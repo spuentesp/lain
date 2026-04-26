@@ -1,0 +1,24 @@
+# Build outputs
+/target
+Cargo.lock
+
+# Lain memory
+/.lain_memory/
+*.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# ONNX models (download at runtime)
+models/
+.lain/

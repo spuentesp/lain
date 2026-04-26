@@ -1,0 +1,34 @@
+{
+  "name": "@spuentesp/lain",
+  "version": "0.1.0",
+  "description": "Language-Augmented Ingestion Network - Architectural brain for AI agents",
+  "mcpName": "io.github.spuentesp/lain",
+  "bin": {
+    "lain": "bin/lain"
+  },
+  "files": [
+    "bin/lain",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:rust": "cargo build --release",
+    "prepublishOnly": "npm run build:rust && mkdir -p bin && cp target/release/lain bin/lain"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "agent",
+    "architecture",
+    "graph",
+    "lsp",
+    "code-analysis"
+  ],
+  "author": "spuentesp",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spuentesp/lain.git"
+  }
+}
