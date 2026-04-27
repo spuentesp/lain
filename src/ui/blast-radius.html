@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blast Radius</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
+        h1 { color: #00e5cc; margin-bottom: 10px; }
+        .info { background: #14141f; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px; color: #888; }
+        #graph { width: 100%; height: 500px; background: #0d0d15; border-radius: 8px; }
+        .node { cursor: pointer; }
+        .node:hover rect { stroke: #00e5cc; stroke-width: 2px; }
+        .instructions { margin-top: 15px; color: #666; font-size: 0.9rem; }
+        .node-label { fill: #e0e0e0; font-size: 11px; }
+        .direct rect { fill: #ff6b6b; }
+        .indirect rect { fill: #2a2a3a; }
+        .selected rect { fill: #00e5cc !important; }
+    </style>
+</head>
+<body>
+    <h1>Blast Radius: SYMBOL_PLACEHOLDER</h1>
+    <div class="info">Click nodes to mark as approved. The agent will parse your selection when you describe it.</div>
+    <svg id="graph"></svg>
+    <div class="instructions">Click nodes to toggle approval. Then tell the agent "I marked X as safe" or "ignore everything except Y".</div>
+    <script>
+        const nodes = NODES_PLACEHOLDER;
+        const selected = new Set();
+        const width = document.getElementById('graph').clientWidth;
+        const height = 500;
+
+        const svg = d3.select("#graph")
+            .attr("viewBox", [0, 0, width, height]);
+
+        const simulation = d3.forceSimulation(nodes)
+            .force("link", d3.forceLink().id(d => d.id).distance(80))
+            .force("charge", d3.forceManyBody().strength(-200))
+            .force("center", d3.forceCenter(width / 2, height / 2));
+
+        const link = svg.append("g")
+            .selectAll("line")
+            .data([])
+            .join("line")
+            .attr("stroke", "#333")
+            .attr("stroke-opacity", 0.6);
+
+        const node = svg.append("g")
+            .selectAll("g")
+            .data(nodes)
+            .join("g")
+            .attr("class", d => "node " + (d.is_direct ? "direct" : "indirect"))
+            .call(d3.drag()
+                .on("start", dragstarted)
+                .on("drag", dragged)
+                .on("end", dragended));
+
+        node.append("rect")
+            .attr("width", 120)
+            .attr("height", 40)
+            .attr("x", -60)
+            .attr("y", -20)
+            .attr("rx", 6)
+            .attr("fill", d => d.is_direct ? "#ff6b6b" : "#2a2a3a");
+
+        node.append("text")
+            .attr("class", "node-label")
+            .attr("text-anchor", "middle")
+            .attr("dy", 4)
+            .text(d => d.name.length > 14 ? d.name.slice(0, 12) + ".." : d.name);
+
+        node.on("click", function(event, d) {
+            if (selected.has(d.id)) {
+                selected.delete(d.id);
+                d3.select(this).classed("selected", false);
+            } else {
+                selected.add(d.id);
+                d3.select(this).classed("selected", true);
+            }
+            console.log("Selected:", Array.from(selected));
+        });
+
+        simulation.on("tick", () => {
+            link
+                .attr("x1", d => d.source.x)
+                .attr("y1", d => d.source.y)
+                .attr("x2", d => d.target.x)
+                .attr("y2", d => d.target.y);
+            node.attr("transform", d => `translate(${d.x},${d.y})`);
+        });
+
+        function dragstarted(event) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            event.subject.fx = event.subject.x;
+            event.subject.fy = event.subject.y;
+        }
+        function dragged(event) {
+            event.subject.fx = event.x;
+            event.subject.fy = event.y;
+        }
+        function dragended(event) {
+            if (!event.active) simulation.alphaTarget(0);
+            event.subject.fx = null;
+            event.subject.fy = null;
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Call Chain</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
+        h1 { color: #00e5cc; margin-bottom: 10px; font-size: 1.2rem; }
+        .info { background: #14141f; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px; color: #888; }
+        #diagram { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 40px; flex-wrap: wrap; }
+        .node { background: #1a1a2a; border: 1px solid #2a2a3a; border-radius: 8px; padding: 15px 20px; min-width: 120px; text-align: center; cursor: pointer; transition: all 0.2s; }
+        .node:hover { border-color: #00e5cc; transform: translateY(-2px); }
+        .arrow { color: #444; font-size: 20px; }
+        .instructions { margin-top: 15px; color: #666; font-size: 0.9rem; }
+        .start { border-color: #00e5cc; }
+        .end { border-color: #ff6b6b; }
+    </style>
+</head>
+<body>
+    <h1>Call Chain: FROM_PLACEHOLDER → TO_PLACEHOLDER</h1>
+    <div class="info">Click any node to see its definition. Describe your selection to the agent.</div>
+    <div id="diagram"></div>
+    <div class="instructions">Click nodes to explore. Tell the agent "I care about X" or "ignore Y" to update the plan.</div>
+    <script>
+        const path = PATH_PLACEHOLDER;
+        const diagram = document.getElementById("diagram");
+        const selected = new Set();
+
+        path.forEach((name, i) => {
+            const div = document.createElement("div");
+            div.className = "node" + (i === 0 ? " start" : i === path.length - 1 ? " end" : "");
+            div.textContent = name;
+            div.onclick = () => {
+                if (selected.has(name)) {
+                    selected.delete(name);
+                    div.style.outline = "";
+                } else {
+                    selected.add(name);
+                    div.style.outline = "2px solid #00e5cc";
+                }
+                console.log("Selected:", Array.from(selected));
+            };
+            diagram.appendChild(div);
+            if (i < path.length - 1) {
+                const arrow = document.createElement("span");
+                arrow.className = "arrow";
+                arrow.textContent = "→";
+                diagram.appendChild(arrow);
+            }
+        });
+    </script>
+</body>
+</html>

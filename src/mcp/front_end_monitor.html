@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LAIN — MCP Diagnostic Console</title>
+<style>
+  :root {
+    --bg: #05080f;
+    --accent: #00e5cc;
+    --dim: #4a8a82;
+    --border: #1f3d3a;
+    --panel-head: #0a1210;
+    --surface: #0a0f14;
+    --err: #ff6b6b;
+    --warn: #ffd93d;
+    --ok: #00e5cc;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--bg);
+    min-height: 100vh;
+    font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
+    color: var(--accent);
+  }
+
+  body {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .lain {
+    width: 100%;
+    min-height: 100vh;
+    background: var(--bg);
+    border-left: 1px solid var(--accent);
+    border-right: 1px solid var(--accent);
+  }
+
+  /* STATUS BAR */
+  .status-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 20px; border-bottom: 1px solid var(--accent);
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .status-bar .left { display: flex; gap: 16px; align-items: center; }
+  .status-bar .right { display: flex; gap: 10px; align-items: center; }
+  .sep { color: var(--dim); }
+  .dim { color: var(--dim); }
+  .accent { color: var(--accent); }
+  .err-color { color: var(--err); }
+  .win-btn {
+    border: 1px solid var(--accent); padding: 0 6px;
+    font-size: 9px; cursor: pointer; background: transparent;
+    color: var(--accent); font-family: inherit;
+  }
+  .win-btn:hover { background: var(--accent); color: var(--bg); }
+
+  /* MAIN LAYOUT */
+  .main {
+    display: grid;
+    grid-template-columns: 300px 1fr 380px;
+    min-height: calc(100vh - 70px);
+  }
+
+  /* TOOLS PANEL (left) */
+  .tools-panel {
+    border-right: 1px solid var(--accent);
+    display: flex; flex-direction: column;
+  }
+  .tools-head {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
+    background: var(--panel-head); display: flex; justify-content: space-between; align-items: center;
+  }
+  .tools-search {
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+  }
+  .tools-search input {
+    width: 100%; border: 1px solid var(--border); background: transparent;
+    color: var(--accent); font-family: inherit; font-size: 11px;
+    padding: 5px 8px; outline: none;
+  }
+  .tools-search input:focus { border-color: var(--accent); }
+  .tools-search input::placeholder { color: var(--dim); }
+  .tools-list {
+    flex: 1; overflow-y: auto; padding: 10px 0;
+  }
+  .tool-group { margin-bottom: 10px; }
+  .tool-group-label {
+    padding: 4px 16px; font-size: 9px; color: var(--dim);
+    letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .tool-item {
+    padding: 6px 16px; font-size: 11px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .tool-item:hover { background: rgba(0,229,204,0.06); }
+  .tool-item.selected { background: rgba(0,229,204,0.12); border-left: 2px solid var(--accent); padding-left: 14px; }
+  .tool-item .name { color: var(--accent); font-size: 12px; }
+  .tool-item .desc { color: var(--dim); font-size: 10px; line-height: 1.4; }
+
+  /* CONSOLE PANEL (center) */
+  .console-panel {
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--accent);
+  }
+  .console-head {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
+    background: var(--panel-head);
+  }
+  .console-body {
+    flex: 1; overflow-y: auto; padding: 12px 16px; font-size: 11px; line-height: 1.5;
+  }
+  .splash {
+    color: var(--dim); font-size: 10px; line-height: 1.5; margin-bottom: 14px;
+  }
+  .log-entry {
+    margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(31,61,58,0.5);
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .log-entry .row { display: flex; gap: 10px; align-items: baseline; }
+  .log-entry .ts { color: var(--dim); font-size: 10px; min-width: 52px; flex-shrink: 0; }
+  .log-entry .dir { font-weight: bold; min-width: 14px; flex-shrink: 0; }
+  .log-entry .tool-name { color: var(--accent); font-size: 11px; min-width: 150px; flex-shrink: 0; }
+  .log-entry .detail { color: #7ab5aa; font-size: 10px; }
+  .log-entry .ok { color: var(--ok); }
+  .log-entry .err { color: var(--err); }
+  .log-entry .viz { color: var(--warn); }
+  .log-entry pre {
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 10px; margin-top: 6px; white-space: pre-wrap;
+    font-size: 10px; max-height: 150px; overflow-y: auto;
+    color: #7ab5aa; border-radius: 3px;
+  }
+  .log-entry .response-block {
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 10px; margin-top: 6px; white-space: pre-wrap;
+    font-size: 11px; max-height: 220px; overflow-y: auto; color: var(--dim);
+    border-radius: 3px;
+  }
+  .log-entry .response-block.error { border-color: var(--err); color: var(--err); }
+  .log-entry .response-block.viz { border-color: var(--warn); }
+
+  /* TOOL INFO (right top) */
+  .info-panel {
+    display: flex; flex-direction: column;
+    background: var(--surface);
+  }
+  .info-head {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
+    background: var(--panel-head);
+  }
+  .info-body {
+    flex: 1; overflow-y: auto; padding: 14px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .info-section { display: flex; flex-direction: column; gap: 5px; }
+  .info-section .label {
+    font-size: 9px; color: var(--dim); letter-spacing: 0.14em;
+    text-transform: uppercase; border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+  }
+  .info-section .content { font-size: 11px; color: #7ab5aa; line-height: 1.55; }
+  .info-section .content .tool-name-display {
+    color: var(--accent); font-size: 14px; font-weight: bold; margin-bottom: 4px;
+  }
+  .info-section .content .category-tag {
+    display: inline-block; font-size: 9px; color: var(--bg);
+    background: var(--accent); padding: 2px 7px; border-radius: 2px;
+    letter-spacing: 0.08em; margin-top: 4px;
+  }
+  .arg-schema-item {
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 3px; margin-bottom: 5px;
+  }
+  .arg-schema-item .arg-name { color: var(--accent); font-size: 11px; }
+  .arg-schema-item .arg-type { color: var(--dim); font-size: 10px; }
+  .arg-schema-item .arg-desc { color: #7ab5aa; font-size: 10px; line-height: 1.4; }
+
+  /* TOOL INVOKER (right bottom) */
+  .invoke-panel {
+    border-top: 1px solid var(--accent);
+    display: flex; flex-direction: column;
+  }
+  .invoke-head {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
+    background: var(--panel-head); display: flex; justify-content: space-between; align-items: center;
+  }
+  .invoke-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .invoke-args {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .arg-row {
+    display: flex; gap: 10px; align-items: center;
+  }
+  .arg-row label {
+    font-size: 10px; color: var(--dim); min-width: 100px; flex-shrink: 0;
+  }
+  .arg-row input, .arg-row textarea {
+    flex: 1; border: 1px solid var(--border); background: var(--surface);
+    color: var(--accent); font-family: inherit; font-size: 11px;
+    padding: 5px 10px; outline: none; border-radius: 3px;
+  }
+  .arg-row input:focus, .arg-row textarea:focus { border-color: var(--accent); }
+  .arg-row textarea { resize: vertical; min-height: 40px; }
+  .invoke-actions { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+  .invoke-btn {
+    background: transparent; color: var(--accent); border: 1px solid var(--accent);
+    padding: 7px 18px; font-family: inherit; font-size: 10px;
+    letter-spacing: 0.1em; cursor: pointer; border-radius: 3px;
+  }
+  .invoke-btn:hover { background: var(--accent); color: var(--bg); }
+  .invoke-btn.call { border-color: var(--ok); color: var(--ok); }
+  .invoke-btn.call:hover { background: var(--ok); color: var(--bg); }
+  .invoke-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .invoke-status { font-size: 10px; color: var(--dim); margin-left: auto; }
+
+  /* QUERY BAR (bottom) */
+  .query-bar {
+    border-top: 1px solid var(--accent); padding: 12px 20px;
+    display: flex; gap: 14px; align-items: center;
+  }
+  .query-bar .label { color: var(--dim); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
+  .query-bar input {
+    flex: 1; border: 1px solid var(--border); background: transparent;
+    color: var(--accent); font-family: inherit; font-size: 11px;
+    padding: 6px 12px; outline: none; border-radius: 3px;
+  }
+  .query-bar input:focus { border-color: var(--accent); }
+  .query-bar input::placeholder { color: var(--dim); }
+  .query-bar .hint { font-size: 10px; color: var(--dim); }
+  .query-bar .hint code { color: var(--accent); }
+
+  /* RIBBON */
+  .ribbon {
+    border-top: 1px solid var(--border); padding: 6px 20px;
+    display: flex; justify-content: space-between; font-size: 9px;
+    color: var(--dim); letter-spacing: 0.1em;
+  }
+  .ribbon .accent { color: var(--accent); }
+
+  /* SCROLLBARS */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+  /* CONNECTION STATES */
+  .conn-ok { color: var(--ok); }
+  .conn-err { color: var(--err); }
+  .conn-pend { color: var(--dim); animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Empty state */
+  .empty-state { color: var(--dim); font-size: 11px; text-align: left; padding: 24px 16px; line-height: 1.7; }
+  .empty-state .big { font-size: 16px; color: var(--accent); margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+<div class="lain">
+
+  <!-- STATUS BAR -->
+  <div class="status-bar">
+    <div class="left">
+      <span>▓▓ L·A·I·N ▓▓</span>
+      <span class="sep">|</span>
+      <span>CONN: <span id="conn-status" class="conn-pend">PENDING</span></span>
+      <span class="sep">|</span>
+      <span>TOOLS: <span id="tools-count" class="accent">--</span></span>
+      <span class="sep">|</span>
+      <span>GRAPH: <span id="graph-nodes" class="accent">--</span> nodes</span>
+      <span class="sep">|</span>
+      <span>EDGES: <span id="graph-edges" class="accent">--</span></span>
+    </div>
+    <div class="right">
+      <span class="dim" id="workspace">./</span>
+      <span class="sep">|</span>
+      <span id="clock" class="accent">--:--:--</span>
+      <span class="sep">|</span>
+      <button class="win-btn">_</button>
+      <button class="win-btn">x</button>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- TOOLS PANEL -->
+    <div class="tools-panel">
+      <div class="tools-head">
+        <span>══ TOOLS ══</span>
+        <span class="dim" id="tools-filter-count">--</span>
+      </div>
+      <div class="tools-search">
+        <input type="text" id="tool-search" placeholder="filter tools...">
+      </div>
+      <div class="tools-list" id="tools-list">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <!-- CONSOLE PANEL -->
+    <div class="console-panel">
+      <div class="console-head">
+        <span>══ SERVER LOG ════════════════════════════════════════</span>
+        <span class="dim">[<a href="javascript:clearLog()" style="color:var(--dim);text-decoration:none">clear</a>]</span>
+      </div>
+      <div class="console-body" id="console-body">
+        <pre class="splash">╔══════════════════════════════════════╗
+║  LAIN · MCP Diagnostic Console      ║
+║  Architecture Brain · v1.0           ║
+╚══════════════════════════════════════╝
+transport ........ <span class="accent">http/json-rpc</span>
+mode ............ <span class="accent">diagnostic</span>
+status .......... <span id="console-status" class="conn-pend">connecting...</span></pre>
+        <div id="log-entries"></div>
+      </div>
+    </div>
+
+    <!-- INFO + INVOKER PANEL (right) -->
+    <div style="display:flex;flex-direction:column;">
+
+      <!-- TOOL INFO -->
+      <div class="info-panel" style="flex:1;border-bottom:1px solid var(--accent);">
+        <div class="info-head">
+          <span>══ TOOL INFO ═══════════════</span>
+        </div>
+        <div class="info-body" id="info-body">
+          <div class="empty-state">
+            <div class="big">▸</div>
+            Select a tool from the list to view its description, category, and schema.
+          </div>
+        </div>
+      </div>
+
+      <!-- TOOL INVOKER -->
+      <div class="invoke-panel">
+        <div class="invoke-head">
+          <span>══ INVOKE ═══════════</span>
+          <span class="dim" id="invoke-phase">idle</span>
+        </div>
+        <div class="invoke-body">
+          <div class="invoke-args" id="invoke-args">
+            <div style="font-size:10px;color:var(--dim);padding:10px 0;">Select a tool to invoke</div>
+          </div>
+          <div class="invoke-actions">
+            <button class="invoke-btn call" id="call-btn" disabled>CALL</button>
+            <button class="invoke-btn" id="clear-btn">CLEAR</button>
+            <span class="invoke-status" id="invoke-status">—</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- QUERY BAR -->
+  <div class="query-bar">
+    <span class="label">QUERY</span>
+    <input type="text" id="query-input" placeholder='{"ops": [{"op": "find", "type": "Function"}]}'>
+    <span class="hint">Raw graph query — <code>Enter</code> to exec · <code>Shift+Enter</code> for multiline</span>
+    <button class="invoke-btn call" id="query-btn">EXEC</button>
+  </div>
+
+  <!-- RIBBON -->
+  <div class="ribbon">
+    <span>mode: <span class="accent">diagnostic</span></span>
+    <span>transport: <span class="accent">http · json-rpc</span></span>
+    <span>local · EN</span>
+  </div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+
+// State
+let tools = [];
+let selectedTool = null;
+
+// DOM refs
+const toolsList = document.getElementById('tools-list');
+const toolsCount = document.getElementById('tools-count');
+const toolsFilterCount = document.getElementById('tools-filter-count');
+const logEntriesEl = document.getElementById('log-entries');
+const connStatus = document.getElementById('conn-status');
+const consoleStatus = document.getElementById('console-status');
+const infoBody = document.getElementById('info-body');
+const invokeArgs = document.getElementById('invoke-args');
+const invokePhase = document.getElementById('invoke-phase');
+const invokeStatus = document.getElementById('invoke-status');
+const callBtn = document.getElementById('call-btn');
+const clearBtn = document.getElementById('clear-btn');
+const toolSearch = document.getElementById('tool-search');
+const graphNodes = document.getElementById('graph-nodes');
+const graphEdges = document.getElementById('graph-edges');
+
+// Clock
+function tick() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  document.getElementById('clock').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+tick();
+setInterval(tick, 1000);
+
+// Tool name to category mapping
+const TOOL_CATEGORIES = {
+  'Architecture': ['explore_architecture', 'list_entry_points', 'compare_modules', 'get_layered_map', 'get_master_map', 'architectural_observations'],
+  'Navigation': ['trace_dependency', 'get_call_chain', 'navigate_to_anchor'],
+  'Search': ['semantic_search'],
+  'Impact': ['get_blast_radius', 'get_coupling_radar'],
+  'Metrics': ['find_anchors', 'get_anchor_score', 'get_context_depth', 'find_dead_code', 'explain_symbol', 'suggest_refactor_targets'],
+  'System': ['get_health', 'install_language_server', 'run_enrichment', 'sync_state', 'get_agent_strategy', 'export_graph_json'],
+  'Filesystem': ['read_file', 'list_directory', 'find_files'],
+  'Execution': ['run_command', 'run_build', 'run_tests', 'run_clippy'],
+  'Context': ['get_context_for_prompt', 'get_code_snippet', 'get_call_sites'],
+  'GitOps': ['get_file_diff', 'get_commit_history', 'get_branch_status'],
+  'Testing': ['find_untested_functions', 'get_test_template', 'find_test_file', 'get_coverage_summary'],
+  'Query': ['query_graph', 'describe_schema'],
+};
+
+function getCategoryForTool(toolName) {
+  for (const [cat, names] of Object.entries(TOOL_CATEGORIES)) {
+    if (names.includes(toolName)) return cat;
+  }
+  return 'Other';
+}
+
+// MCP request helper
+async function mcpRequest(method, params = null) {
+  const request = { jsonrpc: '2.0', method, params, id: Date.now() };
+  const resp = await fetch(`${BASE}/mcp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request)
+  });
+  return resp.json();
+}
+
+// Add log entry
+function addLog(dir, tool, detail, className = '', responseText = null) {
+  const ts = new Date();
+  const tsStr = `${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}:${String(ts.getSeconds()).padStart(2,'0')}`;
+
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  if (dir) row.innerHTML += `<span class="dir" style="color:${className === 'err' ? 'var(--err)' : className === 'ok' ? 'var(--ok)' : 'var(--accent)'}">${dir}</span>`;
+  if (tool) row.innerHTML += `<span class="tool-name">${tool}</span>`;
+  if (detail) row.innerHTML += `<span class="${className || 'detail'}">${detail}</span>`;
+  entry.appendChild(row);
+
+  if (responseText) {
+    const respDiv = document.createElement('pre');
+    respDiv.className = 'response-block' + (className === 'err' ? ' error' : className === 'viz' ? ' viz' : '');
+    respDiv.textContent = responseText.slice(0, 1500) + (responseText.length > 1500 ? '\n...(truncated)' : '');
+    entry.appendChild(respDiv);
+  }
+
+  logEntriesEl.appendChild(entry);
+  logEntriesEl.scrollTop = logEntriesEl.scrollHeight;
+}
+
+// Render tool info panel
+function renderToolInfo(tool) {
+  const category = getCategoryForTool(tool.name);
+  const schema = tool.input_schema || {};
+  const props = schema.properties || {};
+  const required = schema.required || [];
+
+  let html = `
+    <div class="info-section">
+      <div class="label">tool</div>
+      <div class="content">
+        <div class="tool-name-display">${tool.name}</div>
+        <span class="category-tag">${category}</span>
+      </div>
+    </div>`;
+
+  if (tool.description) {
+    html += `
+    <div class="info-section">
+      <div class="label">description</div>
+      <div class="content">${tool.description}</div>
+    </div>`;
+  }
+
+  if (Object.keys(props).length > 0) {
+    html += `<div class="info-section"><div class="label">arguments</div><div class="content">`;
+    for (const [name, prop] of Object.entries(props)) {
+      const req = required.includes(name);
+      html += `
+        <div class="arg-schema-item">
+          <div class="arg-name">${name}${req ? ' <span style="color:var(--err);font-size:9px">required</span>' : ''}</div>
+          <div class="arg-type">${prop.type || 'any'}</div>
+          ${prop.description ? `<div class="arg-desc">${prop.description}</div>` : ''}
+        </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  infoBody.innerHTML = html;
+}
+
+// Load tools and populate panel
+async function loadTools() {
+  addLog('', '', 'connecting to MCP server...', 'detail');
+  try {
+    const res = await mcpRequest('tools/list');
+    if (res.result && res.result.tools) {
+      tools = res.result.tools;
+      toolsCount.textContent = tools.length;
+      toolsFilterCount.textContent = tools.length + ' tools';
+
+      connStatus.textContent = 'OK';
+      connStatus.className = 'conn-ok';
+      consoleStatus.textContent = 'connected';
+      consoleStatus.className = 'conn-ok';
+
+      try {
+        const health = await fetch(`${BASE}/health`).then(r => r.json());
+        graphNodes.textContent = health.graph_nodes?.toLocaleString() || '--';
+        graphEdges.textContent = health.graph_edges?.toLocaleString() || '--';
+      } catch (e) { /* health optional */ }
+
+      renderToolsList(tools);
+      addLog('', '', 'tools loaded: ' + tools.length, 'ok');
+    }
+  } catch (e) {
+    connStatus.textContent = 'ERR';
+    connStatus.className = 'conn-err';
+    consoleStatus.textContent = 'connection failed';
+    addLog('', '', e.message, 'err');
+  }
+}
+
+// Render tools list grouped by category
+function renderToolsList(filter) {
+  toolsList.innerHTML = '';
+  const filterText = filter?.toLowerCase() || '';
+
+  for (const [category, toolNames] of Object.entries(TOOL_CATEGORIES)) {
+    const matching = toolNames.filter(n => !filterText || n.includes(filterText));
+    if (matching.length === 0) continue;
+
+    const group = document.createElement('div');
+    group.className = 'tool-group';
+
+    const label = document.createElement('div');
+    label.className = 'tool-group-label';
+    label.textContent = category;
+    group.appendChild(label);
+
+    for (const name of matching) {
+      const tool = tools.find(t => t.name === name);
+      if (!tool) continue;
+
+      const item = document.createElement('div');
+      item.className = 'tool-item' + (selectedTool?.name === name ? ' selected' : '');
+      item.innerHTML = `<span class="name">${name}</span><span class="desc">${(tool.description || '—').slice(0, 80)}</span>`;
+      item.onclick = () => selectTool(tool);
+      group.appendChild(item);
+    }
+
+    toolsList.appendChild(group);
+  }
+
+  toolsFilterCount.textContent = filterText
+    ? tools.filter(t => t.name.toLowerCase().includes(filterText)).length + ' filtered'
+    : tools.length + ' tools';
+}
+
+// Select a tool and show its arguments
+function selectTool(tool) {
+  selectedTool = tool;
+  callBtn.disabled = false;
+  invokePhase.textContent = 'ready';
+  invokeStatus.textContent = tool.name;
+
+  renderToolInfo(tool);
+
+  const schema = tool.input_schema || {};
+  const props = schema.properties || {};
+  const required = schema.required || [];
+
+  invokeArgs.innerHTML = '';
+
+  if (Object.keys(props).length === 0) {
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size: 10px; color: var(--dim);';
+    hint.textContent = 'No arguments required — click CALL to execute';
+    invokeArgs.appendChild(hint);
+  } else {
+    for (const [name, prop] of Object.entries(props)) {
+      const row = document.createElement('div');
+      row.className = 'arg-row';
+
+      const label = document.createElement('label');
+      label.textContent = name + (required.includes(name) ? ' *' : '');
+      row.appendChild(label);
+
+      if (prop.type === 'object' || prop.type === 'array') {
+        const textarea = document.createElement('textarea');
+        textarea.id = 'arg-' + name;
+        textarea.placeholder = prop.description || (prop.type === 'array' ? 'JSON array' : 'JSON object');
+        row.appendChild(textarea);
+      } else {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.id = 'arg-' + name;
+        input.placeholder = prop.description || name;
+        row.appendChild(input);
+      }
+
+      invokeArgs.appendChild(row);
+    }
+  }
+
+  document.querySelectorAll('.tool-item').forEach(el => el.classList.remove('selected'));
+  document.querySelectorAll('.tool-item').forEach(el => {
+    if (el.querySelector('.name')?.textContent === tool.name) el.classList.add('selected');
+  });
+}
+
+// Build args object from form
+function buildArgs() {
+  const args = {};
+  const inputs = invokeArgs.querySelectorAll('input, textarea');
+  inputs.forEach(input => {
+    const name = input.id.replace('arg-', '');
+    const val = input.value.trim();
+    if (val) {
+      try { args[name] = JSON.parse(val); }
+      catch { args[name] = val; }
+    }
+  });
+  return args;
+}
+
+// Call selected tool
+async function executeTool() {
+  if (!selectedTool) return;
+  const args = buildArgs();
+  const argsStr = JSON.stringify(args);
+
+  invokePhase.textContent = 'calling...';
+  addLog('▸', selectedTool.name, argsStr, 'detail');
+
+  try {
+    const res = await mcpRequest('tools/call', { name: selectedTool.name, arguments: args });
+    invokePhase.textContent = 'done';
+
+    if (res.result && res.result.content) {
+      const text = res.result.content[0]?.text || '';
+      const isViz = text.includes('http://localhost:9999/ui/');
+      addLog('◂', 'ok', selectedTool.name, isViz ? 'viz' : 'ok', text);
+    } else if (res.error) {
+      addLog('◂', 'err', res.error.message || 'unknown error', 'err');
+    }
+  } catch (e) {
+    invokePhase.textContent = 'error';
+    addLog('◂', 'err', e.message, 'err');
+  }
+}
+
+// Execute raw query
+async function executeQuery() {
+  const input = document.getElementById('query-input');
+  const val = input.value.trim();
+  if (!val) return;
+
+  let query;
+  try { query = JSON.parse(val); }
+  catch { addLog('◂', 'err', 'Invalid JSON query', 'err'); return; }
+
+  addLog('▸', 'query_graph', JSON.stringify(query).slice(0, 100), 'detail');
+  try {
+    const res = await mcpRequest('tools/call', { name: 'query_graph', arguments: { query } });
+    if (res.result && res.result.content) {
+      addLog('◂', 'ok', 'query_graph', 'ok', res.result.content[0]?.text);
+    } else if (res.error) {
+      addLog('◂', 'err', res.error.message, 'err');
+    }
+  } catch (e) {
+    addLog('◂', 'err', e.message, 'err');
+  }
+}
+
+// Clear log
+function clearLog() {
+  logEntriesEl.innerHTML = '';
+}
+
+// Event listeners
+callBtn.addEventListener('click', executeTool);
+clearBtn.addEventListener('click', clearLog);
+
+document.getElementById('query-btn').addEventListener('click', executeQuery);
+document.getElementById('query-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    executeQuery();
+  }
+});
+
+toolSearch.addEventListener('input', e => renderToolsList(e.target.value));
+
+// Init
+loadTools();
+</script>
+
+</body>
+</html>

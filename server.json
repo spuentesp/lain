@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.spuentesp/lain",
+  "description": "LAIN-mcp: High-performance knowledge graph MCP server for AI coding agents. Provides architectural reasoning, semantic code search, and impact analysis via local ONNX embeddings.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/spuentesp/lain",
+    "source": "github"
+  },
+  "homepage": "https://github.com/spuentesp/lain#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "coding",
+    "knowledge-graph",
+    "rust",
+    "semantic-search",
+    "code-analysis"
+  ],
+  "installation": {
+    "method": "binary",
+    "binaries": {
+      "linux-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-unknown-linux-gnu",
+      "macos-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-apple-darwin",
+      "macos-aarch64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-aarch64-apple-darwin",
+      "windows-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-pc-windows-msvc.exe"
+    },
+    "compile_from_source": "cargo install --git https://github.com/spuentesp/lain.git",
+    "install_script": "curl -L https://raw.githubusercontent.com/spuentesp/lain/main/install-mcp.sh | bash"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@spuentesp/lain-mcp",
+      "version": "0.1.0",
+      "description": "NPM package with postinstall binary download",
+      "transport": {
+        "type": "stdio"
+      },
+      "installation": {
+        "npmPackage": "@spuentesp/lain-mcp",
+        "installationMethod": "npm install -g @spuentesp/lain-mcp"
+      }
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "lain-mcp",
+  "version": "0.1.0",
+  "description": "Lain - Architectural code intelligence for AI coding agents",
+  "keywords": ["mcp", "code-intelligence", "architectural-analysis", "lain"],
+  "license": "MIT",
+  "homepage": "https://github.com/spuentesp/lain",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spuentesp/lain.git"
+  },
+  "bin": {
+    "lain": "./bin/lain.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

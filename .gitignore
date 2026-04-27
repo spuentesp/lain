@@ -1,0 +1,37 @@
+# Build outputs
+/target
+Cargo.lock
+
+# Lain memory
+/.lain_memory/
+*.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# ONNX models (download at runtime)
+models/
+.lain/
+.venv/
+
+# Python
+.mypy_cache/
+.pytest_cache/
+
+# Claude session files (local only, not for CI)
+.claude/scheduled_tasks.lock
+settings.local.json
+memory.json
+.lain/memory.json
+.lain/
+mcp-publisher

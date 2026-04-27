@@ -1,0 +1,13 @@
+target/
+.git/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.lain/
+npm-shim/node_modules/
+mcp-publisher
+*.onnx
+*.json
+!Cargo.toml
+!Cargo.lock
+!server.json

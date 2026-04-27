@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coupling Heatmap</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
+        h1 { color: #00e5cc; margin-bottom: 10px; }
+        .info { background: #14141f; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px; color: #888; }
+        #matrix { display: grid; gap: 2px; padding: 20px; }
+        .cell { width: 40px; height: 40px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; }
+        .cell:hover { outline: 2px solid #00e5cc; }
+        .header { color: #666; font-size: 11px; text-align: center; padding: 4px; }
+        .instructions { margin-top: 15px; color: #666; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <h1>Coupling Heatmap: SYMBOL_PLACEHOLDER</h1>
+    <div class="info">Click cells to see co-change details. Describe your selection to the agent.</div>
+    <div id="matrix"></div>
+    <div class="instructions">Files shown co-change together in git history. Darker cells = more frequent co-changes.</div>
+    <script>
+        const files = FILES_PLACEHOLDER;
+        const matrix = document.getElementById("matrix");
+        const n = files.length;
+        matrix.style.gridTemplateColumns = `60px repeat(${n}, 40px)`;
+
+        matrix.innerHTML = '<div class="header"></div>';
+        files.forEach(f => {
+            matrix.innerHTML += `<div class="header">${f.slice(-8)}</div>`;
+        });
+
+        const selected = new Set();
+        for (let i = 0; i < n; i++) {
+            matrix.innerHTML += `<div class="header">${files[i].slice(-8)}</div>`;
+            for (let j = 0; j < n; j++) {
+                const intensity = Math.random();
+                const color = intensity > 0.7 ? `hsl(0, 70%, ${50 - intensity * 30}%)` : `hsl(220, 50%, ${30 + intensity * 20}%)`;
+                const idx = i * n + j;
+                matrix.innerHTML += `<div class="cell" style="background:${color}" title="${files[i]} ↔ ${files[j]}" onclick="toggleSelect(${idx})"></div>`;
+            }
+        }
+
+        function toggleSelect(idx) {
+            if (selected.has(idx)) {
+                selected.delete(idx);
+            } else {
+                selected.add(idx);
+            }
+            console.log("Selected:", Array.from(selected));
+        }
+    </script>
+</body>
+</html>
