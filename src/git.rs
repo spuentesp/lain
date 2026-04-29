@@ -404,3 +404,60 @@ pub struct CoChangePair {
     pub file2: String,
     pub co_change_count: usize,
 }
+
+/// GitHub repository identity parsed from git remote
+#[derive(Debug, Clone)]
+pub struct RepoIdentity {
+    pub owner: String,
+    pub name: String,
+}
+
+impl RepoIdentity {
+    /// Parse GitHub repo identity from git remote URL
+    pub fn from_remote(remote_url: &str) -> Option<Self> {
+        // Handle SSH format: git@github.com:owner/repo.git
+        if remote_url.contains("@github.com:") {
+            if let Some(path) = remote_url.rsplit(':').next() {
+                let path = path.trim_end_matches(".git");
+                let parts: Vec<&str> = path.split('/').collect();
+                if parts.len() >= 2 {
+                    return Some(RepoIdentity {
+                        owner: parts[parts.len() - 2].to_string(),
+                        name: parts[parts.len() - 1].to_string(),
+                    });
+                }
+            }
+        }
+        // Handle HTTPS format: https://github.com/owner/repo.git
+        if remote_url.contains("github.com") {
+            let path = remote_url.rsplit("github.com").nth(0)?;
+            let path = path.trim_end_matches(".git");
+            let path = path.trim_end_matches('/');
+            let parts: Vec<&str> = path.rsplit('/').collect();
+            if parts.len() >= 2 {
+                // parts are reversed: [repo, owner, ...]
+                return Some(RepoIdentity {
+                    owner: parts[1].to_string(),
+                    name: parts[0].to_string(),
+                });
+            }
+        }
+        None
+    }
+}
+
+impl GitSensor {
+    /// Get the GitHub repository identity from the git remote
+    pub fn get_repo_identity(&self) -> Result<Option<RepoIdentity>, LainError> {
+        let remotes = self.repo.remotes()?;
+        for remote_name in remotes.iter().flatten() {
+            if remote_name == "origin" {
+                let remote = self.repo.find_remote(remote_name)?;
+                if let Some(url) = remote.url() {
+                    return Ok(RepoIdentity::from_remote(url));
+                }
+            }
+        }
+        Ok(None)
+    }
+}

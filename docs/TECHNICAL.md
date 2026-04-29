@@ -287,6 +287,26 @@ Lain exposes a JSON-based ops-array query interface for flexible graph traversal
 - `depth`: `1` or `{ "min": 1, "max": 3 }`
 - `target`: optional nested `FindOp` for multi-hop queries
 
+**Semantic Filter:**
+- `like`: Natural language query string
+- `threshold`: Minimum cosine similarity (0.0-1.0, default: 0.3)
+
+Example:
+```json
+{ "op": "semantic_filter", "like": "error handling", "threshold": 0.35 }
+```
+
+### RepoIdentity (`src/git.rs`)
+
+`GitSensor::get_repo_identity()` parses the git remote URL to extract GitHub repository owner and name:
+
+```rust
+let identity = sensor.get_repo_identity();
+// RepoIdentity { owner: "spuentesp", name: "lain" }
+```
+
+This allows agents to orient themselves within the repository.
+
 ---
 
 ## Directory Structure
@@ -426,6 +446,7 @@ The query engine is separate from named tools — it accepts ops-array JSON for 
 | `find` | Locate nodes by type, name, label, path, or id |
 | `connect` | Traverse edges with direction and depth |
 | `filter` | Narrow results by type, name, or label |
+| `semantic_filter` | Filter results by semantic similarity to a query string |
 | `group` | Group results by type, label, or name |
 | `sort` | Order results by field and direction |
 | `limit` | Paginate with count and offset |
@@ -443,10 +464,21 @@ The query engine is separate from named tools — it accepts ops-array JSON for 
 - `depth`: `1` or `{ "min": 1, "max": 3 }`
 - `target`: optional nested `FindOp` for multi-hop queries
 
+**Semantic Filter:**
+- `like`: Natural language query string
+- `threshold`: Minimum cosine similarity (0.0-1.0, default: 0.3)
+
+### RepoIdentity
+
+`GitSensor::get_repo_identity()` returns GitHub repo info from git remote:
+```rust
+RepoIdentity { owner: "owner", name: "repo" }
+```
+
 ### Analysis
 - `explain_symbol(symbol)` — Human-readable summary with signature/metrics
 - `suggest_refactor_targets` — High-coupling, low-stability nodes
-- `find_dead_code` — Zero-incoming-call nodes
+- `find_dead_code(like)` — Potentially dead code (filters trait defaults, common names; optional semantic filtering)
 - `get_call_sites(symbol)` — All callers
 
 ### Testing

@@ -1,6 +1,5 @@
 # Build outputs
 /target
-Cargo.lock
 
 # Lain memory
 /.lain_memory/

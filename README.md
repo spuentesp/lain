@@ -1,6 +1,6 @@
 # LAIN-mcp
 
-LAIN builds a map of how all the code in your project connects — what calls what, what depends on what, which files tend to change together. Then it lets your AI coding assistant ask questions about that map. So instead of the AI just looking at one file and guessing, it can ask "if I change this function, what else breaks?" and get a real answer. It plugs into Claude Code (or any AI agent that supports MCP) and runs in the background while you work.
+LAIN builds a map of how all the code in your project connects — what calls what, what depends on what, which files tend to change together. Then it lets your AI coding assistant ask questions about that map. So instead of the AI just looking at one file and guessing, it can ask "if I change this function, what else breaks?" and get a real answer. It plugs into any AI agent that supports MCP and runs in the background while you work.
 
 ---
 
@@ -84,6 +84,21 @@ curl -s -X POST http://localhost:9999/mcp -H "Content-Type: application/json" \
 
 ## Key Features
 
+### Query Language (`query_graph`)
+JSON-based ops array for flexible graph traversals:
+```json
+{
+  "ops": [
+    { "op": "find", "type": "Function" },
+    { "op": "connect", "edge": "Calls", "depth": { "min": 1, "max": 3 } },
+    { "op": "filter", "label": "test" },
+    { "op": "semantic_filter", "like": "error handling", "threshold": 0.35 },
+    { "op": "limit", "count": 10 }
+  ]
+}
+```
+Available ops: `find`, `connect`, `filter`, `semantic_filter`, `group`, `sort`, `limit`
+
 ### Dependency Intelligence
 - **`get_call_chain`** — Shortest path between two functions
 - **`get_blast_radius`** — Everything affected by a change
@@ -98,7 +113,10 @@ curl -s -X POST http://localhost:9999/mcp -H "Content-Type: application/json" \
 
 ### Search
 - **`semantic_search`** — Find code by meaning, not just names (uses local ONNX embeddings)
-- **`query_graph`** — Flexible graph query for complex traversals
+
+### Code Health
+- **`find_dead_code`** — Potentially unreachable code (filters trait defaults, common names)
+- **`suggest_refactor_targets`** — High-coupling, low-stability nodes
 
 ### Build Integration
 Lain enriches build failures with architectural context:

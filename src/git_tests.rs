@@ -5,14 +5,16 @@ use std::path::Path;
 
 #[test]
 fn test_git_sensor_new_valid_repo() {
-    // /Users/spuentesp/lain is a git repo
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain"));
+    // Resolve the repo root dynamically so tests work across machines
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root);
     assert!(sensor.is_ok());
 }
 
 #[test]
 fn test_git_sensor_is_valid() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     assert!(sensor.is_valid());
 }
 
@@ -24,7 +26,8 @@ fn test_git_sensor_new_invalid_path() {
 
 #[test]
 fn test_git_sensor_get_tracked_files() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     let files = sensor.get_all_tracked_files();
     assert!(files.is_ok());
     assert!(!files.unwrap().is_empty()); // This repo has files
@@ -32,7 +35,8 @@ fn test_git_sensor_get_tracked_files() {
 
 #[test]
 fn test_git_sensor_is_ignored() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     // .git directory should be ignored
     let is_ignored = sensor.is_ignored(Path::new(".git"));
     assert!(is_ignored.is_ok());
@@ -40,7 +44,8 @@ fn test_git_sensor_is_ignored() {
 
 #[test]
 fn test_git_sensor_is_ignored_target_dir() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     // target directory (rust build output) should be ignored
     let is_ignored = sensor.is_ignored(Path::new("target"));
     assert!(is_ignored.is_ok());
@@ -48,7 +53,8 @@ fn test_git_sensor_is_ignored_target_dir() {
 
 #[test]
 fn test_git_sensor_is_ignored_nonexistent() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     // A nonexistent path may or may not be ignored depending on gitignore rules
     let result = sensor.is_ignored(Path::new("nonexistent_file_xyz123.txt"));
     assert!(result.is_ok());
@@ -56,7 +62,8 @@ fn test_git_sensor_is_ignored_nonexistent() {
 
 #[test]
 fn test_git_sensor_get_uncommitted_changes_none() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     // Clean working tree (after sync_state)
     let changes = sensor.get_uncommitted_changes();
     assert!(changes.is_ok());
@@ -68,7 +75,8 @@ fn test_git_sensor_get_uncommitted_changes_none() {
 
 #[test]
 fn test_git_sensor_get_uncommitted_changes_staged() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     let changes = sensor.get_uncommitted_changes().unwrap();
     for change in changes {
         println!("Change: {:?} at {:?}", change.change_type, change.path);
@@ -77,7 +85,8 @@ fn test_git_sensor_get_uncommitted_changes_staged() {
 
 #[test]
 fn test_git_sensor_get_file_diff_on_clean_file() {
-    let sensor = GitSensor::new(Path::new("/Users/spuentesp/lain")).unwrap();
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
     let files = sensor.get_all_tracked_files().unwrap();
     if let Some(file) = files.first() {
         let diff = sensor.get_file_diff(file);
@@ -173,4 +182,58 @@ fn test_git_sensor_in_temp_repo_with_file() {
     assert!(!files.is_empty());
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_repo_identity_from_https_url() {
+    use crate::git::RepoIdentity;
+
+    let identity = RepoIdentity::from_remote("https://github.com/spuentesp/lain.git");
+    assert!(identity.is_some());
+    let identity = identity.unwrap();
+    assert_eq!(identity.owner, "spuentesp");
+    assert_eq!(identity.name, "lain");
+}
+
+#[test]
+fn test_repo_identity_from_ssh_url() {
+    use crate::git::RepoIdentity;
+
+    let identity = RepoIdentity::from_remote("git@github.com:spuentesp/lain.git");
+    assert!(identity.is_some());
+    let identity = identity.unwrap();
+    assert_eq!(identity.owner, "spuentesp");
+    assert_eq!(identity.name, "lain");
+}
+
+#[test]
+fn test_repo_identity_from_gh_cli_url() {
+    use crate::git::RepoIdentity;
+
+    // GitHub CLI format
+    let identity = RepoIdentity::from_remote("https://github.com/spuentesp/lain");
+    assert!(identity.is_some());
+    let identity = identity.unwrap();
+    assert_eq!(identity.owner, "spuentesp");
+    assert_eq!(identity.name, "lain");
+}
+
+#[test]
+fn test_repo_identity_invalid() {
+    use crate::git::RepoIdentity;
+
+    let identity = RepoIdentity::from_remote("git@gitlab.com:owner/repo.git");
+    assert!(identity.is_none());
+
+    let identity = RepoIdentity::from_remote("not-a-url");
+    assert!(identity.is_none());
+}
+
+#[test]
+fn test_git_sensor_get_repo_identity() {
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
+    let identity = sensor.get_repo_identity();
+    // May be None if no origin remote or not GitHub
+    assert!(identity.is_ok());
 }

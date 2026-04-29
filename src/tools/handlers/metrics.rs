@@ -2,9 +2,13 @@
 
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
+use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
-use crate::tools::utils::resolve_node;
+use crate::tools::utils::{build_enriched_text, cosine_similarity, resolve_node};
+use std::sync::Arc;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 
 pub fn find_anchors(
     graph: &GraphDatabase, 
@@ -23,7 +27,11 @@ pub fn find_anchors(
             anchors.push(oa);
         }
     }
-    anchors.sort_by(|a, b| b.anchor_score.unwrap_or(0.0).partial_cmp(&a.anchor_score.unwrap_or(0.0)).unwrap());
+    anchors.sort_by(|a, b| {
+        b.anchor_score
+            .unwrap_or(0.0)
+            .total_cmp(&a.anchor_score.unwrap_or(0.0))
+    });
 
     if anchors.is_empty() {
         return Ok("No anchors found in Merged Brain.".to_string());
@@ -62,14 +70,132 @@ pub fn get_context_depth(
     }
 }
 
-pub fn find_dead_code(graph: &GraphDatabase, _overlay: &VolatileOverlay) -> Result<String, LainError> {
-    let functions = graph.get_nodes_by_type(NodeType::Function)?;
-    let dead: Vec<_> = functions.into_iter().filter(|f| f.fan_in.unwrap_or(0) == 0).collect();
+/// Names that commonly indicate a false positive (trait defaults, constructors, etc.)
+const FALSE_POSITIVE_PATTERNS: &[&str] = &[
+    "default", "new", "clone", "from", "into", "as_ref", "as_mut",
+    "to_string", "to_owned", "debug", "display", "fmt", "format",
+    "from_str", "parse", "try_from", "try_into", "borrowed",
+];
 
-    Ok(format!("Found {} dead code symbols in Static Backbone:\n{}",
-        dead.len(),
-        dead.iter().take(20).map(|n| format!("- {} ({})", n.name, n.path)).collect::<Vec<_>>().join("\n")
+/// Check if a function name matches known false-positive patterns
+fn is_false_positive_name(name: &str) -> bool {
+    FALSE_POSITIVE_PATTERNS.iter().any(|p| name == *p || name.ends_with(p))
+}
+
+/// Check if function appears in a trait definition (heuristic: path contains "trait")
+fn is_trait_context(path: &str) -> bool {
+    path.contains("trait") || path.contains("_trait")
+}
+
+/// Check if a function is a likely false positive dead code candidate
+fn is_likely_false_positive(node: &crate::schema::GraphNode) -> bool {
+    // Trait default implementations are not dead code
+    if is_trait_context(&node.path) {
+        return true;
+    }
+    // Functions with common constructor/default names are likely false positives
+    if is_false_positive_name(&node.name) {
+        return true;
+    }
+    // Functions that call other functions are more likely to be utilities/helpers
+    // not truly dead - they have a job even if not directly called
+    if node.fan_out.unwrap_or(0) > 0 {
+        return true;
+    }
+    false
+}
+
+pub fn find_dead_code(
+    graph: &GraphDatabase,
+    _overlay: &VolatileOverlay,
+    like: Option<&str>,
+    embedder: &NlpEmbedder,
+    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+) -> Result<String, LainError> {
+    let functions = graph.get_nodes_by_type(NodeType::Function)?;
+
+    // Primary filter: fan_in == 0 (no incoming calls)
+    let candidates: Vec<_> = functions.into_iter()
+        .filter(|f| f.fan_in.unwrap_or(0) == 0)
+        .collect();
+
+    // Filter out known false positives
+    let truly_dead: Vec<_> = candidates.iter()
+        .filter(|f| !is_likely_false_positive(f))
+        .cloned()
+        .collect();
+
+    // Secondary signal: functions with BOTH fan_in == 0 AND fan_out == 0
+    // are the most likely true dead code (leaf nodes with no callers)
+    let highly_confident: Vec<_> = truly_dead.iter()
+        .filter(|f| f.fan_out.unwrap_or(0) == 0)
+        .cloned()
+        .collect();
+
+    // Return the highly confident set (true dead code)
+    let results = highly_confident;
+
+    // If user provided a "like" query, filter semantically
+    let filtered = if let Some(query) = like {
+        let query_emb = embedder.embed(query)?;
+        let threshold = 0.3; // semantic similarity threshold
+
+        results.into_iter().filter(|n| {
+            let node_emb = get_embedding(n, embedder, embedding_cache);
+            if let Some(emb) = node_emb {
+                cosine_similarity(&query_emb, &emb) > threshold
+            } else {
+                false
+            }
+        }).collect()
+    } else {
+        results
+    };
+
+    let (label, items) = if filtered.is_empty() {
+        ("likely dead", truly_dead.as_slice())
+    } else {
+        ("highly confident dead", filtered.as_slice())
+    };
+
+    Ok(format!(
+        "Found {} {} symbols in Static Backbone:\n{}",
+        items.len(),
+        label,
+        items.iter().take(20).map(|n| {
+            let signals = {
+                let mut s = Vec::new();
+                if n.fan_in.unwrap_or(0) == 0 { s.push("no callers"); }
+                if n.fan_out.unwrap_or(0) == 0 { s.push("no callees"); }
+                if is_false_positive_name(&n.name) { s.push("common name"); }
+                if is_trait_context(&n.path) { s.push("trait context"); }
+                s.join(", ")
+            };
+            format!("- {} ({}) [{}]", n.name, n.path, signals)
+        }).collect::<Vec<_>>().join("\n")
     ))
+}
+
+// Helper to get embedding for a node (cache-first, then on-demand)
+fn get_embedding(
+    node: &crate::schema::GraphNode,
+    embedder: &NlpEmbedder,
+    cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+) -> Option<Vec<f32>> {
+    // Check cache
+    if let Some(emb) = cache.lock().get(&node.id).cloned() {
+        return Some(emb);
+    }
+    // Check stored embedding
+    if let Some(ref e_json) = node.embedding {
+        if let Ok(emb) = serde_json::from_str::<Vec<f32>>(e_json) {
+            cache.lock().insert(node.id.clone(), emb.clone());
+            return Some(emb);
+        }
+    }
+    // On-demand embed
+    let text = build_enriched_text(node);
+    embedder.embed(&text).ok()
 }
 
 pub fn explain_symbol(

@@ -2,27 +2,39 @@
 
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
+use crate::nlp::NlpEmbedder;
 use crate::query::spec::{
     ConnectOp, Direction, EdgeSelector, FilterOp, GraphNodeRef, GraphPath, GraphEdgeRef,
     GroupBy, GroupOp, LimitOp, QueryExplanation, QueryGroup, QueryMeta,
-    QueryResult, QuerySpec, SortDirection, SortField, SortOp, TypeSelector,
+    QueryResult, QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp, TypeSelector,
     FindOp,
 };
+use crate::tools::utils::{build_enriched_text, cosine_similarity};
 use petgraph::Direction as PetDirection;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Executor for running queries against the graph
 pub struct Executor<'a> {
     graph: &'a GraphDatabase,
+    embedder: &'a NlpEmbedder,
+    embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
     nodes_visited: usize,
 }
 
 impl<'a> Executor<'a> {
-    pub fn new(graph: &'a GraphDatabase) -> Self {
+    pub fn new(
+        graph: &'a GraphDatabase,
+        embedder: &'a NlpEmbedder,
+        embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    ) -> Self {
         Self {
             graph,
+            embedder,
+            embedding_cache,
             nodes_visited: 0,
         }
     }
@@ -55,6 +67,9 @@ impl<'a> Executor<'a> {
                 }
                 crate::query::spec::GraphOp::Filter(filter) => {
                     self.apply_filter(&mut current_nodes, filter);
+                }
+                crate::query::spec::GraphOp::SemanticFilter(sem) => {
+                    self.apply_semantic_filter(&mut current_nodes, sem)?;
                 }
                 crate::query::spec::GraphOp::Group(group) => {
                     groups = Some(self.apply_group(&current_nodes, group));
@@ -241,6 +256,65 @@ impl<'a> Executor<'a> {
         });
     }
 
+    fn apply_semantic_filter(
+        &self,
+        nodes: &mut Vec<GraphNodeRef>,
+        sem: &SemanticFilterOp,
+    ) -> Result<(), LainError> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        // Embed the query once
+        let query_emb = self.embedder.embed(&sem.like)
+            .map_err(|e| LainError::Nlp(format!("Failed to embed query: {}", e)))?;
+
+        // Get full graph nodes to access their embeddings
+        let all_graph_nodes: HashMap<String, crate::schema::GraphNode> = self.graph
+            .get_all_nodes()
+            .into_iter()
+            .map(|n| (n.id.clone(), n))
+            .collect();
+
+        nodes.retain(|node_ref| {
+            let full_node = match all_graph_nodes.get(&node_ref.id) {
+                Some(n) => n,
+                None => return false,
+            };
+
+            let node_emb = self.get_node_embedding(full_node);
+            if let Some(emb) = node_emb {
+                cosine_similarity(&query_emb, &emb) > sem.threshold
+            } else {
+                false
+            }
+        });
+
+        Ok(())
+    }
+
+    fn get_node_embedding(&self, node: &crate::schema::GraphNode) -> Option<Vec<f32>> {
+        // Check cache first
+        if let Some(emb) = self.embedding_cache.lock().get(&node.id).cloned() {
+            return Some(emb);
+        }
+
+        // Check stored embedding
+        if let Some(ref e_json) = node.embedding {
+            if let Ok(emb) = serde_json::from_str::<Vec<f32>>(e_json) {
+                self.embedding_cache.lock().insert(node.id.clone(), emb.clone());
+                return Some(emb);
+            }
+        }
+
+        // On-demand embed
+        let text = build_enriched_text(node);
+        self.embedder.embed(&text).ok().map(|emb| {
+            self.embedding_cache.lock().insert(node.id.clone(), emb.clone());
+            emb
+        })
+    }
+
     fn apply_group(&self, nodes: &[GraphNodeRef], group: &GroupOp) -> Vec<QueryGroup> {
         let mut groups: HashMap<String, Vec<GraphNodeRef>> = HashMap::new();
 
@@ -349,6 +423,9 @@ impl<'a> Executor<'a> {
                 }
                 crate::query::spec::GraphOp::Group(group) => {
                     steps.push(format!("Group by {:?}", group.by));
+                }
+                crate::query::spec::GraphOp::SemanticFilter(sem) => {
+                    steps.push(format!("Semantic filter: like '{}' (threshold {:.2})", sem.like, sem.threshold));
                 }
             }
 

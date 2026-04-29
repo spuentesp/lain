@@ -195,6 +195,7 @@ async fn handle_request(
         let health = serde_json::json!({
             "status": "ok",
             "server": "lain",
+            "version": env!("CARGO_PKG_VERSION"),
             "graph_nodes": nodes,
             "graph_edges": edges,
             "tools_count": crate::tools::registry::ToolRegistry::definitions().len()

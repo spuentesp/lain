@@ -1,9 +1,13 @@
 //! Tests for tools/handlers/metrics.rs
 
+use crate::nlp::NlpEmbedder;
 use crate::tools::handlers::metrics::{find_anchors, get_anchor_score, get_context_depth, find_dead_code, explain_symbol, suggest_refactor_targets};
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::{GraphNode, NodeType, EdgeType, GraphEdge};
+use std::sync::Arc;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 
 fn make_test_graph_with_nodes() -> (GraphDatabase, VolatileOverlay) {
     let tmp = std::env::temp_dir().join("test_metrics_graph");
@@ -90,8 +94,10 @@ fn test_get_context_depth_not_found() {
 #[test]
 fn test_find_dead_code() {
     let (graph, overlay) = make_test_graph_with_nodes();
+    let embedder = NlpEmbedder::new_stub();
+    let cache = Arc::new(Mutex::new(HashMap::new()));
 
-    let result = find_dead_code(&graph, &overlay);
+    let result = find_dead_code(&graph, &overlay, None, &embedder, &cache);
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("dead code") || text.contains("Found"));

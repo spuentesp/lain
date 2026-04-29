@@ -334,7 +334,7 @@ impl LainServer {
             let mut anchors: Vec<_> = all_nodes.iter()
                 .filter_map(|n| n.anchor_score.map(|s| (s, n.clone())))
                 .collect();
-            anchors.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            anchors.sort_by(|a, b| b.0.total_cmp(&a.0));
 
             let prewarm_count = anchors.len().min(nlp_prewarm_count);
             let (prewarm_nodes, rest_nodes) = anchors.split_at(prewarm_count);

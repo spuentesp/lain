@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>LAIN — MCP Diagnostic Console</title>
+<title>LAIN — Query Console</title>
 <style>
   :root {
     --bg: #05080f;
@@ -27,9 +27,8 @@
 
   body {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: center;
-    padding: 0;
   }
 
   .lain {
@@ -38,206 +37,137 @@
     background: var(--bg);
     border-left: 1px solid var(--accent);
     border-right: 1px solid var(--accent);
+    display: flex;
+    flex-direction: column;
   }
 
   /* STATUS BAR */
   .status-bar {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 8px 20px; border-bottom: 1px solid var(--accent);
-    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 10px 20px; border-bottom: 1px solid var(--accent);
+    font-size: 11px; letter-spacing: 0.08em;
   }
-  .status-bar .left { display: flex; gap: 16px; align-items: center; }
-  .status-bar .right { display: flex; gap: 10px; align-items: center; }
+  .status-bar .left { display: flex; gap: 20px; align-items: center; }
+  .status-bar .right { display: flex; gap: 16px; align-items: center; }
   .sep { color: var(--dim); }
   .dim { color: var(--dim); }
   .accent { color: var(--accent); }
-  .err-color { color: var(--err); }
-  .win-btn {
-    border: 1px solid var(--accent); padding: 0 6px;
-    font-size: 9px; cursor: pointer; background: transparent;
-    color: var(--accent); font-family: inherit;
-  }
-  .win-btn:hover { background: var(--accent); color: var(--bg); }
+  .conn-ok { color: var(--ok); }
+  .conn-err { color: var(--err); }
+  .conn-pend { color: var(--dim); animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-  /* MAIN LAYOUT */
-  .main {
+  /* WORKBENCH */
+  .workbench {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--accent);
     display: grid;
-    grid-template-columns: 300px 1fr 380px;
-    min-height: calc(100vh - 70px);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    background: var(--surface);
   }
-
-  /* TOOLS PANEL (left) */
-  .tools-panel {
-    border-right: 1px solid var(--accent);
-    display: flex; flex-direction: column;
+  .work-section {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    display: grid;
+    grid-template-rows: auto auto minmax(78px, auto) auto;
+    gap: 10px;
+    padding: 12px;
+    min-width: 0;
   }
-  .tools-head {
-    padding: 10px 16px; border-bottom: 1px solid var(--border);
-    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
-    background: var(--panel-head); display: flex; justify-content: space-between; align-items: center;
+  .work-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
   }
-  .tools-search {
-    padding: 8px 12px; border-bottom: 1px solid var(--border);
+  .label {
+    color: var(--dim); font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; flex-shrink: 0;
   }
-  .tools-search input {
-    width: 100%; border: 1px solid var(--border); background: transparent;
+  .field-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+  }
+  .select-control {
+    border: 1px solid var(--border); background: var(--bg);
     color: var(--accent); font-family: inherit; font-size: 11px;
-    padding: 5px 8px; outline: none;
+    padding: 8px 12px; border-radius: 3px; cursor: pointer;
+    width: 100%; min-width: 0;
   }
-  .tools-search input:focus { border-color: var(--accent); }
-  .tools-search input::placeholder { color: var(--dim); }
-  .tools-list {
-    flex: 1; overflow-y: auto; padding: 10px 0;
+  .select-control:focus { border-color: var(--accent); outline: none; }
+  .select-control option { background: var(--bg); color: var(--accent); }
+  .json-input {
+    width: 100%; min-width: 0; resize: vertical;
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--accent); font-family: inherit; font-size: 12px;
+    line-height: 1.4; padding: 10px 12px; outline: none; border-radius: 3px;
   }
-  .tool-group { margin-bottom: 10px; }
-  .tool-group-label {
-    padding: 4px 16px; font-size: 9px; color: var(--dim);
-    letter-spacing: 0.12em; text-transform: uppercase;
+  .json-input:focus { border-color: var(--accent); }
+  .json-input::placeholder { color: var(--dim); }
+  .exec-btn {
+    background: var(--accent); color: var(--bg); border: none;
+    padding: 10px 18px; font-family: inherit; font-size: 11px;
+    letter-spacing: 0.1em; cursor: pointer; border-radius: 3px;
+    font-weight: bold;
   }
-  .tool-item {
-    padding: 6px 16px; font-size: 11px; cursor: pointer;
-    display: flex; flex-direction: column; gap: 3px;
+  .exec-btn:hover { opacity: 0.85; }
+  .exec-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .tool-meta {
+    color: #7ab5aa; font-size: 10px; line-height: 1.35;
+    min-height: 28px; overflow-wrap: anywhere;
   }
-  .tool-item:hover { background: rgba(0,229,204,0.06); }
-  .tool-item.selected { background: rgba(0,229,204,0.12); border-left: 2px solid var(--accent); padding-left: 14px; }
-  .tool-item .name { color: var(--accent); font-size: 12px; }
-  .tool-item .desc { color: var(--dim); font-size: 10px; line-height: 1.4; }
 
-  /* CONSOLE PANEL (center) */
+  /* CONSOLE */
   .console-panel {
-    display: flex; flex-direction: column;
-    border-right: 1px solid var(--accent);
+    flex: 1; display: flex; flex-direction: column; min-height: 0;
   }
   .console-head {
-    padding: 10px 16px; border-bottom: 1px solid var(--border);
-    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
-    background: var(--panel-head);
+    padding: 8px 20px; border-bottom: 1px solid var(--border);
+    font-size: 10px; letter-spacing: 0.1em; color: var(--dim);
+    background: var(--panel-head); display: flex; justify-content: space-between; align-items: center;
   }
   .console-body {
-    flex: 1; overflow-y: auto; padding: 12px 16px; font-size: 11px; line-height: 1.5;
-  }
-  .splash {
-    color: var(--dim); font-size: 10px; line-height: 1.5; margin-bottom: 14px;
+    flex: 1; overflow-y: auto; padding: 16px 20px; font-size: 11px;
   }
   .log-entry {
-    margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(31,61,58,0.5);
-    display: flex; flex-direction: column; gap: 4px;
+    margin-bottom: 12px; padding-bottom: 12px;
+    border-bottom: 1px solid rgba(31,61,58,0.4);
+    display: flex; flex-direction: column; gap: 6px;
   }
-  .log-entry .row { display: flex; gap: 10px; align-items: baseline; }
-  .log-entry .ts { color: var(--dim); font-size: 10px; min-width: 52px; flex-shrink: 0; }
-  .log-entry .dir { font-weight: bold; min-width: 14px; flex-shrink: 0; }
-  .log-entry .tool-name { color: var(--accent); font-size: 11px; min-width: 150px; flex-shrink: 0; }
+  .log-entry .row { display: flex; gap: 12px; align-items: baseline; }
+  .log-entry .ts { color: var(--dim); font-size: 10px; min-width: 70px; flex-shrink: 0; }
+  .log-entry .dir { font-weight: bold; min-width: 16px; flex-shrink: 0; }
+  .log-entry .tool-name { color: var(--accent); font-size: 11px; min-width: 100px; flex-shrink: 0; }
   .log-entry .detail { color: #7ab5aa; font-size: 10px; }
   .log-entry .ok { color: var(--ok); }
   .log-entry .err { color: var(--err); }
-  .log-entry .viz { color: var(--warn); }
   .log-entry pre {
-    background: var(--surface); border: 1px solid var(--border);
-    padding: 10px; margin-top: 6px; white-space: pre-wrap;
-    font-size: 10px; max-height: 150px; overflow-y: auto;
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 12px; margin-top: 8px; white-space: pre-wrap;
+    font-size: 11px; max-height: 300px; overflow-y: auto;
     color: #7ab5aa; border-radius: 3px;
   }
   .log-entry .response-block {
-    background: var(--surface); border: 1px solid var(--border);
-    padding: 10px; margin-top: 6px; white-space: pre-wrap;
-    font-size: 11px; max-height: 220px; overflow-y: auto; color: var(--dim);
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 12px; margin-top: 8px; white-space: pre-wrap;
+    font-size: 11px; max-height: 400px; overflow-y: auto; color: var(--dim);
     border-radius: 3px;
   }
   .log-entry .response-block.error { border-color: var(--err); color: var(--err); }
-  .log-entry .response-block.viz { border-color: var(--warn); }
+  .splash {
+    color: var(--dim); font-size: 11px; line-height: 1.6;
+    text-align: center; padding: 40px 20px;
+  }
 
-  /* TOOL INFO (right top) */
-  .info-panel {
-    display: flex; flex-direction: column;
-    background: var(--surface);
-  }
-  .info-head {
-    padding: 10px 16px; border-bottom: 1px solid var(--border);
-    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
-    background: var(--panel-head);
-  }
-  .info-body {
-    flex: 1; overflow-y: auto; padding: 14px;
-    display: flex; flex-direction: column; gap: 14px;
-  }
-  .info-section { display: flex; flex-direction: column; gap: 5px; }
-  .info-section .label {
-    font-size: 9px; color: var(--dim); letter-spacing: 0.14em;
-    text-transform: uppercase; border-bottom: 1px solid var(--border);
-    padding-bottom: 4px;
-  }
-  .info-section .content { font-size: 11px; color: #7ab5aa; line-height: 1.55; }
-  .info-section .content .tool-name-display {
-    color: var(--accent); font-size: 14px; font-weight: bold; margin-bottom: 4px;
-  }
-  .info-section .content .category-tag {
-    display: inline-block; font-size: 9px; color: var(--bg);
-    background: var(--accent); padding: 2px 7px; border-radius: 2px;
-    letter-spacing: 0.08em; margin-top: 4px;
-  }
-  .arg-schema-item {
-    display: flex; flex-direction: column; gap: 3px;
-    padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
-    border-radius: 3px; margin-bottom: 5px;
-  }
-  .arg-schema-item .arg-name { color: var(--accent); font-size: 11px; }
-  .arg-schema-item .arg-type { color: var(--dim); font-size: 10px; }
-  .arg-schema-item .arg-desc { color: #7ab5aa; font-size: 10px; line-height: 1.4; }
-
-  /* TOOL INVOKER (right bottom) */
-  .invoke-panel {
-    border-top: 1px solid var(--accent);
-    display: flex; flex-direction: column;
-  }
-  .invoke-head {
-    padding: 10px 16px; border-bottom: 1px solid var(--border);
-    font-size: 10px; letter-spacing: 0.1em; color: var(--accent);
-    background: var(--panel-head); display: flex; justify-content: space-between; align-items: center;
-  }
-  .invoke-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
-  .invoke-args {
-    display: flex; flex-direction: column; gap: 6px;
-  }
-  .arg-row {
-    display: flex; gap: 10px; align-items: center;
-  }
-  .arg-row label {
-    font-size: 10px; color: var(--dim); min-width: 100px; flex-shrink: 0;
-  }
-  .arg-row input, .arg-row textarea {
-    flex: 1; border: 1px solid var(--border); background: var(--surface);
-    color: var(--accent); font-family: inherit; font-size: 11px;
-    padding: 5px 10px; outline: none; border-radius: 3px;
-  }
-  .arg-row input:focus, .arg-row textarea:focus { border-color: var(--accent); }
-  .arg-row textarea { resize: vertical; min-height: 40px; }
-  .invoke-actions { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
-  .invoke-btn {
-    background: transparent; color: var(--accent); border: 1px solid var(--accent);
-    padding: 7px 18px; font-family: inherit; font-size: 10px;
-    letter-spacing: 0.1em; cursor: pointer; border-radius: 3px;
-  }
-  .invoke-btn:hover { background: var(--accent); color: var(--bg); }
-  .invoke-btn.call { border-color: var(--ok); color: var(--ok); }
-  .invoke-btn.call:hover { background: var(--ok); color: var(--bg); }
-  .invoke-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .invoke-status { font-size: 10px; color: var(--dim); margin-left: auto; }
-
-  /* QUERY BAR (bottom) */
-  .query-bar {
-    border-top: 1px solid var(--accent); padding: 12px 20px;
-    display: flex; gap: 14px; align-items: center;
-  }
-  .query-bar .label { color: var(--dim); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
-  .query-bar input {
-    flex: 1; border: 1px solid var(--border); background: transparent;
-    color: var(--accent); font-family: inherit; font-size: 11px;
-    padding: 6px 12px; outline: none; border-radius: 3px;
-  }
-  .query-bar input:focus { border-color: var(--accent); }
-  .query-bar input::placeholder { color: var(--dim); }
-  .query-bar .hint { font-size: 10px; color: var(--dim); }
-  .query-bar .hint code { color: var(--accent); }
+  /* SCROLLBARS */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 
   /* RIBBON */
   .ribbon {
@@ -247,21 +177,13 @@
   }
   .ribbon .accent { color: var(--accent); }
 
-  /* SCROLLBARS */
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
-
-  /* CONNECTION STATES */
-  .conn-ok { color: var(--ok); }
-  .conn-err { color: var(--err); }
-  .conn-pend { color: var(--dim); animation: pulse 1.5s ease-in-out infinite; }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-
-  /* Empty state */
-  .empty-state { color: var(--dim); font-size: 11px; text-align: left; padding: 24px 16px; line-height: 1.7; }
-  .empty-state .big { font-size: 16px; color: var(--accent); margin-bottom: 10px; }
+  @media (max-width: 900px) {
+    .status-bar { flex-direction: column; align-items: stretch; gap: 8px; }
+    .status-bar .left, .status-bar .right { flex-wrap: wrap; gap: 10px; }
+    .workbench { grid-template-columns: 1fr; }
+    .field-row { grid-template-columns: 1fr; }
+    .exec-btn { width: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -273,103 +195,77 @@
     <div class="left">
       <span>▓▓ L·A·I·N ▓▓</span>
       <span class="sep">|</span>
-      <span>CONN: <span id="conn-status" class="conn-pend">PENDING</span></span>
+      <span>MCP: <span id="conn-status" class="conn-pend">PENDING</span></span>
       <span class="sep">|</span>
       <span>TOOLS: <span id="tools-count" class="accent">--</span></span>
       <span class="sep">|</span>
-      <span>GRAPH: <span id="graph-nodes" class="accent">--</span> nodes</span>
-      <span class="sep">|</span>
-      <span>EDGES: <span id="graph-edges" class="accent">--</span></span>
+      <span>GRAPH: <span id="graph-nodes" class="accent">--</span> nodes · <span id="graph-edges" class="accent">--</span> edges</span>
     </div>
     <div class="right">
-      <span class="dim" id="workspace">./</span>
+      <span class="dim">v<span id="pkg-version" class="accent">--</span></span>
       <span class="sep">|</span>
       <span id="clock" class="accent">--:--:--</span>
-      <span class="sep">|</span>
-      <button class="win-btn">_</button>
-      <button class="win-btn">x</button>
     </div>
   </div>
 
-  <!-- MAIN -->
-  <div class="main">
-
-    <!-- TOOLS PANEL -->
-    <div class="tools-panel">
-      <div class="tools-head">
-        <span>══ TOOLS ══</span>
-        <span class="dim" id="tools-filter-count">--</span>
+  <!-- WORKBENCH -->
+  <div class="workbench">
+    <section class="work-section" aria-labelledby="query-title">
+      <div class="work-head">
+        <span id="query-title" class="label">QUERY</span>
       </div>
-      <div class="tools-search">
-        <input type="text" id="tool-search" placeholder="filter tools...">
+      <div class="field-row">
+        <select id="preset-queries" class="select-control">
+          <option value="">preset queries</option>
+          <option value='{"ops": [{"op": "find", "type": "Function"}]}'>Find all Functions</option>
+          <option value='{"ops": [{"op": "find", "type": "Class"}]}'>Find all Classes</option>
+          <option value='{"ops": [{"op": "find", "type": "File"}]}'>Find all Files</option>
+          <option value='{"ops": [{"op": "find", "type": "Function"}, {"op": "limit", "count": 20}, {"op": "sort", "by": "name", "direction": "asc"}]}'>Top 20 Functions (A-Z)</option>
+          <option value='{"ops": [{"op": "find", "type": "Method"}]}'>Find all Methods</option>
+          <option value='{"ops": [{"op": "find", "type": "Module"}]}'>Find all Modules</option>
+          <option value='{"ops": [{"op": "find", "type": "Interface"}]}'>Find all Interfaces</option>
+          <option value='{"ops": [{"op": "find", "type": "Function"}, {"op": "connect", "edge": "Calls", "direction": "incoming"}]}'>Functions with Callers</option>
+          <option value='{"ops": [{"op": "find", "type": "Function"}, {"op": "connect", "edge": "Calls", "direction": "outgoing"}]}'>Functions with Callees</option>
+          <option value='{"ops": [{"op": "find", "type": "Class"}, {"op": "connect", "edge": "Implements", "direction": "outgoing"}]}'>Classes Implementing Interfaces</option>
+          <option value='{"ops": [{"op": "find", "type": "Function"}, {"op": "filter", "name": {"glob": "*test*"}}]}'>Test Functions</option>
+          <option value='{"ops": [{"op": "find", "type": "Variable"}]}'>Find all Variables</option>
+          <option value='{"ops": [{"op": "find", "type": "Constant"}]}'>Find all Constants</option>
+        </select>
+        <button class="exec-btn" id="query-btn">RUN</button>
       </div>
-      <div class="tools-list" id="tools-list">
-        <!-- Populated by JS -->
+      <textarea id="query-input" class="json-input" rows="5" spellcheck="false" placeholder='{"ops": [{"op": "find", "type": "Function"}]}'></textarea>
+      <div class="tool-meta" id="query-meta">query_graph</div>
+    </section>
+
+    <section class="work-section" aria-labelledby="tool-title">
+      <div class="work-head">
+        <span id="tool-title" class="label">TOOL</span>
       </div>
-    </div>
-
-    <!-- CONSOLE PANEL -->
-    <div class="console-panel">
-      <div class="console-head">
-        <span>══ SERVER LOG ════════════════════════════════════════</span>
-        <span class="dim">[<a href="javascript:clearLog()" style="color:var(--dim);text-decoration:none">clear</a>]</span>
+      <div class="field-row">
+        <select id="tool-select" class="select-control">
+          <option value="">loading tools</option>
+        </select>
+        <button class="exec-btn" id="tool-btn" disabled>RUN</button>
       </div>
-      <div class="console-body" id="console-body">
-        <pre class="splash">╔══════════════════════════════════════╗
-║  LAIN · MCP Diagnostic Console      ║
-║  Architecture Brain · v1.0           ║
-╚══════════════════════════════════════╝
-transport ........ <span class="accent">http/json-rpc</span>
-mode ............ <span class="accent">diagnostic</span>
-status .......... <span id="console-status" class="conn-pend">connecting...</span></pre>
-        <div id="log-entries"></div>
-      </div>
-    </div>
-
-    <!-- INFO + INVOKER PANEL (right) -->
-    <div style="display:flex;flex-direction:column;">
-
-      <!-- TOOL INFO -->
-      <div class="info-panel" style="flex:1;border-bottom:1px solid var(--accent);">
-        <div class="info-head">
-          <span>══ TOOL INFO ═══════════════</span>
-        </div>
-        <div class="info-body" id="info-body">
-          <div class="empty-state">
-            <div class="big">▸</div>
-            Select a tool from the list to view its description, category, and schema.
-          </div>
-        </div>
-      </div>
-
-      <!-- TOOL INVOKER -->
-      <div class="invoke-panel">
-        <div class="invoke-head">
-          <span>══ INVOKE ═══════════</span>
-          <span class="dim" id="invoke-phase">idle</span>
-        </div>
-        <div class="invoke-body">
-          <div class="invoke-args" id="invoke-args">
-            <div style="font-size:10px;color:var(--dim);padding:10px 0;">Select a tool to invoke</div>
-          </div>
-          <div class="invoke-actions">
-            <button class="invoke-btn call" id="call-btn" disabled>CALL</button>
-            <button class="invoke-btn" id="clear-btn">CLEAR</button>
-            <span class="invoke-status" id="invoke-status">—</span>
-          </div>
-        </div>
-      </div>
-
-    </div>
-
+      <textarea id="tool-args" class="json-input" rows="5" spellcheck="false" placeholder="{}">{}</textarea>
+      <div class="tool-meta" id="tool-meta">select a tool</div>
+    </section>
   </div>
 
-  <!-- QUERY BAR -->
-  <div class="query-bar">
-    <span class="label">QUERY</span>
-    <input type="text" id="query-input" placeholder='{"ops": [{"op": "find", "type": "Function"}]}'>
-    <span class="hint">Raw graph query — <code>Enter</code> to exec · <code>Shift+Enter</code> for multiline</span>
-    <button class="invoke-btn call" id="query-btn">EXEC</button>
+  <!-- CONSOLE -->
+  <div class="console-panel">
+    <div class="console-head">
+      <span>══ OUTPUT ════════════════════════════════════════════</span>
+      <span>[<a href="javascript:clearLog()" style="color:var(--dim);text-decoration:none">clear</a>]</span>
+    </div>
+    <div class="console-body" id="console-body">
+      <div id="log-entries"></div>
+      <pre class="splash" id="splash-text">LAIN · Query Console
+v<span id="splash-version">--</span>
+
+transport: http/json-rpc
+status: <span id="console-status" class="conn-pend">connecting...</span></pre>
+    </div>
   </div>
 
   <!-- RIBBON -->
@@ -382,27 +278,23 @@ status .......... <span id="console-status" class="conn-pend">connecting...</spa
 
 <script>
 const BASE = window.location.origin;
-
-// State
-let tools = [];
-let selectedTool = null;
-
-// DOM refs
-const toolsList = document.getElementById('tools-list');
-const toolsCount = document.getElementById('tools-count');
-const toolsFilterCount = document.getElementById('tools-filter-count');
-const logEntriesEl = document.getElementById('log-entries');
-const connStatus = document.getElementById('conn-status');
-const consoleStatus = document.getElementById('console-status');
-const infoBody = document.getElementById('info-body');
-const invokeArgs = document.getElementById('invoke-args');
-const invokePhase = document.getElementById('invoke-phase');
-const invokeStatus = document.getElementById('invoke-status');
-const callBtn = document.getElementById('call-btn');
-const clearBtn = document.getElementById('clear-btn');
-const toolSearch = document.getElementById('tool-search');
-const graphNodes = document.getElementById('graph-nodes');
-const graphEdges = document.getElementById('graph-edges');
+let toolsCountEl = document.getElementById('tools-count');
+let graphNodesEl = document.getElementById('graph-nodes');
+let graphEdgesEl = document.getElementById('graph-edges');
+let connStatusEl = document.getElementById('conn-status');
+let consoleStatusEl = document.getElementById('console-status');
+let consoleBodyEl = document.getElementById('console-body');
+let logEntriesEl = document.getElementById('log-entries');
+let splashTextEl = document.getElementById('splash-text');
+let splashVersionEl = document.getElementById('splash-version');
+let pkgVersionEl = document.getElementById('pkg-version');
+let toolSelectEl = document.getElementById('tool-select');
+let toolArgsEl = document.getElementById('tool-args');
+let toolMetaEl = document.getElementById('tool-meta');
+let toolBtnEl = document.getElementById('tool-btn');
+let availableTools = [];
+const MAX_LOG_DETAIL_CHARS = 220;
+const MAX_RESPONSE_CHARS = 8000;
 
 // Clock
 function tick() {
@@ -412,29 +304,6 @@ function tick() {
 }
 tick();
 setInterval(tick, 1000);
-
-// Tool name to category mapping
-const TOOL_CATEGORIES = {
-  'Architecture': ['explore_architecture', 'list_entry_points', 'compare_modules', 'get_layered_map', 'get_master_map', 'architectural_observations'],
-  'Navigation': ['trace_dependency', 'get_call_chain', 'navigate_to_anchor'],
-  'Search': ['semantic_search'],
-  'Impact': ['get_blast_radius', 'get_coupling_radar'],
-  'Metrics': ['find_anchors', 'get_anchor_score', 'get_context_depth', 'find_dead_code', 'explain_symbol', 'suggest_refactor_targets'],
-  'System': ['get_health', 'install_language_server', 'run_enrichment', 'sync_state', 'get_agent_strategy', 'export_graph_json'],
-  'Filesystem': ['read_file', 'list_directory', 'find_files'],
-  'Execution': ['run_command', 'run_build', 'run_tests', 'run_clippy'],
-  'Context': ['get_context_for_prompt', 'get_code_snippet', 'get_call_sites'],
-  'GitOps': ['get_file_diff', 'get_commit_history', 'get_branch_status'],
-  'Testing': ['find_untested_functions', 'get_test_template', 'find_test_file', 'get_coverage_summary'],
-  'Query': ['query_graph', 'describe_schema'],
-};
-
-function getCategoryForTool(toolName) {
-  for (const [cat, names] of Object.entries(TOOL_CATEGORIES)) {
-    if (names.includes(toolName)) return cat;
-  }
-  return 'Other';
-}
 
 // MCP request helper
 async function mcpRequest(method, params = null) {
@@ -447,6 +316,29 @@ async function mcpRequest(method, params = null) {
   return resp.json();
 }
 
+function truncateText(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)} ... (${text.length} chars)`;
+}
+
+function compactJson(value) {
+  return truncateText(JSON.stringify(value), MAX_LOG_DETAIL_CHARS);
+}
+
+function resultContentText(result) {
+  return (result.content || [])
+    .map(item => item?.text)
+    .filter(Boolean)
+    .join('\n');
+}
+
+function appendLogSpan(row, className, text) {
+  const span = document.createElement('span');
+  span.className = className;
+  span.textContent = text;
+  row.appendChild(span);
+}
+
 // Add log entry
 function addLog(dir, tool, detail, className = '', responseText = null) {
   const ts = new Date();
@@ -457,225 +349,126 @@ function addLog(dir, tool, detail, className = '', responseText = null) {
 
   const row = document.createElement('div');
   row.className = 'row';
-  if (dir) row.innerHTML += `<span class="dir" style="color:${className === 'err' ? 'var(--err)' : className === 'ok' ? 'var(--ok)' : 'var(--accent)'}">${dir}</span>`;
-  if (tool) row.innerHTML += `<span class="tool-name">${tool}</span>`;
-  if (detail) row.innerHTML += `<span class="${className || 'detail'}">${detail}</span>`;
+  appendLogSpan(row, 'ts', tsStr);
+  if (dir) {
+    const dirSpan = document.createElement('span');
+    dirSpan.className = 'dir';
+    dirSpan.style.color = className === 'err' ? 'var(--err)' : className === 'ok' ? 'var(--ok)' : 'var(--accent)';
+    dirSpan.textContent = dir;
+    row.appendChild(dirSpan);
+  }
+  if (tool) appendLogSpan(row, 'tool-name', tool);
+  if (detail) appendLogSpan(row, className || 'detail', detail);
   entry.appendChild(row);
 
   if (responseText) {
+    const isTruncated = responseText.length > MAX_RESPONSE_CHARS;
     const respDiv = document.createElement('pre');
-    respDiv.className = 'response-block' + (className === 'err' ? ' error' : className === 'viz' ? ' viz' : '');
-    respDiv.textContent = responseText.slice(0, 1500) + (responseText.length > 1500 ? '\n...(truncated)' : '');
+    respDiv.className = 'response-block' + (className === 'err' ? ' error' : '');
+    respDiv.textContent = responseText.slice(0, MAX_RESPONSE_CHARS)
+      + (isTruncated ? `\n[display truncated at ${MAX_RESPONSE_CHARS} chars; request was sent in full]` : '');
     entry.appendChild(respDiv);
   }
 
-  logEntriesEl.appendChild(entry);
-  logEntriesEl.scrollTop = logEntriesEl.scrollHeight;
+  splashTextEl.style.display = 'none';
+  logEntriesEl.insertBefore(entry, logEntriesEl.firstChild);
+  consoleBodyEl.scrollTop = 0;
 }
 
-// Render tool info panel
-function renderToolInfo(tool) {
-  const category = getCategoryForTool(tool.name);
-  const schema = tool.input_schema || {};
-  const props = schema.properties || {};
-  const required = schema.required || [];
+// Clear log
+function clearLog() {
+  logEntriesEl.innerHTML = '';
+  splashTextEl.style.display = '';
+}
 
-  let html = `
-    <div class="info-section">
-      <div class="label">tool</div>
-      <div class="content">
-        <div class="tool-name-display">${tool.name}</div>
-        <span class="category-tag">${category}</span>
-      </div>
-    </div>`;
-
-  if (tool.description) {
-    html += `
-    <div class="info-section">
-      <div class="label">description</div>
-      <div class="content">${tool.description}</div>
-    </div>`;
-  }
-
-  if (Object.keys(props).length > 0) {
-    html += `<div class="info-section"><div class="label">arguments</div><div class="content">`;
-    for (const [name, prop] of Object.entries(props)) {
-      const req = required.includes(name);
-      html += `
-        <div class="arg-schema-item">
-          <div class="arg-name">${name}${req ? ' <span style="color:var(--err);font-size:9px">required</span>' : ''}</div>
-          <div class="arg-type">${prop.type || 'any'}</div>
-          ${prop.description ? `<div class="arg-desc">${prop.description}</div>` : ''}
-        </div>`;
+// Load health and status
+async function loadStatus() {
+  try {
+    const health = await fetch(`${BASE}/health`).then(r => r.json());
+    graphNodesEl.textContent = health.graph_nodes?.toLocaleString() || '--';
+    graphEdgesEl.textContent = health.graph_edges?.toLocaleString() || '--';
+    toolsCountEl.textContent = health.tools_count || '--';
+    if (health.version) {
+      splashVersionEl.textContent = health.version;
+      pkgVersionEl.textContent = health.version;
     }
-    html += `</div></div>`;
-  }
-
-  infoBody.innerHTML = html;
+  } catch (e) { /* health optional */ }
 }
 
-// Load tools and populate panel
-async function loadTools() {
-  addLog('', '', 'connecting to MCP server...', 'detail');
+// Check MCP connection
+async function checkMcp() {
   try {
     const res = await mcpRequest('tools/list');
     if (res.result && res.result.tools) {
-      tools = res.result.tools;
-      toolsCount.textContent = tools.length;
-      toolsFilterCount.textContent = tools.length + ' tools';
-
-      connStatus.textContent = 'OK';
-      connStatus.className = 'conn-ok';
-      consoleStatus.textContent = 'connected';
-      consoleStatus.className = 'conn-ok';
-
-      try {
-        const health = await fetch(`${BASE}/health`).then(r => r.json());
-        graphNodes.textContent = health.graph_nodes?.toLocaleString() || '--';
-        graphEdges.textContent = health.graph_edges?.toLocaleString() || '--';
-      } catch (e) { /* health optional */ }
-
-      renderToolsList(tools);
-      addLog('', '', 'tools loaded: ' + tools.length, 'ok');
+      availableTools = res.result.tools;
+      populateToolSelect(availableTools);
+      connStatusEl.textContent = 'OK';
+      connStatusEl.className = 'conn-ok';
+      consoleStatusEl.textContent = 'connected';
+      consoleStatusEl.className = 'conn-ok';
+      return true;
     }
-  } catch (e) {
-    connStatus.textContent = 'ERR';
-    connStatus.className = 'conn-err';
-    consoleStatus.textContent = 'connection failed';
-    addLog('', '', e.message, 'err');
+  } catch (e) { /* not connected */ }
+  connStatusEl.textContent = 'ERR';
+  connStatusEl.className = 'conn-err';
+  consoleStatusEl.textContent = 'disconnected';
+  consoleStatusEl.className = 'conn-err';
+  return false;
+}
+
+function populateToolSelect(tools) {
+  const sorted = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+  toolSelectEl.innerHTML = '<option value="">select tool</option>';
+  for (const tool of sorted) {
+    const opt = document.createElement('option');
+    opt.value = tool.name;
+    opt.textContent = tool.name;
+    toolSelectEl.appendChild(opt);
+  }
+  toolBtnEl.disabled = true;
+  toolMetaEl.textContent = sorted.length ? `${sorted.length} tools available` : 'no tools';
+}
+
+function defaultValueForSchema(schema) {
+  if (!schema || typeof schema !== 'object') return null;
+  if (schema.default !== undefined) return schema.default;
+  if (schema.enum && schema.enum.length) return schema.enum[0];
+  switch (schema.type) {
+    case 'string': return '';
+    case 'integer':
+    case 'number': return 0;
+    case 'boolean': return false;
+    case 'array': return [];
+    case 'object': return {};
+    default: return null;
   }
 }
 
-// Render tools list grouped by category
-function renderToolsList(filter) {
-  toolsList.innerHTML = '';
-  const filterText = filter?.toLowerCase() || '';
-
-  for (const [category, toolNames] of Object.entries(TOOL_CATEGORIES)) {
-    const matching = toolNames.filter(n => !filterText || n.includes(filterText));
-    if (matching.length === 0) continue;
-
-    const group = document.createElement('div');
-    group.className = 'tool-group';
-
-    const label = document.createElement('div');
-    label.className = 'tool-group-label';
-    label.textContent = category;
-    group.appendChild(label);
-
-    for (const name of matching) {
-      const tool = tools.find(t => t.name === name);
-      if (!tool) continue;
-
-      const item = document.createElement('div');
-      item.className = 'tool-item' + (selectedTool?.name === name ? ' selected' : '');
-      item.innerHTML = `<span class="name">${name}</span><span class="desc">${(tool.description || '—').slice(0, 80)}</span>`;
-      item.onclick = () => selectTool(tool);
-      group.appendChild(item);
-    }
-
-    toolsList.appendChild(group);
-  }
-
-  toolsFilterCount.textContent = filterText
-    ? tools.filter(t => t.name.toLowerCase().includes(filterText)).length + ' filtered'
-    : tools.length + ' tools';
-}
-
-// Select a tool and show its arguments
-function selectTool(tool) {
-  selectedTool = tool;
-  callBtn.disabled = false;
-  invokePhase.textContent = 'ready';
-  invokeStatus.textContent = tool.name;
-
-  renderToolInfo(tool);
-
-  const schema = tool.input_schema || {};
+function buildArgsTemplate(tool) {
+  const schema = tool?.inputSchema || tool?.input_schema || {};
   const props = schema.properties || {};
-  const required = schema.required || [];
-
-  invokeArgs.innerHTML = '';
-
-  if (Object.keys(props).length === 0) {
-    const hint = document.createElement('div');
-    hint.style.cssText = 'font-size: 10px; color: var(--dim);';
-    hint.textContent = 'No arguments required — click CALL to execute';
-    invokeArgs.appendChild(hint);
-  } else {
-    for (const [name, prop] of Object.entries(props)) {
-      const row = document.createElement('div');
-      row.className = 'arg-row';
-
-      const label = document.createElement('label');
-      label.textContent = name + (required.includes(name) ? ' *' : '');
-      row.appendChild(label);
-
-      if (prop.type === 'object' || prop.type === 'array') {
-        const textarea = document.createElement('textarea');
-        textarea.id = 'arg-' + name;
-        textarea.placeholder = prop.description || (prop.type === 'array' ? 'JSON array' : 'JSON object');
-        row.appendChild(textarea);
-      } else {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.id = 'arg-' + name;
-        input.placeholder = prop.description || name;
-        row.appendChild(input);
-      }
-
-      invokeArgs.appendChild(row);
-    }
+  const required = new Set(schema.required || []);
+  const template = {};
+  for (const key of Object.keys(props)) {
+    if (required.has(key)) template[key] = defaultValueForSchema(props[key]);
   }
-
-  document.querySelectorAll('.tool-item').forEach(el => el.classList.remove('selected'));
-  document.querySelectorAll('.tool-item').forEach(el => {
-    if (el.querySelector('.name')?.textContent === tool.name) el.classList.add('selected');
-  });
+  return template;
 }
 
-// Build args object from form
-function buildArgs() {
-  const args = {};
-  const inputs = invokeArgs.querySelectorAll('input, textarea');
-  inputs.forEach(input => {
-    const name = input.id.replace('arg-', '');
-    const val = input.value.trim();
-    if (val) {
-      try { args[name] = JSON.parse(val); }
-      catch { args[name] = val; }
-    }
-  });
-  return args;
-}
-
-// Call selected tool
-async function executeTool() {
-  if (!selectedTool) return;
-  const args = buildArgs();
-  const argsStr = JSON.stringify(args);
-
-  invokePhase.textContent = 'calling...';
-  addLog('▸', selectedTool.name, argsStr, 'detail');
-
-  try {
-    const res = await mcpRequest('tools/call', { name: selectedTool.name, arguments: args });
-    invokePhase.textContent = 'done';
-
-    if (res.result && res.result.content) {
-      const text = res.result.content[0]?.text || '';
-      const isViz = text.includes('http://localhost:9999/ui/');
-      addLog('◂', 'ok', selectedTool.name, isViz ? 'viz' : 'ok', text);
-    } else if (res.error) {
-      addLog('◂', 'err', res.error.message || 'unknown error', 'err');
-    }
-  } catch (e) {
-    invokePhase.textContent = 'error';
-    addLog('◂', 'err', e.message, 'err');
+function updateToolFields() {
+  const selected = availableTools.find(t => t.name === toolSelectEl.value);
+  toolBtnEl.disabled = !selected;
+  if (!selected) {
+    toolArgsEl.value = '{}';
+    toolMetaEl.textContent = 'select a tool';
+    return;
   }
+  const template = buildArgsTemplate(selected);
+  toolArgsEl.value = JSON.stringify(template, null, 2);
+  toolMetaEl.textContent = selected.description || selected.name;
 }
 
-// Execute raw query
+// Execute query
 async function executeQuery() {
   const input = document.getElementById('query-input');
   const val = input.value.trim();
@@ -685,11 +478,12 @@ async function executeQuery() {
   try { query = JSON.parse(val); }
   catch { addLog('◂', 'err', 'Invalid JSON query', 'err'); return; }
 
-  addLog('▸', 'query_graph', JSON.stringify(query).slice(0, 100), 'detail');
+  addLog('▸', 'query_graph', compactJson(query), 'detail');
   try {
     const res = await mcpRequest('tools/call', { name: 'query_graph', arguments: { query } });
     if (res.result && res.result.content) {
-      addLog('◂', 'ok', 'query_graph', 'ok', res.result.content[0]?.text);
+      const isError = res.result.isError === true;
+      addLog('◂', isError ? 'err' : 'ok', 'query_graph', isError ? 'err' : 'ok', resultContentText(res.result));
     } else if (res.error) {
       addLog('◂', 'err', res.error.message, 'err');
     }
@@ -698,27 +492,61 @@ async function executeQuery() {
   }
 }
 
-// Clear log
-function clearLog() {
-  logEntriesEl.innerHTML = '';
-}
+// Preset dropdown
+document.getElementById('preset-queries').addEventListener('change', e => {
+  if (e.target.value) {
+    document.getElementById('query-input').value = e.target.value;
+  }
+});
 
-// Event listeners
-callBtn.addEventListener('click', executeTool);
-clearBtn.addEventListener('click', clearLog);
-
-document.getElementById('query-btn').addEventListener('click', executeQuery);
+// Query input Enter key
 document.getElementById('query-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
     e.preventDefault();
     executeQuery();
   }
 });
 
-toolSearch.addEventListener('input', e => renderToolsList(e.target.value));
+// Exec button
+document.getElementById('query-btn').addEventListener('click', executeQuery);
+
+async function executeTool() {
+  const name = toolSelectEl.value;
+  if (!name) return;
+
+  let args;
+  try { args = JSON.parse(toolArgsEl.value.trim() || '{}'); }
+  catch { addLog('◂', 'err', 'Invalid tool JSON args', 'err'); return; }
+
+  addLog('▸', name, compactJson(args), 'detail');
+  try {
+    const res = await mcpRequest('tools/call', { name, arguments: args });
+    if (res.result && res.result.content) {
+      const isError = res.result.isError === true;
+      addLog('◂', isError ? 'err' : 'ok', name, isError ? 'err' : 'ok', resultContentText(res.result));
+    } else if (res.error) {
+      addLog('◂', 'err', res.error.message, 'err');
+    }
+  } catch (e) {
+    addLog('◂', 'err', e.message, 'err');
+  }
+}
+
+toolSelectEl.addEventListener('change', updateToolFields);
+toolArgsEl.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    executeTool();
+  }
+});
+toolBtnEl.addEventListener('click', executeTool);
 
 // Init
-loadTools();
+async function init() {
+  await loadStatus();
+  await checkMcp();
+}
+init();
 </script>
 
 </body>
