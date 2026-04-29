@@ -296,9 +296,15 @@ fn test_query_spec_named_unknown() {
 #[test]
 fn test_query_spec_named_all() {
     let names = [
-        "get_blast_radius", "get_call_chain", "get_file_functions",
-        "get_function_imports", "get_callers", "get_callees",
-        "get_module_functions", "get_test_coverage", "get_deprecated_functions"
+        "get_blast_radius",
+        "get_call_chain",
+        "get_file_functions",
+        "get_function_imports",
+        "get_callers",
+        "get_callees",
+        "get_module_functions",
+        "get_test_coverage",
+        "get_deprecated_functions",
     ];
     for name in names {
         let spec = QuerySpec::named(name);
@@ -358,9 +364,16 @@ fn test_graph_op_variants() {
     let find = GraphOp::Find(FindOp::default());
     let connect = GraphOp::Connect(ConnectOp::default());
     let filter = GraphOp::Filter(FilterOp::default());
-    let sort = GraphOp::Sort(SortOp { by: SortField::Name, direction: SortDirection::Asc });
-    let limit = GraphOp::Limit(LimitOp { count: 1, offset: 0 });
+    let sort = GraphOp::Sort(SortOp {
+        by: SortField::Name,
+        direction: SortDirection::Asc,
+    });
+    let limit = GraphOp::Limit(LimitOp {
+        count: 1,
+        offset: 0,
+    });
     let group = GraphOp::Group(GroupOp::default());
+    let semantic_filter = GraphOp::SemanticFilter(SemanticFilterOp::default());
 
     assert!(matches!(find, GraphOp::Find(_)));
     assert!(matches!(connect, GraphOp::Connect(_)));
@@ -368,18 +381,71 @@ fn test_graph_op_variants() {
     assert!(matches!(sort, GraphOp::Sort(_)));
     assert!(matches!(limit, GraphOp::Limit(_)));
     assert!(matches!(group, GraphOp::Group(_)));
+    assert!(matches!(semantic_filter, GraphOp::SemanticFilter(_)));
+}
+
+#[test]
+fn test_semantic_filter_op() {
+    let sem = GraphOp::SemanticFilter(SemanticFilterOp {
+        like: "auth handler".to_string(),
+        threshold: 0.4,
+    });
+    assert!(matches!(sem, GraphOp::SemanticFilter(_)));
+    if let GraphOp::SemanticFilter(s) = sem {
+        assert_eq!(s.like, "auth handler");
+        assert_eq!(s.threshold, 0.4);
+    }
+}
+
+#[test]
+fn test_semantic_filter_default() {
+    let sem = SemanticFilterOp::default();
+    assert_eq!(sem.like, "");
+    assert_eq!(sem.threshold, 0.3);
+}
+
+#[test]
+fn test_semantic_filter_serde() {
+    let sem = SemanticFilterOp {
+        like: "database connection".to_string(),
+        threshold: 0.5,
+    };
+    let json = serde_json::to_string(&sem).unwrap();
+    let back: SemanticFilterOp = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.like, "database connection");
+    assert_eq!(back.threshold, 0.5);
+}
+
+#[test]
+fn test_semantic_filter_in_graph_op() {
+    // Test that semantic_filter can be used in GraphOp enum
+    let json = r#"{"op":"semantic_filter","like":"error handling","threshold":0.35}"#;
+    let op: GraphOp = serde_json::from_str(json).unwrap();
+    assert!(matches!(op, GraphOp::SemanticFilter(_)));
 }
 
 #[test]
 fn test_limit_op() {
-    let limit = GraphOp::Limit(LimitOp { count: 10, offset: 0 });
+    let limit = GraphOp::Limit(LimitOp {
+        count: 10,
+        offset: 0,
+    });
     assert!(matches!(limit, GraphOp::Limit(LimitOp { count: 10, .. })));
 }
 
 #[test]
 fn test_sort_op() {
-    let sort = GraphOp::Sort(SortOp { by: SortField::Type, direction: SortDirection::Desc });
-    assert!(matches!(sort, GraphOp::Sort(SortOp { by: SortField::Type, direction: SortDirection::Desc })));
+    let sort = GraphOp::Sort(SortOp {
+        by: SortField::Type,
+        direction: SortDirection::Desc,
+    });
+    assert!(matches!(
+        sort,
+        GraphOp::Sort(SortOp {
+            by: SortField::Type,
+            direction: SortDirection::Desc
+        })
+    ));
 }
 
 #[test]
@@ -415,6 +481,11 @@ fn test_name_selector_serde() {
     let json = serde_json::to_string(&exact).unwrap();
     let back: NameSelector = serde_json::from_str(&json).unwrap();
     assert!(back.matches("main"));
+
+    let glob = NameSelector::Glob("*test*".to_string());
+    let json = serde_json::to_string(&glob).unwrap();
+    let back: NameSelector = serde_json::from_str(&json).unwrap();
+    assert!(matches!(back, NameSelector::Glob(s) if s == "*test*"));
 }
 
 #[test]
@@ -422,6 +493,15 @@ fn test_name_selector_deserialize() {
     // Test that we can deserialize known name selector variants
     let exact: NameSelector = serde_json::from_str(r#""main""#).unwrap();
     assert!(matches!(exact, NameSelector::Exact(s) if s == "main"));
+
+    let glob: NameSelector = serde_json::from_str(r#"{"glob":"*test*"}"#).unwrap();
+    assert!(matches!(glob, NameSelector::Glob(s) if s == "*test*"));
+
+    let starts_with: NameSelector = serde_json::from_str(r#"{"starts_with":"test_"}"#).unwrap();
+    assert!(matches!(starts_with, NameSelector::StartsWith(s) if s == "test_"));
+
+    let ends_with: NameSelector = serde_json::from_str(r#"{"endsWith":"_test"}"#).unwrap();
+    assert!(matches!(ends_with, NameSelector::EndsWith(s) if s == "_test"));
 }
 
 #[test]
@@ -501,7 +581,14 @@ fn test_graph_op_deserialize_limit() {
 fn test_graph_op_deserialize_sort() {
     let json = r#"{"op":"sort","by":"name","direction":"desc"}"#;
     let op: GraphOp = serde_json::from_str(json).unwrap();
-    assert!(matches!(op, GraphOp::Sort(SortOp { by: SortField::Name, direction: SortDirection::Desc, .. })));
+    assert!(matches!(
+        op,
+        GraphOp::Sort(SortOp {
+            by: SortField::Name,
+            direction: SortDirection::Desc,
+            ..
+        })
+    ));
 }
 
 #[test]

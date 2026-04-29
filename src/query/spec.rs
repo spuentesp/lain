@@ -2,7 +2,9 @@
 //!
 //! JSON-based ops array interface for graph queries, designed for LLM-native construction.
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::RangeInclusive;
 
 // =============================================================================
@@ -148,13 +150,11 @@ impl QuerySpec {
                     target: None,
                 }),
             ]),
-            "get_deprecated_functions" => QuerySpec::new(vec![
-                GraphOp::Find(FindOp {
-                    type_selector: Some(TypeSelector::Single("Function".into())),
-                    label_selector: Some(LabelSelector::Single("deprecated".into())),
-                    ..Default::default()
-                }),
-            ]),
+            "get_deprecated_functions" => QuerySpec::new(vec![GraphOp::Find(FindOp {
+                type_selector: Some(TypeSelector::Single("Function".into())),
+                label_selector: Some(LabelSelector::Single("deprecated".into())),
+                ..Default::default()
+            })]),
             _ => return None,
         };
         Some(spec)
@@ -175,7 +175,12 @@ impl Default for QuerySpec {
 #[serde(untagged)]
 pub enum DepthSpec {
     Single(u32),
-    Range { #[serde(rename = "min")] min: u32, #[serde(rename = "max")] max: u32 },
+    Range {
+        #[serde(rename = "min")]
+        min: u32,
+        #[serde(rename = "max")]
+        max: u32,
+    },
 }
 
 impl DepthSpec {
@@ -228,11 +233,15 @@ impl LabelSelector {
         match self {
             LabelSelector::Single(label) => node_label == Some(label),
             LabelSelector::Or(labels) => {
-                let Some(l) = node_label else { return false; };
+                let Some(l) = node_label else {
+                    return false;
+                };
                 labels.iter().any(|label| label == l)
             }
             LabelSelector::Not(labels) => {
-                let Some(l) = node_label else { return true; };
+                let Some(l) = node_label else {
+                    return true;
+                };
                 !labels.iter().any(|label| label == l)
             }
         }
@@ -285,13 +294,84 @@ impl Default for Direction {
 // =============================================================================
 
 /// Name matching strategy
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum NameSelector {
     Exact(String),
     Glob(String),
     StartsWith(String),
     EndsWith(String),
+}
+
+impl Serialize for NameSelector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            NameSelector::Exact(value) => serializer.serialize_str(value),
+            NameSelector::Glob(value) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("glob", value)?;
+                map.end()
+            }
+            NameSelector::StartsWith(value) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("starts_with", value)?;
+                map.end()
+            }
+            NameSelector::EndsWith(value) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("ends_with", value)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NameSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(value) => Ok(NameSelector::Exact(value)),
+            serde_json::Value::Object(object) if object.len() == 1 => {
+                let (key, value) = object
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| D::Error::custom("expected one name selector key"))?;
+                let value = selector_string::<D::Error>(&key, value)?;
+                match key.as_str() {
+                    "exact" => Ok(NameSelector::Exact(value)),
+                    "glob" => Ok(NameSelector::Glob(value)),
+                    "starts_with" | "startsWith" => Ok(NameSelector::StartsWith(value)),
+                    "ends_with" | "endsWith" => Ok(NameSelector::EndsWith(value)),
+                    _ => Err(D::Error::custom(format!(
+                        "unknown name selector `{key}`; expected exact, glob, starts_with, or ends_with"
+                    ))),
+                }
+            }
+            serde_json::Value::Object(_) => Err(D::Error::custom(
+                "name selector object must contain exactly one key",
+            )),
+            _ => Err(D::Error::custom(
+                "name selector must be a string or an object selector",
+            )),
+        }
+    }
+}
+
+fn selector_string<E>(key: &str, value: serde_json::Value) -> Result<String, E>
+where
+    E: DeError,
+{
+    match value {
+        serde_json::Value::String(value) => Ok(value),
+        _ => Err(E::custom(format!(
+            "name selector `{key}` value must be a string"
+        ))),
+    }
 }
 
 impl NameSelector {
@@ -497,7 +577,37 @@ pub struct LimitOp {
 
 impl Default for LimitOp {
     fn default() -> Self {
-        Self { count: 100, offset: 0 }
+        Self {
+            count: 100,
+            offset: 0,
+        }
+    }
+}
+
+// =============================================================================
+// Semantic Filter Operation
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticFilterOp {
+    /// The natural language query to match semantically
+    pub like: String,
+
+    /// Minimum similarity threshold (0.0 to 1.0), defaults to 0.3
+    #[serde(default = "default_semantic_threshold")]
+    pub threshold: f32,
+}
+
+fn default_semantic_threshold() -> f32 {
+    0.3
+}
+
+impl Default for SemanticFilterOp {
+    fn default() -> Self {
+        Self {
+            like: String::new(),
+            threshold: 0.3,
+        }
     }
 }
 
@@ -511,6 +621,8 @@ pub enum GraphOp {
     Find(FindOp),
     Connect(ConnectOp),
     Filter(FilterOp),
+    #[serde(rename = "semantic_filter")]
+    SemanticFilter(SemanticFilterOp),
     Group(GroupOp),
     Sort(SortOp),
     Limit(LimitOp),

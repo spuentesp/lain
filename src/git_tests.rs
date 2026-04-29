@@ -183,3 +183,57 @@ fn test_git_sensor_in_temp_repo_with_file() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_repo_identity_from_https_url() {
+    use crate::git::RepoIdentity;
+
+    let identity = RepoIdentity::from_remote("https://github.com/spuentesp/lain.git");
+    assert!(identity.is_some());
+    let identity = identity.unwrap();
+    assert_eq!(identity.owner, "spuentesp");
+    assert_eq!(identity.name, "lain");
+}
+
+#[test]
+fn test_repo_identity_from_ssh_url() {
+    use crate::git::RepoIdentity;
+
+    let identity = RepoIdentity::from_remote("git@github.com:spuentesp/lain.git");
+    assert!(identity.is_some());
+    let identity = identity.unwrap();
+    assert_eq!(identity.owner, "spuentesp");
+    assert_eq!(identity.name, "lain");
+}
+
+#[test]
+fn test_repo_identity_from_gh_cli_url() {
+    use crate::git::RepoIdentity;
+
+    // GitHub CLI format
+    let identity = RepoIdentity::from_remote("https://github.com/spuentesp/lain");
+    assert!(identity.is_some());
+    let identity = identity.unwrap();
+    assert_eq!(identity.owner, "spuentesp");
+    assert_eq!(identity.name, "lain");
+}
+
+#[test]
+fn test_repo_identity_invalid() {
+    use crate::git::RepoIdentity;
+
+    let identity = RepoIdentity::from_remote("git@gitlab.com:owner/repo.git");
+    assert!(identity.is_none());
+
+    let identity = RepoIdentity::from_remote("not-a-url");
+    assert!(identity.is_none());
+}
+
+#[test]
+fn test_git_sensor_get_repo_identity() {
+    let repo_root = std::env::current_dir().unwrap();
+    let sensor = GitSensor::new(&repo_root).unwrap();
+    let identity = sensor.get_repo_identity();
+    // May be None if no origin remote or not GitHub
+    assert!(identity.is_ok());
+}
