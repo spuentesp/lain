@@ -23,7 +23,11 @@ pub fn find_anchors(
             anchors.push(oa);
         }
     }
-    anchors.sort_by(|a, b| b.anchor_score.unwrap_or(0.0).partial_cmp(&a.anchor_score.unwrap_or(0.0)).unwrap());
+    anchors.sort_by(|a, b| {
+        b.anchor_score
+            .unwrap_or(0.0)
+            .total_cmp(&a.anchor_score.unwrap_or(0.0))
+    });
 
     if anchors.is_empty() {
         return Ok("No anchors found in Merged Brain.".to_string());

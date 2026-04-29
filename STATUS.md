@@ -3,7 +3,7 @@
 ## Compilation & Tests
 - `cargo check` passes cleanly — zero errors.
 - `cargo build --release` succeeds.
-- **390/390 tests passing** (comprehensive unit, integration, and property tests).
+- **345+/345 tests passing** (unit, integration, and property tests).
 
 ## MCP Server Transport
 - **Dual transport support**: `stdio` (for Claude Code/MCP clients) and `http` (for web diagnostics)

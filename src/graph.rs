@@ -223,10 +223,15 @@ impl GraphDatabase {
         let Some(idx) = self.index_map.get(node_id).map(|r| *r.value()) else { return Vec::new(); };
 
         graph.edges_directed(idx, direction)
-            .map(|e| {
-                let neighbor_idx = e.target();
-                let neighbor = graph.node_weight(neighbor_idx).cloned().unwrap();
-                (neighbor, e.weight().clone())
+            .filter_map(|e| {
+                let neighbor_idx = match direction {
+                    Direction::Incoming => e.source(),
+                    Direction::Outgoing => e.target(),
+                };
+                graph
+                    .node_weight(neighbor_idx)
+                    .cloned()
+                    .map(|neighbor| (neighbor, e.weight().clone()))
             })
             .collect()
     }
@@ -311,7 +316,11 @@ impl GraphDatabase {
     pub fn find_anchors(&self, limit: usize) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let mut sorted: Vec<_> = graph.node_weights().cloned().collect();
-        sorted.sort_by(|a, b| b.anchor_score.unwrap_or(0.0).partial_cmp(&a.anchor_score.unwrap_or(0.0)).unwrap());
+        sorted.sort_by(|a, b| {
+            b.anchor_score
+                .unwrap_or(0.0)
+                .total_cmp(&a.anchor_score.unwrap_or(0.0))
+        });
         Ok(sorted.into_iter().take(limit).collect())
     }
 

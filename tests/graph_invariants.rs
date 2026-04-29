@@ -137,6 +137,9 @@ fn test_graph_get_neighbors_incoming() {
     let neighbors = graph.get_neighbors(&b_node.id, petgraph::Direction::Incoming);
     // b is called by a and x
     assert_eq!(neighbors.len(), 2);
+    let mut names: Vec<_> = neighbors.iter().map(|(node, _)| node.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["a", "x"]);
 }
 
 #[test]
@@ -147,6 +150,9 @@ fn test_graph_get_neighbors_outgoing() {
     let neighbors = graph.get_neighbors(&main_node.id, petgraph::Direction::Outgoing);
     // main calls a and x
     assert_eq!(neighbors.len(), 2);
+    let mut names: Vec<_> = neighbors.iter().map(|(node, _)| node.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["a", "x"]);
 }
 
 #[test]

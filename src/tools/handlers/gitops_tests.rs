@@ -7,7 +7,8 @@ use parking_lot::Mutex;
 
 #[test]
 fn test_get_file_diff_no_changes() {
-    let git = Arc::new(Mutex::new(GitSensor::new(std::path::Path::new("/Users/spuentesp/lain")).unwrap()));
+    let repo_root = std::env::current_dir().unwrap();
+    let git = Arc::new(Mutex::new(GitSensor::new(&repo_root).unwrap()));
 
     let result = get_file_diff(&git, None);
     assert!(result.is_ok());
@@ -18,7 +19,8 @@ fn test_get_file_diff_no_changes() {
 
 #[test]
 fn test_get_file_diff_with_filter() {
-    let git = Arc::new(Mutex::new(GitSensor::new(std::path::Path::new("/Users/spuentesp/lain")).unwrap()));
+    let repo_root = std::env::current_dir().unwrap();
+    let git = Arc::new(Mutex::new(GitSensor::new(&repo_root).unwrap()));
 
     let result = get_file_diff(&git, Some("src"));
     assert!(result.is_ok());
@@ -29,7 +31,8 @@ fn test_get_file_diff_with_filter() {
 
 #[test]
 fn test_get_commit_history_basic() {
-    let git = Arc::new(Mutex::new(GitSensor::new(std::path::Path::new("/Users/spuentesp/lain")).unwrap()));
+    let repo_root = std::env::current_dir().unwrap();
+    let git = Arc::new(Mutex::new(GitSensor::new(&repo_root).unwrap()));
 
     let result = get_commit_history(&git, None);
     assert!(result.is_ok());
@@ -39,7 +42,8 @@ fn test_get_commit_history_basic() {
 
 #[test]
 fn test_get_commit_history_with_limit() {
-    let git = Arc::new(Mutex::new(GitSensor::new(std::path::Path::new("/Users/spuentesp/lain")).unwrap()));
+    let repo_root = std::env::current_dir().unwrap();
+    let git = Arc::new(Mutex::new(GitSensor::new(&repo_root).unwrap()));
 
     let result = get_commit_history(&git, Some(5));
     assert!(result.is_ok());
@@ -51,7 +55,8 @@ fn test_get_commit_history_with_limit() {
 
 #[test]
 fn test_get_branch_status() {
-    let git = Arc::new(Mutex::new(GitSensor::new(std::path::Path::new("/Users/spuentesp/lain")).unwrap()));
+    let repo_root = std::env::current_dir().unwrap();
+    let git = Arc::new(Mutex::new(GitSensor::new(&repo_root).unwrap()));
 
     let result = get_branch_status(&git);
     assert!(result.is_ok());
