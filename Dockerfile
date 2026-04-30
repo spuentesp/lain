@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM rust:1.81-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 # Install build dependencies
 # We need cmake for tree-sitter and other C-based dependencies
