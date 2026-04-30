@@ -202,6 +202,27 @@ curl -s -X POST http://localhost:9999/mcp \
 
 ---
 
+## A/B Testing Results
+
+A simple A/B test was run on the `asciinema_fix_pty_bug` (a small fork i made from https://github.com/asciinema/asciinema.git ) across **5 passes, 4 times** using a script. Median numbers are reported.
+
+| Metric | with_lain | without_lain |
+|--------|-----------|--------------|
+| Pass rate | 5/5 (100%) | 5/5 (100%) |
+| Median duration | 39.3s | 54.1s |
+| Median tokens in | 35,488 | 41,731 |
+
+**Key observations:**
+
+- Both conditions passed 100% — the bug fix worked in both conditions, with variation per run.
+- `with_lain` used fewer input tokens (~35k vs ~42k median), a difference of ~7k tokens per run.
+
+**About the bug:** The failing test (`pty::tests::spawn_extra_env` on macOS) stems from `handle_child()` setting env vars via `env::set_var()` before `execvp()`. The shell's interpretation of `echo -n $VAR` varies across platforms — sometimes `-n` is treated as a literal argument. The fix: use `printf "%s" "$ASCIINEMA_TEST_FOO"` instead, portable across all Unix-like systems.
+
+> This was a test I did for A/B comparison — not a rigorous evaluation.
+
+---
+
 ## License
 
 MIT — Copyright (c) 2026 spuentesp
