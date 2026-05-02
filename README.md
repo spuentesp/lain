@@ -7,8 +7,8 @@ LAIN builds a map of how all the code in your project connects — what calls wh
 
 ## TL, DR: 
 
--download and compile.
--configure the mcp:
+- download and compile.
+- configure the mcp:
 ```bash
 "lain": {
       "command": "PATH_TO_WHERE_LAIN_BINARY_IS",
