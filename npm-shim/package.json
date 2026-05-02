@@ -1,6 +1,7 @@
 {
-  "name": "lain-mcp",
-  "version": "0.1.0",
+  "name": "@spuentesp/lain-mcp",
+  "version": "0.1.5",
+  "mcpName": "io.github.spuentesp/lain",
   "description": "Lain - Architectural code intelligence for AI coding agents",
   "keywords": ["mcp", "code-intelligence", "architectural-analysis", "lain"],
   "license": "MIT",
