@@ -4,8 +4,27 @@ LAIN builds a map of how all the code in your project connects — what calls wh
 
 <img width="1511" height="767" alt="Screenshot 2026-04-29 at 9 18 15 PM" src="https://github.com/user-attachments/assets/3bfbfe83-6813-416a-8dfc-c1c17959a00d" />
 
----
 
+## TL, DR: 
+
+-download and compile.
+-configure the mcp:
+```bash
+"lain": {
+      "command": "PATH_TO_WHERE_LAIN_BINARY_IS",
+      "args": [
+        "--workspace",
+        "PATH_TO_YOUR_REPO_ROOT",
+        "--transport",
+        "both",
+        "--port",
+        "9999",
+        "--embedding-model",
+        "PATH_TO_YOUR_ONNX_MODEL"
+      ],
+      "disabled": false
+    }
+```
 ## What is Lain?
 
 Lain is a persistent code-intelligence MCP server. It builds a queryable knowledge graph of your codebase — symbols and their relationships extracted via LSP and tree-sitter, augmented with git co-change history and optional semantic embeddings — and exposes that graph through MCP tools. The value over LSP-only or RAG-based approaches is cross-file structural reasoning: blast radius for proposed changes, transitive dependency traces, anchor identification, co-change correlation, and contextual build failure decoration so agents can reason about callers rather than just the failing line. Written in Rust, persists across sessions, stays fresh during editing via a file watcher that updates a volatile overlay layered on top of the static graph.
