@@ -61,38 +61,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-linux-arm64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Extract version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-        id: version
-      - uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable
-          targets: aarch64-unknown-linux-gnu
-      - name: Install aarch64 cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-      - name: Build
-        run: cargo build --release --target aarch64-unknown-linux-gnu
-      - name: Package
-        run: |
-          mkdir -p release
-          cp target/aarch64-unknown-linux-gnu/release/lain release/lain
-          tar czf release/lain-${{ steps.version.outputs.VERSION }}-aarch64-unknown-linux-gnu.tar.gz -C release lain
-          rm release/lain
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: release/*
-          draft: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build-windows:
     runs-on: windows-latest
     steps:
@@ -124,7 +92,7 @@ jobs:
   
   publish-server-json:
     runs-on: ubuntu-latest
-    needs: [build-linux, build-linux-arm64, build-macos-arm64, build-windows]
+    needs: [build-linux, build-macos-arm64, build-windows]
     steps:
       - uses: actions/checkout@v4
       - name: Extract version
