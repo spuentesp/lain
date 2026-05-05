@@ -176,7 +176,7 @@ async function install() {
   ensureDir(LAIN_DIR);
 
   const platform = getPlatform();
-  const version = 'v0.1.0';
+  const version = `v${require('../package.json').version}`;
   const assetName = getAssetName(platform, version);
   // On unix the asset IS the binary; on windows it's .exe
   const binaryName = process.platform === 'win32' ? 'lain.exe' : 'lain';
