@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.spuentesp/lain",
   "description": "High-performance knowledge graph MCP server for AI coding agents with semantic search.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "repository": {
     "url": "https://github.com/spuentesp/lain",
     "source": "github"
@@ -21,19 +21,19 @@
   "installation": {
     "method": "binary",
     "binaries": {
-      "linux-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-unknown-linux-gnu",
-      "macos-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-apple-darwin",
-      "macos-aarch64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-aarch64-apple-darwin",
-      "windows-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-pc-windows-msvc.exe"
+      "linux-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-unknown-linux-gnu.tar.gz",
+      "linux-aarch64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-aarch64-unknown-linux-gnu.tar.gz",
+      "macos-aarch64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-aarch64-apple-darwin.tar.gz",
+      "windows-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-pc-windows-msvc.tar.gz"
     },
     "compile_from_source": "cargo install --git https://github.com/spuentesp/lain.git",
-    "install_script": "curl -L https://raw.githubusercontent.com/spuentesp/lain/main/install-mcp.sh | bash"
+    "install_script": "curl -L https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash"
   },
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@spuentesp/lain-mcp",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "description": "NPM package with postinstall binary download",
       "transport": {
         "type": "stdio"

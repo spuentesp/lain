@@ -23,7 +23,11 @@ jobs:
       - name: Build
         run: cargo build --release --target x86_64-unknown-linux-gnu
       - name: Package
-        run: mkdir -p release && cp target/x86_64-unknown-linux-gnu/release/lain release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu
+        run: |
+          mkdir -p release
+          cp target/x86_64-unknown-linux-gnu/release/lain release/lain
+          tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C release lain
+          rm release/lain
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
@@ -45,7 +49,37 @@ jobs:
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
       - name: Package
-        run: mkdir -p release && cp target/aarch64-apple-darwin/release/lain release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin
+        run: |
+          mkdir -p release
+          cp target/aarch64-apple-darwin/release/lain release/lain
+          tar czf release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz -C release lain
+          rm release/lain
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        id: version
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+      - name: Package
+        run: |
+          mkdir -p release
+          cp target/aarch64-unknown-linux-gnu/release/lain release/lain
+          tar czf release/lain-${{ steps.version.outputs.VERSION }}-aarch64-unknown-linux-gnu.tar.gz -C release lain
+          rm release/lain
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
@@ -69,7 +103,11 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc
       - name: Package
         shell: bash
-        run: mkdir -p release && cp target/x86_64-pc-windows-msvc/release/lain.exe release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.exe
+        run: |
+          mkdir -p release
+          cp target/x86_64-pc-windows-msvc/release/lain.exe release/lain.exe
+          tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz -C release lain.exe
+          rm release/lain.exe
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
@@ -80,7 +118,7 @@ jobs:
   
   publish-server-json:
     runs-on: ubuntu-latest
-    needs: [build-linux, build-macos-arm64, build-windows]
+    needs: [build-linux, build-linux-arm64, build-macos-arm64, build-windows]
     steps:
       - uses: actions/checkout@v4
       - name: Extract version

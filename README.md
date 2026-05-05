@@ -5,25 +5,18 @@ LAIN builds a map of how all the code in your project connects — what calls wh
 <img width="1511" height="767" alt="Screenshot 2026-04-29 at 9 18 15 PM" src="https://github.com/user-attachments/assets/3bfbfe83-6813-416a-8dfc-c1c17959a00d" />
 
 
-## TL, DR: 
+## TL,DR:
 
-- download and compile.
-- configure the mcp:
 ```bash
-"lain": {
-      "command": "PATH_TO_WHERE_LAIN_BINARY_IS",
-      "args": [
-        "--workspace",
-        "PATH_TO_YOUR_REPO_ROOT",
-        "--transport",
-        "both",
-        "--port",
-        "9999",
-        "--embedding-model",
-        "PATH_TO_YOUR_ONNX_MODEL"
-      ],
-      "disabled": false
-    }
+# One-line install (interactive - will ask you to configure)
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
+
+# Add to PATH
+export PATH="$HOME/.local/lain:$PATH"
+
+# Or manual install with options (non-interactive)
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
+  bash /dev/stdin --workspace . --transport both --yes
 ```
 ## What is Lain?
 
@@ -33,9 +26,79 @@ Lain is a persistent code-intelligence MCP server. It builds a queryable knowled
 
 ## Installation
 
-### Pre-built Binary (fastest)
+### Quick Install (recommended - interactive)
 
-Download the latest release for your platform from GitHub releases, then:
+```bash
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
+```
+
+The installer will **ask you** to configure:
+- Workspace path
+- MCP transport mode (stdio, http, or both)
+- HTTP port (if using http/both)
+- Target agent (auto-detects Claude Code, Cursor, Windsurf, Cline)
+- Whether to download the ONNX model for semantic search
+
+After you confirm your settings, it will:
+1. Download and install LAIN to `~/.local/lain`
+2. Optionally download the ONNX model (~120MB)
+3. Run `lain init` with your configuration
+4. Add LAIN to your agent's settings
+
+**Non-interactive install (with options):**
+
+```bash
+# Install with specific workspace and download ONNX model for semantic search
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
+  bash /dev/stdin --workspace . --transport both --download-model --yes
+
+# Install for specific agent
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
+  bash /dev/stdin --agent cursor --yes
+
+# See all options
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
+  bash /dev/stdin --help
+```
+
+**Install options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--workspace PATH` | Workspace path for LAIN | `.` |
+| `--transport MODE` | MCP transport: stdio, http, both | `stdio` |
+| `--port PORT` | HTTP port for MCP server | `9999` |
+| `--agent AGENT` | Target agent: auto, claude, cursor, windsurf, cline | `auto` |
+| `--embedding-model PATH` | Path to ONNX embedding model | - |
+| `--download-model` | Download default ONNX model (all-MiniLM-L6-v2.onnx, ~120MB) | - |
+| `-y, --yes` | Skip all confirmation prompts | - |
+
+**After installation:**
+
+```bash
+# Add to PATH (add to ~/.zshrc, ~/.bashrc, or your shell config)
+export PATH="$HOME/.local/lain:$PATH"
+
+# Verify installation
+lain --version
+
+# Query the graph
+lain query "find Function | limit 5"
+```
+
+### Homebrew
+
+```bash
+brew tap lain-ai/tap
+brew install lain
+
+# Initialize
+lain init
+```
+
+### Pre-built Binary
+
+Download the latest release for your platform from [GitHub releases](https://github.com/spuentesp/lain/releases), then:
 
 ```bash
 # Make executable
@@ -62,35 +125,33 @@ cargo build --release
 
 ## Quick Start
 
-### 1. Build Lain
+### 1. Install LAIN
 
 ```bash
-cargo build --release
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
 ```
 
-### 2. Configure Claude Code
+### 2. Initialize for Claude Code (or other agents)
 
-Add to your `~/.claude/settings.json`:
+```bash
+# Auto-detect agent (Claude Code, Cursor, Windsurf, Cline)
+lain init
 
-```json
-{
-  "mcpServers": {
-    "lain": {
-      "command": "/path/to/lain/target/release/lain",
-      "args": ["--workspace", "/path/to/your/project", "--transport", "stdio"]
-    }
-  }
-}
+# Or specify agent explicitly
+lain init --agent claude
 ```
 
 ### 3. Run
 
 ```bash
 # Standard mode (for Claude Code)
-./lain --workspace /path/to/project --transport stdio
+lain --workspace /path/to/project --transport stdio
 
 # With HTTP diagnostics (web UI at http://localhost:9999)
-./lain --workspace /path/to/project --transport both --port 9999
+lain --workspace /path/to/project --transport both --port 9999
+
+# With semantic search (requires ONNX model)
+lain --workspace /path/to/project --embedding-model ~/.local/lain/models/all-MiniLM-L6-v2.onnx
 ```
 
 ### 4. Verify
@@ -99,6 +160,9 @@ Add to your `~/.claude/settings.json`:
 # Check health and LSP status
 curl -s -X POST http://localhost:9999/mcp -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_health","arguments":{}},"id":1}'
+
+# Query the graph directly
+lain query "find Function | limit 5"
 ```
 
 ---
