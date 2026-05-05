@@ -76,12 +76,12 @@ async fn main() -> Result<()> {
 
     let lock_path = args.workspace.join(".lain/server.lock");
     if let Ok(contents) = std::fs::read_to_string(&lock_path) {
-        if let Some((pid_str, port_str)) = contents.split_once(':') {
+        if let Some((pid_str, _port_str)) = contents.split_once(':') {
             let pid: u32 = pid_str.parse().unwrap_or(0);
             if pid != 0 && pid != std::process::id() {
                 #[cfg(unix)]
                 if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-                    eprintln!("ERROR: Another Lain instance is running (pid {}), port {}. Stop it or remove .lain/server.lock.", pid, port_str);
+                    eprintln!("ERROR: Another Lain instance is running (pid {}). Stop it or remove .lain/server.lock.", pid);
                     std::process::exit(1);
                 }
             }
