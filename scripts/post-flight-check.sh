@@ -71,14 +71,15 @@ echo "Check 3: Downloading and verifying binaries..."
 TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
-declare -A SHA256_HASHES
+SHA256_FILE=$(mktemp)
+trap "rm -rf $TEMP_DIR $SHA256_FILE" EXIT
 
 for binary in "${EXPECTED_BINARIES[@]}"; do
     echo "  Downloading $binary..."
     if curl -fsSL "https://github.com/spuentesp/lain/releases/download/v${VERSION}/${binary}" -o "$TEMP_DIR/$binary"; then
         echo "  Calculating SHA256 for $binary..."
         SHA256=$(shasum -a 256 "$TEMP_DIR/$binary" | cut -d' ' -f1)
-        SHA256_HASHES["$binary"]="$SHA256"
+        echo "$binary|$SHA256" >> "$SHA256_FILE"
         echo "    SHA256: $SHA256"
         pass "Downloaded and verified: $binary"
     else

@@ -4,7 +4,7 @@
 # Lain memory
 /.lain_memory/
 *.db
-
+.claude/
 # Editor
 .idea/
 .vscode/
