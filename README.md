@@ -8,13 +8,13 @@ LAIN builds a map of how all the code in your project connects — what calls wh
 ## TL,DR:
 
 ```bash
-# One-line install (interactive - will ask you to configure)
+# One-line install (interactive - will ask you to configure and add to PATH)
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
 
-# Add to PATH
-export PATH="$HOME/.local/lain:$PATH"
+# After install: reload your shell (or open a new terminal)
+source ~/.zshrc   # or ~/.bashrc
 
-# Or manual install with options (non-interactive)
+# Or non-interactive (skips prompts, auto-adds to PATH)
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
   bash /dev/stdin --workspace . --transport both --yes
 ```
@@ -76,8 +76,8 @@ curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
 **After installation:**
 
 ```bash
-# Add to PATH (add to ~/.zshrc, ~/.bashrc, or your shell config)
-export PATH="$HOME/.local/lain:$PATH"
+# Reload your shell (the installer adds to ~/.zshrc or ~/.bashrc automatically)
+source ~/.zshrc   # or ~/.bashrc, then open a new terminal
 
 # Verify installation
 lain --version
@@ -89,7 +89,7 @@ lain query "find Function | limit 5"
 ### Homebrew
 
 ```bash
-brew tap lain-ai/tap
+brew tap spuentesp/lain https://github.com/spuentesp/lain
 brew install lain
 
 # Initialize

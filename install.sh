@@ -94,8 +94,9 @@ parse_args() {
   done
 }
 
-# Only parse args when executed directly (not sourced)
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Only parse args when executed or piped (not sourced)
+# BASH_SOURCE[0] is empty when piped via `curl | bash`
+if [[ -z "${BASH_SOURCE[0]}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   parse_args "$@"
 fi
 
@@ -377,7 +378,7 @@ main() {
 
     # Ask for workspace
     if [ -z "$OPT_WORKSPACE" ]; then
-      read -p "Workspace path [default: .]: " workspace_input
+      read -p "Workspace path [default: .]: " workspace_input || workspace_input=""
       OPT_WORKSPACE="${workspace_input:-.}"
     fi
 
@@ -388,7 +389,7 @@ main() {
       echo "  1) stdio   - Standard MCP (recommended for Claude Code)"
       echo "  2) http    - HTTP only (for debugging)"
       echo "  3) both    - Both stdio + HTTP (recommended for development)"
-      read -p "Choose transport mode [default: stdio]: " transport_input
+      read -p "Choose transport mode [default: stdio]: " transport_input || transport_input=""
       
       case "$transport_input" in
         1|"") OPT_TRANSPORT="stdio" ;;
@@ -402,7 +403,7 @@ main() {
     # Ask for port if http/both
     if [ "$OPT_TRANSPORT" = "http" ] || [ "$OPT_TRANSPORT" = "both" ]; then
       if [ -z "$OPT_PORT" ]; then
-        read -p "HTTP port [default: 9999]: " port_input
+        read -p "HTTP port [default: 9999]: " port_input || port_input=""
         OPT_PORT="${port_input:-9999}"
       fi
     fi
@@ -416,7 +417,7 @@ main() {
       echo "  3) cursor  - Cursor AI"
       echo "  4) windsurf - Windsurf Cascade"
       echo "  5) cline   - Cline / Roo Code"
-      read -p "Choose agent [default: auto]: " agent_input
+      read -p "Choose agent [default: auto]: " agent_input || agent_input=""
       
       case "$agent_input" in
         1|"") OPT_AGENT="auto" ;;
@@ -462,13 +463,47 @@ main() {
   echo "Post-install:"
   echo ""
 
-  # Check PATH
+  # Check PATH and add if missing
   if check_in_path; then
     echo -e "${GREEN}[OK]${NC} $BIN_NAME is in your PATH"
   else
-    echo -e "${YELLOW}[ADD TO PATH]${NC} Add to your shell profile:"
-    echo "    export PATH=\"\$HOME/.local/lain:\$PATH\""
-    echo ""
+    local shell_rc=""
+    if [ "$(basename "${SHELL:-}")" = "zsh" ] || [ -n "${ZSH_VERSION:-}" ]; then
+      shell_rc="$HOME/.zshrc"
+    elif [ "$(basename "${SHELL:-}")" = "bash" ] || [ -n "${BASH_VERSION:-}" ]; then
+      shell_rc="$HOME/.bashrc"
+    fi
+
+    local export_line='export PATH="$HOME/.local/lain:$PATH"'
+    local do_add=""
+
+    if [ -n "$OPT_YES" ]; then
+      do_add="yes"
+    elif [ -n "$shell_rc" ]; then
+      echo ""
+      echo -e "${YELLOW}[PATH]${NC} lain is not in your PATH."
+      read -p "Add to $shell_rc automatically? [Y/n] " -n 1 -r path_reply || path_reply="y"
+      echo ""
+      if [[ $path_reply =~ ^[Yy]$ ]] || [ -z "$path_reply" ]; then
+        do_add="yes"
+      fi
+    fi
+
+    if [ -n "$do_add" ] && [ -n "$shell_rc" ]; then
+      if grep -qF '.local/lain' "$shell_rc" 2>/dev/null; then
+        info "PATH entry already in $shell_rc"
+      else
+        printf '\n# Added by LAIN installer\n%s\n' "$export_line" >> "$shell_rc"
+        info "Added to $shell_rc"
+      fi
+      info "Run: source $shell_rc  (or open a new terminal)"
+      # Also export for the current session so lain init can run
+      export PATH="$HOME/.local/lain:$PATH"
+    else
+      echo -e "${YELLOW}[ADD TO PATH]${NC} Add to your shell profile:"
+      echo "    $export_line"
+      echo ""
+    fi
   fi
 
   # Offer to download ONNX model
@@ -529,7 +564,7 @@ main() {
     info "Installation complete!"
     echo ""
     echo "Next steps:"
-    echo "  1. Add ~/.local/lain to your PATH if not already"
+    echo "  1. Open a new terminal (or: source ~/.zshrc)"
     echo "  2. Restart your agent (Claude Code, Cursor, etc.)"
     echo "  3. Try: lain query \"find Function | limit 5\""
     echo ""
@@ -541,7 +576,8 @@ main() {
   fi
 }
 
-# Only run main when script is executed directly (not sourced)
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Only run main when executed or piped (not sourced)
+# BASH_SOURCE[0] is empty when piped via `curl | bash`
+if [[ -z "${BASH_SOURCE[0]}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main "$@"
 fi
