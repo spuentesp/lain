@@ -9,7 +9,7 @@
 | **Versión del documento** | 1.0 |
 | **Fecha** | 06 de julio de 2026 |
 | **Autores** | Sebastián Puentes |
-| **Curso** | ⟨PENDIENTE: nombre del curso / sección⟩ |
+| **Curso** | EMI307-1 — Especificación de Requerimientos, Módulo 03: Inteligencia Artificial aplicada a Ingeniería de Requerimientos |
 
 ### Control de versiones del documento
 
@@ -84,7 +84,7 @@ El producto a especificar se denomina **LAIN**. LAIN es un sistema de inteligenc
 ### 1.4 Referencias
 
 1. IEEE Std 830-1998, *IEEE Recommended Practice for Software Requirements Specifications*. IEEE, 1998.
-2. Pauta de la Entrega Final del módulo de Ingeniería de Requerimientos, ⟨PENDIENTE: institución y año⟩.
+2. Pauta «Entrega Final — Proyecto de Ingeniería de Requerimientos», curso EMI307-1 Especificación de Requerimientos, Módulo 03: Inteligencia Artificial aplicada a Ingeniería de Requerimientos, 2026.
 3. Anexos A–F del presente documento (`docs/srs/anexos/`).
 
 ### 1.5 Visión general del documento
@@ -149,7 +149,15 @@ Las funciones del producto se agrupan en ocho áreas funcionales. El detalle ver
 | **Líder técnico / arquitecto** | Usuario humano secundario. Utiliza los análisis de arquitectura, acoplamiento y deuda técnica para planificar el trabajo del equipo. | Alto. | Semanal u ocasional. |
 | **Docente / evaluador** | Stakeholder no usuario. Evalúa la especificación y el proceso de ingeniería de requerimientos. | Medio-alto. | Puntual. |
 
-⟨PENDIENTE: incorporar los stakeholders reales identificados en la actividad de identificación de stakeholders del grupo, con sus intereses e influencia.⟩
+**Stakeholders identificados en la etapa de educción:**
+
+| Stakeholder | Rol | Interés / necesidad | Influencia |
+|---|---|---|---|
+| Sebastián Puentes | Desarrollador y propietario del producto (stakeholder principal; cumple además el rol de usuario «Desarrollador de software») | Necesidad de origen del proyecto: en el trabajo diario sobre una base de código de gran tamaño, obtener respuestas del asistente de IA exigía volcar volúmenes inmensos de código al contexto de la conversación, con alto costo en tokens y baja precisión. Requiere que el asistente pueda pedir exactamente la información estructural que necesita, en vez de recibir el código completo. | Alta: define alcance y prioridades. |
+| Docente del curso EMI307-1 | Evaluador del proceso de Ingeniería de Requerimientos | Que la especificación sea coherente, trazable y conforme al estándar IEEE 830-1998 y a la pauta de la entrega. | Media: define los criterios de aceptación del documento. |
+| Comunidad de desarrolladores usuarios de asistentes de IA | Usuarios potenciales del producto | Disponer de la herramienta y de su documentación para integrarla en sus propios proyectos. | Baja en esta etapa: sus necesidades se recogen indirectamente a través del stakeholder principal. |
+
+La necesidad de origen del stakeholder principal —**reducir el consumo de tokens al entregar contexto al asistente**— se refleja en los requerimientos de provisión de contexto curado y acotado (RF-21, RF-22), en la consulta selectiva del mapa (RF-25) y en la observación de tamaño acotado del paquete de contexto registrada en CU-08.
 
 ### 2.4 Restricciones generales
 

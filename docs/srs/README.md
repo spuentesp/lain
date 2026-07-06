@@ -24,13 +24,9 @@ Esta carpeta contiene la **Entrega Final del Proyecto de Ingeniería de Requerim
 2. Los anexos se leen en orden A → F; cada uno referencia los RF y CU con los que se traza.
 3. Los diagramas están en notación Mermaid y se visualizan directamente en GitHub; los wireframes son bloques de texto de baja fidelidad.
 
-## Trabajo pendiente del grupo antes de la entrega definitiva
+## Estado de la entrega
 
-Los puntos que requieren información que solo el autor posee están marcados en los documentos con `⟨PENDIENTE: …⟩`:
-
-- **SRS.md:** nombre del curso/sección; institución y año de la pauta (Sección 1.4); stakeholders reales (Sección 2.3).
-- **Anexo E:** otras herramientas de IA utilizadas (E.2); ajustes reales sobre la propuesta generada (E.7).
-- **Anexo F:** otras herramientas (F.1), prompts adicionales de actividades previas (F.3), elementos modificados (F.5) y otras decisiones humanas (F.6).
+La entrega está **completa**: no quedan marcadores `⟨PENDIENTE⟩` en los documentos. Los aspectos que permanecen abiertos por naturaleza (mediciones de los RNF cuantitativos, validaciones con usuarios) están declarados como «pendientes de validación» en el Anexo F, Sección F.7, tal como lo exige la pauta.
 
 ## Control de versiones
 

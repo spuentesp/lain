@@ -8,7 +8,7 @@ El prototipo **no es una implementación definitiva** del sistema: es un apoyo v
 
 ## E.2 Herramienta de IA utilizada
 
-- **Herramienta:** asistente de programación basado en IA (Claude Code, de Anthropic). ⟨PENDIENTE: confirmar y completar otras herramientas usadas por el grupo, con sus versiones.⟩
+- **Herramienta:** Claude Code (Anthropic), asistente de programación basado en IA. Fue la única herramienta de IA utilizada en la construcción del prototipo y de la entrega.
 - **Modalidad de uso:** generación asistida de páginas web interactivas y autónomas (sin dependencias externas) a partir de descripciones en lenguaje natural de cada vista, iterando sobre la propuesta generada.
 
 ## E.3 Funcionalidad y flujo representado
@@ -66,7 +66,12 @@ Las capturas siguientes corresponden a las vistas reales del prototipo, ejecutad
 
 ## E.7 Ajustes realizados por el grupo
 
-⟨PENDIENTE: completar con los ajustes reales realizados por el grupo sobre la propuesta generada. Ejemplos del tipo de ajuste a documentar: cambios de disposición o de terminología en español, eliminación de controles innecesarios, ajuste de leyendas y umbrales, decisión de qué vistas conservar.⟩
+Sobre la propuesta generada por la IA, el autor realizó los siguientes ajustes:
+
+- **Selección de vistas:** de las visualizaciones exploradas durante el desarrollo se decidió conservar cuatro (consola de consultas, radio de impacto, cadena de llamadas y mapa de calor de acoplamiento), por ser las que mejor representan los casos de uso principales; otras vistas intermedias fueron descartadas.
+- **Datos de ejemplo trazables:** para la evidencia visual se fijaron datos de ejemplo idénticos a los de los wireframes del Anexo D (`procesar_pago`, `main → guardar_registro`, `modelo_pedidos`), de modo que la correspondencia wireframe → prototipo sea verificable a simple vista; la propuesta original usaba datos genéricos.
+- **Encuadre de la evidencia:** se ajustó el encuadre de las capturas (Figuras E-3 y E-4) para eliminar espacio vacío y mejorar la legibilidad en el documento.
+- **Idioma:** se decidió mantener el prototipo en inglés (idioma de la propuesta generada) y documentarlo en español, registrando la diferencia como limitación consciente en E.8 en lugar de retraducir un artefacto exploratorio.
 
 ## E.8 Limitaciones del prototipo
 
