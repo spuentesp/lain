@@ -24,7 +24,23 @@ El prototipo consiste en cuatro vistas web interactivas que representan las pant
 
 ## E.4 Evidencia visual
 
-⟨PENDIENTE: insertar capturas de pantalla de las cuatro vistas del prototipo, con una leyenda por captura indicando la pantalla del Anexo D que representa.⟩
+Las capturas siguientes corresponden a las vistas reales del prototipo, ejecutadas con datos de ejemplo (los mismos símbolos ilustrativos usados en los wireframes del Anexo D, para facilitar la comparación wireframe → prototipo).
+
+**Figura E-1 — Consola de consultas (pantalla P-02).** Estado del servicio y del mapa en la barra superior, editor de consulta estructurada, selector de herramientas de análisis y bitácora de resultados:
+
+![Figura E-1: Consola de consultas del prototipo](img/e1-query-console.png)
+
+**Figura E-2 — Radio de impacto (pantalla P-03).** El símbolo consultado (`procesar_pago`) y sus afectados; en color destacado los afectados directos, en color neutro los transitivos:
+
+![Figura E-2: Radio de impacto del prototipo](img/e2-blast-radius.png)
+
+**Figura E-3 — Cadena de llamadas (pantalla P-04).** Ruta de invocaciones entre `main` (origen, borde verde) y `guardar_registro` (destino, borde rojo):
+
+![Figura E-3: Cadena de llamadas del prototipo](img/e3-call-chain.png)
+
+**Figura E-4 — Mapa de calor de acoplamiento (pantalla P-05).** Intensidad de co-cambio histórico entre `modelo_pedidos` y los archivos relacionados (celdas más intensas = co-cambio más frecuente):
+
+![Figura E-4: Mapa de calor de acoplamiento del prototipo](img/e4-coupling.png)
 
 | Captura | Vista | Pantalla del Anexo D |
 |---|---|---|

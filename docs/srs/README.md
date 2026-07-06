@@ -26,12 +26,11 @@ Esta carpeta contiene la **Entrega Final del Proyecto de Ingeniería de Requerim
 
 ## Trabajo pendiente del grupo antes de la entrega definitiva
 
-Los puntos que requieren información que solo el grupo posee están marcados en los documentos con `⟨PENDIENTE: …⟩`:
+Los puntos que requieren información que solo el autor posee están marcados en los documentos con `⟨PENDIENTE: …⟩`:
 
-- **SRS.md:** nombres de integrantes y curso; fechas y autores del control de versiones; stakeholders reales (Sección 2.3); referencias a los avances anteriores (Sección 1.4).
-- **Anexo B:** validación con stakeholders de la decisión de ruta única en CU-03.
-- **Anexo E:** capturas de pantalla del prototipo; otras herramientas de IA utilizadas; ajustes reales del grupo (E.7).
-- **Anexo F:** prompts adicionales, elementos modificados por el grupo (F.5) y otras decisiones humanas (F.6).
+- **SRS.md:** nombre del curso/sección; institución y año de la pauta (Sección 1.4); stakeholders reales (Sección 2.3).
+- **Anexo E:** otras herramientas de IA utilizadas (E.2); ajustes reales sobre la propuesta generada (E.7).
+- **Anexo F:** otras herramientas (F.1), prompts adicionales de actividades previas (F.3), elementos modificados (F.5) y otras decisiones humanas (F.6).
 
 ## Control de versiones
 

@@ -40,12 +40,12 @@ Conforme a la pauta de la entrega, el grupo declara el uso de herramientas de In
 - La priorización de los requerimientos (Esencial / Deseable / Opcional) y la aceptación final de cada requerimiento propuesto.
 - La elección del proceso de negocio a modelar y del punto de intervención del sistema en dicho proceso.
 - La validación con stakeholders de la información educida en actividades previas.
+- La decisión de que la cadena de llamadas (CU-03) retorne únicamente la ruta más corta, dejando las rutas alternativas como mejora futura.
 - ⟨PENDIENTE: registrar otras decisiones humanas relevantes tomadas durante el módulo.⟩
 
 ## F.7 Aspectos pendientes de validación
 
 - Validación con los stakeholders reales de los umbrales cuantitativos de los RNF (tiempos de respuesta, frescura, escala), que fueron propuestos como metas verificables y no medidos con usuarios.
-- Validación de la decisión de retornar solo la ruta más corta en la cadena de llamadas (observación de CU-03).
 - Revisión de los falsos positivos aceptables en la detección de código sin uso (RF-15).
 - Prueba de usabilidad del proceso de instalación comprometido en RNF-06.
 - Los marcadores ⟨PENDIENTE⟩ distribuidos en el documento, que señalan información que debe ser completada o confirmada por el grupo antes de la entrega definitiva.

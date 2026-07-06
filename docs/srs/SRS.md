@@ -8,17 +8,14 @@
 | **Estándar aplicado** | IEEE 830-1998 |
 | **Versión del documento** | 1.0 |
 | **Fecha** | 06 de julio de 2026 |
-| **Autores** | ⟨PENDIENTE: nombres de los integrantes del grupo⟩ |
+| **Autores** | Sebastián Puentes |
 | **Curso** | ⟨PENDIENTE: nombre del curso / sección⟩ |
 
 ### Control de versiones del documento
 
 | Versión | Fecha | Autor | Descripción del cambio |
 |---|---|---|---|
-| 0.1 | ⟨PENDIENTE⟩ | ⟨PENDIENTE⟩ | Inscripción del proyecto y definición de la problemática |
-| 0.2 | ⟨PENDIENTE⟩ | ⟨PENDIENTE⟩ | Identificación de stakeholders y educción de requerimientos |
-| 0.3 | ⟨PENDIENTE⟩ | ⟨PENDIENTE⟩ | Modelado de casos de uso y procesos de negocio |
-| 1.0 | 06-07-2026 | Grupo | Versión final integrada según IEEE 830-1998 |
+| 1.0 | 06-07-2026 | Sebastián Puentes | Versión final integrada según IEEE 830-1998. El historial detallado de elaboración queda registrado en el control de versiones del repositorio (`git log -- docs/srs/`). |
 
 ---
 
@@ -88,8 +85,7 @@ El producto a especificar se denomina **LAIN**. LAIN es un sistema de inteligenc
 
 1. IEEE Std 830-1998, *IEEE Recommended Practice for Software Requirements Specifications*. IEEE, 1998.
 2. Pauta de la Entrega Final del módulo de Ingeniería de Requerimientos, ⟨PENDIENTE: institución y año⟩.
-3. Documentos de avances anteriores del grupo: inscripción del proyecto, identificación de stakeholders, educción y análisis de requerimientos. ⟨PENDIENTE: referencias exactas⟩.
-4. Anexos A–F del presente documento (`docs/srs/anexos/`).
+3. Anexos A–F del presente documento (`docs/srs/anexos/`).
 
 ### 1.5 Visión general del documento
 
