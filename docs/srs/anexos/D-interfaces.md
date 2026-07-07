@@ -7,7 +7,7 @@ Este anexo presenta el diseño preliminar de las principales interfaces del sist
 | ID | Pantalla | Actor | Caso(s) de uso | RF asociados |
 |---|---|---|---|---|
 | P-01 | Asistente de configuración inicial | Desarrollador | CU-01 | RF-01, RF-02 |
-| P-02 | Consola de consultas y estado | Desarrollador | CU-10, CU-09, CU-05 | RF-25, RF-06, RF-22 |
+| P-02 | Consola de consultas y estado | Desarrollador | CU-10, CU-09 (y acceso a CU-04 a CU-08) | RF-25, RF-03 a RF-06, RF-22 |
 | P-03 | Visualización de radio de impacto | Desarrollador | CU-02 + CU-11 | RF-07, RF-27 |
 | P-04 | Visualización de cadena de llamadas | Desarrollador | CU-03 + CU-11 | RF-08, RF-27 |
 | P-05 | Mapa de calor de acoplamiento | Desarrollador | CU-07 + CU-11 | RF-18, RF-27 |

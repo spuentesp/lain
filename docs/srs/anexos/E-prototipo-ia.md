@@ -53,7 +53,7 @@ Las capturas siguientes corresponden a las vistas reales del prototipo, ejecutad
 
 | Vista del prototipo | Caso(s) de uso | RF asociados |
 |---|---|---|
-| Consola de consultas | CU-10, CU-09, CU-08 (esquema) | RF-25, RF-04, RF-05, RF-06, RF-22 |
+| Consola de consultas | CU-10, CU-09, CU-05, CU-04, CU-08 (esquema) | RF-25, RF-03 a RF-06, RF-12, RF-13, RF-20, RF-22 |
 | Radio de impacto | CU-02, CU-11 | RF-07, RF-09, RF-27 |
 | Cadena de llamadas | CU-03, CU-11 | RF-08, RF-27 |
 | Mapa de calor de acoplamiento | CU-07, CU-11 | RF-18, RF-27 |
@@ -64,7 +64,7 @@ Las capturas siguientes corresponden a las vistas reales del prototipo, ejecutad
 - **Sugeridos por IA:** la organización del radio de impacto en anillos por profundidad; la distinción visual entre relaciones de confianza alta y media; la inclusión de un panel de estado del servicio junto a la consola.
 - **Apoyados por IA:** la redacción de los textos de advertencia (por ejemplo, correlación vs. causalidad en el acoplamiento) y de los estados vacíos.
 
-## E.7 Ajustes realizados por el grupo
+## E.7 Ajustes realizados por el autor
 
 Sobre la propuesta generada por la IA, el autor realizó los siguientes ajustes:
 
@@ -78,5 +78,6 @@ Sobre la propuesta generada por la IA, el autor realizó los siguientes ajustes:
 - Las vistas operan con **datos de ejemplo o resultados puntuales**; no constituyen la interfaz definitiva ni cubren todos los flujos alternativos especificados en el Anexo B.
 - No implementa la pantalla P-01 (configuración inicial) ni la interacción del actor Asistente de IA, que ocurre por protocolo y no por interfaz gráfica.
 - No valida requerimientos no funcionales (rendimiento, escalabilidad, consumo de recursos); solo aspectos de comprensión e interacción.
+- Las vistas están redactadas en inglés, mientras la especificación está en español; la traducción del prototipo se difirió por tratarse de un artefacto exploratorio (decisión registrada en E.7).
 - La accesibilidad y la adaptación a distintos tamaños de pantalla no fueron objetivos de esta exploración.
 - Al ser generado con apoyo de IA, el código del prototipo no sigue estándares de calidad de producción y **no debe reutilizarse como base de la implementación**.

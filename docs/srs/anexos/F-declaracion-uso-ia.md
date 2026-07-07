@@ -1,6 +1,6 @@
 # Anexo F — Declaración de uso de Inteligencia Artificial
 
-Conforme a la pauta de la entrega, el grupo declara el uso de herramientas de Inteligencia Artificial durante la elaboración de este documento. La IA fue empleada como **herramienta de apoyo** al proceso de Ingeniería de Requerimientos, no como fuente definitiva de requerimientos ni como reemplazo del análisis del equipo.
+Conforme a la pauta de la entrega, el autor declara el uso de herramientas de Inteligencia Artificial durante la elaboración de este documento. La IA fue empleada como **herramienta de apoyo** al proceso de Ingeniería de Requerimientos, no como fuente definitiva de requerimientos ni como reemplazo del análisis propio del autor.
 
 ## F.1 Herramientas utilizadas
 
@@ -14,7 +14,7 @@ No se utilizaron otras herramientas de Inteligencia Artificial en la elaboració
 
 - Organizar la información recopilada en las actividades previas del módulo dentro de la estructura del estándar IEEE 830-1998.
 - Apoyar la redacción formal, en tercera persona y verificable, de los requerimientos funcionales y no funcionales.
-- Derivar una propuesta inicial de requerimientos a partir del análisis del dominio y de la solución en desarrollo, para su posterior revisión por el grupo.
+- Derivar una propuesta inicial de requerimientos a partir del análisis del dominio y de la solución en desarrollo, para su posterior revisión por el autor.
 - Generar las versiones iniciales de los diagramas (contexto, casos de uso, proceso de negocio) en notación textual y de los wireframes.
 - Construir el mini prototipo exploratorio descrito en el Anexo E.
 
@@ -29,11 +29,11 @@ No se utilizaron otras herramientas de Inteligencia Artificial en la elaboració
 
 ## F.4 Información generada, revisada u organizada con IA
 
-- **Generada con IA (y revisada por el grupo):** la redacción base de las secciones del SRS, la formulación individual de los RF/RNF/RS con sus criterios de verificación, los diagramas en notación textual, las plantillas y especificaciones de casos de uso, los wireframes del Anexo D y el mini prototipo.
+- **Generada con IA (y revisada por el autor):** la redacción base de las secciones del SRS, la formulación individual de los RF/RNF/RS con sus criterios de verificación, los diagramas en notación textual, las plantillas y especificaciones de casos de uso, los wireframes del Anexo D y el mini prototipo.
 - **Organizada con IA:** la trazabilidad entre requerimientos, casos de uso, proceso de negocio, pantallas y prototipo (matriz de la Sección 3.4).
 - **Revisada con IA:** consistencia de identificadores y referencias cruzadas entre el documento principal y los anexos.
 
-## F.5 Elementos modificados por el grupo
+## F.5 Elementos modificados por el autor
 
 Sobre el material generado por la IA, el autor realizó las siguientes modificaciones y validaciones:
 

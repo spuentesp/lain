@@ -101,7 +101,7 @@ Este anexo especifica textualmente los casos de uso principales del diagrama del
 |---|---|
 | **Postcondiciones** | El actor conoce la cadena de llamadas o la certeza de su inexistencia. |
 | **RF asociados** | RF-08, RF-09, RF-27 |
-| **Observaciones / supuestos** | Cuando existen múltiples rutas, se retorna la más corta; la entrega de rutas alternativas queda como mejora futura. Decisión validada por el equipo (ver Anexo F, Sección F.6). |
+| **Observaciones / supuestos** | Cuando existen múltiples rutas, se retorna la más corta; la entrega de rutas alternativas queda como mejora futura. Decisión validada por el autor (ver Anexo F, Sección F.6). |
 
 ---
 

@@ -7,7 +7,7 @@
 | **Proyecto** | LAIN — Plataforma de inteligencia de código |
 | **Estándar aplicado** | IEEE 830-1998 |
 | **Versión del documento** | 1.0 |
-| **Fecha** | 06 de julio de 2026 |
+| **Fecha** | 07 de julio de 2026 |
 | **Autores** | Sebastián Puentes |
 | **Curso** | EMI307-1 — Especificación de Requerimientos, Módulo 03: Inteligencia Artificial aplicada a Ingeniería de Requerimientos |
 
@@ -15,7 +15,7 @@
 
 | Versión | Fecha | Autor | Descripción del cambio |
 |---|---|---|---|
-| 1.0 | 06-07-2026 | Sebastián Puentes | Versión final integrada según IEEE 830-1998. El historial detallado de elaboración queda registrado en el control de versiones del repositorio (`git log -- docs/srs/`). |
+| 1.0 | 07-07-2026 | Sebastián Puentes | Versión final integrada según IEEE 830-1998. El historial detallado de elaboración queda registrado en el control de versiones del repositorio (`git log -- docs/srs/`). |
 
 ---
 
@@ -359,15 +359,15 @@ La matriz vincula los requerimientos funcionales con los casos de uso (Anexos A 
 | RF | Caso(s) de uso | Proceso de negocio | Pantalla(s) | Prototipo |
 |---|---|---|---|---|
 | RF-01 | CU-01 | — | P-01 | — |
-| RF-02 | CU-01, CU-09 | PN-01 (act. 4) | P-01 | — |
-| RF-03 | CU-09 | PN-01 (act. 4) | P-02 | ✔ |
-| RF-04 | CU-09 | PN-01 (act. 4) | P-02 | ✔ |
+| RF-02 | CU-01, CU-09 | PN-01 (act. 3) | P-01 | — |
+| RF-03 | CU-09 | PN-01 (act. 3) | P-02 | ✔ |
+| RF-04 | CU-09 | PN-01 (act. 3) | P-02 | ✔ |
 | RF-05 | CU-09 | — | P-02 | ✔ |
 | RF-06 | CU-09 | — | P-02 | ✔ |
-| RF-07 | CU-02 | PN-01 (act. 5) | P-03 | ✔ |
-| RF-08 | CU-03 | PN-01 (act. 6) | P-04 | ✔ |
-| RF-09 | CU-02, CU-03 | PN-01 (act. 5) | P-03, P-04 | ✔ |
-| RF-10 | CU-02 | PN-01 (act. 5) | P-03 | — |
+| RF-07 | CU-02 | PN-01 (act. 4-5) | P-03 | ✔ |
+| RF-08 | CU-03 | PN-01 (act. 6b) | P-04 | ✔ |
+| RF-09 | CU-02, CU-03 | PN-01 (act. 4-5) | P-03, P-04 | ✔ |
+| RF-10 | CU-02 | PN-01 (act. 4-5) | P-03 | — |
 | RF-11 | CU-02 | — | P-03 | — |
 | RF-12 | CU-05 | — | P-02 | ✔ |
 | RF-13 | CU-05 | — | P-02 | ✔ |
@@ -375,16 +375,16 @@ La matriz vincula los requerimientos funcionales con los casos de uso (Anexos A 
 | RF-15 | CU-05 | — | P-02 | — |
 | RF-16 | CU-05, CU-07 | — | P-02, P-05 | — |
 | RF-17 | CU-05, CU-08 | — | P-02 | — |
-| RF-18 | CU-07 | PN-01 (act. 5) | P-05 | ✔ |
+| RF-18 | CU-07 | PN-01 (act. 4-5) | P-05 | ✔ |
 | RF-19 | CU-07 | — | P-02 | — |
 | RF-20 | CU-04 | — | P-02 | ✔ |
-| RF-21 | CU-08 | PN-01 (act. 7) | — | — |
+| RF-21 | CU-08, CU-06 | PN-01 (act. 6b) | — | — |
 | RF-22 | CU-08 | — | P-02 | ✔ |
-| RF-23 | CU-06 | PN-01 (act. 9) | P-02 | — |
+| RF-23 | CU-06 | PN-01 (act. 11) | P-02 | — |
 | RF-24 | CU-06 | — | P-02 | — |
 | RF-25 | CU-10 | — | P-02 | ✔ |
 | RF-26 | CU-10 | — | P-02 | — |
-| RF-27 | CU-02, CU-03, CU-07 | PN-01 (act. 6) | P-03, P-04, P-05 | ✔ |
+| RF-27 | CU-02, CU-03, CU-07 | PN-01 (act. 6/8) | P-03, P-04, P-05 | ✔ |
 
 ---
 

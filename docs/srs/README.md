@@ -16,7 +16,7 @@ Esta carpeta contiene la **Entrega Final del Proyecto de Ingeniería de Requerim
 
 **Documento interno (no forma parte de la entrega al profesor):**
 
-- [`comparacion-implementacion.md`](comparacion-implementacion.md) — matriz de comparación entre esta especificación y la versión vigente del producto, para uso del grupo.
+- [`comparacion-implementacion.md`](comparacion-implementacion.md) — matriz de comparación entre esta especificación y la versión vigente del producto, para uso del autor.
 
 ## Cómo leer la entrega
 
