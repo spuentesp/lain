@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Mermaid arch</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { padding: 20px; font-family: 'Helvetica Neue', Arial, sans-serif; }
+  #d { width: 2400px; }
+</style>
+</head>
+<body>
+<div class="mermaid" id="d">
+flowchart LR
+    SRC(["💻 Código fuente<br/>(workspace del Desarrollador)"]) --> FANS
+
+    subgraph FANS["Sistema LAIN (servidor MCP local)"]
+        direction TB
+        WKR["Watcher de archivos<br/>(.rs/.py/.ts/.go/...)"]
+        LSP["Adaptadores LSP<br/>(rust-analyzer, pyright, gopls, tsserver, …)"]
+        TR["Tree-sitter<br/>(fallback heurístico)"]
+        GIT["Sensor Git<br/>(git2: historial y co-cambio)"]
+        ONX["Modelo ONNX local<br/>(all-MiniLM-L6-v2, 384 dim)"]
+        GR[("Grafo de conocimiento<br/>.lain/graph.bin<br/>(petgraph, UUID v5)")]
+        OVL["Capa volátil (overlay)<br/>cambios en memoria"]
+        QRY["Motor de consultas<br/>(JSON ops-array)"]
+        MCP["Servidor MCP<br/>(stdio / HTTP)"]
+
+        WKR --> OVL
+        LSP --> GR
+        TR --> GR
+        GIT --> GR
+        OVL --> GR
+        GR --> QRY
+        QRY --> MCP
+    end
+
+    SRC --> WKR
+    SRC --> GIT
+    SRC --> ONX
+
+    AG(["🤖 Asistente de IA<br/>(Claude Code, Cursor, Windsurf, Cline, Gemini)"]) <--> MCP
+    DEV(["👤 Desarrollador"]) <--> MCP
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'default', flowchart: { htmlLabels: true, curve: 'basis' } });
+</script>
+</body>
+</html>

@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>LAIN — Anexos del SRS (UFRO)</title>
+<link rel="stylesheet" href="template/slides.css">
+</head>
+<body>
+
+<!-- 1. PORTADA -->
+<section class="slide title-bg">
+  <div class="title-zone">
+    <div class="kicker">EMI307-1 · Especificación de Requerimientos · Módulo 03</div>
+    <h1>LAIN — Anexos de la Especificación de Requerimientos</h1>
+    <p class="subtitle">Resumen académico de los Anexos A a F del SRS del sistema LAIN,
+      elaborado conforme al estándar IEEE 830-1998.</p>
+    <div class="author-block">
+      Magíster en Ingeniería Informática · UFRO<br>
+      EMI307-1 · Especificación de Requerimientos · 2026
+    </div>
+  </div>
+</section>
+
+<!-- 2. CONTEXTO -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">01 · Contexto</div>
+    <h2>¿Qué es el SRS y qué son sus anexos?</h2>
+    <div class="grid2">
+      <div>
+        <p><b>LAIN</b> es un sistema de inteligencia de código para asistentes de
+          programación. Construye un mapa de conocimiento del código fuente de un
+          proyecto y lo pone a disposición del Desarrollador y del Asistente de IA.</p>
+        <p><b>SRS</b> (<i>Software Requirements Specification</i>) es el documento
+          que describe, de manera verificable, qué debe hacer el sistema.</p>
+        <p>Se elaboró conforme al estándar <b>IEEE 830-1998</b>, que define la
+          estructura formal de un SRS. El documento se organiza en tres bloques:</p>
+        <ul>
+          <li><b>Introducción</b> — propósito, alcance, definiciones, referencias.</li>
+          <li><b>Descripción general</b> — perspectiva, funciones, usuarios, restricciones y supuestos.</li>
+          <li><b>Requisitos específicos</b> — veintisiete <b>RF</b>, diez <b>RNF</b> y cinco <b>restricciones</b> del sistema, con su matriz de trazabilidad.</li>
+        </ul>
+        <p>Esta especificación integra el trabajo de <b>actividades previas del
+          módulo</b> —inscripción del proyecto, identificación de stakeholders,
+          educción de requerimientos, análisis, modelado de casos de uso,
+          modelado del proceso de negocio y diseño preliminar de interfaces—.
+          Cada actividad dejó un antecedente que el SRS recoge y referencia.</p>
+        <p>El estándar distingue tres categorías de requisito: los
+          <b>RF</b> definen el alcance funcional, los <b>RNF</b> fijan la
+          calidad esperada y las <b>restricciones</b> son condiciones no
+          negociables. En este SRS hay veintisiete RF, diez RNF y cinco
+          restricciones.</p>
+      </div>
+      <div class="card">
+        <div class="meta">Los seis anexos</div>
+        <h3>Qué complementa cada uno</h3>
+        <ul>
+          <li><b>A — Diagrama de casos de uso.</b> Visión gráfica de los CU y sus actores.</li>
+          <li><b>B — Especificación de CU.</b> Descripción textual detallada.</li>
+          <li><b>C — Proceso de negocio.</b> PN-01, situación actual y propuesta.</li>
+          <li><b>D — Interfaces.</b> Wireframes de las pantallas principales.</li>
+          <li><b>E — Prototipo con IA.</b> Exploración visual de cuatro vistas.</li>
+          <li><b>F — Declaración de uso de IA.</b> Cómo se usó la IA en la entrega.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="pageno">2</div>
+</section>
+
+<!-- 3. STAKEHOLDERS Y PROBLEMA -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">02 · Stakeholders y problema</div>
+    <h2>De la fricción operativa a los RF</h2>
+    <p>El SRS abre con tres elementos: un <b>problema</b> observado,
+      unos <b>stakeholders</b> identificados (educidos y validados en
+      actividades previas del módulo) y una <b>necesidad de origen</b>
+      trazable hasta los requerimientos. Esta slide condensa la Sección 2.3
+      del documento.</p>
+    <div class="grid3">
+      <div class="card">
+        <div class="meta">El problema (SRS §1.2)</div>
+        <h3>Fricción con los asistentes de IA</h3>
+        <p>Cuando un asistente razona sobre una base de código grande, solo ve
+          el archivo abierto o resultados de búsqueda textual.</p>
+        <p>Sin esa visibilidad, sus propuestas rompen código en partes no
+          consideradas, duplican funcionalidad que ya existía y dejan fuera
+          acoplamientos que solo se ven en el historial.</p>
+        <p style="margin-top:6px;"><b>Costo en tokens</b> y <b>baja
+          precisión</b> en las respuestas. El Desarrollador, por su parte,
+          carecía de una herramienta que respondiera con evidencia a
+          preguntas como «si modifico esta función, ¿qué más se ve
+          afectado?».</p>
+      </div>
+      <div class="card">
+        <div class="meta">Stakeholders (SRS §2.3)</div>
+        <h3>Tres, con influencia desigual</h3>
+        <p><b>Principal — Sebastián Puentes.</b> Desarrollador y propietario
+          del producto (también cumple el rol de usuario «Desarrollador de
+          software»). Influye en alcance y prioridades.</p>
+        <p><b>Secundario — Docente EMI307-1.</b> Evalúa que la especificación
+          sea coherente y trazable. Define los criterios de aceptación del
+          documento.</p>
+        <p><b>Terciario — Comunidad.</b> Desarrolladores usuarios de
+          asistentes de IA, cuyas necesidades se recogen indirectamente a
+          través del stakeholder principal.</p>
+      </div>
+      <div class="card alt">
+        <div class="meta">Necesidad de origen → RF (SRS §2.3)</div>
+        <h3>Trazabilidad explícita</h3>
+        <p>La necesidad de origen —<b>reducir el consumo de tokens al entregar
+          contexto al asistente</b>— aterriza en los <b>RF-21 y RF-22</b>
+          (provisión de contexto curado y acotado) y en el <b>RF-25</b>
+          (consulta selectiva del mapa). El <b>CU-08</b> registra como
+          observación que el paquete de contexto debe ser acotado, y la
+          <b>RG-1</b> exige ejecución local para que el código no salga del
+          equipo del stakeholder.</p>
+      </div>
+    </div>
+    <div class="quote" style="margin-top:8px;">
+      <b>Por qué importa en el SRS.</b> La Sección 2.3 ata la
+      <i>necesidad de origen</i> de cada stakeholder con los
+      <i>requerimientos que la resuelven</i>. Esa cadena —
+      problema → stakeholder → RF — es el corazón de la trazabilidad.
+    </div>
+  </div>
+  <div class="pageno">3</div>
+</section>
+
+<!-- 4. DEMO: LAIN EN ACCIÓN -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">04 · Demo</div>
+    <h2>LAIN en acción: una sesión real</h2>
+    <p>El sistema ya existe y se ejecuta. Esta es una <b>sesión típica</b>:
+      inicialización del espacio de trabajo, consulta en lenguaje natural y
+      análisis estructural. La captura muestra los comandos y la salida real
+      del CLI.</p>
+    <div style="display:flex; justify-content:center; margin-top:4px;">
+      <div class="diagram" style="padding:4px; display:inline-block; background:#1e1e2e;">
+        <img src="img/lain-terminal-crop.png" alt="Sesión real del CLI de LAIN"
+             style="max-width:1120px; max-height:430px; display:block;">
+      </div>
+    </div>
+    <p class="src" style="margin-top:6px;">Cada comando materializa un caso
+      de uso del Anexo A: <code>lain init</code> corresponde a <b>CU-01</b>,
+      <code>lain ask</code> a <b>CU-04</b> (búsqueda semántica),
+      <code>lain blast-radius</code> a <b>CU-02</b> (radio de impacto) y
+      <code>lain call-chain</code> a <b>CU-03</b> (cadena de llamadas).</p>
+  </div>
+  <div class="pageno">4</div>
+</section>
+
+<!-- 5. ARQUITECTURA DE LAIN -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">05 · Arquitectura</div>
+    <h2>Cómo está construido LAIN</h2>
+    <p>El sistema se ejecuta como un <b>servidor MCP local</b> en la máquina del
+      Desarrollador. El grafo de conocimiento se construye a partir del
+      código fuente mediante tres extractores paralelos, y se expone al
+      Asistente de IA por el protocolo MCP estándar.</p>
+    <div style="display:flex; justify-content:center; margin-top:4px;">
+      <div class="diagram" style="padding:4px; display:inline-block;">
+        <img src="img/diag-arch-crop.png" alt="Arquitectura del sistema LAIN"
+             style="max-width:1120px; max-height:430px; display:block;">
+      </div>
+    </div>
+    <p class="src" style="margin-top:6px;"><b>Trazabilidad.</b> Los
+      extractores (<b>LSP</b>, <b>Tree-sitter</b>, <b>Git</b>) alimentan el
+      <b>grafo de conocimiento</b> (RF-02); el <b>modelo ONNX</b> local
+      sostiene la búsqueda semántica (RF-20); el <b>servidor MCP</b>
+      estandariza la comunicación con los asistentes (RG-2, RG-3).</p>
+  </div>
+  <div class="pageno">5</div>
+</section>
+
+<!-- 6. ANEXO A — CASOS DE USO -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">06 · Anexo A</div>
+    <h2>Casos de uso: actores, límite y alcance</h2>
+    <p>El sistema LAIN se describe mediante <b>once casos de uso</b> y
+      <b>cuatro actores</b>. El <b>límite del sistema</b> está representado por
+      el recuadro «Sistema LAIN»; los actores principales lo cruzan para
+      iniciar CU, y los secundarios son consultados desde dentro.</p>
+    <div style="display:flex; justify-content:center; margin-top:4px;">
+      <div class="diagram" style="padding:4px; display:inline-block;">
+        <img src="img/diag-a-crop.png" alt="Diagrama de casos de uso del sistema LAIN"
+             style="max-width:1120px; max-height:430px; display:block;">
+      </div>
+    </div>
+    <p class="src" style="margin-top:6px;"><b>Relaciones include/extend.</b>
+      <b>CU-09 «Mantener el mapa»</b> es incluido por los casos de consulta
+      (asegura frescura antes de responder). <b>CU-11 «Visualizar»</b>
+      extiende CU-02, CU-03 y CU-07 cuando el Desarrollador solicita una vista
+      gráfica. Coherencia con los <b>veintisiete RF</b> vía matriz de
+      trazabilidad (SRS §3.4).</p>
+  </div>
+  <div class="pageno">6</div>
+</section>
+
+<!-- 7. ANEXO B — ESPECIFICACIÓN DE CASOS DE USO -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">07 · Anexo B</div>
+    <h2>Especificación de los casos de uso</h2>
+    <p>Los ocho casos principales siguen una <b>plantilla única</b>;
+      los tres utilitarios (CU-09, CU-10 y CU-11) se documentan en forma
+      abreviada por su dependencia de los anteriores.</p>
+    <div class="grid2">
+      <div class="card">
+        <div class="meta">Plantilla común</div>
+        <h3>Estructura aplicada a cada CU</h3>
+        <ul>
+          <li>Identificador y nombre.</li>
+          <li>Actor principal y actores secundarios.</li>
+          <li>Objetivo del caso de uso.</li>
+          <li>Precondiciones.</li>
+          <li>Flujo principal (pasos numerados).</li>
+          <li>Flujos alternativos o excepciones.</li>
+          <li>Postcondiciones.</li>
+          <li>RF asociados.</li>
+          <li>Observaciones o supuestos pendientes.</li>
+        </ul>
+      </div>
+      <div class="card alt">
+        <div class="meta">Ejemplo: CU-02 «Evaluar impacto de un cambio»</div>
+        <h3>Resumen del caso</h3>
+        <p><b>Objetivo:</b> conocer, antes de modificar un símbolo, el conjunto
+          de símbolos afectados directa o transitivamente.</p>
+        <p><b>Precondición:</b> espacio de trabajo inicializado y símbolo
+          existente en el mapa.</p>
+        <p><b>Flujo principal:</b> (1) solicitud → (2) actualización del mapa →
+          (3) resolución de referencias → (4) cierre transitivo → (5) retorno
+          jerarquizado.</p>
+        <p><b>RF asociados:</b> RF-07, RF-09, RF-10, RF-11, RF-27.</p>
+      </div>
+    </div>
+    <p class="src" style="margin-top:8px;">Detalle en
+      <code>anexos/B-especificacion-casos-de-uso.md</code>.</p>
+  </div>
+  <div class="pageno">7</div>
+</section>
+
+<!-- 8. ANEXO C — PROCESO DE NEGOCIO -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">08 · Anexo C</div>
+    <h2>Proceso de negocio PN-01</h2>
+    <p>PN-01 «Evaluación de impacto antes de modificar código» describe cómo
+      decide y ejecuta un equipo de desarrollo una modificación sobre código
+      existente. El diagrama siguiente corresponde a la <b>situación
+      propuesta</b>, con el sistema LAIN incorporado entre los participantes.</p>
+    <div style="display:flex; justify-content:center; margin-top:4px;">
+      <div class="diagram" style="padding:4px; display:inline-block;">
+        <img src="img/diag-c-crop.png" alt="Diagrama del proceso de negocio PN-01"
+             style="max-width:540px; max-height:430px; display:block;">
+      </div>
+    </div>
+    <div class="grid2" style="margin-top:8px;">
+      <div>
+        <p><b>Elementos del proceso</b></p>
+        <ul>
+          <li><b>Inicio:</b> surge la necesidad de modificar código.</li>
+          <li><b>Término:</b> cambio integrado con impacto conocido y verificado.</li>
+          <li><b>Decisiones:</b> «¿impacto alto o inesperado?» y «¿aprueba el plan?».</li>
+        </ul>
+      </div>
+      <div>
+        <p><b>Principio clave</b></p>
+        <p style="margin-top:4px;">El sistema acompaña al equipo sin
+          reemplazarlo: aporta evidencia en el momento del proceso donde
+          hoy se origina el retrabajo, pero la decisión sigue siendo humana.</p>
+      </div>
+    </div>
+    <p class="src" style="margin-top:4px;">Detalle en
+      <code>anexos/C-proceso-de-negocio.md</code> · Tabla C.6 vincula cada
+      actividad con los CU y RF correspondientes.</p>
+  </div>
+  <div class="pageno">8</div>
+</section>
+
+<!-- 9. ANEXO D — INTERFACES -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">09 · Anexo D</div>
+    <h2>Diseño preliminar de interfaces</h2>
+    <p>Se diseñan <b>cinco <i>wireframes</i> de baja fidelidad</b> que materializan los
+      casos de uso principales. Las pantallas están dirigidas al Desarrollador;
+      el Asistente de IA interactúa por un protocolo estándar y no requiere GUI.</p>
+    <table class="dense">
+      <tr><th>Pantalla</th><th>Nombre</th><th>Actor</th><th>CU</th><th>RF</th></tr>
+      <tr><td>P-01</td><td>Asistente de configuración inicial</td><td>Desarrollador</td><td>CU-01</td><td>RF-01, RF-02</td></tr>
+      <tr><td>P-02</td><td>Consola de consultas y estado</td><td>Desarrollador</td><td>CU-10, CU-09</td><td>RF-25, RF-03–06, RF-22</td></tr>
+      <tr><td>P-03</td><td>Visualización de radio de impacto</td><td>Desarrollador</td><td>CU-02 + CU-11</td><td>RF-07, RF-27</td></tr>
+      <tr><td>P-04</td><td>Visualización de cadena de llamadas</td><td>Desarrollador</td><td>CU-03 + CU-11</td><td>RF-08, RF-27</td></tr>
+      <tr><td>P-05</td><td>Mapa de calor de acoplamiento</td><td>Desarrollador</td><td>CU-07 + CU-11</td><td>RF-18, RF-27</td></tr>
+    </table>
+    <div class="quote" style="margin-top:10px;">
+      <b>Elementos por pantalla.</b> Cada wireframe declara explícitamente:
+      (i) <b>campos de entrada</b> (carpeta del proyecto, símbolo consultado,
+      profundidad, ventana temporal); (ii) <b>acciones</b> disponibles
+      (ejecutar consulta, sincronizar, enriquecer, exportar); y (iii)
+      <b>mensajes y validaciones</b> para los flujos alternativos del Anexo B
+      (símbolo inexistente, servicio de análisis no disponible, historial
+      insuficiente, consulta mal formada, etc.).
+    </div>
+  </div>
+  <div class="pageno">9</div>
+</section>
+
+<!-- 10. ANEXO E — PROTOTIPO (CAPTURAS) -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">10 · Anexo E</div>
+    <h2>Prototipo exploratorio apoyado con IA</h2>
+    <p>Para validar de manera temprana la interacción del Desarrollador, se
+      construyó un <b>miniprototipo</b> con cuatro vistas web (P-02 a P-05),
+      generado con apoyo de Claude Code y ajustado por el autor.</p>
+    <div class="grid2">
+      <div class="card">
+        <div class="meta">Figura E-1 · Consola de consultas (P-02)</div>
+        <div class="diagram" style="padding:4px;">
+          <img src="../../anexos/img/e1-query-console.png" alt="Consola de consultas"
+               style="max-width:100%; max-height:170px; display:block;">
+        </div>
+      </div>
+      <div class="card">
+        <div class="meta">Figura E-2 · Radio de impacto (P-03)</div>
+        <div class="diagram" style="padding:4px;">
+          <img src="../../anexos/img/e2-blast-radius.png" alt="Radio de impacto"
+               style="max-width:100%; max-height:170px; display:block;">
+        </div>
+      </div>
+      <div class="card">
+        <div class="meta">Figura E-3 · Cadena de llamadas (P-04)</div>
+        <div class="diagram" style="padding:4px;">
+          <img src="../../anexos/img/e3-call-chain.png" alt="Cadena de llamadas"
+               style="max-width:100%; max-height:170px; display:block;">
+        </div>
+      </div>
+      <div class="card alt">
+        <div class="meta">Figura E-4 · Acoplamiento histórico (P-05)</div>
+        <div class="diagram" style="padding:4px;">
+          <img src="../../anexos/img/e4-coupling.png" alt="Mapa de calor de acoplamiento"
+               style="max-width:100%; max-height:170px; display:block;">
+        </div>
+      </div>
+    </div>
+    <p class="src" style="margin-top:6px;">Las capturas usan los mismos datos de
+      ejemplo que los wireframes del Anexo D, para facilitar la comparación
+      visual. Detalle en <code>anexos/E-prototipo-ia.md</code>.</p>
+    <div class="note" style="margin-top:6px;">
+      <b>Limitaciones declaradas.</b> El prototipo opera con datos de ejemplo
+      y cubre solo una parte de los flujos del Anexo B. Quedan fuera de su
+      alcance la pantalla P-01, la interacción del Asistente de IA y la
+      validación de RNF. Las vistas se mantienen en inglés mientras la
+      especificación está en español, y el código generado <b>no debe
+      reutilizarse</b> como base de la implementación.
+    </div>
+  </div>
+  <div class="pageno">10</div>
+</section>
+
+<!-- 11. ANEXO F — DECLARACIÓN DE USO DE IA -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">11 · Anexo F</div>
+    <h2>Declaración de uso de Inteligencia Artificial</h2>
+    <p>La IA se usó como <b>herramienta de apoyo</b> al proceso de
+      Ingeniería de Requerimientos. Su rol fue acotado: nunca fue fuente
+      definitiva de requerimientos ni sustituto del análisis del autor.</p>
+    <div class="grid3">
+      <div class="card">
+        <div class="meta">F.1 – F.3</div>
+        <h3>Qué se usó y para qué</h3>
+        <ul>
+          <li><b>Herramienta:</b> Claude Code (Anthropic), única herramienta de IA empleada.</li>
+          <li><b>Propósito:</b> apoyar la estructuración del SRS según IEEE 830-1998, la redacción de RF/RNF, la generación de diagramas y la construcción del prototipo.</li>
+          <li><b>Modalidad:</b> generación iterativa a partir de descripciones en lenguaje natural.</li>
+          <li><b>Prompts generales:</b> entre otros, «elaborar el SRS según IEEE 830-1998», «redactar RF/RNF claros, formales y verificables», «generar el diagrama de CU con relaciones include y extend» y «revisar los pendientes del documento».</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="meta">F.4 – F.5</div>
+        <h3>Qué generó y qué ajustó el autor</h3>
+        <ul>
+          <li><b>Generado:</b> redacción base, diagramas, wireframes, prototipo.</li>
+          <li><b>Ajustado por el autor:</b> autoría individual, stakeholders reales, datos de ejemplo trazables, selección de vistas.</li>
+          <li><b>Decisiones humanas:</b> alcance, prioridades, proceso PN-01, decisión de CU-03 (ruta única).</li>
+        </ul>
+      </div>
+      <div class="card alt">
+        <div class="meta">F.7</div>
+        <h3>Aspectos pendientes de validación</h3>
+        <ul>
+          <li>Umbrales cuantitativos de los RNF con stakeholders reales.</li>
+          <li>Falsos positivos aceptables en la detección de código sin uso.</li>
+          <li>Prueba de usabilidad del proceso de instalación (RNF-06).</li>
+          <li>Necesidades del tercer stakeholder (comunidad amplia de desarrolladores).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="pageno">11</div>
+</section>
+
+<!-- 12. CIERRE Y REFERENCIAS -->
+<section class="slide content-bg">
+  <div class="content-zone">
+    <div class="kicker-small">Cierre</div>
+    <h2>Anexos cubiertos y referencias</h2>
+    <p>Los seis anexos cubren el sistema desde ángulos distintos: el A
+      desde los casos de uso, el B desde la especificación, el C desde el
+      proceso de negocio, el D y el E desde las interfaces, y el F desde la
+      transparencia sobre el uso de IA.</p>
+    <table class="dense" style="margin-top:6px;">
+      <tr><th>Anexo</th><th>Contenido</th><th>Archivo</th></tr>
+      <tr><td>A</td><td>Diagrama de casos de uso (once CU, cuatro actores)</td><td><code>A-diagrama-casos-de-uso.md</code></td></tr>
+      <tr><td>B</td><td>Especificación de casos de uso</td><td><code>B-especificacion-casos-de-uso.md</code></td></tr>
+      <tr><td>C</td><td>Proceso de negocio PN-01 (actual y propuesto)</td><td><code>C-proceso-de-negocio.md</code></td></tr>
+      <tr><td>D</td><td>Diseño preliminar de interfaces (cinco <i>wireframes</i>)</td><td><code>D-interfaces.md</code></td></tr>
+      <tr><td>E</td><td>Prototipo apoyado con IA (cuatro vistas)</td><td><code>E-prototipo-ia.md</code></td></tr>
+      <tr><td>F</td><td>Declaración de uso de IA</td><td><code>F-declaracion-uso-ia.md</code></td></tr>
+    </table>
+    <div class="quote" style="margin-top:10px;">
+      <b>Control de versiones.</b> El documento incluye al inicio una tabla
+      con versión, fecha, autor y descripción del cambio, donde la versión
+      final es la 1.0. El historial detallado de la elaboración queda
+      registrado en el repositorio y se consulta con
+      <code>git log -- docs/srs/</code>, lo que da cuenta del trabajo
+      realizado a lo largo del módulo conforme lo solicita la pauta.
+    </div>
+    <div class="quote" style="margin-top:6px;">
+      <b>Integración con actividades previas.</b> El SRS integra el trabajo
+      de las actividades previas del módulo (identificación de stakeholders,
+      educción, análisis, modelado de casos de uso, modelado del proceso de
+      negocio y diseño preliminar de interfaces), y cada sección del
+      documento lo referencia de forma trazable.
+    </div>
+    <h3 style="margin-top:14px;">Referencias</h3>
+    <div class="grid2" style="margin-top:6px;">
+      <div class="ref">Anthropic. (s. f.). <i>Claude Code</i>
+        [Software de asistencia de programación].
+        <a href="https://www.anthropic.com/claude-code">https://www.anthropic.com/claude-code</a></div>
+      <div class="ref">Dalpiaz, F., Franch, X., &amp; Horkoff, J. (2016).
+        <i>iStar 2.0 language guide</i> (arXiv:1605.07767). arXiv.
+        <a href="https://arxiv.org/abs/1605.07767">https://arxiv.org/abs/1605.07767</a></div>
+      <div class="ref">Institute of Electrical and Electronics Engineers.
+        (1998). <i>IEEE Std 830-1998: IEEE recommended practice for software
+        requirements specifications</i>. IEEE.
+        <a href="https://doi.org/10.1109/IEEESTD.1998.88286">https://doi.org/10.1109/IEEESTD.1998.88286</a></div>
+      <div class="ref">Puentes, S. (2026, julio 7).
+        <i>Especificación de requerimientos de software: Sistema LAIN —
+        Plataforma de inteligencia de código para asistentes de
+        desarrollo</i> (Versión 1.0) [Documento SRS].
+        <a href="https://github.com/spuentesp/lain/blob/main/docs/srs/SRS.md">https://github.com/spuentesp/lain/blob/main/docs/srs/SRS.md</a></div>
+      <div class="ref">spuentesp. (2026). <i>lain: Plataforma de
+        inteligencia de código para asistentes de desarrollo</i>
+        (v0.3.0) [Software]. GitHub.
+        <a href="https://github.com/spuentesp/lain">https://github.com/spuentesp/lain</a></div>
+      <div class="ref">Universidad de La Frontera. (2026).
+        <i>Entrega final — Proyecto de Ingeniería de Requerimientos</i>
+        [Pauta de evaluación]. Curso EMI307-1 Especificación de
+        Requerimientos, Módulo 03: Inteligencia Artificial aplicada a
+        Ingeniería de Requerimientos.</div>
+    </div>
+  </div>
+  <div class="pageno">12</div>
+</section>
+
+</body>
+</html>

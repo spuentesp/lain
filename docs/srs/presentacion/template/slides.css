@@ -1,0 +1,190 @@
+/* ============================================================
+   UFRO Slides Template — compartido por semana-1..4
+   Cada HTML importa este CSS y declara su propio contenido.
+   ============================================================ */
+
+@page { size: 1280px 720px; margin: 0; }
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  background: #ffffff;
+}
+
+.slide {
+  width: 1280px;
+  height: 720px;
+  page-break-after: always;
+  position: relative;
+  overflow: hidden;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.slide:last-child { page-break-after: auto; }
+
+.title-bg   { background-image: url('assets/ufro_bg_title.png'); }
+.content-bg { background-image: url('assets/ufro_bg_content.png'); }
+
+/* Title / closing slide zone */
+.title-zone {
+  position: absolute;
+  top: 300px; left: 90px; right: 90px; height: 230px;
+  color: #ffffff;
+  display: flex; flex-direction: column; justify-content: center;
+  text-align: center; align-items: center;
+}
+.title-zone h1 {
+  font-size: 32px; margin: 0 0 10px 0; font-weight: 700; line-height: 1.2;
+}
+.title-zone .subtitle {
+  font-size: 16px; font-weight: 400; margin: 0 0 14px 0;
+  color: #d9e6ff; max-width: 900px; line-height: 1.45;
+}
+.title-zone .author-block {
+  font-size: 13px; line-height: 1.7; color: #eef3ff;
+}
+.title-zone .kicker {
+  font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+  color: #9fc4ff; margin-bottom: 8px; font-weight: 600;
+}
+
+/* Content slide zone */
+.content-zone {
+  position: absolute;
+  top: 34px; left: 80px; right: 80px; bottom: 145px;
+  color: #15182b;
+}
+.content-zone h2 {
+  font-size: 26px; margin: 0 0 16px 0; font-weight: 700; color: #15182b;
+  border-bottom: 3px solid #1fb8d8; padding-bottom: 7px; display: inline-block;
+}
+.content-zone h3 {
+  font-size: 15px; margin: 0 0 6px 0; font-weight: 700; color: #15182b;
+}
+.kicker-small {
+  font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: #5a6fd8; margin-bottom: 4px; font-weight: 700;
+}
+p, li { font-size: 13.5px; line-height: 1.45; color: #353a52; margin: 0 0 7px 0; }
+ul { padding-left: 18px; margin: 0; }
+li { margin-bottom: 5px; }
+b, strong { color: #15182b; }
+.accent { color: #1f7fd8; }
+.accent2 { color: #c0334d; }
+.mono { font-family: 'SF Mono', Consolas, monospace; color: #1f7fd8; }
+
+/* Layout helpers */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; align-items: start; }
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.row { display: flex; gap: 18px; align-items: stretch; }
+.col { flex: 1; min-width: 0; }
+
+/* Cards */
+.card {
+  background: #f4f7fc; border: 1px solid #dde4f3; border-left: 4px solid #1fb8d8;
+  border-radius: 8px; padding: 12px 16px;
+}
+.card.alt { border-left-color: #c0334d; }
+.card.gray { border-left-color: #6b7390; }
+.card h3 { font-size: 15px; margin: 0 0 5px 0; font-weight: 700; color: #15182b; }
+.card.alt h3 { color: #c0334d; }
+.card p, .card li { font-size: 12.5px; line-height: 1.42; margin-bottom: 4px; }
+.card .meta {
+  font-size: 10px; color: #6b7390; text-transform: uppercase;
+  letter-spacing: 1px; margin-bottom: 3px; font-weight: 600;
+}
+.card-emphasis {
+  background: linear-gradient(135deg, #f4f7fc 0%, #e8f0fb 100%);
+  border: 1px solid #c5d6ee; border-left: 4px solid #1fb8d8;
+  border-radius: 8px; padding: 14px 18px;
+}
+
+/* Flow steps (numbered cards) */
+.flow-step {
+  background: #f4f7fc; border: 1px solid #dde4f3; border-left: 4px solid #c0334d;
+  border-radius: 8px; padding: 8px 14px; font-size: 13px;
+  line-height: 1.4; margin-bottom: 7px;
+}
+.flow-step b { color: #15182b; }
+.flow-step .num {
+  color: #c0334d; font-weight: 800; font-size: 14px; margin-right: 6px;
+}
+
+/* Pills / badges */
+.badge {
+  display: inline-block; padding: 3px 10px; border-radius: 14px;
+  background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.5);
+  color: #ffffff; font-size: 11px; font-weight: 600; margin-right: 5px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.tag {
+  display: inline-block; padding: 2px 8px; border-radius: 12px;
+  background: #eef3ff; border: 1px solid #c5d6ee;
+  color: #1f7fd8; font-size: 11px; font-weight: 600;
+  margin-right: 4px; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.tag.alt { background: #fce6ea; border-color: #f1c4cf; color: #c0334d; }
+.tag.gray { background: #eef0f5; border-color: #d0d6e2; color: #4a5070; }
+
+/* Quote / callout */
+.quote {
+  border-left: 3px solid #1fb8d8; padding: 8px 14px;
+  background: #f9fbfe; font-size: 13px; font-style: italic; color: #353a52;
+  margin: 8px 0; line-height: 1.45;
+}
+.note {
+  border-left: 3px solid #b8860b; padding: 8px 14px;
+  background: #fffbef; font-size: 12px; color: #5d4c10;
+  margin: 6px 0; line-height: 1.4;
+}
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #e2e7f3; }
+th {
+  color: #1f7fd8; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.5px; background: #f4f7fc; font-weight: 700;
+}
+tr:last-child td { border-bottom: none; }
+table.dense td { padding: 4px 8px; font-size: 12px; }
+
+/* Page number */
+.pageno {
+  position: absolute; bottom: 14px; right: 24px;
+  font-size: 11px; color: #ffffff; opacity: 0.75; z-index: 2;
+}
+
+/* Diagram (SVG) container */
+.diagram {
+  background: #ffffff; border: 1px solid #dde4f3; border-radius: 8px;
+  padding: 10px; margin-top: 6px;
+}
+.diagram svg { width: 100%; height: auto; display: block; }
+.diagram.dark svg { background: #15182b; border-radius: 4px; }
+
+/* Inline icon / pill row */
+.pill-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+
+/* Status colors */
+.check { color: #2f8f4f; font-weight: 700; }
+.cross { color: #c0334d; font-weight: 700; }
+.warn  { color: #b8860b; font-weight: 700; }
+
+/* References list (compact) */
+.ref { font-size: 11.5px; margin-bottom: 7px; color: #353a52; line-height: 1.35; }
+.ref b { color: #15182b; }
+.ref .meta { color: #6b7390; font-style: italic; font-size: 10.5px; }
+
+/* Big numbers */
+.big-num { font-size: 44px; font-weight: 800; color: #1f7fd8; line-height: 1; }
+.small-cap {
+  font-size: 10px; color: #6b7390; text-transform: uppercase;
+  letter-spacing: 1px; font-weight: 600;
+}
+
+/* Footnote / source caption */
+.src {
+  font-size: 10px; color: #8a91a8; font-style: italic; margin-top: 4px;
+}

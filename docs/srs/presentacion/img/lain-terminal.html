@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>LAIN terminal</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #1e1e2e; color: #cdd6f4; font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace; }
+  .terminal {
+    width: 2400px;
+    padding: 40px;
+    font-size: 28px;
+    line-height: 1.5;
+  }
+  .prompt { color: #a6e3a1; }
+  .cmd { color: #f9e2af; }
+  .path { color: #89b4fa; }
+  .ok { color: #a6e3a1; font-weight: bold; }
+  .warn { color: #f9e2af; }
+  .info { color: #89dceb; }
+  .err { color: #f38ba8; }
+  .muted { color: #6c7086; }
+  .hl { color: #fab387; }
+  pre { margin: 0; font-family: inherit; }
+</style>
+</head>
+<body>
+<pre class="terminal">
+<span class="prompt">$</span> <span class="cmd">lain</span> init <span class="path">--workspace . --transport stdio --yes</span>
+
+<span class="info">⠋</span> Detectando asistente...
+<span class="ok">✓</span> Asistente detectado: <span class="hl">Claude Code</span>
+<span class="ok">✓</span> Lenguajes identificados: <span class="hl">Rust, TypeScript, Python (3/11)</span>
+<span class="info">⠋</span> Construyendo mapa de conocimiento...
+<span class="ok">✓</span> Símbolos indexados: <span class="hl">1.247</span>
+<span class="ok">✓</span> Relaciones LSP: <span class="hl">4.832</span>
+<span class="ok">✓</span> Mapa persistido en <span class="path">.lain/graph.bin</span>
+<span class="ok">✓</span> Integración con Claude Code: <span class="path">~/.claude/settings.json</span>
+
+<span class="prompt">$</span> <span class="cmd">lain</span> ask <span class="path">"¿Dónde se maneja la autenticación?"</span>
+
+<span class="info">→</span> Buscando símbolos relevantes (semantic + estructural)...
+<span class="ok">✓</span> <span class="hl">auth/jwt.rs::validate_token</span>   <span class="muted">módulo: auth · confianza: alta</span>
+<span class="ok">✓</span> <span class="hl">auth/session.rs::create_session</span> <span class="muted">módulo: auth · confianza: alta</span>
+<span class="ok">✓</span> <span class="hl">middleware/auth.rs::check_auth</span>    <span class="muted">módulo: middleware · confianza: alta</span>
+
+<span class="prompt">$</span> <span class="cmd">lain</span> blast-radius <span class="path">--symbol auth/jwt.rs::validate_token --depth 3</span>
+
+<span class="info">→</span> Resolviendo radio de impacto (3 niveles, cierre transitivo)...
+<span class="ok">✓</span> <span class="hl">14 símbolos afectados</span> (3 directos, 11 transitivos)
+  <span class="path">Nivel 1:</span>  middleware/auth.rs::check_auth
+                api/users.rs::get_current_user
+                api/admin.rs::require_admin
+  <span class="path">Nivel 2:</span>  api/users.rs::update_user
+                tests/auth_test.rs::test_validate
+                ... <span class="muted">(8 más)</span>
+
+<span class="prompt">$</span> <span class="cmd">lain</span> call-chain <span class="path">--from main --to persist_audit_log</span>
+
+<span class="ok">✓</span> <span class="hl">Ruta encontrada (4 pasos):</span>
+  main → handle_request → process_event → persist_audit_log
+</pre>
+</body>
+</html>
