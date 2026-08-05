@@ -56,9 +56,21 @@ async fn main() -> Result<()> {
     if let Some(cmd) = args.command {
         match cmd {
             Commands::Init { agent, workspace, embedding_model, transport, port, yes } => {
-                return cmds::run_init(&agent, workspace.as_deref(), embedding_model.as_deref(), &transport, port, yes);
+                // Propagate top-level --workspace when subcommand didn't override it.
+                let workspace = workspace.unwrap_or(args.workspace);
+                return cmds::run_init(&agent, Some(&workspace), embedding_model.as_deref(), &transport, port, yes);
             }
-            Commands::Query { expression, workspace } => return cmds::run_query(&expression, &workspace),
+            Commands::Query { expression, workspace } => {
+                // Top-level --workspace is the documented invocation form
+                // (e.g. `lain --workspace /path query "..."`). Honor it when
+                // the subcommand's --workspace is the clap default (".").
+                let workspace = if workspace == std::path::Path::new(".") && args.workspace != std::path::Path::new(".") {
+                    args.workspace
+                } else {
+                    workspace
+                };
+                return cmds::run_query(&expression, &workspace);
+            }
             Commands::Hook { agent, uninstall } => return cmds::run_hook_install(agent, uninstall),
             Commands::Ask => return cmds::run_ask(),
         }
@@ -94,8 +106,15 @@ async fn main() -> Result<()> {
     tokio::spawn(async move { tokio::signal::ctrl_c().await.ok(); let _ = std::fs::remove_file(&cleanup_lock_path); });
 
     let embedder_model = args.embedding_model.as_deref();
+    // Check git repo FIRST so the user sees a clean error, not a libgit2 panic.
+    if !args.workspace.join(".git").exists() {
+        anyhow::bail!(
+            "No Git repository found at {:?}. Lain requires a .git folder.\n\
+             Run `git init` (or open an existing repo) and try again.",
+            args.workspace
+        );
+    }
     let mut server = LainServer::new(&args.workspace, &memory_path, embedder_model)?;
-    if !server.is_git_repo() { anyhow::bail!("No Git repository found. Lain requires a .git folder."); }
 
     server.sync_volatile_overlay().await?;
     let mut server_for_indexing = server.clone_for_background();

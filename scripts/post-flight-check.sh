@@ -126,7 +126,11 @@ Update Formula/lain.rb with the following SHA256 hashes:
 EOF
 
 for binary in "${EXPECTED_BINARIES[@]}"; do
-    SHA256="${SHA256_HASHES[$binary]}"
+    SHA256=$(grep "^${binary}|" "$SHA256_FILE" | cut -d'|' -f2)
+    if [ -z "$SHA256" ]; then
+        warn "No SHA256 recorded for $binary; skipping formula line."
+        continue
+    fi
     case "$binary" in
         *aarch64-apple-darwin*)
             echo "  macOS ARM (aarch64-apple-darwin):"
