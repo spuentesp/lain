@@ -115,6 +115,7 @@ pub fn enrich_with_proto(
             &NodeType::Module,
             &svc.proto_path,
             &service_key,
+            None,
         );
 
         let mut service_node = GraphNode::new(

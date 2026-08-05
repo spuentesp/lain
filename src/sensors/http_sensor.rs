@@ -167,7 +167,7 @@ pub fn routes_to_graph(graph: &GraphDatabase, routes: &[HttpRoute]) -> (Vec<Grap
     let mut edges = Vec::new();
 
     for route in routes {
-        let node_id = GraphNode::generate_id(&NodeType::HttpRoute, &route.handler_path, &format!("{}:{}", route.method, route.path));
+        let node_id = GraphNode::generate_id(&NodeType::HttpRoute, &route.handler_path, &format!("{}:{}", route.method, route.path), None);
 
         let mut node = GraphNode::new(
             NodeType::HttpRoute,
