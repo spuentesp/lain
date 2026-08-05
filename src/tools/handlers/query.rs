@@ -20,11 +20,12 @@ pub fn query_graph(
 ) -> Result<String, LainError> {
     let mut executor = Executor::new(graph, embedder, embedding_cache);
 
-    // Parse query spec from arguments
-    // Accepts both wrapped {"query": {...}} and unwrapped {...}
+    // Parse query spec from arguments.
+    // Accepts: {"spec": {...}} (per docs/query-language.md), {"query": {...}} (legacy),
+    // or the spec fields directly as top-level arguments.
     let spec = if let Some(args) = arguments {
-        if let Some(query_val) = args.get("query") {
-            serde_json::from_value(query_val.clone()).map_err(|e| LainError::Json(e))?
+        if let Some(spec_val) = args.get("spec").or_else(|| args.get("query")) {
+            serde_json::from_value(spec_val.clone()).map_err(|e| LainError::Json(e))?
         } else {
             // User provided unwrapped query spec directly as arguments
             serde_json::from_value(Value::Object(args.clone())).map_err(|e| LainError::Json(e))?

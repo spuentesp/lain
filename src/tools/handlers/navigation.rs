@@ -8,7 +8,6 @@ use crate::tools::utils::resolve_node;
 use crate::tools::{UiSession, UiSessionData, DIAGNOSTICS_PORT};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tokio::runtime::Handle;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
@@ -61,7 +60,7 @@ pub fn trace_dependency(
     ))
 }
 
-pub fn get_call_chain(
+pub async fn get_call_chain(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     from: &str,
@@ -134,18 +133,15 @@ pub fn get_call_chain(
             },
         };
 
-        let sessions_clone = Arc::clone(sessions);
-        let session_id_clone = session_id.clone();
-        let session_clone = session;
-        let handle = tokio::spawn(async move {
-            let mut guard = sessions_clone.lock().await;
+        // Insert the session synchronously before returning. Spawning it
+        // would race the agent's immediate follow-up fetch of the URL in
+        // our response — the session would not exist yet.
+        {
+            let mut guard = sessions.lock().await;
             // Clean up expired sessions before insert (bounded memory)
             let now = std::time::SystemTime::now();
             guard.retain(|_, s| s.expires_at > now);
-            guard.insert(session_id_clone, session_clone);
-        });
-        if let Err(e) = Handle::current().block_on(handle) {
-            tracing::warn!("session store spawn error: {}", e);
+            guard.insert(session_id.clone(), session);
         }
 
         output.push_str(&format!(

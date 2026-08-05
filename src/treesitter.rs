@@ -3,7 +3,7 @@
 //! Operates purely on source text — no LSP, no network, no side effects.
 //! Returns unresolved (line, name, edge_type) tuples; caller resolves to node IDs.
 
-use crate::schema::EdgeType;
+use crate::schema::{EdgeType, NodeType};
 use std::collections::HashSet;
 use std::path::Path;
 use parking_lot::Mutex;
@@ -258,6 +258,290 @@ pub fn extract_strings(path: &Path, source: &str) -> Vec<StringLiteral> {
     }
 }
 
+// ── Symbol Definition Extraction ─────────────────────────────────────────────
+
+/// A symbol definition found in source: a function, struct, trait, etc.,
+/// not yet wired into the graph. Caller maps this to a `GraphNode`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolDef {
+    pub name: String,
+    pub kind: NodeType,
+    /// 0-indexed line where the definition starts.
+    pub line_start: u32,
+    /// 0-indexed line where the definition ends (inclusive).
+    pub line_end: u32,
+    /// True if the symbol is marked `#[deprecated]`.
+    pub is_deprecated: bool,
+    /// Optional labels attached to the symbol (e.g. "test", "async").
+    pub labels: Vec<String>,
+}
+
+/// Extract all top-level (and impl-block) symbol definitions from a source file.
+/// Acts as a fallback when LSP is unavailable: every symbol here becomes a
+/// graph node so downstream `find Function` / `get_blast_radius` queries work.
+///
+/// Returns an empty vec for unsupported file types.
+pub fn extract_definitions(path: &Path, source: &str) -> Vec<SymbolDef> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    match ext {
+        "rs" => extract_definitions_rust(source),
+        "py" => extract_definitions_python(source),
+        "js" | "jsx" | "ts" | "tsx" => extract_definitions_js(source),
+        _ => vec![],
+    }
+}
+
+fn extract_definitions_rust(source: &str) -> Vec<SymbolDef> {
+    PARSER.with(|parser| {
+        let mut parser = parser.lock();
+        if parser.set_language(&tree_sitter_rust::language()).is_err() {
+            return vec![];
+        }
+        let Some(tree) = parser.parse(source, None) else {
+            return vec![];
+        };
+
+        let src_bytes = source.as_bytes();
+        let mut defs: Vec<SymbolDef> = Vec::new();
+        let mut seen_keys: HashSet<(String, u32, u32)> = HashSet::new();
+
+        // Run queries that match definitions at any depth (impl methods included).
+        // The matched node's start/end rows give the line range; the `name`
+        // field gives the identifier child.
+        let patterns: &[(&str, NodeType)] = &[
+            ("(function_item) @d", NodeType::Function),
+            ("(struct_item) @d", NodeType::Struct),
+            ("(trait_item) @d", NodeType::Trait),
+            ("(enum_item) @d", NodeType::Enum),
+        ];
+
+        for (pattern, kind) in patterns {
+            let Ok(query) = Query::new(&tree_sitter_rust::language(), pattern) else {
+                continue;
+            };
+            let mut cursor = QueryCursor::new();
+            for m in cursor.matches(&query, tree.root_node(), src_bytes) {
+                for cap in m.captures {
+                    let node = cap.node;
+                    let Some(name_node) = node.child_by_field_name("name") else {
+                        continue;
+                    };
+                    let Ok(name) = name_node.utf8_text(src_bytes) else {
+                        continue;
+                    };
+                    let line_start = node.start_position().row as u32;
+                    let line_end = node.end_position().row as u32;
+                    let key = (name.to_string(), line_start, line_end);
+                    if seen_keys.insert(key.clone()) {
+                        let (is_deprecated, labels) = collect_rust_metadata(&node, src_bytes);
+                        defs.push(SymbolDef {
+                            name: name.to_string(),
+                            kind: kind.clone(),
+                            line_start,
+                            line_end,
+                            is_deprecated,
+                            labels,
+                        });
+                    }
+                }
+            }
+        }
+
+        defs
+    })
+}
+
+/// Walk a definition node's preceding siblings for `#[...]` attribute items and
+/// extract `(is_deprecated, labels)`. Recognised: `#[deprecated]`, `#[test]`,
+/// `#[async_trait]`, `#[no_mangle]`, and any other attribute's identifier is
+/// captured as a label.
+fn collect_rust_metadata(node: &tree_sitter::Node, src_bytes: &[u8]) -> (bool, Vec<String>) {
+    let mut is_deprecated = false;
+    let mut labels = Vec::new();
+    let Some(parent) = node.parent() else { return (false, labels) };
+
+    // Walk the parent's children backwards starting from the node. Stop as
+    // soon as we encounter a non-attribute sibling — anything beyond that is
+    // attached to a different definition.
+    let node_start = node.start_position().row;
+    let mut cursor = parent.walk();
+    let mut siblings: Vec<tree_sitter::Node> = Vec::new();
+    for sibling in parent.children(&mut cursor) {
+        if sibling.start_position().row >= node_start {
+            break;
+        }
+        siblings.push(sibling);
+    }
+
+    // Now iterate from the closest attribute backwards, stopping at the first
+    // non-attribute sibling.
+    let mut collected = false;
+    for sibling in siblings.iter().rev() {
+        if sibling.kind() != "attribute_item" {
+            // We've gone past the contiguous attribute chain.
+            break;
+        }
+        collected = true;
+        let mut inner = sibling.walk();
+        for child in sibling.children(&mut inner) {
+            if child.kind() == "identifier" {
+                if let Ok(s) = child.utf8_text(src_bytes) {
+                    labels.push(s.to_string());
+                    if s == "deprecated" {
+                        is_deprecated = true;
+                    }
+                }
+            } else if child.kind() == "attribute" {
+                let mut path = child.walk();
+                for p in child.children(&mut path) {
+                    if p.kind() == "identifier" {
+                        if let Ok(s) = p.utf8_text(src_bytes) {
+                            labels.push(s.to_string());
+                            if s == "deprecated" {
+                                is_deprecated = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !collected {
+        // Nothing matched — leave defaults.
+    }
+    // Labels are collected newest-first; reverse for predictable order.
+    labels.reverse();
+    (is_deprecated, labels)
+}
+
+fn extract_definitions_python(source: &str) -> Vec<SymbolDef> {
+    PARSER.with(|parser| {
+        let mut parser = parser.lock();
+        if parser.set_language(&tree_sitter_python::language()).is_err() {
+            return vec![];
+        }
+        let Some(tree) = parser.parse(source, None) else {
+            return vec![];
+        };
+
+        let mut defs = Vec::new();
+        let root = tree.root_node();
+
+        // Top-level module: walk for function_definition, class_definition
+        for child in root.children(&mut root.walk()) {
+            match child.kind() {
+                "function_definition" => {
+                    if let Some(name) = python_def_name(&child, source) {
+                        defs.push(SymbolDef {
+                            name,
+                            kind: NodeType::Function,
+                            line_start: child.start_position().row as u32,
+                            line_end: child.end_position().row as u32,
+                            is_deprecated: false,
+                            labels: Vec::new(),
+                        });
+                    }
+                }
+                "class_definition" => {
+                    if let Some(name) = python_def_name(&child, source) {
+                        defs.push(SymbolDef {
+                            name,
+                            kind: NodeType::Class,
+                            line_start: child.start_position().row as u32,
+                            line_end: child.end_position().row as u32,
+                            is_deprecated: false,
+                            labels: Vec::new(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        defs
+    })
+}
+
+fn python_def_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+fn extract_definitions_js(source: &str) -> Vec<SymbolDef> {
+    PARSER.with(|parser| {
+        let mut parser = parser.lock();
+        if parser
+            .set_language(&tree_sitter_javascript::language())
+            .is_err()
+        {
+            return vec![];
+        }
+        let Some(tree) = parser.parse(source, None) else {
+            return vec![];
+        };
+
+        let mut defs = Vec::new();
+        let root = tree.root_node();
+
+        for child in root.children(&mut root.walk()) {
+            match child.kind() {
+                "function_declaration" => {
+                    if let Some(name) = js_function_name(&child, source) {
+                        defs.push(SymbolDef {
+                            name,
+                            kind: NodeType::Function,
+                            line_start: child.start_position().row as u32,
+                            line_end: child.end_position().row as u32,
+                            is_deprecated: false,
+                            labels: Vec::new(),
+                        });
+                    }
+                }
+                "class_declaration" => {
+                    if let Some(name) = js_class_name(&child, source) {
+                        defs.push(SymbolDef {
+                            name,
+                            kind: NodeType::Class,
+                            line_start: child.start_position().row as u32,
+                            line_end: child.end_position().row as u32,
+                            is_deprecated: false,
+                            labels: Vec::new(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        defs
+    })
+}
+
+fn js_function_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+fn js_class_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
 /// Core string literal extractor using tree-sitter
 fn extract_string_literals(source: &str, language: Language) -> Vec<StringLiteral> {
     PARSER.with(|parser| {
@@ -350,6 +634,7 @@ fn is_semantic_candidate(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::NodeType;
     use std::path::Path;
 
     #[test]
@@ -384,6 +669,105 @@ fn build(db: GraphDatabase, err: LainError) -> Result<ToolExecutor, LainError> {
         assert!(types.contains(&"GraphDatabase"));
         assert!(types.contains(&"LainError"));
         assert!(types.contains(&"ToolExecutor"));
+    }
+
+    #[test]
+    fn test_extract_definitions_finds_rust_function() {
+        let source = r#"
+pub fn add(a: i32, b: i32) -> i32 { a + b }
+pub fn main() { add(1, 2); }
+"#;
+        let defs = extract_definitions(Path::new("lib.rs"), source);
+        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"add"),
+            "extract_definitions should find 'add' function, got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"main"),
+            "extract_definitions should find 'main' function, got: {:?}",
+            names
+        );
+        let add = defs.iter().find(|d| d.name == "add").unwrap();
+        assert!(matches!(add.kind, NodeType::Function));
+        assert_eq!(add.line_start, 1);
+    }
+
+    #[test]
+    fn test_extract_definitions_finds_rust_struct_and_trait() {
+        let source = r#"
+pub struct Calc { pub v: i32 }
+pub trait Shape { fn area(&self) -> f64; }
+impl Shape for Calc { fn area(&self) -> f64 { 0.0 } }
+"#;
+        let defs = extract_definitions(Path::new("lib.rs"), source);
+        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"Calc"), "got: {:?}", names);
+        assert!(names.contains(&"Shape"), "got: {:?}", names);
+        let calc = defs.iter().find(|d| d.name == "Calc").unwrap();
+        assert!(matches!(calc.kind, NodeType::Struct));
+        let shape = defs.iter().find(|d| d.name == "Shape").unwrap();
+        assert!(matches!(shape.kind, NodeType::Trait));
+    }
+
+    #[test]
+    fn test_extract_definitions_finds_impl_methods() {
+        let source = r#"
+pub struct Calc { pub v: i32 }
+impl Calc {
+    pub fn new(v: i32) -> Self { Self { v } }
+    pub fn double(&self) -> i32 { self.v * 2 }
+}
+"#;
+        let defs = extract_definitions(Path::new("lib.rs"), source);
+        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"new"),
+            "impl method 'new' should be extracted; got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"double"),
+            "impl method 'double' should be extracted; got: {:?}",
+            names
+        );
+        let new = defs.iter().find(|d| d.name == "new").unwrap();
+        assert!(matches!(new.kind, NodeType::Function));
+        assert_eq!(new.line_start, 3);
+    }
+
+    #[test]
+    fn test_extract_definitions_captures_deprecated_attribute() {
+        let source = r#"#[deprecated]
+pub fn old_api() -> i32 { 42 }
+pub fn new_api() -> i32 { 1 }
+"#;
+        let defs = extract_definitions(Path::new("lib.rs"), source);
+        let old = defs.iter().find(|d| d.name == "old_api").unwrap();
+        assert!(
+            old.is_deprecated,
+            "old_api should be marked deprecated; got: is_deprecated={} labels={:?}",
+            old.is_deprecated, old.labels
+        );
+        let new = defs.iter().find(|d| d.name == "new_api").unwrap();
+        assert!(!new.is_deprecated, "new_api should not be deprecated");
+    }
+
+    #[test]
+    fn test_extract_definitions_finds_python_function() {
+        let source = r#"
+def hello(name):
+    return name
+
+class Foo:
+    def bar(self):
+        return 1
+"#;
+        let defs = extract_definitions(Path::new("foo.py"), source);
+        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"hello"), "got: {:?}", names);
+        assert!(names.contains(&"Foo"), "got: {:?}", names);
     }
 
     #[test]

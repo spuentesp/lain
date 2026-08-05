@@ -36,6 +36,10 @@ pub struct ToolContext {
     pub jobs: Arc<AsyncMutex<std::collections::HashMap<String, crate::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
     pub diagnostics_port: u16,
+    /// Workspace root path. Used as the default `cwd` for execution tools
+    /// (`run_build`, `run_tests`, `run_clippy`) so they don't fail just
+    /// because the binary was launched from a different directory.
+    pub workspace: std::path::PathBuf,
 }
 
 impl ToolContext {
@@ -63,7 +67,13 @@ impl ToolContext {
             jobs,
             job_webhooks,
             diagnostics_port: crate::tools::DIAGNOSTICS_PORT,
+            workspace: std::path::PathBuf::from("."),
         }
+    }
+
+    pub fn with_workspace(mut self, workspace: std::path::PathBuf) -> Self {
+        self.workspace = workspace;
+        self
     }
 
     /// Remove expired UI sessions. Call periodically to prevent unbounded growth.

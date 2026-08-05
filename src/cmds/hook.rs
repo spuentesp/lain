@@ -1,9 +1,31 @@
 use anyhow::Result;
 
+/// Supported agent names (kept in sync with cmds/init.rs).
+const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "auto"];
+
 pub fn run_hook_install(agent: Option<String>, uninstall: bool) -> Result<()> {
     use std::fs;
 
     let agent = agent.unwrap_or_else(|| "auto".to_string());
+    if !SUPPORTED_AGENTS.contains(&agent.as_str()) {
+        anyhow::bail!(
+            "Unknown agent '{}'. Supported: {}",
+            agent,
+            SUPPORTED_AGENTS.join(", ")
+        );
+    }
+
+    // Hook install currently writes the PreToolUse hook into Claude's
+    // settings.json — that's the only editor that supports MCP hooks via
+    // this mechanism. Other agents get a clear error rather than silently
+    // writing to the wrong dir.
+    if agent != "claude" && agent != "auto" {
+        anyhow::bail!(
+            "Hook install currently only supports the 'claude' agent (got '{}').",
+            agent
+        );
+    }
+
     let home_dir = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
     let claude_dir = home_dir.join(".claude");
     let hooks_dir = claude_dir.join("hooks");

@@ -82,6 +82,7 @@ pub fn enrich_with_websocket(
             &NodeType::Variable,
             &file_path.to_string_lossy(),
             &display_name,
+            None,
         );
 
         let mut node = GraphNode::new(

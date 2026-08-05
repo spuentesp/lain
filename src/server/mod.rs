@@ -73,6 +73,7 @@ impl LainServer {
             Arc::clone(&git),
             Arc::clone(&lsp_pool),
             Arc::clone(&tuning),
+            workspace.to_path_buf(),
         );
 
         info!("Lain server initialized");
@@ -94,17 +95,6 @@ impl LainServer {
 
     pub fn is_git_repo(&self) -> bool {
         self.git.lock().is_valid()
-    }
-
-    pub async fn run_mcp_server(&mut self) -> Result<(), LainError> {
-        info!("Starting MCP server using rust-mcp-sdk");
-
-        let mcp_server = crate::mcp::LainMcpServer::new(self.tool_executor.clone());
-        mcp_server.run_stdio().await.map_err(|e| {
-            LainError::Mcp(format!("MCP server error: {}", e))
-        })?;
-
-        Ok(())
     }
 
     pub async fn shutdown(&self) {

@@ -220,6 +220,7 @@ impl ToolHandler for GetCallChainHandler {
             &to,
             Some(&ctx.ui_sessions),
         )
+        .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCallChainHandler));
@@ -375,6 +376,7 @@ impl ToolHandler for GetBlastRadiusHandler {
             include_coupling,
             Some(&ctx.ui_sessions),
         )
+        .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetBlastRadiusHandler));
@@ -406,6 +408,7 @@ impl ToolHandler for GetCouplingRadarHandler {
             &symbol,
             Some(&ctx.ui_sessions),
         )
+        .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCouplingRadarHandler));
@@ -724,13 +727,15 @@ impl ToolHandler for RunBuildHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
+        // Default cwd to the workspace so the tool works without an explicit
+        // `cwd` argument.
         let cwd = if opt_str_arg(args, "cwd").is_empty() {
-            None
+            ctx.workspace.to_string_lossy().to_string()
         } else {
-            Some(opt_str_arg(args, "cwd"))
+            opt_str_arg(args, "cwd")
         };
         let release = bool_arg(args, "release").unwrap_or(false);
-        handlers::execution::run_build(&ctx.graph, &ctx.overlay, cwd.as_deref(), release).await
+        handlers::execution::run_build(&ctx.graph, &ctx.overlay, Some(&cwd), release).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&RunBuildHandler));
@@ -756,9 +761,9 @@ impl ToolHandler for RunTestsHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let cwd = if opt_str_arg(args, "cwd").is_empty() {
-            None
+            ctx.workspace.to_string_lossy().to_string()
         } else {
-            Some(opt_str_arg(args, "cwd"))
+            opt_str_arg(args, "cwd")
         };
         let filter = if opt_str_arg(args, "filter").is_empty() {
             None
@@ -769,7 +774,7 @@ impl ToolHandler for RunTestsHandler {
         handlers::execution::run_tests(
             &ctx.graph,
             &ctx.overlay,
-            cwd.as_deref(),
+            Some(&cwd),
             filter.as_deref(),
             timeout_secs,
             &ctx.tuning.runtime,
@@ -800,12 +805,12 @@ impl ToolHandler for RunClippyHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let cwd = if opt_str_arg(args, "cwd").is_empty() {
-            None
+            ctx.workspace.to_string_lossy().to_string()
         } else {
-            Some(opt_str_arg(args, "cwd"))
+            opt_str_arg(args, "cwd")
         };
         let fix = bool_arg(args, "fix").unwrap_or(false);
-        handlers::execution::run_clippy(&ctx.graph, &ctx.overlay, cwd.as_deref(), fix).await
+        handlers::execution::run_clippy(&ctx.graph, &ctx.overlay, Some(&cwd), fix).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&RunClippyHandler));

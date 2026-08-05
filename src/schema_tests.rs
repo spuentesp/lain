@@ -180,10 +180,23 @@ fn test_graph_node_serialize() {
 
 #[test]
 fn test_graph_node_deserialize() {
-    let json = r#"{"id":"test-id","node_type":"Function","name":"deser_fn","path":"/src/lib.rs","line_start":null,"line_end":null,"signature":null,"docstring":null,"embedding":null,"fan_in":null,"fan_out":null,"anchor_score":null,"depth_from_main":null,"co_change_count":null,"is_deprecated":false,"last_lsp_sync":null,"last_git_sync":null,"commit_hash":null,"is_hydrated":true}"#;
+    let json = r#"{"id":"test-id","node_type":"Function","name":"deser_fn","path":"/src/lib.rs","line_start":null,"line_end":null,"signature":null,"docstring":null,"embedding":null,"fan_in":null,"fan_out":null,"anchor_score":null,"depth_from_main":null,"co_change_count":null,"is_deprecated":false,"label":null,"last_lsp_sync":null,"last_git_sync":null,"commit_hash":null,"is_hydrated":true}"#;
     let node: GraphNode = serde_json::from_str(json).unwrap();
     assert_eq!(node.name, "deser_fn");
     assert_eq!(node.node_type, NodeType::Function);
+}
+
+/// Backwards compatibility: a GraphNode serialised with an older schema
+/// (missing the `label` field) must still deserialize. This guards against
+/// the bincode-persistence regression where adding any field would break
+/// every existing `.lain/graph.bin` from prior releases.
+#[test]
+fn test_graph_node_deserialize_without_label_is_backward_compatible() {
+    let old_json = r#"{"id":"old","node_type":"Function","name":"old_fn","path":"/src/lib.rs","line_start":null,"line_end":null,"signature":null,"docstring":null,"embedding":null,"fan_in":null,"fan_out":null,"anchor_score":null,"depth_from_main":null,"co_change_count":null,"is_deprecated":false,"last_lsp_sync":null,"last_git_sync":null,"commit_hash":null,"is_hydrated":true}"#;
+    let node: GraphNode = serde_json::from_str(old_json)
+        .expect("old-format JSON must still deserialize");
+    assert_eq!(node.name, "old_fn");
+    assert!(node.label.is_none());
 }
 
 #[test]
@@ -214,4 +227,21 @@ fn test_node_type_equality() {
 fn test_edge_type_equality() {
     assert_eq!(EdgeType::Calls, EdgeType::Calls);
     assert_ne!(EdgeType::Calls, EdgeType::Contains);
+}
+
+/// Two symbols with the same (type, path, name) but different line ranges —
+/// e.g. a top-level `fn add` and an `impl` method `add` — must have distinct
+/// IDs so both survive in the graph. Previously they collided because the ID
+/// ignored line_start, causing the second insert to overwrite the first.
+#[test]
+fn test_graph_node_id_differs_by_line_range() {
+    let top_level = GraphNode::new(NodeType::Function, "add".to_string(), "/src/lib.rs".to_string())
+        .with_location(1, 1);
+    let impl_method = GraphNode::new(NodeType::Function, "add".to_string(), "/src/lib.rs".to_string())
+        .with_location(7, 7);
+    assert_ne!(
+        top_level.id, impl_method.id,
+        "Functions named 'add' at different lines must have distinct IDs (got {} vs {})",
+        top_level.id, impl_method.id
+    );
 }

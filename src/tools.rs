@@ -112,6 +112,7 @@ impl ToolExecutor {
         git: Arc<Mutex<GitSensor>>,
         lsp_pool: Arc<LspPool>,
         tuning: Arc<TuningConfig>,
+        workspace: std::path::PathBuf,
     ) -> Self {
         let jobs_registry = Arc::new(AsyncMutex::new(HashMap::<String, JobInfo>::new()));
         let webhooks = Arc::new(AsyncMutex::new(Vec::new()));
@@ -127,7 +128,7 @@ impl ToolExecutor {
             Arc::new(AsyncMutex::new(HashMap::new())),
             Arc::clone(&jobs_registry),
             Arc::clone(&webhooks),
-        );
+        ).with_workspace(workspace);
 
         // Snapshot persistence (optional, for resumeability)
         let jobs_path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
@@ -303,17 +304,14 @@ impl ToolExecutor {
     async fn install_language_server(&self, language: &str) -> Result<String, LainError> {
         info!("Requesting installation of LSP for: {}", language);
 
+        // Run synchronously so callers see the real result, not a fake
+        // success message. Background install was hiding all install failures.
         let lsp = Arc::clone(&self.ctx.lsp_pool.next());
-        let lang = language.to_string();
-
-        tokio::spawn(async move {
-            let mut lsp_guard = lsp.lock().await;
-            if let Err(e) = lsp_guard.install_server(&lang).await {
-                error!("LSP installation for {} failed: {}", lang, e);
-            }
-        });
-
-        Ok(format!("Installation of LSP for '{}' started in background. Check 'get_health' in a minute to see if it's available.", language))
+        let mut lsp_guard = lsp.lock().await;
+        lsp_guard.install_server(language).await.map_err(|e| {
+            error!("LSP installation for {} failed: {}", language, e);
+            e
+        })
     }
 
     fn get_agent_strategy(&self) -> Result<String, LainError> {
@@ -447,7 +445,7 @@ impl ToolExecutor {
 
 #[doc(hidden)]
 pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> ToolExecutor {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     let overlay = crate::overlay::VolatileOverlay::new();
     let embedder = crate::nlp::NlpEmbedder::new_stub();
     let git = Arc::new(parking_lot::Mutex::new(
@@ -459,5 +457,5 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
         crate::lsp::LspPool::new(Path::new("."), 2).expect("lsp pool"),
     );
     let tuning = Arc::new(crate::tuning::TuningConfig::default());
-    ToolExecutor::new(graph, overlay, embedder, git, lsp_pool, tuning)
+    ToolExecutor::new(graph, overlay, embedder, git, lsp_pool, tuning, PathBuf::from("."))
 }

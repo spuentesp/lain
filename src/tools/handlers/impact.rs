@@ -11,7 +11,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 /// Store a UI session and append its interactive link to the output string.
-fn store_ui_session_and_append_link(
+/// Must be `async` so we can `.lock().await` synchronously — spawning the
+/// insert races the agent's immediate fetch of the URL we return.
+async fn store_ui_session_and_append_link(
     sessions: &Arc<AsyncMutex<HashMap<String, UiSession>>>,
     session_type: &str,
     data: UiSessionData,
@@ -27,15 +29,12 @@ fn store_ui_session_and_append_link(
         data,
     };
 
-    let sessions_clone = Arc::clone(sessions);
-    let session_id_clone = session_id.clone();
-    let session_clone = session;
-    tokio::spawn(async move {
-        let mut guard = sessions_clone.lock().await;
+    {
+        let mut guard = sessions.lock().await;
         let now = std::time::SystemTime::now();
         guard.retain(|_, s| s.expires_at > now);
-        guard.insert(session_id_clone, session_clone);
-    });
+        guard.insert(session_id.clone(), session);
+    }
 
     output.push_str(&format!(
         "\n\n[Interactive {}: http://localhost:{}/ui/{}/{}]",
@@ -43,7 +42,7 @@ fn store_ui_session_and_append_link(
     ));
 }
 
-pub fn get_blast_radius(
+pub async fn get_blast_radius(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
@@ -165,14 +164,14 @@ pub fn get_blast_radius(
             symbol: symbol.to_string(),
             nodes: session_nodes,
         };
-        store_ui_session_and_append_link(sessions, "blast-radius", data, "blast-radius", &mut output);
+        store_ui_session_and_append_link(sessions, "blast-radius", data, "blast-radius", &mut output).await;
         output.push_str("\nClick nodes to mark approved, then describe your selection to the agent.");
     }
 
     Ok(output)
 }
 
-pub fn get_coupling_radar(
+pub async fn get_coupling_radar(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
@@ -206,7 +205,7 @@ pub fn get_coupling_radar(
             matrix: vec![],
             files: partners.iter().map(|(p, _)| p.clone()).take(20).collect(),
         };
-        store_ui_session_and_append_link(sessions, "coupling", data, "coupling", &mut output);
+        store_ui_session_and_append_link(sessions, "coupling", data, "coupling", &mut output).await;
         output.push_str("\nClick cells to see co-change details, then describe your selection to the agent.");
     }
 

@@ -2,6 +2,10 @@ use anyhow::Result;
 use std::fs;
 use std::io::Write;
 
+/// Supported agent names. Anything else is a user error and `run_init` will
+/// refuse rather than silently writing nothing.
+const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "auto"];
+
 pub fn run_init(
     agent: &str,
     workspace: Option<&std::path::Path>,
@@ -10,9 +14,26 @@ pub fn run_init(
     port: u16,
     yes: bool,
 ) -> Result<()> {
+    if !SUPPORTED_AGENTS.contains(&agent) {
+        anyhow::bail!(
+            "Unknown agent '{}'. Supported: {}",
+            agent,
+            SUPPORTED_AGENTS.join(", ")
+        );
+    }
 
     let workspace = workspace.unwrap_or_else(|| std::path::Path::new("."));
     let home_dir = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+
+    // Pre-flight: if the workspace isn't a git repo, refuse with a clear
+    // message rather than letting `build_core_memory` crash with a libgit2 error.
+    if !workspace.join(".git").exists() {
+        anyhow::bail!(
+            "No Git repository found at {:?}. Lain requires a .git folder.\n\
+             Run `git init` (or open an existing repo) and try again.",
+            workspace
+        );
+    }
 
     // Auto-detect ONNX model at the default install location if not explicitly provided
     let default_model_path = home_dir.join(".local/lain/models/all-MiniLM-L6-v2.onnx");
@@ -51,15 +72,76 @@ pub fn run_init(
             let settings_path = gemini_dir.join("settings.json");
             init_gemini(&workspace, embedding_model, transport, port, yes, &gemini_dir, &settings_path)?;
         }
+        "cursor" => {
+            let cursor_dir = home_dir.join(".cursor");
+            init_cursor(&workspace, embedding_model, transport, port, yes, &cursor_dir)?;
+        }
+        "windsurf" => {
+            let windsurf_dir = home_dir.join(".codeium/windsurf");
+            init_windsurf(&workspace, embedding_model, transport, port, yes, &windsurf_dir)?;
+        }
+        "cline" => {
+            let cline_dir = home_dir.join(".cline");
+            init_cline(&workspace, embedding_model, transport, port, yes, &cline_dir)?;
+        }
         other => {
-            eprintln!("Warning: agent '{}' MCP config not supported yet. Supported: claude, gemini, cursor, windsurf, cline", other);
+            anyhow::bail!("Unknown agent '{}'", other);
         }
     }
 
     install_agent_doc(agent_type, &home_dir)?;
 
+    // Build the code graph now so `lain query` works immediately after init.
+    // Without this the README's quickstart (init → query) is broken: the
+    // user has to also run `lain --workspace …` separately to populate
+    // .lain/graph.bin before queries return anything.
+    println!("\nIndexing workspace (one-shot, may take a moment)...");
+    match index_workspace_blocking(workspace, embedding_model) {
+        Ok(()) => println!("Indexed workspace into .lain/graph.bin."),
+        Err(e) => eprintln!(
+            "Warning: indexing failed: {}. Run `lain --workspace {}` to retry.",
+            e,
+            workspace.display()
+        ),
+    }
+
     println!("\nLAIN initialization complete!");
     println!("Restart your agent to use LAIN.");
+    Ok(())
+}
+
+/// Build the code graph synchronously. We can't call `block_on` directly
+/// because `main()` is already inside a `#[tokio::main]` runtime. Spawn a
+/// fresh OS thread that owns its own single-threaded tokio runtime.
+fn index_workspace_blocking(
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+) -> Result<()> {
+    let memory_path = workspace.join(".lain/graph.bin");
+    std::fs::create_dir_all(workspace.join(".lain"))?;
+
+    let workspace_owned = workspace.to_path_buf();
+    let memory_path_owned = memory_path.clone();
+    let model_owned = embedding_model.map(|p| p.to_path_buf());
+
+    let handle = std::thread::Builder::new()
+        .name("lain-init-indexer".into())
+        .spawn(move || -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async move {
+                let server = lain::server::LainServer::new(
+                    &workspace_owned,
+                    &memory_path_owned,
+                    model_owned.as_deref(),
+                )?;
+                let mut bg = server.clone_for_background();
+                bg.build_core_memory().await?;
+                Ok::<(), anyhow::Error>(())
+            })
+        })?;
+    handle.join().map_err(|_| anyhow::anyhow!("indexing thread panicked"))??;
     Ok(())
 }
 
@@ -228,6 +310,132 @@ fn init_gemini(
     }
 
     Ok(())
+}
+
+/// Write an MCP server entry into a JSON settings file at `dir/settings_file`.
+/// `agent_label` is shown in the interactive overwrite prompt and the
+/// "Updated <path>" log. `extra_fields` is merged into the lain server entry
+/// (e.g. Cline's `"disabled": false`).
+fn write_mcp_server_entry(
+    dir: &std::path::Path,
+    settings_file: &str,
+    agent_label: &str,
+    extra_fields: Option<serde_json::Value>,
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    transport: &str,
+    yes: bool,
+) -> Result<()> {
+    use std::fs;
+    if !dir.exists() { fs::create_dir_all(dir)?; }
+    let settings_path = dir.join(settings_file);
+
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&settings_path)?).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !settings.get("mcpServers").and_then(|v| v.as_object()).is_some() {
+        settings.as_object_mut().unwrap().insert("mcpServers".to_string(), serde_json::json!({}));
+    }
+    let mcp_servers = settings.get_mut("mcpServers").unwrap().as_object_mut().unwrap();
+
+    if mcp_servers.get("lain").is_some() {
+        if !yes {
+            print!("LAIN MCP server already configured for {}. Overwrite? [y/N] ", agent_label);
+            std::io::stdout().flush()?;
+            let mut reply = String::new();
+            std::io::stdin().read_line(&mut reply)?;
+            if !(reply.trim().starts_with('y') || reply.trim().starts_with('Y')) {
+                println!("Skipped.");
+                return Ok(());
+            }
+        } else {
+            println!("MCP server already configured - skipped.");
+            return Ok(());
+        }
+    }
+
+    let mut args = vec![
+        "--workspace".to_string(),
+        workspace.to_string_lossy().to_string(),
+        "--transport".to_string(),
+        transport.to_string(),
+    ];
+    if let Some(model) = embedding_model {
+        args.push("--embedding-model".to_string());
+        args.push(model.to_string_lossy().to_string());
+    }
+
+    let mut entry = serde_json::json!({
+        "command": which::which("lain").map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "lain".to_string()),
+        "args": args
+    });
+    if let Some(extra) = extra_fields {
+        if let (Some(entry_obj), Some(extra_obj)) = (entry.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                entry_obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    mcp_servers.insert("lain".to_string(), entry);
+
+    let json = serde_json::to_string_pretty(&settings)?;
+    let tmp = settings_path.with_extension("json.tmp");
+    fs::write(&tmp, &json)?;
+    fs::rename(&tmp, &settings_path)?;
+    println!("Updated ~/{}/{}", dir.file_name().and_then(|s| s.to_str()).unwrap_or(""), settings_file);
+    Ok(())
+}
+
+/// Cursor MCP config: `~/.cursor/mcp.json`. Schema documented at
+/// https://docs.cursor.com/context/model-context-protocol#configuration
+fn init_cursor(
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    transport: &str,
+    _port: u16,
+    yes: bool,
+    cursor_dir: &std::path::Path,
+) -> Result<()> {
+    write_mcp_server_entry(
+        cursor_dir, "mcp.json", "Cursor", None,
+        workspace, embedding_model, transport, yes,
+    )
+}
+
+/// Windsurf MCP config: `~/.codeium/windsurf/mcp_config.json`. Schema
+/// documented at https://docs.codeium.com/windsurf/mcp
+fn init_windsurf(
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    transport: &str,
+    _port: u16,
+    yes: bool,
+    windsurf_dir: &std::path::Path,
+) -> Result<()> {
+    write_mcp_server_entry(
+        windsurf_dir, "mcp_config.json", "Windsurf", None,
+        workspace, embedding_model, transport, yes,
+    )
+}
+
+/// Cline MCP config: `~/.cline/mcp_settings.json`. Schema documented at
+/// https://docs.cline.bot/mcp/configuring-mcp-servers
+fn init_cline(
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    transport: &str,
+    _port: u16,
+    yes: bool,
+    cline_dir: &std::path::Path,
+) -> Result<()> {
+    write_mcp_server_entry(
+        cline_dir, "mcp_settings.json", "Cline",
+        Some(serde_json::json!({ "disabled": false })),
+        workspace, embedding_model, transport, yes,
+    )
 }
 
 fn write_awareness_doc(path: &std::path::Path) -> Result<()> {

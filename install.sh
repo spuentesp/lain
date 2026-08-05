@@ -75,7 +75,7 @@ parse_args() {
         echo "  --workspace PATH         Workspace path for LAIN [default: .]"
         echo "  --transport MODE        MCP transport: stdio, http, both [default: stdio]"
         echo "  --port PORT             HTTP port for MCP server [default: 9999]"
-        echo "  --agent AGENT           Target agent: auto, claude, cursor, windsurf, cline [default: auto]"
+        echo "  --agent AGENT           Target agent: auto, claude, gemini, cursor, windsurf, cline [default: auto]"
         echo "  --embedding-model PATH  Path to ONNX embedding model"
         echo "  --download-model        Download default ONNX model (all-MiniLM-L6-v2.onnx)"
         echo "  -y, --yes               Skip all confirmation prompts"
