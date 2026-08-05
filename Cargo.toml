@@ -11,11 +11,11 @@ license = "MIT"
 tokio = { version = "1.35", features = ["full"] }
 
 # MCP Server (Model Context Protocol)
-rust-mcp-sdk = { version = "=0.9.0", default-features = false, features = ["server", "stdio", "macros", "hyper-server"] }
+rust-mcp-sdk = { version = "=0.9.0", default-features = false, features = ["server", "stdio", "macros"] }
 rust-mcp-schema = "0.10.0"
 
 # HTTP server for diagnostics UI
-hyper = { version = "1.9", features = ["http1"] }
+hyper = { version = "1.9", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body = "1.0"
 http-body-util = "0.1"
