@@ -39,7 +39,7 @@ impl ServerHandler for LainHandler {
         _params: Option<PaginatedRequestParams>,
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<ListToolsResult, RpcError> {
-        let tools: Vec<Tool> = crate::tools::registry::ToolRegistry::definitions()
+        let mut tools: Vec<Tool> = crate::tools::registry::ToolRegistry::definitions()
             .iter()
             .map(|def| {
                 let input_schema = serde_json::from_value(def.input_schema.clone())
@@ -57,6 +57,24 @@ impl ServerHandler for LainHandler {
                 }
             })
             .collect();
+
+        // Append the 6 special-case tools handled in ToolExecutor::call_inner
+        // so MCP clients can see the full surface in tools/list.
+        for special in special_tool_definitions() {
+            let input_schema = serde_json::from_value(special.input_schema.clone())
+                .unwrap_or_else(|_| ToolInputSchema::new(vec![], None, None));
+            tools.push(Tool {
+                name: special.name.to_string(),
+                description: Some(special.description.to_string()),
+                input_schema,
+                annotations: None,
+                execution: None,
+                icons: vec![],
+                meta: None,
+                output_schema: None,
+                title: None,
+            });
+        }
 
         Ok(ListToolsResult { tools, meta: None, next_cursor: None })
     }
@@ -221,7 +239,10 @@ async fn handle_request(
 
                 match rpc_method {
                     "tools/list" => {
-                        let tools_vec = crate::tools::registry::ToolRegistry::definitions();
+                        let mut tools_vec = crate::tools::registry::ToolRegistry::definitions();
+                        // Append the 6 special-case tools (kept in sync with
+                        // the stdio transport's handle_list_tools_request).
+                        tools_vec.extend(special_tool_definitions());
                         let tools: Vec<serde_json::Value> = tools_vec
                             .iter()
                             .map(|def| {
@@ -385,4 +406,58 @@ async fn handle_request(
         .status(StatusCode::NOT_FOUND)
         .body(Full::new(Bytes::from("Not Found")))
         .unwrap())
+}
+
+/// Definitions for the 6 special-case tools that are dispatched directly in
+/// `ToolExecutor::call_inner` (not via the inventory registry). Including them
+/// in `tools/list` makes them visible to MCP clients.
+fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> {
+    use crate::tools::definitions::ToolDefinition;
+    vec![
+        ToolDefinition {
+            name: "get_health",
+            description: "Return server health, node/edge counts, last enriched commit, and language-server availability.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "get_agent_strategy",
+            description: "Return the recommended tool sequence and quick-reference for working with Lain.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "install_language_server",
+            description: "Install the language server for the given file extension (e.g. 'rs', 'py') or language name (e.g. 'rust').",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "language": { "type": "string", "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'." } },
+                "required": ["language"]
+            }),
+        },
+        ToolDefinition {
+            name: "register_job_webhook",
+            description: "Register a webhook URL to receive notifications when background jobs complete.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_job_status",
+            description: "Get the current status and output of a previously-spawned background job.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "job_id": { "type": "string" } },
+                "required": ["job_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "debug_sleep",
+            description: "Sleep for the given number of seconds (useful for testing job infrastructure).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "secs": { "type": "integer", "default": 1 } }
+            }),
+        },
+    ]
 }

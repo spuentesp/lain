@@ -208,8 +208,14 @@ impl LspMultiplexer {
     }
 
     pub async fn install_server(&mut self, ext: &str) -> Result<String, LainError> {
-        let config = self.registry.get(ext)
-            .ok_or_else(|| LainError::NotFound(format!("No LSP configuration found for extension: {}", ext)))?;
+        // Accept either a file extension ("rs", "py") or a language name
+        // ("rust", "python"). When given a name, resolve to the canonical ext.
+        let resolved_ext = resolve_language_to_ext(ext).unwrap_or(ext);
+        let config = self.registry.get(resolved_ext)
+            .ok_or_else(|| LainError::NotFound(format!(
+                "No LSP configuration found for '{}'. Pass a file extension like 'rs' or 'py', or a known language name (rust, python, typescript, ...).",
+                ext
+            )))?;
 
         let install_cmd = config.install_cmd
             .ok_or_else(|| LainError::Lsp(format!("No automated install command available for {} ({})", ext, config.binary)))?;
@@ -218,11 +224,11 @@ impl LspMultiplexer {
         if install_cmd.contains("brew install") && !cfg!(target_os = "macos") {
             return Err(LainError::Lsp(format!(
                 "The install command for {} ({}) requires Homebrew and is only supported on macOS. Please install it manually for your platform.",
-                ext, config.binary
+                resolved_ext, config.binary
             )));
         }
 
-        info!("Attempting to install LSP server for '{}' using: {}", ext, install_cmd);
+        info!("Attempting to install LSP server for '{}' using: {}", resolved_ext, install_cmd);
 
         let parts: Vec<&str> = install_cmd.split_whitespace().collect();
         let mut cmd = tokio::process::Command::new(parts[0]);
@@ -259,6 +265,34 @@ fn marked_string_to_string(m: lsp_types::MarkedString) -> String {
     match m {
         lsp_types::MarkedString::String(s) => s,
         lsp_types::MarkedString::LanguageString(ls) => ls.value,
+    }
+}
+
+/// Map a friendly language name to its canonical file extension. Returns
+/// `None` if the input looks like an extension already (so we don't try to
+/// "translate" `rs` to something else) or if we don't recognise the name.
+fn resolve_language_to_ext(s: &str) -> Option<&'static str> {
+    // If it starts with a dot or looks like an ext, pass through.
+    let normalized = s.trim().trim_start_matches('.').to_ascii_lowercase();
+    match normalized.as_str() {
+        "rust" => Some("rs"),
+        "python" => Some("py"),
+        "typescript" | "ts" => Some("ts"),
+        "javascript" | "js" => Some("js"),
+        "tsx" => Some("tsx"),
+        "jsx" => Some("jsx"),
+        "go" => Some("go"),
+        "c" => Some("c"),
+        "cpp" | "c++" => Some("cpp"),
+        "csharp" | "c#" => Some("cs"),
+        "ruby" => Some("rb"),
+        "swift" => Some("swift"),
+        "kotlin" => Some("kt"),
+        "scala" => Some("scala"),
+        "java" => Some("java"),
+        "vue" => Some("vue"),
+        "svelte" => Some("svelte"),
+        _ => None,
     }
 }
 
