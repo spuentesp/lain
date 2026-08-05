@@ -45,13 +45,13 @@ fn make_overlay_with_node(name: &str, path: &str) -> VolatileOverlay {
     overlay
 }
 
-#[test]
-fn test_blast_radius_leaf_node() {
+#[tokio::test]
+async fn test_blast_radius_leaf_node() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
     // c is a leaf — nothing calls c
-    let result = get_blast_radius(&graph, &overlay, "c", false, None);
+    let result = get_blast_radius(&graph, &overlay, "c", false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Leaf has no callers, so only c itself is in visited set
@@ -59,38 +59,38 @@ fn test_blast_radius_leaf_node() {
     assert!(text.contains("c"));
 }
 
-#[test]
-fn test_blast_radius_b_node() {
+#[tokio::test]
+async fn test_blast_radius_b_node() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
     // b has two callers: a and x. Both should appear in blast radius.
-    let result = get_blast_radius(&graph, &overlay, "b", false, None);
+    let result = get_blast_radius(&graph, &overlay, "b", false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Should show a and x as dependents (at minimum)
     assert!(text.contains("a") || text.contains("x"));
 }
 
-#[test]
-fn test_blast_radius_main_node() {
+#[tokio::test]
+async fn test_blast_radius_main_node() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
     // main is root — no incoming edges to main in our test graph
-    let result = get_blast_radius(&graph, &overlay, "main", false, None);
+    let result = get_blast_radius(&graph, &overlay, "main", false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Either no dependents found OR transitively affected nodes for root
     assert!(text.contains("no dependents") || text.contains("affected"));
 }
 
-#[test]
-fn test_blast_radius_unknown_node() {
+#[tokio::test]
+async fn test_blast_radius_unknown_node() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
-    let result = get_blast_radius(&graph, &overlay, "nonexistent_symbol", false, None);
+    let result = get_blast_radius(&graph, &overlay, "nonexistent_symbol", false, None).await;
     assert!(result.is_err());
 }
 

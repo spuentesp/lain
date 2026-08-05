@@ -57,8 +57,9 @@ else
     fail "Cargo.toml version mismatch"
 fi
 
-# Check README.md
-if grep -q "v$VERSION" README.md || ! grep -q "v[0-9]" README.md; then
+# Check README.md (use word boundaries so we don't false-positive on URLs
+# like https://huggingface.co/.../v2.2.0/...)
+if grep -qE "\\bv$VERSION\\b" README.md || ! grep -qE "\\bv[0-9]+\\.[0-9]+\\.[0-9]+\\b" README.md; then
     pass "README.md version: $VERSION"
 else
     fail "README.md version mismatch"
