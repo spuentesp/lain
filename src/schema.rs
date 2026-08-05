@@ -64,32 +64,66 @@ pub struct GraphNode {
     pub node_type: NodeType,
     pub name: String,
     pub path: String,
+    #[serde(default)]
     pub line_start: Option<u32>,
+    #[serde(default)]
     pub line_end: Option<u32>,
+    #[serde(default)]
     pub signature: Option<String>,
+    #[serde(default)]
     pub docstring: Option<String>,
+    #[serde(default)]
     pub embedding: Option<String>,
+    #[serde(default)]
     pub fan_in: Option<u32>,
+    #[serde(default)]
     pub fan_out: Option<u32>,
+    #[serde(default)]
     pub anchor_score: Option<f32>,
+    #[serde(default)]
     pub depth_from_main: Option<u32>,
+    #[serde(default)]
     pub co_change_count: Option<usize>,
+    #[serde(default)]
     pub is_deprecated: bool,
+    /// Single label for the node (e.g. "test", "deprecated", "async").
+    /// Used by `find ... | filter label X`. For multi-label semantics use
+    /// `signature` with a structured payload.
+    #[serde(default)]
+    pub label: Option<String>,
     // Staleness Metadata
+    #[serde(default)]
     pub last_lsp_sync: Option<i64>,
+    #[serde(default)]
     pub last_git_sync: Option<i64>,
+    #[serde(default)]
     pub commit_hash: Option<String>,
+    #[serde(default)]
     pub is_hydrated: bool,
 }
 
 impl GraphNode {
-    pub fn generate_id(node_type: &NodeType, path: &str, name: &str) -> String {
-        let id_input = format!("{:?}:{}:{}", node_type, path, name);
+    /// Generate a stable UUID for a graph node.
+    ///
+    /// `line_start` is included when known so that two symbols sharing the same
+    /// (type, path, name) — e.g. a top-level `fn add` and an `impl` method
+    /// `add` — get distinct IDs. Pass `None` for nodes where line range is
+    /// not meaningful (e.g. sensors that produce one node per external entity).
+    pub fn generate_id(
+        node_type: &NodeType,
+        path: &str,
+        name: &str,
+        line_start: Option<u32>,
+    ) -> String {
+        let id_input = match line_start {
+            Some(line) => format!("{:?}:{}:{}:{}", node_type, path, name, line),
+            None => format!("{:?}:{}:{}", node_type, path, name),
+        };
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id_input.as_bytes()).to_string()
     }
 
     pub fn new(node_type: NodeType, name: String, path: String) -> Self {
-        let id = Self::generate_id(&node_type, &path, &name);
+        let id = Self::generate_id(&node_type, &path, &name, None);
 
         Self {
             id,
@@ -107,6 +141,7 @@ impl GraphNode {
             depth_from_main: None,
             co_change_count: None,
             is_deprecated: false,
+            label: None,
             last_lsp_sync: None,
             last_git_sync: None,
             commit_hash: None,
@@ -117,6 +152,9 @@ impl GraphNode {
     pub fn with_location(mut self, line_start: u32, line_end: u32) -> Self {
         self.line_start = Some(line_start);
         self.line_end = Some(line_end);
+        // Re-derive the ID so two same-named symbols at different lines
+        // (e.g. top-level fn vs impl method) get distinct IDs.
+        self.id = Self::generate_id(&self.node_type, &self.path, &self.name, Some(line_start));
         self
     }
 }

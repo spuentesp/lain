@@ -110,21 +110,45 @@ pub async fn scan_file_structure(
 
     match symbols_result {
         Ok(symbols) => {
-            for symbol in symbols {
-                process_symbol_recursive_enriched(
+            if symbols.is_empty() {
+                // LSP returned nothing usable (e.g. cold-start, partial parse).
+                // Fall back to tree-sitter so the graph isn't empty.
+                add_tree_sitter_definitions(
+                    &path,
                     &mut nodes,
                     &mut edges,
                     &file_id,
-                    symbol,
                     lsp_sync,
                     git_sync,
-                    commit_hash.clone()
-                ).await;
+                    commit_hash.clone(),
+                );
+            } else {
+                for symbol in symbols {
+                    process_symbol_recursive_enriched(
+                        &mut nodes,
+                        &mut edges,
+                        &file_id,
+                        symbol,
+                        lsp_sync,
+                        git_sync,
+                        commit_hash.clone()
+                    ).await;
+                }
             }
         },
         Err(e) => {
             debug!("No LSP symbols for {:?}: {}", path, e);
-            // We still return the file and module nodes
+            // LSP unavailable (binary missing, language unsupported, etc.).
+            // Fall back to tree-sitter so `find Function` etc. still works.
+            add_tree_sitter_definitions(
+                &path,
+                &mut nodes,
+                &mut edges,
+                &file_id,
+                lsp_sync,
+                git_sync,
+                commit_hash.clone(),
+            );
         }
     }
 
@@ -215,5 +239,165 @@ pub async fn process_symbol_recursive_enriched(
             git_sync,
             commit_hash.clone()
         ).await;
+    }
+}
+
+/// Tree-sitter fallback: when LSP is unavailable, parse the source directly
+/// and create Function/Struct/Trait/Enum/Class nodes with line ranges so that
+/// `get_node_at_location(file, line)` can resolve tree-sitter refs back to them.
+fn add_tree_sitter_definitions(
+    path: &Path,
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
+    file_id: &str,
+    lsp_sync: i64,
+    git_sync: i64,
+    commit_hash: String,
+) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let defs = crate::treesitter::extract_definitions(path, &content);
+    for def in defs {
+        let mut node = GraphNode::new(def.kind, def.name.clone(), path.to_string_lossy().to_string())
+            .with_location(def.line_start, def.line_end);
+        node.last_lsp_sync = Some(lsp_sync);
+        node.last_git_sync = Some(git_sync);
+        node.commit_hash = Some(commit_hash.clone());
+        node.is_deprecated = def.is_deprecated;
+        // Populate `label` so `find ... | filter label X` works.
+        // `is_deprecated` is exposed as the "deprecated" label so users can
+        // query with the same syntax docs advertise.
+        if def.is_deprecated {
+            node.label = Some("deprecated".to_string());
+        } else if let Some(first) = def.labels.first() {
+            node.label = Some(first.clone());
+        }
+        let node_id = node.id.clone();
+        nodes.push(node);
+        edges.push(GraphEdge::new(EdgeType::Contains, file_id.to_string(), node_id));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    /// When LSP is unavailable (no rust-analyzer on PATH, etc.), the scanner must
+    /// still produce Function/Struct/etc. nodes — otherwise `find Function`
+    /// returns 0 and every downstream tool is empty.
+    #[tokio::test]
+    async fn scan_produces_symbol_nodes_without_lsp() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            "pub fn hello() {}\npub struct Calc { pub v: i32 }\n",
+        )
+        .expect("write");
+
+        let lsp = Arc::new(AsyncMutex::new(
+            LspMultiplexer::new(tmp.path()).expect("lsp mux"),
+        ));
+
+        let result = scan_file_structure(
+            file,
+            tmp.path().to_path_buf(),
+            lsp,
+            0,
+            0,
+            "abc".to_string(),
+        )
+        .await
+        .expect("scan ok");
+
+        let has_function = result
+            .nodes
+            .iter()
+            .any(|n| matches!(n.node_type, NodeType::Function) && n.name == "hello");
+        assert!(
+            has_function,
+            "scan should produce Function node for 'hello' even when LSP is unavailable; got nodes: {:?}",
+            result.nodes.iter().map(|n| (&n.node_type, &n.name)).collect::<Vec<_>>()
+        );
+
+        let calc = result
+            .nodes
+            .iter()
+            .find(|n| matches!(n.node_type, NodeType::Struct) && n.name == "Calc");
+        assert!(
+            calc.is_some(),
+            "scan should produce Struct node for 'Calc' even when LSP is unavailable"
+        );
+
+        // Symbol nodes must carry line ranges so get_node_at_location can find
+        // them as the source of static tree-sitter references.
+        let hello = result
+            .nodes
+            .iter()
+            .find(|n| matches!(n.node_type, NodeType::Function) && n.name == "hello")
+            .unwrap();
+        assert!(
+            hello.line_start.is_some() && hello.line_end.is_some(),
+            "Function node must have line_start/line_end populated, got: {:?}",
+            (hello.line_start, hello.line_end)
+        );
+
+        // Sanity: File node should still be there.
+        assert!(result.nodes.iter().any(|n| matches!(n.node_type, NodeType::File)));
+    }
+
+    #[tokio::test]
+    async fn scan_attaches_symbol_to_file_via_contains_edge() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file: PathBuf = tmp.path().join("lib.rs");
+        std::fs::write(&file, "pub fn hello() {}\n").expect("write");
+
+        let lsp = Arc::new(AsyncMutex::new(
+            LspMultiplexer::new(tmp.path()).expect("lsp mux"),
+        ));
+
+        let result = scan_file_structure(
+            file,
+            tmp.path().to_path_buf(),
+            lsp,
+            0,
+            0,
+            "abc".to_string(),
+        )
+        .await
+        .expect("scan ok");
+
+        let file_id = result
+            .nodes
+            .iter()
+            .find(|n| matches!(n.node_type, NodeType::File))
+            .map(|n| n.id.clone())
+            .expect("file node");
+
+        let hello_id = result
+            .nodes
+            .iter()
+            .find(|n| matches!(n.node_type, NodeType::Function) && n.name == "hello")
+            .map(|n| n.id.clone())
+            .expect("hello node");
+
+        let attached = result.edges.iter().any(|e| {
+            matches!(e.edge_type, EdgeType::Contains)
+                && e.source_id == file_id
+                && e.target_id == hello_id
+        });
+        assert!(
+            attached,
+            "File -> Function Contains edge should exist; edges: {:?}",
+            result
+                .edges
+                .iter()
+                .map(|e| (&e.edge_type, &e.source_id, &e.target_id))
+                .collect::<Vec<_>>()
+        );
     }
 }
