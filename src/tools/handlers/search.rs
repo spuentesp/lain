@@ -5,7 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::nlp::NlpEmbedder;
 use crate::schema::{GraphNode, NodeType};
-use crate::tools::utils::{build_enriched_text, cosine_similarity, token_recall};
+use crate::tools::utils::{build_enriched_text, cosine_similarity, read_body_summary, token_recall};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -145,8 +145,15 @@ pub fn semantic_search(
         results.iter().enumerate().map(|(i, (n, sim))| {
             let anchor = n.anchor_score.map(|s| format!("{:.2}", s)).unwrap_or_else(|| "N/A".to_string());
             let sig = n.signature.as_ref().map(|s| format!(" | {}", s)).unwrap_or_default();
-            format!("{}. {} ({:?}){} — sim: {:.3}, anchor: {}",
-                i + 1, n.name, n.node_type, sig, sim, anchor)
+            // Short body excerpt so behavior-shaped terms (e.g. `bincode`
+            // in GraphDatabase::save_to_disk) appear in the response text.
+            // Without this, only name/signature/path terms are visible to
+            // the reader — and most "interesting" terms live in the body.
+            let body = read_body_summary(n, 80)
+                .map(|b| format!(" | {}", b))
+                .unwrap_or_default();
+            format!("{}. {} ({:?}){}{} — sim: {:.3}, anchor: {}",
+                i + 1, n.name, n.node_type, sig, body, sim, anchor)
         }).collect::<Vec<_>>().join("\n")
     ))
 }

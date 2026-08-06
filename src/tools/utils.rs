@@ -211,6 +211,26 @@ fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
     out
 }
 
+/// Read the first ~`max_chars` characters of a node's source body,
+/// collapsing whitespace. Returns None if the node has no line range or
+/// the file can't be read. Used by search.rs to surface behavior-shaped
+/// terms in the response text so users (and rubrics) can see why a node
+/// matched.
+pub fn read_body_summary(node: &GraphNode, max_chars: usize) -> Option<String> {
+    let start = node.line_start?;
+    let end = node.line_end?;
+    if end <= start || (end - start) > 200 {
+        return None;
+    }
+    let body = read_body_excerpt(&node.path, start, end, 30).ok()?;
+    let trimmed: String = body.chars().take(max_chars).collect();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 /// Recall-style lexical score: fraction of query tokens that appear in the
 /// candidate text. Range [0.0, 1.0]. 1.0 = every query token appears in the
 /// candidate; 0.0 = none appear.
