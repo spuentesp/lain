@@ -199,7 +199,23 @@ pub fn navigate_to_anchor(
             Ok(format!("The foundational anchor for '{}' is **{}** (score: {:.3}, path: {}).\n\nThis node is more foundational because it has a higher fan-in/fan-out ratio.",
                 symbol, anchor.name, anchor.anchor_score.unwrap_or(0.0), anchor.path))
         },
-        _ => Ok(format!("'{}' appears to be foundational already, or no other anchors were reachable from it.", symbol))
+        _ => {
+            // Leaf case: no more-foundational anchor is reachable. Rather
+            // than dead-end with "appears to be foundational already" (which
+            // gives the user no actionable next step), point them at the
+            // corpus's overall top anchor — that's the most foundational
+            // symbol the project has, and it's the most useful answer to
+            // "where should I go from here?".
+            let top = graph.find_anchors(1).ok().and_then(|mut v| v.pop());
+            match top {
+                Some(t) if t.name != symbol => Ok(format!(
+                    "'{}' has no more-foundational anchor reachable from it. The corpus's top anchor is **{}** (score: {:.3}, path: {}).",
+                    symbol, t.name, t.anchor_score.unwrap_or(0.0), t.path)),
+                _ => Ok(format!("'{}' is itself a top anchor in this codebase (score: {:.3}, path: {}).",
+                    symbol, best_anchor.as_ref().and_then(|a| a.anchor_score).unwrap_or(0.0),
+                    best_anchor.as_ref().map(|a| a.path.as_str()).unwrap_or("?")))
+            }
+        }
     }
 }
 
