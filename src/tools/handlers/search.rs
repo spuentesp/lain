@@ -66,7 +66,15 @@ pub fn semantic_search(
     }
 
     // 2. Compute query embedding once
-    let query_emb = embedder.embed(query)?;
+    // Apply query_prefix if configured (BGE-style asymmetric retrieval).
+    // Documents embedded during ingestion are NOT prefixed — only the
+    // user's query string gets the instruction.
+    let query_for_embedding = if tuning.query_prefix.is_empty() {
+        query.to_string()
+    } else {
+        format!("{}{}", tuning.query_prefix, query)
+    };
+    let query_emb = embedder.embed(&query_for_embedding)?;
 
     // 3. Batch Scoring with Shadow Masking
     let mut scored: Vec<(&GraphNode, f32)> = Vec::new();

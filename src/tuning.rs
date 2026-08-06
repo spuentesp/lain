@@ -24,6 +24,14 @@ pub struct TuningConfig {
     /// similarity alone is borderline.
     /// Final score = (1 - lexical_weight) * sim + lexical_weight * lex.
     pub lexical_weight: f32,
+    /// Semantic search: string prepended to the user's query before
+    /// embedding. Empty = no prefix (default, preserves MiniLM behavior).
+    /// BGE retrieval models expect
+    /// "Represent this sentence for searching relevant passages: "
+    /// prepended to short queries for optimal alignment with their
+    /// document embeddings. Set this to use BGE-style asymmetric
+    /// retrieval. Documents are NOT prefixed.
+    pub query_prefix: String,
     /// Ingestion: ceiling on cross-boundary coupling edges.
     /// Set to 0 to disable pattern edges.
     pub max_pattern_edges: usize,
@@ -39,6 +47,7 @@ impl Default for TuningConfig {
             semantic_similarity_threshold: 0.3,
             anchor_weight: 0.3,
             lexical_weight: 0.0,
+            query_prefix: String::new(),
             max_pattern_edges: 200,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),
