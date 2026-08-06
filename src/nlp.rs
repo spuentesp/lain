@@ -133,8 +133,28 @@ impl NlpEmbedder {
             EmbedInner::Onnx { session, tokenizer, embedding_dim } => (session, tokenizer, *embedding_dim),
         };
 
-        let encoding = tokenizer.encode(text, true)
-            .map_err(|e| LainError::Nlp(format!("Tokenization error: {}", e)))?;
+        // Truncate to the model's max sequence length so the ONNX Add
+        // op doesn't fail with a "broadcast axis" error when input text
+        // (e.g. a 200-token body excerpt plus name/signature/docstring)
+        // exceeds what the model can handle. 512 covers all common
+        // sentence-transformer models (MiniLM=256, bge=512). With bge
+        // the body still gets to use the full context window; with MiniLM
+        // we lose half the body but it's better than the binary failing.
+        let max_len = 512;
+        let encoding = if text.len() > max_len * 6 {
+            // Heuristic: ~6 chars per token average. Truncate the source
+            // text first to avoid tokenizing a huge string just to drop it.
+            let truncated: String = text.chars().take(max_len * 6).collect();
+            tokenizer.encode(truncated, true)
+                .map_err(|e| LainError::Nlp(format!("Tokenization error: {}", e)))?
+        } else {
+            tokenizer.encode(text, true)
+                .map_err(|e| LainError::Nlp(format!("Tokenization error: {}", e)))?
+        };
+        let mut encoding = encoding;
+        if encoding.get_ids().len() > max_len {
+            encoding.truncate(max_len, 0, tokenizers::TruncationDirection::Right);
+        }
 
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
         let attention_mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&x| x as i64).collect();

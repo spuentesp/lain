@@ -133,11 +133,22 @@ pub fn semantic_search(
         }
     }
 
-    // 4. Sort by hybrid score: combine similarity with anchor score (Importance Sorting)
+    // 4. Sort by hybrid score: combine similarity with anchor score (Importance Sorting).
+    // anchor_score is normalized to [0, 1] within this candidate set via min-max
+    // so the formula behaves consistently regardless of corpus size or
+    // how many times the indexer has re-run. Without this, anchor scores
+    // can grow to 1000+ across reindexes and the formula
+    //   sim + anchor_weight * anchor
+    // becomes anchor-dominated even with anchor_weight=0.05, burying
+    // semantically better matches.
+    let max_anchor = scored.iter()
+        .map(|(n, _)| n.anchor_score.unwrap_or(0.0))
+        .fold(0.0f32, f32::max);
+    let norm = if max_anchor > 0.0 { max_anchor } else { 1.0 };
     scored.sort_by(|a, b| {
-        let anchor_a = a.0.anchor_score.unwrap_or(0.0);
-        let anchor_b = b.0.anchor_score.unwrap_or(0.0);
-        // Hybrid: similarity + anchor_weight * anchor_score
+        let anchor_a = a.0.anchor_score.unwrap_or(0.0) / norm;
+        let anchor_b = b.0.anchor_score.unwrap_or(0.0) / norm;
+        // Hybrid: similarity + anchor_weight * normalized_anchor_score
         let hybrid_a = a.1 + tuning.anchor_weight * anchor_a;
         let hybrid_b = b.1 + tuning.anchor_weight * anchor_b;
         hybrid_b.partial_cmp(&hybrid_a).unwrap_or(std::cmp::Ordering::Equal)
@@ -147,40 +158,62 @@ pub fn semantic_search(
     // The cross-encoder scores each (query, document) pair jointly — much
     // more accurate than cosine similarity but ~50ms per candidate. We only
     // rerank the top-K, so the cost stays bounded.
-    let results: Vec<_> = if tuning.cross_encoder_top_k > 0 && cross_encoder.is_active() {
+    //
+    // For each candidate we keep BOTH scores: the cross-encoder logit
+    // (used for ordering) and the original bi-encoder sim+lex hybrid
+    // (used for the response label and threshold check).
+    #[derive(Clone, Copy)]
+    enum ScoreKind { BiHybrid, CrossLogit }
+    #[derive(Clone, Copy)]
+    struct Scored<'a> {
+        node: &'a crate::schema::GraphNode,
+        hybrid: f32,             // always bi-encoder sim+lex hybrid
+        score: f32,              // the value used for ranking
+        kind: ScoreKind,
+    }
+    let results: Vec<Scored> = if tuning.cross_encoder_top_k > 0 && cross_encoder.is_active() {
         let k = tuning.cross_encoder_top_k.min(scored.len());
-        let mut reranked: Vec<(&GraphNode, f32)> = Vec::with_capacity(k);
-        for (node, _bi_score) in scored.iter().take(k) {
+        let mut reranked: Vec<Scored> = Vec::with_capacity(k);
+        for (node, hybrid) in scored.iter().take(k) {
             let text = build_enriched_text(node);
             let ce_score = cross_encoder.score(query, &text).unwrap_or(0.0);
-            reranked.push((node, ce_score));
+            reranked.push(Scored { node, hybrid: *hybrid, score: ce_score, kind: ScoreKind::CrossLogit });
         }
-        // Stable: reranked set keeps its bi-encoder order on ties
-        reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        // Anything beyond the top-K keeps its original bi-encoder score
-        let mut tail: Vec<_> = scored.iter().skip(k).map(|(n, s)| (*n, *s)).collect();
+        reranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        // Anything beyond the top-K keeps its bi-encoder score
+        let mut tail: Vec<Scored> = scored.iter().skip(k).map(|(n, h)| Scored {
+            node: n, hybrid: *h, score: *h, kind: ScoreKind::BiHybrid,
+        }).collect();
         let mut combined = reranked;
         combined.append(&mut tail);
         combined.into_iter().take(limit).collect()
     } else {
-        scored.into_iter().take(limit).collect()
+        scored.iter().take(limit).map(|(n, h)| Scored {
+            node: n, hybrid: *h, score: *h, kind: ScoreKind::BiHybrid,
+        }).collect()
     };
 
     Ok(format!("Found {} semantic results in Merged Brain for '{}' (using Shadow Masking):\n{}",
         results.len(),
         query,
-        results.iter().enumerate().map(|(i, (n, sim))| {
-            let anchor = n.anchor_score.map(|s| format!("{:.2}", s)).unwrap_or_else(|| "N/A".to_string());
-            let sig = n.signature.as_ref().map(|s| format!(" | {}", s)).unwrap_or_default();
+        results.iter().enumerate().map(|(i, s)| {
+            let anchor = s.node.anchor_score.map(|x| format!("{:.2}", x)).unwrap_or_else(|| "N/A".to_string());
+            let sig = s.node.signature.as_ref().map(|x| format!(" | {}", x)).unwrap_or_default();
             // Short body excerpt so behavior-shaped terms (e.g. `bincode`
             // in GraphDatabase::save_to_disk) appear in the response text.
-            // Without this, only name/signature/path terms are visible to
-            // the reader — and most "interesting" terms live in the body.
-            let body = read_body_summary(n, 80)
+            let body = read_body_summary(s.node, 80)
                 .map(|b| format!(" | {}", b))
                 .unwrap_or_default();
-            format!("{}. {} ({:?}){}{} — sim: {:.3}, anchor: {}",
-                i + 1, n.name, n.node_type, sig, body, sim, anchor)
+            // Label depends on which score drives the ranking. Cross-encoder
+            // logits are unbounded (often -10..+10) and only meaningful for
+            // relative ordering — they don't reflect "similarity" in any
+            // user-facing sense, so we label them differently.
+            let (label, value) = match s.kind {
+                ScoreKind::BiHybrid => ("sim", s.hybrid),
+                ScoreKind::CrossLogit => ("rerank", s.score),
+            };
+            format!("{}. {} ({:?}){}{} — {}: {:.3}, anchor: {}",
+                i + 1, s.node.name, s.node.node_type, sig, body, label, value, anchor)
         }).collect::<Vec<_>>().join("\n")
     ))
 }
