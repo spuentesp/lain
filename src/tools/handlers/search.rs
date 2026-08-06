@@ -114,6 +114,20 @@ pub fn semantic_search(
             if !cache.contains_key(&node.id) {
                 cache.insert(node.id.clone(), emb.clone());
             }
+            // Persist volatile embeddings back to graph.bin so the next
+            // process start doesn't have to re-embed the same nodes.
+            // Only the cold-embed path triggers a write — already-
+            // persisted embeddings are read as-is. Each embedding is
+            // ~3 KB (384 floats * 8 bytes JSON), so 200 new writes add
+            // ~600 KB to graph.bin. Cheap, and the alternative (re-
+            // embedding on every cold start) costs 8-30 s.
+            if node.embedding.is_none() {
+                if let Ok(emb_json) = serde_json::to_string(&emb) {
+                    let mut updated = node.clone();
+                    updated.embedding = Some(emb_json);
+                    let _ = graph.upsert_node(updated);
+                }
+            }
             let sim = cosine_similarity(&query_emb, &emb);
             // Hybrid scoring: combine semantic similarity with lexical token
             // recall. lex_weight = 0.0 falls back to pure cosine (default).

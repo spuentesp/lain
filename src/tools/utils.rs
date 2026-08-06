@@ -277,13 +277,17 @@ pub fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
 
 /// Read the first ~`max_chars` characters of a node's source body,
 /// collapsing whitespace. Returns None if the node has no line range or
-/// the file can't be read. Used by search.rs to surface behavior-shaped
-/// terms in the response text so users (and rubrics) can see why a node
-/// matched.
+/// the file can't be read. Used by search.rs and metrics.rs to surface
+/// behavior-shaped terms and the actual code in responses.
+///
+/// Threshold: 2000 lines. Real-world functions can be long (Python
+/// modules with deep config classes run hundreds of lines); we still
+/// want to show their bodies. Above 2000 lines, fall back to the
+/// first 200 lines via read_body_excerpt's internal cap.
 pub fn read_body_summary(node: &GraphNode, max_chars: usize) -> Option<String> {
     let start = node.line_start?;
     let end = node.line_end?;
-    if end <= start || (end - start) > 200 {
+    if end <= start || (end - start) > 2000 {
         return None;
     }
     let body = read_body_excerpt(&node.path, start, end, 30).ok()?;

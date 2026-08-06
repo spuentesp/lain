@@ -5,6 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
+use crate::tools::utils::read_body_summary;
 use crate::tools::utils::{build_enriched_text, cosine_similarity, resolve_node};
 use std::sync::Arc;
 use parking_lot::Mutex;
@@ -212,9 +213,20 @@ pub fn explain_symbol(
     if let Some(sig) = &node.signature {
         lines.push(format!("**Signature:** `{}`", sig));
     }
-    
+
     if let Some(doc) = &node.docstring {
         lines.push(format!("**Documentation:**\n{}", doc));
+    }
+
+    // Show the actual code so the user can see what the symbol looks
+    // like, not just metadata about it. Single-user value: a developer
+    // asking "what is this?" wants the implementation, not path + score.
+    if let Some(excerpt) = read_body_summary(&node, 200) {
+        lines.push(String::new());
+        lines.push("### Source".to_string());
+        lines.push("```".to_string());
+        lines.push(excerpt);
+        lines.push("```".to_string());
     }
 
     lines.push(String::new());
