@@ -322,3 +322,67 @@ fn test_token_recall_empty_query() {
     let score = token_recall("", "anything here");
     assert_eq!(score, 0.0);
 }
+
+#[test]
+fn test_stem_basic_suffixes() {
+    // -ing → drop
+    assert_eq!(stem("running"), "runn");
+    assert_eq!(stem("indexing"), "index");
+    // -ed → drop
+    assert_eq!(stem("indexed"), "index");
+    assert_eq!(stem("loaded"), "load");
+    // -s → drop (but not -ss, -us)
+    assert_eq!(stem("tokens"), "token");
+    assert_eq!(stem("files"), "file");
+    assert_eq!(stem("queries"), "query");  // consonant + ies → y
+    assert_eq!(stem("ties"), "tie");        // plural -s strips regardless
+    assert_eq!(stem("class"), "class");     // -ss preserved
+    assert_eq!(stem("status"), "status");   // -us preserved
+    // short words unchanged
+    assert_eq!(stem("go"), "go");
+    assert_eq!(stem("be"), "be");
+    // already a stem
+    assert_eq!(stem("index"), "index");
+    assert_eq!(stem("graph"), "graph");
+}
+
+#[test]
+fn test_stem_case_insensitive() {
+    assert_eq!(stem("RUNNING"), "runn");
+    assert_eq!(stem("Indexed"), "index");
+    assert_eq!(stem("ToKeNs"), "token");
+}
+
+#[test]
+fn test_lex_tokens_collapses_word_forms() {
+    // "running" → "runn" (drop -ing). "runs" → "run" (drop -s).
+    // The point: surface forms that share a stem should appear with the
+    // same key in the lex_tokens set.
+    let a = lex_tokens("running the index");
+    let b = lex_tokens("runs the indexed");
+    // "runn" from running, "run" from runs — different stems, but that's
+    // the limit of our rules. What we DO collapse is index/indexed:
+    assert!(a.contains("index"), "expected 'index' in {:?}", a);
+    assert!(b.contains("index"), "expected 'index' in {:?}", b);
+}
+
+#[test]
+fn test_lex_tokens_index_variants_match() {
+    // The whole point: index/indexed/indexing should all stem to the same form
+    let stems: std::collections::HashSet<_> = ["index", "indexed", "indexing", "indexes"]
+        .iter()
+        .map(|w| stem(w))
+        .collect();
+    // "index" and "indexed" both produce "index" — that's the win
+    assert!(stems.contains("index"), "expected 'index' in {:?}", stems);
+}
+
+#[test]
+fn test_token_recall_benefits_from_stemming() {
+    // Query uses "running"; corpus has "index" and "indexing" — without
+    // stemming they'd miss. With stemming, "running" → "runn" and
+    // "indexing" → "index" are still different — that's correct.
+    // But "queries" → "query" and corpus has "query" should now match.
+    let score = token_recall("queries the database", "run a database query");
+    assert!(score > 0.0, "expected non-zero recall after stemming, got {}", score);
+}

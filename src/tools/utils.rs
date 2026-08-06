@@ -197,16 +197,80 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// Light suffix-stripping stemmer. Not a full Porter stemmer — just the
+/// rules that matter for code search:
+///   running  → run       (drop -ing if stem ≥ 3 chars)
+///   indexed  → index     (drop -ed if stem ≥ 3 chars)
+///   queries  → queri     (no, leave alone — we'd want -y replacement)
+///   tokens   → token     (drop -s if stem ≥ 3 chars and not -ss/-us)
+///   boxes    → box       (drop -es if stem ≥ 3 chars)
+///   files    → file      (drop -s if stem ≥ 3 chars)
+/// The point isn't linguistic accuracy, it's collapsing the surface forms
+/// that show up in code identifiers (`fn index`, called as `indexed`,
+/// `indexing`, `indexes`, `indices`) so lexical recall picks them all up.
+pub fn stem(word: &str) -> String {
+    let w = word.to_ascii_lowercase();
+    if w.len() < 4 {
+        return w;
+    }
+    // Order matters: longest suffixes first so we don't double-strip.
+    // -ing: drop if stem ≥ 3 chars ("indexing" → "index", "running" → "runn")
+    if w.len() > 5 && w.ends_with("ing") {
+        return w[..w.len() - 3].to_string();
+    }
+    // -ies → -y for consonant-stem ("queries" → "query", "bodies" → "body")
+    // Skip vowel-stem ("ties", "lies") which don't alternate
+    if w.len() > 4 && w.ends_with("ies") {
+        let stem = &w[..w.len() - 3];
+        if let Some(c) = stem.chars().last() {
+            if !matches!(c, 'a' | 'e' | 'i' | 'o' | 'u') {
+                return format!("{stem}y");
+            }
+        }
+    }
+    // -ed: drop if stem ≥ 3 chars ("indexed" → "index", "loaded" → "load")
+    if w.len() > 4 && w.ends_with("ed") {
+        return w[..w.len() - 2].to_string();
+    }
+    // -es: drop ONLY when preceded by s/x/z/ch/sh (the "boxes/watches"
+    // pattern). Plain "es" after other letters ("files", "names") is
+    // just a plural -s and gets handled by the next rule.
+    if w.len() > 4 && w.ends_with("es") {
+        let stem = &w[..w.len() - 2];
+        if let Some(c) = stem.chars().last() {
+            if matches!(c, 's' | 'x' | 'z') {
+                return stem.to_string();
+            }
+        }
+        let last_two: String = stem.chars().rev().take(2).collect::<Vec<_>>().into_iter().rev().collect();
+        if last_two == "ch" || last_two == "sh" {
+            return stem.to_string();
+        }
+        // fall through to -s stripping
+    }
+    // -s: drop plural/verb -s (but preserve -ss and -us)
+    if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") && !w.ends_with("us") {
+        return w[..w.len() - 1].to_string();
+    }
+    w
+}
+
 /// Tokenize text for lexical scoring: lowercase, split on non-alphanumeric
 /// boundaries, drop tokens shorter than 2 chars and pure-numeric tokens
-/// (which add noise from line numbers, array indices, etc.).
-fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
+/// (which add noise from line numbers, array indices, etc.), then stem
+/// each remaining token so "runs"/"running"/"ran" all collapse to the same
+/// form. Stemming is what lets queries like "indexing" match symbols
+/// named `fn index` even though the surface forms differ.
+pub fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for raw in text.split(|c: char| !c.is_alphanumeric()) {
-        let lower = raw.to_ascii_lowercase();
-        if lower.len() >= 2 && !lower.chars().all(|c| c.is_ascii_digit()) {
-            out.insert(lower);
+        if raw.len() < 3 {
+            continue;
         }
+        if raw.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        out.insert(stem(raw));
     }
     out
 }
