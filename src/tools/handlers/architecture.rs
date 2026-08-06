@@ -43,14 +43,38 @@ pub fn explore_architecture(
         .take(20)
         .collect();
 
-    Ok(format!("## Architecture Overview (Max Depth: {})\n\nFound {} total files in Merged Brain. Showing top {} (sorted by importance):\n\n{}",
+    // Group filtered files by top-level directory so the response shows the
+    // module structure (src/, tests/, docs/, ...) instead of a flat list.
+    // Falls back to "<root>" for files with no directory component.
+    let mut by_dir: std::collections::BTreeMap<String, Vec<&crate::schema::GraphNode>> =
+        std::collections::BTreeMap::new();
+    for f in &filtered {
+        let dir = std::path::Path::new(&f.path)
+            .parent()
+            .and_then(|p| p.components().next())
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .unwrap_or_else(|| "<root>".to_string());
+        by_dir.entry(dir).or_default().push(f);
+    }
+
+    let body = by_dir.iter()
+        .map(|(dir, fs)| {
+            let header = format!("### {}/ ({} files)\n", dir, fs.len());
+            let entries = fs.iter().map(|f| {
+                let depth = f.depth_from_main.map(|d| format!(" (depth: {})", d)).unwrap_or_default();
+                let anchor = f.anchor_score.map(|s| format!(" — anchor {:.2}", s)).unwrap_or_default();
+                format!("- {}{}{}", f.name, depth, anchor)
+            }).collect::<Vec<_>>().join("\n");
+            format!("{}\n{}", header, entries)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(format!("## Architecture Overview (Max Depth: {})\n\nFound {} total files in Merged Brain. Showing top {} (sorted by anchor score):\n\n{}",
         max_depth,
         files.len(),
         filtered.len(),
-        filtered.iter().map(|f| {
-            let depth = f.depth_from_main.map(|d| format!(" (depth: {})", d)).unwrap_or_default();
-            format!("- {}{}", f.name, depth)
-        }).collect::<Vec<_>>().join("\n")
+        body
     ))
 }
 
