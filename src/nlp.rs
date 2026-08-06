@@ -27,8 +27,15 @@ pub struct NlpEmbedder {
 }
 
 impl NlpEmbedder {
-    /// Initialize with default paths (models/all-MiniLM-L6-v2.onnx)
+    /// Initialize with default paths (models/all-MiniLM-L6-v2.onnx).
+    /// Reads `LAIN_EMBEDDING_MODEL` env var if set, else relative path.
+    /// `max_threads` follows the same 0 = auto convention as with_max_threads.
     pub fn new() -> Result<Self, LainError> {
+        Self::new_with_threads(0)
+    }
+
+    /// Like `new()` but with explicit intra-op thread cap (0 = auto).
+    pub fn new_with_threads(max_threads: usize) -> Result<Self, LainError> {
         // Check env var first, then fall back to relative path
         let (model_path, tokenizer_path) = if let Some(model_env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
             let model_path = Path::new(&model_env).to_path_buf();
@@ -55,10 +62,20 @@ impl NlpEmbedder {
             tracing::warn!("ORT initialization returned false - may indicate already initialized");
         }
 
-        Self::new_with_paths(&model_path, &tokenizer_path)
+        Self::with_max_threads(&model_path, &tokenizer_path, max_threads)
     }
 
     pub fn new_with_paths(model_path: &Path, tokenizer_path: &Path) -> Result<Self, LainError> {
+        Self::with_max_threads(model_path, tokenizer_path, 0)
+    }
+
+    /// Like new_with_paths but lets the caller cap intra-op threads.
+    /// max_threads = 0 means auto-detect: min(system cores, 4).
+    pub fn with_max_threads(
+        model_path: &Path,
+        tokenizer_path: &Path,
+        max_threads: usize,
+    ) -> Result<Self, LainError> {
         if !model_path.exists() {
             return Err(LainError::Nlp(format!("Model file not found: {:?}", model_path)));
         }
@@ -69,9 +86,10 @@ impl NlpEmbedder {
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| LainError::Nlp(format!("Failed to load tokenizer: {}", e)))?;
 
-        // Infer embedding dimension from model output shape via dummy inference on first session
+        let threads = resolve_intra_threads(max_threads);
+        tracing::info!("NLP embedder: using {} intra-op thread(s) per call", threads);
         let mut session = Session::builder()?
-            .with_intra_threads(4)?
+            .with_intra_threads(threads)?
             .commit_from_file(model_path)?;
         let embedding_dim = Self::detect_embedding_dim(&mut session)?;
 
@@ -233,10 +251,17 @@ struct CrossInner {
 }
 
 impl CrossEncoder {
+    /// Load from model.onnx + tokenizer.json in `dir` with auto-detected
+    /// thread count. Use from_dir_with_threads to override.
+    pub fn from_dir(dir: &Path) -> Self {
+        Self::from_dir_with_threads(dir, 0)
+    }
+
     /// Load from model.onnx + tokenizer.json in `dir`.
     /// Returns a stub (no-op scorer returning 0.0) if the model files
     /// aren't found — search.rs treats a stub as "skip reranking".
-    pub fn from_dir(dir: &Path) -> Self {
+    /// `max_threads` follows the same convention as NlpEmbedder: 0 = auto.
+    pub fn from_dir_with_threads(dir: &Path, max_threads: usize) -> Self {
         let model_path = dir.join("model.onnx");
         let tok_path = dir.join("tokenizer.json");
         if !model_path.exists() || !tok_path.exists() {
@@ -255,8 +280,10 @@ impl CrossEncoder {
             }
         };
 
+        let threads = resolve_intra_threads(max_threads);
+        tracing::info!("Cross-encoder: using {} intra-op thread(s) per call", threads);
         let session = match Session::builder() {
-            Ok(b) => match b.with_intra_threads(4) {
+            Ok(b) => match b.with_intra_threads(threads) {
                 Ok(mut b) => match b.commit_from_file(&model_path) {
                     Ok(s) => Arc::new(Mutex::new(s)),
                     Err(e) => {
@@ -337,5 +364,26 @@ impl CrossEncoder {
             .map_err(|e| LainError::Nlp(format!("Cross-encoder output: {}", e)))?;
         let data = logits.1;
         Ok(data.first().copied().unwrap_or(0.0))
+    }
+}
+
+/// Resolve the intra-op thread count for an ONNX session.
+///
+/// `max_threads` of 0 means "auto": use min(system cores, 4). The cap
+/// at 4 is intentional — bge-small/bge-base inference doesn't benefit
+/// from more than 4 threads per call (matmul/attention are
+/// already-parallelized internally up to a point), and asking for
+/// more just causes thread contention.
+///
+/// Non-zero `max_threads` is honored as-is (subject to system
+/// availability), letting ops cap usage when sharing the box.
+pub fn resolve_intra_threads(max_threads: usize) -> usize {
+    if max_threads == 0 {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        cores.min(4).max(1)
+    } else {
+        max_threads.max(1)
     }
 }

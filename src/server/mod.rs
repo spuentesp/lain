@@ -55,9 +55,15 @@ impl LainServer {
         let embedder = if let Some(model_path) = embedding_model {
             let tokenizer_path = model_path.parent().map(|p| p.join("tokenizer.json"))
                 .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
-            NlpEmbedder::new_with_paths(model_path, &tokenizer_path)?
+            crate::nlp::NlpEmbedder::with_max_threads(
+                model_path,
+                &tokenizer_path,
+                tuning.ingestion.nlp_max_threads,
+            )?
         } else {
-            NlpEmbedder::new()?
+            // No --embedding-model CLI arg; fall back to LAIN_EMBEDDING_MODEL
+            // env var (handled inside NlpEmbedder::new_with_threads).
+            crate::nlp::NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
         };
 
         if embedder.is_stub() {
@@ -73,7 +79,10 @@ impl LainServer {
                 let home = std::env::var("HOME").unwrap_or_default();
                 PathBuf::from(home).join(".local/lain/models/cross-encoder")
             });
-        let cross_encoder = CrossEncoder::from_dir(&cross_dir);
+        let cross_encoder = CrossEncoder::from_dir_with_threads(
+            &cross_dir,
+            tuning.ingestion.nlp_max_threads,
+        );
         if cross_encoder.is_active() {
             info!("Cross-encoder reranker active (from {:?})", cross_dir);
         } else {

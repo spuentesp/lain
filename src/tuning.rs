@@ -90,6 +90,12 @@ pub struct IngestionConfig {
     pub nlp_batch_size: usize,
     /// NLP background: max nodes embedded per interval pass (backpressure).
     pub nlp_budget_per_pass: usize,
+    /// NLP: cap on intra-op threads per embedding call. 0 = auto-detect
+    /// (uses min(system cores, 4) — 4 is enough for bge-small/bge-base
+    /// inference; more threads doesn't help and burns CPU).
+    /// Higher values help on machines with many idle cores; lower values
+    /// help when sharing the box with other workloads.
+    pub nlp_max_threads: usize,
     /// UI session time-to-live in seconds.
     pub ui_session_ttl_secs: u64,
     /// Default query result limit when not specified.
@@ -110,6 +116,7 @@ impl Default for IngestionConfig {
             nlp_prewarm_count: 20,
             nlp_batch_size: 50,
             nlp_budget_per_pass: 20,
+            nlp_max_threads: 0, // 0 = auto-detect (min(cores, 4))
             ui_session_ttl_secs: 600,
             default_query_limit: 100,
         }
