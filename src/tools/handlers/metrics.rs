@@ -247,6 +247,54 @@ pub fn explain_symbol(
         }
     }
 
+    // Incoming/outgoing call edges: who calls this, what does this call.
+    // Resolves edge.target_id to a node name when possible. Most useful
+    // section for "what's this used for" / "what depends on this" —
+    // the things a developer actually wants to know after "what is this?".
+    let incoming = graph.get_edges_to(&node.id).unwrap_or_default();
+    let outgoing = graph.get_edges_from(&node.id).unwrap_or_default();
+    if !incoming.is_empty() || !outgoing.is_empty() {
+        lines.push(String::new());
+        lines.push("### Call Graph".to_string());
+
+        // Outgoing: "calls X, Y, Z"
+        if !outgoing.is_empty() {
+            let mut names: Vec<String> = outgoing
+                .iter()
+                .take(8)
+                .map(|e| {
+                    graph.get_node(&e.target_id)
+                        .ok()
+                        .flatten()
+                        .map(|n| n.name.clone())
+                        .unwrap_or_else(|| e.target_id.clone())
+                })
+                .collect();
+            if outgoing.len() > 8 {
+                names.push(format!("(+{} more)", outgoing.len() - 8));
+            }
+            lines.push(format!("- **Calls:** {}", names.join(", ")));
+        }
+        // Incoming: "called by A, B, C"
+        if !incoming.is_empty() {
+            let mut names: Vec<String> = incoming
+                .iter()
+                .take(8)
+                .map(|e| {
+                    graph.get_node(&e.source_id)
+                        .ok()
+                        .flatten()
+                        .map(|n| n.name.clone())
+                        .unwrap_or_else(|| e.source_id.clone())
+                })
+                .collect();
+            if incoming.len() > 8 {
+                names.push(format!("(+{} more)", incoming.len() - 8));
+            }
+            lines.push(format!("- **Called by:** {}", names.join(", ")));
+        }
+    }
+
     Ok(lines.join("\n"))
 }
 
