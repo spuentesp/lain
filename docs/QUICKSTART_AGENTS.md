@@ -37,7 +37,13 @@ When you need to perform a task:
 ## 5. Repo Identity
 To identify which repository you're working in:
 - Call `get_health` — includes `RepoIdentity` parsed from git remote
+- If the user has multiple projects registered (`lain projects list`), call `get_health` first to confirm you're operating on the right one.
 
 ## 6. Syncing State
 If you make changes to the code or switch git branches:
 - Call `sync_state`: Refresh the graph using Git deltas.
+
+## 7. Semantic search tips
+- Use BGE-style asymmetric retrieval when calling `semantic_search`: phrase queries like a question or a behavior ("how do we persist graph state?" rather than "save_to_disk")
+- Read body excerpts in the response — the response shows the actual implementation, not just metadata
+- For exact-term queries, the hybrid scorer also uses stemmed token-overlap ("running" matches "index", "indexed", "indexes")

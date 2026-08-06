@@ -154,6 +154,23 @@ lain --workspace /path/to/project --transport both --port 9999
 lain --workspace /path/to/project --embedding-model ~/.local/lain/models/all-MiniLM-L6-v2.onnx
 ```
 
+### 4. (optional) Manage multiple projects
+
+If you work on several repos, register them so `lain` works without `--workspace`:
+
+```bash
+lain projects add lain    ~/code/lain           # registers under basename
+lain projects add other  ~/code/other-thing   # arbitrary name
+lain projects list                              # see registered projects
+lain use lain                                   # mark as active
+
+# Now `lain query "..."` and `lain init` use the active project
+# without typing the path each time.
+```
+
+`lain init` auto-registers the project under its directory basename, so
+first-time use is frictionless.
+
 ### 4. Verify
 
 ```bash
@@ -197,7 +214,24 @@ Available ops: `find`, `connect`, `filter`, `semantic_filter`, `group`, `sort`, 
 - **`explore_architecture`** — High-level tree of modules and files
 
 ### Search
-- **`semantic_search`** — Find code by meaning, not just names (uses local ONNX embeddings)
+- **`semantic_search`** — Find code by meaning, not just names. Uses local ONNX embeddings with hybrid scoring (cosine similarity + stemmed token-overlap) and shows body excerpts in the response. BGE-small-en-v1.5 is the recommended model (better than MiniLM for technical corpora); use a query prefix to enable BGE-style asymmetric retrieval.
+
+### Code Health
+- **`find_dead_code`** — Potentially unreachable code (filters trait defaults, common names)
+- **`suggest_refactor_targets`** — High-coupling, low-stability nodes
+
+### Build Integration
+Lain enriches build failures with architectural context:
+- **`run_build`** — Build with Rust/Go/JS/Python toolchain error parsing
+- **`run_tests`** — Tests with error enrichment
+- **`run_clippy`** — cargo clippy with context
+
+### Project Management
+- **`lain projects add <name> <path>`** — register a project
+- **`lain projects list`** — show registered projects
+- **`lain projects forget <name>`** — remove a project
+- **`lain projects current`** — show the active project
+- **`lain use <name>`** — set the active project (so `lain` without `--workspace` uses it)
 
 ### Code Health
 - **`find_dead_code`** — Potentially unreachable code (filters trait defaults, common names)
@@ -233,10 +267,17 @@ Alternatively, you can set it up manually:
 # Create model directory
 mkdir -p .lain/models
 
-# Download all-MiniLM-L6-v2 (or any compatible model)
-# Model produces 384-dim embeddings
-curl -L https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx -o .lain/models/model.onnx
-curl -L https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json -o .lain/models/tokenizer.json
+# Option A: bge-small-en-v1.5 (recommended — better MTEB scores, 384d, ~120MB)
+curl -L https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx \
+  -o .lain/models/model.onnx
+curl -L https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json \
+  -o .lain/models/tokenizer.json
+
+# Option B: all-MiniLM-L6-v2 (smaller, 384d, ~80MB)
+curl -L https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx \
+  -o .lain/models/model.onnx
+curl -L https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json \
+  -o .lain/models/tokenizer.json
 ```
 
 Set the model path:
@@ -244,6 +285,20 @@ Set the model path:
 export LAIN_EMBEDDING_MODEL=$PWD/.lain/models/model.onnx
 # or
 ./lain --embedding-model ./.lain/models/model.onnx ...
+```
+
+For BGE-style asymmetric retrieval (better for short queries), set the
+query prefix in `.lain/tuning.toml`:
+
+```toml
+query_prefix = "Represent this sentence for searching relevant passages: "
+```
+
+Tune the CPU thread usage (default auto-detects, min(cores, 4)):
+
+```toml
+[ingestion]
+nlp_max_threads = 0  # 0 = auto, or set to a number
 ```
 
 Without the model, `semantic_search` returns "unavailable" but all other features work.
@@ -284,6 +339,22 @@ curl -s -X POST http://localhost:9999/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_agent_strategy","arguments":{}},"id":4}'
 ```
+
+---
+
+## Recent Improvements (0.3.x)
+
+Beyond the headline features above, recent versions added:
+
+- **Hybrid semantic scoring**: `semantic_search` now combines cosine similarity with **stemmed token-overlap** (query "running" matches symbols named `index`, `indexed`, `indexes`, etc.)
+- **Body excerpts in responses**: both `semantic_search` and `explain_symbol` now show the actual code, not just metadata. A developer asking "what is this?" sees the implementation.
+- **Call Graph section**: `explain_symbol` shows callers and callees alongside the source excerpt.
+- **Anchor percentile normalization**: anchor scores are now bounded to [0, 100] via min-max within the candidate set, so the search ranking formula is consistent across reindexes and corpus growth.
+- **Batched inference API**: `NlpEmbedder::embed_batch()` is available for larger models / GPU where batching helps (not used on CPU for bge-small since the per-call overhead dominates).
+- **Configurable ONNX thread count**: `.lain/tuning.toml` has `nlp_max_threads` (0 = auto-detect, or set explicitly). Bumped from 1 to 4-8 threads gives 4-5× faster cold queries.
+- **Cross-encoder reranker** (opt-in): `cross-encoder/ms-marco-MiniLM-L6-v2` can rerank the top-K bi-encoder candidates. Off by default; enable with `cross_encoder_top_k = 20`.
+- **Volatile embedding persistence**: cold-query embeddings are written back to `graph.bin` so subsequent process starts don't re-embed the same nodes. Cold-query latency on a 1500-node corpus drops from 29 s to ~5–10 s.
+- **Project registry**: `lain projects add/list/forget/current/use` manages multiple repos so you don't have to type `--workspace` every time.
 
 ---
 

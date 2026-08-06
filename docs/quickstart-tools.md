@@ -2,6 +2,20 @@
 
 Quick reference for LAIN MCP tools.
 
+## Project Management (CLI)
+
+Multi-project support lives in the CLI, not as MCP tools. Use these to register and switch between projects:
+
+```bash
+lain projects add <name> <path>    # register a project (run after `lain init`)
+lain projects list                 # show registered projects with last-used
+lain projects forget <name>        # remove from registry
+lain projects current              # print active project name
+lain use <name>                    # set active project (used when --workspace omitted)
+```
+
+`lain init` auto-registers the project under its directory basename. Workspace resolution priority: `--workspace` flag → active project → `.lain/` in cwd.
+
 ## Initialization
 
 ### get_health
@@ -71,9 +85,12 @@ Files that co-change with this one.
 ## Search
 
 ### semantic_search
-Find code by meaning, not just names (uses ONNX embeddings).
+Find code by meaning, not just names. Uses local ONNX embeddings with hybrid scoring (cosine similarity + stemmed token-overlap) and shows body excerpts in the response.
+
+Best results with the **BGE** model family (`bge-small-en-v1.5` recommended); set `query_prefix` in `.lain/tuning.toml` for asymmetric retrieval.
+
 ```json
-{ "name": "semantic_search", "arguments": { "query": "error handling" } }
+{ "name": "semantic_search", "arguments": { "query": "error handling", "limit": 5 } }
 ```
 
 ### query_graph
@@ -99,7 +116,7 @@ High-coupling, low-stability nodes.
 ## Analysis
 
 ### explain_symbol
-Human-readable summary with signature and metrics.
+Human-readable summary with signature, body excerpt, anchor score, depth, co-change partners, and a **Call Graph** section listing callers and callees. The most useful tool for "what is this symbol?" — answers the three questions in one call.
 ```json
 { "name": "explain_symbol", "arguments": { "symbol": "my_function" } }
 ```
@@ -153,7 +170,7 @@ File content around a line.
 ## Architecture
 
 ### navigate_to_anchor
-Trace back to architectural anchor.
+Trace back to architectural anchor. If no more-foundational anchor is reachable from the input symbol, returns the corpus's overall top anchor as a fallback so the user always gets a useful pointer.
 ```json
 { "name": "navigate_to_anchor", "arguments": { "symbol": "my_function" } }
 ```

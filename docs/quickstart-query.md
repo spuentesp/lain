@@ -95,6 +95,8 @@ Prebuilt queries via `named` field:
 { "op": "semantic_filter", "like": "error handling", "threshold": 0.35 }
 ```
 
+Note: the underlying `semantic_filter` uses cosine similarity in [0, 1] (after L2 normalization) against the BGE or MiniLM embedding of `like`. With a 0.35 threshold on a well-tuned model, expect ~10-30 matches per `Function` corpus. The score combines pure cosine with the hybrid stem-aware token-overlap from `semantic_search`.
+
 ### group
 ```json
 { "op": "group", "by": "type" }

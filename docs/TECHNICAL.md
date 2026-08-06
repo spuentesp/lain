@@ -13,7 +13,7 @@
                               │ MCP (JSON-RPC over stdio/HTTP)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                         LAIN-mcp                            │
+│                         lain                                │
 │                                                              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
 │  │ MCP Handler │  │  Tool Exec   │  │   Background Jobs   │ │
@@ -31,8 +31,19 @@
 │  │       ▼           ▼           ▼             ▼         │ │
 │  │  .lain/graph  LSP servers  ONNX model   Git history    │ │
 │  └─────────────────────────────────────────────────────────┘ │
+│                                                              │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Project Registry (`src/state.rs`, `src/cmds/projects.rs`)│ │
+│  │  ~/.config/lain/projects.toml + ~/.config/lain/current   │  │
+│  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Workspace resolution** (when `--workspace` is not given):
+1. `--workspace` flag (always wins)
+2. `lain use <name>`-set active project from registry
+3. `.lain/` in current working directory
+4. Error: "no active project; use `lain projects add <name> <path>` then `lain use <name>`"
 
 ---
 
@@ -42,12 +53,14 @@
 
 The graph is a **petgraph** directed acyclic graph stored at `.lain/graph.bin`.
 
-**Node Types:**
+**Node Types** (14 indexed in `semantic_search`, 4 cross-runtime excluded):
 - `File` — Source file
-- `Module` — Language module/namespace
+- `Module` / `Package` / `Namespace` — Language module/namespace
 - `Function` / `Method` / `Class` — Code symbols
 - `Interface` / `Trait` — Type definitions
-- `Variable` / `Constant` — Value bindings
+- `Variable` / `Constant` / `Property` — Value bindings
+- `Enum` / `Struct` — Compound types
+- Excluded from `semantic_search`: `HttpRoute`, `Topic`, `Resource`, `Schema` (cross-runtime, document-shaped)
 
 **Edge Types:**
 
@@ -59,8 +72,11 @@ The graph is a **petgraph** directed acyclic graph stored at `.lain/graph.bin`.
 | `Inherits` | Class inheritance | Tree-sitter AST |
 | `Imports` | Import/use statement | Tree-sitter AST |
 | `CO_CHANGED_WITH` | Historical co-change | Git history analysis |
+| `Pattern` | Cross-boundary pattern | Tree-sitter pattern detection |
 
-**Node Identity:** UUID v5 derived from `(NodeType, FilePath, SymbolName)` for deterministic, stable IDs across runs.
+**Node Identity:** UUID v5 derived from `(NodeType, FilePath, SymbolName)` for deterministic, stable IDs across runs. The `(NodeType, FilePath, SymbolName, line_start?)` quadruple is used when line_start is known (tree-sitter path) so two same-named symbols at different lines get distinct IDs.
+
+**Anchor scores:** percentile-normalized to `[0, 100]` per-corpus via two-pass `calculate_anchor_scores` in `src/graph.rs`. Top symbol always scores 100; everything else scales. Prevents unbounded growth across reindexes. The search formula `sim + anchor_weight × normalized_anchor` is then consistent regardless of corpus size.
 
 ### 2. Volatile Overlay (`src/overlay.rs`)
 
@@ -97,14 +113,22 @@ Multi-language server protocol multiplexer supporting:
 Local ONNX-based semantic search using [ORT (ONNX Runtime)](https://onnxruntime.ai/):
 
 - **Model-agnostic** — any ONNX model producing fixed-dimension embeddings works
-- **Default model:** `all-MiniLM-L6-v2` (384 dimensions)
+- **Recommended model:** `bge-small-en-v1.5` (BAAI, 384 dimensions, ~120MB) — better MTEB scores than MiniLM
+- **Default model:** `all-MiniLM-L6-v2` (384 dimensions, ~80MB)
+- **BGE asymmetric retrieval:** set `query_prefix = "Represent this sentence for searching relevant passages: "` in `.lain/tuning.toml` — prepended to queries at embed time, leaving documents unchanged. Required for optimal BGE performance on short queries.
 - **Tokenization:** Hugging Face `tokenizers` crate
+- **Threading:** `nlp_max_threads` in `.lain/tuning.toml` (0 = auto-detect `min(cores, 4)`). BGE-small inference doesn't benefit from more than 4 threads per call.
 
 When `semantic_search(query)` is called:
-1. Tokenize query
-2. Run ONNX inference
-3. Cosine similarity against all stored embeddings
-4. Return top-k results by semantic similarity
+1. **Query embedding** — tokenize query, apply prefix (if any), run ONNX
+2. **Two-pass scoring** over candidate nodes:
+   - **Pass 1 (cache/persisted):** HashMap lookup for in-process cache, then JSON parse of `node.embedding`. Volatile embeds cached in-process after first use.
+   - **Pass 2 (cold batched):** remaining uncached nodes batched into one ONNX forward pass via `embed_batch`, with right-padding to the longest input and [PAD] id 0.
+3. **Hybrid score** = `(1 - lex_weight) × sim + lex_weight × token_recall` where `token_recall` is the fraction of stemmed query tokens present in the node's enriched text (name + signature + docstring + path + first ~200 tokens of body).
+4. **Anchor normalization** — anchor scores are min-max normalized within the candidate set so the search formula `sim + anchor_weight × anchor` is consistent across reindexes (top symbol = 100).
+5. **Body excerpts** — first ~200 chars of source for each result, so users see the actual implementation, not just metadata.
+6. **Volatile persistence** — fresh embeddings are written back to `graph.bin` so subsequent cold starts don't re-embed.
+7. **Optional reranking** — if `cross_encoder_top_k > 0`, the top-K results are reranked by `cross-encoder/ms-marco-MiniLM-L6-v2` (off by default; toggle via `cross_encoder_top_k = 20` in `.lain/tuning.toml`).
 
 ### 5. Git Sensor (`src/git.rs`)
 
