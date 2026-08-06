@@ -71,7 +71,7 @@ impl NlpEmbedder {
 
         // Infer embedding dimension from model output shape via dummy inference on first session
         let mut session = Session::builder()?
-            .with_intra_threads(1)?
+            .with_intra_threads(4)?
             .commit_from_file(model_path)?;
         let embedding_dim = Self::detect_embedding_dim(&mut session)?;
 
@@ -256,7 +256,7 @@ impl CrossEncoder {
         };
 
         let session = match Session::builder() {
-            Ok(b) => match b.with_intra_threads(1) {
+            Ok(b) => match b.with_intra_threads(4) {
                 Ok(mut b) => match b.commit_from_file(&model_path) {
                     Ok(s) => Arc::new(Mutex::new(s)),
                     Err(e) => {
