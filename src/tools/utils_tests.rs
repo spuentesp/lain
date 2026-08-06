@@ -278,3 +278,47 @@ fn test_resolve_node_overlay_priority() {
     // Should get overlay version since it has priority
     assert_eq!(result.path, "/src/overlay.rs");
 }
+
+#[test]
+fn test_token_recall_perfect_match() {
+    // Every query token appears in the candidate → recall = 1.0
+    let score = token_recall("Tokenizer", "the Tokenizer struct lives here");
+    assert!((score - 1.0).abs() < 1e-6, "expected 1.0, got {}", score);
+}
+
+#[test]
+fn test_token_recall_partial_match() {
+    // "GraphDatabase" matches, "save" and "bincode" don't → recall ≈ 0.333
+    let score = token_recall(
+        "GraphDatabase save bincode",
+        "the GraphDatabase struct holds the merged brain",
+    );
+    assert!((score - 1.0 / 3.0).abs() < 1e-6, "expected ~0.333, got {}", score);
+}
+
+#[test]
+fn test_token_recall_no_match() {
+    let score = token_recall("totally unrelated query", "GraphDatabase save");
+    assert_eq!(score, 0.0);
+}
+
+#[test]
+fn test_token_recall_case_insensitive() {
+    let a = token_recall("LSP", "lsp bridge");
+    let b = token_recall("lsp", "LSP bridge");
+    assert_eq!(a, b);
+    assert!((a - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_token_recall_filters_short_and_numeric() {
+    // "a", "42", "x" should be filtered out as noise
+    let score = token_recall("a 42 x Tokenizer", "the Tokenizer handles encoding");
+    assert!((score - 1.0).abs() < 1e-6, "expected 1.0 (only Tokenizer counted), got {}", score);
+}
+
+#[test]
+fn test_token_recall_empty_query() {
+    let score = token_recall("", "anything here");
+    assert_eq!(score, 0.0);
+}

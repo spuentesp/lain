@@ -17,6 +17,13 @@ pub struct TuningConfig {
     /// hybrid = similarity + anchor_weight * anchor_score.
     /// Range: [0.0, 1.0]. Higher = favor structurally important nodes.
     pub anchor_weight: f32,
+    /// Semantic search: weight for token-overlap (lexical) score in the
+    /// final ranking. 0.0 = pure semantic (default, preserves existing
+    /// behavior); 0.3 = strong lexical boost. Lets exact-term queries
+    /// ("Tokenizer", "GraphDatabase::save") surface when cosine
+    /// similarity alone is borderline.
+    /// Final score = (1 - lexical_weight) * sim + lexical_weight * lex.
+    pub lexical_weight: f32,
     /// Ingestion: ceiling on cross-boundary coupling edges.
     /// Set to 0 to disable pattern edges.
     pub max_pattern_edges: usize,
@@ -31,6 +38,7 @@ impl Default for TuningConfig {
         Self {
             semantic_similarity_threshold: 0.3,
             anchor_weight: 0.3,
+            lexical_weight: 0.0,
             max_pattern_edges: 200,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -121,9 +129,12 @@ impl Default for RuntimeConfig {
 pub fn load_tuning_config(workspace: &Path) -> TuningConfig {
     let path = workspace.join(".lain").join("tuning.toml");
     if let Ok(contents) = std::fs::read_to_string(&path) {
-        if let Ok(config) = toml::from_str::<TuningConfig>(&contents) {
-            tracing::info!("Loaded tuning config from {:?}", path);
-            return config;
+        match toml::from_str::<TuningConfig>(&contents) {
+            Ok(config) => {
+                tracing::info!("Loaded tuning config from {:?}", path);
+                return config;
+            }
+            Err(e) => tracing::warn!("Failed to parse tuning.toml at {:?}: {}", path, e),
         }
     }
     tracing::info!("No tuning.toml found, using defaults");

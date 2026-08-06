@@ -5,7 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::nlp::NlpEmbedder;
 use crate::schema::{GraphNode, NodeType};
-use crate::tools::utils::{build_enriched_text, cosine_similarity};
+use crate::tools::utils::{build_enriched_text, cosine_similarity, token_recall};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -101,8 +101,20 @@ pub fn semantic_search(
                 }
             }
             let sim = cosine_similarity(&query_emb, &emb);
-            if sim > tuning.semantic_similarity_threshold {
-                scored.push((node, sim));
+            // Hybrid scoring: combine semantic similarity with lexical token
+            // recall. lex_weight = 0.0 falls back to pure cosine (default).
+            // With lex_weight > 0, exact-term queries ("Tokenizer",
+            // "GraphDatabase") surface even when the cosine score alone
+            // is borderline.
+            let lex = if tuning.lexical_weight > 0.0 {
+                let text = build_enriched_text(node);
+                token_recall(query, &text)
+            } else {
+                0.0
+            };
+            let hybrid = (1.0 - tuning.lexical_weight) * sim + tuning.lexical_weight * lex;
+            if hybrid > tuning.semantic_similarity_threshold {
+                scored.push((node, hybrid));
             }
         }
     }

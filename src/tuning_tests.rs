@@ -7,6 +7,7 @@ fn test_tuning_config_default() {
     let config = TuningConfig::default();
     assert_eq!(config.semantic_similarity_threshold, 0.3);
     assert_eq!(config.anchor_weight, 0.3);
+    assert_eq!(config.lexical_weight, 0.0); // off by default — preserves existing behavior
     assert_eq!(config.max_pattern_edges, 200);
 }
 

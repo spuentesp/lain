@@ -196,3 +196,36 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         dot / (norm_a.sqrt() * norm_b.sqrt())
     }
 }
+
+/// Tokenize text for lexical scoring: lowercase, split on non-alphanumeric
+/// boundaries, drop tokens shorter than 2 chars and pure-numeric tokens
+/// (which add noise from line numbers, array indices, etc.).
+fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        let lower = raw.to_ascii_lowercase();
+        if lower.len() >= 2 && !lower.chars().all(|c| c.is_ascii_digit()) {
+            out.insert(lower);
+        }
+    }
+    out
+}
+
+/// Recall-style lexical score: fraction of query tokens that appear in the
+/// candidate text. Range [0.0, 1.0]. 1.0 = every query token appears in the
+/// candidate; 0.0 = none appear.
+///
+/// Recall is preferred over Jaccard for search ranking because it directly
+/// answers "did we cover the user's query?" — a candidate that mentions 2
+/// of 3 query terms scores 0.67, while a candidate that mentions 2 of 50
+/// unrelated terms plus those 2 still scores 0.67 (the "unrelated" terms
+/// don't penalize the candidate).
+pub fn token_recall(query: &str, candidate: &str) -> f32 {
+    let q = lex_tokens(query);
+    if q.is_empty() {
+        return 0.0;
+    }
+    let c: std::collections::HashSet<String> = lex_tokens(candidate);
+    let hits = q.intersection(&c).count();
+    hits as f32 / q.len() as f32
+}
