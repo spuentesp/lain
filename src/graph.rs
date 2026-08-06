@@ -298,16 +298,56 @@ impl GraphDatabase {
 
     pub fn calculate_anchor_scores(&self) -> Result<(), LainError> {
         let mut graph = self.graph.write();
-        
+
+        // Two-pass: compute raw anchor ratios, find the corpus-wide max,
+        // then normalize every node so the top symbol scores 100 and
+        // everything else scales accordingly.
+        //
+        // Without this normalization, anchor_score = fan_in / (fan_out+1)
+        // grows unbounded as the corpus grows (we've observed values up
+        // to 1063 in production). That makes the search ranking
+        // `sim + anchor_weight * anchor` anchor-dominated, hiding
+        // semantically better matches and producing different rankings
+        // across reindexes of the same code.
+        //
+        // With percentile normalization:
+        //   - The top symbol in any corpus always scores 100
+        //   - Ranks reflect *relative* importance, not raw fan_in
+        //   - Rankings are stable across reindexes unless the identity
+        //     of the top changes
+        //   - Composes cleanly with the per-candidate-set min-max
+        //     normalization in search.rs
         let indices: Vec<_> = graph.node_indices().collect();
-        for idx in indices {
+
+        // Pass 1: compute raw ratios, find max
+        let mut max_raw: f32 = 0.0;
+        let mut raws: Vec<(petgraph::graph::NodeIndex, f32)> = Vec::with_capacity(indices.len());
+        for idx in &indices {
+            let fan_in = graph.neighbors_directed(*idx, Direction::Incoming).count() as f32;
+            let fan_out = graph.neighbors_directed(*idx, Direction::Outgoing).count() as f32;
+            let raw = fan_in / (fan_out + 1.0);
+            if raw > max_raw {
+                max_raw = raw;
+            }
+            raws.push((*idx, raw));
+        }
+
+        // Pass 2: write fan_in/fan_out + normalized anchor back
+        for (idx, raw) in raws {
             let fan_in = graph.neighbors_directed(idx, Direction::Incoming).count() as u32;
             let fan_out = graph.neighbors_directed(idx, Direction::Outgoing).count() as u32;
-            
+            // 100.0 scale so display "anchor 12.34" is human-readable;
+            // top-of-corpus symbol always scores 100 regardless of how
+            // big the codebase grows.
+            let normalized = if max_raw > 0.0 {
+                raw / max_raw * 100.0
+            } else {
+                0.0
+            };
             if let Some(node) = graph.node_weight_mut(idx) {
                 node.fan_in = Some(fan_in);
                 node.fan_out = Some(fan_out);
-                node.anchor_score = Some(fan_in as f32 / (fan_out as f32 + 1.0));
+                node.anchor_score = Some(normalized);
             }
         }
         Ok(())

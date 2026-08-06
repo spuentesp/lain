@@ -86,6 +86,61 @@ fn test_calculate_anchor_scores() {
 }
 
 #[test]
+fn test_anchor_scores_normalized_to_100() {
+    // After calculate_anchor_scores, the top symbol in the graph should
+    // anchor=100 and everything else should scale accordingly. This is
+    // what makes rankings stable across reindexes of growing corpora.
+    let graph = make_test_graph();
+    graph.calculate_anchor_scores().unwrap();
+
+    let anchors = graph.find_anchors(10).unwrap();
+    assert!(!anchors.is_empty(), "expected some anchors");
+    let top = anchors.first().unwrap().anchor_score.unwrap();
+    assert!(
+        (top - 100.0).abs() < 1e-4,
+        "top symbol should anchor=100, got {}",
+        top
+    );
+
+    // Every other anchor should be <= 100
+    for a in &anchors {
+        let s = a.anchor_score.unwrap();
+        assert!(
+            (0.0..=100.0).contains(&s),
+            "anchor {} out of range [0, 100]",
+            s
+        );
+    }
+
+    // b has fan_in=2, fan_out=1 (calls c) → raw = 2/2 = 1.0; if it's
+    // the top, it gets 100. Otherwise it scales.
+    let b = graph.find_node_by_name("b").unwrap();
+    let b_raw = (b.fan_in.unwrap() as f32) / (b.fan_out.unwrap() as f32 + 1.0);
+    // verify the stored anchor matches the formula raw / max * 100
+    let max_raw: f32 = graph
+        .find_anchors(100)
+        .unwrap()
+        .iter()
+        .map(|n| {
+            let fi = n.fan_in.unwrap_or(0) as f32;
+            let fo = n.fan_out.unwrap_or(0) as f32;
+            fi / (fo + 1.0)
+        })
+        .fold(0.0, f32::max);
+    let expected = if max_raw > 0.0 {
+        b_raw / max_raw * 100.0
+    } else {
+        0.0
+    };
+    assert!(
+        (b.anchor_score.unwrap() - expected).abs() < 1e-4,
+        "b's anchor should be {}, got {}",
+        expected,
+        b.anchor_score.unwrap()
+    );
+}
+
+#[test]
 fn test_find_anchors() {
     let graph = make_test_graph();
     graph.calculate_anchor_scores().unwrap();
