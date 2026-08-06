@@ -24,6 +24,9 @@ models/
 .venv/
 
 # Python
+__pycache__/
+*.pyc
+_*.html
 .mypy_cache/
 .pytest_cache/
 
