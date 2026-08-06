@@ -9,7 +9,7 @@ pub mod jobs;
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::nlp::NlpEmbedder;
+use crate::nlp::{CrossEncoder, NlpEmbedder};
 use crate::overlay::VolatileOverlay;
 use crate::tools::ToolExecutor;
 use crate::tuning::{load_tuning_config, TuningConfig};
@@ -33,6 +33,7 @@ pub struct LainServer {
     pub graph: GraphDatabase,
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
+    pub cross_encoder: CrossEncoder,
     pub git: Arc<Mutex<GitSensor>>,
     pub lsp_pool: Arc<LspPool>,
     pub tool_executor: ToolExecutor,
@@ -63,6 +64,22 @@ impl LainServer {
             info!("NLP embedder running in stub mode - semantic search unavailable");
         }
 
+        // Cross-encoder sits beside the bi-encoder model by default.
+        // Override via LAIN_CROSS_ENCODER env var.
+        let cross_dir = std::env::var("LAIN_CROSS_ENCODER")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                PathBuf::from(home).join(".local/lain/models/cross-encoder")
+            });
+        let cross_encoder = CrossEncoder::from_dir(&cross_dir);
+        if cross_encoder.is_active() {
+            info!("Cross-encoder reranker active (from {:?})", cross_dir);
+        } else {
+            info!("Cross-encoder reranker disabled (no model at {:?})", cross_dir);
+        }
+
         let git = Arc::new(Mutex::new(GitSensor::new(workspace)?));
         let lsp_pool = Arc::new(LspPool::new(workspace, tuning.ingestion.lsp_pool_size)?);
 
@@ -70,6 +87,7 @@ impl LainServer {
             graph.clone(),
             overlay.clone(),
             embedder.clone(),
+            cross_encoder.clone(),
             Arc::clone(&git),
             Arc::clone(&lsp_pool),
             Arc::clone(&tuning),
@@ -82,6 +100,7 @@ impl LainServer {
             graph,
             overlay,
             embedder,
+            cross_encoder,
             git,
             lsp_pool,
             tool_executor,

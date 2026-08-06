@@ -2,8 +2,8 @@
 
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
+use crate::nlp::{CrossEncoder, NlpEmbedder};
 use crate::overlay::VolatileOverlay;
-use crate::nlp::NlpEmbedder;
 use crate::schema::{GraphNode, NodeType};
 use crate::tools::utils::{build_enriched_text, cosine_similarity, read_body_summary, token_recall};
 use crate::tuning::TuningConfig;
@@ -11,10 +11,12 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[allow(clippy::too_many_arguments)]
 pub fn semantic_search(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
+    cross_encoder: &CrossEncoder,
     embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     query: &str,
@@ -82,16 +84,21 @@ pub fn semantic_search(
     let mut cache = embedding_cache.lock();
 
     for node in &all_nodes {
-        // Try cache first, then parse and cache, then on-demand
+        // Try cache first, then parse and cache, then on-demand.
+        // The volatile-embed branch ALSO caches its result so subsequent
+        // queries don't re-embed the same nodes — this is critical for
+        // latency: with 1722 nodes and ~44ms per embed, re-running 500
+        // embeds per query adds 22s. With caching, query 2+ runs in <1s.
         let emb_opt: Option<Vec<f32>> = if let Some(cached) = cache.get(&node.id) {
             Some(cached.clone())
         } else if let Some(ref e_json) = node.embedding {
             serde_json::from_str::<Vec<f32>>(e_json).ok()
-        } else if volatile_embed_count < 500 {
-            // Raised from 50 → 500 so cold queries can embed a meaningful
-            // slice of the corpus on the fly. The previous cap meant
-            // anything beyond the first 50 nodes was effectively invisible
-            // until the background prewarm queue caught up.
+        } else if volatile_embed_count < 200 {
+            // Cap cold-query on-demand embeddings so a single search call
+            // stays fast even on large corpora. The per-call cache (set on
+            // line below) means subsequent calls within the same process
+            // reuse these 200 instead of recomputing, so cold cost amortizes
+            // across the session rather than every call.
             volatile_embed_count += 1;
             let text = build_enriched_text(node);
             embedder.embed(&text).ok()
@@ -100,13 +107,12 @@ pub fn semantic_search(
         };
 
         if let Some(emb) = emb_opt {
-            // Cache the embedding for future searches (even if it came from cache, re-cache is no-op)
+            // Cache whatever we have (persisted or volatile) so subsequent
+            // queries can reuse it. Before this fix, only persisted
+            // embeddings were cached, and every cold query paid the
+            // full embed cost (~22s for 500 nodes on this corpus).
             if !cache.contains_key(&node.id) {
-                if let Some(ref e_json) = node.embedding {
-                    if let Ok(emb) = serde_json::from_str::<Vec<f32>>(e_json) {
-                        cache.insert(node.id.clone(), emb);
-                    }
-                }
+                cache.insert(node.id.clone(), emb.clone());
             }
             let sim = cosine_similarity(&query_emb, &emb);
             // Hybrid scoring: combine semantic similarity with lexical token
@@ -137,7 +143,28 @@ pub fn semantic_search(
         hybrid_b.partial_cmp(&hybrid_a).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let results: Vec<_> = scored.into_iter().take(limit).collect();
+    // 5. Optional cross-encoder reranking on the top-K bi-encoder candidates.
+    // The cross-encoder scores each (query, document) pair jointly — much
+    // more accurate than cosine similarity but ~50ms per candidate. We only
+    // rerank the top-K, so the cost stays bounded.
+    let results: Vec<_> = if tuning.cross_encoder_top_k > 0 && cross_encoder.is_active() {
+        let k = tuning.cross_encoder_top_k.min(scored.len());
+        let mut reranked: Vec<(&GraphNode, f32)> = Vec::with_capacity(k);
+        for (node, _bi_score) in scored.iter().take(k) {
+            let text = build_enriched_text(node);
+            let ce_score = cross_encoder.score(query, &text).unwrap_or(0.0);
+            reranked.push((node, ce_score));
+        }
+        // Stable: reranked set keeps its bi-encoder order on ties
+        reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Anything beyond the top-K keeps its original bi-encoder score
+        let mut tail: Vec<_> = scored.iter().skip(k).map(|(n, s)| (*n, *s)).collect();
+        let mut combined = reranked;
+        combined.append(&mut tail);
+        combined.into_iter().take(limit).collect()
+    } else {
+        scored.into_iter().take(limit).collect()
+    };
 
     Ok(format!("Found {} semantic results in Merged Brain for '{}' (using Shadow Masking):\n{}",
         results.len(),

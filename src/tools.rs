@@ -109,6 +109,7 @@ impl ToolExecutor {
         graph: GraphDatabase,
         overlay: VolatileOverlay,
         embedder: NlpEmbedder,
+        cross_encoder: crate::nlp::CrossEncoder,
         git: Arc<Mutex<GitSensor>>,
         lsp_pool: Arc<LspPool>,
         tuning: Arc<TuningConfig>,
@@ -121,6 +122,7 @@ impl ToolExecutor {
             graph,
             overlay,
             embedder,
+            cross_encoder,
             git,
             lsp_pool,
             Arc::clone(&tuning),
@@ -457,5 +459,6 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
         crate::lsp::LspPool::new(Path::new("."), 2).expect("lsp pool"),
     );
     let tuning = Arc::new(crate::tuning::TuningConfig::default());
-    ToolExecutor::new(graph, overlay, embedder, git, lsp_pool, tuning, PathBuf::from("."))
+    let cross_encoder = crate::nlp::CrossEncoder::from_dir(Path::new("/nonexistent"));
+    ToolExecutor::new(graph, overlay, embedder, cross_encoder, git, lsp_pool, tuning, PathBuf::from("."))
 }

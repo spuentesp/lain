@@ -9,7 +9,7 @@ use ort::value::Tensor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::Mutex;
-use tokenizers::Tokenizer;
+use tokenizers::{Encoding, Tokenizer};
 
 #[derive(Clone)]
 enum EmbedInner {
@@ -190,5 +190,132 @@ impl NlpEmbedder {
         }
 
         Ok(embedding)
+    }
+}
+
+// ─── Cross-encoder reranker ─────────────────────────────────────────────
+//
+// Cross-encoders encode the (query, document) pair jointly and produce a
+// relevance logit, which is much more accurate than a bi-encoder's cosine
+// similarity but ~100x slower. We use them as a second-pass reranker on
+// the top-K candidates from the bi-encoder — typically K=20, so the
+// per-query cost stays around ~50ms.
+
+#[derive(Clone)]
+pub struct CrossEncoder {
+    inner: Option<CrossInner>,
+}
+
+#[derive(Clone)]
+struct CrossInner {
+    session: Arc<Mutex<Session>>,
+    tokenizer: Arc<Tokenizer>,
+}
+
+impl CrossEncoder {
+    /// Load from model.onnx + tokenizer.json in `dir`.
+    /// Returns a stub (no-op scorer returning 0.0) if the model files
+    /// aren't found — search.rs treats a stub as "skip reranking".
+    pub fn from_dir(dir: &Path) -> Self {
+        let model_path = dir.join("model.onnx");
+        let tok_path = dir.join("tokenizer.json");
+        if !model_path.exists() || !tok_path.exists() {
+            tracing::warn!(
+                "Cross-encoder model not found at {:?}, reranking disabled",
+                dir
+            );
+            return Self { inner: None };
+        }
+
+        let tokenizer = match Tokenizer::from_file(&tok_path) {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                tracing::warn!("Failed to load cross-encoder tokenizer: {}", e);
+                return Self { inner: None };
+            }
+        };
+
+        let session = match Session::builder() {
+            Ok(b) => match b.with_intra_threads(1) {
+                Ok(mut b) => match b.commit_from_file(&model_path) {
+                    Ok(s) => Arc::new(Mutex::new(s)),
+                    Err(e) => {
+                        tracing::warn!("Failed to commit cross-encoder ONNX model: {}", e);
+                        return Self { inner: None };
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to configure cross-encoder threads: {}", e);
+                    return Self { inner: None };
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to create cross-encoder session builder: {}", e);
+                return Self { inner: None };
+            }
+        };
+
+        // Same global ORT init as the embedder; second call is a no-op.
+        if !ort::init()
+            .with_name("lain-cross-encoder")
+            .with_execution_providers([
+                ort::execution_providers::CPUExecutionProvider::default().build(),
+            ])
+            .commit()
+        {
+            tracing::debug!("ORT init returned false for cross-encoder (may be already initialized)");
+        }
+
+        tracing::info!("Cross-encoder reranker loaded from {:?}", dir);
+        Self {
+            inner: Some(CrossInner { session, tokenizer }),
+        }
+    }
+
+    /// True iff this is a real model (vs. a no-op stub).
+    pub fn is_active(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// Score a single (query, document) pair. Returns 0.0 if no model
+    /// is loaded.
+    pub fn score(&self, query: &str, document: &str) -> Result<f32, LainError> {
+        let inner = match &self.inner {
+            Some(i) => i,
+            None => return Ok(0.0),
+        };
+
+        // Tokenize the (query, document) pair jointly. The tokenizer
+        // returns type IDs that mark which tokens belong to query vs
+        // document — the model uses these as segment embeddings.
+        let encoding: Encoding = inner
+            .tokenizer
+            .encode((query, document), true)
+            .map_err(|e| LainError::Nlp(format!("Cross-encoder tokenization: {}", e)))?;
+
+        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
+        let attention_mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&x| x as i64).collect();
+        let token_type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&x| x as i64).collect();
+        let seq_len = input_ids.len();
+
+        let ids_tensor = Tensor::from_array(([1, seq_len], input_ids))?;
+        let mask_tensor = Tensor::from_array(([1, seq_len], attention_mask))?;
+        let type_tensor = Tensor::from_array(([1, seq_len], token_type_ids))?;
+
+        let inputs = ort::inputs![
+            "input_ids" => ids_tensor,
+            "attention_mask" => mask_tensor,
+            "token_type_ids" => type_tensor,
+        ];
+
+        let mut session = inner.session.lock();
+        let outputs = session.run(inputs)?;
+
+        // ms-marco-MiniLM-L-6-v2 outputs shape [1, 1] — a single logit.
+        let logits = outputs["logits"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| LainError::Nlp(format!("Cross-encoder output: {}", e)))?;
+        let data = logits.1;
+        Ok(data.first().copied().unwrap_or(0.0))
     }
 }

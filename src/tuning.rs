@@ -32,6 +32,12 @@ pub struct TuningConfig {
     /// document embeddings. Set this to use BGE-style asymmetric
     /// retrieval. Documents are NOT prefixed.
     pub query_prefix: String,
+    /// Semantic search: number of top bi-encoder candidates to rerank
+    /// with the cross-encoder. 0 = disabled (default, preserves
+    /// existing behavior). Each rerank adds ~50ms per candidate, so
+    /// 20 is a reasonable upper bound (1s extra latency for a much
+    /// more accurate top-K).
+    pub cross_encoder_top_k: usize,
     /// Ingestion: ceiling on cross-boundary coupling edges.
     /// Set to 0 to disable pattern edges.
     pub max_pattern_edges: usize,
@@ -48,6 +54,7 @@ impl Default for TuningConfig {
             anchor_weight: 0.3,
             lexical_weight: 0.0,
             query_prefix: String::new(),
+            cross_encoder_top_k: 0,
             max_pattern_edges: 200,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),

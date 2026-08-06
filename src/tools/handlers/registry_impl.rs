@@ -336,6 +336,7 @@ impl ToolHandler for SemanticSearchHandler {
             &ctx.graph,
             &ctx.overlay,
             &ctx.embedder,
+            &ctx.cross_encoder,
             &ctx.embedding_cache,
             &ctx.tuning,
             &query,
