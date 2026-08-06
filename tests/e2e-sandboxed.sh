@@ -100,14 +100,19 @@ echo "Testing: lain init --agent claude --workspace $FAKE_WORKSPACE --yes"
 # Verify LAIN.md was created
 [ -f "$HOME/.claude/LAIN.md" ] && pass "~/.claude/LAIN.md created" || fail "~/.claude/LAIN.md not created"
 
-# Verify settings.json has lain mcp entry
+# Verify settings.json has lain mcp entry.
+# Note: when `lain` is on the host PATH the binary resolves the absolute path
+# via `which::which("lain")` (see src/cmds/init.rs), so we accept either form.
 python3 -c "
 import json
 with open('$HOME/.claude/settings.json') as f:
     d = json.load(f)
-assert 'mcpServers' in d
-assert 'lain' in d['mcpServers']
-assert d['mcpServers']['lain']['command'] == 'lain'
+assert 'mcpServers' in d, 'mcpServers missing'
+assert 'lain' in d['mcpServers'], 'lain entry missing'
+cmd = d['mcpServers']['lain']['command']
+assert cmd == 'lain' or cmd.endswith('/lain'), f'unexpected command: {cmd!r}'
+args = d['mcpServers']['lain'].get('args', [])
+assert '--workspace' in args and '$FAKE_WORKSPACE' in args, f'unexpected args: {args!r}'
 print('OK')
 " 2>/dev/null && pass "settings.json has correct lain MCP entry" || fail "settings.json MCP entry wrong"
 
@@ -189,7 +194,9 @@ echo "$output" | grep -q "hookSpecificOutput" && pass "ask: intercepts LAIN comm
 echo ""
 echo "--- Query Test ---"
 output=$("$LAIN_BINARY" query "find Function | limit 1" --workspace "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" 2>&1)
-echo "$output" | grep -q '"nodes"' && pass "lain query returns JSON with nodes" || fail "lain query output: $output"
+# QueryResult skips `nodes` when empty (serde skip_serializing_if), so check
+# for `count` which is always present and reflects the number of matched nodes.
+echo "$output" | grep -q '"count"' && pass "lain query returns JSON with count" || fail "lain query output: $output"
 
 # ---------- VERIFY NO POLLUTION ----------
 echo ""

@@ -84,6 +84,13 @@ pub fn get_bool_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<bool
 }
 
 /// Build enriched text for embedding: name + signature + docstring + path
+/// + the first ~200 tokens of the source body (when a line range is known).
+///
+/// The body excerpt dramatically improves recall for behavior-oriented
+/// queries (e.g. "graph storage", "error handling", "LSP language server")
+/// because terms like `bincode`, `Tokenizer`, `LSP` only appear in the
+/// implementation, not in the signature or docstring. Without this, the
+/// embedder has no signal that `GraphDatabase::save` is about persistence.
 pub fn build_enriched_text(node: &GraphNode) -> String {
     let mut parts = vec![node.name.clone()];
 
@@ -104,7 +111,52 @@ pub fn build_enriched_text(node: &GraphNode) -> String {
     // Add path for file context
     parts.push(node.path.clone());
 
+    // Add first ~200 tokens of the source body when a line range is known.
+    // Capped at 200 tokens to keep embedding inputs in the model's
+    // sweet spot (MiniLM truncates at 256 anyway, so this stays under the
+    // effective limit while preserving meaningful behavior signals).
+    if let (Some(start), Some(end)) = (node.line_start, node.line_end) {
+        if end > start && (end - start) < 200 {
+            if let Ok(body) = read_body_excerpt(&node.path, start, end, 200) {
+                if !body.is_empty() {
+                    parts.push(body);
+                }
+            }
+        }
+    }
+
     parts.join(" | ")
+}
+
+/// Read lines [start, end) from `path`, collapse to single-line whitespace,
+/// and keep the first `max_tokens` whitespace-separated tokens.
+fn read_body_excerpt(path: &str, start: u32, end: u32, max_tokens: usize) -> std::io::Result<String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    let f = File::open(path)?;
+    let reader = BufReader::new(f);
+    let mut buf = String::new();
+    for (i, line) in reader.lines().enumerate() {
+        let lineno = (i as u32) + 1;
+        if lineno < start {
+            continue;
+        }
+        if lineno >= end {
+            break;
+        }
+        let line = line?;
+        if !buf.is_empty() {
+            buf.push(' ');
+        }
+        buf.push_str(&line);
+        // Stop early if we've already collected enough tokens
+        if buf.split_whitespace().count() >= max_tokens {
+            break;
+        }
+    }
+    // Trim to max_tokens and collapse whitespace
+    let trimmed: String = buf.split_whitespace().take(max_tokens).collect::<Vec<_>>().join(" ");
+    Ok(trimmed)
 }
 
 /// Compute cosine similarity between two embedding vectors

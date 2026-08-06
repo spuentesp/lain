@@ -35,8 +35,27 @@ pub fn semantic_search(
     let static_nodes = graph.get_all_nodes();
     for sn in static_nodes {
         if !masked_ids.contains(&sn.id) {
-            // Only search significant node types to reduce noise and O(N) pressure
-            if matches!(sn.node_type, NodeType::File | NodeType::Class | NodeType::Function | NodeType::Struct | NodeType::Trait) {
+            // Search all symbol-bearing node types so queries like "Tokenizer"
+            // can hit Enum variants, "GraphDatabase::save" can hit Impl methods,
+            // and "graph storage" can hit Module/Constant nodes too.
+            // Cross-runtime nodes (HttpRoute, Topic, Resource, Schema) are
+            // excluded — they're document-shaped, not code-shaped.
+            if matches!(sn.node_type,
+                NodeType::File
+                | NodeType::Namespace
+                | NodeType::Module
+                | NodeType::Package
+                | NodeType::Class
+                | NodeType::Interface
+                | NodeType::Struct
+                | NodeType::Enum
+                | NodeType::Trait
+                | NodeType::Function
+                | NodeType::Method
+                | NodeType::Property
+                | NodeType::Variable
+                | NodeType::Constant
+            ) {
                 all_nodes.push(sn);
             }
         }
@@ -60,7 +79,11 @@ pub fn semantic_search(
             Some(cached.clone())
         } else if let Some(ref e_json) = node.embedding {
             serde_json::from_str::<Vec<f32>>(e_json).ok()
-        } else if volatile_embed_count < 50 {
+        } else if volatile_embed_count < 500 {
+            // Raised from 50 → 500 so cold queries can embed a meaningful
+            // slice of the corpus on the fly. The previous cap meant
+            // anything beyond the first 50 nodes was effectively invisible
+            // until the background prewarm queue caught up.
             volatile_embed_count += 1;
             let text = build_enriched_text(node);
             embedder.embed(&text).ok()
