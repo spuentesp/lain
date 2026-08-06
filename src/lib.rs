@@ -17,6 +17,7 @@ pub mod overlay;
 pub mod query;
 pub mod schema;
 pub mod server;
+pub mod state;
 pub mod tools;
 pub mod treesitter;
 pub mod sensors;

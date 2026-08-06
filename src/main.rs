@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use lain::{LainMcpServer, LainServer};
+use lain::state::Projects;
 use lain::watcher::FileWatcher;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -48,6 +49,32 @@ enum Commands {
         #[arg(long)] uninstall: bool,
     },
     Ask,
+    /// Manage the project registry (`~/.config/lain/projects.toml`).
+    /// Use `lain projects add <name> <path>` then `lain use <name>` to
+    /// switch between projects without typing --workspace every time.
+    Projects {
+        #[command(subcommand)]
+        action: ProjectsAction,
+    },
+    /// Set the active project (shorthand for `lain projects use <name>`).
+    Use {
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectsAction {
+    /// List registered projects.
+    List,
+    /// Register a project by name and path.
+    Add {
+        name: String,
+        path: std::path::PathBuf,
+    },
+    /// Remove a project from the registry.
+    Forget { name: String },
+    /// Show the currently active project name.
+    Current,
 }
 
 #[tokio::main]
@@ -58,7 +85,10 @@ async fn main() -> Result<()> {
             Commands::Init { agent, workspace, embedding_model, transport, port, yes } => {
                 // Propagate top-level --workspace when subcommand didn't override it.
                 let workspace = workspace.unwrap_or(args.workspace);
-                return cmds::run_init(&agent, Some(&workspace), embedding_model.as_deref(), &transport, port, yes);
+                // Resolve workspace through the registry: --workspace wins,
+                // else the active project, else cwd's .lain, else error.
+                let resolved = resolve_workspace_path(&workspace);
+                return cmds::run_init(&agent, Some(&resolved), embedding_model.as_deref(), &transport, port, yes);
             }
             Commands::Query { expression, workspace } => {
                 // Top-level --workspace is the documented invocation form
@@ -69,10 +99,27 @@ async fn main() -> Result<()> {
                 } else {
                     workspace
                 };
-                return cmds::run_query(&expression, &workspace);
+                let resolved = resolve_workspace_path(&workspace);
+                return cmds::run_query(&expression, &resolved);
             }
             Commands::Hook { agent, uninstall } => return cmds::run_hook_install(agent, uninstall),
             Commands::Ask => return cmds::run_ask(),
+            Commands::Projects { action } => match action {
+                ProjectsAction::List => return cmds::projects::run_list(),
+                ProjectsAction::Add { name, path } => return cmds::projects::run_add(&name, &path),
+                ProjectsAction::Forget { name } => return cmds::projects::run_forget(&name),
+                ProjectsAction::Current => {
+                    // Print active project. If none is set, return a
+                    // custom error that main() can map to exit code 1.
+                    if let Some(name) = lain::state::Projects::active_name() {
+                        println!("{}", name);
+                        return Ok(());
+                    } else {
+                        return Err(anyhow::anyhow!("no active project; use `lain use <name>`"));
+                    }
+                }
+            },
+            Commands::Use { name } => return cmds::projects::run_use(&name),
         }
     }
 
@@ -141,4 +188,36 @@ async fn main() -> Result<()> {
 
     std::future::pending::<()>().await;
     unreachable!()
+}
+
+/// Resolve the workspace path used by subcommands that don't accept
+/// their own --workspace flag (e.g. `lain init`, `lain query`).
+///
+/// Priority:
+/// 1. The flag value, if it's not the clap default "."
+/// 2. The active project from `lain use <name>` (if any)
+/// 3. `.lain/` in the current working directory
+/// 4. Error: "no active project; use `lain projects add` then `lain use`"
+fn resolve_workspace_path(explicit: &std::path::Path) -> std::path::PathBuf {
+    // 1. explicit non-default wins
+    if explicit != std::path::Path::new(".") {
+        return explicit.to_path_buf();
+    }
+    // 2. active project from registry
+    if let Some(name) = Projects::active_name() {
+        for p in Projects::list() {
+            if p.name == name {
+                return p.path;
+            }
+        }
+    }
+    // 3. .lain in cwd
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join(".lain").exists() {
+            return cwd;
+        }
+    }
+    // 4. error — clap will surface this as a non-zero exit
+    eprintln!("no active project; use `lain projects add <name> <path>` then `lain use <name>`, or pass --workspace <path>");
+    std::process::exit(1);
 }
