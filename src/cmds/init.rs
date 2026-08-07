@@ -4,7 +4,7 @@ use std::io::Write;
 
 /// Supported agent names. Anything else is a user error and `run_init` will
 /// refuse rather than silently writing nothing.
-const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "auto"];
+const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "kimi", "auto"];
 
 pub fn run_init(
     agent: &str,
@@ -83,6 +83,10 @@ pub fn run_init(
         "cline" => {
             let cline_dir = home_dir.join(".cline");
             init_cline(&workspace, embedding_model, transport, port, yes, &cline_dir)?;
+        }
+        "kimi" => {
+            let kimi_root = home_dir.join(".kimi-code");
+            init_kimi(&workspace, embedding_model, transport, port, yes, &kimi_root)?;
         }
         other => {
             anyhow::bail!("Unknown agent '{}'", other);
@@ -635,3 +639,93 @@ lain query "find Function | limit 20"                                           
 - `get_cross_runtime_callers` — cross-language callers
 - `get_file_diff`, `get_commit_history` — git operations
 "#;
+
+/// Install lain as a kimi-code plugin. Kimi uses a `managed/` plugin
+/// directory with a `kimi.plugin.json` manifest and a `skills/<name>/`
+/// subdirectory for skill markdown. The `command` field must be a
+/// PATH-resolvable name (or start with `./`); an absolute path is
+/// rejected by the plugin manager.
+fn init_kimi(
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    transport: &str,
+    port: u16,
+    _yes: bool,
+    kimi_root: &std::path::Path,
+) -> Result<()> {
+    let plugin_root = kimi_root.join("plugins/managed/lain");
+    fs::create_dir_all(plugin_root.join("skills/lain"))?;
+
+    // Resolve the lain binary. Use PATH lookup (the plugin manager
+    // rejects absolute paths in the `command` field). The `lain`
+    // binary should be on PATH after `install.sh`.
+    let lain_cmd = "lain";
+
+    // Build the mcpServers entry with the actual workspace + model.
+    let plugin_json = serde_json::json!({
+        "name": "lain",
+        "version": "0.4.0",
+        "description": "Structural code intelligence for AI coding agents with semantic search, blast radius, and architectural analysis.",
+        "author": { "name": "spuentesp", "homepage": "https://github.com/spuentesp/lain" },
+        "homepage": "https://github.com/spuentesp/lain",
+        "license": "MIT",
+        "keywords": ["code-intelligence", "mcp", "semantic-search", "architecture", "rust"],
+        "mcpServers": {
+            "lain": {
+                "command": lain_cmd,
+                "args": [
+                    "--workspace", workspace.to_string_lossy().to_string(),
+                    "--embedding-model", embedding_model.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+                    "--transport", transport,
+                    "--port", port.to_string(),
+                ],
+            },
+        },
+        "interface": {
+            "displayName": "LAIN Code Intelligence",
+            "shortDescription": "Structural code intelligence: semantic search, blast radius, dependency traces, architectural analysis",
+            "developerName": "spuentesp",
+        },
+    });
+    let plugin_path = plugin_root.join("kimi.plugin.json");
+    fs::write(&plugin_path, serde_json::to_string_pretty(&plugin_json)?)?;
+
+    // Copy the canonical skill markdown. This is the content from
+    // hooks/kimi/skills/lain/SKILL.md in the lain source tree.
+    let skill_md_src = std::env::var("CARGO_MANIFEST_DIR")
+        .map(|d| std::path::PathBuf::from(d).join("hooks/kimi/skills/lain/SKILL.md"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("hooks/kimi/skills/lain/SKILL.md"));
+    if skill_md_src.exists() {
+        let skill_md_dst = plugin_root.join("skills/lain/SKILL.md");
+        fs::copy(&skill_md_src, &skill_md_dst)?;
+    }
+
+    // Register the plugin in installed.json so the plugin manager
+    // picks it up on the next session start.
+    let installed_path = kimi_root.join("plugins/installed.json");
+    let mut registry: serde_json::Value = if installed_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&installed_path)?)
+            .unwrap_or_else(|_| serde_json::json!({"version": 1, "plugins": []}))
+    } else {
+        serde_json::json!({"version": 1, "plugins": []})
+    };
+    if !registry.get("plugins").map(|p| p.is_array()).unwrap_or(false) {
+        registry["plugins"] = serde_json::json!([]);
+    }
+    let plugins_arr = registry["plugins"].as_array_mut().unwrap();
+    // Remove any existing lain entry so re-running init replaces it.
+    plugins_arr.retain(|p| p.get("id").and_then(|v| v.as_str()) != Some("lain"));
+    plugins_arr.push(serde_json::json!({
+        "id": "lain",
+        "root": plugin_root.to_string_lossy().to_string(),
+        "source": "local-path",
+        "enabled": true,
+        "originalSource": plugin_root.to_string_lossy().to_string(),
+    }));
+    fs::create_dir_all(installed_path.parent().unwrap())?;
+    fs::write(&installed_path, serde_json::to_string_pretty(&registry)?)?;
+
+    println!("Installed kimi-code plugin: {}", plugin_root.display());
+    println!("Restart kimi-code (or open a new window) to load the plugin.");
+    Ok(())
+}

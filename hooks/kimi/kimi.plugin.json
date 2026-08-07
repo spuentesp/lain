@@ -1,0 +1,33 @@
+{
+  "name": "lain",
+  "version": "0.4.0",
+  "description": "Structural code intelligence for AI coding agents with semantic search, blast radius, and architectural analysis.",
+  "author": {
+    "name": "spuentesp",
+    "homepage": "https://github.com/spuentesp/lain"
+  },
+  "homepage": "https://github.com/spuentesp/lain",
+  "license": "MIT",
+  "keywords": [
+    "code-intelligence",
+    "mcp",
+    "semantic-search",
+    "architecture",
+    "rust"
+  ],
+  "mcpServers": {
+    "lain": {
+      "command": "lain",
+      "args": [
+        "--workspace", "REPLACE_ME_AT_INSTALL",
+        "--embedding-model", "REPLACE_ME_AT_INSTALL",
+        "--transport", "stdio"
+      ]
+    }
+  },
+  "interface": {
+    "displayName": "LAIN Code Intelligence",
+    "shortDescription": "Structural code intelligence: semantic search, blast radius, dependency traces, architectural analysis",
+    "developerName": "spuentesp"
+  }
+}
