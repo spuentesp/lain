@@ -137,10 +137,130 @@ impl GraphDatabase {
         Ok(())
     }
 
+    pub fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
+        self.insert_edge(&edge)
+    }
+
     pub fn get_node(&self, id: &str) -> Result<Option<GraphNode>, LainError> {
         let graph = self.graph.read();
 
         Ok(self.index_map.get(id).and_then(|r| graph.node_weight(*r.value()).cloned()))
+    }
+
+    pub fn get_node_by_id(&self, id: &str) -> Result<Option<GraphNode>, LainError> {
+        self.get_node(id)
+    }
+
+    pub fn traverse(&self, start: &str, edge_type: EdgeType, depth: std::ops::Range<u32>) -> Result<Vec<GraphNode>, LainError> {
+        let graph = self.graph.read();
+        let Some(start_idx) = self.index_map.get(start).map(|r| *r.value()) else {
+            return Ok(Vec::new());
+        };
+        let min_depth = depth.start;
+        let max_depth = depth.end;
+        if min_depth > max_depth {
+            return Ok(Vec::new());
+        }
+
+        let mut visited = HashSet::from([start_idx]);
+        let mut queue = VecDeque::from([(start_idx, 0)]);
+        let mut result = Vec::new();
+        while let Some((current, current_depth)) = queue.pop_front() {
+            if current_depth >= max_depth {
+                continue;
+            }
+            for graph_edge in graph.edges_directed(current, Direction::Outgoing) {
+                if graph_edge.weight().edge_type != edge_type {
+                    continue;
+                }
+                let next = graph_edge.target();
+                if !visited.insert(next) {
+                    continue;
+                }
+                let next_depth = current_depth + 1;
+                if let Some(node) = graph.node_weight(next).cloned() {
+                    if next_depth >= min_depth {
+                        result.push(node);
+                    }
+                    queue.push_back((next, next_depth));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn find_path(&self, from: &str, to: &str) -> Result<Vec<GraphNode>, LainError> {
+        let graph = self.graph.read();
+        let (Some(from_idx), Some(to_idx)) = (
+            self.index_map.get(from).map(|r| *r.value()),
+            self.index_map.get(to).map(|r| *r.value()),
+        ) else {
+            return Ok(Vec::new());
+        };
+        let mut parents = HashMap::from([(from_idx, None)]);
+        let mut queue = VecDeque::from([from_idx]);
+        while let Some(current) = queue.pop_front() {
+            if current == to_idx {
+                break;
+            }
+            for graph_edge in graph.edges_directed(current, Direction::Outgoing) {
+                let next = graph_edge.target();
+                if !parents.contains_key(&next) {
+                    parents.insert(next, Some(current));
+                    queue.push_back(next);
+                }
+            }
+        }
+        if !parents.contains_key(&to_idx) {
+            return Ok(Vec::new());
+        }
+        let mut indices = Vec::new();
+        let mut current = Some(to_idx);
+        while let Some(idx) = current {
+            indices.push(idx);
+            current = parents[&idx];
+        }
+        indices.reverse();
+        Ok(indices.into_iter().filter_map(|idx| graph.node_weight(idx).cloned()).collect())
+    }
+
+    pub fn subgraph_around(&self, center: &str, radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError> {
+        let graph = self.graph.read();
+        let Some(center_idx) = self.index_map.get(center).map(|r| *r.value()) else {
+            return Ok(Vec::new());
+        };
+        let mut visited = HashSet::from([center_idx]);
+        let mut queue = VecDeque::from([(center_idx, 0)]);
+        let mut indices = Vec::new();
+        while let Some((current, current_depth)) = queue.pop_front() {
+            indices.push(current);
+            if current_depth >= radius {
+                continue;
+            }
+            for graph_edge in graph.edges_directed(current, Direction::Outgoing) {
+                let next = graph_edge.target();
+                if visited.insert(next) {
+                    queue.push_back((next, current_depth + 1));
+                }
+            }
+        }
+        let selected: HashSet<_> = indices.iter().copied().collect();
+        Ok(indices.into_iter().filter_map(|idx| {
+            let node = graph.node_weight(idx).cloned()?;
+            let edges = graph.edges_directed(idx, Direction::Outgoing)
+                .filter(|e| selected.contains(&e.target()))
+                .map(|e| e.weight().clone())
+                .collect();
+            Some((node, edges))
+        }).collect())
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.graph.read().node_count()
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.graph.read().edge_count()
     }
 
     pub fn get_nodes_by_type(&self, node_type: NodeType) -> Result<Vec<GraphNode>, LainError> {
@@ -470,6 +590,22 @@ impl GraphDatabase {
         tokio::fs::write(&tmp_path, data).await.map_err(|e| LainError::Database(e.to_string()))?;
         tokio::fs::rename(&tmp_path, &persistence_path).await.map_err(|e| LainError::Database(e.to_string()))?;
 
+        Ok(())
+    }
+
+    pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
+        let state = GraphState {
+            graph: self.graph.read().clone(),
+            index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
+            last_commit: self.last_commit.read().clone(),
+        };
+        let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
+        if let Some(parent) = self.persistence_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| LainError::Database(e.to_string()))?;
+        }
+        let tmp_path = self.persistence_path.with_extension("tmp");
+        std::fs::write(&tmp_path, data).map_err(|e| LainError::Database(e.to_string()))?;
+        std::fs::rename(&tmp_path, &self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
         Ok(())
     }
 

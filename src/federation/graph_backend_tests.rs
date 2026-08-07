@@ -1,7 +1,7 @@
 //! Contract tests for GraphBackend. The same tests will run against PetgraphBackend
 //! in Task 7. Here we use a simple in-memory HashMap impl to define the contract.
 use crate::error::LainError;
-use crate::federation::graph_backend::GraphBackend;
+use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -68,4 +68,26 @@ fn contract_upsert_edge_increments_count() {
 fn contract_get_missing_returns_none() {
     let b = HashMapBackend::new();
     assert!(b.get_node("nope").unwrap().is_none());
+}
+
+#[test]
+fn petgraph_backend_persists_and_reloads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = PetgraphBackend::new(tmp.path()).unwrap();
+    b.upsert_node_global(
+        "repo1:Function:src/lib.rs:f",
+        NodeType::Function,
+        "src/lib.rs",
+        "f",
+    )
+    .unwrap();
+    assert_eq!(b.node_count(), 1);
+    drop(b);
+
+    let b2 = PetgraphBackend::new(tmp.path()).unwrap();
+    assert_eq!(b2.node_count(), 1);
+    assert!(b2
+        .get_node("repo1:Function:src/lib.rs:f")
+        .unwrap()
+        .is_some());
 }
