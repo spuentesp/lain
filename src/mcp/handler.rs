@@ -39,6 +39,22 @@ fn tool_text_result(text: String, is_error: bool) -> CallToolResult {
     }
 }
 
+/// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
+/// error on malformed input. Used by both stdio and HTTP dispatch arms for
+/// `get_cross_repo_blast_radius*`.
+fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
+    let (start_s, end_s) = s.split_once("..").ok_or_else(|| {
+        format!("Invalid depth: expected \"<start>..<end>\", got {s:?}")
+    })?;
+    let start: u32 = start_s.trim().parse().map_err(|e| {
+        format!("Invalid depth start: {e}")
+    })?;
+    let end: u32 = end_s.trim().parse().map_err(|e| {
+        format!("Invalid depth end: {e}")
+    })?;
+    Ok(start..end)
+}
+
 /// Tool definitions exposed only when the MCP server was constructed with a
 /// `FederatedIndex`. Centralized here so the stdio `tools/list` response, the
 /// stdio `tools/call` dispatch, and the HTTP JSON-RPC `tools/list` / `tools/call`
@@ -63,6 +79,16 @@ const FEDERATION_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "search_org",
         "Case-insensitive substring search across every repo's symbols (matched on name or path). Args: query (substring), limit (max results, parsed as usize). Returns matches sorted by (repo_id, name).",
         &["query", "limit"],
+    ),
+    (
+        "get_cross_repo_blast_radius",
+        "Resolve a symbol across the federation, traverse outgoing Calls edges in [min_depth, max_depth) (depth is a u32 range like \"1..3\"), and group visited nodes by repo. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit.",
+        &["symbol", "depth"],
+    ),
+    (
+        "get_cross_repo_blast_radius_for_repo",
+        "Same as get_cross_repo_blast_radius but the caller disambiguates the repo explicitly via repo_id, bypassing symbol resolution. Args: repo_id, symbol, depth (u32 range like \"1..3\"). Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}.",
+        &["repo_id", "symbol", "depth"],
     ),
 ];
 
@@ -223,6 +249,79 @@ impl ServerHandler for LainHandler {
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
                     ));
+                }
+                "get_cross_repo_blast_radius" => {
+                    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: symbol".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth_str = match args.get("depth").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: depth".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth = match parse_depth_range(depth_str) {
+                        Ok(r) => r,
+                        Err(e) => return Ok(tool_text_result(e, true)),
+                    };
+                    return match crate::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
+                        Ok(r) => Ok(tool_text_result(
+                            serde_json::to_string(&r)
+                                .unwrap_or_else(|e| format!("serialization error: {e}")),
+                            false,
+                        )),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                    };
+                }
+                "get_cross_repo_blast_radius_for_repo" => {
+                    let repo_id = match args.get("repo_id").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: repo_id".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: symbol".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth_str = match args.get("depth").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: depth".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth = match parse_depth_range(depth_str) {
+                        Ok(r) => r,
+                        Err(e) => return Ok(tool_text_result(e, true)),
+                    };
+                    return match crate::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
+                        Ok(r) => Ok(tool_text_result(
+                            serde_json::to_string(&r)
+                                .unwrap_or_else(|e| format!("serialization error: {e}")),
+                            false,
+                        )),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                    };
                 }
                 _ => {}
             }
@@ -527,6 +626,58 @@ async fn handle_request(
                                         Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
                                     };
                                     return Ok(jsonrpc_tool_result(id, &text, false));
+                                }
+                                "get_cross_repo_blast_radius" => {
+                                    let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
+                                    };
+                                    let depth_str = match args_map.get("depth").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: depth", true)),
+                                    };
+                                    let depth = match parse_depth_range(depth_str) {
+                                        Ok(r) => r,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
+                                    };
+                                    match crate::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
+                                        Ok(r) => {
+                                            let text = match serde_json::to_string(&r) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            return Ok(jsonrpc_tool_result(id, &text, false));
+                                        }
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    }
+                                }
+                                "get_cross_repo_blast_radius_for_repo" => {
+                                    let repo_id = match args_map.get("repo_id").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: repo_id", true)),
+                                    };
+                                    let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
+                                    };
+                                    let depth_str = match args_map.get("depth").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: depth", true)),
+                                    };
+                                    let depth = match parse_depth_range(depth_str) {
+                                        Ok(r) => r,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
+                                    };
+                                    match crate::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
+                                        Ok(r) => {
+                                            let text = match serde_json::to_string(&r) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            return Ok(jsonrpc_tool_result(id, &text, false));
+                                        }
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    }
                                 }
                                 _ => {}
                             }
