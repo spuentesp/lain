@@ -15,6 +15,7 @@
 
 use lain::federation::federation_index_for_test;
 use lain::mcp::get_cross_repo_blast_radius;
+use lain::mcp::get_federation_health;
 use std::time::Instant;
 
 #[test]
@@ -63,5 +64,19 @@ fn small_fixture_blast_radius_under_100ms_p99() {
         p99 < 100,
         "p99 = {p99}ms, target < 100ms (median = {median}ms, min = {min}ms, \
          max = {max}ms)"
+    );
+}
+
+#[test]
+#[ignore]
+fn large_fixture_cold_start_under_30_min() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = federation_index_for_test(&tmp.path(), 200, 50_000).unwrap();
+    let h = get_federation_health(&fed);
+    assert_eq!(h.total_repos, 200);
+    assert!(h.total_nodes >= 200 * 50_000, "expected at least 10M nodes");
+    assert!(
+        h.memory_estimate_bytes < 32 * 1024 * 1024 * 1024,
+        "expected < 32 GB"
     );
 }
