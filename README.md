@@ -342,7 +342,7 @@ curl -s -X POST http://localhost:9999/mcp \
 
 ---
 
-## Recent Improvements (0.3.x)
+## Recent Improvements (0.4.x)
 
 Beyond the headline features above, recent versions added:
 
