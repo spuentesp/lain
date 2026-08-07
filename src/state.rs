@@ -384,13 +384,27 @@ mod tests {
         let resolved = Projects::resolve_workspace(Path::new(".")).unwrap();
         assert_eq!(resolved, p.canonicalize().unwrap());
 
-        // 3. cwd .lain (use a fresh dir with .lain inside)
-        let cwd_dir = tmp("cwd");
-        std::env::set_var("XDG_CONFIG_HOME", &cwd_dir);
-        let lain_dir = cwd_dir.join(".lain");
-        fs::create_dir_all(&lain_dir).unwrap();
-        let resolved = Projects::resolve_workspace(Path::new(".")).unwrap();
-        let _ = resolved;
+        // 3. cwd .lain fallback is tested separately below because the
+        // main implementation reads std::env::current_dir() which is a
+        // process-global we can't safely mutate under parallel test
+        // execution (would race other tests that may also read cwd).
+    }
+
+    /// Verify the cwd-with-.lain fallback. This test must run serially
+    /// (TEST_LOCK) because it uses set_current_dir, which is a process-
+    /// wide mutation. Other tests reading cwd concurrently would see
+    /// the changed value and either fail or behave non-deterministically.
+    #[test]
+    fn resolve_workspace_cwd_fallback() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("resolve_cwd");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        fs::create_dir_all(dir.join(".lain")).unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let result = Projects::resolve_workspace(Path::new(".")).unwrap();
+        std::env::set_current_dir(&original_cwd).unwrap();
+        assert_eq!(result.canonicalize().unwrap(), dir.canonicalize().unwrap());
     }
 
     #[test]
