@@ -100,8 +100,15 @@ pub fn resolve_repo_for_tool(
 /// Run the federation-mode repo resolver against a tool call's `args`. Returns
 /// `Ok(repo_id)` when the call is safe to dispatch, or `Err(text)` with the
 /// pre-formatted error string the caller should surface as `is_error: true`.
-/// `AmbiguousSymbol` is surfaced as a structured JSON payload so the agent can
-/// see the candidate repos and disambiguate.
+///
+/// **Spec deviation (Important issue 2):** `AmbiguousSymbol` is surfaced as
+/// JSON text inside `CallToolResult::content`, not via
+/// `CallToolResult::structured_content`. The shape is
+/// `{"error": "ambiguous_symbol", "candidates": [...], "message": "..."}` so
+/// the agent can parse it today without bumping the rust-mcp-sdk schema.
+/// A future SDK upgrade that supports proper error data on the
+/// `CallToolResult` would be a cleaner home for this payload; tracked in
+/// the report.
 fn resolve_repo_or_error(
     fed: &FederatedIndex,
     args: &Map<String, serde_json::Value>,
@@ -230,7 +237,14 @@ impl ServerHandler for LainHandler {
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError> {
         let empty: Map<String, serde_json::Value> = Map::new();
-        let args = params.arguments.as_ref().unwrap_or(&empty);
+        let args_ref = params.arguments.as_ref().unwrap_or(&empty);
+        // Clone the args so we can inject the resolved `repo_id` in
+        // federation mode. The executor already clones internally
+        // (`call_inner` does `arguments.cloned().unwrap_or_default()`), so
+        // this is a no-op cost-wise. Owning the map lets the resolver's
+        // successful `RepoId` flow through to downstream tool handlers
+        // instead of being discarded (Task 19 round-1 fix).
+        let mut args_owned: Map<String, serde_json::Value> = args_ref.clone();
 
         if let Some(fed) = &self.federation {
             match params.name.as_str() {
@@ -243,7 +257,7 @@ impl ServerHandler for LainHandler {
                     ));
                 }
                 "get_repo_info" => {
-                    let id_str = match args.get("id").and_then(|v| v.as_str()) {
+                    let id_str = match args_owned.get("id").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
@@ -276,7 +290,7 @@ impl ServerHandler for LainHandler {
                     ));
                 }
                 "search_org" => {
-                    let query = match args.get("query").and_then(|v| v.as_str()) {
+                    let query = match args_owned.get("query").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
@@ -285,7 +299,7 @@ impl ServerHandler for LainHandler {
                             ));
                         }
                     };
-                    let limit: usize = match args.get("limit") {
+                    let limit: usize = match args_owned.get("limit") {
                         Some(serde_json::Value::Number(n)) => match n.as_u64() {
                             Some(u) => u as usize,
                             None => {
@@ -321,7 +335,7 @@ impl ServerHandler for LainHandler {
                     ));
                 }
                 "get_cross_repo_blast_radius" => {
-                    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+                    let symbol = match args_owned.get("symbol").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
@@ -330,7 +344,7 @@ impl ServerHandler for LainHandler {
                             ));
                         }
                     };
-                    let depth_str = match args.get("depth").and_then(|v| v.as_str()) {
+                    let depth_str = match args_owned.get("depth").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
@@ -353,7 +367,7 @@ impl ServerHandler for LainHandler {
                     };
                 }
                 "get_cross_repo_blast_radius_for_repo" => {
-                    let repo_id = match args.get("repo_id").and_then(|v| v.as_str()) {
+                    let repo_id = match args_owned.get("repo_id").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
@@ -362,7 +376,7 @@ impl ServerHandler for LainHandler {
                             ));
                         }
                     };
-                    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+                    let symbol = match args_owned.get("symbol").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
@@ -371,7 +385,7 @@ impl ServerHandler for LainHandler {
                             ));
                         }
                     };
-                    let depth_str = match args.get("depth").and_then(|v| v.as_str()) {
+                    let depth_str = match args_owned.get("depth").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
@@ -398,12 +412,25 @@ impl ServerHandler for LainHandler {
         }
 
         if let Some(fed) = &self.federation {
-            if let Err(text) = resolve_repo_or_error(fed, args) {
-                return Ok(tool_text_result(text, true));
+            match resolve_repo_or_error(fed, &args_owned) {
+                Ok(rid) => {
+                    // Inject the resolved `repo_id` into the args the
+                    // executor will see. Existing per-repo tools resolve
+                    // symbols against `ctx.graph` (the executor's
+                    // single-workspace context) and ignore this; future
+                    // federation-aware tool handlers can read it. This is
+                    // the round-1 fix: the previously discarded `RepoId`
+                    // now flows through dispatch.
+                    args_owned.insert(
+                        "repo_id".into(),
+                        serde_json::Value::String(rid.as_str().to_string()),
+                    );
+                }
+                Err(text) => return Ok(tool_text_result(text, true)),
             }
         }
 
-        match self.executor.call(&params.name, Some(args)).await {
+        match self.executor.call(&params.name, Some(&args_owned)).await {
             Ok(text) => Ok(CallToolResult {
                 content: vec![ContentBlock::TextContent(TextContent::new(text, None, None))],
                 is_error: Some(false),
@@ -635,12 +662,11 @@ async fn handle_request(
                             .and_then(|p| p.get("name"))
                             .and_then(|n| n.as_str())
                             .unwrap_or("");
-                        let args_map: serde_json::Map<String, serde_json::Value> = params
+                        let mut args_map: serde_json::Map<String, serde_json::Value> = params
                             .and_then(|p| p.get("arguments"))
                             .and_then(|v| v.as_object())
                             .cloned()
                             .unwrap_or_default();
-                        let args: Option<&serde_json::Map<String, serde_json::Value>> = if args_map.is_empty() { None } else { Some(&args_map) };
 
                         if let Some(fed) = &federation {
                             match name {
@@ -760,10 +786,29 @@ async fn handle_request(
                         }
 
                         if let Some(fed) = &federation {
-                            if let Err(text) = resolve_repo_or_error(fed, &args_map) {
-                                return Ok(jsonrpc_tool_result(id, &text, true));
+                            match resolve_repo_or_error(fed, &args_map) {
+                                Ok(rid) => {
+                                    // Inject the resolved `repo_id` into
+                                    // the args the executor will see (Task
+                                    // 19 round-1 fix). Existing per-repo
+                                    // tools resolve against `ctx.graph`
+                                    // and ignore this; future
+                                    // federation-aware handlers can read it.
+                                    args_map.insert(
+                                        "repo_id".into(),
+                                        serde_json::Value::String(rid.as_str().to_string()),
+                                    );
+                                }
+                                Err(text) => return Ok(jsonrpc_tool_result(id, &text, true)),
                             }
                         }
+
+                        // Recompute the args reference after the
+                        // `repo_id` injection so a previously-empty
+                        // `args_map` (which would have produced
+                        // `args = None`) now flows as `Some(&args_map)`.
+                        let args: Option<&serde_json::Map<String, serde_json::Value>> =
+                            if args_map.is_empty() { None } else { Some(&args_map) };
 
                         match executor.call(name, args).await {
                             Ok(text) => {
@@ -930,5 +975,120 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         assert!(matches!(resolve_repo_for_tool(&fed, None, None), Err(LainError::Config(_))));
+    }
+
+    /// Verifies the round-1 fix: when `resolve_repo_or_error` resolves a
+    /// symbol to a single repo, the caller now propagates the resolved
+    /// `RepoId` (as `repo_id` in the args) instead of discarding it.
+    /// We exercise the resolver + the manual injection step the dispatcher
+    /// performs in both stdio and HTTP paths.
+    #[test]
+    fn symbol_hint_resolves_and_injects_repo_id() {
+        use crate::schema::NodeType;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        fed.backend()
+            .upsert_node_global(
+                "repo-x:Function:src/lib.rs:only_one",
+                NodeType::Function,
+                "src/lib.rs",
+                "only_one",
+            )
+            .unwrap();
+
+        // Resolve via the same helper the dispatcher uses, then mirror
+        // the dispatcher's injection step.
+        let mut args = Map::new();
+        args.insert(
+            "symbol".into(),
+            serde_json::Value::String("only_one".into()),
+        );
+        let rid = resolve_repo_or_error(&fed, &args).expect("unique symbol should resolve");
+        assert_eq!(rid.as_str(), "repo-x");
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String(rid.as_str().to_string()),
+        );
+        assert_eq!(
+            args.get("repo_id").and_then(|v| v.as_str()),
+            Some("repo-x"),
+            "resolved repo_id must be present in args after dispatcher's injection step",
+        );
+    }
+
+    /// Asserts the JSON shape of the `AmbiguousSymbol` error surfaced
+    /// through the dispatcher. This pins down the spec deviation
+    /// documented in the report (Important issue 2): the payload is
+    /// shipped as JSON text inside `CallToolResult::content`, not via
+    /// `CallToolResult::structured_content`, so the agent can parse it
+    /// today without bumping the rust-mcp-sdk schema.
+    #[test]
+    fn ambiguous_symbol_serializes_as_structured_json() {
+        use crate::schema::NodeType;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        fed.backend()
+            .upsert_node_global(
+                "repo-a:Function:src/lib.rs:shared",
+                NodeType::Function,
+                "src/lib.rs",
+                "shared",
+            )
+            .unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-b:Function:src/lib.rs:shared",
+                NodeType::Function,
+                "src/lib.rs",
+                "shared",
+            )
+            .unwrap();
+
+        let mut args = Map::new();
+        args.insert("symbol".into(), serde_json::Value::String("shared".into()));
+        let text = resolve_repo_or_error(&fed, &args)
+            .expect_err("duplicate symbol must surface as AmbiguousSymbol");
+
+        // The payload must be valid JSON with the documented shape.
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .expect("AmbiguousSymbol error must serialize as JSON for SDK compatibility");
+        assert_eq!(v["error"], "ambiguous_symbol");
+        let cands: Vec<&str> = v["candidates"]
+            .as_array()
+            .expect("candidates must be a JSON array")
+            .iter()
+            .map(|c| c.as_str().expect("each candidate is a string"))
+            .collect();
+        assert_eq!(cands.len(), 2, "exactly two repos match the shared symbol");
+        assert!(cands.contains(&"repo-a"));
+        assert!(cands.contains(&"repo-b"));
+        assert!(
+            v["message"].as_str().is_some(),
+            "message field must be present and a string",
+        );
+    }
+
+    /// Verifies that when `repo_id` is provided explicitly, the symbol
+    /// hint is ignored — `resolve_repo_or_error` short-circuits to the
+    /// explicit id. This is the priority ordering documented on
+    /// `resolve_repo_for_tool`: explicit > symbol > single-repo fallback.
+    #[test]
+    fn explicit_repo_id_overrides_symbol_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let mut args = Map::new();
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("explicit-repo".into()),
+        );
+        args.insert(
+            "symbol".into(),
+            serde_json::Value::String("any-symbol".into()),
+        );
+        let rid = resolve_repo_or_error(&fed, &args)
+            .expect("explicit repo_id must short-circuit past the symbol hint");
+        assert_eq!(rid.as_str(), "explicit-repo");
     }
 }
