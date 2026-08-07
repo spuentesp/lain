@@ -88,3 +88,63 @@ impl RepoSource for LocalCloneSource {
         self.last_refreshed().elapsed().map(|e| e > max_age).unwrap_or(true)
     }
 }
+
+pub struct ShallowCloneSource {
+    inner: LocalCloneSource,
+    refresh_interval: Duration,
+}
+
+impl ShallowCloneSource {
+    pub fn new(repo_id: RepoId, url: &str, git_ref: &str, local_path: PathBuf, refresh_interval: Duration) -> Result<Self, LainError> {
+        let inner = LocalCloneSource::new(repo_id, url, git_ref, local_path)?;
+        Ok(Self { inner, refresh_interval })
+    }
+    pub fn refresh_interval(&self) -> Duration { self.refresh_interval }
+}
+
+#[async_trait]
+impl RepoSource for ShallowCloneSource {
+    fn id(&self) -> &RepoId { self.inner.id() }
+    fn local_path(&self) -> &Path { self.inner.local_path() }
+    async fn fetch(&self) -> Result<(), LainError> {
+        use std::process::Command;
+        let path = self.inner.local_path.clone();
+        let url = self.inner.url.clone();
+        let git_ref = self.inner.git_ref.clone();
+        let last_refreshed = self.inner.last_refreshed.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), LainError> {
+            if !path.exists() {
+                let status = Command::new("git")
+                    .arg("clone").arg("--quiet").arg("--depth").arg("1").arg("--branch").arg(&git_ref).arg(&url).arg(&path)
+                    .status()
+                    .map_err(|e| LainError::Git(format!("git clone --depth 1 failed to start: {e}")))?;
+                if !status.success() {
+                    return Err(LainError::Git(format!("git clone --depth 1 {} failed", url)));
+                }
+            } else {
+                let fetch = Command::new("git")
+                    .current_dir(&path)
+                    .arg("fetch").arg("--quiet").arg("--depth").arg("1").arg("origin").arg(&git_ref)
+                    .status()
+                    .map_err(|e| LainError::Git(format!("git fetch --depth 1 failed: {e}")))?;
+                if !fetch.success() {
+                    return Err(LainError::Git("git fetch --depth 1 failed".into()));
+                }
+                let reset = Command::new("git")
+                    .current_dir(&path)
+                    .arg("reset").arg("--hard").arg(format!("origin/{}", git_ref))
+                    .status()
+                    .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
+                if !reset.success() {
+                    return Err(LainError::Git(format!("git reset to origin/{} failed", git_ref)));
+                }
+            }
+            *last_refreshed.write() = SystemTime::now();
+            Ok(())
+        }).await.map_err(|e| LainError::Git(format!("join error: {e}")))?
+    }
+    fn last_refreshed(&self) -> SystemTime { self.inner.last_refreshed() }
+    fn is_stale(&self, max_age: Duration) -> bool {
+        self.inner.is_stale(max_age)
+    }
+}
