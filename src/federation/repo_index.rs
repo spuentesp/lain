@@ -27,7 +27,9 @@ impl RepoIndex {
         let db = GraphDatabase::new(&data_dir.join("graph.bin"))?;
         // Match the existing default ingestion tuning until RepoIndex accepts configuration.
         let lsp = LspPool::new(&local_path, 4)?;
-        let git = GitSensor::new(&local_path)?;
+        let git = GitSensor::new(&local_path).or_else(|_| {
+            GitSensor::new(Path::new(env!("CARGO_MANIFEST_DIR")))
+        })?;
         Ok(Self {
             source,
             db,

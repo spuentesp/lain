@@ -2,6 +2,7 @@ pub mod config;
 pub mod federated_index;
 pub mod graph_backend;
 pub mod health;
+pub mod loader;
 pub mod manifest;
 pub mod matching;
 pub mod repo_id;

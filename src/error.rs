@@ -56,6 +56,9 @@ pub enum LainError {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    #[error("Other error: {0}")]
+    Other(String),
+
     #[error("Ambiguous symbol: matches repos {0:?}")]
     AmbiguousSymbol(Vec<crate::federation::repo_id::RepoId>),
 }
