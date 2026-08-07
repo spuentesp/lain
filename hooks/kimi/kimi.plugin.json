@@ -19,8 +19,8 @@
     "lain": {
       "command": "lain",
       "args": [
-        "--workspace", "/home/sebastian/orca/workspaces/lain/langostino",
-        "--embedding-model", "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx",
+        "--workspace", "REPLACE_ME_AT_INSTALL",
+        "--embedding-model", "REPLACE_ME_AT_INSTALL",
         "--transport", "stdio"
       ]
     }
