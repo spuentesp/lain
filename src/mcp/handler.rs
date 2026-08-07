@@ -2,7 +2,9 @@
 //!
 //! Implements the ServerHandler trait to expose tools via MCP protocol
 
+use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
+use crate::federation::repo_id::RepoId;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
 use rust_mcp_sdk::{
@@ -53,6 +55,74 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
         format!("Invalid depth end: {e}")
     })?;
     Ok(start..end)
+}
+
+/// Resolve which repo an existing per-repo MCP tool call should be routed to
+/// when the server is in federation mode.
+///
+/// Priority:
+///   1. `explicit_repo` — caller passed `repo_id` in args; validate the id and return it.
+///   2. `symbol_hint` — caller passed `symbol`; defer to `FederatedIndex::resolve_symbol`
+///      (which can return `Ok`, `NotFound`, or `AmbiguousSymbol`).
+///   3. Neither — fall back to inspecting the federation: zero repos is an error,
+///      one repo is treated as the implicit target, multiple repos without any
+///      hint is an error so the agent is forced to disambiguate.
+///
+/// In single-workspace mode the existing dispatch path doesn't call this at all
+/// (the resolver would also be a no-op there: with one configured repo it
+/// returns that repo, and with the legacy executor the per-repo constructor
+/// already binds to the single repo).
+pub fn resolve_repo_for_tool(
+    fed: &FederatedIndex,
+    symbol_hint: Option<&str>,
+    explicit_repo: Option<&str>,
+) -> Result<RepoId, LainError> {
+    if let Some(r) = explicit_repo {
+        return RepoId::new(r);
+    }
+    match symbol_hint {
+        Some(s) => fed.resolve_symbol(s),
+        None => {
+            let listed = fed.list_repos();
+            if listed.is_empty() {
+                Err(LainError::Config("no repos registered".into()))
+            } else if listed.len() == 1 {
+                Ok(listed[0].0.clone())
+            } else {
+                Err(LainError::Config(
+                    "multiple repos; specify repo_id or symbol".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// Run the federation-mode repo resolver against a tool call's `args`. Returns
+/// `Ok(repo_id)` when the call is safe to dispatch, or `Err(text)` with the
+/// pre-formatted error string the caller should surface as `is_error: true`.
+/// `AmbiguousSymbol` is surfaced as a structured JSON payload so the agent can
+/// see the candidate repos and disambiguate.
+fn resolve_repo_or_error(
+    fed: &FederatedIndex,
+    args: &Map<String, serde_json::Value>,
+) -> Result<RepoId, String> {
+    let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
+    let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
+    match resolve_repo_for_tool(fed, symbol_hint, explicit_repo) {
+        Ok(rid) => Ok(rid),
+        Err(LainError::AmbiguousSymbol(candidates)) => {
+            let payload = serde_json::json!({
+                "error": "ambiguous_symbol",
+                "candidates": candidates
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>(),
+                "message": "Multiple repos match this symbol; specify repo_id or disambiguate."
+            });
+            Err(payload.to_string())
+        }
+        Err(e) => Err(format!("{}", e)),
+    }
 }
 
 /// Tool definitions exposed only when the MCP server was constructed with a
@@ -324,6 +394,12 @@ impl ServerHandler for LainHandler {
                     };
                 }
                 _ => {}
+            }
+        }
+
+        if let Some(fed) = &self.federation {
+            if let Err(text) = resolve_repo_or_error(fed, args) {
+                return Ok(tool_text_result(text, true));
             }
         }
 
@@ -683,6 +759,12 @@ async fn handle_request(
                             }
                         }
 
+                        if let Some(fed) = &federation {
+                            if let Err(text) = resolve_repo_or_error(fed, &args_map) {
+                                return Ok(jsonrpc_tool_result(id, &text, true));
+                            }
+                        }
+
                         match executor.call(name, args).await {
                             Ok(text) => {
                                 serde_json::json!({
@@ -825,4 +907,28 @@ async fn handle_request(
         .status(StatusCode::NOT_FOUND)
         .body(Full::new(Bytes::from("Not Found")))
         .unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::federation::federated_index::FederatedIndex;
+    use crate::federation::graph_backend::PetgraphBackend;
+    use crate::LainError;
+    use std::sync::Arc;
+
+    #[test]
+    fn explicit_repo_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let rid = resolve_repo_for_tool(&fed, None, Some("repo-a")).unwrap();
+        assert_eq!(rid.as_str(), "repo-a");
+    }
+
+    #[test]
+    fn no_symbol_no_explicit_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        assert!(matches!(resolve_repo_for_tool(&fed, None, None), Err(LainError::Config(_))));
+    }
 }
