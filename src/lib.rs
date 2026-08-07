@@ -8,6 +8,7 @@
 //! - MCP protocol server
 
 pub mod error;
+pub mod federation;
 pub mod graph;
 pub mod git;
 pub mod lsp;

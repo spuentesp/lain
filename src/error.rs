@@ -35,6 +35,12 @@ pub enum LainError {
     #[error("Unavailable: {0}")]
     Unavailable(String),
 
+    #[error("Invalid repo id: {0}")]
+    InvalidRepoId(String),
+
+    #[error("Invalid global id: {0}")]
+    InvalidGlobalId(String),
+
     #[error("Fatal: {0}")]
     Fatal(String),
 }
