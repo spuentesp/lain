@@ -63,3 +63,21 @@ async fn shallow_clone_source_is_stale_when_never_refreshed() {
     let src = ShallowCloneSource::new(dummy_id(), "https://example.com/repo.git", "main", PathBuf::from("/tmp/repo"), Duration::from_secs(60)).unwrap();
     assert!(src.is_stale(Duration::from_secs(60)));
 }
+
+#[tokio::test]
+async fn workspace_dir_source_id_and_path() {
+    let src = WorkspaceDirSource::new(dummy_id(), PathBuf::from("/srv/legacy")).unwrap();
+    assert_eq!(src.id().as_str(), "test-repo");
+    assert_eq!(src.local_path(), PathBuf::from("/srv/legacy").as_path());
+}
+
+#[tokio::test]
+async fn workspace_dir_source_fetch_is_noop() {
+    let src = WorkspaceDirSource::new(dummy_id(), PathBuf::from("/srv/legacy")).unwrap();
+    src.fetch().await.expect("fetch should be a no-op");
+}
+
+#[tokio::test]
+async fn workspace_dir_source_rejects_empty_path() {
+    assert!(WorkspaceDirSource::new(dummy_id(), PathBuf::new()).is_err());
+}

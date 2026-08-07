@@ -148,3 +148,29 @@ impl RepoSource for ShallowCloneSource {
         self.inner.is_stale(max_age)
     }
 }
+
+/// Back-compat source for today's single-workspace mode. The workspace
+/// directory already contains a checkout on disk; the file watcher handles
+/// live updates, so `fetch` is a no-op and the source is always fresh.
+pub struct WorkspaceDirSource {
+    repo_id: RepoId,
+    local_path: PathBuf,
+}
+
+impl WorkspaceDirSource {
+    pub fn new(repo_id: RepoId, local_path: PathBuf) -> Result<Self, LainError> {
+        if local_path.as_os_str().is_empty() {
+            return Err(LainError::Config("WorkspaceDirSource path cannot be empty".into()));
+        }
+        Ok(Self { repo_id, local_path })
+    }
+}
+
+#[async_trait]
+impl RepoSource for WorkspaceDirSource {
+    fn id(&self) -> &RepoId { &self.repo_id }
+    fn local_path(&self) -> &Path { &self.local_path }
+    async fn fetch(&self) -> Result<(), LainError> { Ok(()) }
+    fn last_refreshed(&self) -> SystemTime { SystemTime::now() }
+    fn is_stale(&self, _max_age: Duration) -> bool { false }
+}

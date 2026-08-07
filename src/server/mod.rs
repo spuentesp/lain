@@ -26,6 +26,14 @@ pub struct LainConfig {
     pub memory_path: PathBuf,
 }
 
+/// MCP transport for federation-mode servers. Stdio for local agents,
+/// Http for network-reachable deployments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Stdio,
+    Http,
+}
+
 /// Main Lain server
 #[derive(Clone)]
 pub struct LainServer {
@@ -86,6 +94,22 @@ impl LainServer {
             tool_executor,
             tuning,
         })
+    }
+
+    /// Federation-aware constructor. Builds a `LainServer` whose read paths
+    /// go through the federation's global graph rather than a single
+    /// `GraphDatabase`. Tool-by-tool routing is implemented in Tasks 15-19;
+    /// for now this is a `todo!()` placeholder that lets downstream code
+    /// compile against the signature.
+    pub fn with_federation(
+        _federation: std::sync::Arc<crate::federation::federated_index::FederatedIndex>,
+        _transport: Transport,
+        _port: u16,
+    ) -> Result<Self, LainError> {
+        // Body: build LainServer so that all read paths go through the federation's
+        // global graph. For now, store the Arc and route every tool call through it.
+        // Tool-by-tool routing is implemented in Tasks 15-19.
+        todo!("implemented in Task 15 onward — placeholder to compile")
     }
 
     pub fn clone_for_background(&self) -> Self {
