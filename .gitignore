@@ -26,6 +26,7 @@ models/
 # Python
 .mypy_cache/
 .pytest_cache/
+__pycache__/
 
 # Claude session files (local only, not for CI)
 .claude/scheduled_tasks.lock
