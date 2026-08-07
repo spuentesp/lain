@@ -54,7 +54,7 @@ impl Default for TuningConfig {
             anchor_weight: 0.3,
             lexical_weight: 0.0,
             query_prefix: String::new(),
-            cross_encoder_top_k: 0,
+            cross_encoder_top_k: 20,
             max_pattern_edges: 200,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),
