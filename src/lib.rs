@@ -40,6 +40,9 @@ mod graph_tests;
 #[cfg(test)]
 #[path = "federation/repo_source_tests.rs"]
 mod repo_source_tests;
+#[cfg(test)]
+#[path = "federation/graph_backend_tests.rs"]
+mod graph_backend_tests;
 
 pub use error::LainError;
 pub use mcp::LainMcpServer;
