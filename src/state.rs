@@ -135,7 +135,7 @@ impl Projects {
         if !canon.is_absolute() {
             return Err(RegistryError::NotAbsolutePath(path.display().to_string()));
         }
-        let mut reg = read_registry();
+        let reg = read_registry();
         let mut map = reg.to_map();
 
         // Reject if a different name already points at the same path.
@@ -164,7 +164,7 @@ impl Projects {
     pub fn register_or_touch(path: &Path) -> Result<bool, RegistryError> {
         let canon = std::fs::canonicalize(path)
             .map_err(|e| RegistryError::Io(e))?;
-        let mut reg = read_registry();
+        let reg = read_registry();
         let mut map = reg.to_map();
 
         // Path already registered — just touch it, don't create a new
@@ -194,7 +194,7 @@ impl Projects {
 
     /// Remove a project by name. Errors if not found.
     pub fn forget(name: &str) -> Result<(), RegistryError> {
-        let mut reg = read_registry();
+        let reg = read_registry();
         let mut map = reg.to_map();
         if map.remove(name).is_none() {
             return Err(RegistryError::NotFound(name.to_string()));
@@ -210,7 +210,7 @@ impl Projects {
 
     /// Touch a project's last_used timestamp. Silent no-op if missing.
     pub fn touch(name: &str) {
-        let mut reg = read_registry();
+        let reg = read_registry();
         let mut map = reg.to_map();
         if let Some(p) = map.get_mut(name) {
             p.last_used = Some(chrono_like_now());
@@ -221,7 +221,7 @@ impl Projects {
     /// List registered projects sorted by name.
     pub fn list() -> Vec<Project> {
         let reg = read_registry();
-        let mut map = reg.to_map();
+        let map = reg.to_map();
         let mut out: Vec<Project> = map.into_values().collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
