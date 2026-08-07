@@ -344,7 +344,7 @@ curl -s -X POST http://localhost:9999/mcp \
 
 ## Recent Improvements (0.4.x)
 
-## v0.4.1 (this release)
+## v0.4.2 (this release)
 - `lain init --agent kimi` installs `~/.kimi-code/plugins/managed/lain/` with `kimi.plugin.json` + `skills/lain/SKILL.md` + registers in `installed.json` (source=`local-path`).
 - `lain init --agent gemini` now writes `GEMINI.md` (canonical filename per gemini-cli docs). The previous `LAIN.md` was silently ignored.
 

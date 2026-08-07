@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // postinstall script — downloads the Lain binary and creates ~/.lain/ structure
 
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -226,6 +226,30 @@ async function install() {
 
   // Symlink for npm
   createSymlink();
+
+  // Post-install: if a known agent config dir is present, run
+  // `lain init --agent auto -y` so the user lands on a working MCP
+  // configuration. Skip with LAIN_SKIP_INIT=1 for CI/scripted installs.
+  const agentDirs = [
+    path.join(process.env.HOME, '.claude'),
+    path.join(process.env.HOME, '.gemini'),
+    path.join(process.env.HOME, '.cursor'),
+    path.join(process.env.HOME, '.codeium', 'windsurf'),
+    path.join(process.env.HOME, '.cline'),
+    path.join(process.env.HOME, '.kimi-code'),
+  ];
+  const hasAgentConfig = agentDirs.some(d => fs.existsSync(d));
+
+  if (hasAgentConfig && !process.env.LAIN_SKIP_INIT) {
+    console.log('\nDetected an agent config directory. Running `lain init --agent auto -y`...');
+    const result = spawnSync(launcherPath, ['init', '--agent', 'auto', '-y'], { stdio: 'inherit' });
+    if (result.status !== 0) {
+      console.warn('  init failed; run manually: lain init --agent <name>');
+    }
+  } else {
+    console.log('\nNo agent config detected. To configure lain for your agent, run:');
+    console.log(`  ${launcherPath} init --agent <claude|gemini|cursor|windsurf|cline|kimi>`);
+  }
 
   console.log('\n=== Installation complete ===\n');
   console.log('  To use Lain:');

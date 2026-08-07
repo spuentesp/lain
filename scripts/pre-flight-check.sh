@@ -132,9 +132,13 @@ fi
 echo "Check 10: Checking awareness docs..."
 AWARENESS_DOCS=(
     "hooks/claude/lain-awareness.md"
+    "hooks/claude/lain-hook.sh"
     "hooks/cursor/lain-awareness.md"
     "hooks/windsurf/lain-rules.md"
     "hooks/cline/lain-rules.md"
+    "hooks/kimi/kimi.plugin.json"
+    "hooks/kimi/skills/lain/SKILL.md"
+    "hooks/kimi/README.md"
 )
 
 ALL_DOCS_EXIST=true
@@ -144,6 +148,25 @@ for doc in "${AWARENESS_DOCS[@]}"; do
         ALL_DOCS_EXIST=false
     fi
 done
+
+# Defensive: the kimi.template must still contain REPLACE_ME_AT_INSTALL
+# placeholders. Catches accidental commits with substituted paths
+# (which leaks personal paths into the repo).
+if ! grep -q 'REPLACE_ME_AT_INSTALL' "hooks/kimi/kimi.plugin.json"; then
+    warn "hooks/kimi/kimi.plugin.json is missing REPLACE_ME_AT_INSTALL placeholders \
+          — was it accidentally committed with substituted paths?"
+    ALL_DOCS_EXIST=false
+fi
+
+# Defensive: REPLACE_ME_AT_INSTALL should only appear in the kimi
+# template. Catches future drift if another agent ever adopts the
+# same placeholder convention without updating this check.
+LEAKED=$(grep -rl 'REPLACE_ME_AT_INSTALL' hooks/ 2>/dev/null \
+    | grep -v '^hooks/kimi/' || true)
+if [ -n "$LEAKED" ]; then
+    warn "Found REPLACE_ME_AT_INSTALL outside hooks/kimi/: $LEAKED"
+    ALL_DOCS_EXIST=false
+fi
 
 if [ "$ALL_DOCS_EXIST" = true ]; then
     pass "All awareness docs exist"

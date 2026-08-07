@@ -6,6 +6,21 @@ use std::io::Write;
 /// refuse rather than silently writing nothing.
 const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "kimi", "auto"];
 
+// ── Bundled agent resources ────────────────────────────────────────────────
+//
+// These are the canonical per-agent install artifacts, embedded at compile
+// time so downloaded-release binaries don't need filesystem lookups at
+// runtime. Edit the source files under hooks/<agent>/ and the change ships
+// with the next release; do not duplicate the content as string literals
+// elsewhere.
+const CLAUDE_AWARENESS_MD: &str = include_str!("../../hooks/claude/lain-awareness.md");
+const CLAUDE_HOOK_SH: &str = include_str!("../../hooks/claude/lain-hook.sh");
+const GEMINI_AWARENESS_MD: &str = include_str!("../../hooks/gemini/GEMINI.md");
+const CURSOR_AWARENESS_MD: &str = include_str!("../../hooks/cursor/lain-awareness.md");
+const WINDSURF_RULES_MD: &str = include_str!("../../hooks/windsurf/lain-rules.md");
+const CLINE_RULES_MD: &str = include_str!("../../hooks/cline/lain-rules.md");
+const KIMI_SKILL_MD: &str = include_str!("../../hooks/kimi/skills/lain/SKILL.md");
+
 pub fn run_init(
     agent: &str,
     workspace: Option<&std::path::Path>,
@@ -160,6 +175,7 @@ fn index_workspace_blocking(
 }
 
 fn detect_agent(home_dir: &std::path::Path) -> &'static str {
+    if home_dir.join(".kimi-code").exists() { return "kimi"; }
     if home_dir.join(".claude").exists() { return "claude"; }
     if home_dir.join(".gemini").exists() { return "gemini"; }
     if home_dir.join(".cursor").exists() { return "cursor"; }
@@ -244,7 +260,99 @@ fn init_claude(
         println!("Updated ~/.claude/settings.json");
     }
 
-    write_awareness_doc(lain_md_path)?;
+    // Install Claude Code PreToolUse hook (separate from MCP). The
+    // hook reads stdin and delegates to `lain ask`, which is the
+    // CLI-side bridge for tools that don't go through MCP.
+    install_claude_hook(claude_dir, settings_path, &mut settings)?;
+
+    // Write awareness markdown from the bundled source.
+    write_awareness_doc(lain_md_path, CLAUDE_AWARENESS_MD)?;
+
+    Ok(())
+}
+
+/// Install the Claude Code `PreToolUse` hook. Copies the bundled
+/// `lain-hook.sh` script to `~/.claude/hooks/`, makes it executable,
+/// and registers it under `hooks.PreToolUse` in settings.json.
+/// Idempotent: skips both the script copy and the settings.json
+/// registration if either already references the hook.
+fn install_claude_hook(
+    claude_dir: &std::path::Path,
+    settings_path: &std::path::Path,
+    settings: &mut serde_json::Value,
+) -> Result<()> {
+    use std::fs;
+
+    let hook_path = claude_dir.join("hooks/lain-hook.sh");
+    let hook_path_str = hook_path.to_string_lossy().to_string();
+
+    // 1. Copy the hook script if missing.
+    if let Some(parent) = hook_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    if hook_path.exists() {
+        println!("Claude hook script already exists - skipped.");
+    } else {
+        fs::write(&hook_path, CLAUDE_HOOK_SH)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&hook_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&hook_path, perms)?;
+        }
+        println!("Installed {}", hook_path.display());
+    }
+
+    // 2. Register under hooks.PreToolUse if missing.
+    let already_registered = settings
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(hook_path_str.as_str())
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    if already_registered {
+        println!("Claude PreToolUse hook already registered - skipped.");
+        return Ok(());
+    }
+
+    if !settings.get("hooks").map(|h| h.is_object()).unwrap_or(false) {
+        settings["hooks"] = serde_json::json!({});
+    }
+    if !settings["hooks"].get("PreToolUse").map(|p| p.is_array()).unwrap_or(false) {
+        settings["hooks"]["PreToolUse"] = serde_json::json!([]);
+    }
+    let hook_entry = serde_json::json!({
+        "matcher": "",
+        "hooks": [
+            { "type": "command", "command": hook_path_str }
+        ]
+    });
+    settings["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .push(hook_entry);
+
+    let settings_json = serde_json::to_string_pretty(&*settings)?;
+    let tmp_path = settings_path.with_extension("json.tmp");
+    fs::write(&tmp_path, settings_json)?;
+    fs::rename(&tmp_path, settings_path)?;
+    println!("Registered Claude PreToolUse hook in {}", settings_path.display());
 
     Ok(())
 }
@@ -452,60 +560,29 @@ fn init_cline(
     )
 }
 
-fn write_awareness_doc(path: &std::path::Path) -> Result<()> {
+fn write_awareness_doc(path: &std::path::Path, content: &str) -> Result<()> {
     if path.exists() {
         println!("Awareness doc already exists - skipped.");
         return Ok(());
     }
-    let doc = r#"# LAIN — Query for structure. Use tools only when query can't answer.
-
-## Query Syntax
-
-```
-lain query "find TYPE [name PATTERN] | connect EDGE [DIRECTION] depth N | limit N"
-```
-
-Types: `File`, `Module`, `Function`, `Method`, `Class`, `Interface`, `Trait`
-Edges: `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`, `TestedBy`
-
-## Quick Examples
-
-```bash
-lain query "find Function name handle | connect Calls direction incoming depth 1..=2"
-lain query "find Function name save | connect Calls direction outgoing depth 1..=3"
-lain query "find File name db.rs | connect CO_CHANGED_WITH"
-lain query "find Function | limit 20"
-```
-
-Full reference: `docs/query-language.md`
-
-## When NOT to query (use MCP tools)
-
-- `semantic_search` — meaning-based code search
-- `get_code_snippet` — read source of any symbol
-- `find_dead_code` — unused definitions
-- `get_cross_runtime_callers` — cross-language callers
-- `get_file_diff`, `get_commit_history` — git operations
-- `get_health` — server health check
-
-## Workflow
-
-1. **Before editing** → query for blast radius
-2. **Understanding flow** → query for call chain
-3. **Need source** → `get_code_snippet`
-4. **Meaning search** → `semantic_search`
-"#;
-    fs::write(path, doc)?;
-    println!("Created ~/.claude/LAIN.md");
+    fs::write(path, content)?;
+    println!("Created {}", path.display());
     Ok(())
 }
 
 fn install_agent_doc(agent_type: &str, home_dir: &std::path::Path) -> Result<()> {
     match agent_type {
-        "gemini" => write_agent_doc(home_dir, ".gemini", "LAIN.md", GEMINI_DOC)?,
-        "cursor" => write_agent_doc(home_dir, ".cursor", "LAIN.md", CURSOR_DOC)?,
-        "windsurf" => write_agent_doc(home_dir, ".windsurf", "lain-rules.md", WINDSURF_DOC)?,
-        "cline" => write_agent_doc(home_dir, ".cline", "lain-rules.md", CLINE_DOC)?,
+        // gemini-cli reads GEMINI.md (the canonical filename per
+        // gemini-cli docs). LAIN.md is silently ignored, so we must
+        // use the correct filename.
+        "gemini" => write_agent_doc(home_dir, ".gemini", "GEMINI.md", GEMINI_AWARENESS_MD)?,
+        "cursor" => write_agent_doc(home_dir, ".cursor", "LAIN.md", CURSOR_AWARENESS_MD)?,
+        "windsurf" => write_agent_doc(home_dir, ".windsurf", "lain-rules.md", WINDSURF_RULES_MD)?,
+        "cline" => write_agent_doc(home_dir, ".cline", "lain-rules.md", CLINE_RULES_MD)?,
+        // claude is handled inside init_claude via write_awareness_doc
+        // + install_claude_hook, so it doesn't appear here.
+        // kimi is handled inside init_kimi (skill markdown lives in
+        // the managed plugin directory, not ~/.kimi-code/).
         _ => {}
     }
     Ok(())
@@ -524,121 +601,6 @@ fn write_agent_doc(home_dir: &std::path::Path, dir_name: &str, file_name: &str, 
     }
     Ok(())
 }
-
-const GEMINI_DOC: &str = r#"# LAIN — Query for structure. Use tools only when query can't answer.
-
-## Query Syntax
-
-```
-lain query "find TYPE [name PATTERN] | connect EDGE [DIRECTION] depth N | limit N"
-```
-
-Types: `File`, `Module`, `Function`, `Method`, `Class`, `Interface`, `Trait`
-Edges: `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`, `TestedBy`
-
-Full reference: `docs/query-language.md`
-
-## Quick Examples
-
-```bash
-lain query "find Function | limit 10"
-lain query "find Class name User | connect Calls direction outgoing depth 1..=2"
-lain query "find File name main.rs | connect Contains | connect Calls"
-```
-
-## When NOT to query (use MCP tools)
-
-- `semantic_search` — meaning-based code search
-- `get_code_snippet` — read source code
-- `find_dead_code` — unused definitions
-- `get_cross_runtime_callers` — cross-language callers
-"#;
-
-const CURSOR_DOC: &str = r#"# LAIN — Query for structure. Use tools only when query can't answer.
-
-## Query Syntax
-
-```
-lain query "find TYPE [name PATTERN] | connect EDGE [DIRECTION] depth N | limit N"
-```
-
-Types: `File`, `Module`, `Function`, `Method`, `Class`, `Interface`, `Trait`
-Edges: `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`, `TestedBy`
-
-Full reference: `docs/query-language.md`
-
-## Quick Examples
-
-```bash
-lain query "find Function | limit 10"
-lain query "find Class name User | connect Calls direction outgoing depth 1..=2"
-lain query "find File name main.rs | connect Contains | connect Calls"
-```
-
-## When NOT to query (use MCP tools)
-
-- `semantic_search` — meaning-based code search
-- `get_code_snippet` — read source code
-- `find_dead_code` — unused definitions
-- `get_cross_runtime_callers` — cross-language callers
-"#;
-
-const WINDSURF_DOC: &str = r#"# LAIN — Query for structure. Use tools only when query can't answer.
-
-Rule: before any structural edit, query LAIN first.
-
-## Query Syntax
-
-```
-lain query "find TYPE [name PATTERN] | connect EDGE [DIRECTION] depth N | limit N"
-```
-
-Types: `File`, `Module`, `Function`, `Method`, `Class`, `Interface`, `Trait`
-Edges: `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`, `TestedBy`
-
-Full reference: `docs/query-language.md`
-
-| Need | Command |
-|------|---------|
-| Who calls X? | `lain query "find Function name X \| connect Calls direction incoming"` |
-| What does X call? | `lain query "find Function name X \| connect Calls direction outgoing depth 1..=2"` |
-| Blast radius | `lain query "find Function name X \| connect Calls direction outgoing depth 1..=3"` |
-| Co-change risk | `lain query "find File name X \| connect CO_CHANGED_WITH"` |
-| Find by meaning | `semantic_search` tool |
-| Read code | `get_code_snippet` tool |
-| Find dead code | `find_dead_code` tool |
-"#;
-
-const CLINE_DOC: &str = r#"# LAIN — Query for structure. Use tools only when query can't answer.
-
-Rule: query for structure. Use MCP tools only when query can't answer.
-
-## Query Syntax
-
-```
-lain query "find TYPE [name PATTERN] | connect EDGE [DIRECTION] depth N | limit N"
-```
-
-Types: `File`, `Module`, `Function`, `Method`, `Class`, `Interface`, `Trait`
-Edges: `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`, `TestedBy`
-
-Full reference: `docs/query-language.md`
-
-```bash
-lain query "find Function name X | connect Calls direction incoming depth 1..=2"   # callers
-lain query "find Function name X | connect Calls direction outgoing depth 1..=3"    # callees
-lain query "find File name X | connect CO_CHANGED_WITH"                             # co-change
-lain query "find Function | limit 20"                                                # overview
-```
-
-## MCP Tools (non-query operations only)
-
-- `semantic_search` — meaning-based code search
-- `get_code_snippet` — read source code
-- `find_dead_code` — unused definitions
-- `get_cross_runtime_callers` — cross-language callers
-- `get_file_diff`, `get_commit_history` — git operations
-"#;
 
 /// Install lain as a kimi-code plugin. Kimi uses a `managed/` plugin
 /// directory with a `kimi.plugin.json` manifest and a `skills/<name>/`
@@ -661,10 +623,28 @@ fn init_kimi(
     // binary should be on PATH after `install.sh`.
     let lain_cmd = "lain";
 
+    // Build args conditionally: --embedding-model is optional (semantic
+    // search is unavailable without it), and --port is only meaningful
+    // for non-stdio transports.
+    let mut args: Vec<String> = vec![
+        "--workspace".to_string(),
+        workspace.to_string_lossy().to_string(),
+    ];
+    if let Some(model) = embedding_model {
+        args.push("--embedding-model".to_string());
+        args.push(model.to_string_lossy().to_string());
+    }
+    args.push("--transport".to_string());
+    args.push(transport.to_string());
+    if transport != "stdio" {
+        args.push("--port".to_string());
+        args.push(port.to_string());
+    }
+
     // Build the mcpServers entry with the actual workspace + model.
     let plugin_json = serde_json::json!({
         "name": "lain",
-        "version": "0.4.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "description": "Structural code intelligence for AI coding agents with semantic search, blast radius, and architectural analysis.",
         "author": { "name": "spuentesp", "homepage": "https://github.com/spuentesp/lain" },
         "homepage": "https://github.com/spuentesp/lain",
@@ -673,12 +653,7 @@ fn init_kimi(
         "mcpServers": {
             "lain": {
                 "command": lain_cmd,
-                "args": [
-                    "--workspace", workspace.to_string_lossy().to_string(),
-                    "--embedding-model", embedding_model.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-                    "--transport", transport,
-                    "--port", port.to_string(),
-                ],
+                "args": args,
             },
         },
         "interface": {
@@ -690,15 +665,11 @@ fn init_kimi(
     let plugin_path = plugin_root.join("kimi.plugin.json");
     fs::write(&plugin_path, serde_json::to_string_pretty(&plugin_json)?)?;
 
-    // Copy the canonical skill markdown. This is the content from
-    // hooks/kimi/skills/lain/SKILL.md in the lain source tree.
-    let skill_md_src = std::env::var("CARGO_MANIFEST_DIR")
-        .map(|d| std::path::PathBuf::from(d).join("hooks/kimi/skills/lain/SKILL.md"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("hooks/kimi/skills/lain/SKILL.md"));
-    if skill_md_src.exists() {
-        let skill_md_dst = plugin_root.join("skills/lain/SKILL.md");
-        fs::copy(&skill_md_src, &skill_md_dst)?;
-    }
+    // Write the bundled skill markdown (compiled into the binary via
+    // include_str!) so the plugin ships with skill content even when
+    // installed from a downloaded release tarball.
+    let skill_md_dst = plugin_root.join("skills/lain/SKILL.md");
+    fs::write(&skill_md_dst, KIMI_SKILL_MD)?;
 
     // Register the plugin in installed.json so the plugin manager
     // picks it up on the next session start.

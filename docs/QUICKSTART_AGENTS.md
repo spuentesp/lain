@@ -2,6 +2,40 @@
 
 If you are an AI agent (Claude, Gemini, etc.) connecting to this MCP server, follow this strategy to understand the codebase efficiently.
 
+## 0. For humans installing lain
+
+Pick the install path that matches your platform; all three end with
+the same post-install step.
+
+**GitHub release (recommended):**
+```sh
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash -s -- --agent <name> -y
+```
+Replace `<name>` with `claude`, `gemini`, `cursor`, `windsurf`, `cline`,
+or `kimi`. Use `--agent auto` to detect from your home directory.
+
+**npm:**
+```sh
+npm install -g lain-mcp
+```
+The postinstall step runs `lain init --agent auto -y` automatically if
+it finds an agent config directory (`~/.claude`, `~/.kimi-code`, etc.).
+Set `LAIN_SKIP_INIT=1` to opt out.
+
+**Homebrew:**
+```sh
+brew install lain
+lain init --agent <name>
+```
+The formula prints the same hint via `brew info lain`.
+
+**After installing** — restart your agent (Claude Code, Kimi Code, etc.)
+to pick up the plugin. Verify with:
+```sh
+lain --version      # should print the installed version
+lain --help          # should list `init`, `query`, `hook`, `ask`, ...
+```
+
 ## 1. Initialize & Verify
 Start by checking the server's health and knowledge freshness.
 - Call `get_health`: See which language servers are ready and repository info.
