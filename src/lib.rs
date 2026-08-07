@@ -37,6 +37,9 @@ mod schema_tests;
 mod tuning_tests;
 #[cfg(test)]
 mod graph_tests;
+#[cfg(test)]
+#[path = "federation/repo_source_tests.rs"]
+mod repo_source_tests;
 
 pub use error::LainError;
 pub use mcp::LainMcpServer;

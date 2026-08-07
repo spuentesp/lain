@@ -43,6 +43,12 @@ pub enum LainError {
 
     #[error("Fatal: {0}")]
     Fatal(String),
+
+    #[error("Config error: {0}")]
+    Config(String),
+
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 impl From<git2::Error> for LainError {
