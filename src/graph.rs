@@ -285,6 +285,16 @@ impl GraphDatabase {
         graph.node_weights().cloned().collect()
     }
 
+    pub fn all_nodes(&self) -> Vec<GraphNode> {
+        let graph = self.graph.read();
+        graph.node_references().map(|(_, node)| node.clone()).collect()
+    }
+
+    pub fn all_edges(&self) -> Vec<GraphEdge> {
+        let graph = self.graph.read();
+        graph.edge_weights().cloned().collect()
+    }
+
     pub fn find_node_by_name(&self, name: &str) -> Option<GraphNode> {
         self.graph.read().node_weights().find(|n| n.name == name).cloned()
     }
