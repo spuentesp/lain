@@ -54,6 +54,11 @@ const FEDERATION_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "Get info about a single repository in the federation by id.",
         &["id"],
     ),
+    (
+        "get_federation_health",
+        "Aggregate health counts and total node/edge counts across the federation, plus a rough memory estimate.",
+        &[],
+    ),
 ];
 
 struct LainHandler {
@@ -160,6 +165,14 @@ impl ServerHandler for LainHandler {
                         )),
                         Err(e) => Ok(tool_text_result(format!("{e}"), true)),
                     };
+                }
+                "get_federation_health" => {
+                    let health = crate::mcp::federation_tools::get_federation_health(fed);
+                    return Ok(tool_text_result(
+                        serde_json::to_string(&health)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ));
                 }
                 _ => {}
             }
@@ -433,6 +446,14 @@ async fn handle_request(
                                         }
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
                                     }
+                                }
+                                "get_federation_health" => {
+                                    let health = crate::mcp::federation_tools::get_federation_health(fed);
+                                    let text = match serde_json::to_string(&health) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    };
+                                    return Ok(jsonrpc_tool_result(id, &text, false));
                                 }
                                 _ => {}
                             }

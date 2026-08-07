@@ -1,12 +1,14 @@
 //! Federation-mode MCP tools.
 //!
-//! Exposes two read-only tools for inspecting the live state of a
+//! Exposes three read-only tools for inspecting the live state of a
 //! `FederatedIndex`:
 //!
 //! - `list_repos` — returns every registered repo with its current health,
 //!   path, last refresh/index timestamps, and node/edge counts.
 //! - `get_repo_info` — returns the same `RepoInfo` payload for a single
 //!   repo by id.
+//! - `get_federation_health` — returns aggregate counts per health bucket
+//!   plus total node/edge counts and a rough memory estimate.
 //!
 //! Both tools are gated on the MCP server having been constructed with a
 //! `FederatedIndex` (see `LainMcpServer::with_federation`). When the server
@@ -79,6 +81,46 @@ pub fn get_repo_info(fed: &FederatedIndex, id: &RepoId) -> Result<RepoInfo, Lain
         .ok_or_else(|| LainError::NotFound(format!("repo {id}")))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FederationHealth {
+    pub total_repos: usize,
+    pub ready: usize,
+    pub indexing: usize,
+    pub degraded: usize,
+    pub unavailable: usize,
+    pub missing: usize,
+    pub total_nodes: usize,
+    pub total_edges: usize,
+    pub memory_estimate_bytes: u64,
+}
+
+pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
+    use crate::federation::health::RepoHealth;
+    let repos = fed.list_repos();
+    let mut h = FederationHealth {
+        total_repos: repos.len(),
+        ready: 0,
+        indexing: 0,
+        degraded: 0,
+        unavailable: 0,
+        missing: 0,
+        total_nodes: fed.backend().node_count(),
+        total_edges: fed.backend().edge_count(),
+        memory_estimate_bytes: 0,
+    };
+    for (_, health) in &repos {
+        match health {
+            RepoHealth::Ready => h.ready += 1,
+            RepoHealth::Indexing => h.indexing += 1,
+            RepoHealth::Degraded => h.degraded += 1,
+            RepoHealth::Unavailable => h.unavailable += 1,
+            RepoHealth::Missing => h.missing += 1,
+        }
+    }
+    h.memory_estimate_bytes = (h.total_nodes as u64) * 200 + (h.total_edges as u64) * 100;
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +191,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         assert!(list_repos(&fed).is_empty());
+    }
+
+    #[test]
+    fn federation_health_counts_correctly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let h = get_federation_health(&fed);
+        assert_eq!(h.total_repos, 0);
+        assert_eq!(h.total_nodes, 0);
+        assert_eq!(h.total_edges, 0);
     }
 }

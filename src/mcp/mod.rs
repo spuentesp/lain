@@ -5,5 +5,7 @@
 mod federation_tools;
 mod handler;
 
-pub use federation_tools::{get_repo_info, list_repos, RepoInfo};
+pub use federation_tools::{
+    get_federation_health, get_repo_info, list_repos, FederationHealth, RepoInfo,
+};
 pub use handler::LainMcpServer;
