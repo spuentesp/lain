@@ -1,0 +1,153 @@
+//! Federation-mode MCP tools.
+//!
+//! Exposes two read-only tools for inspecting the live state of a
+//! `FederatedIndex`:
+//!
+//! - `list_repos` — returns every registered repo with its current health,
+//!   path, last refresh/index timestamps, and node/edge counts.
+//! - `get_repo_info` — returns the same `RepoInfo` payload for a single
+//!   repo by id.
+//!
+//! Both tools are gated on the MCP server having been constructed with a
+//! `FederatedIndex` (see `LainMcpServer::with_federation`). When the server
+//! runs in single-workspace mode these tools are not registered and the
+//! existing tool surface is unchanged.
+
+use crate::error::LainError;
+use crate::federation::federated_index::FederatedIndex;
+use crate::federation::repo_id::RepoId;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepoInfo {
+    pub id: String,
+    pub path: String,
+    pub health: String,
+    pub last_refreshed_unix: i64,
+    pub last_indexed_unix: i64,
+    pub node_count: usize,
+    pub edge_count: usize,
+}
+
+pub fn list_repos(fed: &FederatedIndex) -> Vec<RepoInfo> {
+    fed.list_repos()
+        .into_iter()
+        .map(|(id, health)| {
+            let repo = fed.get_repo(&id);
+            let (last_refreshed_unix, last_indexed_unix, node_count, edge_count, path) =
+                match repo {
+                    Some(r) => {
+                        let path = r.source().local_path().display().to_string();
+                        let last_refreshed = r
+                            .source()
+                            .last_refreshed()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        let last_indexed = r
+                            .last_indexed()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        (
+                            last_refreshed,
+                            last_indexed,
+                            r.nodes().len(),
+                            r.edges().len(),
+                            path,
+                        )
+                    }
+                    None => (0, 0, 0, 0, String::new()),
+                };
+            RepoInfo {
+                id: id.to_string(),
+                path,
+                health: health.to_string(),
+                last_refreshed_unix,
+                last_indexed_unix,
+                node_count,
+                edge_count,
+            }
+        })
+        .collect()
+}
+
+pub fn get_repo_info(fed: &FederatedIndex, id: &RepoId) -> Result<RepoInfo, LainError> {
+    let list = list_repos(fed);
+    list.into_iter()
+        .find(|r| r.id == id.as_str())
+        .ok_or_else(|| LainError::NotFound(format!("repo {id}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::federation::federated_index::FederatedIndex;
+    use crate::federation::graph_backend::PetgraphBackend;
+    use crate::federation::health::RepoHealth;
+    use crate::federation::repo_id::RepoId;
+    use crate::federation::repo_source::WorkspaceDirSource;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn list_repos_returns_registered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        // `RepoIndex::new` instantiates a `GitSensor` against the source's
+        // local path, so the path must be a real git repo. `/tmp` is not;
+        // initialize a throwaway repo in a fresh tempdir for the source.
+        // (Same fix used by `federated_index_tests::add_repo_registers_and_lists_it`.)
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(
+                RepoId::new("a").unwrap(),
+                src_dir.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        let list = list_repos(&fed);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "a");
+        // `RepoInfo::health` is a `String`; compare against the canonical
+        // string form of `RepoHealth::Indexing`.
+        assert_eq!(list[0].health, RepoHealth::Indexing.as_str());
+        // Sanity-check the path was projected through.
+        assert_eq!(list[0].path, src_dir.path().display().to_string());
+    }
+
+    #[tokio::test]
+    async fn get_repo_info_returns_matching_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(
+                RepoId::new("a").unwrap(),
+                src_dir.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+        let info = get_repo_info(&fed, &RepoId::new("a").unwrap()).unwrap();
+        assert_eq!(info.id, "a");
+        assert_eq!(info.health, RepoHealth::Indexing.as_str());
+    }
+
+    #[tokio::test]
+    async fn get_repo_info_unknown_id_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let err = get_repo_info(&fed, &RepoId::new("ghost").unwrap()).unwrap_err();
+        assert!(matches!(err, LainError::NotFound(_)));
+    }
+
+    #[test]
+    fn list_repos_empty_index_returns_empty_vec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        assert!(list_repos(&fed).is_empty());
+    }
+}

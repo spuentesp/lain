@@ -2,6 +2,7 @@
 //!
 //! Implements the ServerHandler trait to expose tools via MCP protocol
 
+use crate::federation::federated_index::FederatedIndex;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
 use rust_mcp_sdk::{
@@ -28,8 +29,36 @@ use tracing::info;
 
 const FRONT_END_HTML: &str = include_str!("front_end_monitor.html");
 
+/// Wrap a string payload in a `CallToolResult` with a single text block.
+fn tool_text_result(text: String, is_error: bool) -> CallToolResult {
+    CallToolResult {
+        content: vec![ContentBlock::TextContent(TextContent::new(text, None, None))],
+        is_error: Some(is_error),
+        meta: None,
+        structured_content: None,
+    }
+}
+
+/// Tool definitions exposed only when the MCP server was constructed with a
+/// `FederatedIndex`. Centralized here so the stdio `tools/list` response, the
+/// stdio `tools/call` dispatch, and the HTTP JSON-RPC `tools/list` / `tools/call`
+/// paths agree on names, schemas, and gating.
+const FEDERATION_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
+    (
+        "list_repos",
+        "List every repository currently registered in the federation, with id, path, health, and graph stats.",
+        &[],
+    ),
+    (
+        "get_repo_info",
+        "Get info about a single repository in the federation by id.",
+        &["id"],
+    ),
+];
+
 struct LainHandler {
     executor: Arc<ToolExecutor>,
+    federation: Option<Arc<FederatedIndex>>,
 }
 
 #[async_trait]
@@ -39,7 +68,7 @@ impl ServerHandler for LainHandler {
         _params: Option<PaginatedRequestParams>,
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<ListToolsResult, RpcError> {
-        let tools: Vec<Tool> = crate::tools::registry::ToolRegistry::definitions()
+        let mut tools: Vec<Tool> = crate::tools::registry::ToolRegistry::definitions()
             .iter()
             .map(|def| {
                 let input_schema = serde_json::from_value(def.input_schema.clone())
@@ -58,6 +87,34 @@ impl ServerHandler for LainHandler {
             })
             .collect();
 
+        if self.federation.is_some() {
+            for (name, description, required) in FEDERATION_TOOL_DEFS {
+                let mut props = std::collections::BTreeMap::new();
+                for req in *required {
+                    let mut p = serde_json::Map::new();
+                    p.insert("type".into(), serde_json::Value::String("string".into()));
+                    p.insert("description".into(), serde_json::Value::String(format!("{req} of the repo to look up")));
+                    props.insert((*req).to_string(), p);
+                }
+                let input_schema = ToolInputSchema::new(
+                    required.iter().map(|s| s.to_string()).collect(),
+                    if props.is_empty() { None } else { Some(props) },
+                    None,
+                );
+                tools.push(Tool {
+                    name: (*name).to_string(),
+                    description: Some((*description).to_string()),
+                    input_schema,
+                    annotations: None,
+                    execution: None,
+                    icons: vec![],
+                    meta: None,
+                    output_schema: None,
+                    title: None,
+                });
+            }
+        }
+
         Ok(ListToolsResult { tools, meta: None, next_cursor: None })
     }
 
@@ -68,6 +125,45 @@ impl ServerHandler for LainHandler {
     ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError> {
         let empty: Map<String, serde_json::Value> = Map::new();
         let args = params.arguments.as_ref().unwrap_or(&empty);
+
+        if let Some(fed) = &self.federation {
+            match params.name.as_str() {
+                "list_repos" => {
+                    let repos = crate::mcp::federation_tools::list_repos(fed);
+                    return Ok(tool_text_result(
+                        serde_json::to_string(&repos)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ));
+                }
+                "get_repo_info" => {
+                    let id_str = match args.get("id").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: id".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Ok(tool_text_result(format!("{e}"), true));
+                        }
+                    };
+                    return match crate::mcp::federation_tools::get_repo_info(fed, &rid) {
+                        Ok(info) => Ok(tool_text_result(
+                            serde_json::to_string(&info)
+                                .unwrap_or_else(|e| format!("serialization error: {e}")),
+                            false,
+                        )),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                    };
+                }
+                _ => {}
+            }
+        }
 
         match self.executor.call(&params.name, Some(args)).await {
             Ok(text) => Ok(CallToolResult {
@@ -93,11 +189,20 @@ impl ServerHandler for LainHandler {
 #[derive(Clone)]
 pub struct LainMcpServer {
     executor: ToolExecutor,
+    federation: Option<Arc<FederatedIndex>>,
 }
 
 impl LainMcpServer {
     pub fn new(executor: ToolExecutor) -> Self {
-        Self { executor }
+        Self { executor, federation: None }
+    }
+
+    /// Federation-mode constructor. When set, the handler also exposes
+    /// `list_repos` and `get_repo_info` over MCP. With `new(executor)` alone
+    /// the federation surface is not registered and single-workspace
+    /// behavior is preserved.
+    pub fn with_federation(executor: ToolExecutor, federation: Arc<FederatedIndex>) -> Self {
+        Self { executor, federation: Some(federation) }
     }
 
     /// Run with stdio transport (for local/MCP clients)
@@ -106,7 +211,10 @@ impl LainMcpServer {
 
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
-        let handler = LainHandler { executor: Arc::new(self.executor) };
+        let handler = LainHandler {
+            executor: Arc::new(self.executor),
+            federation: self.federation,
+        };
 
         let server = server_runtime::create_server(McpServerOptions {
             server_details,
@@ -125,17 +233,20 @@ impl LainMcpServer {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
         let executor = Arc::new(self.executor);
+        let federation = self.federation;
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let executor = executor.clone();
+                    let federation = federation.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
-                            handle_request(req, executor)
+                            let federation = federation.clone();
+                            handle_request(req, executor, federation)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -176,7 +287,33 @@ impl LainMcpServer {
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
+    federation: Option<Arc<FederatedIndex>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    let jsonrpc_response = |value: serde_json::Value| -> Response<Full<Bytes>> {
+        let body = serde_json::to_string(&value).unwrap_or_default();
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap()
+    };
+    let jsonrpc_error = |id: Option<&serde_json::Value>, code: i32, msg: String| {
+        jsonrpc_response(serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": code, "message": msg},
+            "id": id
+        }))
+    };
+    let jsonrpc_tool_result = |id: Option<&serde_json::Value>, text: &str, is_error: bool| {
+        jsonrpc_response(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": is_error
+            },
+            "id": id
+        }))
+    };
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
@@ -222,7 +359,7 @@ async fn handle_request(
                 match rpc_method {
                     "tools/list" => {
                         let tools_vec = crate::tools::registry::ToolRegistry::definitions();
-                        let tools: Vec<serde_json::Value> = tools_vec
+                        let mut tools: Vec<serde_json::Value> = tools_vec
                             .iter()
                             .map(|def| {
                                 serde_json::json!({
@@ -232,6 +369,27 @@ async fn handle_request(
                                 })
                             })
                             .collect();
+                        if federation.is_some() {
+                            for (name, description, required) in FEDERATION_TOOL_DEFS {
+                                let mut props = serde_json::Map::new();
+                                for req in *required {
+                                    let mut p = serde_json::Map::new();
+                                    p.insert("type".into(), serde_json::Value::String("string".into()));
+                                    p.insert("description".into(), serde_json::Value::String(format!("{req} of the repo to look up")));
+                                    props.insert((*req).to_string(), serde_json::Value::Object(p));
+                                }
+                                let input_schema = serde_json::json!({
+                                    "type": "object",
+                                    "properties": props,
+                                    "required": required,
+                                });
+                                tools.push(serde_json::json!({
+                                    "name": name,
+                                    "description": description,
+                                    "inputSchema": input_schema
+                                }));
+                            }
+                        }
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
                     }
                     "tools/call" => {
@@ -239,9 +397,46 @@ async fn handle_request(
                             .and_then(|p| p.get("name"))
                             .and_then(|n| n.as_str())
                             .unwrap_or("");
-                        let args: Option<&serde_json::Map<String, serde_json::Value>> = params
+                        let args_map: serde_json::Map<String, serde_json::Value> = params
                             .and_then(|p| p.get("arguments"))
-                            .and_then(|v| v.as_object());
+                            .and_then(|v| v.as_object())
+                            .cloned()
+                            .unwrap_or_default();
+                        let args: Option<&serde_json::Map<String, serde_json::Value>> = if args_map.is_empty() { None } else { Some(&args_map) };
+
+                        if let Some(fed) = &federation {
+                            match name {
+                                "list_repos" => {
+                                    let repos = crate::mcp::federation_tools::list_repos(fed);
+                                    let text = match serde_json::to_string(&repos) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    };
+                                    return Ok(jsonrpc_tool_result(id, &text, false));
+                                }
+                                "get_repo_info" => {
+                                    let id_str = match args_map.get("id").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: id", true)),
+                                    };
+                                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                                        Ok(r) => r,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    };
+                                    match crate::mcp::federation_tools::get_repo_info(fed, &rid) {
+                                        Ok(info) => {
+                                            let text = match serde_json::to_string(&info) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            return Ok(jsonrpc_tool_result(id, &text, false));
+                                        }
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
 
                         match executor.call(name, args).await {
                             Ok(text) => {
