@@ -10,6 +10,12 @@ use std::time::{Duration, SystemTime};
 pub trait RepoSource: Send + Sync {
     fn id(&self) -> &RepoId;
     fn local_path(&self) -> &Path;
+    /// Stable, lowercase kind label for this source (e.g. `"workspace_dir"`,
+    /// `"local_clone"`, `"shallow_clone"`). Used as the `source_kind` field in
+    /// the cold-restart manifest. The set of returned values is closed: any
+    /// new source type must add a new label here AND a new `SourceConfig`
+    /// variant in `config.rs` so the YAML schema stays in sync.
+    fn kind(&self) -> &'static str;
     async fn fetch(&self) -> Result<(), LainError>;
     fn last_refreshed(&self) -> SystemTime;
     fn is_stale(&self, max_age: Duration) -> bool;
@@ -47,6 +53,7 @@ impl LocalCloneSource {
 impl RepoSource for LocalCloneSource {
     fn id(&self) -> &RepoId { &self.repo_id }
     fn local_path(&self) -> &Path { &self.local_path }
+    fn kind(&self) -> &'static str { "local_clone" }
     async fn fetch(&self) -> Result<(), LainError> {
         use std::process::Command;
         let path = self.local_path.clone();
@@ -106,6 +113,7 @@ impl ShallowCloneSource {
 impl RepoSource for ShallowCloneSource {
     fn id(&self) -> &RepoId { self.inner.id() }
     fn local_path(&self) -> &Path { self.inner.local_path() }
+    fn kind(&self) -> &'static str { "shallow_clone" }
     async fn fetch(&self) -> Result<(), LainError> {
         use std::process::Command;
         let path = self.inner.local_path.clone();
@@ -170,6 +178,7 @@ impl WorkspaceDirSource {
 impl RepoSource for WorkspaceDirSource {
     fn id(&self) -> &RepoId { &self.repo_id }
     fn local_path(&self) -> &Path { &self.local_path }
+    fn kind(&self) -> &'static str { "workspace_dir" }
     async fn fetch(&self) -> Result<(), LainError> { Ok(()) }
     fn last_refreshed(&self) -> SystemTime { SystemTime::now() }
     fn is_stale(&self, _max_age: Duration) -> bool { false }

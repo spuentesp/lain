@@ -7,6 +7,7 @@
 //! `POST /mcp` exactly like a single-workspace `lain --transport http`.
 
 use anyhow::{anyhow, Result};
+use lain::federation::health::RepoHealth;
 use lain::federation::loader::load_federation;
 use lain::server::{LainServer, Transport};
 use std::path::Path;
@@ -49,6 +50,12 @@ pub async fn run_server(
         if let Some(repo) = fed.get_repo(&id) {
             info!("lain server: indexing repo '{}'", id.as_str());
             if let Err(e) = repo.index().await {
+                // `RepoIndex::index` already demotes its own health to
+                // `Degraded` on failure, but we re-assert it here so the
+                // demotion is independent of `index()`'s implementation
+                // details (e.g. if a future refactor moves the demotion
+                // out of `index()` callers won't silently lose it).
+                repo.set_health(RepoHealth::Degraded);
                 tracing::warn!(
                     "lain server: indexing repo '{}' failed: {e} (marking Degraded)",
                     id.as_str()
