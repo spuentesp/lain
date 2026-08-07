@@ -13,6 +13,18 @@ pub struct GitSensor {
     workspace: PathBuf,
 }
 
+// SAFETY: `git2::Repository` is internally thread-safe per libgit2's
+// design (it guards its own internals with refcounts and per-handle locks).
+// git2 explicitly provides `unsafe impl Send for Repository` but no `Sync`
+// impl; we extend the same trust to `GitSensor` (whose only other field,
+// `PathBuf`, is `Sync`) so that `&GitSensor` is `Send` and can be passed
+// across `.await` points in the federation runtime. Callers must still
+// serialize concurrent method calls (e.g. via a `Mutex`) — libgit2 has
+// no cross-call synchronization, but the data races we'd hit without
+// the Mutex are about cache coherency on the `git2::Repository` handle,
+// not about memory unsafety at the Rust level.
+unsafe impl Sync for GitSensor {}
+
 impl GitSensor {
     /// Open a Git repository at the given path
     pub fn new(workspace: &Path) -> Result<Self, LainError> {
