@@ -8,8 +8,16 @@ use std::path::Path;
 
 pub trait GraphBackend: Send + Sync {
     fn upsert_node(&self, node: GraphNode) -> Result<(), LainError>;
+    fn upsert_node_global(
+        &self,
+        global_id: &str,
+        kind: NodeType,
+        path: &str,
+        name: &str,
+    ) -> Result<(), LainError>;
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError>;
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError>;
+    fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError>;
     fn traverse(&self, start: &str, edge: EdgeType, depth: Range<u32>) -> Result<Vec<GraphNode>, LainError>;
     fn find_path(&self, from: &str, to: &str) -> Result<Vec<GraphNode>, LainError>;
     fn subgraph_around(&self, center: &str, radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError>;
@@ -58,6 +66,16 @@ impl GraphBackend for PetgraphBackend {
         self.db.save_to_disk_sync()
     }
 
+    fn upsert_node_global(
+        &self,
+        global_id: &str,
+        kind: NodeType,
+        path: &str,
+        name: &str,
+    ) -> Result<(), LainError> {
+        Self::upsert_node_global(self, global_id, kind, path, name)
+    }
+
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.db.upsert_edge(edge)?;
         self.db.save_to_disk_sync()
@@ -65,6 +83,15 @@ impl GraphBackend for PetgraphBackend {
 
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError> {
         self.db.get_node_by_id(global_id)
+    }
+
+    fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError> {
+        Ok(self
+            .db
+            .get_all_nodes()
+            .into_iter()
+            .filter(|n| n.name == name)
+            .collect())
     }
 
     fn traverse(&self, start: &str, edge: EdgeType, depth: Range<u32>) -> Result<Vec<GraphNode>, LainError> {

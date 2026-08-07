@@ -49,6 +49,9 @@ pub enum LainError {
 
     #[error("Not implemented: {0}")]
     NotImplemented(String),
+
+    #[error("Ambiguous symbol: matches repos {0:?}")]
+    AmbiguousSymbol(Vec<crate::federation::repo_id::RepoId>),
 }
 
 impl From<git2::Error> for LainError {

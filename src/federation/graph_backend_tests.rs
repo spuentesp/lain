@@ -23,12 +23,33 @@ impl GraphBackend for HashMapBackend {
         self.nodes.write().unwrap().insert(node.id.clone(), node);
         Ok(())
     }
+    fn upsert_node_global(
+        &self,
+        global_id: &str,
+        kind: NodeType,
+        path: &str,
+        name: &str,
+    ) -> Result<(), LainError> {
+        let mut node = GraphNode::new(kind, name.to_string(), path.to_string());
+        node.id = global_id.to_string();
+        self.upsert_node(node)
+    }
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.edges.write().unwrap().push(edge);
         Ok(())
     }
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError> {
         Ok(self.nodes.read().unwrap().get(global_id).cloned())
+    }
+    fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError> {
+        Ok(self
+            .nodes
+            .read()
+            .unwrap()
+            .values()
+            .filter(|n| n.name == name)
+            .cloned()
+            .collect())
     }
     fn traverse(&self, _start: &str, _edge: EdgeType, _depth: Range<u32>) -> Result<Vec<GraphNode>, LainError> {
         Ok(Vec::new())
