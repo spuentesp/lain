@@ -75,7 +75,7 @@ parse_args() {
         echo "  --workspace PATH         Workspace path for LAIN [default: .]"
         echo "  --transport MODE        MCP transport: stdio, http, both [default: stdio]"
         echo "  --port PORT             HTTP port for MCP server [default: 9999]"
-        echo "  --agent AGENT           Target agent: auto, claude, gemini, cursor, windsurf, cline [default: auto]"
+        echo "  --agent AGENT           Target agent: auto, claude, gemini, cursor, windsurf, cline, kimi [default: auto]"
         echo "  --embedding-model PATH  Path to ONNX embedding model"
         echo "  --download-model        Download default ONNX model (all-MiniLM-L6-v2.onnx)"
         echo "  -y, --yes               Skip all confirmation prompts"
@@ -412,20 +412,24 @@ main() {
     if [ -z "$OPT_AGENT" ]; then
       echo ""
       echo "Target Agent:"
-      echo "  1) auto    - Auto-detect (recommended)"
-      echo "  2) claude  - Claude Code"
-      echo "  3) cursor  - Cursor AI"
+      echo "  1) auto     - Auto-detect (recommended)"
+      echo "  2) claude   - Claude Code"
+      echo "  3) cursor   - Cursor AI"
       echo "  4) windsurf - Windsurf Cascade"
-      echo "  5) cline   - Cline / Roo Code"
+      echo "  5) cline    - Cline / Roo Code"
+      echo "  6) gemini   - Gemini CLI"
+      echo "  7) kimi     - Kimi Code"
       read -p "Choose agent [default: auto]: " agent_input || agent_input=""
-      
+
       case "$agent_input" in
         1|"") OPT_AGENT="auto" ;;
         2)     OPT_AGENT="claude" ;;
         3)     OPT_AGENT="cursor" ;;
         4)     OPT_AGENT="windsurf" ;;
         5)     OPT_AGENT="cline" ;;
-        auto|claude|cursor|windsurf|cline) OPT_AGENT="$agent_input" ;;
+        6)     OPT_AGENT="gemini" ;;
+        7)     OPT_AGENT="kimi" ;;
+        auto|claude|gemini|cursor|windsurf|cline|kimi) OPT_AGENT="$agent_input" ;;
         *)     warn "Invalid choice, using auto"; OPT_AGENT="auto" ;;
       esac
     fi

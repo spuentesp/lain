@@ -31,6 +31,16 @@ class Lain < Formula
     bin.install "lain"
   end
 
+  def caveats
+    <<~EOS
+      Lain is installed but not yet configured for any agent.
+      To configure, run:
+        lain init --agent <claude|gemini|cursor|windsurf|cline|kimi>
+      For automatic detection:
+        lain init --agent auto
+    EOS
+  end
+
   test do
     assert_match "lain #{version}", shell_output("#{bin}/lain --version")
   end
