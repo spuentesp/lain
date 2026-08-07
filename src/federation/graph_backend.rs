@@ -61,6 +61,22 @@ impl PetgraphBackend {
         self.index.insert(global_id.to_string(), parsed);
         self.db.save_to_disk_sync()
     }
+
+    /// Direct access to the underlying `GraphDatabase` for bulk operations.
+    /// Used by the `test-utils` federation fixture helper
+    /// (`federation_index_for_test`) to seed a synthetic federation with
+    /// `insert_nodes_batch` / `insert_edges_batch` without paying the
+    /// per-write `save_to_disk_sync` cost of `upsert_node_global` /
+    /// `upsert_edge` — the latter would serialize 50K writes to disk for a
+    /// small-fixture perf test.
+    ///
+    /// The `&GraphDatabase` view is enough for batch inserts: callers cannot
+    /// mutate petgraph state outside of the documented batch methods, and
+    /// any internal `save_to_disk_sync` they trigger is an explicit choice.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn db(&self) -> &crate::graph::GraphDatabase {
+        &self.db
+    }
 }
 
 impl GraphBackend for PetgraphBackend {
