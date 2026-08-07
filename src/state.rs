@@ -90,6 +90,10 @@ fn write_registry(reg: &RegistryFile) -> std::io::Result<()> {
 pub enum RegistryError {
     AlreadyExists(String),
     NotFound(String),
+    /// Tried to register a project at a path that's already registered
+    /// under a different name. Includes the existing name so the CLI
+    /// can tell the user what to do.
+    PathAlreadyRegistered { path: String, existing_name: String },
     Io(std::io::Error),
     Parse(String),
     NotAbsolutePath(String),
@@ -100,6 +104,11 @@ impl std::fmt::Display for RegistryError {
         match self {
             RegistryError::AlreadyExists(n) => write!(f, "project '{}' already exists in registry", n),
             RegistryError::NotFound(n) => write!(f, "project '{}' not found in registry", n),
+            RegistryError::PathAlreadyRegistered { path, existing_name } => write!(
+                f,
+                "path '{}' is already registered as '{}'; use that name or run `lain projects forget {}` first",
+                path, existing_name, existing_name
+            ),
             RegistryError::Io(e) => write!(f, "I/O error: {}", e),
             RegistryError::Parse(s) => write!(f, "parse error: {}", s),
             RegistryError::NotAbsolutePath(s) => write!(f, "path is not absolute: {}", s),
@@ -115,7 +124,11 @@ impl From<std::io::Error> for RegistryError { fn from(e: std::io::Error) -> Self
 pub struct Projects;
 
 impl Projects {
-    /// Add or replace a project by name. Replaces if name exists.
+    /// Add or replace a project by name. Refuses if the path is already
+    /// registered under a different name (prevents the "monitor" vs
+    /// "monitor_dm_system" duplicate the user hit during stress testing).
+    /// If the same name already exists with the same path, just updates
+    /// last_used.
     pub fn add(name: &str, path: &Path) -> Result<(), RegistryError> {
         let canon = std::fs::canonicalize(path)
             .map_err(|e| RegistryError::Io(e))?;
@@ -124,12 +137,59 @@ impl Projects {
         }
         let mut reg = read_registry();
         let mut map = reg.to_map();
+
+        // Reject if a different name already points at the same path.
+        // Same name + same path is a no-op (just touch last_used).
+        if let Some((existing_name, _)) = map.iter().find(|(_, p)| p.path == canon) {
+            if existing_name != name {
+                return Err(RegistryError::PathAlreadyRegistered {
+                    path: canon.display().to_string(),
+                    existing_name: existing_name.clone(),
+                });
+            }
+        }
+
         let now = chrono_like_now();
         let entry = Project { name: name.to_string(), path: canon, last_used: Some(now) };
         map.insert(name.to_string(), entry);
         let reg = RegistryFile::from_map(map);
         write_registry(&reg)?;
         Ok(())
+    }
+
+    /// Register a project, or update its last_used if the path is
+    /// already registered. Used by `lain init`'s auto-register so
+    /// re-running init doesn't create duplicates. Returns true if a
+    /// new entry was created, false if an existing one was updated.
+    pub fn register_or_touch(path: &Path) -> Result<bool, RegistryError> {
+        let canon = std::fs::canonicalize(path)
+            .map_err(|e| RegistryError::Io(e))?;
+        let mut reg = read_registry();
+        let mut map = reg.to_map();
+
+        // Path already registered — just touch it, don't create a new
+        // entry. This is the core of the "no double register" behavior.
+        if let Some((_, existing)) = map.iter_mut().find(|(_, p)| p.path == canon) {
+            existing.last_used = Some(chrono_like_now());
+            let reg = RegistryFile::from_map(map);
+            write_registry(&reg)?;
+            return Ok(false);
+        }
+
+        // New path. Use the directory basename as the default name.
+        let name = canon
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+        let now = chrono_like_now();
+        map.insert(
+            name.clone(),
+            Project { name, path: canon, last_used: Some(now) },
+        );
+        let reg = RegistryFile::from_map(map);
+        write_registry(&reg)?;
+        Ok(true)
     }
 
     /// Remove a project by name. Errors if not found.
@@ -290,11 +350,13 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tmp("add");
         std::env::set_var("XDG_CONFIG_HOME", &dir);
-        let p = dir.join("repo");
-        fs::create_dir_all(&p).unwrap();
+        let p1 = dir.join("repo1");
+        let p2 = dir.join("repo2");
+        fs::create_dir_all(&p1).unwrap();
+        fs::create_dir_all(&p2).unwrap();
 
-        Projects::add("alpha", &p).unwrap();
-        Projects::add("beta", &p).unwrap();
+        Projects::add("alpha", &p1).unwrap();
+        Projects::add("beta", &p2).unwrap();
 
         let list = Projects::list();
         assert_eq!(list.len(), 2);
@@ -343,5 +405,52 @@ mod tests {
         assert_eq!(Projects::active_name().as_deref(), Some("alpha"));
         Projects::forget("alpha").unwrap();
         assert!(Projects::active_name().is_none());
+    }
+
+    #[test]
+    fn add_rejects_path_already_registered_under_different_name() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("pathdup");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let p = dir.join("repo");
+        fs::create_dir_all(&p).unwrap();
+
+        // First add under one name works.
+        Projects::add("alpha", &p).unwrap();
+        // Same path, different name — must refuse, not silently overwrite.
+        let err = Projects::add("beta", &p).unwrap_err();
+        match err {
+            RegistryError::PathAlreadyRegistered { existing_name, .. } => {
+                assert_eq!(existing_name, "alpha");
+            }
+            other => panic!("expected PathAlreadyRegistered, got {:?}", other),
+        }
+        // And list still has only one entry.
+        assert_eq!(Projects::list().len(), 1);
+        // Re-adding under the same name is a no-op (just touches last_used).
+        Projects::add("alpha", &p).unwrap();
+        assert_eq!(Projects::list().len(), 1);
+    }
+
+    #[test]
+    fn register_or_touch_no_duplicate() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("touch");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let p = dir.join("repo");
+        fs::create_dir_all(&p).unwrap();
+
+        // First call creates with directory basename.
+        let created = Projects::register_or_touch(&p).unwrap();
+        assert!(created);
+        let list = Projects::list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "repo");
+
+        // Second call doesn't create a duplicate.
+        let created = Projects::register_or_touch(&p).unwrap();
+        assert!(!created);
+        assert_eq!(Projects::list().len(), 1);
+        // But last_used is updated.
     }
 }

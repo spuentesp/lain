@@ -8,7 +8,6 @@
 use lain::state::{Projects, RegistryError};
 use anyhow::Result;
 use std::path::Path;
-use std::process::ExitCode;
 
 /// `lain projects list` — show registered projects.
 pub fn run_list() -> Result<()> {
@@ -41,6 +40,18 @@ pub fn run_add(name: &str, path: &Path) -> Result<()> {
             println!("registered '{}' -> {}", name, path.display());
             Ok(())
         }
+        // Path is already registered under a different name — surface the
+        // existing name so the user can run `lain projects use <name>`
+        // or `lain projects forget` first. Prevents the
+        // "monitor" + "monitor_dm_system" double-register trap.
+        Err(RegistryError::PathAlreadyRegistered { path, existing_name }) => {
+            Err(anyhow::anyhow!(
+                "path '{}' is already registered as '{}'.\n\
+                 Use `lain use {}` to switch to it, or run \
+                 `lain projects forget {}` first to re-add under a new name.",
+                path, existing_name, existing_name, existing_name
+            ))
+        }
         Err(RegistryError::Io(e)) => Err(anyhow::Error::from(e)),
         Err(e) => Err(anyhow::anyhow!("{}", e)),
     }
@@ -69,21 +80,5 @@ pub fn run_use(name: &str) -> Result<()> {
         Err(RegistryError::NotFound(_)) => Err(anyhow::anyhow!("project '{}' not found in registry; use `lain projects add` first", name)),
         Err(RegistryError::Io(e)) => Err(anyhow::Error::from(e)),
         Err(e) => Err(anyhow::anyhow!("{}", e)),
-    }
-}
-
-/// `lain projects current` — print the active project name.
-/// Returns ExitCode so main can propagate the failure (no active project)
-/// while still printing the friendly message.
-pub fn run_current() -> ExitCode {
-    match Projects::active_name() {
-        Some(name) => {
-            println!("{}", name);
-            ExitCode::SUCCESS
-        }
-        None => {
-            eprintln!("no active project; use `lain use <name>`");
-            ExitCode::from(1)
-        }
     }
 }

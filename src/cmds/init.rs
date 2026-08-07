@@ -109,17 +109,12 @@ pub fn run_init(
     println!("Restart your agent to use LAIN.");
 
     // Auto-register the project so `lain use <name>` works later without
-    // the user having to type the path. Default name is the directory's
-    // basename; user can rename later via `lain projects forget`/`add`.
-    let name = workspace
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("project")
-        .to_string();
-    match lain::state::Projects::add(&name, workspace) {
-        Ok(()) => {
-            eprintln!("registered project '{}' -> {}", name, workspace.display());
-        }
+    // the user having to type the path. Uses register_or_touch: if the
+    // path is already registered under any name, we just update
+    // last_used instead of creating a duplicate entry.
+    match lain::state::Projects::register_or_touch(workspace) {
+        Ok(true) => eprintln!("registered project under directory basename"),
+        Ok(false) => {} // already registered, just touched
         Err(e) => eprintln!("Note: could not auto-register project: {}", e),
     }
     Ok(())
