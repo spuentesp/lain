@@ -48,6 +48,17 @@ enum Commands {
         #[arg(long)] uninstall: bool,
     },
     Ask,
+    /// Start a federation-mode MCP server backed by a `repos.yaml` config.
+    /// Federation tools (list_repos, get_federation_health, search_org,
+    /// get_cross_repo_blast_radius*, get_repo_info) are exposed over the
+    /// chosen transport. Existing per-repo tools are not registered in
+    /// federation mode.
+    Server {
+        #[arg(long)] config: std::path::PathBuf,
+        #[arg(long, default_value = "http")] transport: String,
+        #[arg(long, default_value = "9999")] port: u16,
+        #[arg(long, default_value = "info")] log_level: String,
+    },
 }
 
 #[tokio::main]
@@ -61,6 +72,9 @@ async fn main() -> Result<()> {
             Commands::Query { expression, workspace } => return cmds::run_query(&expression, &workspace),
             Commands::Hook { agent, uninstall } => return cmds::run_hook_install(agent, uninstall),
             Commands::Ask => return cmds::run_ask(),
+            Commands::Server { config, transport, port, log_level } => {
+                return cmds::run_server(&config, &transport, port, &log_level).await;
+            }
         }
     }
 

@@ -23,6 +23,11 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // applies to the in-flight count, not the spawn count; each task holds
     // its permit until completion (the `_permit` binding), so permits are
     // released by drop when the task end.
+    //
+    // For each source we first run `fetch()` (clones the repo if needed).
+    // `WorkspaceDirSource::fetch` is a no-op so this is cheap for in-tree
+    // repos; for `ShallowCloneSource` it materializes the on-disk checkout
+    // that `RepoIndex::new` (via `GitSensor::new`) requires to exist.
     let mut handles = Vec::with_capacity(sources.len());
     for src in sources {
         let permit = semaphore
@@ -34,6 +39,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         let data_dir = config.data_dir.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
+            src.fetch().await?;
             let repo_id = src.id().clone();
             fed_clone.add_repo(src, &data_dir).await?;
             fed_clone.project_repo(&repo_id).await?;
