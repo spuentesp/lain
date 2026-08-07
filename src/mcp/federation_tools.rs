@@ -1,6 +1,6 @@
 //! Federation-mode MCP tools.
 //!
-//! Exposes three read-only tools for inspecting the live state of a
+//! Exposes four read-only tools for inspecting the live state of a
 //! `FederatedIndex`:
 //!
 //! - `list_repos` — returns every registered repo with its current health,
@@ -9,15 +9,18 @@
 //!   repo by id.
 //! - `get_federation_health` — returns aggregate counts per health bucket
 //!   plus total node/edge counts and a rough memory estimate.
+//! - `search_org` — case-insensitive substring search across every repo's
+//!   symbols (matched on `name` or `path`), sorted by `(repo_id, name)` and
+//!   truncated to a caller-supplied limit.
 //!
-//! Both tools are gated on the MCP server having been constructed with a
+//! All tools are gated on the MCP server having been constructed with a
 //! `FederatedIndex` (see `LainMcpServer::with_federation`). When the server
 //! runs in single-workspace mode these tools are not registered and the
 //! existing tool surface is unchanged.
 
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
-use crate::federation::repo_id::RepoId;
+use crate::federation::repo_id::{GlobalId, RepoId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,6 +124,81 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
     h
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SymbolMatch {
+    pub global_id: String,
+    pub repo_id: String,
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+}
+
+/// Case-insensitive substring search for symbols across every repo in the
+/// federation. Matches on `name` or `path`, sorts by `(repo_id, name)`, and
+/// truncates to `limit`.
+///
+/// The primary path iterates `list_repos()` → `get_repo()` → per-repo
+/// `RepoIndex::nodes()`, which covers repos added through `add_repo` whether
+/// or not they have been projected. A backend fallback then scans
+/// `fed.backend().list_nodes()` to catch nodes inserted directly into the
+/// federated backend (bypassing `add_repo` / `project_repo` — the same
+/// fallback pattern used by `FederatedIndex::resolve_symbol`). Results are
+/// deduplicated by `global_id` so a node visible through both paths is
+/// returned once.
+pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<SymbolMatch> {
+    let q = query.to_lowercase();
+    let mut hits: Vec<SymbolMatch> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Primary path: per-repo nodes.
+    for (repo_id, _) in fed.list_repos() {
+        if let Some(repo) = fed.get_repo(&repo_id) {
+            for n in repo.nodes() {
+                if n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q) {
+                    if seen.insert(n.id.clone()) {
+                        hits.push(SymbolMatch {
+                            global_id: n.id.clone(),
+                            repo_id: repo_id.to_string(),
+                            name: n.name.clone(),
+                            path: n.path.clone(),
+                            kind: n.node_type.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: backend nodes not already collected from per-repo indexes.
+    // `repo_id` is parsed from the node's global id, since the backend path
+    // has no `list_repos()` iteration to draw from.
+    if let Ok(backend_nodes) = fed.backend().list_nodes() {
+        for n in backend_nodes {
+            if seen.contains(&n.id) {
+                continue;
+            }
+            if n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q) {
+                let repo_id = GlobalId::parse(&n.id)
+                    .ok()
+                    .map(|g| g.repo_id().to_string())
+                    .unwrap_or_default();
+                seen.insert(n.id.clone());
+                hits.push(SymbolMatch {
+                    global_id: n.id.clone(),
+                    repo_id,
+                    name: n.name.clone(),
+                    path: n.path.clone(),
+                    kind: n.node_type.to_string(),
+                });
+            }
+        }
+    }
+
+    hits.sort_by(|a, b| a.repo_id.cmp(&b.repo_id).then(a.name.cmp(&b.name)));
+    hits.truncate(limit);
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +279,19 @@ mod tests {
         assert_eq!(h.total_repos, 0);
         assert_eq!(h.total_nodes, 0);
         assert_eq!(h.total_edges, 0);
+    }
+
+    #[tokio::test]
+    async fn search_org_finds_across_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        fed.backend().upsert_node_global("repo-a:Function:src/auth.rs:verify_token", crate::schema::NodeType::Function, "src/auth.rs", "verify_token").unwrap();
+        fed.backend().upsert_node_global("repo-b:Function:src/auth.rs:verify_token", crate::schema::NodeType::Function, "src/auth.rs", "verify_token").unwrap();
+        fed.backend().upsert_node_global("repo-c:Function:src/x.rs:other", crate::schema::NodeType::Function, "src/x.rs", "other").unwrap();
+        let hits = search_org(&fed, "verify", 10);
+        assert_eq!(hits.len(), 2);
+        let repos: std::collections::HashSet<_> = hits.iter().map(|h| h.repo_id.clone()).collect();
+        assert!(repos.contains("repo-a"));
+        assert!(repos.contains("repo-b"));
     }
 }

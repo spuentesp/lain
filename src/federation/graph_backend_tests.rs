@@ -51,6 +51,9 @@ impl GraphBackend for HashMapBackend {
             .cloned()
             .collect())
     }
+    fn list_nodes(&self) -> Result<Vec<GraphNode>, LainError> {
+        Ok(self.nodes.read().unwrap().values().cloned().collect())
+    }
     fn traverse(&self, _start: &str, _edge: EdgeType, _depth: Range<u32>) -> Result<Vec<GraphNode>, LainError> {
         Ok(Vec::new())
     }

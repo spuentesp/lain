@@ -59,6 +59,11 @@ const FEDERATION_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "Aggregate health counts and total node/edge counts across the federation, plus a rough memory estimate.",
         &[],
     ),
+    (
+        "search_org",
+        "Case-insensitive substring search across every repo's symbols (matched on name or path). Args: query (substring), limit (max results, parsed as usize). Returns matches sorted by (repo_id, name).",
+        &["query", "limit"],
+    ),
 ];
 
 struct LainHandler {
@@ -170,6 +175,51 @@ impl ServerHandler for LainHandler {
                     let health = crate::mcp::federation_tools::get_federation_health(fed);
                     return Ok(tool_text_result(
                         serde_json::to_string(&health)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ));
+                }
+                "search_org" => {
+                    let query = match args.get("query").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: query".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let limit: usize = match args.get("limit") {
+                        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+                            Some(u) => u as usize,
+                            None => {
+                                return Ok(tool_text_result(
+                                    "Invalid argument: limit must be a non-negative integer"
+                                        .to_string(),
+                                    true,
+                                ));
+                            }
+                        },
+                        Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
+                            Ok(u) => u,
+                            Err(_) => {
+                                return Ok(tool_text_result(
+                                    "Invalid argument: limit must be a non-negative integer"
+                                        .to_string(),
+                                    true,
+                                ));
+                            }
+                        },
+                        _ => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: limit".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let hits = crate::mcp::federation_tools::search_org(fed, query, limit);
+                    return Ok(tool_text_result(
+                        serde_json::to_string(&hits)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
                     ));
@@ -450,6 +500,29 @@ async fn handle_request(
                                 "get_federation_health" => {
                                     let health = crate::mcp::federation_tools::get_federation_health(fed);
                                     let text = match serde_json::to_string(&health) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    };
+                                    return Ok(jsonrpc_tool_result(id, &text, false));
+                                }
+                                "search_org" => {
+                                    let query = match args_map.get("query").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: query", true)),
+                                    };
+                                    let limit: usize = match args_map.get("limit") {
+                                        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+                                            Some(u) => u as usize,
+                                            None => return Ok(jsonrpc_tool_result(id, "Invalid argument: limit must be a non-negative integer", true)),
+                                        },
+                                        Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
+                                            Ok(u) => u,
+                                            Err(_) => return Ok(jsonrpc_tool_result(id, "Invalid argument: limit must be a non-negative integer", true)),
+                                        },
+                                        _ => return Ok(jsonrpc_tool_result(id, "Missing required argument: limit", true)),
+                                    };
+                                    let hits = crate::mcp::federation_tools::search_org(fed, query, limit);
+                                    let text = match serde_json::to_string(&hits) {
                                         Ok(s) => s,
                                         Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
                                     };

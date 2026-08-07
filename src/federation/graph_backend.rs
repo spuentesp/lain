@@ -18,6 +18,11 @@ pub trait GraphBackend: Send + Sync {
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError>;
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError>;
     fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError>;
+    /// Return every node currently in the backend. Used by
+    /// `mcp::federation_tools::search_org` as a fallback for nodes inserted
+    /// into the backend directly (bypassing `add_repo` / `project_repo`).
+    /// Same pattern as `resolve_symbol` falling back to `find_nodes_by_name`.
+    fn list_nodes(&self) -> Result<Vec<GraphNode>, LainError>;
     fn traverse(&self, start: &str, edge: EdgeType, depth: Range<u32>) -> Result<Vec<GraphNode>, LainError>;
     fn find_path(&self, from: &str, to: &str) -> Result<Vec<GraphNode>, LainError>;
     fn subgraph_around(&self, center: &str, radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError>;
@@ -92,6 +97,10 @@ impl GraphBackend for PetgraphBackend {
             .into_iter()
             .filter(|n| n.name == name)
             .collect())
+    }
+
+    fn list_nodes(&self) -> Result<Vec<GraphNode>, LainError> {
+        Ok(self.db.get_all_nodes())
     }
 
     fn traverse(&self, start: &str, edge: EdgeType, depth: Range<u32>) -> Result<Vec<GraphNode>, LainError> {
