@@ -5,24 +5,11 @@
 //! transport. In HTTP mode the federation tool surface (`list_repos`,
 //! `get_federation_health`, `search_org`, etc.) is exposed at
 //! `POST /mcp` exactly like a single-workspace `lain --transport http`.
-//!
-//! Note: this implements only the subset of Task 24 required to smoke-test
-//! the federation end-to-end. Federation-mode routing for the existing
-//! per-repo tool surface is out of scope here.
 
 use anyhow::{anyhow, Result};
 use lain::federation::loader::load_federation;
-use lain::git::GitSensor;
-use lain::graph::GraphDatabase;
-use lain::lsp::LspPool;
-use lain::mcp::LainMcpServer;
-use lain::nlp::NlpEmbedder;
-use lain::overlay::VolatileOverlay;
-use lain::tools::ToolExecutor;
-use lain::tuning::load_tuning_config;
-use parking_lot::Mutex;
+use lain::server::{LainServer, Transport};
 use std::path::Path;
-use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -79,30 +66,25 @@ pub async fn run_server(
         }
     }
 
-    let executor = build_minimal_executor()?;
-
-    let mcp = LainMcpServer::with_federation(executor, fed);
-
-    match transport {
-        "http" => {
-            info!("lain server: HTTP transport on port {}", port);
-            mcp.run_http(port)
-                .await
-                .map_err(|e| anyhow!("HTTP transport: {e}"))?;
-        }
-        "stdio" => {
-            info!("lain server: stdio transport");
-            mcp.run_stdio()
-                .await
-                .map_err(|e| anyhow!("stdio transport: {e}"))?;
-        }
+    let transport_enum = match transport {
+        "http" => Transport::Http,
+        "stdio" => Transport::Stdio,
         other => {
             return Err(anyhow!(
                 "unknown transport: {other} (expected 'http' or 'stdio')"
             ));
         }
-    }
-    Ok(())
+    };
+
+    let server = LainServer::with_federation(fed, transport_enum, port)?;
+    info!(
+        "lain server: starting on {:?} transport (port {})",
+        transport_enum, port
+    );
+    server
+        .serve()
+        .await
+        .map_err(|e| anyhow!("federation server: {e}"))
 }
 
 fn init_tracing(log_level: &str) {
@@ -113,47 +95,4 @@ fn init_tracing(log_level: &str) {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .try_init();
-}
-
-/// Build a minimal `ToolExecutor` so `LainMcpServer::with_federation` can be
-/// constructed. Federation tools are dispatched in `mcp/handler.rs` before
-/// the executor is touched, so for a federation-only server the executor
-/// is just a placeholder — none of its underlying services are exercised.
-///
-/// The components it wires up still require a working directory and a git
-/// repository to point at (GitSensor opens the workspace with git2). Use a
-/// temp directory seeded by `std::process::id()` (unique per invocation) and
-/// `git init` it. The graph memory path is a fresh path under that dir so
-/// `load_from_disk` is never triggered.
-fn build_minimal_executor() -> Result<ToolExecutor> {
-    let ws = std::env::temp_dir().join(format!("lain-federation-{}", std::process::id()));
-    std::fs::create_dir_all(&ws)?;
-    if !ws.join(".git").exists() {
-        git2::Repository::init(&ws)?;
-    }
-
-    let mem_dir = ws.join(".lain");
-    std::fs::create_dir_all(&mem_dir)?;
-    let mem_path = mem_dir.join("graph.bin");
-    // Ensure no stale file from a previous run leaks in.
-    let _ = std::fs::remove_file(&mem_path);
-
-    let graph = GraphDatabase::new(&mem_path)?;
-    let overlay = VolatileOverlay::new();
-    let embedder = NlpEmbedder::new()?;
-    if embedder.is_stub() {
-        info!("NLP embedder running in stub mode (no ONNX model found)");
-    }
-    let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
-    let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
-    let tuning = Arc::new(load_tuning_config(&ws));
-
-    Ok(ToolExecutor::new(
-        graph,
-        overlay,
-        embedder,
-        git,
-        lsp_pool,
-        tuning,
-    ))
 }
