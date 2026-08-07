@@ -49,6 +49,9 @@ mod matching_tests;
 #[cfg(test)]
 #[path = "federation/federated_index_tests.rs"]
 mod federated_index_tests;
+#[cfg(test)]
+#[path = "federation/manifest_tests.rs"]
+mod manifest_tests;
 
 pub use error::LainError;
 pub use mcp::LainMcpServer;

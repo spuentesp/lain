@@ -24,7 +24,13 @@ pub enum LainError {
     Mcp(String),
 
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("Unsupported manifest version: {0}")]
+    UnsupportedManifestVersion(u32),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -57,6 +63,12 @@ pub enum LainError {
 impl From<git2::Error> for LainError {
     fn from(err: git2::Error) -> Self {
         LainError::Git(err.message().to_string())
+    }
+}
+
+impl From<std::io::Error> for LainError {
+    fn from(err: std::io::Error) -> Self {
+        LainError::Io(err.to_string())
     }
 }
 

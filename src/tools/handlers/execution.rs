@@ -64,7 +64,7 @@ pub async fn run_build(
     }
     cmd.current_dir(work_dir);
 
-    let output = cmd.output().await.map_err(LainError::Io)?;
+    let output = cmd.output().await.map_err(|e| LainError::Io(e.to_string()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.status.code().unwrap_or(-1);
@@ -141,7 +141,7 @@ pub async fn run_tests(
 
     let result = timeout(timeout_duration, cmd.output()).await
         .map_err(|_| LainError::Mcp("Tests timed out".to_string()))?
-        .map_err(LainError::Io)?;
+        .map_err(|e| LainError::Io(e.to_string()))?;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -198,7 +198,7 @@ pub async fn run_clippy(
     cmd.arg("--message-format=json");
     cmd.current_dir(work_dir);
 
-    let output = cmd.output().await.map_err(LainError::Io)?;
+    let output = cmd.output().await.map_err(|e| LainError::Io(e.to_string()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.status.code().unwrap_or(-1);

@@ -111,7 +111,7 @@ pub fn get_code_snippet(
 
 fn read_file_range(path: &str, start: usize, end: usize, _ctx: usize) -> Result<String, LainError> {
     let content = std::fs::read_to_string(path)
-        .map_err(LainError::Io)?;
+        .map_err(|e| LainError::Io(e.to_string()))?;
     let lines: Vec<&str> = content.lines().collect();
 
     let start = start.saturating_sub(1).min(lines.len());
