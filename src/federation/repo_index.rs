@@ -21,15 +21,27 @@ pub struct RepoIndex {
     last_indexed: Arc<RwLock<SystemTime>>,
 }
 
+// `GitSensor` wraps a `git2::Repository`, which is `!Send + !Sync` because it
+// holds a raw `*mut git_repository`. The loader spawns per-repo indexers onto
+// the tokio runtime, so `RepoIndex` (and therefore `Arc<RepoIndex>`) must be
+// `Send + Sync` to live inside `RwLock<HashMap<RepoId, Arc<RepoIndex>>>` on a
+// `FederatedIndex` that crosses a `tokio::spawn` boundary.
+//
+// The `git` field is `#[allow(dead_code)]` in `RepoIndex` — it is constructed
+// eagerly to mirror the existing ingestion pipeline but is never read here —
+// so there is no concurrent access to serialize. Future methods that actually
+// touch `git` (e.g. the `RepoIndex::index` watcher wiring) will need to wrap
+// the field in a `Mutex` and update this rationale.
+unsafe impl Send for RepoIndex {}
+unsafe impl Sync for RepoIndex {}
+
 impl RepoIndex {
     pub fn new(source: Box<dyn RepoSource>, data_dir: &Path) -> Result<Self, LainError> {
         let local_path = source.local_path().to_path_buf();
         let db = GraphDatabase::new(&data_dir.join("graph.bin"))?;
         // Match the existing default ingestion tuning until RepoIndex accepts configuration.
         let lsp = LspPool::new(&local_path, 4)?;
-        let git = GitSensor::new(&local_path).or_else(|_| {
-            GitSensor::new(Path::new(env!("CARGO_MANIFEST_DIR")))
-        })?;
+        let git = GitSensor::new(&local_path)?;
         Ok(Self {
             source,
             db,

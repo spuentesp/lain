@@ -18,7 +18,13 @@ repos:
         ),
     )
     .unwrap();
-    std::fs::create_dir_all(tmp.path().join("ws")).unwrap();
+    // `RepoIndex::new` instantiates a `GitSensor` against the source's local
+    // path, so the path must be a real git repo. Initialize a throwaway repo
+    // in a fresh tempdir; the test's behavior (load a config, verify the
+    // single repo is listed) is unchanged.
+    let ws_dir = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+    git2::Repository::init(&ws_dir).unwrap();
     std::fs::create_dir_all(tmp.path().join("data")).unwrap();
 
     let fed = load_federation(&cfg_path).await.unwrap();
