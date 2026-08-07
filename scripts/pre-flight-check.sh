@@ -37,8 +37,8 @@ fi
 
 # Check 2: No compilation warnings
 echo "Check 2: Checking for compilation warnings..."
-if cargo build --release 2>&1 | grep -i warning > /dev/null 2>&1; then
-    fail "Compilation warnings found. Run: cargo build --release 2>&1 | grep -i warning"
+if cargo build --release --locked 2>&1 | grep -i warning > /dev/null 2>&1; then
+    fail "Compilation warnings found. Run: cargo build --release --locked 2>&1 | grep -i warning"
 else
     pass "No compilation warnings"
 fi
@@ -74,7 +74,7 @@ fi
 
 # Check 4: Binary builds locally
 echo "Check 4: Building binary locally..."
-if cargo build --release 2>&1 | grep -q "Finished \`release\`"; then
+if cargo build --release --locked 2>&1 | grep -q "Finished \`release\`"; then
     pass "Binary builds successfully"
 else
     fail "Binary build failed"
