@@ -261,6 +261,12 @@ The `ToolExecutor` dispatches based on tool name, routing to the appropriate han
 4. update overlay graph (in-memory)
 ```
 
+The file watcher discovers readable directories using the repository's
+.gitignore rules and registers them independently. Unreadable directories
+(such as Docker-owned bind mounts) are logged and skipped; they do not stop
+watching or overlay updates for the remaining workspace. Newly-created
+readable directories are registered as they appear.
+
 ### Query Flow (e.g., `get_blast_radius`)
 
 ```
