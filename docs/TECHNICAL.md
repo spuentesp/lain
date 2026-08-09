@@ -1,6 +1,6 @@
-# LAIN-mcp — Technical Reference
+# WIRD-mcp — Technical Reference
 
-*Deep dive into how Lain works under the hood.*
+*Deep dive into how Wird works under the hood.*
 
 ---
 
@@ -13,7 +13,7 @@
                               │ MCP (JSON-RPC over stdio/HTTP)
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                         LAIN-mcp                            │
+│                         WIRD-mcp                            │
 │                                                              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
 │  │ MCP Handler │  │  Tool Exec   │  │   Background Jobs   │ │
@@ -90,7 +90,7 @@ Multi-language server protocol multiplexer supporting:
 | Scala | metals | ✅ |
 | Svelte | svelte-language-server | ✅ |
 
-**On-demand reference ingestion:** When `get_blast_radius` or `get_call_chain` is called, Lain uses LSP `find_references` to build real `Calls` edges—never static heuristics alone.
+**On-demand reference ingestion:** When `get_blast_radius` or `get_call_chain` is called, Wird uses LSP `find_references` to build real `Calls` edges—never static heuristics alone.
 
 ### 4. NLP Embedder (`src/nlp.rs`)
 
@@ -128,6 +128,112 @@ Async job system for long-running tasks:
 | **Sliding Window** | Periodic | Every 30s |
 | **Background Sync** | Periodic | Every 60s |
 | **Lazy NLP** | Post-sync | On-demand |
+
+---
+
+## Federation Architecture
+
+Federation mode is an optional way to run a single lain process that owns N repos at once.
+It is gated behind `LainMcpServer::with_federation` (`src/mcp/handler.rs`) and is loaded from a `repos.yaml` config;
+existing single-workspace invocations (`lain --workspace ./myrepo`) keep working unchanged.
+The entry point is `FederatedIndex` (`src/federation/federated_index.rs`), which holds a
+`RwLock<HashMap<RepoId, Arc<RepoIndex>>>` of per-repo workers plus a single
+`Arc<dyn GraphBackend>` that projects every worker's nodes into one global petgraph.
+
+Each worker runs its own LSP pool, tree-sitter extractor, per-repo petgraph,
+file watcher, and bincode persistence — federation does not pool those.
+`add_repo(source, data_dir)` registers a worker; `project_repo(id)` re-keys
+its nodes to global ids (`src/federation/repo_id.rs`), upserts them into the
+backend, then iterates every other worker's nodes and runs
+`find_cross_repo_matches` against each of the projected node's signatures.
+`resolve_symbol(name)` maps a name to a single `RepoId` via an in-memory
+`symbol_to_repos` index rebuilt on every add/remove/project; a backend-scan
+fallback (`find_nodes_by_name` filtered by repo) catches nodes inserted
+directly into the backend without going through `project_repo` — the same
+fallback used by `search_org` and the cross-repo blast-radius lookup.
+Single-workspace mode (the `--workspace` flag, see `src/main.rs`) still goes
+through the pre-federation `LainServer::new` path and does not construct a
+`FederatedIndex` — it shares the lower layers (`GraphDatabase`, file watcher,
+LSP pool) but not the federation orchestrator. `WorkspaceDirSource` exists
+as the documented back-compat shim for migrating that path onto the
+federation layer later; today it is exercised only by federation tests.
+
+Two traits carry the load. **`RepoSource`** (`src/federation/repo_source.rs`)
+defines how the server obtains code: `id`, `local_path`, `kind` (a stable
+label like `"workspace_dir"` / `"local_clone"` / `"shallow_clone"`),
+`fetch`, `last_refreshed`, `is_stale`. Three impls ship today:
+`LocalCloneSource` does `git clone` if the path does not yet exist, then
+runs `git fetch --all` and `reset --hard origin/<ref>` on every `fetch()`;
+`ShallowCloneSource` does `git clone --depth 1 --branch <ref>` (and
+`git fetch --depth 1 origin <ref>` on subsequent fetches) for storage-light
+deployments; `WorkspaceDirSource` is the back-compat shim for `--workspace`
+mode — `fetch` is a no-op because the workspace watcher already drives live
+updates, so the source is always fresh.
+
+**`GraphBackend`** (`src/federation/graph_backend.rs`) defines how the
+projected graph is stored: `upsert_node` / `upsert_node_global` / `upsert_edge`
+writes, plus `get_node` / `find_nodes_by_name` / `list_nodes` / `traverse` /
+`find_path` / `subgraph_around` reads. Only `PetgraphBackend` is implemented
+today; it persists to `federated_graph.bin` via the existing `GraphDatabase`
+and keeps a `DashMap<String, GlobalId>` parse-index so traversal lookups do
+not reparse the whole graph on every call. Every write goes through
+`save_to_disk_sync`, so a federation crash mid-write loses at most the
+in-flight batch. The documented escape hatch for an external store is
+`MemgraphBackend` (deferred — not implemented in this codebase). The trait
+is the contract; `GraphBackend::traverse` returns nodes reachable in the
+given `Range<u32>` depth, which is what `get_cross_repo_blast_radius`
+sits on top of.
+
+The global ID scheme (`src/federation/repo_id.rs`) is
+`repo_id:NodeType:path:name` (where `NodeType` formats via the `Debug` impl,
+e.g. `Function`, `Method`, `Class`). Every per-repo node is re-keyed to
+that format before it lands in the backend, so the global petgraph has no
+`File` / `Module` collisions across repos and no central registry is needed.
+`RepoId::new` rejects empty / colon / slash to keep the format unambiguous.
+Cross-repo edges are added by `find_cross_repo_matches`
+(`src/federation/matching.rs`): for each new symbol, the signature is
+tokenized into identifier-like tokens (alphanumeric and `_`, lowercased,
+with `fn` stripped) and cosine similarity is computed against every other
+repo's symbols. Matches above threshold (`0.5`, top-`5` per symbol,
+enforced in `FederatedIndex::project_repo`) become
+`EdgeType::CrossRepoSameSymbol` edges weighted by similarity. The
+tokenization is intentionally simple — the embedding pipeline planned for
+the redundancy sub-project can replace it later for richer similarity.
+
+Deferred sub-projects (2–7 of the 7 in the org-wide code intelligence
+vision, see `docs/superpowers/specs/2026-08-07-federated-indexer-design.md`):
+**Service Identity** (sub-project 2 — no `Service` node type yet),
+**IaC/schema ingestion** (sub-project 3 — `Resource` / `Schema` types exist
+in `schema.rs` but have no ingesters), **Redundancy detection** (sub-project
+4 — the symbol-embedding pipeline will replace the tokenized-signature
+heuristic), **Multi-tenancy** (sub-project 5 — server is single-tenant; all
+clients see all repos; `GraphBackend` is designed to leave room for ACL
+filtering later), **UI** (sub-project 6 — MCP tools only today), and
+**Live PR overlay** (sub-project 7 — file-watcher-only updates; no PR
+polling). `MemgraphBackend` is part of the storage story and is the only
+"in-this-codebase-but-unimplemented" piece — the trait is the contract.
+
+### Cross-repo blast-radius semantics
+
+The headline federation tool is `get_cross_repo_blast_radius(symbol, depth)`
+(`src/mcp/federation_tools.rs`). It resolves `symbol` to a single repo via
+`FederatedIndex::resolve_symbol` (propagating `AmbiguousSymbol` so callers
+can prompt the user to disambiguate, or `NotFound` if the symbol is unknown).
+Once a repo is picked, the seed node is looked up in the backend via
+`find_nodes_by_name` filtered by repo — that returns the seed's full global
+id including the real path component (the caller's `symbol` is just a name,
+not a global id). From that seed it calls
+`GraphBackend::traverse(seed.id, EdgeType::Calls, depth)` — an
+**outgoing-only** traversal — so incoming callers of the seed are
+deliberately not visited; if the caller wants reverse direction they have
+to seed a different node. Visited nodes are bucketed by `RepoId` (parsed
+out of each node's global id) into a `BTreeMap<String, Vec<String>>` so the
+client sees per-repo counts. The result is capped at `BLAST_RADIUS_CAP = 1000`
+nodes; when that cap is hit the response sets `truncated: true`,
+signalling that more reachable nodes exist beyond the cap. The
+`_for_repo` variant skips `resolve_symbol` when the caller already knows
+which repo owns the seed (or when `resolve_symbol` would be ambiguous) and
+looks the seed up the same way.
 
 ---
 
@@ -184,7 +290,7 @@ After build, the binary is at:
 
 **stdio (default):**
 ```
-Claude Code <--stdin/stdout--> Lain MCP handler
+Claude Code <--stdin/stdout--> Wird MCP handler
 ```
 Uses `rust-mcp-sdk` with JSON-RPC over process I/O.
 
@@ -250,7 +356,7 @@ The `ToolExecutor` dispatches based on tool name, routing to the appropriate han
 
 ### Query Language (`query_graph`)
 
-Lain exposes a JSON-based ops-array query interface for flexible graph traversal:
+Wird exposes a JSON-based ops-array query interface for flexible graph traversal:
 
 ```json
 {
