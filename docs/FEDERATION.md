@@ -149,6 +149,7 @@ repo by id.
   - `id` (string, required) — the repo id
 - **Returns:** a single `RepoInfo` object (same shape as above)
 - **Errors:**
+  - `Missing required argument: id` — no `id` key in args
   - `NotFound: repo <id>` — no repo with that id is registered
 
 ### `get_federation_health`
@@ -253,7 +254,7 @@ Implementation notes:
 **Errors:**
 - `Missing required argument: symbol`
 - `Missing required argument: depth`
-- `Invalid depth: expected "<start>..<end>"` — depth string is malformed
+- `Invalid depth: expected "<start>..<end>", got "<input>"` — depth string is malformed; the trailing `got "<input>"` echoes the offending value (debug-quoted) so you can see what the parser saw
 - `NotFound: symbol <name> not found in any repo` — `resolve_symbol` found nothing
 - `AmbiguousSymbol: [...]` — `resolve_symbol` found the symbol in multiple repos; the caller should disambiguate via `repo_id` (use `get_cross_repo_blast_radius_for_repo` or pass a disambiguator)
 - `NotFound: symbol <name> not found in repo <id>` — only possible via the `_for_repo` variant
@@ -272,9 +273,9 @@ the seed.
 - **Returns:** `CrossRepoBlastRadius` (same shape as above)
 - **Errors:**
   - `Missing required argument: repo_id | symbol | depth`
-  - `Invalid depth: expected "<start>..<end>"`
+  - `Invalid depth: expected "<start>..<end>", got "<input>"`
   - `NotFound: symbol <name> not found in repo <id>`
-  - `NotFound: repo <id>` — bad repo id (raised by `RepoId::new`'s validation)
+  - `Invalid repo id: <id>` — bad repo id (raised by `RepoId::new`'s validation: empty, contains `:`, or contains `/`)
 
 ---
 
@@ -287,7 +288,7 @@ single-workspace mode that are resolved against a federation) use
 
 1. **Explicit `repo_id`.** If the call's `args.repo_id` is present and
    non-empty, use it as-is. If it's malformed (fails `RepoId::new`'s
-   validation), return `NotFound: repo <id>`.
+   validation), return `Invalid repo id: <id>`.
 2. **Symbol hint.** Otherwise, if `args.symbol` is present, call
    `FederatedIndex::resolve_symbol(symbol)`:
    - exactly one repo owns that name → return that repo
@@ -414,10 +415,19 @@ explicit `repo_id` (or use `get_cross_repo_blast_radius_for_repo`).
 
 ### `NotFound: repo <id>`
 
-The caller passed a `repo_id` that isn't registered, or one that fails
-`RepoId::new`'s validation (e.g. empty string). Check `list_repos` for
-the canonical id spelling; remember `id` rules are enforced by the
-parser.
+The caller passed a well-formed `repo_id` that isn't registered. Only
+raised by `get_repo_info` — the cross-repo blast-radius tools don't look
+up by registration; they filter by the `repo_id` prefix on the symbol
+search. Check `list_repos` for the canonical id spelling.
+
+### `Invalid repo id: <id>`
+
+The caller passed a `repo_id` that fails `RepoId::new`'s validation
+(empty string, contains `:`, or contains `/`). Raised by any tool that
+validates the `repo_id` directly: `get_repo_info`,
+`get_cross_repo_blast_radius_for_repo`, and the per-repo tool resolver
+(`resolve_repo_for_tool`). Fix the id to match `RepoId`'s rules and
+retry.
 
 ### `NotFound: symbol <name> not found in repo <id>`
 
@@ -455,12 +465,13 @@ appears in the literal error text. Re-call with the missing key.
 integer (or a string that fails to parse as one). Pass `limit` as a
 JSON number (or a string of digits).
 
-### `Invalid depth: expected "<start>..<end>"`
+### `Invalid depth: expected "<start>..<end>", got "<input>"`
 
 `get_cross_repo_blast_radius*` was called with a `depth` that isn't a
-`Range<u32>` literal of the form `"<start>..<end>"`. The end is
-**exclusive**. For example, `depth: "1..3"` traverses depth 1 and 2
-only.
+`Range<u32>` literal of the form `"<start>..<end>"`. The trailing
+`got "<input>"` echoes the offending value (debug-quoted) so you can
+see what the parser saw. The end is **exclusive**. For example,
+`depth: "1..3"` traverses depth 1 and 2 only.
 
 ### Repo stuck in `indexing` / `degraded` / `unavailable` / `missing`
 
