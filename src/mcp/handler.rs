@@ -1138,10 +1138,77 @@ mod tests {
     /// round-trip. When `FederatedIndex` is None (single-workspace
     /// mode) the field is `null`; when set it carries the repo
     /// roster and aggregate stats.
-    #[test]
-    fn health_response_includes_federation_blob_when_set() {
+    ///
+    /// The test pins down EXACT values, not just the JSON shape: it
+    /// registers two repos via `add_repo`, upserts a known number of
+    /// nodes and edges into the backend, then asserts that
+    /// `total_nodes`, `total_edges`, and the 200-byte-per-node +
+    /// 100-byte-per-edge `memory_estimate_bytes` formula all match
+    /// the seeded counts. This catches a producer that silently drops
+    /// data, conflates counts, or breaks the memory formula.
+    #[tokio::test]
+    async fn health_response_includes_federation_blob_when_set() {
+        use crate::federation::repo_source::WorkspaceDirSource;
+        use crate::schema::{EdgeType, GraphEdge, NodeType};
+
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+
+        // Register two repos. `WorkspaceDirSource` requires a path that
+        // exists, so init a throwaway git repo for each source (same
+        // pattern as `federated_index_tests::add_repo_registers_and_lists_it`).
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        // Populate the backend with a known number of nodes and edges
+        // so `node_count()` / `edge_count()` return deterministic values
+        // the assertions can check against.
+        let backend = fed.backend();
+        backend
+            .upsert_node_global(
+                "repo-a:Function:src/x.rs:shared",
+                NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/x.rs:shared",
+                NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/y.rs:caller",
+                NodeType::Function,
+                "src/y.rs",
+                "caller",
+            )
+            .unwrap();
+        backend
+            .upsert_edge(GraphEdge::new(
+                EdgeType::Calls,
+                "repo-b:Function:src/y.rs:caller".into(),
+                "repo-a:Function:src/x.rs:shared".into(),
+            ))
+            .unwrap();
+        backend
+            .upsert_edge(GraphEdge::new(
+                EdgeType::Calls,
+                "repo-b:Function:src/y.rs:caller".into(),
+                "repo-b:Function:src/x.rs:shared".into(),
+            ))
+            .unwrap();
 
         let body = build_health_body(0, 0, Some(&fed));
 
@@ -1152,7 +1219,7 @@ mod tests {
         assert!(body["graph_edges"].is_number());
         assert!(body["tools_count"].is_number());
 
-        // Federation blob shape.
+        // Federation blob shape and contents.
         let fed_blob = body
             .get("federation")
             .expect("federation key must be present in /health response");
@@ -1160,13 +1227,55 @@ mod tests {
             fed_blob.is_object(),
             "federation must be an object when federation is set, got {fed_blob}",
         );
-        assert!(fed_blob.get("repos").is_some(), "repos array must be present");
         assert!(fed_blob["repos"].is_array(), "repos must be a JSON array");
-        assert!(fed_blob.get("total_nodes").is_some());
-        assert!(fed_blob.get("total_edges").is_some());
-        assert!(fed_blob.get("memory_estimate_bytes").is_some());
-        // memory_estimate_bytes is u64 — must serialize as a non-negative integer.
-        assert!(fed_blob["memory_estimate_bytes"].is_u64());
+        let repos = fed_blob["repos"]
+            .as_array()
+            .expect("repos must be a JSON array");
+
+        // Exact repo roster: both registered repos are present with their
+        // ids and the default `Ready` health.
+        assert_eq!(
+            repos.len(),
+            2,
+            "expected both registered repos in the federation blob, got {repos:?}",
+        );
+        let ids: Vec<&str> = repos
+            .iter()
+            .map(|r| {
+                r.get("id")
+                    .and_then(|v| v.as_str())
+                    .expect("each repo entry has an id string")
+            })
+            .collect();
+        assert!(ids.contains(&"repo-a"), "repo-a missing from federation blob: {ids:?}");
+        assert!(ids.contains(&"repo-b"), "repo-b missing from federation blob: {ids:?}");
+        for r in repos {
+            assert_eq!(
+                r.get("health").and_then(|v| v.as_str()),
+                Some("indexing"),
+                "every repo entry must carry the default Indexing health until projection, got {r:?}",
+            );
+        }
+
+        // Exact aggregate counts: 3 nodes upserted above, 2 edges.
+        assert_eq!(
+            fed_blob["total_nodes"].as_u64(),
+            Some(3),
+            "total_nodes must equal the number of nodes upserted into the backend",
+        );
+        assert_eq!(
+            fed_blob["total_edges"].as_u64(),
+            Some(2),
+            "total_edges must equal the number of edges upserted into the backend",
+        );
+
+        // Exact memory formula: 200 bytes/node + 100 bytes/edge.
+        let expected_mem: u64 = 3 * 200 + 2 * 100;
+        assert_eq!(
+            fed_blob["memory_estimate_bytes"].as_u64(),
+            Some(expected_mem),
+            "memory_estimate_bytes must be total_nodes*200 + total_edges*100 ({expected_mem})",
+        );
     }
 
     /// Single-workspace mode (the default `lain --workspace ./myrepo`
