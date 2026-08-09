@@ -60,6 +60,11 @@ enum Commands {
         #[command(subcommand)]
         action: ProjectsAction,
     },
+    /// Manage agent MCP configurations (Claude, Kimi, Cursor, etc.)
+    Agents {
+        #[command(subcommand)]
+        action: AgentsAction,
+    },
     /// Set the active project (shorthand for `lain projects use <name>`).
     Use {
         name: String,
@@ -90,6 +95,36 @@ enum ProjectsAction {
     Forget { name: String },
     /// Show the currently active project name.
     Current,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentsAction {
+    /// List supported agents.
+    List,
+    /// Install MCP config for one or all agents.
+    Install {
+        /// Agent id (e.g. claude, kimi). Omit with --all.
+        id: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value = "user", value_parser = ["user", "project", "workspace"])]
+        scope: String,
+    },
+    /// Verify that installed agents can reach the Lain MCP server.
+    Verify {
+        /// Agent id. Omit with --all.
+        id: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an agent's MCP config.
+    Remove {
+        id: String,
+        #[arg(long, default_value = "user", value_parser = ["user", "project", "workspace"])]
+        scope: String,
+    },
 }
 
 #[tokio::main]
@@ -132,6 +167,26 @@ async fn main() -> Result<()> {
                     } else {
                         return Err(anyhow::anyhow!("no active project; use `lain use <name>`"));
                     }
+                }
+            },
+            Commands::Agents { action } => match action {
+                AgentsAction::List => return cmds::agents::list::run_list(),
+                AgentsAction::Install { id, all, scope } => {
+                    let scope = parse_install_scope(&scope)?;
+                    if !all && id.is_none() {
+                        anyhow::bail!("--all or <id> is required");
+                    }
+                    return cmds::agents::install::run_install(id.as_deref(), all, scope);
+                }
+                AgentsAction::Verify { id, all, json } => {
+                    if !all && id.is_none() {
+                        anyhow::bail!("--all or <id> is required");
+                    }
+                    return cmds::agents::verify::run_verify(all, id.as_deref(), json).await;
+                }
+                AgentsAction::Remove { id, scope } => {
+                    let scope = parse_install_scope(&scope)?;
+                    return cmds::agents::remove::run_remove(&id, scope);
                 }
             },
             Commands::Use { name } => return cmds::projects::run_use(&name),
@@ -260,6 +315,16 @@ async fn main() -> Result<()> {
             };
             return lain::sidecar::run(cfg).await.map_err(anyhow::Error::from);
         }
+    }
+}
+
+fn parse_install_scope(s: &str) -> Result<cmds::agents::adapters::InstallScope> {
+    use cmds::agents::adapters::InstallScope;
+    match s {
+        "user" => Ok(InstallScope::User),
+        "project" => Ok(InstallScope::Project),
+        "workspace" => Ok(InstallScope::Workspace),
+        _ => Err(anyhow::anyhow!("unknown scope: {s}")),
     }
 }
 
