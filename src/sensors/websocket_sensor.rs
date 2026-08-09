@@ -65,6 +65,9 @@ pub fn enrich_with_websocket(
     graph: &GraphDatabase,
     file_path: &Path,
 ) -> Result<usize, LainError> {
+    if graph.is_read_only() {
+        return Ok(0);
+    }
     let content = std::fs::read_to_string(file_path)?;
     let patterns = extract_websocket_patterns(&content);
 

@@ -133,6 +133,9 @@ pub fn enrich_with_openapi(
     graph: &GraphDatabase,
     spec_path: &Path,
 ) -> Result<usize, LainError> {
+    if graph.is_read_only() {
+        return Ok(0);
+    }
     let content = std::fs::read_to_string(spec_path)?;
     let operations = parse_openapi(&content, &spec_path.to_string_lossy());
 

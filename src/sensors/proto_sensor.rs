@@ -105,6 +105,9 @@ pub fn enrich_with_proto(
     graph: &GraphDatabase,
     proto_path: &Path,
 ) -> Result<usize, LainError> {
+    if graph.is_read_only() {
+        return Ok(0);
+    }
     let content = std::fs::read_to_string(proto_path)?;
     let services = parse_proto(&content, &proto_path.to_string_lossy());
 

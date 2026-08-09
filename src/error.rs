@@ -37,6 +37,9 @@ pub enum LainError {
 
     #[error("Fatal: {0}")]
     Fatal(String),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 impl From<git2::Error> for LainError {

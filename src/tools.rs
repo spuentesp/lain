@@ -154,6 +154,85 @@ impl ToolExecutor {
         }
     }
 
+    /// Construct a minimal read-only executor for the sidecar runtime.
+    ///
+    /// Sidecar processes never start LSP multiplexers, never load a bi-encoder
+    /// model, and never open the git repository — they only need a graph view
+    /// and an overlay that the owner feeds via `/overlay/subscribe`. Any tool
+    /// handler that touches a heavier subsystem will fail at call time and
+    /// surface a clear error to the MCP client.
+    ///
+    /// `workspace` is preferred for the git/LSP fallbacks when it points at a
+    /// real repository; otherwise the constructor falls back to a tmpdir that
+    /// has been initialized as a git repo so the read-only `ToolContext` can
+    /// still satisfy the `GitSensor` contract.
+    pub fn new_read_only(
+        graph: GraphDatabase,
+        overlay: VolatileOverlay,
+        workspace: std::path::PathBuf,
+    ) -> Self {
+        let jobs_registry = Arc::new(AsyncMutex::new(HashMap::<String, JobInfo>::new()));
+        let webhooks = Arc::new(AsyncMutex::new(Vec::new()));
+        let tuning = Arc::new(TuningConfig::default());
+
+        // The sidecar's read-only `ToolContext` carries a git sensor and LSP
+        // pool because the rest of the executor plumbing is shared with the
+        // owner. A sidecar should never call into the git/LSP handlers, so
+        // any failure to construct those subsystems must not block the
+        // sidecar from booting. Use the real workspace when it is a git repo
+        // (the normal case in production); otherwise initialize a stub repo
+        // under the system temp dir so the constructor still succeeds in
+        // tests and minimal workspaces.
+        let git_root = match crate::git::GitSensor::new(&workspace) {
+            Ok(_) => workspace.clone(),
+            Err(_) => match Self::ensure_stub_git_repo() {
+                Ok(path) => path,
+                Err(e) => panic!(
+                    "sidecar stub git sensor setup failed: workspace={:?} error={}",
+                    workspace, e
+                ),
+            },
+        };
+        let git = Arc::new(Mutex::new(
+            crate::git::GitSensor::new(&git_root)
+                .expect("sidecar git sensor must succeed after stub init"),
+        ));
+        let lsp_root = match crate::lsp::LspPool::new(&workspace, 1) {
+            Ok(pool) => pool,
+            Err(_) => {
+                // `LspPool::new` only fails on unexpected errors; an empty
+                // multiplex registry is fine for the sidecar, so retry on
+                // the stub root if the workspace cannot be used.
+                let _ = Self::ensure_stub_git_repo();
+                crate::lsp::LspPool::new(&git_root, 1).unwrap_or_else(|e| {
+                    panic!("sidecar lsp pool fallback failed: {e}");
+                })
+            }
+        };
+        let lsp_pool = Arc::new(lsp_root);
+
+        let ctx = ToolContext::new(
+            graph,
+            overlay,
+            NlpEmbedder::new_stub(),
+            crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
+            git,
+            lsp_pool,
+            Arc::clone(&tuning),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AsyncMutex::new(HashMap::new())),
+            Arc::clone(&jobs_registry),
+            Arc::clone(&webhooks),
+        ).with_workspace(workspace);
+
+        Self {
+            ctx,
+            jobs: jobs_registry,
+            job_webhooks: webhooks,
+            tuning,
+        }
+    }
+
     async fn persist_jobs_snapshot(jobs: Arc<AsyncMutex<HashMap<String, JobInfo>>>) -> Result<(), ()> {
         let path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         let guard = jobs.lock().await;
@@ -162,6 +241,28 @@ impl ToolExecutor {
             let _ = std::fs::write(&path, json);
         }
         Ok(())
+    }
+
+    /// Create a throwaway git repository under the system temp dir and
+    /// return its root path. Used by the sidecar's read-only `ToolContext`
+    /// when the configured workspace is not a git repo (e.g. in tests) so
+    /// that `GitSensor::new` always has a valid `.git` to open.
+    fn ensure_stub_git_repo() -> Result<std::path::PathBuf, String> {
+        use std::sync::OnceLock;
+        use std::sync::Mutex;
+
+        static STUB: OnceLock<Mutex<Result<std::path::PathBuf, String>>> = OnceLock::new();
+        let cell = STUB.get_or_init(|| Mutex::new(Err("init pending".into())));
+        let mut guard = cell.lock().expect("stub repo lock");
+        if let Ok(path) = guard.as_ref() {
+            return Ok(path.clone());
+        }
+        let dir = std::env::temp_dir().join("lain-sidecar-stub-git");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create stub dir: {e}"))?;
+        git2::Repository::init(&dir).map_err(|e| format!("git init stub: {e}"))?;
+        *guard = Ok(dir.clone());
+        Ok(dir)
     }
 
     /// Primary dispatcher for all MCP tools

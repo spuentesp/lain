@@ -453,7 +453,10 @@ async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn st
     let count = symbols.len();
     for mut symbol in symbols {
         symbol.node.last_lsp_sync = Some(now);
+        let node = symbol.node.clone();
         server.overlay.insert_node(symbol.node);
+        // Broadcast the new node to any subscribed sidecar.
+        server.broadcast_overlay_insert(node);
     }
 
     debug!("FileWatcher: updated overlay with {} symbols from {:?}", count, path);

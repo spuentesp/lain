@@ -352,3 +352,41 @@ fn test_insert_edges_batch() {
     assert!(result.is_ok());
     assert_eq!(graph.get_stats().1, 2);
 }
+
+#[test]
+fn open_read_only_rejects_writes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("graph.bin");
+    let owner = GraphDatabase::new(&path).expect("new owner");
+
+    // Build a real test node using the existing graph_tests.rs pattern.
+    let n = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
+    let id = n.id.clone();
+    owner.upsert_node(n.clone()).expect("owner insert");
+    // Persist so open_read_only below can hydrate from disk.
+    let rt = tokio::runtime::Runtime::new().expect("rt");
+    rt.block_on(owner.save_to_disk()).expect("save");
+    drop(owner);
+
+    let ro = GraphDatabase::open_read_only(&path).expect("open read-only");
+    assert!(ro.is_read_only(), "open_read_only must set the flag");
+
+    // Writes must fail.
+    let write_node = GraphNode::new(NodeType::Function, "x".to_string(), "/src/x.rs".to_string());
+    let r = ro.upsert_node(write_node);
+    assert!(r.is_err(), "upsert_node on a read-only graph must error");
+
+    let r2 = ro.insert_edge(&GraphEdge::new(
+        EdgeType::Calls,
+        id.clone(),
+        id.clone(),
+    ));
+    assert!(r2.is_err(), "insert_edge on a read-only graph must error");
+
+    let r3 = ro.set_last_commit("deadbeef".to_string());
+    assert!(r3.is_err(), "set_last_commit on a read-only graph must error");
+
+    // Reads still succeed and reflect the owner's snapshot.
+    let n2 = ro.get_node(&id).expect("get on read-only").expect("node present");
+    assert_eq!(n2.id, n.id);
+}

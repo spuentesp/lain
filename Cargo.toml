@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/lain-mcp-probe"]
+
 [package]
 name = "lain"
 version = "0.4.2"
@@ -11,8 +14,8 @@ license = "MIT"
 tokio = { version = "1.35", features = ["full"] }
 
 # MCP Server (Model Context Protocol)
-rust-mcp-sdk = { version = "=0.9.0", default-features = false, features = ["server", "stdio", "macros"] }
-rust-mcp-schema = "0.10.0"
+rust-mcp-sdk = { version = "=1.0.1", default-features = false, features = ["server", "stdio", "macros"] }
+rust-mcp-schema = { version = "=0.10.3", default-features = false, features = ["2025_11_25", "schema_utils"] }
 
 # HTTP server for diagnostics UI
 hyper = { version = "1.9", features = ["http1", "server"] }
@@ -92,10 +95,16 @@ which = "8.0.2"
 dashmap = "6.0"
 rayon = "1.10"
 async-recursion = "1.1.1"
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "blocking"] }
+
+# MCP probe for `lain agents verify`
+lain-mcp-probe = { path = "crates/lain-mcp-probe" }
 
 # Unix process checks (for single-instance guard)
 libc = "0.2"
+
+# File locking (flock) for workspace owner/sidecar coordination
+fs2 = "0.4"
 
 # Tree-sitter static analysis
 tree-sitter = "0.22"
@@ -107,6 +116,7 @@ tree-sitter-javascript = "0.21"
 tempfile = "3.8"
 proptest = { version = "1.5", features = ["std"] }
 inventory = "0.1"
+fs2 = "0.4"
 
 [lib]
 name = "lain"

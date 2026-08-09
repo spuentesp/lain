@@ -141,6 +141,12 @@ lain init
 lain init --agent claude
 ```
 
+For per-agent installation across Kimi, Claude, Cursor, Continue,
+Windsurf, Cline, Codex, OMP, and Gemini, see `docs/agent-installation.md`.
+
+For multi-instance wiring (one `owner` plus N `sidecars` on the same
+workspace), see `docs/agent-installation.md#sidecar-mode`.
+
 ### 3. Run
 
 ```bash

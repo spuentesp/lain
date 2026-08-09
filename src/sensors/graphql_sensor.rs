@@ -146,6 +146,9 @@ pub fn enrich_with_graphql(
     graph: &GraphDatabase,
     schema_path: &Path,
 ) -> Result<usize, LainError> {
+    if graph.is_read_only() {
+        return Ok(0);
+    }
     let content = std::fs::read_to_string(schema_path)?;
     let operations = parse_graphql(&content, &schema_path.to_string_lossy());
 

@@ -2,6 +2,10 @@
 
 Quick reference for LAIN MCP tools.
 
+> Haven't installed Lain into your agent yet? See
+> `docs/agent-installation.md` — `lain agents install <agent>` and
+> `lain agents verify --all`.
+
 ## Project Management (CLI)
 
 Multi-project support lives in the CLI, not as MCP tools. Use these to register and switch between projects:

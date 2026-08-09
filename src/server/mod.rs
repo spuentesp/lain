@@ -10,11 +10,12 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::{CrossEncoder, NlpEmbedder};
-use crate::overlay::VolatileOverlay;
+use crate::overlay::{OverlayDiff, VolatileOverlay};
 use crate::tools::ToolExecutor;
 use crate::tuning::{load_tuning_config, TuningConfig};
 use crate::git::GitSensor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use tracing::info;
@@ -38,6 +39,9 @@ pub struct LainServer {
     pub lsp_pool: Arc<LspPool>,
     pub tool_executor: ToolExecutor,
     pub tuning: Arc<TuningConfig>,
+    /// Monotonic counter used as the `revision` field of every
+    /// `OverlayDiff` this process broadcasts.
+    overlay_revision: Arc<AtomicU64>,
 }
 
 impl LainServer {
@@ -114,11 +118,35 @@ impl LainServer {
             lsp_pool,
             tool_executor,
             tuning,
+            overlay_revision: Arc::new(AtomicU64::new(0)),
         })
     }
 
     pub fn clone_for_background(&self) -> Self {
         self.clone()
+    }
+
+    /// Allocate the next overlay-diff revision id. Sidecars use this to
+    /// detect drops in the broadcast bus.
+    pub fn next_revision(&self) -> crate::overlay::RevisionId {
+        self.overlay_revision.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Broadcast a single node insertion. Sidecars pull these diffs from
+    /// the broadcast bus and merge them into their in-memory overlay.
+    /// Only fires when this process is an *owner* — the sidecar has its
+    /// graph opened read-only (Task 3) and never reaches the call sites
+    /// below `check_writable`, so it cannot broadcast by accident.
+    pub fn broadcast_overlay_insert(
+        &self,
+        node: crate::schema::GraphNode,
+    ) {
+        crate::overlay::broadcast_overlay_diff(OverlayDiff {
+            revision: self.next_revision(),
+            added: vec![node],
+            removed: vec![],
+            updated: vec![],
+        });
     }
 
     pub fn is_git_repo(&self) -> bool {

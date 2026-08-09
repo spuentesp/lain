@@ -29,6 +29,11 @@ pub struct GraphDatabase {
     path_index: DashMap<String, Vec<NodeIndex>>,
     last_commit: Arc<RwLock<Option<String>>>,
     persistence_path: PathBuf,
+    /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
+    /// `LainError::Other("graph is read-only")`. Set by `open_read_only`,
+    /// used by sidecar processes that subscribe to an owner's overlay
+    /// stream and never mutate the static graph on disk.
+    read_only: bool,
 }
 
 impl GraphDatabase {
@@ -39,6 +44,7 @@ impl GraphDatabase {
             path_index: DashMap::new(),
             last_commit: Arc::new(RwLock::new(None)),
             persistence_path: memory_path.to_path_buf(),
+            read_only: false,
         };
 
         if memory_path.exists() {
@@ -47,11 +53,35 @@ impl GraphDatabase {
         Ok(db)
     }
 
+    /// Open an existing on-disk graph as immutable.
+    ///
+    /// Sidecar processes use this to share an owner's static graph without
+    /// ever acquiring the workspace write lock. Every mutating method on
+    /// the returned handle returns `LainError::Other("graph is read-only")`.
+    pub fn open_read_only(memory_path: &Path) -> Result<Self, LainError> {
+        let mut g = GraphDatabase::new(memory_path)?;
+        g.read_only = true;
+        Ok(g)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn check_writable(&self) -> Result<(), LainError> {
+        if self.read_only {
+            Err(LainError::Other("graph is read-only".into()))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn insert_node(&self, node: &GraphNode) -> Result<(), LainError> {
         self.upsert_node(node.clone())
     }
 
     pub fn upsert_node(&self, node: GraphNode) -> Result<(), LainError> {
+        self.check_writable()?;
         let mut graph = self.graph.write();
 
         if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
@@ -71,6 +101,7 @@ impl GraphDatabase {
     pub fn insert_nodes_batch(&self, new_nodes: &[GraphNode]) -> Result<(), LainError> {
         use rayon::prelude::*;
 
+        self.check_writable()?;
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();
 
@@ -110,6 +141,7 @@ impl GraphDatabase {
     }
 
     pub fn insert_edge(&self, edge: &GraphEdge) -> Result<(), LainError> {
+        self.check_writable()?;
         let mut graph = self.graph.write();
 
         let source_idx = self.index_map.get(&edge.source_id)
@@ -124,6 +156,7 @@ impl GraphDatabase {
     }
 
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<(), LainError> {
+        self.check_writable()?;
         let mut graph = self.graph.write();
 
         for edge in new_edges {
@@ -297,6 +330,7 @@ impl GraphDatabase {
     }
 
     pub fn calculate_anchor_scores(&self) -> Result<(), LainError> {
+        self.check_writable()?;
         let mut graph = self.graph.write();
 
         // Two-pass: compute raw anchor ratios, find the corpus-wide max,
@@ -365,6 +399,7 @@ impl GraphDatabase {
     }
 
     pub fn calculate_depths(&self) -> Result<(), LainError> {
+        self.check_writable()?;
         let mut graph = self.graph.write();
 
         // 1. Reset
@@ -453,6 +488,7 @@ impl GraphDatabase {
     }
 
     pub fn set_last_commit(&self, hash: String) -> Result<(), LainError> {
+        self.check_writable()?;
         *self.last_commit.write() = Some(hash);
         Ok(())
     }
@@ -488,6 +524,7 @@ impl GraphDatabase {
 
     /// Save graph to disk asynchronously (non-blocking)
     pub async fn save_to_disk(&self) -> Result<(), LainError> {
+        self.check_writable()?;
         // Clone state under lock (fast)
         let (data, tmp_path, persistence_path) = {
             let state = GraphState {
@@ -514,6 +551,9 @@ impl GraphDatabase {
     }
 
     pub fn load_from_disk(&self) -> Result<(), LainError> {
+        // load_from_disk is allowed on read-only graphs — it's how we hydrate
+        // the static sidecar view from the owner's on-disk snapshot. Only
+        // *mutations* are gated by `check_writable`.
         let data = std::fs::read(&self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
         let state: GraphState = bincode::deserialize(&data).map_err(|e| LainError::Database(e.to_string()))?;
 

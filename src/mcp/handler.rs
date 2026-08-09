@@ -15,16 +15,29 @@ use rust_mcp_sdk::{
     error::SdkResult,
     McpServer, StdioTransport, TransportOptions,
 };
-use http_body_util::{BodyExt, Full};
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper::body::Bytes;
+use hyper::body::{Bytes, Frame};
 use hyper_util::rt::TokioIo;
 use serde_json::Map;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::net::TcpListener;
-use tracing::info;
+use tokio::sync::mpsc;
+use tracing::{debug, info};
+
+/// Response body used by the HTTP handler. Most responses are a single
+/// buffered payload (`Full<Bytes>` boxed here for unification), but the
+/// `/overlay/subscribe` endpoint returns a streaming body so sidecars
+/// can follow live updates.
+type OverlayHttpBody = UnsyncBoxBody<Bytes, std::io::Error>;
+
+fn full_body(data: Bytes) -> OverlayHttpBody {
+    UnsyncBoxBody::new(Full::new(data).map_err(|never| match never {}))
+}
 
 const FRONT_END_HTML: &str = include_str!("front_end_monitor.html");
 
@@ -118,6 +131,60 @@ impl LainMcpServer {
         Self { executor }
     }
 
+    /// Build a sidecar-flavored server. The graph inside `executor` should
+    /// already be opened read-only (see `GraphDatabase::open_read_only`),
+    /// so mutating tool calls fail at the database layer with a clean
+    /// `graph is read-only` error.
+    pub fn new_read_only(executor: ToolExecutor) -> Self {
+        Self { executor }
+    }
+
+    /// Convenience: build a sidecar server directly from a read-only graph
+    /// and a freshly-allocated overlay.
+    pub fn from_read_only_graph(
+        graph: crate::graph::GraphDatabase,
+        overlay: crate::overlay::VolatileOverlay,
+        workspace: std::path::PathBuf,
+    ) -> Self {
+        let executor = crate::tools::ToolExecutor::new_read_only(graph, overlay, workspace);
+        Self { executor }
+    }
+
+    /// Serve on a specific `SocketAddr`. Used by the sidecar so it can bind
+    /// to `127.0.0.1:<port>` without going through `run_http`'s
+    /// `"0.0.0.0:<port>"` listener (the sidecar must never accept
+    /// connections from outside the loopback).
+    pub async fn serve(self, addr: std::net::SocketAddr) -> SdkResult<()> {
+        info!("Starting Lain sidecar MCP HTTP server on {}", addr);
+
+        let executor = Arc::new(self.executor);
+        let listener = TcpListener::bind(addr).await?;
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let executor = executor.clone();
+                    tokio::spawn(async move {
+                        let io = TokioIo::new(stream);
+                        let service = service_fn(move |req| {
+                            let executor = executor.clone();
+                            handle_request(req, executor)
+                        });
+                        if let Err(e) = http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::debug!("Connection error: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Accept error: {}", e);
+                }
+            }
+        }
+    }
+
     /// Run with stdio transport (for local/MCP clients)
     pub async fn run_stdio(self) -> SdkResult<()> {
         info!("Starting Lain MCP server on stdio");
@@ -186,7 +253,7 @@ impl LainMcpServer {
             },
             meta: None,
             instructions: Some("Call get_agent_strategy for your operational manual.".into()),
-            protocol_version: ProtocolVersion::V2024_11_05.into(),
+            protocol_version: ProtocolVersion::V2025_11_25.into(),
         }
     }
 }
@@ -194,7 +261,7 @@ impl LainMcpServer {
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
@@ -203,7 +270,7 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/html")
-            .body(Full::new(Bytes::from(FRONT_END_HTML)))
+            .body(full_body(Bytes::from(FRONT_END_HTML)))
             .unwrap());
     }
 
@@ -221,7 +288,7 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(health.to_string())))
+            .body(full_body(Bytes::from(health.to_string())))
             .unwrap());
     }
 
@@ -309,7 +376,7 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(response_str)))
+            .body(full_body(Bytes::from(response_str)))
             .unwrap());
     }
 
@@ -318,13 +385,13 @@ async fn handle_request(
         let session_id = match path.strip_prefix("/ui/blast-radius/") {
             Some(s) => s,
             None => return Ok(Response::builder().status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from("Invalid path"))).unwrap()),
+                .body(full_body(Bytes::from("Invalid path"))).unwrap()),
         };
         let sessions = executor.ui_sessions().lock().await;
         if let Some(session) = sessions.get(session_id) {
             let (symbol, nodes) = match &session.data {
                 crate::tools::UiSessionData::BlastRadius { symbol, nodes } => (symbol, nodes),
-                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(Full::new(Bytes::from("Invalid session type"))).unwrap()),
+                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
             let mut html = include_str!("../ui/blast-radius.html").to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", &symbol);
@@ -332,13 +399,13 @@ async fn handle_request(
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "text/html")
-                .body(Full::new(Bytes::from(html)))
+                .body(full_body(Bytes::from(html)))
                 .unwrap());
         }
         return Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header("Content-Type", "text/html")
-            .body(Full::new(Bytes::from("Session not found or expired")))
+            .body(full_body(Bytes::from("Session not found or expired")))
             .unwrap());
     }
 
@@ -347,13 +414,13 @@ async fn handle_request(
         let session_id = match path.strip_prefix("/ui/coupling/") {
             Some(s) => s,
             None => return Ok(Response::builder().status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from("Invalid path"))).unwrap()),
+                .body(full_body(Bytes::from("Invalid path"))).unwrap()),
         };
         let sessions = executor.ui_sessions().lock().await;
         if let Some(session) = sessions.get(session_id) {
             let (symbol, files, _) = match &session.data {
                 crate::tools::UiSessionData::Coupling { symbol, files, .. } => (symbol, files, &()),
-                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(Full::new(Bytes::from("Invalid session type"))).unwrap()),
+                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
             let mut html = include_str!("../ui/coupling.html").to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", symbol);
@@ -361,13 +428,13 @@ async fn handle_request(
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "text/html")
-                .body(Full::new(Bytes::from(html)))
+                .body(full_body(Bytes::from(html)))
                 .unwrap());
         }
         return Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header("Content-Type", "text/html")
-            .body(Full::new(Bytes::from("Session not found or expired")))
+            .body(full_body(Bytes::from("Session not found or expired")))
             .unwrap());
     }
 
@@ -376,13 +443,13 @@ async fn handle_request(
         let session_id = match path.strip_prefix("/ui/call-chain/") {
             Some(s) => s,
             None => return Ok(Response::builder().status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from("Invalid path"))).unwrap()),
+                .body(full_body(Bytes::from("Invalid path"))).unwrap()),
         };
         let sessions = executor.ui_sessions().lock().await;
         if let Some(session) = sessions.get(session_id) {
             let (from, to, path) = match &session.data {
                 crate::tools::UiSessionData::CallChain { from, to, path } => (from, to, path),
-                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(Full::new(Bytes::from("Invalid session type"))).unwrap()),
+                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
             let mut html = include_str!("../ui/call-chain.html").to_string();
             html = html.replace("FROM_PLACEHOLDER", from);
@@ -391,21 +458,125 @@ async fn handle_request(
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "text/html")
-                .body(Full::new(Bytes::from(html)))
+                .body(full_body(Bytes::from(html)))
                 .unwrap());
         }
         return Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header("Content-Type", "text/html")
-            .body(Full::new(Bytes::from("Session not found or expired")))
+            .body(full_body(Bytes::from("Session not found or expired")))
+            .unwrap());
+    }
+
+    // GET /overlay/subscribe -> newline-delimited JSON stream of overlay
+    // diffs. Sidecars consume this to mirror the owner's volatile overlay
+    // across processes. Each frame is one `OverlayDiff` serialized as
+    // JSON followed by a single `\n`; the body stays open until the
+    // server shuts down or the client closes the connection.
+    if method == Method::GET && path == "/overlay/subscribe" {
+        let (tx, rx) = mpsc::unbounded_channel::<std::io::Result<Bytes>>();
+        let mut bus_rx = crate::overlay::subscribe_channel();
+        tokio::spawn(async move {
+            loop {
+                match bus_rx.recv().await {
+                    Ok(diff) => {
+                        let json = match serde_json::to_vec(&diff) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                debug!(
+                                    "overlay subscribe: failed to serialize diff: {}",
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+                        let mut chunk = Vec::with_capacity(json.len() + 1);
+                        chunk.extend_from_slice(&json);
+                        chunk.push(b'\n');
+                        if tx.send(Ok(Bytes::from(chunk))).is_err() {
+                            // Receiver dropped — client disconnected.
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Slow subscriber. Skip the gap; keep streaming.
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Sender is gone — process is shutting down. Close
+                        // the response by dropping the sender.
+                        break;
+                    }
+                }
+            }
+        });
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/x-ndjson")
+            .header("Cache-Control", "no-cache")
+            .body(UnsyncBoxBody::new(OverlaySubscribeBody { rx }))
+            .unwrap());
+    }
+
+    // GET /overlay/get_snapshot -> JSON array of every node currently in
+    // the volatile overlay. This is the polling fallback used by sidecars
+    // that don't (yet) speak the streaming protocol. A snapshot will
+    // briefly miss changes that arrive between the read and the response,
+    // but the sidecar's overlay stays coherent because each node is
+    // upserted by id.
+    if method == Method::GET && path == "/overlay/get_snapshot" {
+        let nodes = executor.overlay().get_all_nodes();
+        let body = match serde_json::to_vec(&nodes) {
+            Ok(v) => Bytes::from(v),
+            Err(e) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from(
+                        format!("snapshot encode failed: {}", e),
+                    )))
+                    .unwrap())
+            }
+        };
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(full_body(body))
             .unwrap());
     }
 
     // 404 for everything else
     Ok(Response::builder()
         .status(StatusCode::NOT_FOUND)
-        .body(Full::new(Bytes::from("Not Found")))
+        .body(full_body(Bytes::from("Not Found")))
         .unwrap())
+}
+
+/// Streaming response body for `/overlay/subscribe`. Polls an mpsc
+/// channel that is fed by a tokio task that pumps broadcast events into
+/// JSON bytes. When the client disconnects (the channel is closed), the
+/// body returns `None` and hyper finishes the response.
+struct OverlaySubscribeBody {
+    rx: mpsc::UnboundedReceiver<std::io::Result<Bytes>>,
+}
+
+impl http_body::Body for OverlaySubscribeBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::io::Result<Frame<Self::Data>>>> {
+        match Pin::new(&mut self.rx).poll_recv(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                Poll::Ready(Some(Ok(Frame::data(bytes))))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// Definitions for the 6 special-case tools that are dispatched directly in

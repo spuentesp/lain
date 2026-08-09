@@ -4,30 +4,24 @@ If you are an AI agent (Claude, Gemini, etc.) connecting to this MCP server, fol
 
 ## 0. For humans installing lain
 
-Pick the install path that matches your platform; all three end with
-the same post-install step.
+Lain has a manifest-driven installer that writes the per-agent MCP
+config for you. Install once via your platform of choice (GitHub release,
+`npm install -g lain-mcp`, or `brew install lain`), then run:
 
-**GitHub release (recommended):**
 ```sh
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash -s -- --agent <name> -y
-```
-Replace `<name>` with `claude`, `gemini`, `cursor`, `windsurf`, `cline`,
-or `kimi`. Use `--agent auto` to detect from your home directory.
+# Single agent, user-scope (recommended)
+lain agents install --scope user <name>
 
-**npm:**
-```sh
-npm install -g lain-mcp
-```
-The postinstall step runs `lain init --agent auto -y` automatically if
-it finds an agent config directory (`~/.claude`, `~/.kimi-code`, etc.).
-Set `LAIN_SKIP_INIT=1` to opt out.
+# All detected agents
+lain agents install --all --scope user
 
-**Homebrew:**
-```sh
-brew install lain
-lain init --agent <name>
+# Verify each installed agent can reach Lain
+lain agents verify --all
 ```
-The formula prints the same hint via `brew info lain`.
+
+Replace `<name>` with one of `claude`, `kimi`, `cursor`, `continue`,
+`windsurf`, `cline`, `codex`, `omp`, `gemini`, or `vscode_copilot`. See
+`docs/agent-installation.md` for the full reference.
 
 **After installing** — restart your agent (Claude Code, Kimi Code, etc.)
 to pick up the plugin. Verify with:

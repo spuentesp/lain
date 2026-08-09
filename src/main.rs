@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use lain::lock::WorkspaceLock;
 use lain::{LainMcpServer, LainServer};
+use lain::mode::LainMode;
 use lain::state::Projects;
 use lain::watcher::FileWatcher;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -28,6 +30,8 @@ struct Args {
     transport: String,
     #[arg(long, default_value = "9999")]
     port: u16,
+    #[arg(long, default_value = "owner", value_parser = ["owner", "sidecar"])]
+    mode: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,26 +135,10 @@ async fn main() -> Result<()> {
 
     tracing::info!("Initializing Lain");
     if !args.workspace.exists() { anyhow::bail!("Workspace does not exist: {:?}", args.workspace); }
-    let memory_path = args.memory_path.unwrap_or_else(|| args.workspace.join(".lain/graph.bin"));
-
-    let lock_path = args.workspace.join(".lain/server.lock");
-    if let Ok(contents) = std::fs::read_to_string(&lock_path) {
-        if let Some((pid_str, _port_str)) = contents.split_once(':') {
-            let pid: u32 = pid_str.parse().unwrap_or(0);
-            if pid != 0 && pid != std::process::id() {
-                #[cfg(unix)]
-                if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-                    eprintln!("ERROR: Another Lain instance is running (pid {}). Stop it or remove .lain/server.lock.", pid);
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
+    let memory_path = args.memory_path.clone().unwrap_or_else(|| args.workspace.join(".lain/graph.bin"));
     std::fs::create_dir_all(args.workspace.join(".lain"))?;
-    std::fs::write(&lock_path, format!("{}:{}", std::process::id(), args.port))?;
-
-    let cleanup_lock_path = lock_path.clone();
-    tokio::spawn(async move { tokio::signal::ctrl_c().await.ok(); let _ = std::fs::remove_file(&cleanup_lock_path); });
+    let lock_path = args.workspace.join(".lain/server.lock");
+    let workspace_lock = WorkspaceLock::new(lock_path.clone());
 
     let embedder_model = args.embedding_model.as_deref();
     // Check git repo FIRST so the user sees a clean error, not a libgit2 panic.
@@ -163,31 +151,102 @@ async fn main() -> Result<()> {
     }
     let mut server = LainServer::new(&args.workspace, &memory_path, embedder_model)?;
 
-    server.sync_volatile_overlay().await?;
-    let mut server_for_indexing = server.clone_for_background();
-    if let Err(e) = server_for_indexing.build_core_memory().await { tracing::error!("Indexing failed: {}", e); }
+    let mode: LainMode = args.mode.parse().expect("validated by clap");
+    match mode {
+        LainMode::Owner => {
+            // Acquire the workspace's exclusive flock. A second owner
+            // pointing at the same workspace must fail fast with a clear
+            // message rather than clobbering the on-disk graph.
+            let _owner_guard = workspace_lock.acquire_exclusive().map_err(|e| {
+                let existing = workspace_lock.read_owner_pid()
+                    .map(|pid| format!(" (existing owner pid {pid})"))
+                    .unwrap_or_default();
+                anyhow::anyhow!(
+                    "Another Lain owner already holds the workspace lock at {:?}{}: {}",
+                    workspace_lock.path(),
+                    existing,
+                    e
+                )
+            })?;
+            // Record our pid:port for the next sidecar to read.
+            workspace_lock.write_owner_pid(std::process::id(), args.port)?;
 
-    let watcher = FileWatcher::new();
-    watcher.start(args.workspace.clone(), server.clone());
+            server.sync_volatile_overlay().await?;
+            let mut server_for_indexing = server.clone_for_background();
+            if let Err(e) = server_for_indexing.build_core_memory().await { tracing::error!("Indexing failed: {}", e); }
 
-    let s_sync = server.clone();
-    tokio::spawn(async move { s_sync.run_background_sync(300).await; });
-    let s_window = server.clone();
-    tokio::spawn(async move { s_window.run_sliding_window(30).await; });
+            let watcher = FileWatcher::new();
+            watcher.start(args.workspace.clone(), server.clone());
 
-    let mcp_server = LainMcpServer::new(server.tool_executor.clone());
-    match args.transport.as_str() {
-        "both" => {
-            let h = mcp_server.clone(); let s = mcp_server;
-            tokio::spawn(async move { if let Err(e) = h.run_http(args.port).await { tracing::error!("HTTP: {}", e); } });
-            tokio::spawn(async move { if let Err(e) = s.run_stdio().await { tracing::error!("Stdio: {}", e); } });
+            let s_sync = server.clone();
+            tokio::spawn(async move { s_sync.run_background_sync(300).await; });
+            let s_window = server.clone();
+            tokio::spawn(async move { s_window.run_sliding_window(30).await; });
+
+            let mcp_server = LainMcpServer::new(server.tool_executor.clone());
+            match args.transport.as_str() {
+                "both" => {
+                    let h = mcp_server.clone(); let s = mcp_server;
+                    tokio::spawn(async move { if let Err(e) = h.run_http(args.port).await { tracing::error!("HTTP: {}", e); } });
+                    tokio::spawn(async move { if let Err(e) = s.run_stdio().await { tracing::error!("Stdio: {}", e); } });
+                }
+                "http" => { tokio::spawn(async move { if let Err(e) = mcp_server.run_http(args.port).await { tracing::error!("HTTP: {}", e); } }); }
+                _ => { tokio::spawn(async move { if let Err(e) = mcp_server.run_stdio().await { tracing::error!("Stdio: {}", e); } }); }
+            };
+
+            std::future::pending::<()>().await;
+            unreachable!()
         }
-        "http" => { tokio::spawn(async move { if let Err(e) = mcp_server.run_http(args.port).await { tracing::error!("HTTP: {}", e); } }); }
-        _ => { tokio::spawn(async move { if let Err(e) = mcp_server.run_stdio().await { tracing::error!("Stdio: {}", e); } }); }
-    };
-
-    std::future::pending::<()>().await;
-    unreachable!()
+        LainMode::Sidecar => {
+            // Verify the owner is alive by briefly attempting a shared
+            // flock on the workspace lock file. flock semantics: a shared
+            // acquire against an exclusively-held file fails with
+            // WouldBlock — that contention is the "owner is alive" signal.
+            // If the shared acquire succeeds, no exclusive holder exists.
+            // If the lock file doesn't exist yet (no owner has ever run
+            // here), bail with a clear message.
+            if !workspace_lock.path().exists() {
+                anyhow::bail!(
+                    "Cannot start sidecar: no owner has ever written a workspace lock at {:?}. \
+                     Start an owner first with `--mode owner`.",
+                    workspace_lock.path()
+                );
+            }
+            match workspace_lock.acquire_shared() {
+                Ok(_shared) => {
+                    // No exclusive holder — no owner running.
+                    tracing::warn!(
+                        "Sidecar started with no live owner holding the workspace lock at {:?}",
+                        workspace_lock.path()
+                    );
+                }
+                Err(e) => {
+                    // Exclusive holder exists → owner is alive.
+                    tracing::debug!(
+                        "Sidecar observed held workspace lock ({}); owner is alive",
+                        e
+                    );
+                }
+            }
+            if let Some(owner_pid) = workspace_lock.read_owner_pid() {
+                if owner_pid != std::process::id() {
+                    tracing::info!("Sidecar verified owner pid {} at {:?}", owner_pid, workspace_lock.path());
+                }
+            }
+            tracing::info!("Starting Lain in sidecar mode");
+            let cfg = lain::sidecar::SidecarConfig {
+                workspace: args.workspace.clone(),
+                memory_path: args.memory_path.clone().unwrap_or_else(|| args.workspace.join(".lain/graph.bin")),
+                port: args.port,
+                owner_url: std::env::var("LAIN_OWNER_URL").unwrap_or_else(|_| {
+                    let port = std::env::var("LAIN_PORT").unwrap_or_else(|_| "9999".into());
+                    format!("http://localhost:{}/mcp", port)
+                }),
+                embedding_model: args.embedding_model.clone().map(std::path::PathBuf::from),
+            };
+            return lain::sidecar::run(cfg).await.map_err(anyhow::Error::from);
+        }
+    }
 }
 
 /// Resolve the workspace path used by subcommands that don't accept

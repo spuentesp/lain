@@ -6,6 +6,10 @@ use tracing::{debug, info, warn};
 impl LainServer {
     /// Run periodic sync every interval_seconds
     pub async fn run_background_sync(&self, interval_secs: u64) {
+        // Sidecars never re-ingest; the owner drives that work.
+        if self.graph.is_read_only() {
+            return;
+        }
         let interval = tokio::time::Duration::from_secs(interval_secs);
         loop {
             tokio::time::sleep(interval).await;
@@ -34,6 +38,10 @@ impl LainServer {
     /// Priority: overlay (dirty files) → LSP symbols → tree-sitter edges → queue NLP.
     /// Non-blocking at every phase — never stalls the hot path.
     pub async fn run_sliding_window(&self, interval_secs: u64) {
+        // Sidecars never re-ingest; the owner drives that work.
+        if self.graph.is_read_only() {
+            return;
+        }
         let interval = tokio::time::Duration::from_secs(interval_secs);
         info!("Sliding window background task started (interval: {}s)", interval_secs);
         loop {
@@ -85,7 +93,10 @@ impl LainServer {
                             let mut node = symbol.node;
                             node.last_lsp_sync = Some(now);
                             refreshed_ids.push(node.id.clone());
-                            self.overlay.insert_node(node);
+                            self.overlay.insert_node(node.clone());
+                            // Broadcast the refreshed node to any subscribed sidecar.
+                            // `is_read_only` above guarantees this only runs for owners.
+                            self.broadcast_overlay_insert(node);
                         }
                         // LSP references for Call edges
                         let path_str = path.to_string_lossy();

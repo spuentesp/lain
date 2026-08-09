@@ -9,6 +9,12 @@ use tracing::{debug, info, warn};
 impl LainServer {
     /// The "Sane" Ingestion Pipeline: Map -> Reduce -> Resolve -> Enrich
     pub async fn build_core_memory(&mut self) -> Result<(), LainError> {
+        // Defensive gate: sidecar processes should never call build_core_memory,
+        // but if a future refactor routes them here, bail out cleanly instead
+        // of corrupting the shared on-disk graph.
+        if self.graph.is_read_only() {
+            return Ok(());
+        }
         let scan_start = std::time::Instant::now();
         let (latest_commit, latest_time) = self.git.lock().get_latest_commit_info()?;
         let last_commit = self.graph.get_last_commit()?;
@@ -390,6 +396,11 @@ impl LainServer {
     }
 
     pub async fn sync_volatile_overlay(&mut self) -> Result<(), LainError> {
+        // Sidecars populate their overlay from the owner's /overlay/subscribe
+        // stream; they never re-scan the local working tree.
+        if self.graph.is_read_only() {
+            return Ok(());
+        }
         self.overlay.clear();
         let changes = self.git.lock().get_uncommitted_changes()?;
 
@@ -414,7 +425,11 @@ impl LainServer {
             }
         };
         for symbol in symbols {
-            self.overlay.insert_node(symbol.node);
+            self.overlay.insert_node(symbol.node.clone());
+            // Broadcast the new node to any subscribed sidecar. The
+            // read-only gate above (`is_read_only`) ensures this only
+            // runs for owners.
+            self.broadcast_overlay_insert(symbol.node);
         }
         Ok(())
     }

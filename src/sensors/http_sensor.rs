@@ -197,6 +197,9 @@ pub fn scan_workspace_routes(
     graph: &GraphDatabase,
     root: &std::path::Path,
 ) -> Result<usize, LainError> {
+    if graph.is_read_only() {
+        return Ok(0);
+    }
     let mut count = 0;
     let walker = ignore::WalkBuilder::new(root)
         .hidden(true)
