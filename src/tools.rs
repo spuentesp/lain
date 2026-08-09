@@ -381,6 +381,27 @@ impl ToolExecutor {
         sections.push("6. **Complex queries**: Use `query_graph` for multi-hop traversals\n".to_string());
 
         sections.push("\n*Use tools incrementally (N+1 approach) to avoid context window overflow.*\n".to_string());
+
+        sections.push("\n---\n\n## Federation Mode (for org-wide questions)\n".to_string());
+        sections.push(
+            "When the user's question spans multiple repos (e.g. \"who else uses this function?\", \
+             \"what depends on this service?\"), switch to federation mode by launching the server \
+             with `lain server --config repos.yaml` instead of single-workspace mode (`lain --workspace PATH`).\n"
+                .to_string(),
+        );
+        sections.push("\n### Federation Tools\n".to_string());
+        sections.push("- **list_repos**: list all indexed repos with health\n".to_string());
+        sections.push("- **get_repo_info**: get a single repo's details\n".to_string());
+        sections.push("- **get_federation_health**: get federation-wide stats (repo counts, node/edge totals, memory estimate)\n".to_string());
+        sections.push("- **search_org**: search symbols across all repos\n".to_string());
+        sections.push("- **get_cross_repo_blast_radius** (+ `_for_repo` variant): cross-repo symbol blast radius\n".to_string());
+
+        sections.push("\n### `repo_id` Resolution Rule\n".to_string());
+        sections.push("1. If `repo_id` is explicit → use it.\n".to_string());
+        sections.push("2. If `symbol` is given and resolves to a unique repo → use that.\n".to_string());
+        sections.push("3. If 1 repo is registered → use it.\n".to_string());
+        sections.push("4. Otherwise → `Config(\"multiple repos; specify repo_id or symbol\")`.\n".to_string());
+
         Ok(sections.join(""))
     }
 
@@ -460,4 +481,46 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
     );
     let tuning = Arc::new(crate::tuning::TuningConfig::default());
     ToolExecutor::new(graph, overlay, embedder, git, lsp_pool, tuning)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_agent_strategy_mentions_federation_tools() {
+        let strategy = build_test_strategy();
+        // The strategy must mention each of the 5 federation tool names.
+        for tool in [
+            "list_repos",
+            "get_repo_info",
+            "get_federation_health",
+            "search_org",
+            "get_cross_repo_blast_radius",
+        ] {
+            assert!(
+                strategy.contains(tool),
+                "strategy must mention federation tool {}: \n{}",
+                tool,
+                strategy,
+            );
+        }
+        // The strategy must explain the repo_id resolution rule.
+        assert!(
+            strategy.contains("repo_id") || strategy.contains("repo id"),
+            "strategy must mention repo_id resolution",
+        );
+        // The strategy must explain single-workspace vs federation.
+        assert!(
+            strategy.contains("federation") || strategy.contains("Federation"),
+            "strategy must mention federation mode",
+        );
+    }
+
+    fn build_test_strategy() -> String {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = crate::graph::GraphDatabase::new(&temp_dir.path().join("graph.bin")).unwrap();
+        let exec = create_test_executor_with_graph(graph);
+        exec.get_agent_strategy().expect("get_agent_strategy should succeed")
+    }
 }
