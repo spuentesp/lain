@@ -128,9 +128,12 @@ this can be hundreds of MB per repo.
 
 ### `shallow_clone`
 
-Like `local_clone` but `git clone --depth 1`. Re-clones fully on each
-refresh instead of `fetch`-ing. Lower disk cost; co-change mining across
-history is not possible because history is shallow.
+Like `local_clone` but `git clone --depth 1` on first run. On
+subsequent runs, `git fetch --depth 1 origin <ref>` then
+`git reset --hard origin/<ref>` — same fetch cadence as `local_clone`,
+but bounded by `--depth 1` from the initial clone onward. Lower disk
+cost; co-change mining across history is not possible because history
+is shallow.
 
 ```yaml
 - id: billing-svc
