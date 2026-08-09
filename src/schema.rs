@@ -49,6 +49,7 @@ pub enum EdgeType {
     Produces,      // Producer -> Topic (Kafka producer, event emitter)
     Consumes,      // Consumer -> Topic (Kafka consumer, queue listener)
     DeployedTo,    // IaC resource -> cloud resource (k8s, AWS, etc.)
+    CrossRepoSameSymbol, // Federation-only: same symbol across different repos (added Task 10)
 }
 
 impl std::fmt::Display for EdgeType {

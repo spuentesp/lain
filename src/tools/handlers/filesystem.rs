@@ -9,7 +9,7 @@ pub fn read_file(path: &str, line_start: Option<u32>, line_end: Option<u32>) -> 
     if !path.exists() {
         return Err(LainError::NotFound(format!("File not found: {}", path.display())));
     }
-    let content = std::fs::read_to_string(path).map_err(LainError::Io)?;
+    let content = std::fs::read_to_string(path).map_err(|e| LainError::Io(e.to_string()))?;
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
         return Ok(format!("File: {}\n\n(empty)", path.display()));
@@ -37,11 +37,11 @@ pub fn list_directory(path: &str, include_hidden: bool) -> Result<String, LainEr
         return Err(LainError::NotFound(format!("Not a directory: {}", dir_path.display())));
     }
     let mut entries: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(dir_path).map_err(LainError::Io)? {
-        let entry = entry.map_err(LainError::Io)?;
+    for entry in std::fs::read_dir(dir_path).map_err(|e| LainError::Io(e.to_string()))? {
+        let entry = entry.map_err(|e| LainError::Io(e.to_string()))?;
         let name = entry.file_name().to_string_lossy().to_string();
         if !include_hidden && name.starts_with('.') { continue; }
-        let ft = if entry.file_type().map_err(LainError::Io)?.is_dir() {
+        let ft = if entry.file_type().map_err(|e| LainError::Io(e.to_string()))?.is_dir() {
             "📁"
         } else { "📄" };
         entries.push(format!("{} {}", ft, name));

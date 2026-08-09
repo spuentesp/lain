@@ -1,4 +1,7 @@
 use crate::error::LainError;
+use crate::git::GitSensor;
+use crate::graph::GraphDatabase;
+use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
 use crate::server::LainServer;
 use crate::server::scan::{scan_file_batch, StaticFileRef, PatternRef};
@@ -433,4 +436,327 @@ impl LainServer {
         }
         Ok(())
     }
+}
+
+/// Per-repo ingestion pipeline used by the federation writer. Runs the same
+/// algorithmic stages as `LainServer::build_core_memory` (latest-commit
+/// short-circuit → file batch scan → resolve → co-change → enrich → save)
+/// but takes the four components it needs directly so it can be called on
+/// any `RepoSource` without instantiating a full `LainServer`.
+///
+/// Federation ingestion intentionally skips the per-server NLP pre-warm
+/// phase (`tokio::spawn` block in `build_core_memory`); the global
+/// `FederatedIndex` runs its own embedding/index work and we don't want to
+/// block the per-repo write on it. The signature takes `&GitSensor` (not
+/// `Arc<Mutex<GitSensor>>`) so the caller decides the locking strategy;
+/// `RepoIndex::index` wraps the lock in a single `let _g = ...` scope.
+pub async fn index_one_repo(
+    path: &Path,
+    db: &GraphDatabase,
+    lsp: &LspPool,
+    git: &GitSensor,
+) -> Result<(), LainError> {
+    let scan_start = std::time::Instant::now();
+    let (latest_commit, latest_time) = git.get_latest_commit_info()?;
+    let last_commit = db.get_last_commit()?;
+
+    if let Some(ref last) = last_commit {
+        if last == &latest_commit {
+            info!("[federation] {:?} already up to date at {}", path, last);
+            return Ok(());
+        }
+    }
+
+    info!("[federation] Building core topology for {:?} at commit {}", path, latest_commit);
+
+    let files = if let Some(ref last) = last_commit {
+        info!("[federation] Incremental update since {} for {:?}", last, path);
+        git.get_changed_files_since(last)?
+    } else {
+        info!("[federation] Full repository scan for {:?}", path);
+        git.get_all_tracked_files()?
+    };
+
+    if files.is_empty() {
+        info!("[federation] No files to process for {:?}.", path);
+        db.set_last_commit(latest_commit)?;
+        db.save_to_disk_sync()?;
+        return Ok(());
+    }
+
+    let lsp_sync_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    // Tighter batches than the default tuning for federation workloads —
+    // repos are loaded concurrently and we want to keep each batch's wall
+    // time bounded. The full pipeline doesn't need micro-batches here.
+    const FILES_PER_BATCH: usize = 8;
+    const INGEST_BATCH_SIZE: usize = 256;
+    const COCHANGE_COMMIT_WINDOW: usize = 100;
+    const COCHANGE_MIN_PAIR_COUNT: usize = 2;
+    const COCHANGE_MAX_COMMIT_FILES: usize = 50;
+    const PATTERN_MAX_REF_COUNT: usize = 20;
+    const PATTERN_MIN_DIRS: usize = 2;
+    const PATTERN_MAX_EDGES: usize = 200;
+    const PATTERN_EDGES_PER_VALUE: usize = 10;
+
+    let files_to_scan: Vec<_> = files.into_iter().collect();
+    let file_chunks: Vec<Vec<PathBuf>> = files_to_scan
+        .chunks(FILES_PER_BATCH)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+
+    let mut set = tokio::task::JoinSet::new();
+    for chunk in file_chunks {
+        let lsp_mux = lsp.next();
+        let workspace = path.to_path_buf();
+        let commit_hash = latest_commit.clone();
+        let git_time = latest_time;
+
+        set.spawn(async move {
+            scan_file_batch(chunk, workspace, lsp_mux, lsp_sync_time, git_time, commit_hash).await
+        });
+    }
+
+    // Reduce phase
+    let mut batch_nodes: Vec<GraphNode> = Vec::new();
+    let mut batch_edges: Vec<GraphEdge> = Vec::new();
+    let mut all_external_refs: Vec<(String, crate::lsp::ReferenceLocation)> = Vec::new();
+    let mut all_static_refs: Vec<StaticFileRef> = Vec::new();
+    let mut all_pattern_refs: Vec<PatternRef> = Vec::new();
+
+    let mut scanned = 0usize;
+    let mut failed = 0usize;
+
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(batch_results) => {
+                for file_result in batch_results {
+                    match file_result {
+                        Ok(scan_result) => {
+                            scanned += 1;
+                            batch_nodes.extend(scan_result.nodes);
+                            batch_edges.extend(scan_result.edges);
+                            all_external_refs.extend(scan_result.external_references);
+                            all_static_refs.extend(scan_result.static_refs);
+                            all_pattern_refs.extend(scan_result.pattern_refs);
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            warn!("[federation] File scan error: {}", e);
+                        }
+                    }
+                }
+
+                if batch_nodes.len() >= INGEST_BATCH_SIZE {
+                    if let Err(e) = db.insert_nodes_batch(&batch_nodes) {
+                        warn!("[federation] Batch node write error: {}", e);
+                    }
+                    if let Err(e) = db.insert_edges_batch(&batch_edges) {
+                        warn!("[federation] Batch edge write error: {}", e);
+                    }
+                    batch_nodes.clear();
+                    batch_edges.clear();
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                warn!("[federation] Task join error: {}", e);
+            }
+        }
+    }
+
+    if !batch_nodes.is_empty() {
+        if let Err(e) = db.insert_nodes_batch(&batch_nodes) {
+            warn!("[federation] Final batch node write error: {}", e);
+        }
+        if let Err(e) = db.insert_edges_batch(&batch_edges) {
+            warn!("[federation] Final batch edge write error: {}", e);
+        }
+    }
+
+    info!(
+        "[federation] {:?}: scanned {} files, {} failed, {} external refs, {} static refs, {} pattern refs",
+        path,
+        scanned,
+        failed,
+        all_external_refs.len(),
+        all_static_refs.len(),
+        all_pattern_refs.len(),
+    );
+
+    // Resolve phase: link external references to internal nodes (CALLS)
+    let mut call_edges: Vec<GraphEdge> = Vec::new();
+    for (source_id, ref_loc) in all_external_refs {
+        let path_str = ref_loc.path.to_string_lossy().to_string();
+        if let Some(target_node) = db.get_node_at_location(&path_str, ref_loc.line) {
+            if target_node.id != source_id {
+                call_edges.push(GraphEdge::new(EdgeType::Calls, source_id, target_node.id));
+            }
+        }
+    }
+    info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
+    db.insert_edges_batch(&call_edges)?;
+
+    // Static resolve: tree-sitter derived Calls/Uses edges
+    {
+        let mut name_index: HashMap<String, Vec<(String, NodeType)>> = HashMap::new();
+        for node in db.get_all_nodes() {
+            name_index
+                .entry(node.name.clone())
+                .or_default()
+                .push((node.id.clone(), node.node_type.clone()));
+        }
+
+        let mut static_edges: Vec<GraphEdge> = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+
+        for sr in all_static_refs {
+            let Some(source_node) = db.get_node_at_location(&sr.file_path, sr.source_line) else {
+                continue;
+            };
+            let Some(candidates) = name_index.get(&sr.target_name) else {
+                continue;
+            };
+            for (target_id, target_type) in candidates {
+                if *target_id == source_node.id {
+                    continue;
+                }
+                if matches!(sr.edge_type, EdgeType::Uses)
+                    && !matches!(
+                        target_type,
+                        NodeType::Struct
+                            | NodeType::Enum
+                            | NodeType::Trait
+                            | NodeType::Class
+                            | NodeType::Interface
+                    )
+                {
+                    continue;
+                }
+                let key = (source_node.id.clone(), target_id.clone());
+                if seen.insert(key) {
+                    static_edges.push(GraphEdge::new(
+                        sr.edge_type.clone(),
+                        source_node.id.clone(),
+                        target_id.clone(),
+                    ));
+                }
+            }
+        }
+        info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
+        db.insert_edges_batch(&static_edges)?;
+    }
+
+    // Pattern resolve: cross-boundary detection
+    {
+        let file_nodes: HashMap<String, GraphNode> = db.get_all_nodes()
+            .into_iter()
+            .filter(|n| matches!(n.node_type, NodeType::File))
+            .map(|n| (n.path.clone(), n))
+            .collect();
+
+        let mut value_to_files: HashMap<String, Vec<String>> = HashMap::new();
+        for pr in &all_pattern_refs {
+            let entry = value_to_files.entry(pr.value.clone()).or_default();
+            if !entry.contains(&pr.file_path) {
+                entry.push(pr.file_path.clone());
+            }
+        }
+
+        let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
+        for (value, files) in value_to_files {
+            if files.len() < 2 || files.len() > PATTERN_MAX_REF_COUNT {
+                continue;
+            }
+            let mut dirs: HashSet<String> = HashSet::new();
+            for f in &files {
+                if let Some(parent) = std::path::Path::new(f).parent() {
+                    dirs.insert(parent.to_string_lossy().to_string());
+                }
+            }
+            if dirs.len() < PATTERN_MIN_DIRS {
+                continue;
+            }
+            let pairs = dirs.len() * (dirs.len() - 1) / 2;
+            scored.push((pairs, value, files));
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let max_pattern_edges = (scored.len() * PATTERN_EDGES_PER_VALUE).min(PATTERN_MAX_EDGES);
+        let mut pattern_edges: Vec<GraphEdge> = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+
+        for (_score, _value, files) in scored {
+            if pattern_edges.len() >= max_pattern_edges {
+                break;
+            }
+            let mut dirs: HashMap<String, String> = HashMap::new();
+            for f in &files {
+                if let Some(parent) = std::path::Path::new(f).parent() {
+                    let parent_str = parent.to_string_lossy().to_string();
+                    dirs.entry(parent_str).or_insert_with(|| f.clone());
+                }
+            }
+            let all_dirs: Vec<_> = dirs.into_iter().collect();
+            for i in 0..all_dirs.len() {
+                if pattern_edges.len() >= max_pattern_edges {
+                    break;
+                }
+                for j in (i + 1)..all_dirs.len() {
+                    let (_dir_a, file_a) = &all_dirs[i];
+                    let (_dir_b, file_b) = &all_dirs[j];
+                    let key = (file_a.clone(), file_b.clone());
+                    if seen.insert(key) {
+                        if let (Some(node_a), Some(node_b)) = (
+                            file_nodes.get(file_a),
+                            file_nodes.get(file_b),
+                        ) {
+                            pattern_edges.push(GraphEdge::new(
+                                EdgeType::Pattern,
+                                node_a.id.clone(),
+                                node_b.id.clone(),
+                            ));
+                        }
+                    }
+                    if pattern_edges.len() >= max_pattern_edges {
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
+        db.insert_edges_batch(&pattern_edges)?;
+    }
+
+    // Co-change analysis
+    let co_change_pairs = git
+        .analyze_co_changes(
+            COCHANGE_COMMIT_WINDOW,
+            COCHANGE_MIN_PAIR_COUNT,
+            COCHANGE_MAX_COMMIT_FILES,
+        )
+        .unwrap_or_default();
+    let co_change_tuples: Vec<_> = co_change_pairs
+        .into_iter()
+        .map(|p| (p.file1, p.file2, p.co_change_count))
+        .collect();
+    db.insert_co_change_edges(&co_change_tuples)?;
+
+    // Enrichment: anchor scores + depths
+    db.calculate_anchor_scores()?;
+    db.calculate_depths()?;
+
+    db.set_last_commit(latest_commit)?;
+    db.save_to_disk_sync()?;
+
+    info!(
+        "[federation] {:?}: fully indexed in {:?}",
+        path,
+        scan_start.elapsed()
+    );
+    Ok(())
 }

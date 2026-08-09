@@ -24,7 +24,13 @@ pub enum LainError {
     Mcp(String),
 
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("Unsupported manifest version: {0}")]
+    UnsupportedManifestVersion(u32),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -35,16 +41,37 @@ pub enum LainError {
     #[error("Unavailable: {0}")]
     Unavailable(String),
 
+    #[error("Invalid repo id: {0}")]
+    InvalidRepoId(String),
+
+    #[error("Invalid global id: {0}")]
+    InvalidGlobalId(String),
+
     #[error("Fatal: {0}")]
     Fatal(String),
 
-    #[error("{0}")]
+    #[error("Config error: {0}")]
+    Config(String),
+
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
+
+    #[error("Other error: {0}")]
     Other(String),
+
+    #[error("Ambiguous symbol: matches repos {0:?}")]
+    AmbiguousSymbol(Vec<crate::federation::repo_id::RepoId>),
 }
 
 impl From<git2::Error> for LainError {
     fn from(err: git2::Error) -> Self {
         LainError::Git(err.message().to_string())
+    }
+}
+
+impl From<std::io::Error> for LainError {
+    fn from(err: std::io::Error) -> Self {
+        LainError::Io(err.to_string())
     }
 }
 

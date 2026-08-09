@@ -8,6 +8,7 @@
 //! - MCP protocol server
 
 pub mod error;
+pub mod federation;
 pub mod graph;
 pub mod git;
 pub mod lock;
@@ -40,6 +41,24 @@ mod schema_tests;
 mod tuning_tests;
 #[cfg(test)]
 mod graph_tests;
+#[cfg(test)]
+#[path = "federation/repo_source_tests.rs"]
+mod repo_source_tests;
+#[cfg(test)]
+#[path = "federation/graph_backend_tests.rs"]
+mod graph_backend_tests;
+#[cfg(test)]
+#[path = "federation/matching_tests.rs"]
+mod matching_tests;
+#[cfg(test)]
+#[path = "federation/federated_index_tests.rs"]
+mod federated_index_tests;
+#[cfg(test)]
+#[path = "federation/manifest_tests.rs"]
+mod manifest_tests;
+#[cfg(test)]
+#[path = "federation/loader_tests.rs"]
+mod loader_tests;
 
 pub use error::LainError;
 pub use mcp::LainMcpServer;

@@ -266,7 +266,7 @@ mod tests {
                 "/src/should_fail.rs".into(),
             ))
             .expect_err("sidecar graph must reject writes");
-        assert_eq!(write_error.to_string(), "graph is read-only");
+        assert_eq!(write_error.to_string(), "Other error: graph is read-only");
 
         sidecar_task.abort();
         owner_task.abort();

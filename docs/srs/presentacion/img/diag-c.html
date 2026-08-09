@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Mermaid C</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { padding: 20px; font-family: 'Helvetica Neue', Arial, sans-serif; }
+  #d { width: 2400px; }
+</style>
+</head>
+<body>
+<div class="mermaid" id="d">
+flowchart TB
+    subgraph L1["Desarrollador"]
+        A(("Inicio: necesidad<br/>de modificar código")) --> B["1. Solicita el cambio<br/>al asistente de IA"]
+        J{"8. ¿Aprueba el plan<br/>con la evidencia?"}
+        K["10. Revisa el resultado<br/>y la verificación"]
+        FIN(("Fin: cambio integrado<br/>con impacto conocido"))
+    end
+
+    subgraph L2["Asistente de IA"]
+        C["2. Identifica los símbolos<br/>que planea modificar"]
+        F{"6. ¿Impacto alto<br/>o inesperado?"}
+        G["7a. Replantea el plan:<br/>acota el cambio o lo divide"]
+        H["7b. Elabora el plan de cambio<br/>con los afectados a la vista"]
+        I["9. Aplica la modificación<br/>planificada"]
+    end
+
+    subgraph L3["Sistema LAIN"]
+        D["3. Actualiza el mapa<br/>de conocimiento (CU-09)"]
+        E["4-5. Calcula radio de impacto,<br/>llamadores y acoplamientos<br/>(CU-02, CU-07)"]
+        M["6b. Entrega cadenas de llamadas<br/>y contexto de símbolos<br/>(CU-03, CU-08)"]
+        V["11. Ejecuta verificación con<br/>contexto arquitectónico (CU-06)"]
+    end
+
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F -- "Sí" --> M
+    M --> G
+    G --> H
+    F -- "No" --> H
+    H --> J
+    J -- "No: ajustar" --> C
+    J -- "Sí" --> I
+    I --> V
+    V --> K
+    K -- "Falla con contexto:<br/>corregir" --> C
+    K -- "Conforme" --> FIN
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'default', flowchart: { htmlLabels: true, curve: 'basis' } });
+</script>
+</body>
+</html>

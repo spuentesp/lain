@@ -122,6 +122,12 @@ fs2 = "0.4"
 name = "lain"
 path = "src/lib.rs"
 
+[features]
+# Enables shared test helpers (e.g. `federation_index_for_test`) for use from
+# integration tests in `tests/`. Has no effect on production binaries; gated
+# helpers are compiled out unless `--features test-utils` is passed.
+test-utils = []
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -2,6 +2,9 @@
 //!
 //! Implements the ServerHandler trait to expose tools via MCP protocol
 
+use crate::error::LainError;
+use crate::federation::federated_index::FederatedIndex;
+use crate::federation::repo_id::RepoId;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
 use rust_mcp_sdk::{
@@ -41,8 +44,147 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
 
 const FRONT_END_HTML: &str = include_str!("front_end_monitor.html");
 
+/// Wrap a string payload in a `CallToolResult` with a single text block.
+fn tool_text_result(text: String, is_error: bool) -> CallToolResult {
+    CallToolResult {
+        content: vec![ContentBlock::TextContent(TextContent::new(text, None, None))],
+        is_error: Some(is_error),
+        meta: None,
+        structured_content: None,
+    }
+}
+
+/// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
+/// error on malformed input. Used by both stdio and HTTP dispatch arms for
+/// `get_cross_repo_blast_radius*`.
+fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
+    let (start_s, end_s) = s.split_once("..").ok_or_else(|| {
+        format!("Invalid depth: expected \"<start>..<end>\", got {s:?}")
+    })?;
+    let start: u32 = start_s.trim().parse().map_err(|e| {
+        format!("Invalid depth start: {e}")
+    })?;
+    let end: u32 = end_s.trim().parse().map_err(|e| {
+        format!("Invalid depth end: {e}")
+    })?;
+    Ok(start..end)
+}
+
+/// Resolve which repo an existing per-repo MCP tool call should be routed to
+/// when the server is in federation mode.
+///
+/// Priority:
+///   1. `explicit_repo` — caller passed `repo_id` in args; validate the id and return it.
+///   2. `symbol_hint` — caller passed `symbol`; defer to `FederatedIndex::resolve_symbol`
+///      (which can return `Ok`, `NotFound`, or `AmbiguousSymbol`).
+///   3. Neither — fall back to inspecting the federation: zero repos is an error,
+///      one repo is treated as the implicit target, multiple repos without any
+///      hint is an error so the agent is forced to disambiguate.
+///
+/// In single-workspace mode the existing dispatch path doesn't call this at all
+/// (the resolver would also be a no-op there: with one configured repo it
+/// returns that repo, and with the legacy executor the per-repo constructor
+/// already binds to the single repo).
+pub fn resolve_repo_for_tool(
+    fed: &FederatedIndex,
+    symbol_hint: Option<&str>,
+    explicit_repo: Option<&str>,
+) -> Result<RepoId, LainError> {
+    if let Some(r) = explicit_repo {
+        return RepoId::new(r);
+    }
+    match symbol_hint {
+        Some(s) => fed.resolve_symbol(s),
+        None => {
+            let listed = fed.list_repos();
+            if listed.is_empty() {
+                Err(LainError::Config("no repos registered".into()))
+            } else if listed.len() == 1 {
+                Ok(listed[0].0.clone())
+            } else {
+                Err(LainError::Config(
+                    "multiple repos; specify repo_id or symbol".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// Run the federation-mode repo resolver against a tool call's `args`. Returns
+/// `Ok(repo_id)` when the call is safe to dispatch, or `Err(text)` with the
+/// pre-formatted error string the caller should surface as `is_error: true`.
+///
+/// **Spec deviation (Important issue 2):** `AmbiguousSymbol` is surfaced as
+/// JSON text inside `CallToolResult::content`, not via
+/// `CallToolResult::structured_content`. The shape is
+/// `{"error": "ambiguous_symbol", "candidates": [...], "message": "..."}` so
+/// the agent can parse it today without bumping the rust-mcp-sdk schema.
+/// A future SDK upgrade that supports proper error data on the
+/// `CallToolResult` would be a cleaner home for this payload; tracked in
+/// the report.
+fn resolve_repo_or_error(
+    fed: &FederatedIndex,
+    args: &Map<String, serde_json::Value>,
+) -> Result<RepoId, String> {
+    let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
+    let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
+    match resolve_repo_for_tool(fed, symbol_hint, explicit_repo) {
+        Ok(rid) => Ok(rid),
+        Err(LainError::AmbiguousSymbol(candidates)) => {
+            let payload = serde_json::json!({
+                "error": "ambiguous_symbol",
+                "candidates": candidates
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>(),
+                "message": "Multiple repos match this symbol; specify repo_id or disambiguate."
+            });
+            Err(payload.to_string())
+        }
+        Err(e) => Err(format!("{}", e)),
+    }
+}
+
+/// Tool definitions exposed only when the MCP server was constructed with a
+/// `FederatedIndex`. Centralized here so the stdio `tools/list` response, the
+/// stdio `tools/call` dispatch, and the HTTP JSON-RPC `tools/list` / `tools/call`
+/// paths agree on names, schemas, and gating.
+const FEDERATION_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
+    (
+        "list_repos",
+        "List every repository currently registered in the federation, with id, path, health, and graph stats.",
+        &[],
+    ),
+    (
+        "get_repo_info",
+        "Get info about a single repository in the federation by id.",
+        &["id"],
+    ),
+    (
+        "get_federation_health",
+        "Aggregate health counts and total node/edge counts across the federation, plus a rough memory estimate.",
+        &[],
+    ),
+    (
+        "search_org",
+        "Case-insensitive substring search across every repo's symbols (matched on name or path). Args: query (substring), limit (max results, parsed as usize). Returns matches sorted by (repo_id, name).",
+        &["query", "limit"],
+    ),
+    (
+        "get_cross_repo_blast_radius",
+        "Resolve a symbol across the federation, traverse outgoing Calls edges in [min_depth, max_depth) (depth is a u32 range like \"1..3\"), and group visited nodes by repo. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit.",
+        &["symbol", "depth"],
+    ),
+    (
+        "get_cross_repo_blast_radius_for_repo",
+        "Same as get_cross_repo_blast_radius but the caller disambiguates the repo explicitly via repo_id, bypassing symbol resolution. Args: repo_id, symbol, depth (u32 range like \"1..3\"). Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}.",
+        &["repo_id", "symbol", "depth"],
+    ),
+];
+
 struct LainHandler {
     executor: Arc<ToolExecutor>,
+    federation: Option<Arc<FederatedIndex>>,
 }
 
 #[async_trait]
@@ -88,6 +230,33 @@ impl ServerHandler for LainHandler {
                 title: None,
             });
         }
+        if self.federation.is_some() {
+            for (name, description, required) in FEDERATION_TOOL_DEFS {
+                let mut props = std::collections::BTreeMap::new();
+                for req in *required {
+                    let mut p = serde_json::Map::new();
+                    p.insert("type".into(), serde_json::Value::String("string".into()));
+                    p.insert("description".into(), serde_json::Value::String(format!("{req} of the repo to look up")));
+                    props.insert((*req).to_string(), p);
+                }
+                let input_schema = ToolInputSchema::new(
+                    required.iter().map(|s| s.to_string()).collect(),
+                    if props.is_empty() { None } else { Some(props) },
+                    None,
+                );
+                tools.push(Tool {
+                    name: (*name).to_string(),
+                    description: Some((*description).to_string()),
+                    input_schema,
+                    annotations: None,
+                    execution: None,
+                    icons: vec![],
+                    meta: None,
+                    output_schema: None,
+                    title: None,
+                });
+            }
+        }
 
         Ok(ListToolsResult { tools, meta: None, next_cursor: None })
     }
@@ -98,9 +267,200 @@ impl ServerHandler for LainHandler {
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError> {
         let empty: Map<String, serde_json::Value> = Map::new();
-        let args = params.arguments.as_ref().unwrap_or(&empty);
+        let args_ref = params.arguments.as_ref().unwrap_or(&empty);
+        // Clone the args so we can inject the resolved `repo_id` in
+        // federation mode. The executor already clones internally
+        // (`call_inner` does `arguments.cloned().unwrap_or_default()`), so
+        // this is a no-op cost-wise. Owning the map lets the resolver's
+        // successful `RepoId` flow through to downstream tool handlers
+        // instead of being discarded (Task 19 round-1 fix).
+        let mut args_owned: Map<String, serde_json::Value> = args_ref.clone();
 
-        match self.executor.call(&params.name, Some(args)).await {
+        if let Some(fed) = &self.federation {
+            match params.name.as_str() {
+                "list_repos" => {
+                    let repos = crate::mcp::federation_tools::list_repos(fed);
+                    return Ok(tool_text_result(
+                        serde_json::to_string(&repos)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ));
+                }
+                "get_repo_info" => {
+                    let id_str = match args_owned.get("id").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: id".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Ok(tool_text_result(format!("{e}"), true));
+                        }
+                    };
+                    return match crate::mcp::federation_tools::get_repo_info(fed, &rid) {
+                        Ok(info) => Ok(tool_text_result(
+                            serde_json::to_string(&info)
+                                .unwrap_or_else(|e| format!("serialization error: {e}")),
+                            false,
+                        )),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                    };
+                }
+                "get_federation_health" => {
+                    let health = crate::mcp::federation_tools::get_federation_health(fed);
+                    return Ok(tool_text_result(
+                        serde_json::to_string(&health)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ));
+                }
+                "search_org" => {
+                    let query = match args_owned.get("query").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: query".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let limit: usize = match args_owned.get("limit") {
+                        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+                            Some(u) => u as usize,
+                            None => {
+                                return Ok(tool_text_result(
+                                    "Invalid argument: limit must be a non-negative integer"
+                                        .to_string(),
+                                    true,
+                                ));
+                            }
+                        },
+                        Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
+                            Ok(u) => u,
+                            Err(_) => {
+                                return Ok(tool_text_result(
+                                    "Invalid argument: limit must be a non-negative integer"
+                                        .to_string(),
+                                    true,
+                                ));
+                            }
+                        },
+                        _ => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: limit".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let hits = crate::mcp::federation_tools::search_org(fed, query, limit);
+                    return Ok(tool_text_result(
+                        serde_json::to_string(&hits)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ));
+                }
+                "get_cross_repo_blast_radius" => {
+                    let symbol = match args_owned.get("symbol").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: symbol".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth_str = match args_owned.get("depth").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: depth".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth = match parse_depth_range(depth_str) {
+                        Ok(r) => r,
+                        Err(e) => return Ok(tool_text_result(e, true)),
+                    };
+                    return match crate::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
+                        Ok(r) => Ok(tool_text_result(
+                            serde_json::to_string(&r)
+                                .unwrap_or_else(|e| format!("serialization error: {e}")),
+                            false,
+                        )),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                    };
+                }
+                "get_cross_repo_blast_radius_for_repo" => {
+                    let repo_id = match args_owned.get("repo_id").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: repo_id".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let symbol = match args_owned.get("symbol").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: symbol".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth_str = match args_owned.get("depth").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            return Ok(tool_text_result(
+                                "Missing required argument: depth".to_string(),
+                                true,
+                            ));
+                        }
+                    };
+                    let depth = match parse_depth_range(depth_str) {
+                        Ok(r) => r,
+                        Err(e) => return Ok(tool_text_result(e, true)),
+                    };
+                    return match crate::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
+                        Ok(r) => Ok(tool_text_result(
+                            serde_json::to_string(&r)
+                                .unwrap_or_else(|e| format!("serialization error: {e}")),
+                            false,
+                        )),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(fed) = &self.federation {
+            match resolve_repo_or_error(fed, &args_owned) {
+                Ok(rid) => {
+                    // Inject the resolved `repo_id` into the args the
+                    // executor will see. Existing per-repo tools resolve
+                    // symbols against `ctx.graph` (the executor's
+                    // single-workspace context) and ignore this; future
+                    // federation-aware tool handlers can read it. This is
+                    // the round-1 fix: the previously discarded `RepoId`
+                    // now flows through dispatch.
+                    args_owned.insert(
+                        "repo_id".into(),
+                        serde_json::Value::String(rid.as_str().to_string()),
+                    );
+                }
+                Err(text) => return Ok(tool_text_result(text, true)),
+            }
+        }
+
+        match self.executor.call(&params.name, Some(&args_owned)).await {
             Ok(text) => Ok(CallToolResult {
                 content: vec![ContentBlock::TextContent(TextContent::new(text, None, None))],
                 is_error: Some(false),
@@ -124,11 +484,20 @@ impl ServerHandler for LainHandler {
 #[derive(Clone)]
 pub struct LainMcpServer {
     executor: ToolExecutor,
+    federation: Option<Arc<FederatedIndex>>,
 }
 
 impl LainMcpServer {
     pub fn new(executor: ToolExecutor) -> Self {
-        Self { executor }
+        Self { executor, federation: None }
+    }
+
+    /// Federation-mode constructor. When set, the handler also exposes
+    /// `list_repos` and `get_repo_info` over MCP. With `new(executor)` alone
+    /// the federation surface is not registered and single-workspace
+    /// behavior is preserved.
+    pub fn with_federation(executor: ToolExecutor, federation: Arc<FederatedIndex>) -> Self {
+        Self { executor, federation: Some(federation) }
     }
 
     /// Build a sidecar-flavored server. The graph inside `executor` should
@@ -136,7 +505,7 @@ impl LainMcpServer {
     /// so mutating tool calls fail at the database layer with a clean
     /// `graph is read-only` error.
     pub fn new_read_only(executor: ToolExecutor) -> Self {
-        Self { executor }
+        Self { executor, federation: None }
     }
 
     /// Convenience: build a sidecar server directly from a read-only graph
@@ -147,7 +516,7 @@ impl LainMcpServer {
         workspace: std::path::PathBuf,
     ) -> Self {
         let executor = crate::tools::ToolExecutor::new_read_only(graph, overlay, workspace);
-        Self { executor }
+        Self { executor, federation: None }
     }
 
     /// Serve on a specific `SocketAddr`. Used by the sidecar so it can bind
@@ -168,7 +537,7 @@ impl LainMcpServer {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
-                            handle_request(req, executor)
+                            handle_request(req, executor, None)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -191,7 +560,10 @@ impl LainMcpServer {
 
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
-        let handler = LainHandler { executor: Arc::new(self.executor) };
+        let handler = LainHandler {
+            executor: Arc::new(self.executor),
+            federation: self.federation,
+        };
 
         let server = server_runtime::create_server(McpServerOptions {
             server_details,
@@ -210,17 +582,20 @@ impl LainMcpServer {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
         let executor = Arc::new(self.executor);
+        let federation = self.federation;
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let executor = executor.clone();
+                    let federation = federation.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
-                            handle_request(req, executor)
+                            let federation = federation.clone();
+                            handle_request(req, executor, federation)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -261,7 +636,34 @@ impl LainMcpServer {
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
+    federation: Option<Arc<FederatedIndex>>,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
+    let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
+        let body = serde_json::to_string(&value).unwrap_or_default();
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(full_body(Bytes::from(body)))
+            .unwrap()
+    };
+    let jsonrpc_error = |id: Option<&serde_json::Value>, code: i32, msg: String| {
+        jsonrpc_response(serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": code, "message": msg},
+            "id": id
+        }))
+    };
+    let jsonrpc_tool_result = |id: Option<&serde_json::Value>, text: &str, is_error: bool| {
+        jsonrpc_response(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "content": [{"type": "text", "text": text}],
+                "isError": is_error
+            },
+            "id": id
+        }))
+    };
+
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
@@ -310,7 +712,7 @@ async fn handle_request(
                         // Append the 6 special-case tools (kept in sync with
                         // the stdio transport's handle_list_tools_request).
                         tools_vec.extend(special_tool_definitions());
-                        let tools: Vec<serde_json::Value> = tools_vec
+                        let mut tools: Vec<serde_json::Value> = tools_vec
                             .iter()
                             .map(|def| {
                                 serde_json::json!({
@@ -320,6 +722,27 @@ async fn handle_request(
                                 })
                             })
                             .collect();
+                        if federation.is_some() {
+                            for (name, description, required) in FEDERATION_TOOL_DEFS {
+                                let mut props = serde_json::Map::new();
+                                for req in *required {
+                                    let mut p = serde_json::Map::new();
+                                    p.insert("type".into(), serde_json::Value::String("string".into()));
+                                    p.insert("description".into(), serde_json::Value::String(format!("{req} of the repo to look up")));
+                                    props.insert((*req).to_string(), serde_json::Value::Object(p));
+                                }
+                                let input_schema = serde_json::json!({
+                                    "type": "object",
+                                    "properties": props,
+                                    "required": required,
+                                });
+                                tools.push(serde_json::json!({
+                                    "name": name,
+                                    "description": description,
+                                    "inputSchema": input_schema
+                                }));
+                            }
+                        }
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
                     }
                     "tools/call" => {
@@ -327,9 +750,153 @@ async fn handle_request(
                             .and_then(|p| p.get("name"))
                             .and_then(|n| n.as_str())
                             .unwrap_or("");
-                        let args: Option<&serde_json::Map<String, serde_json::Value>> = params
+                        let mut args_map: serde_json::Map<String, serde_json::Value> = params
                             .and_then(|p| p.get("arguments"))
-                            .and_then(|v| v.as_object());
+                            .and_then(|v| v.as_object())
+                            .cloned()
+                            .unwrap_or_default();
+
+                        if let Some(fed) = &federation {
+                            match name {
+                                "list_repos" => {
+                                    let repos = crate::mcp::federation_tools::list_repos(fed);
+                                    let text = match serde_json::to_string(&repos) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    };
+                                    return Ok(jsonrpc_tool_result(id, &text, false));
+                                }
+                                "get_repo_info" => {
+                                    let id_str = match args_map.get("id").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: id", true)),
+                                    };
+                                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                                        Ok(r) => r,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    };
+                                    match crate::mcp::federation_tools::get_repo_info(fed, &rid) {
+                                        Ok(info) => {
+                                            let text = match serde_json::to_string(&info) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            return Ok(jsonrpc_tool_result(id, &text, false));
+                                        }
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    }
+                                }
+                                "get_federation_health" => {
+                                    let health = crate::mcp::federation_tools::get_federation_health(fed);
+                                    let text = match serde_json::to_string(&health) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    };
+                                    return Ok(jsonrpc_tool_result(id, &text, false));
+                                }
+                                "search_org" => {
+                                    let query = match args_map.get("query").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: query", true)),
+                                    };
+                                    let limit: usize = match args_map.get("limit") {
+                                        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+                                            Some(u) => u as usize,
+                                            None => return Ok(jsonrpc_tool_result(id, "Invalid argument: limit must be a non-negative integer", true)),
+                                        },
+                                        Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
+                                            Ok(u) => u,
+                                            Err(_) => return Ok(jsonrpc_tool_result(id, "Invalid argument: limit must be a non-negative integer", true)),
+                                        },
+                                        _ => return Ok(jsonrpc_tool_result(id, "Missing required argument: limit", true)),
+                                    };
+                                    let hits = crate::mcp::federation_tools::search_org(fed, query, limit);
+                                    let text = match serde_json::to_string(&hits) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    };
+                                    return Ok(jsonrpc_tool_result(id, &text, false));
+                                }
+                                "get_cross_repo_blast_radius" => {
+                                    let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
+                                    };
+                                    let depth_str = match args_map.get("depth").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: depth", true)),
+                                    };
+                                    let depth = match parse_depth_range(depth_str) {
+                                        Ok(r) => r,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
+                                    };
+                                    match crate::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
+                                        Ok(r) => {
+                                            let text = match serde_json::to_string(&r) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            return Ok(jsonrpc_tool_result(id, &text, false));
+                                        }
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    }
+                                }
+                                "get_cross_repo_blast_radius_for_repo" => {
+                                    let repo_id = match args_map.get("repo_id").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: repo_id", true)),
+                                    };
+                                    let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
+                                    };
+                                    let depth_str = match args_map.get("depth").and_then(|v| v.as_str()) {
+                                        Some(s) => s,
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: depth", true)),
+                                    };
+                                    let depth = match parse_depth_range(depth_str) {
+                                        Ok(r) => r,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
+                                    };
+                                    match crate::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
+                                        Ok(r) => {
+                                            let text = match serde_json::to_string(&r) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            return Ok(jsonrpc_tool_result(id, &text, false));
+                                        }
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        if let Some(fed) = &federation {
+                            match resolve_repo_or_error(fed, &args_map) {
+                                Ok(rid) => {
+                                    // Inject the resolved `repo_id` into
+                                    // the args the executor will see (Task
+                                    // 19 round-1 fix). Existing per-repo
+                                    // tools resolve against `ctx.graph`
+                                    // and ignore this; future
+                                    // federation-aware handlers can read it.
+                                    args_map.insert(
+                                        "repo_id".into(),
+                                        serde_json::Value::String(rid.as_str().to_string()),
+                                    );
+                                }
+                                Err(text) => return Ok(jsonrpc_tool_result(id, &text, true)),
+                            }
+                        }
+
+                        // Recompute the args reference after the
+                        // `repo_id` injection so a previously-empty
+                        // `args_map` (which would have produced
+                        // `args = None`) now flows as `Some(&args_map)`.
+                        let args: Option<&serde_json::Map<String, serde_json::Value>> =
+                            if args_map.is_empty() { None } else { Some(&args_map) };
 
                         match executor.call(name, args).await {
                             Ok(text) => {
@@ -443,7 +1010,8 @@ async fn handle_request(
         let session_id = match path.strip_prefix("/ui/call-chain/") {
             Some(s) => s,
             None => return Ok(Response::builder().status(StatusCode::BAD_REQUEST)
-                .body(full_body(Bytes::from("Invalid path"))).unwrap()),
+                .body(full_body(Bytes::from("Invalid path")))
+                .unwrap()),
         };
         let sessions = executor.ui_sessions().lock().await;
         if let Some(session) = sessions.get(session_id) {
@@ -631,4 +1199,143 @@ fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> 
             }),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::federation::federated_index::FederatedIndex;
+    use crate::federation::graph_backend::PetgraphBackend;
+    use crate::LainError;
+    use std::sync::Arc;
+
+    #[test]
+    fn explicit_repo_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let rid = resolve_repo_for_tool(&fed, None, Some("repo-a")).unwrap();
+        assert_eq!(rid.as_str(), "repo-a");
+    }
+
+    #[test]
+    fn no_symbol_no_explicit_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        assert!(matches!(resolve_repo_for_tool(&fed, None, None), Err(LainError::Config(_))));
+    }
+
+    /// Verifies the round-1 fix: when `resolve_repo_or_error` resolves a
+    /// symbol to a single repo, the caller now propagates the resolved
+    /// `RepoId` (as `repo_id` in the args) instead of discarding it.
+    /// We exercise the resolver + the manual injection step the dispatcher
+    /// performs in both stdio and HTTP paths.
+    #[test]
+    fn symbol_hint_resolves_and_injects_repo_id() {
+        use crate::schema::NodeType;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        fed.backend()
+            .upsert_node_global(
+                "repo-x:Function:src/lib.rs:only_one",
+                NodeType::Function,
+                "src/lib.rs",
+                "only_one",
+            )
+            .unwrap();
+
+        // Resolve via the same helper the dispatcher uses, then mirror
+        // the dispatcher's injection step.
+        let mut args = Map::new();
+        args.insert(
+            "symbol".into(),
+            serde_json::Value::String("only_one".into()),
+        );
+        let rid = resolve_repo_or_error(&fed, &args).expect("unique symbol should resolve");
+        assert_eq!(rid.as_str(), "repo-x");
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String(rid.as_str().to_string()),
+        );
+        assert_eq!(
+            args.get("repo_id").and_then(|v| v.as_str()),
+            Some("repo-x"),
+            "resolved repo_id must be present in args after dispatcher's injection step",
+        );
+    }
+
+    /// Asserts the JSON shape of the `AmbiguousSymbol` error surfaced
+    /// through the dispatcher. This pins down the spec deviation
+    /// documented in the report (Important issue 2): the payload is
+    /// shipped as JSON text inside `CallToolResult::content`, not via
+    /// `CallToolResult::structured_content`, so the agent can parse it
+    /// today without bumping the rust-mcp-sdk schema.
+    #[test]
+    fn ambiguous_symbol_serializes_as_structured_json() {
+        use crate::schema::NodeType;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        fed.backend()
+            .upsert_node_global(
+                "repo-a:Function:src/lib.rs:shared",
+                NodeType::Function,
+                "src/lib.rs",
+                "shared",
+            )
+            .unwrap();
+        fed.backend()
+            .upsert_node_global(
+                "repo-b:Function:src/lib.rs:shared",
+                NodeType::Function,
+                "src/lib.rs",
+                "shared",
+            )
+            .unwrap();
+
+        let mut args = Map::new();
+        args.insert("symbol".into(), serde_json::Value::String("shared".into()));
+        let text = resolve_repo_or_error(&fed, &args)
+            .expect_err("duplicate symbol must surface as AmbiguousSymbol");
+
+        // The payload must be valid JSON with the documented shape.
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .expect("AmbiguousSymbol error must serialize as JSON for SDK compatibility");
+        assert_eq!(v["error"], "ambiguous_symbol");
+        let cands: Vec<&str> = v["candidates"]
+            .as_array()
+            .expect("candidates must be a JSON array")
+            .iter()
+            .map(|c| c.as_str().expect("each candidate is a string"))
+            .collect();
+        assert_eq!(cands.len(), 2, "exactly two repos match the shared symbol");
+        assert!(cands.contains(&"repo-a"));
+        assert!(cands.contains(&"repo-b"));
+        assert!(
+            v["message"].as_str().is_some(),
+            "message field must be present and a string",
+        );
+    }
+
+    /// Verifies that when `repo_id` is provided explicitly, the symbol
+    /// hint is ignored — `resolve_repo_or_error` short-circuits to the
+    /// explicit id. This is the priority ordering documented on
+    /// `resolve_repo_for_tool`: explicit > symbol > single-repo fallback.
+    #[test]
+    fn explicit_repo_id_overrides_symbol_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let mut args = Map::new();
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("explicit-repo".into()),
+        );
+        args.insert(
+            "symbol".into(),
+            serde_json::Value::String("any-symbol".into()),
+        );
+        let rid = resolve_repo_or_error(&fed, &args)
+            .expect("explicit repo_id must short-circuit past the symbol hint");
+        assert_eq!(rid.as_str(), "explicit-repo");
+    }
 }

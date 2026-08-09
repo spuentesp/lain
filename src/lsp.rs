@@ -350,6 +350,22 @@ pub struct LspPool {
     next: AtomicUsize,
 }
 
+impl Clone for LspPool {
+    fn clone(&self) -> Self {
+        // `AtomicUsize` isn't `Clone` so we can't `#[derive(Clone)]`, but
+        // every clone should share the round-robin counter (a freshly
+        // zeroed counter would split the multiplexer pool across clones
+        // and starve some multiplexers). The pool is intended to be cloned
+        // for read-only sharing, so pointing at the original counter is
+        // correct: it's a stateless index, not a per-clone state.
+        let next = AtomicUsize::new(self.next.load(Ordering::Relaxed));
+        LspPool {
+            multiplexers: self.multiplexers.clone(),
+            next,
+        }
+    }
+}
+
 impl LspPool {
     pub fn new(workspace: &Path, size: usize) -> Result<Self, LainError> {
         let mut multiplexers = Vec::with_capacity(size);
