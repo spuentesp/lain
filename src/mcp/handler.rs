@@ -30,6 +30,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 const FRONT_END_HTML: &str = include_str!("front_end_monitor.html");
+const FEDERATION_DASHBOARD_HTML: &str = include_str!("federation_dashboard.html");
 
 /// Wrap a string payload in a `CallToolResult` with a single text block.
 fn tool_text_result(text: String, is_error: bool) -> CallToolResult {
@@ -636,6 +637,17 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "text/html")
             .body(Full::new(Bytes::from(FRONT_END_HTML)))
+            .unwrap());
+    }
+
+    // GET /federation-dashboard.html -> federation landing page (used by
+    // the federation-aware UI; itself a static asset that fetches
+    // /health + /mcp at runtime).
+    if method == Method::GET && path == "/federation-dashboard.html" {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/html")
+            .body(Full::new(Bytes::from(FEDERATION_DASHBOARD_HTML)))
             .unwrap());
     }
 

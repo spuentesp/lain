@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Federation Dashboard — Lain</title>
+  <style>
+    /* Federation landing page — light theme (intentional contrast to the
+       dark `front_end_monitor.html` query console). Single file, no
+       external assets, vanilla JS only. */
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #222; }
+    h1 { margin-bottom: 0.5rem; }
+    h2 { margin-top: 2rem; }
+    .subtitle { color: #666; margin-bottom: 2rem; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; vertical-align: top; }
+    th { background: #f4f4f4; }
+    code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 0.9em; background: #f4f4f4; padding: 0.05rem 0.3rem; border-radius: 2px; }
+    .health { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.85em; font-weight: 600; }
+    .health.ready { background: #d4edda; color: #155724; }
+    .health.indexing { background: #fff3cd; color: #856404; }
+    .health.degraded { background: #f8d7da; color: #721c24; }
+    .health.unavailable { background: #e2e3e5; color: #383d41; }
+    .health.missing { background: #e2e3e5; color: #383d41; }
+    .stats { display: flex; gap: 2rem; margin-bottom: 2rem; flex-wrap: wrap; }
+    .stat { padding: 1rem; background: #f4f4f4; border-radius: 4px; min-width: 120px; }
+    .stat-label { font-size: 0.8em; color: #666; }
+    .stat-value { font-size: 1.5em; font-weight: 600; }
+    .tool-links a { display: inline-block; margin-right: 1rem; margin-bottom: 0.5rem; padding: 0.5rem 1rem; background: #007bff; color: white; text-decoration: none; border-radius: 3px; }
+    .tool-links a:hover { background: #0056b3; }
+    .row-actions a { margin-right: 0.75rem; }
+    .error { background: #f8d7da; color: #721c24; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
+    .muted { color: #888; }
+  </style>
+</head>
+<body>
+  <h1>Federation Dashboard</h1>
+  <div class="subtitle">Org-wide structural intelligence for Lain</div>
+
+  <div id="error" class="error" style="display: none"></div>
+
+  <div class="stats" id="stats"></div>
+
+  <h2>Repositories</h2>
+  <table id="repos">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Path</th>
+        <th>Health</th>
+        <th>Last refresh</th>
+        <th>Last indexed</th>
+        <th>Nodes</th>
+        <th>Edges</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Quick links</h2>
+  <div class="tool-links">
+    <a href="/ui/blast-radius/?repo_id=__DEFAULT__&symbol=__SELECTED__">Blast radius</a>
+    <a href="/ui/call-chain/?repo_id=__DEFAULT__&from=__&to=__">Call chain</a>
+    <a href="/ui/coupling/?repo_id=__DEFAULT__&symbol=__">Coupling</a>
+    <a href="/">Home</a>
+  </div>
+
+  <script>
+    // Helper: format a unix-epoch second as a locale string or em-dash.
+    function fmtUnix(epoch) {
+      if (!epoch || epoch <= 0) return '—';
+      return new Date(epoch * 1000).toLocaleString();
+    }
+
+    // Helper: issue a JSON-RPC `tools/call` to `/mcp` and parse the
+    // unwrapped text payload as JSON. The server returns
+    // `{result:{content:[{type:"text",text:"<json>"}]},id}`.
+    async function callTool(name, args) {
+      const base = window.location.origin;
+      const res = await fetch(base + '/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'dashboard-' + name,
+          method: 'tools/call',
+          params: { name: name, arguments: args || {} }
+        })
+      });
+      const json = await res.json();
+      const block = json.result && json.result.content && json.result.content[0];
+      if (!block || block.type !== 'text') {
+        throw new Error('tools/call ' + name + ' returned no text content');
+      }
+      return JSON.parse(block.text);
+    }
+
+    async function load() {
+      try {
+        const base = window.location.origin;
+
+        // Step 1: GET /health to detect federation mode and pull aggregate
+        // counts (the blob is intentionally minimal — per-repo detail
+        // comes from the list_repos tool call below).
+        const healthRes = await fetch(base + '/health');
+        const health = await healthRes.json();
+        if (!health.federation) {
+          // Back-compat: redirect to the single-workspace home when the
+          // server isn't running in federation mode.
+          window.location.href = '/';
+          return;
+        }
+        const f = health.federation;
+
+        // Step 2: render aggregate stats.
+        const statsEl = document.getElementById('stats');
+        statsEl.innerHTML = `
+          <div class="stat"><div class="stat-label">Repositories</div><div class="stat-value">${f.repos.length}</div></div>
+          <div class="stat"><div class="stat-label">Total nodes</div><div class="stat-value">${f.total_nodes.toLocaleString()}</div></div>
+          <div class="stat"><div class="stat-label">Total edges</div><div class="stat-value">${f.total_edges.toLocaleString()}</div></div>
+          <div class="stat"><div class="stat-label">Memory est.</div><div class="stat-value">${(f.memory_estimate_bytes / 1024 / 1024).toFixed(1)} MB</div></div>
+        `;
+
+        // Step 3: pull rich per-repo detail (path, last_refreshed, last_indexed,
+        // node_count, edge_count) via the federation `list_repos` tool.
+        const repos = await callTool('list_repos', {});
+
+        const tbody = document.querySelector('#repos tbody');
+        for (const r of repos) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td><code>${escapeHtml(r.id)}</code></td>
+            <td><code>${escapeHtml(r.path || '')}</code></td>
+            <td><span class="health ${(r.health || 'unavailable').toLowerCase()}">${escapeHtml(r.health || 'unknown')}</span></td>
+            <td>${fmtUnix(r.last_refreshed_unix)}</td>
+            <td>${fmtUnix(r.last_indexed_unix)}</td>
+            <td>${(r.node_count || 0).toLocaleString()}</td>
+            <td>${(r.edge_count || 0).toLocaleString()}</td>
+            <td class="row-actions">
+              <a href="/ui/blast-radius/?repo_id=${encodeURIComponent(r.id)}&symbol=">blast radius</a>
+              <a href="/ui/coupling/?repo_id=${encodeURIComponent(r.id)}&symbol=">coupling</a>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        }
+
+        // Step 4: pick the first ready repo (from the /health summary) to
+        // populate the placeholder URLs in the quick-links section.
+        const firstReady = (f.repos || []).find(function (r) { return r.health === 'ready'; });
+        if (firstReady) {
+          const defaultId = encodeURIComponent(firstReady.id);
+          document.querySelectorAll('.tool-links a').forEach(function (a) {
+            a.href = a.href.replace('__DEFAULT__', defaultId);
+          });
+        } else {
+          // No ready repo — leave the placeholders so the link is still
+          // visible (and obviously broken) rather than silently dropping it.
+          document.querySelectorAll('.tool-links a').forEach(function (a) {
+            if (a.href.indexOf('__DEFAULT__') !== -1) {
+              a.classList.add('muted');
+              a.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                alert('No ready repository available yet — wait for at least one repo to finish indexing.');
+              });
+            }
+          });
+        }
+      } catch (e) {
+        const el = document.getElementById('error');
+        el.textContent = 'Failed to load federation: ' + (e && e.message ? e.message : e);
+        el.style.display = 'block';
+      }
+    }
+
+    // Minimal HTML escape for values interpolated into innerHTML.
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+      });
+    }
+
+    load();
+  </script>
+</body>
+</html>
