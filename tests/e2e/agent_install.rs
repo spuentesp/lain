@@ -25,6 +25,20 @@ fn pick_port() -> u16 {
     p
 }
 
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 fn prepare_home(case: &AgentCase, home: &Path) {
     match case.id {
         "kimi" => {
@@ -39,6 +53,10 @@ type = "kimi"
 api_key = ""
 base_url = "https://api.kimi.com/coding/v1"
 
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
 [models."kimi-code/kimi-for-coding"]
 provider = "managed:kimi-code"
 model = "kimi-for-coding"
@@ -46,6 +64,22 @@ max_context_size = 262144
 "#,
             )
             .expect("kimi config");
+            // Kimi needs OAuth / device credentials to run headlessly.
+            // Copy them from the caller's real HOME into the temp HOME.
+            if let Ok(real_home) = std::env::var("HOME") {
+                let real = Path::new(&real_home).join(".kimi-code");
+                for sub in ["credentials", "oauth", "device_id"] {
+                    let src = real.join(sub);
+                    if src.exists() {
+                        let dst = dir.join(sub);
+                        if src.is_dir() {
+                            copy_dir_all(&src, &dst).expect("copy kimi {sub}");
+                        } else {
+                            std::fs::copy(&src, &dst).expect("copy kimi {sub}");
+                        }
+                    }
+                }
+            }
         }
         "omp" => {
             let dir = home.join(".config/omp");

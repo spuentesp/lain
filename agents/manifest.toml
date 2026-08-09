@@ -30,7 +30,7 @@ transport = "http"
 command = "/home/sebastian/.local/lain/lain"
 default_args = ["--workspace", "{{workspace}}", "--transport", "stdio", "--embedding-model", "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx"]
 headless_probe = ["kimi", "-p", "list your tools"]
-format = "http"
+format = "json"
 
 [[agent]]
 id = "cursor"

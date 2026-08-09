@@ -25,6 +25,8 @@ impl AgentAdapter for KimiAdapter {
         });
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
         std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+        // Kimi only loads plugins that are listed in installed.json.
+        register_kimi_plugin(&path)?;
         Ok(())
     }
 
@@ -40,4 +42,41 @@ impl AgentAdapter for KimiAdapter {
         let doc: Value = serde_json::from_str(&raw)?;
         Ok(doc.pointer("/mcpServers/lain").cloned().unwrap_or(Value::Null))
     }
+}
+
+fn register_kimi_plugin(plugin_path: &Path) -> Result<(), AdapterError> {
+    // plugin_path is ~/.kimi-code/plugins/managed/lain/kimi.plugin.json
+    // installed.json lives in ~/.kimi-code/plugins/installed.json
+    let plugin_root = plugin_path
+        .parent()
+        .ok_or_else(|| AdapterError::Shape("kimi plugin path has no parent".into()))?;
+    let plugins_dir = plugin_root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| AdapterError::Shape("kimi plugin path is too shallow".into()))?;
+    let installed_path = plugins_dir.join("installed.json");
+    let mut doc: Value = if installed_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&installed_path)?)?
+    } else {
+        json!({ "plugins": [], "version": 1 })
+    };
+    let plugins = doc
+        .get_mut("plugins")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| AdapterError::Shape("plugins not array".into()))?;
+    let root = plugin_root.to_string_lossy().to_string();
+    let existing = plugins.iter().position(|p| p.get("id").and_then(Value::as_str) == Some("lain"));
+    let entry = json!({
+        "id": "lain",
+        "enabled": true,
+        "source": "local-path",
+        "originalSource": root,
+        "root": root
+    });
+    match existing {
+        Some(idx) => plugins[idx] = entry,
+        None => plugins.push(entry),
+    }
+    std::fs::write(&installed_path, serde_json::to_string_pretty(&doc)?)?;
+    Ok(())
 }
