@@ -394,7 +394,7 @@ impl ToolExecutor {
         sections.push("- **get_repo_info**: get a single repo's details\n".to_string());
         sections.push("- **get_federation_health**: get federation-wide stats (repo counts, node/edge totals, memory estimate)\n".to_string());
         sections.push("- **search_org**: search symbols across all repos\n".to_string());
-        sections.push("- **get_cross_repo_blast_radius** (+ `_for_repo` variant): cross-repo symbol blast radius\n".to_string());
+        sections.push("- **get_cross_repo_blast_radius** / **get_cross_repo_blast_radius_for_repo**: cross-repo symbol blast radius\n".to_string());
 
         sections.push("\n### `repo_id` Resolution Rule\n".to_string());
         sections.push("1. If `repo_id` is explicit → use it.\n".to_string());
@@ -490,13 +490,15 @@ mod tests {
     #[test]
     fn get_agent_strategy_mentions_federation_tools() {
         let strategy = build_test_strategy();
-        // The strategy must mention each of the 5 federation tool names.
+        // The strategy must mention each federation tool name (including the
+        // `_for_repo` variant of `get_cross_repo_blast_radius`).
         for tool in [
             "list_repos",
             "get_repo_info",
             "get_federation_health",
             "search_org",
             "get_cross_repo_blast_radius",
+            "get_cross_repo_blast_radius_for_repo",
         ] {
             assert!(
                 strategy.contains(tool),

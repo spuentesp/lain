@@ -1245,7 +1245,7 @@ mod tests {
             .expect("repos must be a JSON array");
 
         // Exact repo roster: both registered repos are present with their
-        // ids and the default `Ready` health.
+        // ids and the default `Indexing` health.
         assert_eq!(
             repos.len(),
             2,
