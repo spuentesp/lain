@@ -91,7 +91,7 @@ a `workspace_dir` entry.
 
 | Field  | Type | Required | Notes |
 |--------|------|----------|-------|
-| `path` | path string | yes | Absolute or relative to the working directory when `lain server` was launched. Must already contain a `.git` directory (lain checks `is_git_repo()`). |
+| `path` | path string | yes | Absolute or relative to the working directory when `lain server` was launched. Must point at a non-empty directory. If the directory is not a git working tree, the repo will degrade to `Degraded` health during indexing rather than failing at startup. |
 
 **Use when:** the repo lives on the machine, you don't want lain to
 manage git state, or you want to test the indexing pipeline without
@@ -145,7 +145,7 @@ history is not possible because history is shallow.
 |-------------------------|--------|----------|---------|-------|
 | `url`                   | string | yes      | —       | Same rules as `local_clone`. |
 | `ref`                   | string | no       | `"main"` | Same rules as `local_clone`. |
-| `refresh_interval_secs` | u64    | no       | `300`   | Minimum seconds between refreshes. lain records `last_refreshed` and skips the next refresh if the age is below this threshold. |
+| `refresh_interval_secs` | u64    | no       | `300`   | Captured and exposed via `source.refresh_interval()`; the loader does not currently throttle fetches based on this value. (Future enhancement.) |
 
 **Use when:** the repo is large, you only need the latest commit's
 nodes/edges, and disk matters. The default 5-minute refresh interval
@@ -269,8 +269,10 @@ repos:
   `workspace_dir`. Anything else is a config error and `lain server`
   refuses to start.
 - `url`: required for `local_clone` / `shallow_clone`, must be non-empty.
-- `path`: required for `workspace_dir`, must point at an existing git
-  working tree at the moment `lain server` starts.
+- `path`: required for `workspace_dir`, must point at a non-empty
+  directory. The federation loader does not verify the directory is a git
+  working tree; if it isn't, the repo will degrade to `Degraded` health
+  during indexing rather than failing at startup.
 - All other fields are optional and fall back to the defaults in the
   table above.
 
