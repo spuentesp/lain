@@ -188,6 +188,11 @@
 </head>
 <body>
 
+<div id="federation-banner" style="display: none; background: #e7f3ff; border: 1px solid #b6daff; padding: 1rem; margin-bottom: 1rem; border-radius: 4px;">
+  <strong>Federation mode</strong> — <span id="fed-summary"></span>
+  — <a href="/federation-dashboard.html">open dashboard</a>
+</div>
+
 <div class="lain">
 
   <!-- STATUS BAR -->
@@ -547,6 +552,20 @@ async function init() {
   await checkMcp();
 }
 init();
+</script>
+
+<script>
+(async function() {
+  try {
+    const h = await fetch('/health').then(r => r.json());
+    if (h.federation) {
+      const f = h.federation;
+      const summary = `${f.repos.length} repos · ${f.total_nodes.toLocaleString()} nodes · ${f.total_edges.toLocaleString()} edges`;
+      document.getElementById('fed-summary').textContent = summary;
+      document.getElementById('federation-banner').style.display = 'block';
+    }
+  } catch (e) { /* silent: single-workspace mode may not have /health */ }
+})();
 </script>
 
 </body>
