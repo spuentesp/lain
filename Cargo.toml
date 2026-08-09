@@ -128,6 +128,10 @@ path = "src/lib.rs"
 # helpers are compiled out unless `--features test-utils` is passed.
 test-utils = []
 
+[[test]]
+name = "agent_install"
+path = "tests/e2e/agent_install.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
