@@ -25,6 +25,41 @@ fn pick_port() -> u16 {
     p
 }
 
+fn prepare_home(case: &AgentCase, home: &Path) {
+    match case.id {
+        "kimi" => {
+            let dir = home.join(".kimi-code");
+            std::fs::create_dir_all(&dir).expect("kimi config dir");
+            std::fs::write(
+                dir.join("config.toml"),
+                r#"default_model = "kimi-code/kimi-for-coding"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+api_key = ""
+base_url = "https://api.kimi.com/coding/v1"
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+"#,
+            )
+            .expect("kimi config");
+        }
+        "omp" => {
+            let dir = home.join(".config/omp");
+            std::fs::create_dir_all(&dir).expect("omp config dir");
+            std::fs::write(
+                dir.join("config.json"),
+                r#"{"providers":{"ollama":{"base_url":"http://localhost:11434"}}}"#,
+            )
+            .expect("omp config");
+        }
+        _ => {}
+    }
+}
+
 fn install_into(case: &AgentCase, home: &Path, port: u16) -> Command {
     let xdg = home.join(".config");
     let mut c = Command::new(lain_bin());
@@ -174,6 +209,7 @@ fn assert_watcher_round_trip(
 /// leading `~/` against the temp HOME we just set.
 fn assert_adapter_round_trip(case: &AgentCase) -> Result<(), String> {
     let home = tempfile::tempdir().expect("tempdir");
+    prepare_home(case, home.path());
     // Same port resolution as the live install path so the URL written to
     // the agent config matches what the singleton would actually answer.
     let port: u16 = std::env::var("LAIN_PORT")
@@ -233,6 +269,7 @@ fn assert_adapter_round_trip(case: &AgentCase) -> Result<(), String> {
 fn run_case(case: &AgentCase) -> Result<(), String> {
     use std::io::Read;
     let tmp = tempfile::tempdir().expect("tempdir");
+    prepare_home(case, tmp.path());
     // The brief calls `pick_port()`, but the live HTTP singleton listens on
     // a fixed port (default 9999). `LAIN_PORT` overrides the install-time
     // URL the agent will call; the spec says default 9999 and the harness

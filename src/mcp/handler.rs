@@ -43,6 +43,7 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
 }
 
 const FRONT_END_HTML: &str = include_str!("front_end_monitor.html");
+const FEDERATION_DASHBOARD_HTML: &str = include_str!("federation_dashboard.html");
 
 /// Wrap a string payload in a `CallToolResult` with a single text block.
 fn tool_text_result(text: String, is_error: bool) -> CallToolResult {
@@ -633,6 +634,54 @@ impl LainMcpServer {
     }
 }
 
+/// Build the JSON body returned by `GET /health`. Extracted so the
+/// federation-aware shape can be unit-tested without spinning up an
+/// HTTP harness. When `federation` is `None` (single-workspace mode)
+/// the `federation` field serializes as JSON `null`; when `Some` it
+/// carries the repo roster and aggregate stats so the UI can detect
+/// federation mode without a separate `tools/call` round-trip.
+fn build_health_body(
+    nodes: usize,
+    edges: usize,
+    federation: Option<&FederatedIndex>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "server": "lain",
+        "version": env!("CARGO_PKG_VERSION"),
+        "graph_nodes": nodes,
+        "graph_edges": edges,
+        "tools_count": crate::tools::registry::ToolRegistry::definitions().len(),
+        "federation": federation.map(federation_blob),
+    })
+}
+
+/// Render the federation summary embedded in `/health`. The
+/// `memory_estimate_bytes` figure is a rough heuristic
+/// (200 bytes/node + 100 bytes/edge) — sufficient for the dashboard's
+/// capacity bar; not a precise accounting.
+fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
+    let repos: Vec<serde_json::Value> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, health)| {
+            serde_json::json!({
+                "id": id.to_string(),
+                "health": health.to_string(),
+            })
+        })
+        .collect();
+    let backend = fed.backend();
+    let node_count = backend.node_count();
+    let edge_count = backend.edge_count();
+    serde_json::json!({
+        "repos": repos,
+        "total_nodes": node_count,
+        "total_edges": edge_count,
+        "memory_estimate_bytes": node_count as u64 * 200 + edge_count as u64 * 100,
+    })
+}
+
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
@@ -676,17 +725,21 @@ async fn handle_request(
             .unwrap());
     }
 
+    // GET /federation-dashboard.html -> federation landing page (used by
+    // the federation-aware UI; itself a static asset that fetches
+    // /health + /mcp at runtime).
+    if method == Method::GET && path == "/federation-dashboard.html" {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/html")
+            .body(full_body(Bytes::from(FEDERATION_DASHBOARD_HTML)))
+            .unwrap());
+    }
+
     // GET /health -> health check with graph stats
     if method == Method::GET && path == "/health" {
         let (nodes, edges) = executor.graph().get_stats();
-        let health = serde_json::json!({
-            "status": "ok",
-            "server": "lain",
-            "version": env!("CARGO_PKG_VERSION"),
-            "graph_nodes": nodes,
-            "graph_edges": edges,
-            "tools_count": crate::tools::registry::ToolRegistry::definitions().len()
-        });
+        let health = build_health_body(nodes, edges, federation.as_deref());
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -1337,5 +1390,165 @@ mod tests {
         let rid = resolve_repo_or_error(&fed, &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    /// `GET /health` must serialize the federation summary so the UI
+    /// can detect federation mode without a separate `tools/call`
+    /// round-trip. When `FederatedIndex` is None (single-workspace
+    /// mode) the field is `null`; when set it carries the repo
+    /// roster and aggregate stats.
+    ///
+    /// The test pins down EXACT values, not just the JSON shape: it
+    /// registers two repos via `add_repo`, upserts a known number of
+    /// nodes and edges into the backend, then asserts that
+    /// `total_nodes`, `total_edges`, and the 200-byte-per-node +
+    /// 100-byte-per-edge `memory_estimate_bytes` formula all match
+    /// the seeded counts. This catches a producer that silently drops
+    /// data, conflates counts, or breaks the memory formula.
+    #[tokio::test]
+    async fn health_response_includes_federation_blob_when_set() {
+        use crate::federation::repo_source::WorkspaceDirSource;
+        use crate::schema::{EdgeType, GraphEdge, NodeType};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+
+        // Register two repos. `WorkspaceDirSource` requires a path that
+        // exists, so init a throwaway git repo for each source (same
+        // pattern as `federated_index_tests::add_repo_registers_and_lists_it`).
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        // Populate the backend with a known number of nodes and edges
+        // so `node_count()` / `edge_count()` return deterministic values
+        // the assertions can check against.
+        let backend = fed.backend();
+        backend
+            .upsert_node_global(
+                "repo-a:Function:src/x.rs:shared",
+                NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/x.rs:shared",
+                NodeType::Function,
+                "src/x.rs",
+                "shared",
+            )
+            .unwrap();
+        backend
+            .upsert_node_global(
+                "repo-b:Function:src/y.rs:caller",
+                NodeType::Function,
+                "src/y.rs",
+                "caller",
+            )
+            .unwrap();
+        backend
+            .upsert_edge(GraphEdge::new(
+                EdgeType::Calls,
+                "repo-b:Function:src/y.rs:caller".into(),
+                "repo-a:Function:src/x.rs:shared".into(),
+            ))
+            .unwrap();
+        backend
+            .upsert_edge(GraphEdge::new(
+                EdgeType::Calls,
+                "repo-b:Function:src/y.rs:caller".into(),
+                "repo-b:Function:src/x.rs:shared".into(),
+            ))
+            .unwrap();
+
+        let body = build_health_body(0, 0, Some(&fed));
+
+        // Top-level keys are preserved.
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["server"], "lain");
+        assert!(body["graph_nodes"].is_number());
+        assert!(body["graph_edges"].is_number());
+        assert!(body["tools_count"].is_number());
+
+        // Federation blob shape and contents.
+        let fed_blob = body
+            .get("federation")
+            .expect("federation key must be present in /health response");
+        assert!(
+            fed_blob.is_object(),
+            "federation must be an object when federation is set, got {fed_blob}",
+        );
+        assert!(fed_blob["repos"].is_array(), "repos must be a JSON array");
+        let repos = fed_blob["repos"]
+            .as_array()
+            .expect("repos must be a JSON array");
+
+        // Exact repo roster: both registered repos are present with their
+        // ids and the default `Indexing` health.
+        assert_eq!(
+            repos.len(),
+            2,
+            "expected both registered repos in the federation blob, got {repos:?}",
+        );
+        let ids: Vec<&str> = repos
+            .iter()
+            .map(|r| {
+                r.get("id")
+                    .and_then(|v| v.as_str())
+                    .expect("each repo entry has an id string")
+            })
+            .collect();
+        assert!(ids.contains(&"repo-a"), "repo-a missing from federation blob: {ids:?}");
+        assert!(ids.contains(&"repo-b"), "repo-b missing from federation blob: {ids:?}");
+        for r in repos {
+            assert_eq!(
+                r.get("health").and_then(|v| v.as_str()),
+                Some("indexing"),
+                "every repo entry must carry the default Indexing health until projection, got {r:?}",
+            );
+        }
+
+        // Exact aggregate counts: 3 nodes upserted above, 2 edges.
+        assert_eq!(
+            fed_blob["total_nodes"].as_u64(),
+            Some(3),
+            "total_nodes must equal the number of nodes upserted into the backend",
+        );
+        assert_eq!(
+            fed_blob["total_edges"].as_u64(),
+            Some(2),
+            "total_edges must equal the number of edges upserted into the backend",
+        );
+
+        // Exact memory formula: 200 bytes/node + 100 bytes/edge.
+        let expected_mem: u64 = 3 * 200 + 2 * 100;
+        assert_eq!(
+            fed_blob["memory_estimate_bytes"].as_u64(),
+            Some(expected_mem),
+            "memory_estimate_bytes must be total_nodes*200 + total_edges*100 ({expected_mem})",
+        );
+    }
+
+    /// Single-workspace mode (the default `lain --workspace ./myrepo`
+    /// path) must continue to work — `federation` serializes as JSON
+    /// `null` so the UI knows to render single-repo chrome.
+    #[test]
+    fn health_response_has_null_federation_when_unset() {
+        let body = build_health_body(0, 0, None);
+        assert!(
+            body.get("federation")
+                .map(|v| v.is_null())
+                .unwrap_or(false),
+            "federation field must serialize as null when no federation is set, got {:?}",
+            body.get("federation"),
+        );
     }
 }

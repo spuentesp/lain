@@ -2,6 +2,8 @@
 
 Query the LAIN knowledge graph via `query_graph` MCP tool.
 
+> **Federation note:** cross-repo queries (`get_cross_repo_blast_radius`, `search_org`) require federation mode (`lain server --config repos.yaml`). See [`docs/FEDERATION.md`](./FEDERATION.md) for the full guide.
+
 ---
 
 ## Tool Call
