@@ -549,6 +549,54 @@ impl LainMcpServer {
     }
 }
 
+/// Build the JSON body returned by `GET /health`. Extracted so the
+/// federation-aware shape can be unit-tested without spinning up an
+/// HTTP harness. When `federation` is `None` (single-workspace mode)
+/// the `federation` field serializes as JSON `null`; when `Some` it
+/// carries the repo roster and aggregate stats so the UI can detect
+/// federation mode without a separate `tools/call` round-trip.
+fn build_health_body(
+    nodes: usize,
+    edges: usize,
+    federation: Option<&FederatedIndex>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "server": "lain",
+        "version": env!("CARGO_PKG_VERSION"),
+        "graph_nodes": nodes,
+        "graph_edges": edges,
+        "tools_count": crate::tools::registry::ToolRegistry::definitions().len(),
+        "federation": federation.map(federation_blob),
+    })
+}
+
+/// Render the federation summary embedded in `/health`. The
+/// `memory_estimate_bytes` figure is a rough heuristic
+/// (200 bytes/node + 100 bytes/edge) — sufficient for the dashboard's
+/// capacity bar; not a precise accounting.
+fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
+    let repos: Vec<serde_json::Value> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, health)| {
+            serde_json::json!({
+                "id": id.to_string(),
+                "health": health.to_string(),
+            })
+        })
+        .collect();
+    let backend = fed.backend();
+    let node_count = backend.node_count();
+    let edge_count = backend.edge_count();
+    serde_json::json!({
+        "repos": repos,
+        "total_nodes": node_count,
+        "total_edges": edge_count,
+        "memory_estimate_bytes": node_count as u64 * 200 + edge_count as u64 * 100,
+    })
+}
+
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
@@ -594,14 +642,7 @@ async fn handle_request(
     // GET /health -> health check with graph stats
     if method == Method::GET && path == "/health" {
         let (nodes, edges) = executor.graph().get_stats();
-        let health = serde_json::json!({
-            "status": "ok",
-            "server": "lain",
-            "version": env!("CARGO_PKG_VERSION"),
-            "graph_nodes": nodes,
-            "graph_edges": edges,
-            "tools_count": crate::tools::registry::ToolRegistry::definitions().len()
-        });
+        let health = build_health_body(nodes, edges, federation.as_deref());
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -1090,5 +1131,56 @@ mod tests {
         let rid = resolve_repo_or_error(&fed, &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    /// `GET /health` must serialize the federation summary so the UI
+    /// can detect federation mode without a separate `tools/call`
+    /// round-trip. When `FederatedIndex` is None (single-workspace
+    /// mode) the field is `null`; when set it carries the repo
+    /// roster and aggregate stats.
+    #[test]
+    fn health_response_includes_federation_blob_when_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+
+        let body = build_health_body(0, 0, Some(&fed));
+
+        // Top-level keys are preserved.
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["server"], "lain");
+        assert!(body["graph_nodes"].is_number());
+        assert!(body["graph_edges"].is_number());
+        assert!(body["tools_count"].is_number());
+
+        // Federation blob shape.
+        let fed_blob = body
+            .get("federation")
+            .expect("federation key must be present in /health response");
+        assert!(
+            fed_blob.is_object(),
+            "federation must be an object when federation is set, got {fed_blob}",
+        );
+        assert!(fed_blob.get("repos").is_some(), "repos array must be present");
+        assert!(fed_blob["repos"].is_array(), "repos must be a JSON array");
+        assert!(fed_blob.get("total_nodes").is_some());
+        assert!(fed_blob.get("total_edges").is_some());
+        assert!(fed_blob.get("memory_estimate_bytes").is_some());
+        // memory_estimate_bytes is u64 — must serialize as a non-negative integer.
+        assert!(fed_blob["memory_estimate_bytes"].is_u64());
+    }
+
+    /// Single-workspace mode (the default `lain --workspace ./myrepo`
+    /// path) must continue to work — `federation` serializes as JSON
+    /// `null` so the UI knows to render single-repo chrome.
+    #[test]
+    fn health_response_has_null_federation_when_unset() {
+        let body = build_health_body(0, 0, None);
+        assert!(
+            body.get("federation")
+                .map(|v| v.is_null())
+                .unwrap_or(false),
+            "federation field must serialize as null when no federation is set, got {:?}",
+            body.get("federation"),
+        );
     }
 }
