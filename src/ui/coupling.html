@@ -14,9 +14,23 @@
         .cell:hover { outline: 2px solid #00e5cc; }
         .header { color: #666; font-size: 11px; text-align: center; padding: 4px; }
         .instructions { margin-top: 15px; color: #666; font-size: 0.9rem; }
+        /* Federation selector + form — matches the page's dark theme. */
+        #repo-selector label, #query-form label { margin-right: 0.5rem; color: #e0e0e0; }
+        #repo-selector select, #query-form input { background: #14141f; color: #e0e0e0; border: 1px solid #2a2a3a; padding: 4px 8px; border-radius: 4px; font-family: inherit; }
+        #query-form button { background: #00e5cc; color: #0a0a0f; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; margin-left: 0.5rem; font-family: inherit; }
     </style>
 </head>
 <body>
+    <div id="repo-selector" style="display: none; margin-bottom: 1rem;">
+      <label>Repo:
+        <select id="repo-select"></select>
+      </label>
+    </div>
+    <form id="query-form">
+      <label>Symbol: <input name="symbol" /></label>
+      <input type="hidden" name="repo_id" id="repo-id-input" />
+      <button type="submit">Compute coupling heatmap</button>
+    </form>
     <h1>Coupling Heatmap: SYMBOL_PLACEHOLDER</h1>
     <div class="info">Click cells to see co-change details. Describe your selection to the agent.</div>
     <div id="matrix"></div>
@@ -51,6 +65,33 @@
             }
             console.log("Selected:", Array.from(selected));
         }
+    </script>
+    <script>
+        // Federation repo selector. Hidden in single-workspace mode (when
+        // /health does not return a federation blob); visible and populated
+        // in federation mode. The form's hidden repo_id mirrors the selected
+        // repo so submitting the form reloads the page at
+        // /ui/coupling/?repo_id=...&symbol=... (routing this query-driven
+        // URL is the responsibility of the server, not this page).
+        (async function() {
+            const h = await fetch('/health').then(r => r.json());
+            if (!h.federation) return;  // single-workspace: hide selector
+            const sel = document.getElementById('repo-select');
+            for (const r of h.federation.repos) {
+                const opt = document.createElement('option');
+                opt.value = r.id;
+                opt.textContent = `${r.id} (${r.health})`;
+                sel.appendChild(opt);
+            }
+            // Honour the URL params if the user linked in directly.
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('repo_id')) sel.value = params.get('repo_id');
+            document.getElementById('repo-selector').style.display = 'block';
+            document.getElementById('repo-id-input').value = sel.value;
+            sel.addEventListener('change', () => {
+                document.getElementById('repo-id-input').value = sel.value;
+            });
+        })();
     </script>
 </body>
 </html>
