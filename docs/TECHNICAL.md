@@ -154,9 +154,12 @@ fallback used by `search_org` and the cross-repo blast-radius lookup.
 Single-workspace mode (the `--workspace` flag, see `src/main.rs`) still goes
 through the pre-federation `LainServer::new` path and does not construct a
 `FederatedIndex` — it shares the lower layers (`GraphDatabase`, file watcher,
-LSP pool) but not the federation orchestrator. `WorkspaceDirSource` exists
-as the documented back-compat shim for migrating that path onto the
-federation layer later; today it is exercised only by federation tests.
+LSP pool) but not the federation orchestrator. It is paralleled — not yet
+unified — by the federation code path: `WorkspaceDirSource` is a fully
+supported source type for `repos.yaml` configs
+(`src/federation/config.rs:55`), and an operator can already declare
+`type: workspace_dir` to run an existing checkout through `FederatedIndex`.
+The unification of `--workspace` and federation is left for a later change.
 
 Two traits carry the load. **`RepoSource`** (`src/federation/repo_source.rs`)
 defines how the server obtains code: `id`, `local_path`, `kind` (a stable
@@ -175,8 +178,9 @@ projected graph is stored: `upsert_node` / `upsert_node_global` / `upsert_edge`
 writes, plus `get_node` / `find_nodes_by_name` / `list_nodes` / `traverse` /
 `find_path` / `subgraph_around` reads. Only `PetgraphBackend` is implemented
 today; it persists to `federated_graph.bin` via the existing `GraphDatabase`
-and keeps a `DashMap<String, GlobalId>` parse-index so traversal lookups do
-not reparse the whole graph on every call. Every write goes through
+and keeps a `DashMap<String, GlobalId>` parse-index populated at load time
+(currently read-only — the read paths still go through `GraphDatabase`
+directly). Every write goes through
 `save_to_disk_sync`, so a federation crash mid-write loses at most the
 in-flight batch. The documented escape hatch for an external store is
 `MemgraphBackend` (deferred — not implemented in this codebase). The trait
