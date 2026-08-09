@@ -167,7 +167,15 @@ lain query "find Function | limit 5"
 
 ---
 
+## Federation mode
+
+For org-wide structural questions — "who else uses this function?", "what depends on this service?" — run `lain server --config repos.yaml` to index N repos and answer cross-repo queries. Federation mode exposes six MCP tools (`list_repos`, `get_repo_info`, `get_federation_health`, `search_org`, `get_cross_repo_blast_radius`, and `get_cross_repo_blast_radius_for_repo`) that answer questions spanning repos. See [`docs/FEDERATION.md`](docs/FEDERATION.md) for the full guide and [`docs/REPOS_YAML.md`](docs/REPOS_YAML.md) for the config schema.
+
+---
+
 ## Key Features
+
+- **Federation mode** — index N repos and answer org-wide structural questions across them
 
 ### Query Language (`query_graph`)
 JSON-based ops array for flexible graph traversals:
