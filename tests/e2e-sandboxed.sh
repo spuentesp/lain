@@ -112,7 +112,7 @@ assert 'lain' in d['mcpServers'], 'lain entry missing'
 cmd = d['mcpServers']['lain']['command']
 assert cmd == 'lain' or cmd.endswith('/lain'), f'unexpected command: {cmd!r}'
 args = d['mcpServers']['lain'].get('args', [])
-assert '--workspace' in args and '$FAKE_WORKSPACE' in args, f'unexpected args: {args!r}'
+assert '--workspace' in args and 'auto' in args, f'unexpected args: {args!r}'
 print('OK')
 " 2>/dev/null && pass "settings.json has correct lain MCP entry" || fail "settings.json MCP entry wrong"
 
