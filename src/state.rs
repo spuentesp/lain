@@ -283,7 +283,7 @@ impl Projects {
                 return Ok(repo_root.to_path_buf());
             }
         }
-        Err("no active project; run `lain projects add <name> <path>` then `lain use <name>`, or pass --workspace".to_string())
+        Err("no active project; run `lain projects add <name> <path>` then `lain use <name>`, pass --workspace, or run inside a git repo to auto-discover it".to_string())
     }
 
     /// Resolve the workspace when the user passed `--workspace auto`.
