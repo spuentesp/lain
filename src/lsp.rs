@@ -9,6 +9,7 @@ use lsp_types::{DocumentSymbol, SymbolKind, SymbolTag, Position};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 
 /// Configuration for a specific language server
@@ -16,6 +17,13 @@ struct LspConfig {
     binary: &'static str,
     install_cmd: Option<&'static str>,
 }
+
+/// Maximum time to wait for an LSP server to register and initialize.
+/// rust-analyzer can be slow on first startup, but a crashed or defunct
+/// process must not hang the caller forever.
+const LSP_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time for a single LSP request (references, document symbols).
+const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 const LANGUAGE_MAP: &[(&str, LspConfig)] = &[
     ("rs", LspConfig { binary: "rust-analyzer", install_cmd: Some("rustup component add rust-analyzer") }),
@@ -98,10 +106,29 @@ impl LspMultiplexer {
                 .command(&binary)
                 .root_path(self.workspace.clone());
 
-            self.bridge.register_server(&binary, lsp_config).await.map_err(|e| LainError::Lsp(e.to_string()))?;
-            self.bridge.start_server(&binary).await.map_err(|e| LainError::Lsp(e.to_string()))?;
-            self.started.insert(binary.clone());
-            info!("Started LSP server: {}", binary);
+            let startup = async {
+                self.bridge.register_server(&binary, lsp_config).await?;
+                self.bridge.start_server(&binary).await?;
+                Ok::<(), lsp_bridge::LspBridgeError>(())
+            };
+            match tokio::time::timeout(LSP_STARTUP_TIMEOUT, startup).await {
+                Ok(Ok(())) => {
+                    self.started.insert(binary.clone());
+                    info!("Started LSP server: {}", binary);
+                }
+                Ok(Err(e)) => {
+                    warn!("LSP server '{}' failed to start: {}; marking unavailable", binary, e);
+                    // Do not call stop_server here: if the process is already
+                    // defunct or unresponsive, stop_server can itself hang.
+                    self.unavailable.insert(binary.clone());
+                    return Err(LainError::Lsp(format!("LSP server '{}' failed to start: {}", binary, e)));
+                }
+                Err(_) => {
+                    warn!("LSP server '{}' startup timed out after {:?}; marking unavailable", binary, LSP_STARTUP_TIMEOUT);
+                    self.unavailable.insert(binary.clone());
+                    return Err(LainError::Lsp(format!("LSP server '{}' startup timed out", binary)));
+                }
+            }
         }
 
         Ok(binary)
@@ -118,12 +145,15 @@ impl LspMultiplexer {
         // Wait for LSP to analyze (intelligent polling)
         let mut symbols = Vec::new();
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(2);
+        let poll_timeout = std::time::Duration::from_secs(2);
         let tick = std::time::Duration::from_millis(50);
 
-        while start.elapsed() < timeout {
-            symbols = self.bridge.get_document_symbols(&server_id, &uri).await
-                .map_err(|e| LainError::Lsp(e.to_string()))?;
+        while start.elapsed() < poll_timeout {
+            symbols = match tokio::time::timeout(LSP_REQUEST_TIMEOUT, self.bridge.get_document_symbols(&server_id, &uri)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return Err(LainError::Lsp(e.to_string())),
+                Err(_) => return Err(LainError::Lsp(format!("document symbols request timed out for {}", server_id))),
+            };
 
             if !symbols.is_empty() {
                 break;
@@ -190,8 +220,11 @@ impl LspMultiplexer {
         let uri = format!("file://{}", path.display());
         let position = Position::new(line, col);
 
-        let locations = self.bridge.find_references(&server_id, &uri, position).await
-            .map_err(|e| LainError::Lsp(e.to_string()))?;
+        let locations = match tokio::time::timeout(LSP_REQUEST_TIMEOUT, self.bridge.find_references(&server_id, &uri, position)).await {
+            Ok(Ok(l)) => l,
+            Ok(Err(e)) => return Err(LainError::Lsp(e.to_string())),
+            Err(_) => return Err(LainError::Lsp(format!("find references request timed out for {}", server_id))),
+        };
 
         let mut results = Vec::new();
         for loc in locations {
@@ -252,6 +285,14 @@ impl LspMultiplexer {
         }
         langs.sort_by(|a, b| a.0.cmp(&b.0));
         langs
+    }
+
+    /// Mark a language server binary as unavailable. Used by tests that want
+    /// to exercise the tree-sitter fallback path without spawning real LSP
+    /// processes that may hang during cleanup.
+    #[cfg(test)]
+    pub fn mark_unavailable(&mut self, binary: &str) {
+        self.unavailable.insert(binary.to_string());
     }
 
     pub async fn shutdown(&mut self) {

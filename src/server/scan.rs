@@ -32,7 +32,7 @@ pub struct FileScanResult {
 
 /// Pure structural scan without side effects (Map)
 pub async fn scan_file_structure(
-    path: PathBuf, 
+    path: PathBuf,
     workspace: PathBuf,
     lsp_mux: Arc<AsyncMutex<LspMultiplexer>>,
     lsp_sync: i64,
@@ -302,6 +302,11 @@ mod tests {
         let lsp = Arc::new(AsyncMutex::new(
             LspMultiplexer::new(tmp.path()).expect("lsp mux"),
         ));
+        // These tests verify the tree-sitter fallback, not a real LSP server.
+        // Mark rust-analyzer unavailable so no child process is spawned; the
+        // lsp-bridge crate's LspProcess::Drop can hang when cleaning up a
+        // defunct or unresponsive LSP process.
+        lsp.lock().await.mark_unavailable("rust-analyzer");
 
         let result = scan_file_structure(
             file,
@@ -359,6 +364,11 @@ mod tests {
         let lsp = Arc::new(AsyncMutex::new(
             LspMultiplexer::new(tmp.path()).expect("lsp mux"),
         ));
+        // These tests verify the tree-sitter fallback, not a real LSP server.
+        // Mark rust-analyzer unavailable so no child process is spawned; the
+        // lsp-bridge crate's LspProcess::Drop can hang when cleaning up a
+        // defunct or unresponsive LSP process.
+        lsp.lock().await.mark_unavailable("rust-analyzer");
 
         let result = scan_file_structure(
             file,
