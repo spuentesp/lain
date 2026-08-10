@@ -129,7 +129,19 @@ enum AgentsAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    let log_level = if args.verbose { "debug" } else { &args.log_level };
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log_level.into()))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+
+    if args.workspace.as_os_str() == "auto" {
+        args.workspace = lain::state::Projects::resolve_auto_workspace()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    tracing::info!(workspace = %args.workspace.display(), "Serving repo");
     if let Some(cmd) = args.command {
         match cmd {
             Commands::Init { agent, workspace, embedding_model, transport, port, yes } => {
@@ -197,10 +209,11 @@ async fn main() -> Result<()> {
     }
 
     let log_level = if args.verbose { "debug" } else { &args.log_level };
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| log_level.into()))
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
+    // Subscriber was initialized at the top of main() so that the
+    // "Serving repo" event above is captured. Keep the local for parity
+    // with prior behavior (it is currently unused here, but documents
+    // the resolved verbosity level for this code path).
+    let _ = log_level;
 
     tracing::info!("Initializing Lain");
     if !args.workspace.exists() { anyhow::bail!("Workspace does not exist: {:?}", args.workspace); }
