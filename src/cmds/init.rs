@@ -743,6 +743,63 @@ mod tests {
         );
     }
 
+    /// Regression pin for the Claude awareness doc. The agent only reaches
+    /// for the right tool if the doc actually contains the trigger phrases
+    /// and tool table. Asserts the structural shape so a future edit can't
+    /// silently strip the guidance without a test failure.
+    #[test]
+    fn claude_awareness_doc_contains_key_guidance() {
+        let doc = CLAUDE_AWARENESS_MD;
+
+        // Trigger / when-to-use section.
+        assert!(
+            doc.contains("When to use lain"),
+            "Claude awareness doc must have a 'When to use lain' section"
+        );
+
+        // Full tool table — every tool an agent should know about must be
+        // named explicitly. Adding a tool means adding a row here.
+        let required_tools = [
+            "get_health",
+            "find_anchors",
+            "get_blast_radius",
+            "trace_dependency",
+            "semantic_search",
+            "explain_symbol",
+            "get_code_snippet",
+            "find_dead_code",
+            "get_coupling_radar",
+        ];
+        let missing: Vec<&str> = required_tools
+            .iter()
+            .filter(|name| !doc.contains(*name))
+            .copied()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "Claude awareness doc is missing tools: {missing:?}"
+        );
+
+        // Canonical workflows.
+        assert!(doc.contains("Workflows"), "missing 'Workflows' section");
+        assert!(doc.contains("I'm new here"), "missing 'new here' workflow");
+        assert!(
+            doc.contains("refactor"),
+            "missing refactor / blast-radius workflow"
+        );
+
+        // Caveats must warn about cold-call latency and workspace scope.
+        assert!(doc.contains("Caveats"), "missing 'Caveats' section");
+        assert!(doc.contains("latency"), "missing cold-call latency note");
+        assert!(doc.contains("workspace"), "missing workspace scope note");
+
+        // No hardcoded /home/.../langostino path — workspace is auto-resolved.
+        assert!(
+            !doc.contains("/home/sebastian/orca/workspaces/lain/langostino"),
+            "awareness doc must not hardcode the absolute workspace path"
+        );
+    }
+
     #[test]
     fn init_kimi_writes_workspace_auto() {
         let tmp = tempfile::tempdir().unwrap();
