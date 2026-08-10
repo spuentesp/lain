@@ -1,6 +1,6 @@
 //! Smoke test that the `lain agents ...` CLI subcommands dispatch correctly.
-//! Runs in-process by invoking the agents subsystem functions directly
-//! (no shell-out) to avoid the cost of a full cargo build.
+//! Runs each subcommand against the compiled `lain` binary (via `CARGO_BIN_EXE_lain`)
+//! using a throwaway `HOME` so it doesn't clobber the developer's real config.
 
 use std::process::Command;
 
