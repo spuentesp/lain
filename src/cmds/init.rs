@@ -730,4 +730,31 @@ mod tests {
             "expected --workspace auto in args, got: {slice:?}"
         );
     }
+
+    #[test]
+    fn init_kimi_writes_workspace_auto() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        // git repo not strictly required by init_kimi, but matches the
+        // pattern used by the claude test and reflects how a real user
+        // would invoke `lain init kimi` (init pre-flight elsewhere
+        // requires a git repo).
+        Command::new("git").args(["init", "--quiet"]).current_dir(&workspace).status().unwrap();
+
+        let kimi_root = home.join(".kimi-code");
+        init_kimi(&workspace, None, "stdio", 0, true, &kimi_root).unwrap();
+
+        let plugin_path = kimi_root.join("plugins/managed/lain/kimi.plugin.json");
+        let body = std::fs::read_to_string(&plugin_path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let args = json.pointer("/mcpServers/lain/args").unwrap().as_array().unwrap();
+        let slice: Vec<String> = args.iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(
+            slice.windows(2).any(|w| w == ["--workspace", "auto"]),
+            "expected --workspace auto in args, got: {slice:?}"
+        );
+    }
 }
