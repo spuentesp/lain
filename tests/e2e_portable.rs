@@ -69,6 +69,13 @@ fn lain_init_in_repo_a_then_run_from_repo_b_serves_repo_b() {
     let repo_a_str = repo_a.to_string_lossy().to_string();
 
     // ── Step 1: `lain init --agent claude --yes` from repo A. ────────
+    // The init now registers the MCP server via `claude mcp add
+    // --scope user`, which writes to the real `~/.claude.json`. The
+    // call is idempotent (re-registering the same server), so it is
+    // safe to run as part of this e2e. The exact `claude mcp add`
+    // arguments are pinned by the
+    // `register_claude_mcp_invokes_claude_with_workspace_auto_and_bare_lain`
+    // unit test, so this e2e only verifies the cross-repo outcome.
     let init_status = Command::new(lain_bin())
         .args(["init", "--agent", "claude", "--yes"])
         .args(["--workspace", &repo_a_str])
@@ -83,29 +90,14 @@ fn lain_init_in_repo_a_then_run_from_repo_b_serves_repo_b() {
         "lain init failed with {init_status:?}"
     );
 
-    // ── Step 2: read ~/.claude/settings.json and verify auto. ────────
-    let settings_path = home.path().join(".claude/settings.json");
-    let body = std::fs::read_to_string(&settings_path)
-        .expect("read ~/.claude/settings.json");
-    let json: serde_json::Value =
-        serde_json::from_str(&body).expect("parse settings.json");
-    let args = json
-        .pointer("/mcpServers/lain/args")
-        .expect("mcpServers.lain.args present")
-        .as_array()
-        .expect("args is an array");
-    let slice: Vec<String> = args
-        .iter()
-        .map(|v| v.as_str().expect("arg is a string").to_string())
-        .collect();
-    assert!(
-        slice.windows(2).any(|w| w == ["--workspace", "auto"]),
-        "expected --workspace auto in installed args, got: {slice:?}"
-    );
-    assert!(
-        !slice.iter().any(|a| a == &repo_a_str),
-        "args must not contain repo A's path; got: {slice:?}"
-    );
+    // The MCP config no longer lives in `~/.claude/settings.json` —
+    // Claude Code 2.1+ reads it from `~/.claude.json`, written by
+    // `claude mcp add`. We do not assert on that file here because
+    // `claude mcp add --scope user` ignores the test's temp HOME and
+    // touches the real `~/.claude.json`; the per-repo portability
+    // behavior under test is independent of where the registration
+    // lives. The MCP args themselves are verified by the unit test
+    // `register_claude_mcp_invokes_claude_with_workspace_auto_and_bare_lain`.
 
     // ── Step 3: spawn the binary as the agent would, from repo B. ────
     let mut child = Command::new(lain_bin())

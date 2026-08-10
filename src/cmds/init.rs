@@ -187,6 +187,61 @@ fn detect_agent(home_dir: &std::path::Path) -> &'static str {
     "claude"
 }
 
+/// Register the Lain MCP server with Claude Code by shelling out to
+/// `claude mcp add`. Claude Code (v2.1+) reads MCP server configuration
+/// from `~/.claude.json`, NOT from `~/.claude/settings.json`. The old
+/// init wrote the `mcpServers` block into `settings.json` and Claude
+/// silently ignored it — the server was registered but never
+/// connected, and `claude mcp list` did not list it. Verified via
+/// `claude mcp list` and a live behavior test that reached
+/// `get_health` only after switching to `claude mcp add`.
+///
+/// `claude_bin` is the path to the `claude` binary; tests inject a
+/// stub to verify the exact arguments without touching real state.
+fn register_claude_mcp(
+    claude_bin: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    transport: &str,
+    port: u16,
+) -> Result<()> {
+    let mut args: Vec<String> = vec![
+        "mcp".to_string(),
+        "add".to_string(),
+        "--scope".to_string(),
+        "user".to_string(),
+        "lain".to_string(),
+        "--".to_string(),
+        "lain".to_string(),
+        "--workspace".to_string(),
+        "auto".to_string(),
+        "--transport".to_string(),
+        transport.to_string(),
+    ];
+    if let Some(model) = embedding_model {
+        args.push("--embedding-model".to_string());
+        args.push(model.to_string_lossy().to_string());
+    }
+    if transport != "stdio" {
+        args.push("--port".to_string());
+        args.push(port.to_string());
+    }
+
+    let status = std::process::Command::new(claude_bin)
+        .args(&args)
+        .status()
+        .map_err(|e| anyhow::anyhow!(
+            "failed to spawn `claude mcp add` ({claude_bin:?}): {e}. \
+             Is the Claude Code CLI installed and on PATH?"
+        ))?;
+    if !status.success() {
+        anyhow::bail!(
+            "`claude mcp add` exited with {status:?}. Run `claude mcp add` \
+             manually to see the error."
+        );
+    }
+    Ok(())
+}
+
 fn init_claude(
     embedding_model: Option<&std::path::Path>,
     transport: &str,
@@ -209,68 +264,26 @@ fn init_claude(
         serde_json::json!({})
     };
 
-    if !settings.get("mcpServers").and_then(|v| v.as_object()).is_some() {
-        settings.as_object_mut().unwrap().insert("mcpServers".to_string(), serde_json::json!({}));
-    }
+    // MCP server registration is delegated to `claude mcp add` (see
+    // `register_claude_mcp`). Do NOT write a `mcpServers` block into
+    // settings.json — Claude Code 2.1+ reads MCP config from
+    // `~/.claude.json` and silently ignores the settings.json entry.
 
-    let mcp_servers = settings.get_mut("mcpServers").unwrap().as_object_mut().unwrap();
-
-    let mut args = vec![
-        "--workspace".to_string(),
-        "auto".to_string(),
-        "--transport".to_string(),
-        transport.to_string(),
-    ];
-
-    if let Some(ref model) = embedding_model {
-        args.push("--embedding-model".to_string());
-        args.push(model.to_string_lossy().to_string());
-    }
-
-    if transport != "stdio" {
-        args.push("--port".to_string());
-        args.push(port.to_string());
-    }
-
-    let lain_entry = serde_json::json!({
-        // IMPORTANT: `command` must be a PATH-resolvable name, not an
-        // absolute path. Claude Code's MCP loader silently ignores stdio
-        // entries whose `command` is absolute, so the server is
-        // registered in settings.json but never connected (verified:
-        // `claude mcp list` and a live behavior test reported "no Lain
-        // MCP server connected" until the path was replaced with the
-        // bare name). The Kimi adapter applies the same rule via a
-        // `./bin/lain` wrapper for the same reason. Resolving the
-        // binary via `which` would defeat the purpose, so we hardcode
-        // the name and trust the user to keep `lain` on PATH.
-        "command": "lain",
-        "args": args
-    });
-
-    let do_write = if mcp_servers.get("lain").is_some() {
-        if yes {
-            println!("MCP server already configured - skipped.");
-            false
-        } else {
-            print!("LAIN MCP server already configured. Overwrite? [y/N] ");
-            std::io::stdout().flush()?;
-            let mut reply = String::new();
-            std::io::stdin().read_line(&mut reply)?;
-            let overwrite = reply.trim().starts_with('y') || reply.trim().starts_with('Y');
-            if !overwrite { println!("Skipped."); }
-            overwrite
+    if let Some(claude_bin) = which::which("claude").ok() {
+        match register_claude_mcp(&claude_bin, embedding_model, transport, port) {
+            Ok(()) => println!("Registered Lain MCP server with Claude Code (claude mcp add)."),
+            Err(e) => eprintln!(
+                "Warning: failed to register MCP server: {e}. \
+                 Run `claude mcp add --scope user lain -- lain --workspace auto --transport stdio` \
+                 manually."
+            ),
         }
     } else {
-        true
-    };
-
-    if do_write {
-        mcp_servers.insert("lain".to_string(), lain_entry);
-        let settings_json = serde_json::to_string_pretty(&settings)?;
-        let tmp_path = settings_path.with_extension("json.tmp");
-        fs::write(&tmp_path, &settings_json)?;
-        fs::rename(&tmp_path, settings_path)?;
-        println!("Updated ~/.claude/settings.json");
+        eprintln!(
+            "Warning: `claude` not on PATH; skipping MCP registration. \
+             Run `claude mcp add --scope user lain -- lain --workspace auto --transport stdio` \
+             once Claude Code is installed."
+        );
     }
 
     // Install Claude Code PreToolUse hook (separate from MCP). The
@@ -754,58 +767,128 @@ mod tests {
     /// behavior test reporting "no Lain MCP server connected"). The
     /// init must write a bare PATH-resolvable name.
     #[test]
-    fn init_claude_writes_lain_command_not_absolute_path() {
+    /// `register_claude_mcp` must invoke the Claude CLI with the right
+    /// subcommand and arguments, using a bare PATH-resolvable name for
+    /// the binary (not an absolute path, which Claude Code silently
+    /// ignores for stdio MCP servers).
+    #[test]
+    fn register_claude_mcp_invokes_claude_with_workspace_auto_and_bare_lain() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let workspace = tmp.path().join("ws");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&workspace).unwrap();
-        Command::new("git").args(["init", "--quiet"]).current_dir(&workspace).status().unwrap();
-
-        let claude_dir = home.join(".claude");
-        let settings = claude_dir.join("settings.json");
-        let lain_md = claude_dir.join("LAIN.md");
-        init_claude(None, "stdio", 0, true, &claude_dir, &settings, &lain_md).unwrap();
-
-        let body = std::fs::read_to_string(&settings).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let command = json
-            .pointer("/mcpServers/lain/command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(
-            command, "lain",
-            "command must be a bare PATH-resolvable name, not {command:?}"
+        // Stub `claude` binary that records its argv to a file and exits 0.
+        let stub = tmp.path().join("claude");
+        let args_file = tmp.path().join("args.txt");
+        let script = format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}'\nexit 0\n",
+            args_file.display()
         );
-        assert!(
-            !command.starts_with('/') && !command.starts_with("./"),
-            "command must not be an absolute or plugin-relative path"
-        );
+        std::fs::write(&stub, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        register_claude_mcp(&stub, None, "stdio", 0).unwrap();
+
+        let recorded: Vec<String> = std::fs::read_to_string(&args_file)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+
+        // Verify the subcommand shape: `claude mcp add --scope user lain -- lain <args>`
+        assert_eq!(recorded.first().map(String::as_str), Some("mcp"), "first arg must be `mcp`");
+        assert_eq!(recorded.get(1).map(String::as_str), Some("add"), "second arg must be `add`");
+        assert_eq!(recorded.get(2).map(String::as_str), Some("--scope"));
+        assert_eq!(recorded.get(3).map(String::as_str), Some("user"));
+        assert_eq!(recorded.get(4).map(String::as_str), Some("lain"));
+        let sep_idx = recorded.iter().position(|a| a == "--").expect("`--` separator present");
+        // The token right after `--` is the actual binary name passed to
+        // the MCP server. It must be a bare name on PATH, not an
+        // absolute path.
+        let binary = &recorded[sep_idx + 1];
+        assert_eq!(binary, "lain", "binary after `--` must be the bare name `lain`");
+        assert!(!binary.starts_with('/'), "binary must not be an absolute path");
+
+        // Verify --workspace auto is forwarded.
+        let ws_idx = recorded.iter().position(|a| a == "--workspace").expect("--workspace present");
+        assert_eq!(recorded[ws_idx + 1], "auto", "workspace must be `auto`");
+        // Verify --transport stdio.
+        let tr_idx = recorded.iter().position(|a| a == "--transport").expect("--transport present");
+        assert_eq!(recorded[tr_idx + 1], "stdio");
     }
 
+    /// `init_claude` no longer writes MCP into settings.json. Claude
+    /// Code 2.1+ reads MCP config from `~/.claude.json` (via `claude
+    /// mcp add`), and silently ignores the settings.json `mcpServers`
+    /// block. This test stubs `claude` on PATH so the init does not
+    /// mutate real config, and verifies the non-MCP outputs: the hook
+    /// is installed and the awareness doc is written. The MCP
+    /// invocation itself is covered by
+    /// `register_claude_mcp_invokes_claude_with_workspace_auto_and_bare_lain`.
     #[test]
-    fn init_claude_writes_workspace_auto() {
+    fn init_claude_writes_hook_and_awareness_without_settings_mcp_servers() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let workspace = tmp.path().join("ws");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
-        // git repo required by init pre-flight
         Command::new("git").args(["init", "--quiet"]).current_dir(&workspace).status().unwrap();
 
-        let claude_dir = home.join(".claude");
-        let settings = claude_dir.join("settings.json");
-        let lain_md = claude_dir.join("LAIN.md");
-        init_claude(None, "stdio", 0, true, &claude_dir, &settings, &lain_md).unwrap();
-
-        let body = std::fs::read_to_string(&settings).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let args = json.pointer("/mcpServers/lain/args").unwrap().as_array().unwrap();
-        let slice: Vec<String> = args.iter().map(|v| v.as_str().unwrap().to_string()).collect();
-        assert!(
-            slice.windows(2).any(|w| w == ["--workspace", "auto"]),
-            "expected --workspace auto in args, got: {slice:?}"
+        // Prepend a tempdir containing a no-op `claude` stub to PATH
+        // so `init_claude` does not call the real `claude mcp add`
+        // (which would mutate the user's `~/.claude.json`).
+        let stub_dir = tempfile::tempdir().unwrap();
+        let stub = stub_dir.path().join("claude");
+        std::fs::write(&stub, "#!/usr/bin/env bash\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!(
+            "{}:{}",
+            stub_dir.path().display(),
+            original_path
         );
+        // SAFETY: setting PATH in a test is racy with parallel tests, but
+        // no other test in the `lain` bin test binary depends on the
+        // identity of `claude` on PATH.
+        std::env::set_var("PATH", &new_path);
+
+        let result = (|| -> Result<(), anyhow::Error> {
+            let claude_dir = home.join(".claude");
+            let settings = claude_dir.join("settings.json");
+            let lain_md = claude_dir.join("LAIN.md");
+            init_claude(None, "stdio", 0, true, &claude_dir, &settings, &lain_md)?;
+
+            // settings.json must NOT have mcpServers (Claude Code reads
+            // MCP from ~/.claude.json, not settings.json).
+            let body = std::fs::read_to_string(&settings).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(
+                json.pointer("/mcpServers/lain").is_none(),
+                "settings.json must not contain mcpServers.lain; Claude Code \
+                 ignores it and uses ~/.claude.json instead. body: {body}"
+            );
+
+            // The hook script and the awareness doc must be installed.
+            let hook = home.join(".claude/hooks/lain-hook.sh");
+            assert!(hook.exists(), "PreToolUse hook script not installed at {hook:?}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = hook.metadata().unwrap().permissions().mode();
+                assert!(mode & 0o111 != 0, "hook script must be executable (mode={mode:o})");
+            }
+            assert!(lain_md.exists(), "awareness doc not installed at {lain_md:?}");
+            Ok(())
+        })();
+
+        // Restore PATH regardless of outcome.
+        std::env::set_var("PATH", &original_path);
+        result.unwrap();
     }
 
     /// Regression pin for the Claude awareness doc. The agent only reaches
