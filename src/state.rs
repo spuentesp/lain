@@ -285,6 +285,31 @@ impl Projects {
         }
         Err("no active project; run `lain projects add <name> <path>` then `lain use <name>`, or pass --workspace".to_string())
     }
+
+    /// Resolve the workspace when the user passed `--workspace auto`.
+    ///
+    /// Walks up from the current working directory to find the nearest
+    /// enclosing git repository and returns its workdir. Returns a clear
+    /// user-facing error when no repository is found.
+    pub fn resolve_auto_workspace() -> Result<PathBuf, crate::error::LainError> {
+        let repo = git2::Repository::discover(".").map_err(|e| {
+            crate::error::LainError::Workspace(format!(
+                "--workspace auto requires a git repository, but none was found from {}: {e}. \
+                 Pass an explicit --workspace <path> or run inside a git repo.",
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "<unknown cwd>".into())
+            ))
+        })?;
+        let path = repo.workdir().ok_or_else(|| {
+            crate::error::LainError::Workspace(
+                "--workspace auto: bare repositories are not supported. \
+                 Pass an explicit --workspace <path>."
+                    .to_string(),
+            )
+        })?;
+        Ok(path.to_path_buf())
+    }
 }
 
 /// Tiny inline replacement for chrono so we don't pull in a date dep.
@@ -336,6 +361,17 @@ mod tests {
     // env var, so parallel tests would stomp on each other. Serialize the
     // state tests through a global mutex.
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DirGuard(PathBuf);
+    impl DirGuard {
+        fn new(p: PathBuf) -> Self { Self(p) }
+    }
+    #[allow(dead_code)]
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir()
@@ -466,5 +502,81 @@ mod tests {
         assert!(!created);
         assert_eq!(Projects::list().len(), 1);
         // But last_used is updated.
+    }
+
+    #[test]
+    fn resolve_auto_workspace_finds_repo_root() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("auto-root");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        let expected = std::fs::canonicalize(&repo).unwrap();
+
+        let _restore = DirGuard::new(cwd);
+        std::env::set_current_dir(&repo).unwrap();
+        let resolved = Projects::resolve_auto_workspace().expect("resolve");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_auto_workspace_walks_up_to_repo_root() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("auto-subdir");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let repo = dir.join("repo");
+        let sub = repo.join("a/b/c");
+        std::fs::create_dir_all(&sub).unwrap();
+        git2::Repository::init(&repo).unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        let expected = std::fs::canonicalize(&repo).unwrap();
+
+        let _restore = DirGuard::new(cwd);
+        std::env::set_current_dir(&sub).unwrap();
+        let resolved = Projects::resolve_auto_workspace().expect("resolve");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_auto_workspace_errors_outside_repo() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("auto-none");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let outside = dir.join("no-repo");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        let _restore = DirGuard::new(cwd);
+        std::env::set_current_dir(&outside).unwrap();
+        let err = Projects::resolve_auto_workspace().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--workspace auto"),
+            "error should mention --workspace auto, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_workspace_rejects_bare_repo() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("auto-bare");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let bare = dir.join("bare.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        let repo = git2::Repository::init_bare(&bare).unwrap();
+        let _ = repo; // silence unused
+        let cwd = std::env::current_dir().unwrap();
+        let _restore = DirGuard::new(cwd);
+        std::env::set_current_dir(&bare).unwrap();
+        let err = Projects::resolve_auto_workspace().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("bare") || msg.contains("--workspace auto"),
+            "error should mention bare repo or --workspace auto, got: {msg}"
+        );
     }
 }
