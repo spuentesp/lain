@@ -34,20 +34,18 @@ fn auto_workspace_resolves_to_git_root() {
     let mut stderr = String::new();
     let start = Instant::now();
     let deadline = Duration::from_secs(20);
+    use std::io::{BufRead, BufReader};
+    let mut pipe = BufReader::new(child.stderr.take().expect("stderr pipe")).lines();
     loop {
-        if let Some(mut pipe) = child.stderr.take() {
-            use std::io::Read;
-            let mut buf = [0u8; 4096];
-            match pipe.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    stderr.push_str(&String::from_utf8_lossy(&buf[..n]));
-                    if stderr.contains("Serving repo") {
-                        break;
-                    }
+        match pipe.next() {
+            Some(Ok(line)) => {
+                stderr.push_str(&line);
+                stderr.push('\n');
+                if stderr.contains("Serving repo") {
+                    break;
                 }
-                Err(_) => break,
             }
+            Some(Err(_)) | None => break,
         }
         if start.elapsed() > deadline {
             let _ = child.kill();

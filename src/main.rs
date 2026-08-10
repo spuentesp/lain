@@ -208,13 +208,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    let log_level = if args.verbose { "debug" } else { &args.log_level };
-    // Subscriber was initialized at the top of main() so that the
-    // "Serving repo" event above is captured. Keep the local for parity
-    // with prior behavior (it is currently unused here, but documents
-    // the resolved verbosity level for this code path).
-    let _ = log_level;
-
     tracing::info!("Initializing Lain");
     if !args.workspace.exists() { anyhow::bail!("Workspace does not exist: {:?}", args.workspace); }
     let memory_path = args.memory_path.clone().unwrap_or_else(|| args.workspace.join(".lain/graph.bin"));
