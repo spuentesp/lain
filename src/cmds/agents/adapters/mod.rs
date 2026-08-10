@@ -31,6 +31,9 @@ pub trait AgentAdapter {
     fn id(&self) -> &'static str;
     fn install(&self, entry: &AgentEntry, scope: InstallScope) -> Result<(), AdapterError>;
     fn read(&self, entry: &AgentEntry, scope: InstallScope) -> Result<serde_json::Value, AdapterError>;
+    /// Remove any adapter-specific state beyond the generic MCP config file.
+    /// The default implementation is a no-op.
+    fn remove(&self, _entry: &AgentEntry, _scope: InstallScope) -> Result<(), AdapterError> { Ok(()) }
 }
 
 pub fn adapter_for(id: &str) -> Option<Box<dyn AgentAdapter>> {

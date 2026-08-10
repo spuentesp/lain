@@ -27,6 +27,12 @@ pub fn run_remove(id: &str, scope: InstallScope) -> Result<()> {
         }
     }
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    // Let the adapter clean up any side-band state (e.g. Kimi's installed.json
+    // registration and managed plugin directory). Failures here are logged but
+    // do not block the generic config removal.
+    if let Err(e) = adapter.remove(entry, scope) {
+        eprintln!("warning: {id} adapter-specific remove failed: {e}");
+    }
     println!("removed {id} from {} scope", match scope { InstallScope::User => "user", InstallScope::Project => "project", InstallScope::Workspace => "workspace" });
     Ok(())
 }

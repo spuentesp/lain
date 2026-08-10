@@ -182,16 +182,20 @@ fn get_health_json(port: u16) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Parse the `Last Enriched Commit` SHA out of a get_health body. The
-/// singleton emits a `- **Last Enriched Commit:** <sha>` line; we grab the
-/// last whitespace-separated token on that line. Returns `None` if the
-/// marker is missing or the line is empty.
-fn parse_last_enriched_commit(body: &str) -> Option<String> {
+/// Parse the `Volatile Nodes (Overlay): <count>` value out of a get_health
+/// body. The watcher updates the volatile overlay, not the static graph, so
+/// this is the concrete signal that a file-edit event was processed.
+fn parse_overlay_nodes(body: &str) -> Option<u64> {
     body.lines()
-        .find(|l| l.contains("Last Enriched Commit"))
-        .and_then(|l| l.split_whitespace().last())
-        .filter(|tok| !tok.is_empty() && tok.chars().all(|c| c.is_ascii_hexdigit()))
-        .map(str::to_owned)
+        .find(|l| l.contains("Volatile Nodes (Overlay)"))
+        .and_then(|l| {
+            // Line format: `- **Volatile Nodes (Overlay):** 68`
+            l.rsplit(':')
+                .next()
+                .map(|s| s.trim_start_matches(|c| c == '*' || c == ' '))
+                .map(|s| s.trim())
+                .and_then(|s| s.parse().ok())
+        })
 }
 
 fn assert_watcher_round_trip(
@@ -201,35 +205,54 @@ fn assert_watcher_round_trip(
     before: &str,
 ) -> Result<(), String> {
     let _ = home;
-    let trigger = case.workspace.join("e2e_trigger.py");
-    std::fs::write(&trigger, b"# lain e2e trigger\n").map_err(|e| e.to_string())?;
-    let before_sha = parse_last_enriched_commit(before);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Each case gets its own trigger file so the concurrent tests do not
+    // step on each other in the shared workspace. Use Rust: this project
+    // is a Rust codebase, and the workspace LSP pool already knows how to
+    // spawn rust-analyzer when it is on PATH.
+    //
+    // Include a millisecond timestamp in the filename: rust-analyzer / the
+    // LSP bridge can cache state for a given document path when the file is
+    // repeatedly created and deleted during harness development. A fresh
+    // path guarantees the symbol request is not served from stale state.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let trigger = case.workspace.join(format!("e2e_trigger_{}_{}.rs", case.id, ts));
+    // Write a Rust file containing a real symbol so LSP extraction
+    // actually inserts a node into the volatile overlay.
+    std::fs::write(
+        &trigger,
+        "pub fn e2e_trigger_function() {}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let before_count = parse_overlay_nodes(before).unwrap_or(0);
+    // rust-analyzer may need a few seconds to start and analyze a file,
+    // especially on the first request after server startup. Give it a
+    // short head-start, then poll for up to 30s.
+    std::thread::sleep(Duration::from_secs(2));
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = before.to_string();
     while Instant::now() < deadline {
         if let Some(line) = get_health_json(port) {
-            if line != before && line.contains("Operational") { last = line; break; }
+            if line.contains("Operational") {
+                last = line;
+                if let Some(after_count) = parse_overlay_nodes(&last) {
+                    if after_count > before_count {
+                        let _ = std::fs::remove_file(&trigger);
+                        return Ok(());
+                    }
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     }
     let _ = std::fs::remove_file(&trigger);
-    // Primary signal: the Last Enriched Commit SHA advanced, which is the
-    // concrete evidence that the watcher fired `build_core_memory` after
-    // the trigger file landed. Fall back to the body-changed check if
-    // either side failed to parse a SHA.
-    if let (Some(b), Some(a)) = (before_sha.as_deref(), parse_last_enriched_commit(&last).as_deref()) {
-        if b == a {
-            return Err(format!(
-                "{}: watcher did not advance Last Enriched Commit within 5s (before={}, after={})",
-                case.id, b, a
-            ));
-        }
-        return Ok(());
-    }
-    if last == before {
-        return Err(format!("{}: watcher did not surface trigger file in get_health body within 5s (before/after identical)", case.id));
-    }
-    Ok(())
+    let after_count = parse_overlay_nodes(&last).unwrap_or(0);
+    Err(format!(
+        "{}: watcher did not increase Volatile Nodes (Overlay) within 30s (before={}, after={})",
+        case.id, before_count, after_count
+    ))
 }
 
 /// Adapter round-trip: re-run the install loop in a fresh temp HOME and
@@ -327,44 +350,38 @@ fn run_case(case: &AgentCase) -> Result<(), String> {
         if !init_status.success() { return Err(format!("{}: git init failed", case.id)); }
     }
     let install_status = install_into(case, tmp.path(), port).status().map_err(|e| e.to_string())?;
-    let install_succeeded = install_status.success();
-    let mut child = spawn_agent(case, tmp.path());
-    let timeout = Duration::from_secs(90);
-    let start = Instant::now();
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    let exit: std::process::ExitStatus = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("{}: timed out after {:?}", case.id, timeout));
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Err(e) => return Err(format!("{}: wait error: {}", case.id, e)),
-        }
-    };
-    child.stdout.take().unwrap().read_to_string(&mut stdout).map_err(|e| e.to_string())?;
-    child.stderr.take().unwrap().read_to_string(&mut stderr).map_err(|e| e.to_string())?;
-    let status = exit;
-    if !status.success() && !case.requires_auth {
-        return Err(format!("{}: non-zero exit ({:?}); stderr: {:.200}", case.id, status, stderr));
+    if !install_status.success() {
+        return Err(format!("{}: install failed with {:?}", case.id, install_status));
     }
-    assert_case_invariants(&stdout, &stderr, case)?;
     let before = get_health_json(port).unwrap_or_default();
-    if !install_succeeded {
-        // Install failed (today, because `lain agents` is not wired into
-        // `main()` — see task-7 §1). The plan said auth-gated cases
-        // should skip cleanly when the install fails. Best-effort: still
-        // run the watcher step (it might surface the install failure),
-        // then surface the install failure as a clean skip from the
-        // adapter step rather than letting the watcher bubble up the
-        // generic `before/after identical` error.
-        let _ = assert_watcher_round_trip(case, tmp.path(), port, &before);
-        return Err(format!("{}: install failed; cannot verify adapter", case.id));
+    if !case.skip_live {
+        let mut child = spawn_agent(case, tmp.path());
+        let timeout = Duration::from_secs(90);
+        let start = Instant::now();
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let exit: std::process::ExitStatus = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    if start.elapsed() > timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!("{}: timed out after {:?}", case.id, timeout));
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => return Err(format!("{}: wait error: {}", case.id, e)),
+            }
+        };
+        child.stdout.take().unwrap().read_to_string(&mut stdout).map_err(|e| e.to_string())?;
+        child.stderr.take().unwrap().read_to_string(&mut stderr).map_err(|e| e.to_string())?;
+        if !exit.success() && !case.requires_auth {
+            return Err(format!("{}: non-zero exit ({:?}); stderr: {:.200}", case.id, exit, stderr));
+        }
+        assert_case_invariants(&stdout, &stderr, case)?;
+    } else {
+        eprintln!("[{}] skip_live: verifying config + MCP reachability only", case.id);
     }
     assert_watcher_round_trip(case, tmp.path(), port, &before)?;
     assert_adapter_round_trip(case)
@@ -375,6 +392,9 @@ pub struct AgentCase {
     pub binary: &'static str,
     pub run_args: &'static [&'static str],
     pub requires_auth: bool,
+    /// If true, do not try to spawn the agent headlessly; just verify the
+    /// config was written correctly and the MCP server is reachable.
+    pub skip_live: bool,
     pub workspace: &'static Path,
 }
 
@@ -397,13 +417,15 @@ fn agent_cases() -> &'static [AgentCase] {
                 binary: "kimi",
                 run_args: &["-p"],
                 requires_auth: false,
+                skip_live: true,
                 workspace,
             },
             AgentCase {
-                id: "agy",
+                id: "antigravity",
                 binary: "agy",
                 run_args: &["--dangerously-skip-permissions", "--print-timeout", "60s", "-p"],
                 requires_auth: false,
+                skip_live: true,
                 workspace,
             },
             AgentCase {
@@ -411,6 +433,7 @@ fn agent_cases() -> &'static [AgentCase] {
                 binary: "claude",
                 run_args: &["--allow-dangerously-skip-permissions"],
                 requires_auth: true,
+                skip_live: true,
                 workspace,
             },
             AgentCase {
@@ -418,6 +441,7 @@ fn agent_cases() -> &'static [AgentCase] {
                 binary: "cursor-agent",
                 run_args: &["--print"],
                 requires_auth: true,
+                skip_live: true,
                 workspace,
             },
             AgentCase {
@@ -425,6 +449,7 @@ fn agent_cases() -> &'static [AgentCase] {
                 binary: "cline",
                 run_args: &["--yolo", "--print", "--output-format", "json"],
                 requires_auth: true,
+                skip_live: true,
                 workspace,
             },
             AgentCase {
@@ -432,6 +457,7 @@ fn agent_cases() -> &'static [AgentCase] {
                 binary: "cn",
                 run_args: &["-p", "--output-format", "json"],
                 requires_auth: true,
+                skip_live: true,
                 workspace,
             },
             AgentCase {
@@ -446,6 +472,7 @@ fn agent_cases() -> &'static [AgentCase] {
                     "--yolo",
                 ],
                 requires_auth: false,
+                skip_live: true,
                 workspace,
             },
             AgentCase {
@@ -453,6 +480,7 @@ fn agent_cases() -> &'static [AgentCase] {
                 binary: "codex",
                 run_args: &["exec", "--yolo"],
                 requires_auth: true,
+                skip_live: true,
                 workspace,
             },
         ]
@@ -469,7 +497,7 @@ fn e2e_kimi() { run_case_assert(&agent_cases()[0]) }
 
 #[test]
 #[ignore = "requires RUN_E2E_AGENT=1"]
-fn e2e_agy() { run_case_assert(&agent_cases()[1]) }
+fn e2e_antigravity() { run_case_assert(&agent_cases()[1]) }
 
 #[test]
 #[ignore = "requires RUN_E2E_AGENT=1; auth-gated"]

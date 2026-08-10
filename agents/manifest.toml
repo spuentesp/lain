@@ -10,11 +10,11 @@ config_project = ".claude/settings.json"
 config_format = "json"
 mcp_section = "mcpServers"
 mcp_name = "lain"
-transport = "http"
+transport = "stdio"
 command = "/home/sebastian/.local/lain/lain"
 default_args = ["--workspace", "{{workspace}}", "--transport", "stdio", "--embedding-model", "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx"]
 headless_probe = ["claude", "--print", "--mcp-config", "{{config_path}}", "list your tools"]
-format = "http"
+format = "json"
 
 [[agent]]
 id = "kimi"
@@ -26,7 +26,7 @@ config_project = ".kimi-code/plugins/lain/kimi.plugin.json"
 config_format = "kimi-plugin"
 mcp_section = "mcpServers"
 mcp_name = "lain"
-transport = "http"
+transport = "stdio"
 command = "/home/sebastian/.local/lain/lain"
 default_args = ["--workspace", "{{workspace}}", "--transport", "stdio", "--embedding-model", "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx"]
 headless_probe = ["kimi", "-p", "list your tools"]

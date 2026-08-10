@@ -50,29 +50,56 @@ LAIN_BINARY=target/release/lain LAIN_WORKSPACE=/path/to/project python tests/e2e
 
 ## Agent end-to-end harness
 
-`tests/e2e/agent_install.rs` drives every installed agent binary
-through the same scripted scenario and asserts the same five
-invariants. Run it with `RUN_E2E_AGENT=1`:
+`tests/e2e/agent_install.rs` drives every supported agent through the same
+scripted scenario and asserts the same invariants. Run it with
+`RUN_E2E_AGENT=1`:
 
 ```bash
 RUN_E2E_AGENT=1 cargo test --test agent_install -- --include-ignored --nocapture
 ```
 
+What it verifies for every agent:
+
+1. `lain agents install --scope user <id>` writes valid config.
+2. The configured MCP server is reachable via the shared HTTP singleton.
+3. A file-edit watcher round-trip increases `Volatile Nodes (Overlay)`.
+4. A fresh temp-HOME adapter round-trip reproduces the same config.
+
 Per-agent behavior:
 
-- Kimi, agy, omp: the harness exercises the live HTTP singleton end
-  to end (install + spawn + tool list + get_health + watcher round-trip).
-- claude, cursor, cline, cn, codex: auth-gated. The test installs the
-  config and runs the binary; the binary fails to authenticate, the
-  stderr-as-fatal check catches the error, and the test reports
-  `auth-gated: skipped inner assertions` so a CI run is green except
-  for those rows. Once you sign in to the relevant agent, the test
-  automatically picks up the working `get_health` reply.
+- **kimi**, **antigravity**, **omp**: config-only verification (`skip_live: true`).
+  - Kimi is verified separately by `scripts/smoke-test-kimi.sh`, which spawns
+    `kimi -p` and confirms Lain is loaded as a native MCP plugin.
+- **claude**, **cursor**, **cline**, **cn**, **codex**: auth-gated. The harness
+  installs the config and asserts the adapter round-trip; the live spawn is
+  skipped. Once signed in, `scripts/smoke-test-claude.sh` verifies the real
+  end-to-end path.
 
-The harness does not require the live HTTP singleton to be
-re-installed; it uses `lain agents install --scope user <id>` against
-a fresh temp HOME for the round-trip step.
+## Live agent smoke tests
 
-The harness is DST-style: one fixed scenario script, per-agent run,
-fixed output contract. It is not a FoundationDB-class simulator; it is
-a deterministic run that produces a clear pass/fail per agent.
+Two helper scripts exercise the real agent binaries against the running Lain
+singleton:
+
+```bash
+# Requires `claude` to be signed in.
+scripts/smoke-test-claude.sh
+
+# Requires `kimi` to be signed in.
+scripts/smoke-test-kimi.sh
+```
+
+Both scripts:
+
+- Install the Lain config for the agent if missing.
+- Prompt the agent to list its MCP tools and call `get_health` on Lain.
+- Assert the output contains Lain tools and an `Operational` health response.
+
+## Notes
+
+- The agent harness uses the shared HTTP singleton on port 9999 (override with
+  `LAIN_PORT`). Make sure an owner is running before invoking the harness or
+  smoke tests.
+- Kimi's plugin security model requires stdio MCP `command` and `cwd` to be
+  `./` paths inside the plugin root. The Kimi adapter therefore generates a
+  wrapper script at `~/.kimi-code/plugins/managed/lain/bin/lain` and references
+  it as `./bin/lain` in `kimi.plugin.json`.

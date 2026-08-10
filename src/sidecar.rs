@@ -19,6 +19,7 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::mcp::LainMcpServer;
 use crate::overlay::VolatileOverlay;
+use crate::server::Transport;
 
 /// Configuration for `sidecar::run`. The caller (typically `main.rs`) is
 /// responsible for translating the parsed CLI `Args` into this struct.
@@ -27,6 +28,8 @@ pub struct SidecarConfig {
     pub workspace: PathBuf,
     pub memory_path: PathBuf,
     pub port: u16,
+    /// Transport the sidecar should expose to its agent client.
+    pub transport: Transport,
     /// HTTP base URL of the owner instance (e.g. `http://localhost:9999/mcp`).
     /// The sidecar appends `/overlay/subscribe` to subscribe to volatile
     /// overlay events.
@@ -68,10 +71,17 @@ pub async fn run(cfg: SidecarConfig) -> Result<(), LainError> {
         overlay,
         cfg.workspace.clone(),
     );
-    let addr: SocketAddr = ([127, 0, 0, 1], cfg.port).into();
-    // `serve` is an infinite loop; surface its MCP error to the caller as
-    // `LainError::Mcp` so `main.rs` can map it into anyhow.
-    server.serve(addr).await.map_err(|e| LainError::Mcp(format!("{e:?}")))
+    match cfg.transport {
+        Transport::Http => {
+            let addr: SocketAddr = ([127, 0, 0, 1], cfg.port).into();
+            // `serve` is an infinite loop; surface its MCP error to the caller as
+            // `LainError::Mcp` so `main.rs` can map it into anyhow.
+            server.serve(addr).await.map_err(|e| LainError::Mcp(format!("{e:?}")))
+        }
+        Transport::Stdio => {
+            server.run_stdio().await.map_err(|e| LainError::Mcp(format!("{e:?}")))
+        }
+    }
 }
 
 /// Initial backoff between overlay subscription attempts.
@@ -115,6 +125,7 @@ mod tests {
             workspace: tmp.path().to_path_buf(),
             memory_path: path.clone(),
             port: 0,
+            transport: Transport::Http,
             owner_url: "http://127.0.0.1:1/mcp".into(),
             embedding_model: None,
         };
@@ -226,6 +237,7 @@ mod tests {
                 workspace: sidecar_workspace,
                 memory_path: sidecar_memory,
                 port: sidecar_port,
+                transport: Transport::Http,
                 owner_url: format!("http://127.0.0.1:{owner_port}/mcp"),
                 embedding_model: None,
             })
