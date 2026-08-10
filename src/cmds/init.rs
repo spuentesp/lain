@@ -629,7 +629,7 @@ fn init_kimi(
     // for non-stdio transports.
     let mut args: Vec<String> = vec![
         "--workspace".to_string(),
-        workspace.to_string_lossy().to_string(),
+        "auto".to_string(),
     ];
     if let Some(model) = embedding_model {
         args.push("--embedding-model".to_string());
