@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod gemini;
 pub mod kimi;
 pub mod omp;
+pub mod opencode;
 
 use crate::cmds::agents::manifest::AgentEntry;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,7 @@ pub fn adapter_for(id: &str) -> Option<Box<dyn AgentAdapter>> {
         "continue"      => Some(Box::new(continue_dev::ContinueAdapter)),
         "cursor"        => Some(Box::new(cursor::CursorAdapter)),
         "omp"           => Some(Box::new(omp::OmpAdapter)),
+        "opencode"      => Some(Box::new(opencode::OpenCodeAdapter)),
         "kimi"          => Some(Box::new(kimi::KimiAdapter)),
         _ => None,
     }
