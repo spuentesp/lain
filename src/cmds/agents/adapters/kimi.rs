@@ -22,17 +22,17 @@ impl AgentAdapter for KimiAdapter {
         // either on PATH or a `./` path inside the plugin root, and `cwd` must
         // also be `./` and inside the plugin root. An absolute command path is
         // silently ignored. Build a wrapper script inside the plugin root that
-        // execs the real binary, then reference it with `./bin/lain`.
+        // resolves the workspace from the parent agent's cwd (Kimi pins this
+        // subprocess's cwd to the plugin root, so `--workspace auto` inside
+        // `lain` would resolve to the plugin directory instead of the project).
+        // The wrapper then execs the real `lain` from PATH.
         let plugin_root = path
             .parent()
             .ok_or_else(|| AdapterError::Shape("kimi plugin path has no parent".into()))?;
         let wrapper_dir = plugin_root.join("bin");
         std::fs::create_dir_all(&wrapper_dir)?;
         let wrapper = wrapper_dir.join("lain");
-        let wrapper_script = format!(
-            "#!/usr/bin/env bash\n# Kimi plugin wrapper for Lain. Re-execs the real binary so\n# the plugin manifest can use a `./` relative command.\nexec \"{}\" \"$@\"\n",
-            entry.command
-        );
+        let wrapper_script = include_str!("../../kimi_plugin_wrapper.sh");
         std::fs::write(&wrapper, wrapper_script)?;
         #[cfg(unix)]
         {

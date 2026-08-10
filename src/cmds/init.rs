@@ -3,6 +3,8 @@ use std::fs;
 use std::io::Write;
 use std::process::Command;
 
+use crate::cmds::agents::adapters::AUTO_WORKSPACE;
+
 /// Supported agent names. Anything else is a user error and `run_init` will
 /// refuse rather than silently writing nothing.
 const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "kimi", "auto"];
@@ -21,6 +23,7 @@ const CURSOR_AWARENESS_MD: &str = include_str!("../../hooks/cursor/lain-awarenes
 const WINDSURF_RULES_MD: &str = include_str!("../../hooks/windsurf/lain-rules.md");
 const CLINE_RULES_MD: &str = include_str!("../../hooks/cline/lain-rules.md");
 const KIMI_SKILL_MD: &str = include_str!("../../hooks/kimi/skills/lain/SKILL.md");
+const KIMI_PLUGIN_WRAPPER_SH: &str = include_str!("kimi_plugin_wrapper.sh");
 
 pub fn run_init(
     agent: &str,
@@ -612,17 +615,30 @@ fn init_kimi(
     let plugin_root = kimi_root.join("plugins/managed/lain");
     fs::create_dir_all(plugin_root.join("skills/lain"))?;
 
-    // Resolve the lain binary. Use PATH lookup (the plugin manager
-    // rejects absolute paths in the `command` field). The `lain`
-    // binary should be on PATH after `install.sh`.
-    let lain_cmd = "lain";
+    // Kimi's plugin security model only allows stdio MCP commands that are
+    // either on PATH or a `./` path inside the plugin root, and `cwd` must
+    // also be `./` and inside the plugin root. An absolute command path is
+    // silently ignored. Build a wrapper script at `bin/lain` that resolves
+    // `--workspace auto` from the parent agent's cwd (Kimi pins this
+    // subprocess's cwd to the plugin root, so the wrapper has to peek at
+    // /proc/$PPID/cwd) and then execs the real `lain` from PATH.
+    let bin_dir = plugin_root.join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let wrapper_path = bin_dir.join("lain");
+    fs::write(&wrapper_path, KIMI_PLUGIN_WRAPPER_SH)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))?;
+    }
 
     // Build args conditionally: --embedding-model is optional (semantic
     // search is unavailable without it), and --port is only meaningful
-    // for non-stdio transports.
+    // for non-stdio transports. The wrapper replaces `--workspace <sentinel>`
+    // with the resolved repo before exec'ing the real `lain`.
     let mut args: Vec<String> = vec![
         "--workspace".to_string(),
-        "auto".to_string(),
+        AUTO_WORKSPACE.to_string(),
     ];
     if let Some(model) = embedding_model {
         args.push("--embedding-model".to_string());
@@ -635,7 +651,9 @@ fn init_kimi(
         args.push(port.to_string());
     }
 
-    // Build the mcpServers entry with the actual workspace + model.
+    // Build the mcpServers entry with the plugin-root-relative command/cwd.
+    // Args can be absolute paths (workspace, model) because they are not
+    // subject to the plugin-root restriction.
     let plugin_json = serde_json::json!({
         "name": "lain",
         "version": env!("CARGO_PKG_VERSION"),
@@ -646,8 +664,9 @@ fn init_kimi(
         "keywords": ["code-intelligence", "mcp", "semantic-search", "architecture", "rust"],
         "mcpServers": {
             "lain": {
-                "command": lain_cmd,
+                "command": "./bin/lain",
                 "args": args,
+                "cwd": "./",
             },
         },
         "interface": {
@@ -748,6 +767,166 @@ mod tests {
         assert!(
             slice.windows(2).any(|w| w == ["--workspace", "auto"]),
             "expected --workspace auto in args, got: {slice:?}"
+        );
+    }
+
+    /// Same `include_str!` source the install paths use, exposed at test
+    /// time so the wrapper-resolution tests exercise the exact bytes that
+    /// land on disk in `~/.kimi-code/plugins/managed/lain/bin/lain`.
+    const KIMI_PLUGIN_WRAPPER_SCRIPT: &str = include_str!("kimi_plugin_wrapper.sh");
+
+    #[test]
+    fn kimi_wrapper_resolves_workspace_from_parent_cwd() {
+        // The wrapper script reads /proc/$PPID/cwd and walks up to the
+        // enclosing git repo, then execs the real `lain` (PATH). To make
+        // $PPID point at a process whose cwd is the temp repo we spawn
+        // `bash -c "cd <repo> && <wrapper> ...; sleep 60"` — the trailing
+        // `sleep` keeps bash from exec'ing into the wrapper (which would
+        // make its parent the test binary instead of bash).
+        if which::which("lain").is_err() {
+            eprintln!("skipping: `lain` is not on PATH");
+            return;
+        }
+        if which::which("git").is_err() {
+            eprintln!("skipping: `git` is not on PATH");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init failed");
+
+        // Materialise the wrapper exactly as `init_kimi` would.
+        let wrapper_path = tmp.path().join("wrapper.sh");
+        std::fs::write(&wrapper_path, KIMI_PLUGIN_WRAPPER_SCRIPT).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &wrapper_path,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "cd {} && {} --workspace auto --transport stdio; sleep 60",
+                repo.display(),
+                wrapper_path.display(),
+            ))
+            .env("LAIN_PORT", "19997")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn wrapper");
+
+        let mut stderr = String::new();
+        let start = std::time::Instant::now();
+        let deadline = std::time::Duration::from_secs(20);
+        let mut pipe = BufReader::new(child.stderr.take().unwrap()).lines();
+        loop {
+            match pipe.next() {
+                Some(Ok(line)) => {
+                    stderr.push_str(&line);
+                    stderr.push('\n');
+                    if stderr.contains("Serving repo") {
+                        break;
+                    }
+                }
+                Some(Err(_)) | None => break,
+            }
+            if start.elapsed() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("timeout waiting for Serving repo (stderr so far: {stderr})");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            stderr.contains("Serving repo"),
+            "stderr should advertise the resolved workspace; got: {stderr}"
+        );
+        assert!(
+            stderr.contains(repo.to_str().unwrap()),
+            "stderr should include the resolved repo path; got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn kimi_wrapper_errors_outside_repo() {
+        // Run the wrapper in a tempdir that is NOT a git repo. The wrapper
+        // should refuse to fall back to a random directory and emit a
+        // message that points the user at `--workspace <path>`.
+        if which::which("git").is_err() {
+            eprintln!("skipping: `git` is not on PATH");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let nonrepo = tmp.path().join("norepo");
+        std::fs::create_dir_all(&nonrepo).unwrap();
+
+        let wrapper_path = tmp.path().join("wrapper.sh");
+        std::fs::write(&wrapper_path, KIMI_PLUGIN_WRAPPER_SCRIPT).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &wrapper_path,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "cd {} && {} --workspace auto --transport stdio; sleep 60",
+                nonrepo.display(),
+                wrapper_path.display(),
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn wrapper");
+
+        let mut stderr = String::new();
+        let start = std::time::Instant::now();
+        let deadline = std::time::Duration::from_secs(5);
+        let mut pipe = BufReader::new(child.stderr.take().unwrap()).lines();
+        while let Some(Ok(line)) = pipe.next() {
+            stderr.push_str(&line);
+            stderr.push('\n');
+            if stderr.contains("--workspace auto") {
+                break;
+            }
+            if start.elapsed() > deadline {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            stderr.contains("--workspace auto"),
+            "stderr should explain the missing git repo; got: {stderr}"
         );
     }
 }
