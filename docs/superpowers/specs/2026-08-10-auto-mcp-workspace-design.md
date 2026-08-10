@@ -83,7 +83,8 @@ subdirectory.
 
 ### Startup path
 
-In `src/main.rs`, before the server starts:
+In `src/main.rs`, resolve `auto` **before dispatching any subcommand**, so that
+`init`, `query`, and the default server path all benefit:
 
 ```rust
 if args.workspace.as_os_str() == "auto" {
@@ -93,6 +94,13 @@ if args.workspace.as_os_str() == "auto" {
 
 After this point the rest of the startup code treats `args.workspace` as a
 normal, explicit path.
+
+The server logs the resolved workspace at startup so the user sees what was
+selected:
+
+```
+info!(workspace = %args.workspace.display(), "Serving repo")
+```
 
 ### Agent installers
 
@@ -111,6 +119,8 @@ embedding model) remain unchanged.
   - inside a git repo root → returns that path
   - inside a subdirectory → returns repo root
   - outside any git repo → returns an error
+  - bare repo without `workdir()` → falls back to the repo path or returns a
+    clear error
 - **Update** `tests/e2e-sandboxed.sh`, which currently asserts that the
   hardcoded fake workspace appears in the installed MCP args. It should now
   expect `--workspace auto`.
