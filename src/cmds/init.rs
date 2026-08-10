@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::fs;
 use std::io::Write;
+use std::process::Command;
 
 /// Supported agent names. Anything else is a user error and `run_init` will
 /// refuse rather than silently writing nothing.
@@ -214,7 +215,7 @@ fn init_claude(
 
     let mut args = vec![
         "--workspace".to_string(),
-        workspace.to_string_lossy().to_string(),
+        "auto".to_string(),
         "--transport".to_string(),
         transport.to_string(),
     ];
@@ -385,7 +386,7 @@ fn init_gemini(
 
     let mut args = vec![
         "--workspace".to_string(),
-        workspace.to_string_lossy().to_string(),
+        "auto".to_string(),
         "--transport".to_string(),
         transport.to_string(),
     ];
@@ -481,7 +482,7 @@ fn write_mcp_server_entry(
 
     let mut args = vec![
         "--workspace".to_string(),
-        workspace.to_string_lossy().to_string(),
+        "auto".to_string(),
         "--transport".to_string(),
         transport.to_string(),
     ];
@@ -699,4 +700,34 @@ fn init_kimi(
     println!("Installed kimi-code plugin: {}", plugin_root.display());
     println!("Restart kimi-code (or open a new window) to load the plugin.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_claude_writes_workspace_auto() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        // git repo required by init pre-flight
+        Command::new("git").args(["init", "--quiet"]).current_dir(&workspace).status().unwrap();
+
+        let claude_dir = home.join(".claude");
+        let settings = claude_dir.join("settings.json");
+        let lain_md = claude_dir.join("LAIN.md");
+        init_claude(&workspace, None, "stdio", 0, true, &claude_dir, &settings, &lain_md).unwrap();
+
+        let body = std::fs::read_to_string(&settings).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let args = json.pointer("/mcpServers/lain/args").unwrap().as_array().unwrap();
+        let slice: Vec<String> = args.iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(
+            slice.windows(2).any(|w| w == ["--workspace", "auto"]),
+            "expected --workspace auto in args, got: {slice:?}"
+        );
+    }
 }
