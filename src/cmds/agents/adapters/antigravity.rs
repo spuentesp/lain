@@ -25,7 +25,7 @@ impl AgentAdapter for AntigravityAdapter {
             InstallScope::Workspace => return Err(AdapterError::Unsupported(scope, self.id().into())),
         }).into() else { return Err(AdapterError::Unsupported(scope, self.id().into())); };
         let path = expand_home(path);
-        let workspace = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let workspace = "auto".to_string();
         let server = server_for(entry, &workspace);
         write_gemini_mcp_config(&path, &server)
     }

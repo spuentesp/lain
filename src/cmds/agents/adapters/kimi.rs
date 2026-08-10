@@ -16,7 +16,7 @@ impl AgentAdapter for KimiAdapter {
         }).into() else { return Err(AdapterError::Unsupported(scope, self.id().into())); };
         let path = expand_home(path);
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
-        let workspace = std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let workspace = "auto".to_string();
 
         // Kimi's plugin security model only allows stdio MCP commands that are
         // either on PATH or a `./` path inside the plugin root, and `cwd` must
