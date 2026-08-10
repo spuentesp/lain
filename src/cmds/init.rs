@@ -233,7 +233,17 @@ fn init_claude(
     }
 
     let lain_entry = serde_json::json!({
-        "command": which::which("lain").map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "lain".to_string()),
+        // IMPORTANT: `command` must be a PATH-resolvable name, not an
+        // absolute path. Claude Code's MCP loader silently ignores stdio
+        // entries whose `command` is absolute, so the server is
+        // registered in settings.json but never connected (verified:
+        // `claude mcp list` and a live behavior test reported "no Lain
+        // MCP server connected" until the path was replaced with the
+        // bare name). The Kimi adapter applies the same rule via a
+        // `./bin/lain` wrapper for the same reason. Resolving the
+        // binary via `which` would defeat the purpose, so we hardcode
+        // the name and trust the user to keep `lain` on PATH.
+        "command": "lain",
         "args": args
     });
 
@@ -403,7 +413,17 @@ fn init_gemini(
     }
 
     let lain_entry = serde_json::json!({
-        "command": which::which("lain").map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "lain".to_string()),
+        // IMPORTANT: `command` must be a PATH-resolvable name, not an
+        // absolute path. Claude Code's MCP loader silently ignores stdio
+        // entries whose `command` is absolute, so the server is
+        // registered in settings.json but never connected (verified:
+        // `claude mcp list` and a live behavior test reported "no Lain
+        // MCP server connected" until the path was replaced with the
+        // bare name). The Kimi adapter applies the same rule via a
+        // `./bin/lain` wrapper for the same reason. Resolving the
+        // binary via `which` would defeat the purpose, so we hardcode
+        // the name and trust the user to keep `lain` on PATH.
+        "command": "lain",
         "args": args
     });
 
@@ -492,7 +512,17 @@ fn write_mcp_server_entry(
     }
 
     let mut entry = serde_json::json!({
-        "command": which::which("lain").map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "lain".to_string()),
+        // IMPORTANT: `command` must be a PATH-resolvable name, not an
+        // absolute path. Claude Code's MCP loader silently ignores stdio
+        // entries whose `command` is absolute, so the server is
+        // registered in settings.json but never connected (verified:
+        // `claude mcp list` and a live behavior test reported "no Lain
+        // MCP server connected" until the path was replaced with the
+        // bare name). The Kimi adapter applies the same rule via a
+        // `./bin/lain` wrapper for the same reason. Resolving the
+        // binary via `which` would defeat the purpose, so we hardcode
+        // the name and trust the user to keep `lain` on PATH.
+        "command": "lain",
         "args": args
     });
     if let Some(extra) = extra_fields {
@@ -717,6 +747,41 @@ fn init_kimi(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: Claude Code silently ignores stdio MCP entries whose
+    /// `command` is an absolute path. The MCP server is registered but
+    /// never connected (verified via `claude mcp list` and a live
+    /// behavior test reporting "no Lain MCP server connected"). The
+    /// init must write a bare PATH-resolvable name.
+    #[test]
+    fn init_claude_writes_lain_command_not_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        Command::new("git").args(["init", "--quiet"]).current_dir(&workspace).status().unwrap();
+
+        let claude_dir = home.join(".claude");
+        let settings = claude_dir.join("settings.json");
+        let lain_md = claude_dir.join("LAIN.md");
+        init_claude(None, "stdio", 0, true, &claude_dir, &settings, &lain_md).unwrap();
+
+        let body = std::fs::read_to_string(&settings).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let command = json
+            .pointer("/mcpServers/lain/command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            command, "lain",
+            "command must be a bare PATH-resolvable name, not {command:?}"
+        );
+        assert!(
+            !command.starts_with('/') && !command.starts_with("./"),
+            "command must not be an absolute or plugin-relative path"
+        );
+    }
 
     #[test]
     fn init_claude_writes_workspace_auto() {
