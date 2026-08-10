@@ -761,6 +761,8 @@ fn init_kimi(
 mod tests {
     use super::*;
 
+    const OPENCODE_AGENTS_MD: &str = include_str!("../../hooks/opencode/AGENTS.md");
+
     /// Regression: Claude Code silently ignores stdio MCP entries whose
     /// `command` is an absolute path. The MCP server is registered but
     /// never connected (verified via `claude mcp list` and a live
@@ -889,6 +891,41 @@ mod tests {
         // Restore PATH regardless of outcome.
         std::env::set_var("PATH", &original_path);
         result.unwrap();
+    }
+
+    /// Regression pin for the bundled OpenCode `AGENTS.md`. The agent only
+    /// reaches for the right tool if the doc actually contains the trigger
+    /// phrases and tool table. Asserts the structural shape so a future edit
+    /// can't silently strip the guidance without a test failure.
+    #[test]
+    fn opencode_agents_md_contains_key_guidance() {
+        let doc = OPENCODE_AGENTS_MD;
+        assert!(
+            doc.contains("When to use lain"),
+            "AGENTS.md must have a 'When to use lain' section"
+        );
+        let required_tools = [
+            "get_health",
+            "find_anchors",
+            "get_blast_radius",
+            "trace_dependency",
+            "semantic_search",
+            "explain_symbol",
+            "get_code_snippet",
+            "find_dead_code",
+            "get_coupling_radar",
+        ];
+        let missing: Vec<&str> = required_tools
+            .iter()
+            .filter(|name| !doc.contains(**name))
+            .copied()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "AGENTS.md is missing tools: {missing:?}"
+        );
+        assert!(doc.contains("Workflows"), "missing 'Workflows' section");
+        assert!(doc.contains("Caveats"), "missing 'Caveats' section");
     }
 
     /// Regression pin for the Claude awareness doc. The agent only reaches

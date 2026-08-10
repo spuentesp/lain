@@ -166,3 +166,18 @@ command = "/home/sebastian/.local/lain/lain"
 default_args = ["--workspace", "{{workspace}}", "--transport", "stdio", "--embedding-model", "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx"]
 headless_probe = []
 format = "http"
+
+[[agent]]
+id = "opencode"
+display_name = "OpenCode"
+binary = "opencode"
+detect_paths = ["~/.config/opencode"]
+config_user = "~/.config/opencode/opencode.json"
+config_project = "opencode.json"
+config_format = "jsonc"
+mcp_section = "mcp"
+mcp_name = "lain"
+transport = "stdio"
+command = "lain"
+default_args = []
+headless_probe = ["opencode", "--version"]
