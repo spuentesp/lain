@@ -380,9 +380,15 @@ impl ToolExecutor {
             format!("Loaded ({}d embeddings)", self.ctx.embedder.embedding_dim())
         };
 
+        // Surface the resolved workspace so callers can confirm
+        // `--workspace auto` (or any other resolution path) picked the right
+        // repo. This is the field MCP clients read back to verify the server
+        // is indexing the project they expected.
+        let workspace_display = self.ctx.workspace.display().to_string();
+
         let mut output = format!(
-            "## Lain Server Health\n\n- **Status:** Operational ✅\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
-            nodes, edges, overlay_stats.node_count, last_commit, embedder_status
+            "## Lain Server Health\n\n- **Workspace:** {}\n- **Status:** Operational ✅\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
+            workspace_display, nodes, edges, overlay_stats.node_count, last_commit, embedder_status
         );
 
         output.push_str("\n### Language Support\n");
