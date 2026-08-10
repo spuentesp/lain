@@ -7,7 +7,7 @@
 //! adapter does not need to special-case the format.
 
 use super::{
-    expand_home, server_for, write_gemini_mcp_config, AdapterError, AgentAdapter, InstallScope,
+    expand_home, server_for, write_gemini_mcp_config, AdapterError, AgentAdapter, AUTO_WORKSPACE, InstallScope,
 };
 use crate::cmds::agents::manifest::AgentEntry;
 use serde_json::Value;
@@ -25,7 +25,7 @@ impl AgentAdapter for AntigravityAdapter {
             InstallScope::Workspace => return Err(AdapterError::Unsupported(scope, self.id().into())),
         }).into() else { return Err(AdapterError::Unsupported(scope, self.id().into())); };
         let path = expand_home(path);
-        let workspace = "auto".to_string();
+        let workspace = AUTO_WORKSPACE.to_string();
         let server = server_for(entry, &workspace);
         write_gemini_mcp_config(&path, &server)
     }

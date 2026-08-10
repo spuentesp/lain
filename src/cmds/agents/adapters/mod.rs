@@ -2,6 +2,14 @@
 
 use serde_json::{json, Value};
 
+/// Sentinel workspace string written into per-agent MCP server args.
+///
+/// Mirrors the CLI sentinel consumed by `--workspace auto` and the
+/// `resolve_auto_workspace` helper: when the spawned lain process starts,
+/// it walks up from the current working directory to the enclosing git
+/// repository. Centralised here so every adapter writes the same literal.
+pub const AUTO_WORKSPACE: &str = "auto";
+
 pub mod antigravity;
 pub mod claude;
 pub mod cline;

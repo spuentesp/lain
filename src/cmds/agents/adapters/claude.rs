@@ -1,4 +1,4 @@
-use super::{expand_home, server_for, AdapterError, AgentAdapter, InstallScope};
+use super::{expand_home, server_for, AdapterError, AgentAdapter, AUTO_WORKSPACE, InstallScope};
 use crate::cmds::agents::manifest::AgentEntry;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -20,7 +20,7 @@ impl AgentAdapter for ClaudeAdapter {
             let raw = std::fs::read_to_string(&path)?;
             serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
         } else { json!({}) };
-        let workspace = "auto".to_string();
+        let workspace = AUTO_WORKSPACE.to_string();
         let server = server_for(entry, &workspace);
         let obj = doc.as_object_mut().ok_or_else(|| AdapterError::Shape("root not object".into()))?;
         let servers = obj.entry(entry.mcp_section.clone()).or_insert_with(|| json!({}));
