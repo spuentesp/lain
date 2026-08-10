@@ -373,6 +373,28 @@ mod tests {
         }
     }
 
+    /// Save and restore the `XDG_CONFIG_HOME` env var so test mutations
+    /// don't leak into other tests sharing the same process.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn tmp(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir()
             .join(format!("lain-state-{}-{}", std::process::id(), tag))
@@ -508,7 +530,7 @@ mod tests {
     fn resolve_auto_workspace_finds_repo_root() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tmp("auto-root");
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", &dir);
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git2::Repository::init(&repo).unwrap();
@@ -526,7 +548,7 @@ mod tests {
     fn resolve_auto_workspace_walks_up_to_repo_root() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tmp("auto-subdir");
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", &dir);
         let repo = dir.join("repo");
         let sub = repo.join("a/b/c");
         std::fs::create_dir_all(&sub).unwrap();
@@ -544,10 +566,23 @@ mod tests {
     #[test]
     fn resolve_auto_workspace_errors_outside_repo() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tmp("auto-none");
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        // Use a freshly-created tempdir that is itself NOT inside any git
+        // repo, so the "no-repo" subdir is guaranteed to live outside of
+        // a discovered repository. This keeps the test deterministic
+        // regardless of where the build sandbox places /tmp.
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let dir = tmpdir.path().to_path_buf();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", &dir);
         let outside = dir.join("no-repo");
         std::fs::create_dir_all(&outside).unwrap();
+
+        // Sanity: confirm the chosen directory has no enclosing repo, so
+        // the assertion below is meaningful.
+        assert!(
+            git2::Repository::discover(&outside).is_err(),
+            "test setup: expected no enclosing git repo at {}",
+            outside.display()
+        );
 
         let cwd = std::env::current_dir().unwrap();
         let _restore = DirGuard::new(cwd);
@@ -564,11 +599,10 @@ mod tests {
     fn resolve_auto_workspace_rejects_bare_repo() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tmp("auto-bare");
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", &dir);
         let bare = dir.join("bare.git");
         std::fs::create_dir_all(&bare).unwrap();
-        let repo = git2::Repository::init_bare(&bare).unwrap();
-        let _ = repo; // silence unused
+        git2::Repository::init_bare(&bare).unwrap();
         let cwd = std::env::current_dir().unwrap();
         let _restore = DirGuard::new(cwd);
         std::env::set_current_dir(&bare).unwrap();
