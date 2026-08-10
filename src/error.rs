@@ -53,7 +53,7 @@ pub enum LainError {
     #[error("Config error: {0}")]
     Config(String),
 
-    #[error("{0}")]
+    #[error("Workspace error: {0}")]
     Workspace(String),
 
     #[error("Not implemented: {0}")]
