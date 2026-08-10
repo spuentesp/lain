@@ -81,28 +81,28 @@ pub fn run_init(
             let claude_dir = home_dir.join(".claude");
             let settings_path = claude_dir.join("settings.json");
             let lain_md_path = claude_dir.join("LAIN.md");
-            init_claude(&workspace, embedding_model, transport, port, yes, &claude_dir, &settings_path, &lain_md_path)?;
+            init_claude(embedding_model, transport, port, yes, &claude_dir, &settings_path, &lain_md_path)?;
         }
         "gemini" => {
             let gemini_dir = home_dir.join(".gemini");
             let settings_path = gemini_dir.join("settings.json");
-            init_gemini(&workspace, embedding_model, transport, port, yes, &gemini_dir, &settings_path)?;
+            init_gemini(embedding_model, transport, port, yes, &gemini_dir, &settings_path)?;
         }
         "cursor" => {
             let cursor_dir = home_dir.join(".cursor");
-            init_cursor(&workspace, embedding_model, transport, port, yes, &cursor_dir)?;
+            init_cursor(embedding_model, transport, port, yes, &cursor_dir)?;
         }
         "windsurf" => {
             let windsurf_dir = home_dir.join(".codeium/windsurf");
-            init_windsurf(&workspace, embedding_model, transport, port, yes, &windsurf_dir)?;
+            init_windsurf(embedding_model, transport, port, yes, &windsurf_dir)?;
         }
         "cline" => {
             let cline_dir = home_dir.join(".cline");
-            init_cline(&workspace, embedding_model, transport, port, yes, &cline_dir)?;
+            init_cline(embedding_model, transport, port, yes, &cline_dir)?;
         }
         "kimi" => {
             let kimi_root = home_dir.join(".kimi-code");
-            init_kimi(&workspace, embedding_model, transport, port, yes, &kimi_root)?;
+            init_kimi(embedding_model, transport, port, yes, &kimi_root)?;
         }
         other => {
             anyhow::bail!("Unknown agent '{}'", other);
@@ -185,7 +185,6 @@ fn detect_agent(home_dir: &std::path::Path) -> &'static str {
 }
 
 fn init_claude(
-    workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     transport: &str,
     port: u16,
@@ -359,7 +358,6 @@ fn install_claude_hook(
 }
 
 fn init_gemini(
-    workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     transport: &str,
     port: u16,
@@ -444,7 +442,6 @@ fn write_mcp_server_entry(
     settings_file: &str,
     agent_label: &str,
     extra_fields: Option<serde_json::Value>,
-    workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     transport: &str,
     yes: bool,
@@ -515,7 +512,6 @@ fn write_mcp_server_entry(
 /// Cursor MCP config: `~/.cursor/mcp.json`. Schema documented at
 /// https://docs.cursor.com/context/model-context-protocol#configuration
 fn init_cursor(
-    workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     transport: &str,
     _port: u16,
@@ -524,14 +520,13 @@ fn init_cursor(
 ) -> Result<()> {
     write_mcp_server_entry(
         cursor_dir, "mcp.json", "Cursor", None,
-        workspace, embedding_model, transport, yes,
+        embedding_model, transport, yes,
     )
 }
 
 /// Windsurf MCP config: `~/.codeium/windsurf/mcp_config.json`. Schema
 /// documented at https://docs.codeium.com/windsurf/mcp
 fn init_windsurf(
-    workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     transport: &str,
     _port: u16,
@@ -540,14 +535,13 @@ fn init_windsurf(
 ) -> Result<()> {
     write_mcp_server_entry(
         windsurf_dir, "mcp_config.json", "Windsurf", None,
-        workspace, embedding_model, transport, yes,
+        embedding_model, transport, yes,
     )
 }
 
 /// Cline MCP config: `~/.cline/mcp_settings.json`. Schema documented at
 /// https://docs.cline.bot/mcp/configuring-mcp-servers
 fn init_cline(
-    workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     transport: &str,
     _port: u16,
@@ -557,7 +551,7 @@ fn init_cline(
     write_mcp_server_entry(
         cline_dir, "mcp_settings.json", "Cline",
         Some(serde_json::json!({ "disabled": false })),
-        workspace, embedding_model, transport, yes,
+        embedding_model, transport, yes,
     )
 }
 
@@ -609,7 +603,6 @@ fn write_agent_doc(home_dir: &std::path::Path, dir_name: &str, file_name: &str, 
 /// PATH-resolvable name (or start with `./`); an absolute path is
 /// rejected by the plugin manager.
 fn init_kimi(
-    workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     transport: &str,
     port: u16,
@@ -719,7 +712,7 @@ mod tests {
         let claude_dir = home.join(".claude");
         let settings = claude_dir.join("settings.json");
         let lain_md = claude_dir.join("LAIN.md");
-        init_claude(&workspace, None, "stdio", 0, true, &claude_dir, &settings, &lain_md).unwrap();
+        init_claude(None, "stdio", 0, true, &claude_dir, &settings, &lain_md).unwrap();
 
         let body = std::fs::read_to_string(&settings).unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -745,7 +738,7 @@ mod tests {
         Command::new("git").args(["init", "--quiet"]).current_dir(&workspace).status().unwrap();
 
         let kimi_root = home.join(".kimi-code");
-        init_kimi(&workspace, None, "stdio", 0, true, &kimi_root).unwrap();
+        init_kimi(None, "stdio", 0, true, &kimi_root).unwrap();
 
         let plugin_path = kimi_root.join("plugins/managed/lain/kimi.plugin.json");
         let body = std::fs::read_to_string(&plugin_path).unwrap();
