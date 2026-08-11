@@ -5,7 +5,7 @@ class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://lain.dev"
 <<<<<<< HEAD
-  version "0.4.2"
+  version "0.5.0"
 =======
   version "0.4.0"
 >>>>>>> claude/ieee-830-srs-spec-m3ajim
