@@ -38,11 +38,20 @@ fn install_and_verify_for_supported_agents() {
         .args(["init", "--quiet", tmp.path().to_str().unwrap()])
         .status().expect("git init");
     assert!(init_status.success(), "git init failed");
+    // The test hardcodes a user-local model path. In CI the file does
+    // not exist, so pass --embedding-model only when present; otherwise
+    // the server falls back to stub mode and starts fast (the test only
+    // needs get_health to respond, which works in stub mode).
     let model = "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx";
+    let model_flag: &[&str] = if std::path::Path::new(model).exists() {
+        &["--embedding-model", model]
+    } else {
+        &[]
+    };
     let mut server = ChildGuard(Command::new(lain_bin())
         .args(["--workspace", tmp.path().to_str().unwrap(),
-               "--transport", "http", "--port", &port.to_string(),
-               "--embedding-model", model])
+               "--transport", "http", "--port", &port.to_string()])
+        .args(model_flag)
         .envs(env_overrides.iter().copied())
         .stdout(Stdio::null()).stderr(Stdio::null())
         .spawn().expect("spawn lain"));
