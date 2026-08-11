@@ -8,13 +8,15 @@ pub mod remove;
 pub mod verify;
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::manifest::{load_manifest, AgentEntry};
     use std::sync::Mutex;
 
     // Serializes tests that mutate the process-global HOME env var so they
     // don't race each other when cargo runs the suite in parallel.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    // `pub` so other test modules (e.g. cmds::init::tests) can also serialize
+    // against HOME mutations performed outside this module.
+    pub static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn loader_returns_known_agents() {

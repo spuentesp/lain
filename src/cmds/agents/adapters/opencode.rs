@@ -106,14 +106,17 @@ impl AgentAdapter for OpenCodeAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::cmds::agents::manifest::AgentEntry;
-    use std::sync::Mutex;
 
     // Serializes tests that mutate the process-global HOME env var so they
-    // don't race each other when cargo runs the suite in parallel.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    // don't race each other when cargo runs the suite in parallel. Aliased to
+    // the agents-level `HOME_LOCK` so all HOME-mutating tests across the
+    // binary share one mutex (the previous per-module mutexes did not
+    // synchronize with each other, producing intermittent failures between
+    // `claude_round_trip_under_temp_home` and the opencode adapter tests).
+    pub use super::super::super::tests::HOME_LOCK;
 
     fn entry() -> AgentEntry {
         // Minimal manifest row. Only the fields the adapter reads matter here.

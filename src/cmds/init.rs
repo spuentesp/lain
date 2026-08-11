@@ -7,7 +7,7 @@ use crate::cmds::agents::adapters::AUTO_WORKSPACE;
 
 /// Supported agent names. Anything else is a user error and `run_init` will
 /// refuse rather than silently writing nothing.
-const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "kimi", "auto"];
+const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "kimi", "opencode", "auto"];
 
 // ── Bundled agent resources ────────────────────────────────────────────────
 //
@@ -24,6 +24,7 @@ const WINDSURF_RULES_MD: &str = include_str!("../../hooks/windsurf/lain-rules.md
 const CLINE_RULES_MD: &str = include_str!("../../hooks/cline/lain-rules.md");
 const KIMI_SKILL_MD: &str = include_str!("../../hooks/kimi/skills/lain/SKILL.md");
 const KIMI_PLUGIN_WRAPPER_SH: &str = include_str!("kimi_plugin_wrapper.sh");
+const OPENCODE_AGENTS_MD: &str = include_str!("../../hooks/opencode/AGENTS.md");
 
 pub fn run_init(
     agent: &str,
@@ -32,6 +33,7 @@ pub fn run_init(
     transport: &str,
     port: u16,
     yes: bool,
+    scope: &str,
 ) -> Result<()> {
     if !SUPPORTED_AGENTS.contains(&agent) {
         anyhow::bail!(
@@ -106,6 +108,16 @@ pub fn run_init(
         "kimi" => {
             let kimi_root = home_dir.join(".kimi-code");
             init_kimi(embedding_model, transport, port, yes, &kimi_root)?;
+        }
+        "opencode" => {
+            init_opencode(
+                workspace,
+                embedding_model,
+                transport,
+                port,
+                yes,
+                scope,
+            )?;
         }
         other => {
             anyhow::bail!("Unknown agent '{}'", other);
@@ -757,9 +769,69 @@ fn init_kimi(
     Ok(())
 }
 
+/// Install Lain for OpenCode. Writes `opencode.json` (MCP config) and,
+/// when `scope == "project"`, `AGENTS.md` (awareness doc) in the
+/// workspace root. When `scope == "user"`, writes the global
+/// `~/.config/opencode/opencode.json` and skips `AGENTS.md` (a
+/// per-project convention, inappropriate to write globally).
+fn init_opencode(
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    _transport: &str,
+    _port: u16,
+    _yes: bool,
+    scope: &str,
+) -> Result<()> {
+    if scope != "project" && scope != "user" {
+        anyhow::bail!(
+            "init_opencode: --scope must be 'project' or 'user', got '{}'",
+            scope
+        );
+    }
+    use crate::cmds::agents::adapters::opencode::build_opencode_lain_entry;
+
+    let target_path: std::path::PathBuf = if scope == "project" {
+        workspace.join("opencode.json")
+    } else {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+        home.join(".config/opencode/opencode.json")
+    };
+
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut doc: serde_json::Value = if target_path.exists() {
+        let raw = std::fs::read_to_string(&target_path)?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    {
+        let schema = doc.as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("opencode.json root is not a JSON object"))?;
+        let mcp = schema.entry("mcp".to_string()).or_insert_with(|| serde_json::json!({}));
+        let mcp_obj = mcp.as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("opencode.json `mcp` is not an object"))?;
+        mcp_obj.insert("lain".to_string(), build_opencode_lain_entry(embedding_model));
+    }
+    let serialized = serde_json::to_string_pretty(&doc)?;
+    std::fs::write(&target_path, serialized)?;
+    println!("Wrote OpenCode MCP config to {}", target_path.display());
+
+    if scope == "project" {
+        let agents_path = workspace.join("AGENTS.md");
+        std::fs::write(&agents_path, OPENCODE_AGENTS_MD)?;
+        println!("Wrote OpenCode awareness doc to {}", agents_path.display());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmds::agents::adapters::opencode::build_opencode_lain_entry;
 
     const OPENCODE_AGENTS_MD: &str = include_str!("../../hooks/opencode/AGENTS.md");
 
@@ -1170,5 +1242,103 @@ mod tests {
             stderr.contains("--workspace auto"),
             "stderr should explain the missing git repo; got: {stderr}"
         );
+    }
+
+    fn temp_git_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("repo");
+        std::fs::create_dir_all(&ws).unwrap();
+        Command::new("git").args(["init", "--quiet"]).current_dir(&ws).status().unwrap();
+        (tmp, ws)
+    }
+
+    #[test]
+    fn init_opencode_writes_verified_mcp_config() {
+        let (_tmp, ws) = temp_git_workspace();
+        init_opencode(&ws, None, "stdio", 0, true, "project").unwrap();
+        let body = std::fs::read_to_string(ws.join("opencode.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let lain = doc.pointer("/mcp/lain").expect("mcp.lain present");
+        assert_eq!(lain["type"], "local");
+        let cmd = lain["command"].as_array().expect("command is JSON array");
+        let cmd: Vec<String> = cmd.iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert_eq!(cmd.first().map(String::as_str), Some("lain"));
+        assert!(cmd.windows(2).any(|w| w == ["--workspace", "auto"]));
+        assert!(cmd.windows(2).any(|w| w == ["--transport", "stdio"]));
+        assert_eq!(lain["enabled"], true);
+        assert_eq!(lain["timeout"], 30000);
+    }
+
+    #[test]
+    fn init_opencode_includes_embedding_model_when_provided() {
+        let (_tmp, ws) = temp_git_workspace();
+        let model = std::path::Path::new("/models/all-MiniLM-L6-v2.onnx");
+        init_opencode(&ws, Some(model), "stdio", 0, true, "project").unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ws.join("opencode.json")).unwrap()).unwrap();
+        let cmd: Vec<String> = doc.pointer("/mcp/lain/command").unwrap().as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let idx = cmd.iter().position(|s| s == "--embedding-model").expect("--embedding-model present");
+        assert_eq!(cmd[idx + 1], "/models/all-MiniLM-L6-v2.onnx");
+    }
+
+    #[test]
+    fn init_opencode_writes_agents_md_in_project_root() {
+        let (_tmp, ws) = temp_git_workspace();
+        init_opencode(&ws, None, "stdio", 0, true, "project").unwrap();
+        let agents = ws.join("AGENTS.md");
+        assert!(agents.exists(), "AGENTS.md must be written to project root");
+        let body = std::fs::read_to_string(&agents).unwrap();
+        assert!(body.contains("When to use lain"));
+        assert!(body.contains("find_anchors"));
+    }
+
+    #[test]
+    fn init_opencode_scope_user_writes_global_config() {
+        // Serialize against other tests that mutate HOME. Cargo runs tests
+        // in parallel, and a concurrent HOME change here would derail
+        // `claude_round_trip_under_temp_home` (in cmds::agents::tests) and
+        // `opencode_adapter_*` (in cmds::agents::adapters::opencode::tests).
+        // Note: as of Task 3, both `HOME_LOCK` aliases resolve to the same
+        // mutex (`crate::cmds::agents::tests::HOME_LOCK`), so we only lock
+        // once — `std::sync::Mutex` is not reentrant.
+        let _home_guard = crate::cmds::agents::tests::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("repo");
+        std::fs::create_dir_all(&ws).unwrap();
+        Command::new("git").args(["init", "--quiet"]).current_dir(&ws).status().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", tmp.path());
+        init_opencode(&ws, None, "stdio", 0, true, "user").unwrap();
+        if let Some(h) = &original_home { std::env::set_var("HOME", h); } else { std::env::remove_var("HOME"); }
+
+        let global = tmp.path().join(".config/opencode/opencode.json");
+        assert!(global.exists(), "user-scope must write ~/.config/opencode/opencode.json");
+        assert!(!ws.join("opencode.json").exists(), "user-scope must NOT write project config");
+        assert!(!ws.join("AGENTS.md").exists(), "user-scope must NOT write AGENTS.md");
+    }
+
+    #[test]
+    fn init_opencode_merges_with_existing_opencode_json() {
+        let (_tmp, ws) = temp_git_workspace();
+        std::fs::write(
+            ws.join("opencode.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcp": {
+                    "other-server": { "type": "local", "command": ["x"], "enabled": true }
+                },
+                "$schema": "https://opencode.ai/config.json"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        init_opencode(&ws, None, "stdio", 0, true, "project").unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ws.join("opencode.json")).unwrap()).unwrap();
+        assert!(doc.pointer("/mcp/other-server").is_some(), "other-server preserved");
+        assert!(doc.pointer("/mcp/lain").is_some(), "lain added");
+        assert_eq!(doc["$schema"], "https://opencode.ai/config.json", "other top-level keys preserved");
     }
 }

@@ -43,6 +43,11 @@ enum Commands {
         #[arg(long, default_value = "stdio")] transport: String,
         #[arg(long, default_value = "9999")] port: u16,
         #[arg(long, short)] yes: bool,
+        /// Where to write the agent's MCP config: `project` (in-repo) or
+        /// `user` (global, e.g. `~/.config/...`). Currently only honored
+        /// by `--agent opencode`; other agents ignore it.
+        #[arg(long, default_value = "project", value_parser = ["project", "user"])]
+        scope: String,
     },
     Query {
         #[arg(required = true)] expression: String,
@@ -144,13 +149,13 @@ async fn main() -> Result<()> {
     tracing::info!(workspace = %args.workspace.display(), "Serving repo");
     if let Some(cmd) = args.command {
         match cmd {
-            Commands::Init { agent, workspace, embedding_model, transport, port, yes } => {
+            Commands::Init { agent, workspace, embedding_model, transport, port, yes, scope } => {
                 // Propagate top-level --workspace when subcommand didn't override it.
                 let workspace = workspace.unwrap_or(args.workspace);
                 // Resolve workspace through the registry: --workspace wins,
                 // else the active project, else cwd's .lain, else error.
                 let resolved = resolve_workspace_path(&workspace);
-                return cmds::run_init(&agent, Some(&resolved), embedding_model.as_deref(), &transport, port, yes);
+                return cmds::run_init(&agent, Some(&resolved), embedding_model.as_deref(), &transport, port, yes, &scope);
             }
             Commands::Query { expression, workspace } => {
                 // Top-level --workspace is the documented invocation form
