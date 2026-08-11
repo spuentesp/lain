@@ -233,7 +233,7 @@ That's 8 tests. The two new ones (`cross_repo_calls_edge_resolves_to_global_node
 
 ### A fixture — extensions to `tests/e2e/federation_e2e.sh`
 
-**Existing script stays.** The 3 famous-repo assertions (`list_repos == 3`, `health.total_repos == 3`, `search_org("serialize") ≥ 1`) are unchanged.
+**Existing script stays.** The 3 famous-repo baseline assertions remain meaningful: `list_repos` still lists the 3 famous repos (alongside OTel entries), and `search_org("serialize") ≥ 1` still passes (famous-repo concept found). The existing `total_repos == 3` strict check is relaxed to `total_repos >= 3` (famous-repo presence) so the same script can also assert the new `total_repos >= 12` ceiling after OTel repos are added. Both checks live in the script; the famous-repo baseline is preserved in spirit even though the count assertion changed.
 
 **Additions** between existing line 43 (the heredoc closing the `repos.yaml`) and line 45 (the "Starting lain server" line):
 
@@ -431,7 +431,7 @@ If the OTel demo clone is unreliable in the nightly environment, the script can 
 1. `src/federation/federated_index.rs::project_repo` projects every per-repo edge into the global backend (Pass A).
 2. `src/federation/federated_index.rs::project_repo` produces cross-repo `Calls` edges for unambiguous per-repo `Calls` references to functions in other repos (Pass B).
 3. `tests/federation_cross_repo_e2e.rs` exists; builds with `--features test-utils`; all 8 tests pass on a clean clone.
-4. `tests/e2e/federation_e2e.sh` extended; existing 3 assertions still pass; new OTel assertions pass against a freshly cloned OTel demo at upstream HEAD.
+4. `tests/e2e/federation_e2e.sh` extended; the existing famous-repo baseline stays meaningful (the `total_repos == 3` check is relaxed to `>= 3` so the same script can also assert `total_repos >= 12` after OTel repos are added); the other 2 famous-repo assertions (`list_repos` lists the 3 famous repos, `search_org("serialize") ≥ 1`) are unchanged; new OTel assertions pass against a freshly cloned OTel demo at upstream HEAD.
 5. `cargo test --test federation_cross_repo_e2e` passes in CI on a clean PR branch.
 6. `tests/e2e/federation_e2e.sh` (extended) passes in the nightly workflow.
 7. `docs/FEDERATION.md` smoke-test and performance sections updated with pointers to both fixtures.
