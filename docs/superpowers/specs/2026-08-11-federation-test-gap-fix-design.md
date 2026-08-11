@@ -20,9 +20,11 @@ Lain's federation mode (`lain server --config repos.yaml`) answers org-wide stru
 
 `src/mcp/federation_tools.rs` already has a unit test (`cross_repo_blast_radius_walks_calls_across_repo_boundaries` and variants) that proves `GraphBackend::traverse` **correctly walks `Calls` edges whose source and target live in different repos** when such edges exist in the global petgraph. The traversal logic is right.
 
-**But the federation never actually creates such edges in production.** Looking at `src/federation/federated_index.rs::project_repo`, the only cross-repo edges it inserts are `CrossRepoSameSymbol` (via `find_cross_repo_matches`). Per-repo `Calls` edges come from each `RepoIndex`'s `GraphDatabase`, where they point to local reference / import names — never to a global node in another repo. So when an agent asks `get_cross_repo_blast_radius` for a function in repo A that genuinely calls a function in repo B, the result is empty for B's bucket: federation knows the symbols exist in both repos (via `CrossRepoSameSymbol`) but cannot trace the call chain across the boundary.
+**But the federation never actually creates such edges in production — and the gap is wider than that.** Reading `src/federation/federated_index.rs::project_repo` (lines 84–119) carefully: it only (1) upserts per-repo **nodes** (re-keyed to global ids) and (2) adds `CrossRepoSameSymbol` edges from `find_cross_repo_matches`. It does **not** call `RepoIndex::edges()` (`src/federation/repo_index.rs:106`) at all. **No per-repo `Calls`, `Contains`, `Defines`, or `Imports` edges are projected into the global backend.** Existing federation unit tests that pass (the unit test above, and `federation_index_for_test` in `src/federation/mod.rs`) all manually insert `Calls` edges via `backend.upsert_edge(...)` or `insert_edges_batch(...)`, bypassing `project_repo`.
 
-That's a feature gap, not just a test gap. To make "analyze interconnectedly" real at the call-chain level, the federation must produce cross-repo `Calls` edges at projection time. This spec does both: the engine change that produces the edges, and the test fixtures that prove they exist and the traversal walks them.
+So in production today, `get_cross_repo_blast_radius` returns empty for every seed — not because the seed has no cross-repo callers, but because the global backend has zero `Calls` edges of any kind. Both intra-repo and cross-repo call-chain reasoning are unavailable.
+
+That's a feature gap, not just a test gap. To make "analyze interconnectedly" real at the call-chain level, the federation must (1) actually project per-repo edges into the global backend, and (2) resolve cross-repo `Calls` references to global nodes in other repos. This spec does both: two engine passes, plus test fixtures that prove they work end-to-end.
 
 The upcoming Workspaces feature (`docs/superpowers/specs/2026-08-11-lain-workspaces-design.md`, forthcoming) sits directly on the federation substrate — a workspace is a named subset of `repos.yaml`'s repos that the federation engine indexes together. Before we build that, we need evidence the substrate actually produces and traverses cross-repo call chains.
 
@@ -37,8 +39,10 @@ Together they turn the federation's correctness claims from "trust the unit test
 
 ## Goals
 
-1. **Federation engine change:** `project_repo` produces cross-repo `Calls` edges in the global petgraph by resolving per-repo `Calls` references to global nodes in other repos (via the symbol index). Existing traversal logic (proven cross-repo correct by the unit tests) now has real cross-repo edges to walk.
-2. **Per-PR guarantee** that federation's semantic contracts hold: `resolve_symbol` returns the right repo for unique / ambiguous / not-found inputs, cross-repo `Calls` edges exist after indexing, `get_cross_repo_blast_radius` walks them across repo boundaries and buckets by repo, `search_org` finds shared concepts across repos.
+1. **Federation engine change (two passes):**
+   - **Pass A:** `project_repo` projects every per-repo edge (`Calls`, `Contains`, `Defines`, `Imports`, etc.) into the global petgraph by re-keying source and target ids to global format. After this pass, intra-repo `Calls` traversal works in production for the first time.
+   - **Pass B:** After Pass A, `project_repo` walks the projected `Calls` edges whose target is a reference name (not a defined function in the source repo), looks each name up in `symbol_to_repos`, and inserts a cross-repo `Calls` edge when the lookup is unambiguous. After this pass, cross-repo `Calls` traversal works.
+2. **Per-PR guarantee** that federation's semantic contracts hold: `resolve_symbol` returns the right repo for unique / ambiguous / not-found inputs, both intra-repo and cross-repo `Calls` edges exist after indexing, `get_cross_repo_blast_radius` walks them and buckets by repo, `search_org` finds shared concepts across repos.
 3. **Nightly guarantee** that federation works against real polyglot OSS code: ≥9 OTel services indexed (out of the 12 service subdirs at upstream HEAD) across 6+ languages, `search_org` finds shared domain concepts (`Product`, `Money`) in ≥2 repos, `get_repo_info` returns valid shape for a known OTel service, `get_cross_repo_blast_radius` returns valid shape against a documented gRPC method.
 4. **No regression** to the existing per-PR test matrix or the existing e2e behavior — the existing 3-repo e2e assertions stay green and become the "famous independent projects still index" baseline.
 5. **CI-budget-bounded:** D adds <30s to per-PR. A extends the existing nightly e2e (no new CI workflow).
@@ -60,9 +64,12 @@ A small federation-engine change plus two new test artifacts.
 ```
 Production code (CHANGED):
   src/federation/federated_index.rs
-  └── project_repo(id) — now ALSO resolves per-repo Calls targets via the
-                          symbol_to_repos index and inserts cross-repo Calls
-                          edges in the global petgraph where unambiguous
+  └── project_repo(id) — gains TWO passes:
+        Pass A: re-key every per-repo edge (Calls/Contains/Defines/Imports/...)
+                to global ids and upsert into the global backend
+        Pass B: for each projected Calls edge whose target resolves (via
+                symbol_to_repos) to a single repo different from the source,
+                add a cross-repo Calls edge to the global node in that repo
 
 Per-PR (NEW):
   tests/federation_cross_repo_e2e.rs
@@ -89,7 +96,7 @@ Nightly / manual:
   └── NEW: get_cross_repo_blast_radius("GetProduct", "1..3") returns valid shape
 ```
 
-The production change is small and targeted: a new pass inside `project_repo` that takes per-repo `Calls` edges whose target is an unresolved name reference, looks the name up in `symbol_to_repos`, and — when the lookup is unambiguous and the target repo is different from the source repo — replaces the local target id with the global id. Ambiguous names and not-found names leave the original intra-repo edge in place (we don't fabricate cross-repo calls out of fuzzy matches).
+The production change has two passes, both inside `project_repo`. Pass A copies per-repo edges (re-keyed) into the global backend — this is the prerequisite Pass B needs. Pass B walks the projected `Calls` edges, takes those whose target is a reference name (not a defined function in the source repo), looks each name up in `symbol_to_repos`, and — when the lookup is unambiguous and the target repo is different from the source repo — adds a cross-repo `Calls` edge to the global node in that repo. Ambiguous names and not-found names leave the original intra-repo edge in place (we don't fabricate cross-repo calls out of fuzzy matches).
 
 ---
 
@@ -97,59 +104,84 @@ The production change is small and targeted: a new pass inside `project_repo` th
 
 ### Current behavior
 
-`project_repo(id)` does (today):
+`project_repo(id)` does (today), reading `src/federation/federated_index.rs:84–119`:
 
 1. Re-keys per-repo nodes from `(NodeType, path, name)` to global ids (`{id}:{NodeType}:{path}:{name}`) and upserts them into the `GraphBackend`.
-2. Re-keys and upserts per-repo edges (`Calls`, `Contains`, `Defines`, `Imports`, etc.) — including per-repo `Calls` edges whose target is a local reference name (a node that exists in this repo's `GraphDatabase` because the import is recorded as a placeholder, not because the function is defined here).
-3. Iterates over every other repo's nodes and runs `find_cross_repo_matches` against the projected repo's signatures, adding `CrossRepoSameSymbol` edges for matches above threshold.
+2. Iterates over every other repo's nodes and runs `find_cross_repo_matches` against the projected repo's signatures, adding `CrossRepoSameSymbol` edges for matches above threshold.
+3. Rebuilds the `symbol_to_repos` index.
 
-The per-repo `Calls` edges stay intra-repo even when the underlying call is to a function in another repo — the edge's target is the local reference placeholder, not the global node.
+**Notably absent:** `RepoIndex::edges()` (`src/federation/repo_index.rs:106`) is never called. No per-repo edges (`Calls`, `Contains`, `Defines`, `Imports`, etc.) are projected into the global backend. The global backend accumulates only `CrossRepoSameSymbol` edges. As a result, in production today, `get_cross_repo_blast_radius` returns empty for every seed — the global backend has zero `Calls` edges of any kind, and the traversal has nothing to walk.
 
 ### New behavior (this spec)
 
-After step 2 and before step 3, insert a new step 2.5:
+After step 1 and before step 2, insert **Pass A** (project per-repo edges). After Pass A and before the existing step 2, insert **Pass B** (resolve cross-repo `Calls` edges).
+
+#### Pass A — Project per-repo edges into the global backend
 
 ```rust
-// NEW: resolve per-repo Calls edges whose target is a reference/placeholder
-// against the symbol_to_repos index (which already reflects every OTHER repo
-// because they were all added via add_repo before project_repo runs).
-for edge in repo_index.calls_edges() {
-    if edge.source_id_starts_with(&repo_id)
-        && !edge.target_id_starts_with(&repo_id)
-        && let Some(global_target) = symbol_to_repos
-            .get(&edge.target_name())
-            .filter(|repos| repos.len() == 1)
-    {
-        // Unambiguous external owner — rewrite the edge to point at the
-        // global id of the function in the other repo.
-        backend.upsert_edge(GraphEdge::new(
-            EdgeType::Calls,
-            global_source_id,
-            global_target_id,
-        ))?;
-    }
-    // else: ambiguous (skip), not-found (leave intra-repo), or already global (skip)
+// NEW (Pass A): Re-key every per-repo edge to global ids and upsert into
+// the global backend. Source and target ids are rewritten from local
+// per-repo ids (whatever RepoIndex::edges() yields) to global ids.
+for edge in repo_index.edges() {
+    let global_source = GlobalId::new(id, ...).as_str().to_string();
+    let global_target = GlobalId::new(id, ...).as_str().to_string();
+    let mut rewritten = edge.clone();
+    rewritten.source_id = global_source;
+    rewritten.target_id = global_target;
+    self.backend.upsert_edge(rewritten)?;
 }
 ```
 
-The key correctness property: **we only fabricate a cross-repo `Calls` edge when the resolver is unambiguous** (single owner in `symbol_to_repos`). If a name is owned by ≥2 repos, we leave the intra-repo edge alone rather than guessing which owner the call meant. This is conservative on purpose — a wrong cross-repo edge would produce false positives in `get_cross_repo_blast_radius` results, which is worse than no cross-repo info.
+The exact id re-keying depends on what `RepoIndex::edges()` returns. If edges carry `(NodeType, path, name)` for source and target (in addition to the local id), re-keying is direct. If they carry only local ids, the implementation plan must derive `NodeType`/`path`/`name` from the local ids (via a lookup against the per-repo `nodes()` set).
+
+After Pass A, intra-repo `Calls` traversal works in production for the first time. `get_cross_repo_blast_radius("hash", "1..3")` now returns the inner_hash node.
+
+#### Pass B — Cross-repo `Calls` resolution
+
+```rust
+// NEW (Pass B): For each projected Calls edge whose target is a reference
+// name (a node that exists in this repo as an imported name but is defined
+// in another repo), look up the target's name in symbol_to_repos. If the
+// lookup is unambiguous and the target repo is different from the source
+// repo, insert a cross-repo Calls edge from the global source to the
+// global target in the other repo.
+for (global_source, ref_name) in self.repo_index(id).external_calls() {
+    if let Some(repos) = self.symbol_to_repos.get(ref_name) {
+        if repos.len() != 1 { continue; }            // ambiguous: skip
+        let target_repo = &repos[0];
+        if target_repo == id { continue; }            // already global: skip
+        let global_target = self.global_id(target_repo, ...).as_str().to_string();
+        self.backend.upsert_edge(GraphEdge::new(
+            EdgeType::Calls,
+            global_source,
+            global_target,
+        ))?;
+    }
+}
+```
+
+`external_calls()` is a new accessor on `RepoIndex` that returns `(global_source_id, target_name)` for every `Calls` edge where the target is not a function defined in this repo. The implementation walks `repo_index.edges()`, checks each `Calls` edge's target against `repo_index.nodes()` to determine "defined locally" vs "imported reference", and emits the tuple only for imports.
+
+After Pass B, cross-repo `Calls` traversal works. `get_cross_repo_blast_radius("auth", "1..3")` returns nodes bucketed into `shared`.
 
 ### Algorithm invariants
 
-- **No new edges created when the target name resolves to a node in the same repo.** Intra-repo calls stay intra-repo.
-- **No new edges created when the target name is ambiguous** (`symbol_to_repos.get(name)` returns ≥2 entries). Logged at debug level.
-- **No new edges created when the target name is not in `symbol_to_repos`** at all. Logged at debug level.
+- **Pass A always projects every per-repo edge** (no filtering). The global backend accumulates the full per-repo edge set, re-keyed.
+- **Pass B never creates an edge when the target name is ambiguous** (`symbol_to_repos.get(name)` returns ≥2 entries). Logged at debug level.
+- **Pass B never creates an edge when the target name is not in `symbol_to_repos`.** Logged at debug level.
+- **Pass B never creates an edge when the target repo is the same as the source repo.** (Defensive; shouldn't happen if `external_calls` filters correctly.)
 - **Edges are written via `upsert_edge` with the existing `Calls` edge type.** No new edge types introduced.
-- **Existing intra-repo `Calls` edges are not removed.** Both edges can coexist: the local reference placeholder remains as a `Calls` target (intra-repo), and a new `Calls` edge from the same source to the resolved global node is added (cross-repo). For traversal purposes the global one wins because it's what `find_path` and `get_cross_repo_blast_radius` see first (depending on graph order; the implementation plan must pin this down).
+- **Pass A's projected intra-repo edges coexist with Pass B's cross-repo edges.** A single `auth` node may have one `Calls` edge to a local reference (Pass A) and another `Calls` edge to the global node in `shared` (Pass B). For traversal purposes both edges are valid; the implementation plan must decide traversal ordering (the spec recommends: traverse all outgoing `Calls` edges from a node, regardless of source).
 
 ### Why this works
 
-The existing `GraphBackend::traverse(..., EdgeType::Calls, ...)` already walks `Calls` edges regardless of source/target repo (proven by `src/mcp/federation_tools.rs`'s unit tests, which manually insert cross-repo `Calls` edges and assert the traversal buckets correctly). The missing piece was the edges themselves. This spec adds them at the right point in the projection pipeline so the existing traversal logic has real cross-repo edges to walk.
+The existing `GraphBackend::traverse(..., EdgeType::Calls, ...)` already walks `Calls` edges regardless of source/target repo (proven by `src/mcp/federation_tools.rs`'s unit tests, which manually insert both intra- and cross-repo `Calls` edges and assert the traversal buckets correctly). The missing piece was the edges themselves — Pass A adds intra-repo edges, Pass B adds cross-repo edges. After both, the existing traversal logic has real edges to walk.
 
 ### Failure modes
 
-- **`project_repo` crashes mid-resolution**: per-repo state is already persisted (bincode under `data_dir/<id>/`); the global backend's `save_to_disk_sync` (called per `upsert_edge`) means a federation crash loses at most the in-flight batch. Re-running projection is idempotent because per-repo nodes are upserted with deterministic global ids.
-- **`symbol_to_repos` is stale at projection time**: it's rebuilt on every `add_repo` before `project_repo` runs, so when `project_repo(id)` runs, all OTHER repos are already in the index. The repo being projected (`id`) is added during projection itself — we resolve against OTHER repos' symbols, not our own.
+- **`project_repo` crashes mid-projection**: per-repo state is already persisted (bincode under `data_dir/<id>/`); the global backend's `save_to_disk_sync` (called per `upsert_edge` and `upsert_node`) means a federation crash loses at most the in-flight batch. Re-running projection is idempotent because per-repo nodes are upserted with deterministic global ids, and `upsert_edge` deduplicates by `(source_id, target_id, edge_type)`.
+- **`symbol_to_repos` is stale at Pass B time**: it's rebuilt on every `add_repo` before `project_repo` runs, so when `project_repo(id)` runs, all OTHER repos are already in the index. The repo being projected (`id`) is added during projection itself — we resolve against OTHER repos' symbols, not our own.
+- **`RepoIndex::edges()` returns stale data**: each `RepoIndex::index()` rebuilds its `GraphDatabase` from disk; the bincode file under `data_dir/<id>/graph.bin` is the source of truth. If a project_repo runs while a repo's bincode is being rewritten by an in-flight indexing, we'd see partial edges. Same hazard exists today for per-repo nodes; we don't add new exposure.
 
 ---
 
@@ -381,8 +413,9 @@ This spec is itself a test artifact. Meta-validation:
 Two PRs, in order:
 
 **PR 1 — Engine change (must land first):**
-- `src/federation/federated_index.rs`: new pass in `project_repo` (described above).
-- Existing federation tests must still pass.
+- `src/federation/federated_index.rs`: Pass A (project per-repo edges) and Pass B (cross-repo `Calls` resolution) added to `project_repo` (described above).
+- A new accessor on `RepoIndex` (`external_calls()` returning `(global_source_id, target_name)` tuples) if needed.
+- Existing federation tests must still pass. `tests/federation_integration.rs` and `tests/federation_benchmark.rs` cover this.
 - New test fixtures (PR 2) are NOT in this PR — we land the engine change with the existing test surface so the diff is reviewable in isolation.
 
 **PR 2 — Test fixtures (lands immediately after PR 1):**
@@ -395,14 +428,15 @@ If the OTel demo clone is unreliable in the nightly environment, the script can 
 
 ## Definition of done
 
-1. `src/federation/federated_index.rs::project_repo` produces cross-repo `Calls` edges for unambiguous per-repo `Calls` references to functions in other repos.
-2. `tests/federation_cross_repo_e2e.rs` exists; builds with `--features test-utils`; all 8 tests pass on a clean clone.
-3. `tests/e2e/federation_e2e.sh` extended; existing 3 assertions still pass; new OTel assertions pass against a freshly cloned OTel demo at upstream HEAD.
-4. `cargo test --test federation_cross_repo_e2e` passes in CI on a clean PR branch.
-5. `tests/e2e/federation_e2e.sh` (extended) passes in the nightly workflow.
-6. `docs/FEDERATION.md` smoke-test and performance sections updated with pointers to both fixtures.
-7. The OTel service subdirectory list in the script's `repos.yaml` matches what's actually in `opentelemetry-demo/src/` at HEAD — if upstream adds/removes a service, the script handles it gracefully (skips missing dirs, asserts against a tolerant threshold).
-8. The existing `tests/federation_integration.rs` and `tests/federation_benchmark.rs` still pass after PR 1 lands (no regression).
+1. `src/federation/federated_index.rs::project_repo` projects every per-repo edge into the global backend (Pass A).
+2. `src/federation/federated_index.rs::project_repo` produces cross-repo `Calls` edges for unambiguous per-repo `Calls` references to functions in other repos (Pass B).
+3. `tests/federation_cross_repo_e2e.rs` exists; builds with `--features test-utils`; all 8 tests pass on a clean clone.
+4. `tests/e2e/federation_e2e.sh` extended; existing 3 assertions still pass; new OTel assertions pass against a freshly cloned OTel demo at upstream HEAD.
+5. `cargo test --test federation_cross_repo_e2e` passes in CI on a clean PR branch.
+6. `tests/e2e/federation_e2e.sh` (extended) passes in the nightly workflow.
+7. `docs/FEDERATION.md` smoke-test and performance sections updated with pointers to both fixtures.
+8. The OTel service subdirectory list in the script's `repos.yaml` matches what's actually in `opentelemetry-demo/src/` at HEAD — if upstream adds/removes a service, the script handles it gracefully (skips missing dirs, asserts against a tolerant threshold).
+9. The existing `tests/federation_integration.rs` and `tests/federation_benchmark.rs` still pass after PR 1 lands (no regression).
 
 ## Open questions (for the implementation plan, not blockers)
 
@@ -414,4 +448,4 @@ If the OTel demo clone is unreliable in the nightly environment, the script can 
 
 ## Status
 
-Brainstorming complete. Sections 1–3 approved. Spec expanded to include the federation engine change after user pushback on the cross-repo `Calls` semantic. Awaiting user review of the rewritten spec before invoking writing-plans.
+Brainstorming complete. Spec expanded twice after user pushback: first to include the federation engine change (Pass B for cross-repo `Calls` resolution), then to acknowledge that `project_repo` doesn't even copy per-repo edges today (Pass A added). The full engine change is now two passes inside `project_repo`: A) project per-repo edges, B) resolve cross-repo `Calls` edges. Test fixtures and migration plan updated. Awaiting user review of the rewritten spec before invoking writing-plans.
