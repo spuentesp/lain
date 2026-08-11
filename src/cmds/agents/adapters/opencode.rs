@@ -55,13 +55,13 @@ impl AgentAdapter for OpenCodeAdapter {
         };
         let root = doc.as_object_mut()
             .ok_or_else(|| AdapterError::Shape("opencode.json root is not a JSON object".into()))?;
-        let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
+        let mcp = root.entry(entry.mcp_section.clone()).or_insert_with(|| json!({}));
         let mcp_obj = mcp.as_object_mut()
             .ok_or_else(|| AdapterError::Shape("opencode.json `mcp` is not an object".into()))?;
         // The adapter path doesn't have an embedding-model path; the init
         // path does. Without the model, Lain runs in stub embedder mode
         // (semantic search unavailable, every other tool works).
-        mcp_obj.insert("lain".to_string(), build_opencode_lain_entry(None));
+        mcp_obj.insert(entry.mcp_name.clone(), build_opencode_lain_entry(None));
         let serialized = serde_json::to_string_pretty(&doc)?;
         std::fs::write(&path, serialized)?;
         Ok(())
@@ -96,8 +96,8 @@ impl AgentAdapter for OpenCodeAdapter {
         if !path.exists() { return Ok(()); }
         let raw = std::fs::read_to_string(&path)?;
         let mut doc: Value = serde_json::from_str(&raw)?;
-        if let Some(mcp) = doc.get_mut("mcp").and_then(|v| v.as_object_mut()) {
-            mcp.remove("lain");
+        if let Some(mcp) = doc.get_mut(&entry.mcp_section).and_then(|v| v.as_object_mut()) {
+            mcp.remove(&entry.mcp_name);
         }
         let serialized = serde_json::to_string_pretty(&doc)?;
         std::fs::write(&path, serialized)?;

@@ -831,7 +831,6 @@ fn init_opencode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmds::agents::adapters::opencode::build_opencode_lain_entry;
 
     const OPENCODE_AGENTS_MD: &str = include_str!("../../hooks/opencode/AGENTS.md");
 
