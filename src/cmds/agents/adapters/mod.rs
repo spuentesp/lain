@@ -15,6 +15,7 @@ pub mod claude;
 pub mod cline;
 pub mod codex;
 pub mod continue_dev;
+pub mod copilot;
 pub mod cursor;
 pub mod gemini;
 pub mod kimi;
@@ -52,6 +53,7 @@ pub fn adapter_for(id: &str) -> Option<Box<dyn AgentAdapter>> {
         "cline"         => Some(Box::new(cline::ClineAdapter)),
         "codex"         => Some(Box::new(codex::CodexAdapter)),
         "continue"      => Some(Box::new(continue_dev::ContinueAdapter)),
+        "copilot"       => Some(Box::new(copilot::CopilotAdapter)),
         "cursor"        => Some(Box::new(cursor::CursorAdapter)),
         "omp"           => Some(Box::new(omp::OmpAdapter)),
         "opencode"      => Some(Box::new(opencode::OpenCodeAdapter)),
