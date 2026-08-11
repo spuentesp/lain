@@ -152,22 +152,6 @@ headless_probe = []
 format = "http"
 
 [[agent]]
-id = "vscode_copilot"
-display_name = "VS Code + GitHub Copilot"
-binary = "code"
-detect_paths = [".vscode"]
-config_user = ""
-config_project = ".vscode/mcp.json"
-config_format = "json"
-mcp_section = "servers"
-mcp_name = "lain"
-transport = "http"
-command = "/home/sebastian/.local/lain/lain"
-default_args = ["--workspace", "{{workspace}}", "--transport", "stdio", "--embedding-model", "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx"]
-headless_probe = []
-format = "http"
-
-[[agent]]
 id = "opencode"
 display_name = "OpenCode"
 binary = "opencode"
@@ -181,3 +165,18 @@ transport = "stdio"
 command = "lain"
 default_args = []
 headless_probe = ["opencode", "--version"]
+
+[[agent]]
+id = "copilot"
+display_name = "GitHub Copilot in VS Code"
+binary = "code"
+detect_paths = ["~/.config/Code", "~/.vscode"]
+config_user = "~/.copilot/mcp-config.json"
+config_project = ".vscode/mcp.json"
+config_format = "jsonc"
+mcp_section = "servers"
+mcp_name = "lain"
+transport = "stdio"
+command = "lain"
+default_args = []
+headless_probe = ["code", "--version"]

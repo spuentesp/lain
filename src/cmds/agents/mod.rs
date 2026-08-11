@@ -24,7 +24,7 @@ pub mod tests {
         let ids: Vec<&str> = agents.iter().map(|a| a.id.as_str()).collect();
         for required in [
             "claude", "kimi", "cursor", "continue", "windsurf",
-            "cline", "codex", "omp", "antigravity", "vscode_copilot",
+            "cline", "codex", "omp", "antigravity", "copilot",
         ] {
             assert!(ids.contains(&required), "missing manifest row for {required}");
         }

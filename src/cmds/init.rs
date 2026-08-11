@@ -17,6 +17,7 @@ const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "c
 // with the next release; do not duplicate the content as string literals
 // elsewhere.
 const CLAUDE_AWARENESS_MD: &str = include_str!("../../hooks/claude/lain-awareness.md");
+const COPILOT_INSTRUCTIONS_MD: &str = include_str!("../../hooks/copilot/copilot-instructions.md");
 const CLAUDE_HOOK_SH: &str = include_str!("../../hooks/claude/lain-hook.sh");
 const GEMINI_AWARENESS_MD: &str = include_str!("../../hooks/gemini/GEMINI.md");
 const CURSOR_AWARENESS_MD: &str = include_str!("../../hooks/cursor/lain-awareness.md");
@@ -1033,6 +1034,43 @@ mod tests {
         assert!(
             missing.is_empty(),
             "AGENTS.md is missing tools: {missing:?}"
+        );
+        assert!(doc.contains("Workflows"), "missing 'Workflows' section");
+        assert!(doc.contains("Caveats"), "missing 'Caveats' section");
+    }
+
+    /// Regression pin for the bundled Copilot `copilot-instructions.md`.
+    /// Same intent as `claude_awareness_doc_contains_key_guidance` and
+    /// `opencode_agents_md_contains_key_guidance`: the agent only
+    /// reaches for the right tool if the doc actually contains the
+    /// trigger phrases and tool table. A future edit that strips the
+    /// guidance fails this test.
+    #[test]
+    fn copilot_instructions_md_contains_key_guidance() {
+        let doc = COPILOT_INSTRUCTIONS_MD;
+        assert!(
+            doc.contains("When to use lain"),
+            "copilot-instructions.md must have a 'When to use lain' section"
+        );
+        let required_tools = [
+            "get_health",
+            "find_anchors",
+            "get_blast_radius",
+            "trace_dependency",
+            "semantic_search",
+            "explain_symbol",
+            "get_code_snippet",
+            "find_dead_code",
+            "get_coupling_radar",
+        ];
+        let missing: Vec<&str> = required_tools
+            .iter()
+            .filter(|name| !doc.contains(**name))
+            .copied()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "copilot-instructions.md is missing tools: {missing:?}"
         );
         assert!(doc.contains("Workflows"), "missing 'Workflows' section");
         assert!(doc.contains("Caveats"), "missing 'Caveats' section");
