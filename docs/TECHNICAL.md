@@ -689,6 +689,54 @@ curl -X POST http://localhost:9999/mcp \
 
 ---
 
+## v0.5.0 Highlights
+
+### New agent adapters
+
+Two new adapters ship alongside the per-agent `Init`/`install` path in `src/cmds/agents/adapters/`. Both honor `InstallScope::{User, Project}` and use `entry.mcp_section` / `entry.mcp_name` rather than hardcoded literals — the same pattern the other adapters already followed.
+
+- **`OpenCodeAdapter`** (`src/cmds/agents/adapters/opencode.rs`) — writes `opencode.json` (project) or `~/.config/opencode/opencode.json` (user). The MCP entry is `mcp.<name>` with an **array** `command` (verified against the OpenCode schema — a string `command` is rejected):
+  ```json
+  {
+    "mcp": {
+      "lain": {
+        "type": "local",
+        "command": ["lain", "--workspace", "auto", "--transport", "stdio"],
+        "enabled": true,
+        "timeout": 30000
+      }
+    }
+  }
+  ```
+  Bundles `AGENTS.md` for project scope. The 30000 ms timeout supersedes OpenCode's 5000 ms default, which is too short for Lain's cold-start NLP model load.
+
+- **`CopilotAdapter`** (`src/cmds/agents/adapters/copilot.rs`) — writes `.vscode/mcp.json` (project) or `~/.copilot/mcp-config.json` (user). Distinct from OpenCode: the entry is `servers.<name>` with a **string** `command` plus an **array** `args`:
+  ```json
+  {
+    "servers": {
+      "lain": {
+        "command": "lain",
+        "args": ["--workspace", "auto", "--transport", "stdio"]
+      }
+    }
+  }
+  ```
+  Bundles `.github/copilot-instructions.md`. The pre-existing broken `vscode_copilot` manifest row was migrated to `copilot`; the legacy identifier is no longer recognized.
+
+In both adapters, `command` is a bare PATH-resolvable name (`lain`), not an absolute path, so the agent re-launches the installer's `lain` from `$PATH` rather than the per-agent adapter's compile-time path.
+
+### `--scope {project|user}` on `Init`
+
+The `Init` command now accepts `--scope`. `init_opencode` and `init_copilot` honor it; `init` for the other agents ignores it (Claude and Kimi are inherently user-scope, the rest are inherently project-scope). The `agents install` path already accepted both scopes for every row — that surface is unchanged.
+
+### `--workspace auto`
+
+`--workspace auto` (passed through by every new adapter as `["--workspace", "auto"]`) calls `ServerState::resolve_auto_workspace()` in `src/state.rs`, which runs `git2::Repository::discover(".")` against the MCP subprocess's cwd and returns the enclosing repo. This works without ceremony for Claude Code, OpenCode, and VS Code because those agents spawn the subprocess with the project's directory as `cwd`.
+
+Kimi is the exception: its plugin manager pins the subprocess's `cwd` to the plugin root, so `--workspace auto` would resolve to the plugin directory instead of the project. The init path detects this and writes a wrapper script at `bin/lain` inside the plugin root that resolves the workspace from the parent agent's cwd via `/proc/$PPID/cwd` (Linux only — the wrapper errors out on macOS), then `exec`s the real `lain` from `$PATH`. The wrapper is sourced from `src/cmds/kimi_plugin_wrapper.sh` and is the only shipped place where the sentinel `auto` is translated pre-process.
+
+---
+
 ## License
 
 MIT — Copyright (c) 2026 spuentesp

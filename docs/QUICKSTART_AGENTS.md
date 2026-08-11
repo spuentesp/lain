@@ -19,9 +19,9 @@ lain agents install --all --scope user
 lain agents verify --all
 ```
 
-Replace `<name>` with one of `claude`, `kimi`, `cursor`, `continue`,
-`windsurf`, `cline`, `codex`, `omp`, `gemini`, or `copilot`. See
-`docs/agent-installation.md` for the full reference.
+Replace `<name>` with one of `antigravity`, `claude`, `cline`, `codex`,
+`continue`, `copilot`, `gemini`, `kimi`, `omp`, `opencode`, or
+`windsurf`. See `docs/agent-installation.md` for the full reference.
 
 **After installing** — restart your agent (Claude Code, Kimi Code, etc.)
 to pick up the plugin. Verify with:

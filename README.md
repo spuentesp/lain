@@ -356,9 +356,16 @@ curl -s -X POST http://localhost:9999/mcp \
 
 ---
 
-## Recent Improvements (0.4.x)
+## Recent Improvements (0.4.x and 0.5.0)
 
-## v0.4.2 (this release)
+## v0.5.0
+- **New first-class agent: `opencode`** — `OpenCodeAdapter` writes `opencode.json` (project) or `~/.config/opencode/opencode.json` (user) with the verified `mcp.<name>.{ type: "local", command: ["lain", ...], enabled: true, timeout: 30000 }` array-command shape, and bundles `AGENTS.md` for project scope.
+- **New first-class agent: `copilot`** (GitHub Copilot in VS Code) — `CopilotAdapter` writes `.vscode/mcp.json` (project) or `~/.copilot/mcp-config.json` (user) with the verified `servers.<name>.{ command: "lain", args: [...] }` shape (string `command` + array `args`, distinct from OpenCode), and bundles `.github/copilot-instructions.md`. The pre-existing broken `vscode_copilot` row was migrated to `copilot`.
+- **`--scope {project|user}` on `Init`**: per-project (default, travels with the repo) or user-global. Currently honored by `init_opencode` and `init_copilot`; other agents ignore it.
+- **`--workspace auto`** resolves the git root from the MCP subprocess's cwd via `git2::Repository::discover(".")`. Works for Claude Code, OpenCode, and VS Code out of the box; Kimi ships a `/proc/$PPID/cwd` wrapper because its plugin manager pins the subprocess's cwd.
+- **Bug fixes since 0.4.2**: Claude Code MCP now writes to `~/.claude.json` via `claude mcp add` (the old `mcpServers` block in `~/.claude/settings.json` was silently ignored); adapter commands are bare PATH-resolvable names everywhere; `entry.mcp_section` / `entry.mcp_name` are used in install/read/remove (no hardcoded literals); file-watcher tolerates inaccessible subdirs; LSP timeouts; awareness-doc skip-when-`--yes`-is-false; expanded Claude `LAIN.md`.
+
+## v0.4.2
 - `lain init --agent kimi` installs `~/.kimi-code/plugins/managed/lain/` with `kimi.plugin.json` + `skills/lain/SKILL.md` + registers in `installed.json` (source=`local-path`).
 - `lain init --agent gemini` now writes `GEMINI.md` (canonical filename per gemini-cli docs). The previous `LAIN.md` was silently ignored.
 

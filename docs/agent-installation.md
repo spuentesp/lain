@@ -18,7 +18,10 @@ lain agents install --scope project claude
 
 `--scope` accepts `user` (writes to the agent's home config), `project`
 (writes to the project's own config), or `workspace` (uses the active
-Orca worktree context).
+Orca worktree context). The `install` loop currently honors both
+`user` and `project` for every row; only `opencode` and `copilot`
+expose both scopes to `Init` (Claude and Kimi are user-only, the
+remainder are project-only).
 
 ### Supported agents
 
@@ -32,15 +35,24 @@ list is:
 | `cursor`       | Cursor (CLI)                | wired, `Operational` |
 | `continue`     | Continue.dev CLI            | wired, `Operational` |
 | `antigravity`  | Antigravity CLI (`agy`)     | wired, `Operational` |
+| `gemini`       | Legacy Gemini CLI           | init-only (no manifest row; use `lain init --agent gemini`; `antigravity` supersedes it for `agy` users) |
 | `cline`        | Cline CLI                   | wired, `Operational` |
 | `codex`        | OpenAI Codex CLI            | wired, `Operational` |
 | `omp`          | OMP (oh-my-pi)              | wired, `Operational` |
 | `windsurf`     | Windsurf (no headless CLI)  | config-only; `not installed` until a Windsurf IDE writes `~/.windsurf/mcp.json` |
+| `opencode`     | OpenCode                    | wired, `Operational`; project (default, writes `opencode.json`) or user (`--scope user`, writes `~/.config/opencode/opencode.json`) |
 | `copilot`        | VS Code + GitHub Copilot | project (default) or user (`--scope user`) |
 
 Windsurf is listed because the install loop will still write its
 config and `verify` will report it correctly as `not installed`; the
-shipped Windsurf product has no headless CLI today. `copilot` is project-scope by default, and supports user scope with `--scope user`.
+shipped Windsurf product has no headless CLI today. `opencode` and
+`copilot` are the only agents that honor `--scope {project|user}` on
+`Init` — `opencode.json` is project-scope by default (travels with the
+repo) and switches to `~/.config/opencode/opencode.json` with
+`--scope user`; `copilot` writes `.vscode/mcp.json` by default and
+`~/.copilot/mcp-config.json` with `--scope user`. All other agents are
+inherently user-scope (Claude, Kimi) or always project-scope (the
+remaining rows).
 
 ## Verify
 
