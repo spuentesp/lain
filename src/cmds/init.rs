@@ -774,12 +774,20 @@ fn init_kimi(
 /// workspace root. When `scope == "user"`, writes the global
 /// `~/.config/opencode/opencode.json` and skips `AGENTS.md` (a
 /// per-project convention, inappropriate to write globally).
+///
+/// `AGENTS.md` is **never** clobbered by default: if a file already
+/// exists at the target path and `yes` is false we print a message
+/// and skip the write. Pass `--yes` to force-overwrite the awareness
+/// doc (the bundled doc replaces whatever is there). This mirrors the
+/// spec at `docs/superpowers/specs/2026-08-10-opencode-agent-design.md`
+/// and the skip-on-exists pattern used by `write_awareness_doc` for
+/// the Claude awareness doc.
 fn init_opencode(
     workspace: &std::path::Path,
     embedding_model: Option<&std::path::Path>,
     _transport: &str,
     _port: u16,
-    _yes: bool,
+    yes: bool,
     scope: &str,
 ) -> Result<()> {
     if scope != "project" && scope != "user" {
@@ -821,8 +829,15 @@ fn init_opencode(
 
     if scope == "project" {
         let agents_path = workspace.join("AGENTS.md");
-        std::fs::write(&agents_path, OPENCODE_AGENTS_MD)?;
-        println!("Wrote OpenCode awareness doc to {}", agents_path.display());
+        if agents_path.exists() && !yes {
+            println!(
+                "{} already exists - skipped (use --yes to overwrite).",
+                agents_path.display()
+            );
+        } else {
+            std::fs::write(&agents_path, OPENCODE_AGENTS_MD)?;
+            println!("Wrote OpenCode awareness doc to {}", agents_path.display());
+        }
     }
 
     Ok(())
@@ -1314,6 +1329,43 @@ mod tests {
         let body = std::fs::read_to_string(&agents).unwrap();
         assert!(body.contains("When to use lain"));
         assert!(body.contains("find_anchors"));
+    }
+
+    /// Regression: `init_opencode` used to unconditionally clobber an
+    /// existing `AGENTS.md`, losing any project-specific guidance the
+    /// user had written there. With `--yes` not passed, an existing
+    /// awareness doc must be left alone.
+    #[test]
+    fn init_opencode_does_not_overwrite_existing_agents_md_without_yes() {
+        let (_tmp, ws) = temp_git_workspace();
+        let agents = ws.join("AGENTS.md");
+        let custom = "# Project-specific AGENTS.md\n\nUser-curated guidance.\n";
+        std::fs::write(&agents, custom).unwrap();
+
+        init_opencode(&ws, None, "stdio", 0, /* yes = */ false, "project").unwrap();
+
+        let body = std::fs::read_to_string(&agents).unwrap();
+        assert_eq!(
+            body, custom,
+            "AGENTS.md must be preserved when yes=false; the existing file \
+             was overwritten despite the spec saying to skip when not --yes"
+        );
+    }
+
+    /// Mirror pin for the --yes branch: passing `yes=true` does
+    /// overwrite an existing `AGENTS.md` with the bundled awareness
+    /// doc, even after the skip-on-exists gate was added.
+    #[test]
+    fn init_opencode_yes_overwrites_existing_agents_md() {
+        let (_tmp, ws) = temp_git_workspace();
+        let agents = ws.join("AGENTS.md");
+        std::fs::write(&agents, "# project doc\n").unwrap();
+
+        init_opencode(&ws, None, "stdio", 0, /* yes = */ true, "project").unwrap();
+
+        let body = std::fs::read_to_string(&agents).unwrap();
+        assert_ne!(body, "# project doc\n", "yes=true must replace the existing doc");
+        assert!(body.contains("When to use lain"), "bundled awareness doc content expected");
     }
 
     #[test]
