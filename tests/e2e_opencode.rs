@@ -7,6 +7,28 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// `Drop`-based HOME restore. Captures the previous value on `set`,
+/// then restores it on scope exit — including the panic path. Without
+/// this, an assertion panic between `set_var("HOME", tmp)` and the
+/// explicit restore would leak the tempdir HOME into every subsequent
+/// test that runs in this process.
+struct HomeGuard(Option<String>);
+impl HomeGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", path);
+        Self(prev)
+    }
+}
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
 fn lain_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lain"))
 }
@@ -63,8 +85,10 @@ fn lain_init_opencode_scope_user_writes_global_only() {
     std::fs::create_dir_all(&repo).expect("create repo");
     git_init_quiet(&repo);
 
-    let original_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", tmp.path());
+    // `HomeGuard` restores the prior HOME on scope exit (including the
+    // panic path). Binding it to a local keeps restoration tied to
+    // this test's frame.
+    let _home_guard = HomeGuard::set(tmp.path());
 
     let status = Command::new(lain_bin())
         .args(["init", "--agent", "opencode", "--yes", "--scope", "user"])
@@ -73,9 +97,6 @@ fn lain_init_opencode_scope_user_writes_global_only() {
         .status()
         .expect("spawn lain init");
     assert!(status.success(), "lain init exited with {status:?}");
-
-    if let Some(h) = &original_home { std::env::set_var("HOME", h); }
-    else { std::env::remove_var("HOME"); }
 
     let global = tmp.path().join(".config/opencode/opencode.json");
     assert!(global.exists(), "user-scope must write ~/.config/opencode/opencode.json");

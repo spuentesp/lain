@@ -832,6 +832,30 @@ fn init_opencode(
 mod tests {
     use super::*;
 
+    /// `Drop`-based HOME restore. Captures the previous value on `set`,
+    /// then restores it on scope exit — including the panic path. Without
+    /// this, an assertion panic between `set_var("HOME", tmp)` and the
+    /// explicit `set_var("HOME", prev)` would leak the tempdir HOME into
+    /// every subsequent test that runs in this process (every test that
+    /// uses the same `HOME_LOCK`, plus any test whose `opencode.json`
+    /// resolution walks `HOME`).
+    struct HomeGuard(Option<String>);
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let prev = std::env::var("HOME").ok();
+            std::env::set_var("HOME", path);
+            Self(prev)
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
     const OPENCODE_AGENTS_MD: &str = include_str!("../../hooks/opencode/AGENTS.md");
 
     /// Regression: Claude Code silently ignores stdio MCP entries whose
@@ -1301,17 +1325,18 @@ mod tests {
         // Note: as of Task 3, both `HOME_LOCK` aliases resolve to the same
         // mutex (`crate::cmds::agents::tests::HOME_LOCK`), so we only lock
         // once — `std::sync::Mutex` is not reentrant.
-        let _home_guard = crate::cmds::agents::tests::HOME_LOCK
+        let _home_lock_guard = crate::cmds::agents::tests::HOME_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("repo");
         std::fs::create_dir_all(&ws).unwrap();
         Command::new("git").args(["init", "--quiet"]).current_dir(&ws).status().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", tmp.path());
+        // `HomeGuard` restores the prior HOME on scope exit (including
+        // the panic path); binding it to a local keeps the restoration
+        // tied to this test's frame.
+        let _home_guard = HomeGuard::set(tmp.path());
         init_opencode(&ws, None, "stdio", 0, true, "user").unwrap();
-        if let Some(h) = &original_home { std::env::set_var("HOME", h); } else { std::env::remove_var("HOME"); }
 
         let global = tmp.path().join(".config/opencode/opencode.json");
         assert!(global.exists(), "user-scope must write ~/.config/opencode/opencode.json");
