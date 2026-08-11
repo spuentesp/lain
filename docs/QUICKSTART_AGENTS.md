@@ -20,7 +20,7 @@ lain agents verify --all
 ```
 
 Replace `<name>` with one of `claude`, `kimi`, `cursor`, `continue`,
-`windsurf`, `cline`, `codex`, `omp`, `gemini`, or `vscode_copilot`. See
+`windsurf`, `cline`, `codex`, `omp`, `gemini`, or `copilot`. See
 `docs/agent-installation.md` for the full reference.
 
 **After installing** — restart your agent (Claude Code, Kimi Code, etc.)

@@ -44,8 +44,8 @@ enum Commands {
         #[arg(long, default_value = "9999")] port: u16,
         #[arg(long, short)] yes: bool,
         /// Where to write the agent's MCP config: `project` (in-repo) or
-        /// `user` (global, e.g. `~/.config/...`). Currently only honored
-        /// by `--agent opencode`; other agents ignore it.
+        /// `user` (global, e.g. `~/.config/...`). Currently honored
+        /// by `--agent opencode` and `--agent copilot`; other agents ignore it.
         #[arg(long, default_value = "project", value_parser = ["project", "user"])]
         scope: String,
     },

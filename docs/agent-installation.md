@@ -36,11 +36,11 @@ list is:
 | `codex`        | OpenAI Codex CLI            | wired, `Operational` |
 | `omp`          | OMP (oh-my-pi)              | wired, `Operational` |
 | `windsurf`     | Windsurf (no headless CLI)  | config-only; `not installed` until a Windsurf IDE writes `~/.windsurf/mcp.json` |
-| `vscode_copilot` | VS Code + GitHub Copilot | project-scope only    |
+| `copilot`        | VS Code + GitHub Copilot | project-scope only    |
 
 Windsurf is listed because the install loop will still write its
 config and `verify` will report it correctly as `not installed`; the
-shipped Windsurf product has no headless CLI today. `vscode_copilot` is
+shipped Windsurf product has no headless CLI today. `copilot` is
 project-scope only by design.
 
 ## Verify
