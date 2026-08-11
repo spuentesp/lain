@@ -40,11 +40,6 @@ fn default_version() -> u32 { 1 }
 
 pub const DEFAULT_MANIFEST: &str = include_str!("../../../agents/manifest.toml");
 
-pub const SUPPORTED_AGENT_IDS: &[&str] = &[
-    "claude", "kimi", "cursor", "continue", "windsurf", "cline",
-    "codex", "omp", "gemini", "vscode_copilot",
-];
-
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     #[error("failed to parse agent manifest: {0}")]
