@@ -56,8 +56,8 @@ fn dual_instance_owner_and_sidecar_coexist() {
     // referencing any user-local paths. Set
     // LAIN_TEST_EMBEDDING_MODEL=/path/to/all-MiniLM-L6-v2.onnx to exercise
     // the real-model path locally.
-    let model_flag: Vec<&str> = match std::env::var("LAIN_TEST_EMBEDDING_MODEL") {
-        Ok(p) if !p.is_empty() => vec!["--embedding-model", p.as_str()],
+    let model_flag: Vec<String> = match std::env::var("LAIN_TEST_EMBEDDING_MODEL") {
+        Ok(p) if !p.is_empty() => vec!["--embedding-model".to_string(), p],
         _ => vec![],
     };
 
