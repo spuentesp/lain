@@ -7,7 +7,7 @@ use crate::cmds::agents::adapters::AUTO_WORKSPACE;
 
 /// Supported agent names. Anything else is a user error and `run_init` will
 /// refuse rather than silently writing nothing.
-const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "kimi", "opencode", "auto"];
+const SUPPORTED_AGENTS: &[&str] = &["claude", "gemini", "cursor", "windsurf", "cline", "copilot", "kimi", "opencode", "auto"];
 
 // ── Bundled agent resources ────────────────────────────────────────────────
 //
@@ -112,6 +112,16 @@ pub fn run_init(
         }
         "opencode" => {
             init_opencode(
+                workspace,
+                embedding_model,
+                transport,
+                port,
+                yes,
+                scope,
+            )?;
+        }
+        "copilot" => {
+            init_copilot(
                 workspace,
                 embedding_model,
                 transport,
@@ -844,6 +854,74 @@ fn init_opencode(
     Ok(())
 }
 
+/// Install Lain for GitHub Copilot in VS Code. Writes `.vscode/mcp.json`
+/// (MCP config) and, when `scope == "project"`, `.github/copilot-instructions.md`
+/// (awareness doc) in the workspace root. When `scope == "user"`, writes
+/// the global `~/.copilot/mcp-config.json` and skips the awareness doc
+/// (a per-repo convention, inappropriate to write globally).
+fn init_copilot(
+    workspace: &std::path::Path,
+    embedding_model: Option<&std::path::Path>,
+    _transport: &str,
+    _port: u16,
+    yes: bool,
+    scope: &str,
+) -> Result<()> {
+    if scope != "project" && scope != "user" {
+        anyhow::bail!(
+            "init_copilot: --scope must be 'project' or 'user', got '{}'",
+            scope
+        );
+    }
+    use crate::cmds::agents::adapters::copilot::build_copilot_lain_entry;
+
+    let target_path: std::path::PathBuf = if scope == "project" {
+        workspace.join(".vscode/mcp.json")
+    } else {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+        home.join(".copilot/mcp-config.json")
+    };
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut doc: serde_json::Value = if target_path.exists() {
+        let raw = std::fs::read_to_string(&target_path)?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    {
+        let root = doc.as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("mcp.json root is not a JSON object"))?;
+        let section = root.entry("servers".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let section_obj = section.as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("`servers` is not an object"))?;
+        section_obj.insert("lain".to_string(), build_copilot_lain_entry(embedding_model));
+    }
+    let serialized = serde_json::to_string_pretty(&doc)?;
+    std::fs::write(&target_path, serialized)?;
+    println!("Wrote GitHub Copilot/VS Code MCP config to {}", target_path.display());
+
+    if scope == "project" {
+        let instructions_dir = workspace.join(".github");
+        std::fs::create_dir_all(&instructions_dir)?;
+        let instructions_path = instructions_dir.join("copilot-instructions.md");
+        if instructions_path.exists() && !yes {
+            println!(
+                "Copilot instructions file already exists at {} - skipped.",
+                instructions_path.display()
+            );
+        } else {
+            std::fs::write(&instructions_path, COPILOT_INSTRUCTIONS_MD)?;
+            println!("Wrote GitHub Copilot awareness doc to {}", instructions_path.display());
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,5 +1532,115 @@ mod tests {
         assert!(doc.pointer("/mcp/other-server").is_some(), "other-server preserved");
         assert!(doc.pointer("/mcp/lain").is_some(), "lain added");
         assert_eq!(doc["$schema"], "https://opencode.ai/config.json", "other top-level keys preserved");
+    }
+
+    /// Local `temp_git_workspace_copilot` helper. Mirrors
+    /// `temp_git_workspace` (the opencode helper), but named for
+    /// grouping with the `init_copilot` tests. Each helper is kept
+    /// separately so a future change to one suite's repo bootstrap
+    /// doesn't accidentally affect the other.
+    fn temp_git_workspace_copilot() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("repo");
+        std::fs::create_dir_all(&ws).unwrap();
+        Command::new("git").args(["init", "--quiet"]).current_dir(&ws).status().unwrap();
+        (tmp, ws)
+    }
+
+    #[test]
+    fn init_copilot_writes_verified_mcp_config() {
+        let (_tmp, ws) = temp_git_workspace_copilot();
+        init_copilot(&ws, None, "stdio", 0, true, "project").unwrap();
+        let body = std::fs::read_to_string(ws.join(".vscode/mcp.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let lain = doc.pointer("/servers/lain").expect("servers.lain present");
+        assert_eq!(lain["command"], "lain");
+        let args = lain["args"].as_array().expect("args is JSON array");
+        let cmd: Vec<String> = args.iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(cmd.windows(2).any(|w| w == ["--workspace", "auto"]));
+        assert!(cmd.windows(2).any(|w| w == ["--transport", "stdio"]));
+    }
+
+    #[test]
+    fn init_copilot_includes_embedding_model_when_provided() {
+        let (_tmp, ws) = temp_git_workspace_copilot();
+        let model = std::path::Path::new("/models/all-MiniLM-L6-v2.onnx");
+        init_copilot(&ws, Some(model), "stdio", 0, true, "project").unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ws.join(".vscode/mcp.json")).unwrap()).unwrap();
+        let cmd: Vec<String> = doc.pointer("/servers/lain/args").unwrap().as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let idx = cmd.iter().position(|s| s == "--embedding-model").expect("--embedding-model present");
+        assert_eq!(cmd[idx + 1], "/models/all-MiniLM-L6-v2.onnx");
+    }
+
+    #[test]
+    fn init_copilot_writes_copilot_instructions_md_in_project_root() {
+        let (_tmp, ws) = temp_git_workspace_copilot();
+        init_copilot(&ws, None, "stdio", 0, true, "project").unwrap();
+        let instructions = ws.join(".github/copilot-instructions.md");
+        assert!(instructions.exists(), ".github/copilot-instructions.md must be written to project root");
+        let body = std::fs::read_to_string(&instructions).unwrap();
+        assert!(body.contains("When to use lain"));
+        assert!(body.contains("find_anchors"));
+    }
+
+    #[test]
+    fn init_copilot_scope_user_writes_global_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("repo");
+        std::fs::create_dir_all(&ws).unwrap();
+        Command::new("git").args(["init", "--quiet"]).current_dir(&ws).status().unwrap();
+        let _home_guard = HomeGuard::set(tmp.path());
+        init_copilot(&ws, None, "stdio", 0, true, "user").unwrap();
+        drop(_home_guard); // restore HOME before assertions, in case a later assert panics
+
+        let global = tmp.path().join(".copilot/mcp-config.json");
+        assert!(global.exists(), "user-scope must write ~/.copilot/mcp-config.json");
+        assert!(!ws.join(".vscode/mcp.json").exists(), "user-scope must NOT write project .vscode/mcp.json");
+        assert!(!ws.join(".github/copilot-instructions.md").exists(), "user-scope must NOT write project awareness doc");
+    }
+
+    #[test]
+    fn init_copilot_merges_with_existing_mcp_json() {
+        let (_tmp, ws) = temp_git_workspace_copilot();
+        std::fs::create_dir_all(ws.join(".vscode")).unwrap();
+        std::fs::write(
+            ws.join(".vscode/mcp.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "servers": {
+                    "other-server": { "command": "x", "args": ["y"] }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        init_copilot(&ws, None, "stdio", 0, true, "project").unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ws.join(".vscode/mcp.json")).unwrap()).unwrap();
+        assert!(doc.pointer("/servers/other-server").is_some(), "other-server preserved");
+        assert!(doc.pointer("/servers/lain").is_some(), "lain added");
+    }
+
+    #[test]
+    fn init_copilot_does_not_overwrite_existing_instructions_md_without_yes() {
+        let (_tmp, ws) = temp_git_workspace_copilot();
+        let instructions = ws.join(".github/copilot-instructions.md");
+        std::fs::create_dir_all(instructions.parent().unwrap()).unwrap();
+        std::fs::write(&instructions, "# my custom instructions\n").unwrap();
+        init_copilot(&ws, None, "stdio", 0, false, "project").unwrap();
+        let body = std::fs::read_to_string(&instructions).unwrap();
+        assert_eq!(body, "# my custom instructions\n", "existing awareness doc must be preserved when yes=false");
+    }
+
+    #[test]
+    fn init_copilot_yes_overwrites_existing_instructions_md() {
+        let (_tmp, ws) = temp_git_workspace_copilot();
+        let instructions = ws.join(".github/copilot-instructions.md");
+        std::fs::create_dir_all(instructions.parent().unwrap()).unwrap();
+        std::fs::write(&instructions, "# my custom instructions\n").unwrap();
+        init_copilot(&ws, None, "stdio", 0, true, "project").unwrap();
+        let body = std::fs::read_to_string(&instructions).unwrap();
+        assert!(body.contains("When to use lain"), "yes=true must replace with the bundled doc");
     }
 }
