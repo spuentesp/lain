@@ -113,11 +113,15 @@ fn should_run() -> bool {
         && claude_is_authed()
 }
 
-/// Use the langostino workspace as the test repo: it is the project the
-/// test suite is developed in, it has a real git history, and the user
-/// has Lain configured in `~/.claude/settings.json` for it.
-fn test_workspace() -> PathBuf {
-    PathBuf::from("/home/sebastian/orca/workspaces/lain/langostino")
+/// Workspace for the live behavior test. By default we skip (the test is
+/// `#[ignore]`d). To exercise it locally, set LAIN_TEST_WORKSPACE to the
+/// absolute path of a git repo you want OpenCode/Copilot/Claude to operate
+/// on (the repo must have Lain configured — e.g. `lain init --agent <x>`
+/// was run there). CI never sets this env var, so the path is never
+/// referenced.
+fn test_workspace() -> Option<PathBuf> {
+    let s = std::env::var("LAIN_TEST_WORKSPACE").ok()?;
+    if s.is_empty() { None } else { Some(PathBuf::from(s)) }
 }
 
 // ── Test 1: sanity — Claude can call get_health and get a real response ──
@@ -142,7 +146,10 @@ fn claude_calls_get_health_when_asked() {
         under the Lain MCP server in your tools). Print the raw response \
         body verbatim. Do not run any other tools. Do not write files.";
 
-    let (stdout, stderr, ok) = run_claude_prompt(&test_workspace(), prompt);
+    let ws = test_workspace().expect(
+        "LAIN_TEST_WORKSPACE not set; this live behavior test requires a workspace",
+    );
+    let (stdout, stderr, ok) = run_claude_prompt(&ws, prompt);
     assert!(
         ok,
         "claude --print exited non-zero.\n--- stdout ---\n{stdout}\n\

@@ -50,8 +50,16 @@ fn dual_instance_owner_and_sidecar_coexist() {
     let tmp = tempfile::tempdir().unwrap();
     let owner_port = pick_port();
     let sidecar_port = pick_port();
-    let model = "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx";
     let lain = env!("CARGO_BIN_EXE_lain");
+    // By default the test runs the server in stub mode (no
+    // --embedding-model flag) so it is hermetic and works in CI without
+    // referencing any user-local paths. Set
+    // LAIN_TEST_EMBEDDING_MODEL=/path/to/all-MiniLM-L6-v2.onnx to exercise
+    // the real-model path locally.
+    let model_flag: Vec<&str> = match std::env::var("LAIN_TEST_EMBEDDING_MODEL") {
+        Ok(p) if !p.is_empty() => vec!["--embedding-model", p.as_str()],
+        _ => vec![],
+    };
 
     // lain's main() requires a `.git` folder in the workspace, so init one
     // first. This mirrors `tests/agents_install.rs` and is the only piece
@@ -65,7 +73,8 @@ fn dual_instance_owner_and_sidecar_coexist() {
     let mut owner = ChildGuard(Command::new(lain)
         .args(["--workspace", tmp.path().to_str().unwrap(),
                "--transport", "http", "--port", &owner_port.to_string(),
-               "--mode", "owner", "--embedding-model", model])
+               "--mode", "owner"])
+        .args(&model_flag)
         .env("LAIN_PORT", owner_port.to_string())
         .stdout(Stdio::null()).stderr(Stdio::null())
         .spawn().expect("spawn owner"));
@@ -77,7 +86,8 @@ fn dual_instance_owner_and_sidecar_coexist() {
     let mut sidecar = ChildGuard(Command::new(lain)
         .args(["--workspace", tmp.path().to_str().unwrap(),
                "--transport", "http", "--port", &sidecar_port.to_string(),
-               "--mode", "sidecar", "--embedding-model", model])
+               "--mode", "sidecar"])
+        .args(&model_flag)
         .env("LAIN_PORT", sidecar_port.to_string())
         .env("LAIN_OWNER_URL", format!("http://127.0.0.1:{}", owner_port))
         .stdout(Stdio::null()).stderr(Stdio::null())
@@ -92,7 +102,8 @@ fn dual_instance_owner_and_sidecar_coexist() {
     let second_owner = Command::new(lain)
         .args(["--workspace", tmp.path().to_str().unwrap(),
                "--transport", "http", "--port", &pick_port().to_string(),
-               "--mode", "owner", "--embedding-model", model])
+               "--mode", "owner"])
+        .args(&model_flag)
         .env("LAIN_PORT", "9998")
         .stdout(Stdio::null()).stderr(Stdio::piped())
         .output().expect("spawn second owner");

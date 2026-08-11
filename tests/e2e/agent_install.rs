@@ -336,9 +336,8 @@ fn run_case(case: &AgentCase) -> Result<(), String> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(9999);
     // Lain's main() bails when the workspace lacks `.git`. If the workspace
-    // already has `.git` (e.g. because it's a git worktree like the
-    // /home/sebastian/orca/workspaces/lain/langostino worktree this harness
-    // is developed in), skip the init — re-initing a worktree dir is a
+    // already has `.git` (i.e. it's any git repo the test is invoked
+    // against), skip the init — re-initing an existing repo dir is a
     // destructive operation we do not want the test to attempt.
     let already_repo = Command::new("git")
         .args(["-C", case.workspace.to_str().unwrap(), "rev-parse", "--git-dir"])
@@ -402,9 +401,20 @@ fn agent_cases() -> &'static [AgentCase] {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Vec<AgentCase>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let workspace: &'static Path = Box::leak(Box::new(PathBuf::from(
-            "/home/sebastian/orca/workspaces/lain/langostino",
-        )));
+        // Workspace for the e2e harness. Override with LAIN_TEST_WORKSPACE
+        // to point at a different git repo; otherwise defaults to a path
+        // relative to the test file (the lain repo itself, which has .git).
+        let workspace: &'static Path = Box::leak(Box::new(
+            std::env::var("LAIN_TEST_WORKSPACE")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    // tests/e2e/agent_install.rs → ../../. → the lain repo root
+                    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                    here.to_path_buf()
+                }),
+        ));
         // Kimi's CLI exposes `-p <prompt>` and `-y/--yolo`; the two flags
         // cannot be combined (kimi errors with "Cannot combine --prompt
         // with --yolo"), so we use `-p` alone. There is no `--print-timeout`

@@ -26,8 +26,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const MODEL: &str = "/home/sebastian/.local/lain/models/all-MiniLM-L6-v2.onnx";
-const WRAPPER: &str = "/home/sebastian/.kimi-code/plugins/managed/lain/bin/lain";
+// Optional paths for richer local runs. The tests skip when unset, so
+// CI runs are hermetic and reference no user-local files. Set
+// LAIN_TEST_EMBEDDING_MODEL and LAIN_TEST_KIMI_WRAPPER to exercise the
+// real-model and kimi-wrapper paths locally.
+fn model_path() -> Option<String> {
+    let s = std::env::var("LAIN_TEST_EMBEDDING_MODEL").ok()?;
+    if s.is_empty() { None } else { Some(s) }
+}
+fn wrapper_path() -> Option<String> {
+    let s = std::env::var("LAIN_TEST_KIMI_WRAPPER").ok()?;
+    if s.is_empty() { None } else { Some(s) }
+}
 
 const INIT_PAYLOAD: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}"#;
 const INITIALIZED_PAYLOAD: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
@@ -166,10 +176,13 @@ fn claude_style_get_health_resolves_temp_repo() {
         eprintln!("skipping: `git` is not on PATH");
         return;
     }
-    if !Path::new(MODEL).exists() {
-        eprintln!("skipping: ONNX model missing at {MODEL}");
-        return;
-    }
+    let model = match model_path() {
+        Some(p) if Path::new(&p).exists() => p,
+        _ => {
+            eprintln!("skipping: ONNX model not provided (set LAIN_TEST_EMBEDDING_MODEL) or missing");
+            return;
+        }
+    };
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
@@ -189,7 +202,7 @@ fn claude_style_get_health_resolves_temp_repo() {
             "--transport",
             "stdio",
             "--embedding-model",
-            MODEL,
+            &model,
         ])
         .env("LAIN_PORT", "19991")
         .current_dir(&repo)
@@ -219,14 +232,23 @@ fn kimi_wrapper_get_health_resolves_parent_cwd() {
         eprintln!("skipping: `git` is not on PATH");
         return;
     }
-    if !Path::new(MODEL).exists() {
-        eprintln!("skipping: ONNX model missing at {MODEL}");
+    let model = match model_path() {
+        Some(p) if Path::new(&p).exists() => p,
+        _ => {
+            eprintln!("skipping: ONNX model not provided (set LAIN_TEST_EMBEDDING_MODEL) or missing");
+            return;
+        }
+    };
+    if let Some(w) = wrapper_path() {
+        if !Path::new(&w).exists() {
+            eprintln!("skipping: kimi wrapper path set but file missing at {w}");
+            return;
+        }
+    } else {
+        eprintln!("skipping: LAIN_TEST_KIMI_WRAPPER not set");
         return;
     }
-    if !Path::new(WRAPPER).exists() {
-        eprintln!("skipping: kimi wrapper missing at {WRAPPER}");
-        return;
-    }
+    let wrapper = wrapper_path().expect("checked above");
     // The wrapper hardcodes `exec "lain"` — the real binary must be on PATH.
     if which::which("lain").is_err() {
         eprintln!("skipping: `lain` is not on PATH (wrapper requires it)");
@@ -246,8 +268,8 @@ fn kimi_wrapper_get_health_resolves_parent_cwd() {
     let cmd = format!(
         "cd '{}' && '{}' --workspace auto --transport stdio --embedding-model '{}'; sleep 30",
         repo.display(),
-        WRAPPER,
-        MODEL,
+        wrapper,
+        model,
     );
 
     // The wrapper hardcodes `exec "lain"` and picks up the first `lain` on
