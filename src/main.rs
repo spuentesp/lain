@@ -84,6 +84,11 @@ enum Commands {
         #[arg(long, default_value = "http")] transport: String,
         #[arg(long, default_value = "9999")] port: u16,
         #[arg(long, default_value = "info")] log_level: String,
+        /// Active workspace. One of:
+        /// - "auto" (default): resolve via `~/.config/lain/active_workspace`
+        /// - "": no workspace — load every repo in `repos.yaml` (today's behavior)
+        /// - <name>: load the named workspace from `workspaces.yaml` next to `repos.yaml`
+        #[arg(long, default_value = "auto")] workspace: String,
     },
 }
 
@@ -207,8 +212,8 @@ async fn main() -> Result<()> {
                 }
             },
             Commands::Use { name } => return cmds::projects::run_use(&name),
-            Commands::Server { config, transport, port, log_level } => {
-                return cmds::run_server(&config, &transport, port, &log_level).await;
+            Commands::Server { config, transport, port, log_level, workspace } => {
+                return cmds::run_server(&config, &transport, port, &log_level, &workspace).await;
             }
         }
     }
