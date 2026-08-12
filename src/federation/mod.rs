@@ -8,6 +8,7 @@ pub mod matching;
 pub mod repo_id;
 pub mod repo_index;
 pub mod repo_source;
+pub mod workspace;
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::error::LainError;
