@@ -8,6 +8,7 @@ pub mod jobs;
 
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
+use crate::federation::workspace::WorkspacesFile;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::{CrossEncoder, NlpEmbedder};
@@ -55,6 +56,10 @@ pub struct LainServer {
     /// via `with_federation`); `None` for single-workspace servers
     /// (constructed via `new`).
     federation: Option<Arc<FederatedIndex>>,
+    /// Workspaces file passed to `LainMcpServer` when `with_federation_and_workspaces`
+    /// is used. `Some` when a workspace is active; `None` for the
+    /// all-repos path (no workspaces.yaml).
+    federation_workspaces: Option<Arc<WorkspacesFile>>,
     /// Transport chosen at `with_federation` time. Consumed by `serve`.
     federation_transport: Option<Transport>,
     /// Port chosen at `with_federation` time. Consumed by `serve`.
@@ -130,6 +135,7 @@ impl LainServer {
             graph,
             overlay,
             embedder,
+            federation_workspaces: None,
             cross_encoder,
             git,
             lsp_pool,
@@ -224,6 +230,83 @@ impl LainServer {
             cross_encoder,
             overlay_revision: Arc::new(AtomicU64::new(0)),
             federation: Some(federation),
+            federation_workspaces: None,
+            federation_transport: Some(transport),
+            federation_port: Some(port),
+        })
+    }
+
+    /// Same as `with_federation` but also registers the workspace MCP
+    /// tools (`list_workspaces`, `get_active_workspace`, `get_workspace`,
+    /// `get_workspace_graph`) against the supplied `WorkspacesFile`. Used
+    /// when the server is started with `--workspace <name>` and a
+    /// `workspaces.yaml` is present next to `repos.yaml`.
+    pub fn with_federation_and_workspaces(
+        federation: Arc<FederatedIndex>,
+        transport: Transport,
+        port: u16,
+        workspaces: Arc<WorkspacesFile>,
+    ) -> Result<Self, LainError> {
+        // Mostly the same wiring as `with_federation`. The differences:
+        // we store the workspaces file in `federation_workspaces`, and we
+        // build the LainMcpServer with the workspaces-aware constructor
+        // eagerly so any wiring problems surface at construction time.
+        let ws = std::env::temp_dir().join(format!("lain-federation-{}", std::process::id()));
+        std::fs::create_dir_all(&ws)?;
+        if !ws.join(".git").exists() {
+            git2::Repository::init(&ws)?;
+        }
+        let mem_dir = ws.join(".lain");
+        std::fs::create_dir_all(&mem_dir)?;
+        let mem_path = mem_dir.join("graph.bin");
+        let _ = std::fs::remove_file(&mem_path);
+
+        let graph = GraphDatabase::new(&mem_path)?;
+        let overlay = VolatileOverlay::new();
+        let embedder = NlpEmbedder::new()?;
+        if embedder.is_stub() {
+            info!("NLP embedder running in stub mode (federation placeholder)");
+        }
+        let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
+        let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
+        let tuning = Arc::new(load_tuning_config(&ws));
+
+        let tool_executor = ToolExecutor::new(
+            graph.clone(),
+            overlay.clone(),
+            embedder.clone(),
+            crate::nlp::CrossEncoder::from_dir(&ws),
+            Arc::clone(&git),
+            Arc::clone(&lsp_pool),
+            Arc::clone(&tuning),
+            ws.to_path_buf(),
+        );
+
+        let _mcp = crate::mcp::LainMcpServer::with_federation_and_workspaces(
+            tool_executor.clone(),
+            Arc::clone(&federation),
+            Arc::clone(&workspaces),
+        );
+
+        info!("Lain federation server initialized with workspaces");
+        let cross_encoder = crate::nlp::CrossEncoder::from_dir(&ws);
+
+        Ok(Self {
+            config: LainConfig {
+                workspace: ws,
+                memory_path: mem_path,
+            },
+            graph,
+            overlay,
+            embedder,
+            git,
+            lsp_pool,
+            tool_executor,
+            tuning,
+            cross_encoder,
+            overlay_revision: Arc::new(AtomicU64::new(0)),
+            federation: Some(federation),
+            federation_workspaces: Some(workspaces),
             federation_transport: Some(transport),
             federation_port: Some(port),
         })
@@ -248,7 +331,12 @@ impl LainServer {
         })?;
         let port = self.federation_port.unwrap_or(9999);
 
-        let mcp = crate::mcp::LainMcpServer::with_federation(self.tool_executor, federation);
+        let mcp = match self.federation_workspaces {
+            Some(ws) => crate::mcp::LainMcpServer::with_federation_and_workspaces(
+                self.tool_executor, federation, ws,
+            ),
+            None => crate::mcp::LainMcpServer::with_federation(self.tool_executor, federation),
+        };
         match transport {
             Transport::Http => mcp
                 .run_http(port)

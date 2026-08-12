@@ -701,11 +701,13 @@ impl LainMcpServer {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let executor = executor.clone();
+                    let workspaces = self.workspaces.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
-                            handle_request(req, executor, None)
+                            let workspaces = workspaces.clone();
+                            handle_request(req, executor, None, workspaces)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -759,12 +761,14 @@ impl LainMcpServer {
                 Ok((stream, _)) => {
                     let executor = executor.clone();
                     let federation = federation.clone();
+                    let workspaces = self.workspaces.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
                             let federation = federation.clone();
-                            handle_request(req, executor, federation)
+                            let workspaces = workspaces.clone();
+                            handle_request(req, executor, federation, workspaces)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -854,6 +858,7 @@ async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
+    workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
         let body = serde_json::to_string(&value).unwrap_or_default();
@@ -1089,6 +1094,104 @@ async fn handle_request(
                                         }
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
                                     }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Workspace tools: only registered when a
+                        // workspaces file was supplied to the server
+                        // constructor. Mirrors the stdio dispatch in
+                        // handle_call_tool_request.
+                        if let Some(workspaces) = &workspaces {
+                            match name {
+                                "list_workspaces" => {
+                                    let active = crate::state::ActiveWorkspace::load().ok().flatten();
+                                    let infos = crate::mcp::federation_tools::list_workspaces(workspaces, active.as_ref());
+                                    let text = match serde_json::to_string(&infos) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    };
+                                    return Ok(jsonrpc_tool_result(id, &text, false));
+                                }
+                                "get_active_workspace" => {
+                                    let fed_ref = match federation.as_deref() {
+                                        Some(f) => f,
+                                        None => return Ok(jsonrpc_tool_result(
+                                            id,
+                                            &format!("{}", crate::error::LainError::Workspace("get_active_workspace requires federation mode".into())),
+                                            true,
+                                        )),
+                                    };
+                                    return match crate::mcp::federation_tools::get_active_workspace(fed_ref, workspaces) {
+                                        Ok(info) => {
+                                            let text = match serde_json::to_string(&info) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            Ok(jsonrpc_tool_result(id, &text, false))
+                                        }
+                                        Err(e) => Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    };
+                                }
+                                "get_workspace" => {
+                                    let name_arg = args_map.get("name").and_then(|v| v.as_str());
+                                    let name_str = match name_arg {
+                                        Some(s) => s.to_string(),
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: name", true)),
+                                    };
+                                    let detail = match federation.as_deref() {
+                                        Some(fed) => crate::mcp::federation_tools::get_workspace(fed, workspaces, &name_str),
+                                        None => {
+                                            // Defensive fallback: no federation
+                                            // means the workspace tools shouldn't
+                                            // have been registered. Build a minimal
+                                            // detail from the workspaces file.
+                                            match workspaces.workspaces.iter().find(|w| w.name == name_str) {
+                                                Some(ws) => Ok(crate::mcp::federation_tools::WorkspaceDetail {
+                                                    name: ws.name.clone(),
+                                                    description: ws.description.clone(),
+                                                    source: None,
+                                                    members: ws.members.iter().map(|m| crate::mcp::federation_tools::WorkspaceRepoInfo {
+                                                        repo_id: m.clone(),
+                                                        path: String::new(),
+                                                        health: "not_loaded".into(),
+                                                    }).collect(),
+                                                }),
+                                                None => Err(crate::error::LainError::NotFound(format!("workspace {name_str}"))),
+                                            }
+                                        }
+                                    };
+                                    return match detail {
+                                        Ok(d) => {
+                                            let text = match serde_json::to_string(&d) {
+                                                Ok(s) => s,
+                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            };
+                                            Ok(jsonrpc_tool_result(id, &text, false))
+                                        }
+                                        Err(e) => Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                    };
+                                }
+                                "get_workspace_graph" => {
+                                    let filter = args_map.get("filter").and_then(|v| v.as_str());
+                                    return match federation.as_deref() {
+                                        Some(fed) => match crate::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
+                                            Ok(graph) => {
+                                                let text = match serde_json::to_string(&graph) {
+                                                    Ok(s) => s,
+                                                    Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                                };
+                                                Ok(jsonrpc_tool_result(id, &text, false))
+                                            }
+                                            Err(e) => Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                        },
+                                        None => Ok(jsonrpc_tool_result(
+                                            id,
+                                            &format!("{}", crate::error::LainError::Workspace("get_workspace_graph requires federation mode".into())),
+                                            true,
+                                        )),
+                                    };
                                 }
                                 _ => {}
                             }

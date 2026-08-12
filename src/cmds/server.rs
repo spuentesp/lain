@@ -89,7 +89,15 @@ pub async fn run_server(
         }
     };
 
-    let server = LainServer::with_federation(fed, transport_enum, port)?;
+    // If a workspaces file exists next to repos.yaml, load it so the
+    // workspace MCP tools are registered. Optional — a server with no
+    // workspaces.yaml still works (no workspace tools, today's behavior).
+    let workspaces = load_workspaces_for_server(config_path).ok().flatten();
+    let server = if let Some(workspaces) = workspaces {
+        LainServer::with_federation_and_workspaces(fed, transport_enum, port, workspaces)?
+    } else {
+        LainServer::with_federation(fed, transport_enum, port)?
+    };
     info!(
         "lain server: starting on {:?} transport (port {})",
         transport_enum, port
@@ -98,6 +106,25 @@ pub async fn run_server(
         .serve()
         .await
         .map_err(|e| anyhow!("federation server: {e}"))
+}
+
+/// Load `workspaces.yaml` from the same directory as `repos.yaml`. Returns
+/// `Ok(None)` if the file doesn't exist (no workspaces configured) or
+/// can't be loaded for any reason — workspace tooling is opt-in, and a
+/// server without it still works.
+fn load_workspaces_for_server(
+    config_path: &Path,
+) -> Result<Option<Arc<lain::federation::workspace::WorkspacesFile>>, anyhow::Error> {
+    let workspaces_path = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("workspaces.yaml");
+    if !workspaces_path.exists() {
+        return Ok(None);
+    }
+    let workspaces = lain::federation::workspace::WorkspacesFile::load(&workspaces_path)
+        .map_err(|e| anyhow!("load {}: {e}", workspaces_path.display()))?;
+    Ok(Some(Arc::new(workspaces)))
 }
 
 /// Resolve the `--workspace` arg and dispatch to the right loader.

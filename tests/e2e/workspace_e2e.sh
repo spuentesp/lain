@@ -58,21 +58,26 @@ repos:
     source: { type: workspace_dir, path: ${WORKDIR}/gamma }
 EOF
 
-# workspaces.yaml: 2 workspaces.
+# workspaces.yaml: 2 workspaces, each with >= 2 members
+# (the spec requires >= 2; a 1-member workspace is a config error).
 cat > "${WORKDIR}/workspaces.yaml" <<EOF
 workspaces:
   - name: ab
     members: [alpha, beta]
-  - name: cg
-    members: [gamma]
+  - name: bc
+    members: [beta, gamma]
 EOF
 
 call_tool() {
     local name="$1"
-    local args="${2:-{}}"
+    local args="${2-}"
+    local args_json="${args:-{\}}"
+    # NOTE: the original default `{}}` produced malformed JSON
+    # (`arguments":{}},"id":1` — extra `}`). We now insert the closing
+    # brace explicitly in the payload template.
     curl -fsS -X POST "http://localhost:${PORT}/mcp" \
         -H "Content-Type: application/json" \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"${name}\",\"arguments\":${args}},\"id\":1}"
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"${name}\",\"arguments\":${args_json}},\"id\":1}"
 }
 
 mcp_text() {
@@ -141,29 +146,29 @@ if [[ "${member_count}" -ne 2 ]]; then
 fi
 echo "    get_active_workspace: ${active_name} (${member_count} members)"
 
-echo "==> Calling get_workspace for 'cg' (different from active)..."
-detail_text="$(call_tool "get_workspace" '{"name":"cg"}' | mcp_text)"
+echo "==> Calling get_workspace for 'bc' (different from active)..."
+detail_text="$(call_tool "get_workspace" '{"name":"bc"}' | mcp_text)"
 detail_count="$(printf '%s' "${detail_text}" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["members"]))')"
-if [[ "${detail_count}" -ne 1 ]]; then
-    echo "ERROR: cg workspace has ${detail_count} members, expected 1." >&2
+if [[ "${detail_count}" -ne 2 ]]; then
+    echo "ERROR: bc workspace has ${detail_count} members, expected 2." >&2
     exit 1
 fi
-echo "    get_workspace(cg): ${detail_count} member"
+echo "    get_workspace(bc): ${detail_count} members"
 
 echo "==> Calling get_workspace_graph (no filter)..."
 graph_text="$(call_tool "get_workspace_graph" '{}' | mcp_text)"
 node_count="$(printf '%s' "${graph_text}" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["nodes"]))')"
 echo "    workspace graph: ${node_count} nodes (empty per-repo graphs, so 0 expected)"
 
-echo "==> Restarting server with --workspace cg..."
+echo "==> Restarting server with --workspace bc..."
 stop_server
-start_server cg
+start_server bc
 
 echo "==> Calling get_active_workspace after switch..."
 active_text="$(call_tool "get_active_workspace" '{}' | mcp_text)"
 active_name="$(printf '%s' "${active_text}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
-if [[ "${active_name}" != "cg" ]]; then
-    echo "ERROR: get_active_workspace returned ${active_name} after switch, expected cg." >&2
+if [[ "${active_name}" != "bc" ]]; then
+    echo "ERROR: get_active_workspace returned ${active_name} after switch, expected bc." >&2
     exit 1
 fi
 echo "    get_active_workspace: ${active_name} (after restart)"
