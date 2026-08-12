@@ -124,6 +124,50 @@ impl std::fmt::Display for WorkspaceSourceKind {
     }
 }
 
+/// In-memory index over a single workspace's member-repo ids. Pre-computes
+/// the set for fast O(1) `contains_repo` lookups during loader filtering.
+#[derive(Debug, Clone)]
+pub struct WorkspaceIndex {
+    pub spec: WorkspaceSpec,
+    pub members: std::collections::HashSet<String>,
+}
+
+impl WorkspaceIndex {
+    pub fn from_spec(spec: WorkspaceSpec) -> Self {
+        let members = spec.members.iter().cloned().collect();
+        Self { spec, members }
+    }
+
+    pub fn contains_repo(&self, repo_id: &str) -> bool {
+        self.members.contains(repo_id)
+    }
+}
+
+/// Filter a list of `RepoConfig` (from `FederationConfig::repos`) down to
+/// the members of the given workspace. Repos in `all_repos` not in the
+/// workspace are dropped; repos in the workspace not in `all_repos` produce
+/// a `LainError::Config` listing the missing ids.
+pub fn filter_repos_by_workspace<'a>(
+    all_repos: &'a [crate::federation::config::RepoConfig],
+    workspace: &WorkspaceIndex,
+) -> Result<Vec<&'a crate::federation::config::RepoConfig>, LainError> {
+    let mut picked = Vec::with_capacity(workspace.members.len());
+    let mut missing = Vec::new();
+    for member_id in &workspace.spec.members {
+        match all_repos.iter().find(|r| &r.id == member_id) {
+            Some(entry) => picked.push(entry),
+            None => missing.push(member_id.clone()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(LainError::Config(format!(
+            "workspace '{}' references repos not in repos.yaml: {:?}",
+            workspace.spec.name, missing
+        )));
+    }
+    Ok(picked)
+}
+
 /// Mirror of `RepoSource` for workspace definitions. Same shape, separate
 /// trait so callers can be explicit about which subsystem they're driving.
 #[async_trait]
@@ -461,5 +505,57 @@ workspaces:
             PathBuf::from("/tmp"),
         );
         assert!(r.is_err());
+    }
+
+    fn make_config_repo(id: &str) -> crate::federation::config::RepoConfig {
+        crate::federation::config::RepoConfig {
+            id: id.to_string(),
+            source: crate::federation::config::SourceConfig::WorkspaceDir { path: PathBuf::from("/tmp") },
+        }
+    }
+
+    #[test]
+    fn workspace_index_contains_repo() {
+        let ws = WorkspaceIndex::from_spec(WorkspaceSpec {
+            name: "team".into(),
+            description: None,
+            source: None,
+            members: vec!["a".into(), "b".into()],
+        });
+        assert!(ws.contains_repo("a"));
+        assert!(ws.contains_repo("b"));
+        assert!(!ws.contains_repo("c"));
+    }
+
+    #[test]
+    fn filter_picks_only_members() {
+        let all = vec![
+            make_config_repo("a"),
+            make_config_repo("b"),
+            make_config_repo("c"),
+        ];
+        let ws = WorkspaceIndex::from_spec(WorkspaceSpec {
+            name: "team".into(),
+            description: None,
+            source: None,
+            members: vec!["a".into(), "c".into()],
+        });
+        let picked = filter_repos_by_workspace(&all, &ws).unwrap();
+        let ids: Vec<&str> = picked.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn filter_errors_on_missing_member() {
+        let all = vec![make_config_repo("a")];
+        let ws = WorkspaceIndex::from_spec(WorkspaceSpec {
+            name: "team".into(),
+            description: None,
+            source: None,
+            members: vec!["a".into(), "ghost".into()],
+        });
+        let err = filter_repos_by_workspace(&all, &ws).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("ghost"), "expected missing id in error, got: {msg}");
     }
 }
