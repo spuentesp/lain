@@ -87,12 +87,65 @@ impl FederatedIndex {
             .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
         let nodes = repo.nodes();
 
+        // Strip the per-repo `local_path` prefix from absolute paths so the
+        // global id is repo-relative (e.g. `src/lib.rs` not
+        // `/tmp/.../shared/src/lib.rs`). Per-repo nodes store absolute paths
+        // because the GraphDatabase records them as-is; the global id
+        // format is repo-relative by convention.
+        let local_path_str = repo.source().local_path().to_string_lossy().into_owned();
+        let strip = |p: &str| -> String {
+            p.strip_prefix(&local_path_str)
+                .map(|s| s.trim_start_matches('/').to_string())
+                .unwrap_or_else(|| p.to_string())
+        };
+
         // Re-key every node to its global id and upsert into the backend.
         for n in &nodes {
-            let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name);
+            let gid = GlobalId::new(id, n.node_type.clone(), &strip(&n.path), &n.name);
             let mut rewritten = n.clone();
             rewritten.id = gid.as_str().to_string();
             self.backend.upsert_node(rewritten)?;
+        }
+
+        // Pass A: project per-repo edges into the global backend, re-keying
+        // both endpoints to global ids. `GraphEdge` carries only
+        // (edge_type, source_id, target_id, weight), so we build a local-id
+        // → (kind, path, name) lookup from the per-repo `nodes()` set.
+        let mut local_id_to_triple: std::collections::HashMap<String, (NodeType, String, String)> =
+            std::collections::HashMap::new();
+        for n in &nodes {
+            local_id_to_triple.insert(n.id.clone(), (n.node_type.clone(), n.path.clone(), n.name.clone()));
+        }
+        for edge in repo.edges() {
+            let Some((src_kind, src_path, src_name)) = local_id_to_triple.get(&edge.source_id) else {
+                tracing::debug!(source_id = %edge.source_id, "skipping edge: source node not in local index");
+                continue;
+            };
+            let Some((tgt_kind, tgt_path, tgt_name)) = local_id_to_triple.get(&edge.target_id) else {
+                tracing::debug!(target_id = %edge.target_id, "skipping edge: target node not in local index");
+                continue;
+            };
+            // Strip the per-repo `local_path` prefix from absolute paths so
+            // the global id is repo-relative (e.g. `src/lib.rs` not
+            // `/tmp/.../shared/src/lib.rs`). Per-repo nodes store absolute
+            // paths because the GraphDatabase records them as-is; the global
+            // id format is repo-relative by convention.
+            let strip = |p: &str| {
+                p.strip_prefix(repo.source().local_path().to_string_lossy().as_ref())
+                    .map(|s| s.trim_start_matches('/').to_string())
+                    .unwrap_or_else(|| p.to_string())
+            };
+            let global_source = GlobalId::new(id, src_kind.clone(), &strip(src_path), src_name)
+                .as_str()
+                .to_string();
+            let global_target = GlobalId::new(id, tgt_kind.clone(), &strip(tgt_path), tgt_name)
+                .as_str()
+                .to_string();
+            
+            let mut rewritten = edge.clone();
+            rewritten.source_id = global_source;
+            rewritten.target_id = global_target;
+            self.backend.upsert_edge(rewritten)?;
         }
 
         // Cross-repo matching: gather every other repo's nodes once, then for
