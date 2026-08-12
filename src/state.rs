@@ -353,14 +353,17 @@ fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
+// Test-only mutex shared by all `mod tests` and `mod active_workspace_tests`
+// blocks in this file. cargo test runs tests in parallel; XDG_CONFIG_HOME
+// and cwd are process-global state, so parallel tests would stomp on each
+// other without serialization. Defined at file scope so both test mods
+// (which are sibling test sub-modules) can see it.
+#[cfg(test)]
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // cargo test runs tests in parallel. XDG_CONFIG_HOME is a process-global
-    // env var, so parallel tests would stomp on each other. Serialize the
-    // state tests through a global mutex.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct DirGuard(PathBuf);
     impl DirGuard {
@@ -612,5 +615,212 @@ mod tests {
             msg.contains("bare") || msg.contains("--workspace auto"),
             "error should mention bare repo or --workspace auto, got: {msg}"
         );
+    }
+}
+
+// =============================================================================
+// Federation workspace pointer
+// =============================================================================
+//
+// A federation workspace is a named subset of repos declared in
+// `workspaces.yaml`. The active workspace pointer lives at
+// `~/.config/lain/active_workspace` (separate from the single-workspace
+// `~/.config/lain/current` file because the two registries are
+// independent — a user can be working on a single-workspace project AND
+// have an active federation workspace at the same time).
+//
+// File format: two whitespace-separated tokens on one or more lines:
+//   <workspace-name>  <path-to-workspaces.yaml>
+// Example:
+//   backend-team  /home/user/code/lain/workspaces.yaml
+//
+// The path is stored so the server can resolve the active workspace's
+// definition without needing `--workspace` to be passed explicitly.
+
+/// Pointer to the active federation workspace: name + path to the
+/// `workspaces.yaml` it was sourced from. Lives at
+/// `~/.config/lain/active_workspace`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveWorkspace {
+    pub name: String,
+    pub source_path: PathBuf,
+}
+
+fn active_workspace_file() -> PathBuf {
+    config_dir().join("active_workspace")
+}
+
+impl ActiveWorkspace {
+    /// Load the active workspace pointer from disk. Returns `Ok(None)` if
+    /// the file does not exist (no workspace ever set). Returns `Err` if
+    /// the file exists but is malformed.
+    pub fn load() -> Result<Option<Self>, crate::error::LainError> {
+        let path = active_workspace_file();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(crate::error::LainError::Io(e.to_string())),
+        };
+        let mut parts = text.split_whitespace();
+        let name = parts.next()
+            .ok_or_else(|| crate::error::LainError::Config(format!(
+                "active_workspace file empty: {}", path.display()
+            )))?
+            .to_string();
+        let source_path = PathBuf::from(parts.next().ok_or_else(|| crate::error::LainError::Config(format!(
+            "active_workspace missing source path: {}", path.display()
+        )))?);
+        if name.is_empty() {
+            return Err(crate::error::LainError::Config(format!(
+                "active_workspace name is empty: {}", path.display()
+            )));
+        }
+        Ok(Some(Self { name, source_path }))
+    }
+
+    /// Save this pointer to disk atomically (write to .tmp, rename).
+    pub fn save(&self) -> Result<(), crate::error::LainError> {
+        if self.name.is_empty() {
+            return Err(crate::error::LainError::Config("active workspace name cannot be empty".into()));
+        }
+        let dir = config_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| crate::error::LainError::Io(e.to_string()))?;
+        let path = active_workspace_file();
+        let text = format!("{}\n{}\n", self.name, self.source_path.display());
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, text).map_err(|e| crate::error::LainError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| crate::error::LainError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Remove the active workspace pointer file. No-op if it doesn't
+    /// exist.
+    pub fn clear() -> Result<(), crate::error::LainError> {
+        let path = active_workspace_file();
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(crate::error::LainError::Io(e.to_string())),
+        }
+    }
+}
+
+/// Look up a workspace by name in a `WorkspacesFile`. Returns
+/// `LainError::Config` with a clear message if the name is not present.
+pub fn resolve_active_workspace<'a>(
+    spec: &'a crate::federation::workspace::WorkspacesFile,
+    name: &str,
+) -> Result<&'a crate::federation::workspace::WorkspaceSpec, crate::error::LainError> {
+    spec.workspaces.iter()
+        .find(|w| w.name == name)
+        .ok_or_else(|| crate::error::LainError::Config(format!(
+            "workspace '{name}' not found in workspaces.yaml"
+        )))
+}
+
+#[cfg(test)]
+mod active_workspace_tests {
+    use super::*;
+
+    /// Run a closure with XDG_CONFIG_HOME pointed at a tempdir, restoring
+    /// the original env var on drop. Used so tests don't touch the user's
+    /// real `~/.config/lain/active_workspace`.
+    struct XdgGuard { prev: Option<String> }
+    impl XdgGuard {
+        fn new(dir: &Path) -> Self {
+            let prev = std::env::var("XDG_CONFIG_HOME").ok();
+            std::env::set_var("XDG_CONFIG_HOME", dir);
+            Self { prev }
+        }
+    }
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn load_returns_none_when_file_missing() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = XdgGuard::new(tmp.path());
+        let r = ActiveWorkspace::load().expect("load should not error on missing file");
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = XdgGuard::new(tmp.path());
+        let aw = ActiveWorkspace {
+            name: "backend-team".into(),
+            source_path: PathBuf::from("/srv/workspaces.yaml"),
+        };
+        aw.save().expect("save should succeed");
+        let loaded = ActiveWorkspace::load().unwrap().expect("load should return Some");
+        assert_eq!(loaded, aw);
+    }
+
+    #[test]
+    fn clear_removes_the_file() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = XdgGuard::new(tmp.path());
+        let aw = ActiveWorkspace {
+            name: "team".into(),
+            source_path: PathBuf::from("/srv/ws.yaml"),
+        };
+        aw.save().unwrap();
+        assert!(active_workspace_file().exists());
+        ActiveWorkspace::clear().unwrap();
+        assert!(!active_workspace_file().exists());
+        // Idempotent: clear on missing file is OK.
+        ActiveWorkspace::clear().unwrap();
+    }
+
+    #[test]
+    fn load_errors_on_malformed_file() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = XdgGuard::new(tmp.path());
+        std::fs::create_dir_all(active_workspace_file().parent().unwrap()).unwrap();
+        // Only the name, no path — malformed.
+        std::fs::write(active_workspace_file(), "just-a-name\n").unwrap();
+        let r = ActiveWorkspace::load();
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn resolve_active_workspace_finds_known() {
+        let f = crate::federation::workspace::WorkspacesFile {
+            default: None,
+            workspaces: vec![
+                crate::federation::workspace::WorkspaceSpec {
+                    name: "alpha".into(),
+                    description: None,
+                    source: None,
+                    members: vec!["a".into(), "b".into()],
+                },
+                crate::federation::workspace::WorkspaceSpec {
+                    name: "beta".into(),
+                    description: None,
+                    source: None,
+                    members: vec!["c".into(), "d".into()],
+                },
+            ],
+        };
+        let ws = resolve_active_workspace(&f, "beta").unwrap();
+        assert_eq!(ws.name, "beta");
+    }
+
+    #[test]
+    fn resolve_active_workspace_errors_on_unknown() {
+        let f = crate::federation::workspace::WorkspacesFile::default();
+        let r = resolve_active_workspace(&f, "ghost");
+        assert!(r.is_err());
     }
 }
