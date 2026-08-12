@@ -41,7 +41,20 @@
     .stat-value { font-size: 1.5em; font-weight: 600; }
     .error { background: #f8d7da; color: #721c24; padding: 1rem; border-radius: 4px; margin-bottom: 1rem; }
     .muted { color: #888; }
+    /* Workspace dashboard additions (Task 13 of the Lain Workspaces plan). */
+    .banner { padding: 1rem; background: #f4f4f4; border-radius: 4px; margin-bottom: 1rem; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 3px; font-weight: 600; background: #d4edda; color: #155724; }
+    #workspace-graph { background: #fafafa; border: 1px solid #ddd; border-radius: 4px; }
+    .graph-legend { display: flex; gap: 1.5rem; margin-top: 0.5rem; font-size: 0.85em; color: #666; }
+    .graph-legend .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
+    .graph-legend .line { display: inline-block; width: 24px; height: 0; border-top: 2px solid #888; vertical-align: middle; margin-right: 4px; }
+    .graph-legend .line.cross { border-top-style: dashed; border-top-color: #d6336c; }
+    .graph-legend .line.imports { border-top-style: dotted; border-top-color: #bbb; }
+    .controls { display: flex; gap: 1rem; align-items: center; margin-bottom: 0.5rem; }
+    .controls input { padding: 0.25rem 0.5rem; font-family: inherit; font-size: 0.9em; }
   </style>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
 </head>
 <body>
   <h1>Federation Dashboard</h1>
@@ -69,6 +82,32 @@
   </table>
 
   <p>Federation tools are available via MCP — see <code>docs/FEDERATION.md</code>.</p>
+
+  <h2 id="workspace-header" style="display: none">Active workspace</h2>
+  <div id="workspace-banner" class="banner" style="display: none">
+    <span class="badge" id="workspace-name-badge"></span>
+    <span class="muted" id="workspace-meta"></span>
+  </div>
+  <table id="workspace-members" style="display: none">
+    <thead><tr><th>Repo id</th><th>Path</th><th>Health</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Config</h2>
+  <table id="config"><tbody></tbody></table>
+
+  <h2 id="workspace-graph-header" style="display: none">Workspace graph</h2>
+  <div class="controls" id="graph-controls" style="display: none">
+    <label>Filter: <input id="graph-filter" type="text" placeholder="substring match (name or path)"></label>
+    <span class="muted" id="graph-meta"></span>
+  </div>
+  <svg id="workspace-graph" width="100%" height="500" style="display: none"></svg>
+  <div class="graph-legend" id="graph-legend" style="display: none">
+    <span><span class="dot" style="background: #4e79a7"></span> node (color = repo)</span>
+    <span><span class="line"></span> Calls (intra-repo, solid)</span>
+    <span><span class="line cross"></span> Calls (cross-repo, dashed)</span>
+    <span><span class="line imports"></span> Imports (dotted)</span>
+  </div>
 
   <script>
     // Helper: format a unix-epoch second as a locale string or em-dash.
@@ -149,11 +188,119 @@
         // (Tool-link placeholders and the firstReady substitution were
         // removed along with the .tool-links block; see the top-of-file
         // comment for the rationale.)
+
+        // Step 4: workspace sections (only registered when the server was
+        // constructed with a workspaces file). Probe with list_workspaces
+        // first; if it errors (tool not registered), hide the new sections
+        // and render a "no workspaces configured" note in the config panel.
+        let workspacesConfigured = true;
+        let activeWs = null;
+        try {
+          const list = await callTool('list_workspaces', {});
+          renderConfig(list);
+          activeWs = list.find(w => w.is_active);
+          if (activeWs) {
+            await renderWorkspacePanel(activeWs);
+            await renderWorkspaceGraph();
+          }
+        } catch (e) {
+          workspacesConfigured = false;
+          renderConfigUnavailable();
+        }
       } catch (e) {
         const el = document.getElementById('error');
         el.textContent = 'Failed to load federation: ' + (e && e.message ? e.message : e);
         el.style.display = 'block';
       }
+    }
+
+    // Render the config table (repos.yaml path is opaque to the page;
+    // we report the loaded-repo count and active workspace pointer).
+    function renderConfig(workspaces) {
+      const tbody = document.querySelector('#config tbody');
+      const active = workspaces.find(w => w.is_active);
+      tbody.innerHTML = `
+        <tr><td>repos.yaml</td><td><code>${escapeHtml(window.location.pathname)}</code></td></tr>
+        <tr><td>workspaces.yaml</td><td>${workspacesConfigured ? `<code>${workspaces.length} workspaces</code>` : '<span class="muted">not configured</span>'}</td></tr>
+        <tr><td>active workspace</td><td>${active ? `<code>${escapeHtml(active.name)}</code> (${active.member_count} repos${active.description ? ', ' + escapeHtml(active.description) : ''})` : '<span class="muted">none (all repos loaded)</span>'}</td></tr>
+      `;
+    }
+
+    function renderConfigUnavailable() {
+      const tbody = document.querySelector('#config tbody');
+      tbody.innerHTML = `
+        <tr><td>repos.yaml</td><td><code>${escapeHtml(window.location.pathname)}</code></td></tr>
+        <tr><td>workspaces.yaml</td><td><span class="muted">not configured (run <code>lain workspaces create &lt;name&gt; --members ...</code>)</span></td></tr>
+        <tr><td>active workspace</td><td><span class="muted">none (all repos loaded)</span></td></tr>
+      `;
+    }
+
+    // Render the active workspace's member table.
+    async function renderWorkspacePanel(active) {
+      document.getElementById('workspace-header').style.display = '';
+      document.getElementById('workspace-banner').style.display = '';
+      document.getElementById('workspace-members').style.display = '';
+      document.getElementById('workspace-name-badge').textContent = active.name;
+      document.getElementById('workspace-meta').textContent =
+        `${active.member_count} repos${active.description ? ' · ' + active.description : ''}`;
+
+      const detail = await callTool('get_workspace', { name: active.name });
+      const tbody = document.querySelector('#workspace-members tbody');
+      for (const m of detail.members) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><code>${escapeHtml(m.repo_id)}</code></td>
+          <td><code>${escapeHtml(m.path || '')}</code></td>
+          <td><span class="health ${(m.health || 'unavailable').toLowerCase()}">${escapeHtml(m.health || 'unknown')}</span></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    // Render the per-workspace D3 force-directed graph.
+    async function renderWorkspaceGraph() {
+      document.getElementById('workspace-graph-header').style.display = '';
+      document.getElementById('graph-controls').style.display = '';
+      document.getElementById('workspace-graph').style.display = '';
+      document.getElementById('graph-legend').style.display = '';
+
+      const filterEl = document.getElementById('graph-filter');
+      filterEl.oninput = () => renderWorkspaceGraph();
+
+      const graph = await callTool('get_workspace_graph',
+        filterEl.value ? { filter: filterEl.value } : {});
+
+      // Deterministic per-repo color palette.
+      const repos = [...new Set(graph.nodes.map(n => n.repo_id))].sort();
+      const palette = ['#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f', '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ab'];
+      const colorFor = (rid) => palette[repos.indexOf(rid) % palette.length];
+
+      const svg = d3.select('#workspace-graph');
+      svg.selectAll('*').remove();
+      const width = svg.node().clientWidth || 800;
+      const height = 500;
+      const sim = d3.forceSimulation(graph.nodes)
+        .force('link', d3.forceLink(graph.edges).id(d => d.id).distance(80))
+        .force('charge', d3.forceManyBody().strength(-200))
+        .force('center', d3.forceCenter(width / 2, height / 2));
+      const link = svg.append('g').selectAll('line').data(graph.edges).join('line')
+        .attr('class', d => 'edge' + (d.cross_repo ? ' cross-repo' : '') + (d.edge_type === 'Imports' ? ' imports' : ''))
+        .attr('stroke', d => d.cross_repo ? '#d6336c' : (d.edge_type === 'Imports' ? '#bbb' : '#888'))
+        .attr('stroke-width', 1.5);
+      const node = svg.append('g').selectAll('circle').data(graph.nodes).join('circle')
+        .attr('r', 6)
+        .attr('fill', d => colorFor(d.repo_id))
+        .append('title')
+        .text(d => `${d.name}\n${d.repo_id} · ${d.path}`);
+      sim.on('tick', () => {
+        link
+          .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+        node.attr('cx', d => d.x).attr('cy', d => d.y);
+      });
+
+      document.getElementById('graph-meta').textContent =
+        `${graph.nodes.length} nodes · ${graph.edges.length} edges${graph.truncated ? ' (truncated)' : ''}`;
     }
 
     // Minimal HTML escape for values interpolated into innerHTML.

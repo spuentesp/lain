@@ -48,15 +48,22 @@ impl FederationConfig {
     pub fn build_sources(&self) -> Result<Vec<Box<dyn RepoSource>>, LainError> {
         let mut out = Vec::with_capacity(self.repos.len());
         for r in &self.repos {
-            let id = RepoId::new(&r.id)?;
-            let src: Box<dyn RepoSource> = match &r.source {
-                SourceConfig::LocalClone { url, r#ref } => Box::new(LocalCloneSource::new(id, url, r#ref, self.data_dir.join(&r.id))?),
-                SourceConfig::ShallowClone { url, r#ref, refresh_interval_secs } => Box::new(ShallowCloneSource::new(id, url, r#ref, self.data_dir.join(&r.id), Duration::from_secs(*refresh_interval_secs))?),
-                SourceConfig::WorkspaceDir { path } => Box::new(WorkspaceDirSource::new(id, path.clone())?),
-            };
-            out.push(src);
+            out.push(self.build_source_for(r)?);
         }
         Ok(out)
+    }
+
+    /// Build a single `RepoSource` from one `RepoConfig`. Pulled out of
+    /// `build_sources` so the workspace loader can construct one source
+    /// at a time as it iterates the workspace's filtered member set.
+    pub fn build_source_for(&self, repo: &RepoConfig) -> Result<Box<dyn RepoSource>, LainError> {
+        let id = RepoId::new(&repo.id)?;
+        let src: Box<dyn RepoSource> = match &repo.source {
+            SourceConfig::LocalClone { url, r#ref } => Box::new(LocalCloneSource::new(id, url, r#ref, self.data_dir.join(&repo.id))?),
+            SourceConfig::ShallowClone { url, r#ref, refresh_interval_secs } => Box::new(ShallowCloneSource::new(id, url, r#ref, self.data_dir.join(&repo.id), Duration::from_secs(*refresh_interval_secs))?),
+            SourceConfig::WorkspaceDir { path } => Box::new(WorkspaceDirSource::new(id, path.clone())?),
+        };
+        Ok(src)
     }
 }
 

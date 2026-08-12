@@ -8,10 +8,11 @@
 
 use anyhow::{anyhow, Result};
 use lain::federation::health::RepoHealth;
-use lain::federation::loader::load_federation;
+use lain::federation::loader::{load_federation, load_federation_with_workspace};
 use lain::server::{LainServer, Transport};
+use lain::state::ActiveWorkspace;
 use std::path::Path;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Start a federation-mode MCP server.
@@ -20,11 +21,16 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 /// `src/federation/config.rs` for the schema). `transport` is one of
 /// `"http"` or `"stdio"`. `port` is the TCP port for HTTP. `log_level`
 /// is a tracing `EnvFilter` directive (e.g. `"info"`, `"debug"`).
+/// `workspace_arg` selects the active workspace: "auto" resolves via
+/// `~/.config/lain/active_workspace`, "" loads every repo in
+/// `repos.yaml` (today's behavior), and any other value names a workspace
+/// from `workspaces.yaml` next to `repos.yaml`.
 pub async fn run_server(
     config_path: &Path,
     transport: &str,
     port: u16,
     log_level: &str,
+    workspace_arg: &str,
 ) -> Result<()> {
     init_tracing(log_level);
 
@@ -32,9 +38,9 @@ pub async fn run_server(
         "lain server: loading federation from {}",
         config_path.display()
     );
-    let fed = load_federation(config_path)
+    let fed = load_federation_for_workspace(config_path, workspace_arg)
         .await
-        .map_err(|e| anyhow!("load_federation({}): {e}", config_path.display()))?;
+        .map_err(|e| anyhow!("federation load: {e}"))?;
 
     // `load_federation` adds each repo to the federation and projects whatever
     // nodes are already in the per-repo DB, but it does NOT run the indexing
@@ -83,7 +89,15 @@ pub async fn run_server(
         }
     };
 
-    let server = LainServer::with_federation(fed, transport_enum, port)?;
+    // If a workspaces file exists next to repos.yaml, load it so the
+    // workspace MCP tools are registered. Optional — a server with no
+    // workspaces.yaml still works (no workspace tools, today's behavior).
+    let workspaces = load_workspaces_for_server(config_path).ok().flatten();
+    let server = if let Some(workspaces) = workspaces {
+        LainServer::with_federation_and_workspaces(fed, transport_enum, port, workspaces)?
+    } else {
+        LainServer::with_federation(fed, transport_enum, port)?
+    };
     info!(
         "lain server: starting on {:?} transport (port {})",
         transport_enum, port
@@ -93,6 +107,67 @@ pub async fn run_server(
         .await
         .map_err(|e| anyhow!("federation server: {e}"))
 }
+
+/// Load `workspaces.yaml` from the same directory as `repos.yaml`. Returns
+/// `Ok(None)` if the file doesn't exist (no workspaces configured) or
+/// can't be loaded for any reason — workspace tooling is opt-in, and a
+/// server without it still works.
+fn load_workspaces_for_server(
+    config_path: &Path,
+) -> Result<Option<Arc<lain::federation::workspace::WorkspacesFile>>, anyhow::Error> {
+    let workspaces_path = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("workspaces.yaml");
+    if !workspaces_path.exists() {
+        return Ok(None);
+    }
+    let workspaces = lain::federation::workspace::WorkspacesFile::load(&workspaces_path)
+        .map_err(|e| anyhow!("load {}: {e}", workspaces_path.display()))?;
+    Ok(Some(Arc::new(workspaces)))
+}
+
+/// Resolve the `--workspace` arg and dispatch to the right loader.
+/// Exposed at the file level so a unit test can exercise the resolution
+/// without spinning up an MCP server.
+async fn load_federation_for_workspace(
+    config_path: &Path,
+    workspace_arg: &str,
+) -> Result<Arc<FederatedIndex>, anyhow::Error> {
+    use lain::error::LainError;
+    let arg = workspace_arg.trim();
+    let resolved_name: Option<String> = match arg {
+        "" | "none" => None,  // explicit "no workspace" — today's behavior
+        "auto" => {
+            match ActiveWorkspace::load() {
+                Ok(Some(active)) => Some(active.name),
+                Ok(None) => None,  // no pointer set → fall through to all-repos
+                Err(e) => {
+                    // Don't fail startup over a corrupt pointer file;
+                    // log and fall through. The operator can re-run
+                    // `lain workspaces use <name>` to repair.
+                    warn!("could not read ~/.config/lain/active_workspace: {e}");
+                    None
+                }
+            }
+        }
+        _ => Some(arg.to_string()),
+    };
+    match resolved_name {
+        None => Ok(load_federation(config_path).await?),
+        Some(name) => {
+            let workspaces_path = config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("workspaces.yaml");
+            Ok(load_federation_with_workspace(config_path, &workspaces_path, &name).await?)
+        }
+    }
+}
+
+// Bring `FederatedIndex` into scope for the helper above.
+use lain::federation::federated_index::FederatedIndex;
+use std::sync::Arc;
 
 fn init_tracing(log_level: &str) {
     let _ = tracing_subscriber::registry()

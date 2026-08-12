@@ -509,6 +509,35 @@ impl ToolExecutor {
         sections.push("3. If 1 repo is registered → use it.\n".to_string());
         sections.push("4. Otherwise → `Config(\"multiple repos; specify repo_id or symbol\")`.\n".to_string());
 
+        // Workspace mode: appends a section that explains the 4 new
+        // workspace tools + the resolution rule when a workspace is
+        // active. The current section is unconditional — operators who
+        // haven't configured workspaces see the same text; the tools
+        // are simply not registered for them.
+        sections.push("\n---\n\n## Workspace Mode (scoped subset of repos)\n".to_string());
+        sections.push(
+            "When the server is started with `--workspace <name>`, only that workspace's \
+             repos are loaded. Use these tools to learn the scope and reason about it:\n"
+                .to_string(),
+        );
+        sections.push("- **list_workspaces**: list known workspaces + which is active\n".to_string());
+        sections.push("- **get_active_workspace**: which workspace the server holds right now\n".to_string());
+        sections.push("- **get_workspace(name)**: full detail on one workspace\n".to_string());
+        sections.push("- **get_workspace_graph(filter?)**: node + edge data for the dashboard view\n".to_string());
+        sections.push(
+            "\nThe 6 federation tools (`list_repos`, `search_org`, `get_cross_repo_blast_radius`, etc.) \
+             operate over the active workspace's repo subset. `get_repo_info(<id>)` returns `NotFound` \
+             if the id isn't in the active workspace — that's correct, not a bug.\n"
+                .to_string(),
+        );
+        sections.push("\n### Detection\n".to_string());
+        sections.push(
+            "If `list_workspaces` appears in your tool list, you're in workspace mode. Call \
+             `get_active_workspace` to learn which subset is loaded before issuing broad queries \
+             like `search_org`.\n"
+                .to_string(),
+        );
+
         Ok(sections.join(""))
     }
 
