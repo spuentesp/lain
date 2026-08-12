@@ -74,6 +74,12 @@ enum Commands {
     Use {
         name: String,
     },
+    /// Manage the federation workspace registry (`workspaces.yaml`).
+    /// Use `lain workspaces use <name>` to set the active workspace.
+    Workspaces {
+        #[command(subcommand)]
+        action: WorkspacesAction,
+    },
     /// Start a federation-mode MCP server backed by a `repos.yaml` config.
     /// Federation tools (list_repos, get_federation_health, search_org,
     /// get_cross_repo_blast_radius*, get_repo_info) are exposed over the
@@ -105,6 +111,63 @@ enum ProjectsAction {
     Forget { name: String },
     /// Show the currently active project name.
     Current,
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkspacesAction {
+    /// Create a new workspace.
+    Create {
+        name: String,
+        #[arg(long)] description: Option<String>,
+        #[arg(long, value_delimiter = ',')] members: Vec<String>,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// Add a repo to a workspace's members.
+    Add {
+        name: String,
+        #[arg(long)] repo: String,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// Remove a repo from a workspace's members.
+    Remove {
+        name: String,
+        #[arg(long)] repo: String,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// Import a workspace from another workspaces.yaml.
+    Import {
+        name: String,
+        #[arg(long)] from: std::path::PathBuf,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// Clone a workspace definition repo and register it.
+    Init {
+        name: String,
+        #[arg(long)] from: String,            // git url
+        #[arg(long, default_value = "main")] ref_: Option<String>,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// List all known workspaces.
+    List {
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// Show full spec of one workspace.
+    Show {
+        name: String,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// Set the active workspace (writes ~/.config/lain/active_workspace).
+    Use {
+        name: String,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
+    /// Print the active workspace.
+    Current,
+    /// Remove a workspace from workspaces.yaml.
+    Forget {
+        name: String,
+        #[arg(long)] config: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -189,6 +252,36 @@ async fn main() -> Result<()> {
                     } else {
                         return Err(anyhow::anyhow!("no active project; use `lain use <name>`"));
                     }
+                }
+            },
+            Commands::Workspaces { action } => match action {
+                WorkspacesAction::Create { name, description, members, config } => {
+                    return cmds::workspaces::run_create(&name, description, members, config.as_deref());
+                }
+                WorkspacesAction::Add { name, repo, config } => {
+                    return cmds::workspaces::run_add(&name, &repo, config.as_deref());
+                }
+                WorkspacesAction::Remove { name, repo, config } => {
+                    return cmds::workspaces::run_remove(&name, &repo, config.as_deref());
+                }
+                WorkspacesAction::Import { name, from, config } => {
+                    return cmds::workspaces::run_import(&name, &from, config.as_deref());
+                }
+                WorkspacesAction::Init { name, from, ref_, config } => {
+                    return cmds::workspaces::run_init(&name, &from, ref_, config.as_deref()).await;
+                }
+                WorkspacesAction::List { config } => {
+                    return cmds::workspaces::run_list(config.as_deref());
+                }
+                WorkspacesAction::Show { name, config } => {
+                    return cmds::workspaces::run_show(&name, config.as_deref());
+                }
+                WorkspacesAction::Use { name, config } => {
+                    return cmds::workspaces::run_use(&name, config.as_deref());
+                }
+                WorkspacesAction::Current => return cmds::workspaces::run_current(),
+                WorkspacesAction::Forget { name, config } => {
+                    return cmds::workspaces::run_forget(&name, config.as_deref());
                 }
             },
             Commands::Agents { action } => match action {

@@ -5,6 +5,7 @@ pub mod ask;
 pub mod hook;
 pub mod agents;
 pub mod server;
+pub mod workspaces;
 
 pub use init::run_init;
 pub use query::run_query;
