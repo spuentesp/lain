@@ -203,6 +203,11 @@ const WORKSPACE_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "Full detail on one workspace by name: description?, source?, members: [{repo_id, path, health}]. Errors with NotFound if name is unknown.",
         &["name"],
     ),
+    (
+        "get_workspace_graph",
+        "Per-workspace graph for the dashboard. Returns {nodes: [...], edges: [...], truncated: bool}. Filters to Function/Method/Class + Calls/Imports. Optional filter: substring match against node name + path. Cross-repo Calls edges are marked cross_repo: true.",
+        &["filter?"],
+    ),
 ];
 
 struct LainHandler {
@@ -568,6 +573,23 @@ impl ServerHandler for LainHandler {
                             false,
                         )),
                         Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                    };
+                }
+                "get_workspace_graph" => {
+                    let filter = args_owned.get("filter").and_then(|v| v.as_str());
+                    return match self.federation.as_deref() {
+                        Some(fed) => match crate::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
+                            Ok(graph) => Ok(tool_text_result(
+                                serde_json::to_string(&graph)
+                                    .unwrap_or_else(|e| format!("serialization error: {e}")),
+                                false,
+                            )),
+                            Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                        },
+                        None => Ok(tool_text_result(
+                            LainError::Workspace("get_workspace_graph requires federation mode".into()).to_string(),
+                            true,
+                        )),
                     };
                 }
                 _ => {}

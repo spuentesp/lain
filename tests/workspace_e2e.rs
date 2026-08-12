@@ -209,3 +209,21 @@ async fn workspace_mcp_get_active_workspace_returns_correct_subset() {
     assert_eq!(info.name, "auth-ws");
     assert_eq!(info.members, vec!["shared", "db-client"]);
 }
+
+#[tokio::test]
+async fn workspace_mcp_get_workspace_graph_filters_correctly() {
+    use lain::mcp::federation_tools::get_workspace_graph;
+    let tmp = tempfile::tempdir().unwrap();
+    write_three_dependent_crates(tmp.path());
+    let repos_yaml = write_repos_yaml(tmp.path(), &["shared", "db-client", "auth-svc"]);
+    write_workspaces_yaml(tmp.path(), "subset", &["shared", "db-client"]);
+    let fed = load_federation_with_workspace(&repos_yaml, tmp.path().join("workspaces.yaml").as_path(), "subset").await.unwrap();
+    let workspaces = WorkspacesFile::load(tmp.path().join("workspaces.yaml").as_path()).unwrap();
+    let graph = get_workspace_graph(&fed, &workspaces, None).expect("graph should succeed");
+    for n in &graph.nodes {
+        assert!(
+            n.repo_id == "shared" || n.repo_id == "db-client",
+            "node '{}' should be in workspace subset, got repo_id='{}'", n.name, n.repo_id
+        );
+    }
+}

@@ -645,3 +645,122 @@ pub fn get_workspace(
         members,
     })
 }
+
+// =============================================================================
+// Per-workspace graph (for the dashboard's D3 force-directed view)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphNode {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub repo_id: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+    pub edge_type: String,
+    pub cross_repo: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub truncated: bool,
+}
+
+const GRAPH_NODE_CAP: usize = 5000;
+const GRAPH_EDGE_CAP: usize = 10000;
+
+fn node_kind_str(s: &str) -> bool {
+    matches!(s, "Function" | "Method" | "Class")
+}
+
+fn edge_kind_str(s: &str) -> bool {
+    matches!(s, "Calls" | "Imports")
+}
+
+/// Per-workspace graph data for the dashboard's D3 force-directed view.
+///
+/// Filters to `Function` / `Method` / `Class` nodes and `Calls` / `Imports`
+/// edges (per the spec's "filtered Functions + Calls + cross-repo" scope).
+/// Marks edges as `cross_repo: true` when source's repo_id differs from
+/// target's. Caps at 5000 nodes / 10000 edges.
+pub fn get_workspace_graph(
+    fed: &FederatedIndex,
+    workspaces: &WorkspacesFile,
+    filter: Option<&str>,
+) -> Result<WorkspaceGraph, LainError> {
+    // Identify the active workspace by intersecting loaded repos with
+    // each workspace's member set. Errors if no match.
+    let loaded: std::collections::HashSet<String> =
+        fed.list_repos().into_iter().map(|(id, _)| id.to_string()).collect();
+    let active = workspaces.workspaces.iter()
+        .find(|ws| {
+            let ws_set: std::collections::HashSet<&String> = ws.members.iter().collect();
+            ws_set.len() == loaded.len()
+                && ws_set.iter().all(|m| loaded.contains(*m))
+                && loaded.iter().all(|l| ws_set.contains(l))
+        })
+        .ok_or_else(|| LainError::Workspace(
+            "federation loaded but no workspace matches the loaded repos".into(),
+        ))?;
+    let members: std::collections::HashSet<String> = active.members.iter().cloned().collect();
+
+    let all_nodes = fed.backend().list_nodes().map_err(LainError::from)?;
+    let mut nodes: Vec<GraphNode> = Vec::new();
+    let mut truncated = false;
+    for n in all_nodes {
+        let kind = format!("{:?}", n.node_type);
+        if !node_kind_str(&kind) { continue; }
+        let gid = crate::federation::repo_id::GlobalId::parse(&n.id).ok();
+        let repo_id = gid.as_ref().map(|g| g.repo_id().to_string()).unwrap_or_default();
+        if !members.contains(&repo_id) { continue; }
+        if let Some(f) = filter {
+            if !n.name.contains(f) && !n.path.contains(f) { continue; }
+        }
+        if nodes.len() >= GRAPH_NODE_CAP {
+            truncated = true;
+            break;
+        }
+        nodes.push(GraphNode {
+            id: n.id.clone(),
+            name: n.name.clone(),
+            path: n.path.clone(),
+            repo_id,
+            kind,
+        });
+    }
+    let node_ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+
+    let mut edges: Vec<GraphEdge> = Vec::new();
+    let all_edges = fed.backend().all_edges().map_err(LainError::from)?;
+    for e in all_edges {
+        if !node_ids.contains(e.source_id.as_str()) || !node_ids.contains(e.target_id.as_str()) { continue; }
+        let kind = format!("{:?}", e.edge_type);
+        if !edge_kind_str(&kind) { continue; }
+        if edges.len() >= GRAPH_EDGE_CAP {
+            truncated = true;
+            break;
+        }
+        let s = crate::federation::repo_id::GlobalId::parse(&e.source_id).ok();
+        let t = crate::federation::repo_id::GlobalId::parse(&e.target_id).ok();
+        let cross_repo = match (s, t) {
+            (Some(a), Some(b)) => a.repo_id() != b.repo_id(),
+            _ => false,
+        };
+        edges.push(GraphEdge {
+            source: e.source_id,
+            target: e.target_id,
+            edge_type: kind,
+            cross_repo,
+        });
+    }
+
+    Ok(WorkspaceGraph { nodes, edges, truncated })
+}
