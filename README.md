@@ -177,6 +177,28 @@ lain use lain                                   # mark as active
 `lain init` auto-registers the project under its directory basename, so
 first-time use is frictionless.
 
+### 5. (optional) Group repos into workspaces
+
+For federation mode, declare named groups of repos in `workspaces.yaml`
+and load only the subset you care about. Workspaces are switchable on
+server restart; switching hot-reload is not supported (intentional — see
+the spec for rationale).
+
+```bash
+# Declare a workspace (one-time)
+lain workspaces create backend-team --members auth-svc,billing-svc,db-client
+
+# Activate it (writes ~/.config/lain/active_workspace)
+lain workspaces use backend-team
+
+# Run the server scoped to that workspace
+lain server --config repos.yaml --workspace auto --transport http --port 9999
+```
+
+See `docs/FEDERATION.md#workspaces` for the full guide and the new MCP
+tools (`list_workspaces`, `get_active_workspace`, `get_workspace`,
+`get_workspace_graph`).
+
 ### 4. Verify
 
 ```bash

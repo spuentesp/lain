@@ -509,6 +509,69 @@ exists in exactly one repo and isn't a high-fanout hub.
 
 ---
 
+## Workspaces
+
+Workspaces are named groups of repos that the federation engine indexes
+together as a coherent unit. A workspace = a subset of `repos.yaml`'s
+repos, switchable on server restart. Workspaces are documented in
+`docs/superpowers/specs/2026-08-12-lain-workspaces-design.md`; this
+section is a quick reference.
+
+### When to use workspaces
+
+| Mode | Use it when |
+|---|---|
+| Federation (`lain server --config repos.yaml`) | Org-wide questions across all repos |
+| Workspace (`lain server --config repos.yaml --workspace <name>`) | Questions scoped to a named subset ("backend-team", "payments-ws") |
+
+### Setup
+
+1. Declare workspaces in `workspaces.yaml` (same directory as `repos.yaml`):
+   ```yaml
+   workspaces:
+     - name: backend-team
+       members: [auth-svc, billing-svc, db-client]
+   ```
+2. Pick one: `lain workspaces use backend-team` (writes
+   `~/.config/lain/active_workspace`).
+3. Start the server: `lain server --config repos.yaml --workspace auto
+   --transport http --port 9999`. The federation loads only
+   `backend-team`'s members. All 6 federation tools operate scoped.
+4. Switching is restart-only. Run `lain workspaces use <other>` and
+   bounce the server.
+
+### Workspace CLI
+
+```
+lain workspaces create / add / remove / import / init / list / show / use / current / forget
+```
+
+See `lain workspaces --help`.
+
+### MCP tools (workspace mode)
+
+In addition to the 6 federation tools (scoped to the workspace's repos):
+- `list_workspaces` — all known workspaces + which is active
+- `get_active_workspace` — the active workspace's name + members
+- `get_workspace(name)` — full detail on one workspace
+- `get_workspace_graph(filter?)` — node + edge data for the dashboard graph
+
+### Federation dashboard
+
+`/federation-dashboard.html` (when running `lain server --transport
+http`) gains three sections when a workspace is active:
+- Active workspace panel (name + members + their paths/healths)
+- Config panel (paths + repo counts)
+- Per-workspace D3 force-directed graph view (Functions/Methods/Classes
+  + Calls/Imports, color by `repo_id`, dashed lines for cross-repo
+  Calls)
+
+### Agents
+
+`get_agent_strategy` (a built-in MCP tool) includes a "Workspace mode"
+section that documents the new tools + the `repo_id` resolution rule
+when scoped.
+
 ## Migration
 
 Federation mode is additive on top of single-workspace mode.
