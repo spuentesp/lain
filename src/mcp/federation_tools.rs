@@ -512,3 +512,136 @@ mod tests {
         assert_eq!(result.total_count, 1);
     }
 }
+
+// =============================================================================
+// Workspace tools (read-only)
+// =============================================================================
+//
+// Three new MCP tools for workspace-aware federation. All are read-only.
+// They depend on the WorkspacesFile the server was constructed with — the
+// handler passes the active workspace file at dispatch time.
+
+use crate::federation::workspace::{WorkspaceSourceConfig, WorkspacesFile};
+use crate::state::ActiveWorkspace;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceInfo {
+    pub name: String,
+    pub description: Option<String>,
+    /// Source kind as a stable label: "workspace_dir" or "workspace_clone".
+    /// None if the workspace was declared without a `source:` block.
+    pub source: Option<String>,
+    pub member_count: usize,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActiveWorkspaceInfo {
+    pub name: String,
+    pub members: Vec<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceRepoInfo {
+    pub repo_id: String,
+    pub path: String,
+    pub health: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceDetail {
+    pub name: String,
+    pub description: Option<String>,
+    pub source: Option<String>,
+    pub members: Vec<WorkspaceRepoInfo>,
+}
+
+fn source_label(s: &Option<WorkspaceSourceConfig>) -> Option<String> {
+    s.as_ref().map(|c| match c {
+        WorkspaceSourceConfig::WorkspaceDir { .. } => "workspace_dir".to_string(),
+        WorkspaceSourceConfig::WorkspaceClone { .. } => "workspace_clone".to_string(),
+    })
+}
+
+pub fn list_workspaces(
+    workspaces: &WorkspacesFile,
+    active: Option<&ActiveWorkspace>,
+) -> Vec<WorkspaceInfo> {
+    workspaces.workspaces.iter().map(|ws| {
+        let is_active = active.as_ref().map(|a| a.name == ws.name).unwrap_or(false);
+        WorkspaceInfo {
+            name: ws.name.clone(),
+            description: ws.description.clone(),
+            source: source_label(&ws.source),
+            member_count: ws.members.len(),
+            is_active,
+        }
+    }).collect()
+}
+
+/// Identify the workspace whose member set exactly matches the loaded repo
+/// ids in the federation. Returns `LainError::Workspace(...)` if no
+/// workspace matches (no workspace was active, or the federation was
+/// loaded without workspace filtering).
+pub fn get_active_workspace(
+    fed: &FederatedIndex,
+    workspaces: &WorkspacesFile,
+) -> Result<ActiveWorkspaceInfo, LainError> {
+    let loaded: std::collections::HashSet<String> =
+        fed.list_repos().into_iter().map(|(id, _)| id.to_string()).collect();
+    if loaded.is_empty() {
+        return Err(LainError::Workspace(
+            "no repos loaded; no active workspace".into(),
+        ));
+    }
+    let active = workspaces.workspaces.iter()
+        .find(|ws| {
+            let ws_set: std::collections::HashSet<&String> = ws.members.iter().collect();
+            ws_set.len() == loaded.len()
+                && ws_set.iter().all(|m| loaded.contains(*m))
+                && loaded.iter().all(|l| ws_set.contains(l))
+        })
+        .ok_or_else(|| LainError::Workspace(
+            "federation loaded but no workspace matches the loaded repos".into(),
+        ))?;
+    Ok(ActiveWorkspaceInfo {
+        name: active.name.clone(),
+        members: active.members.clone(),
+        source: source_label(&active.source),
+    })
+}
+
+pub fn get_workspace(
+    fed: &FederatedIndex,
+    workspaces: &WorkspacesFile,
+    name: &str,
+) -> Result<WorkspaceDetail, LainError> {
+    let ws = workspaces.workspaces.iter().find(|w| w.name == name)
+        .ok_or_else(|| LainError::NotFound(format!("workspace {name}")))?;
+    // Resolve path + health for each member from the federation, if loaded.
+    let loaded = fed.list_repos();
+    let mut members = Vec::with_capacity(ws.members.len());
+    for m in &ws.members {
+        let info = loaded.iter().find(|(id, _)| id.as_str() == m);
+        let (path, health) = match info {
+            Some((id, h)) => {
+                let repo = fed.get_repo(id);
+                let path = repo.map(|r| r.source().local_path().display().to_string()).unwrap_or_default();
+                (path, h.to_string())
+            }
+            None => (String::new(), "not_loaded".to_string()),
+        };
+        members.push(WorkspaceRepoInfo {
+            repo_id: m.clone(),
+            path,
+            health,
+        });
+    }
+    Ok(WorkspaceDetail {
+        name: ws.name.clone(),
+        description: ws.description.clone(),
+        source: source_label(&ws.source),
+        members,
+    })
+}
