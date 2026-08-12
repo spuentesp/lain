@@ -4,7 +4,7 @@ use crate::federation::repo_source::RepoSource;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::schema::{GraphEdge, GraphNode};
+use crate::schema::{EdgeType, GraphEdge, GraphNode};
 use crate::server::ingestion::index_one_repo;
 use parking_lot::RwLock;
 use std::path::Path;
@@ -105,6 +105,35 @@ impl RepoIndex {
 
     pub fn edges(&self) -> Vec<GraphEdge> {
         self.db.all_edges()
+    }
+
+    /// For every `Calls` edge in this repo's per-repo graph whose target is
+    /// NOT a function defined in this repo (i.e., the target is an imported
+    /// reference name), return `(source_local_id, target_name)`.
+    ///
+    /// Used by `FederatedIndex::project_repo` Pass B to resolve cross-repo
+    /// `Calls` edges via the federation's `symbol_to_repos` index.
+    pub fn external_calls(&self) -> Vec<(String, String)> {
+        let local_node_names: std::collections::HashSet<String> = self
+            .nodes()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        let mut out = Vec::new();
+        for edge in self.edges() {
+            if edge.edge_type != EdgeType::Calls {
+                continue;
+            }
+            // The per-repo GraphDatabase's id for a node is the node's
+            // `name` (see src/graph.rs all_nodes — it uses the node's name
+            // as the local id). So if the target_id isn't in the local
+            // node-name set, the target is an imported reference.
+            let target_name = edge.target_id.clone();
+            if !local_node_names.contains(&target_name) {
+                out.push((edge.source_id, target_name));
+            }
+        }
+        out
     }
 
     /// Run the per-repo ingestion pipeline: tree-sitter extract → LSP hydrate

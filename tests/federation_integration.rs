@@ -324,3 +324,134 @@ async fn cold_restart_reloads_all_repos() {
     let second = load_federation(&cfg_path).await.unwrap();
     assert_eq!(second.list_repos().len(), 3);
 }
+
+#[tokio::test]
+async fn project_repo_projects_intra_repo_calls_edges() {
+    // Use the explicit per-repo indexing pattern (load_federation does NOT
+    // trigger indexing — see tests/federation_integration.rs:46-84 for the
+    // canonical pattern, and src/cmds/server.rs:49-74 for the production
+    // pattern). The order is: build a RepoSource, register it via
+    // add_repo, retrieve the resulting RepoIndex, run index(), then
+    // project_repo. Without index(), the per-repo graph is empty and
+    // project_repo has nothing to project.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let shared = root.join("shared");
+    let auth_svc = root.join("auth-svc");
+
+    // Write all files BEFORE init_temp_git_repo, which runs `git add -A`
+    // and requires at least one tracked file to produce a non-empty commit.
+    for sub in [&shared, &auth_svc] {
+        std::fs::create_dir_all(sub.join("src")).unwrap();
+    }
+    std::fs::write(
+        shared.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ).unwrap();
+    std::fs::write(
+        shared.join("src/lib.rs"),
+        "pub fn inner_hash(s: &str) -> u64 { 0 }\n\
+         pub fn hash(s: &str) -> u64 { inner_hash(s) }\n",
+    ).unwrap();
+    std::fs::write(
+        auth_svc.join("Cargo.toml"),
+        "[package]\nname = \"auth-svc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [dependencies]\nshared = { path = \"../shared\" }\n",
+    ).unwrap();
+    std::fs::write(
+        auth_svc.join("src/lib.rs"),
+        "pub fn auth(s: &str) -> bool { shared::hash(s) > 0 }\n",
+    ).unwrap();
+    for sub in [&shared, &auth_svc] {
+        init_temp_git_repo(sub);
+    }
+
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let backend: Arc<dyn lain::federation::graph_backend::GraphBackend> =
+        Arc::new(lain::federation::graph_backend::PetgraphBackend::new(&data_dir).unwrap());
+    let fed = Arc::new(lain::federation::federated_index::FederatedIndex::new(backend));
+
+    // Index each repo and project it into the federation.
+    for (id_str, path) in [("shared", &shared), ("auth-svc", &auth_svc)] {
+        let id = RepoId::new(id_str).unwrap();
+        let source: Box<dyn lain::federation::repo_source::RepoSource> =
+            Box::new(lain::federation::repo_source::WorkspaceDirSource::new(
+                id.clone(),
+                path.clone(),
+            ).unwrap());
+        fed.add_repo(source, &data_dir).await.expect("add_repo should succeed");
+        let ri = fed.get_repo(&id).expect("repo should be registered");
+        ri.index().await.expect("repo index should succeed");
+        fed.project_repo(&id).await.expect("project_repo should succeed");
+    }
+
+    // Pass A: per-repo Calls edges must be projected to the global backend.
+    // hash (in shared) calls inner_hash (in shared) — this is an intra-repo
+    // Calls edge that must exist in the global graph after project_repo.
+    let hash_global = "shared:Function:src/lib.rs:hash".to_string();
+    let inner_global = "shared:Function:src/lib.rs:inner_hash".to_string();
+    let path = fed.backend().find_path(&hash_global, &inner_global).unwrap();
+    assert!(
+        !path.is_empty(),
+        "expected non-empty path from shared::hash to shared::inner_hash; \
+         Pass A (project per-repo edges) not yet implemented"
+    );
+}
+
+#[tokio::test]
+async fn project_repo_produces_cross_repo_calls_edges() {
+    // 2-crate fixture where auth-svc imports from shared. Same shape as
+    // the Pass A test, but the call target is in a different repo, so
+    // Pass A's intra-repo projection doesn't help. Pass B must insert
+    // a cross-repo Calls edge from auth-svc::auth to shared::hash.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let shared = root.join("shared");
+    let auth_svc = root.join("auth-svc");
+
+    for sub in [&shared, &auth_svc] {
+        std::fs::create_dir_all(sub.join("src")).unwrap();
+        git2::Repository::init(sub).expect("git init");
+    }
+    std::fs::write(
+        shared.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ).unwrap();
+    std::fs::write(
+        shared.join("src/lib.rs"),
+        "pub fn hash(s: &str) -> u64 { 0 }\n",
+    ).unwrap();
+    std::fs::write(
+        auth_svc.join("Cargo.toml"),
+        "[package]\nname = \"auth-svc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [dependencies]\nshared = { path = \"../shared\" }\n",
+    ).unwrap();
+    std::fs::write(
+        auth_svc.join("src/lib.rs"),
+        "pub fn auth(s: &str) -> bool { shared::hash(s) > 0 }\n",
+    ).unwrap();
+
+    let cfg_path = root.join("repos.yaml");
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(&cfg_path, format!(
+        "data_dir: {}\nrepos:\n  - id: shared\n    source: {{ type: workspace_dir, path: {} }}\n  - id: auth-svc\n    source: {{ type: workspace_dir, path: {} }}\n",
+        data_dir.display(), shared.display(), auth_svc.display(),
+    )).unwrap();
+
+    let fed = load_federation(&cfg_path).await.unwrap();
+
+    // Pass B: auth-svc::auth calls shared::hash. After Pass A projects the
+    // intra-repo Calls (none here, since auth's call target is in another repo),
+    // Pass B must insert a cross-repo Calls edge from auth-svc::auth to
+    // shared::hash.
+    let auth_global = "auth-svc:Function:src/lib.rs:auth".to_string();
+    let hash_global = "shared:Function:src/lib.rs:hash".to_string();
+    let path = fed.backend().find_path(&auth_global, &hash_global).unwrap();
+    assert!(
+        !path.is_empty(),
+        "expected non-empty path from auth-svc::auth to shared::hash; \
+         Pass B (cross-repo Calls resolution) not yet implemented"
+    );
+}
