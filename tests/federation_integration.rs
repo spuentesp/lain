@@ -398,3 +398,60 @@ async fn project_repo_projects_intra_repo_calls_edges() {
          Pass A (project per-repo edges) not yet implemented"
     );
 }
+
+#[tokio::test]
+async fn project_repo_produces_cross_repo_calls_edges() {
+    // 2-crate fixture where auth-svc imports from shared. Same shape as
+    // the Pass A test, but the call target is in a different repo, so
+    // Pass A's intra-repo projection doesn't help. Pass B must insert
+    // a cross-repo Calls edge from auth-svc::auth to shared::hash.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let shared = root.join("shared");
+    let auth_svc = root.join("auth-svc");
+
+    for sub in [&shared, &auth_svc] {
+        std::fs::create_dir_all(sub.join("src")).unwrap();
+        git2::Repository::init(sub).expect("git init");
+    }
+    std::fs::write(
+        shared.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ).unwrap();
+    std::fs::write(
+        shared.join("src/lib.rs"),
+        "pub fn hash(s: &str) -> u64 { 0 }\n",
+    ).unwrap();
+    std::fs::write(
+        auth_svc.join("Cargo.toml"),
+        "[package]\nname = \"auth-svc\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [dependencies]\nshared = { path = \"../shared\" }\n",
+    ).unwrap();
+    std::fs::write(
+        auth_svc.join("src/lib.rs"),
+        "pub fn auth(s: &str) -> bool { shared::hash(s) > 0 }\n",
+    ).unwrap();
+
+    let cfg_path = root.join("repos.yaml");
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(&cfg_path, format!(
+        "data_dir: {}\nrepos:\n  - id: shared\n    source: {{ type: workspace_dir, path: {} }}\n  - id: auth-svc\n    source: {{ type: workspace_dir, path: {} }}\n",
+        data_dir.display(), shared.display(), auth_svc.display(),
+    )).unwrap();
+
+    let fed = load_federation(&cfg_path).await.unwrap();
+
+    // Pass B: auth-svc::auth calls shared::hash. After Pass A projects the
+    // intra-repo Calls (none here, since auth's call target is in another repo),
+    // Pass B must insert a cross-repo Calls edge from auth-svc::auth to
+    // shared::hash.
+    let auth_global = "auth-svc:Function:src/lib.rs:auth".to_string();
+    let hash_global = "shared:Function:src/lib.rs:hash".to_string();
+    let path = fed.backend().find_path(&auth_global, &hash_global).unwrap();
+    assert!(
+        !path.is_empty(),
+        "expected non-empty path from auth-svc::auth to shared::hash; \
+         Pass B (cross-repo Calls resolution) not yet implemented"
+    );
+}
