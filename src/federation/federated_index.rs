@@ -148,6 +148,50 @@ impl FederatedIndex {
             self.backend.upsert_edge(rewritten)?;
         }
 
+        // Pass B: resolve per-repo Calls edges that target functions in
+        // other repos. Uses repo.external_calls() to find edges whose
+        // target is NOT defined in this repo, then looks up the target's
+        // owning repos in symbol_to_repos. Only acts on unambiguous cases
+        // (single owner); ambiguous or not-found targets are skipped
+        // silently — a wrong cross-repo edge would be worse than no edge.
+        for (source_local_id, target_name) in repo.external_calls() {
+            let Some((src_kind, src_path, src_name)) = local_id_to_triple.get(&source_local_id) else {
+                continue;
+            };
+            let owners = match self.symbol_to_repos.get(&target_name) {
+                Some(entries) => entries.clone(),
+                None => continue,
+            };
+            if owners.len() != 1 {
+                // Ambiguous target — skip (don't fabricate cross-repo).
+                continue;
+            }
+            let target_repo = &owners[0];
+            if target_repo == id {
+                // Target is in the same repo — Pass A handled it.
+                continue;
+            }
+            let global_source =
+                GlobalId::new(id, src_kind.clone(), &strip(src_path), src_name)
+                    .as_str()
+                    .to_string();
+            // For the target side we use empty path because Pass B only
+            // knows the target's name + owning repo, not its full node
+            // triple. The federation's symbol_to_repos is what would
+            // resolve this to a precise node id; for the edges emitted
+            // by Pass B, the path component of the global id is a
+            // best-effort placeholder.
+            let global_target =
+                GlobalId::new(target_repo, NodeType::Function, "", &target_name)
+                    .as_str()
+                    .to_string();
+            self.backend.upsert_edge(GraphEdge::new(
+                EdgeType::Calls,
+                global_source,
+                global_target,
+            ))?;
+        }
+
         // Cross-repo matching: gather every other repo's nodes once, then for
         // each of this repo's nodes find similarity candidates above threshold.
         let other_nodes: Vec<GraphNode> = self
