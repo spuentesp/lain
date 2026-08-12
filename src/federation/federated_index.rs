@@ -86,59 +86,13 @@ impl FederatedIndex {
             .get_repo(id)
             .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
         let nodes = repo.nodes();
-        let workspace_root = repo.source().local_path();
-
-        // Helper: strip the repo workspace prefix from an absolute path so
-        // global ids carry the same relative path the federation's other
-        // code paths (and the test fixtures) expect. Falls back to the
-        // original path if the prefix doesn't match — e.g. when a node's
-        // path was loaded from a different repo at some prior point.
-        let to_relative = |p: &str| -> String {
-            std::path::Path::new(p)
-                .strip_prefix(workspace_root)
-                .map(|rel| rel.to_string_lossy().to_string())
-                .unwrap_or_else(|_| p.to_string())
-        };
 
         // Re-key every node to its global id and upsert into the backend.
         for n in &nodes {
-            let rel_path = to_relative(&n.path);
-            let gid = GlobalId::new(id, n.node_type.clone(), &rel_path, &n.name);
+            let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name);
             let mut rewritten = n.clone();
             rewritten.id = gid.as_str().to_string();
-            rewritten.path = rel_path;
             self.backend.upsert_node(rewritten)?;
-        }
-
-        // Build a local-id → (kind, path, name) lookup so per-repo edges
-        // (whose source/target carry only the local id) can be re-keyed to
-        // global ids below. Store the *relative* path so the edge re-key
-        // matches the node ids we just wrote above.
-        let mut local_id_to_triple: HashMap<String, (NodeType, String, String)> = HashMap::new();
-        for n in &nodes {
-            local_id_to_triple.insert(
-                n.id.clone(),
-                (n.node_type.clone(), to_relative(&n.path), n.name.clone()),
-            );
-        }
-
-        // Pass A: project per-repo edges into the global backend, re-keying
-        // both endpoints from local ids to global ids.
-        for edge in repo.edges() {
-            let Some((src_kind, src_path, src_name)) = local_id_to_triple.get(&edge.source_id) else {
-                tracing::debug!(source_id = %edge.source_id, "skipping edge: source node not in local index");
-                continue;
-            };
-            let Some((tgt_kind, tgt_path, tgt_name)) = local_id_to_triple.get(&edge.target_id) else {
-                tracing::debug!(target_id = %edge.target_id, "skipping edge: target node not in local index");
-                continue;
-            };
-            let global_source = GlobalId::new(id, src_kind.clone(), src_path, src_name).as_str().to_string();
-            let global_target = GlobalId::new(id, tgt_kind.clone(), tgt_path, tgt_name).as_str().to_string();
-            let mut rewritten = edge.clone();
-            rewritten.source_id = global_source;
-            rewritten.target_id = global_target;
-            self.backend.upsert_edge(rewritten)?;
         }
 
         // Cross-repo matching: gather every other repo's nodes once, then for
