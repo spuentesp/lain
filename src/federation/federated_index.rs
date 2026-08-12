@@ -46,7 +46,13 @@ impl FederatedIndex {
         data_dir: &Path,
     ) -> Result<(), LainError> {
         let id = source.id().clone();
-        let index = Arc::new(RepoIndex::new(source, data_dir)?);
+        // Per-repo state goes in a per-repo subdir under data_dir so
+        // workspace restarts that load a different member set don't
+        // collide on a shared file (the pre-fix behavior clobbered state
+        // across repos and broke any workspace switch to a new repo_id).
+        let per_repo_dir = data_dir.join("repos").join(id.as_str());
+        std::fs::create_dir_all(&per_repo_dir).map_err(|e| LainError::Io(e.to_string()))?;
+        let index = Arc::new(RepoIndex::new(source, &per_repo_dir)?);
         self.repos.write().insert(id, index);
         self.rebuild_symbol_index();
         Ok(())
