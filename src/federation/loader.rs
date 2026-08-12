@@ -3,6 +3,8 @@ use crate::federation::config::FederationConfig;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use crate::federation::manifest::{FederationManifest, RepoEntry};
+use crate::federation::workspace::{WorkspacesFile, WorkspaceIndex, filter_repos_by_workspace};
+use crate::state::resolve_active_workspace;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,6 +62,75 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // manifest is an observability snapshot of what *was* loaded rather
     // than the source of truth for repo membership — see the inline notes
     // in `save_manifest` for the full rationale.
+    let _ = save_manifest(&fed, &manifest_path);
+    Ok(fed)
+}
+
+/// Load a federation scoped to a single workspace's repos. Same pattern as
+/// `load_federation` but filters `repos.yaml` to the workspace's members
+/// before adding them to the federation. Errors fast at config time if the
+/// workspace references a repo id not in `repos.yaml`.
+///
+/// `workspaces.yaml` is loaded from `<config_path parent>/workspaces.yaml`
+/// by default; pass an explicit path via the `workspaces_path` arg if it's
+/// somewhere else.
+///
+/// Like `load_federation`, this function does NOT call `repo.index()`. The
+/// per-repo indexing pass is the caller's responsibility (see
+/// `src/cmds/server.rs:35-74` for the canonical pattern that handles both
+/// all-repos and workspace modes uniformly).
+pub async fn load_federation_with_workspace(
+    config_path: &Path,
+    workspaces_path: &Path,
+    workspace_name: &str,
+) -> Result<Arc<FederatedIndex>, LainError> {
+    let config = FederationConfig::load(config_path)?;
+    let manifest_path = config.data_dir.join("federation_manifest.bin");
+    let _manifest = FederationManifest::load_or_default(&manifest_path)?;
+
+    // Load + validate the workspaces file; resolve the named workspace.
+    let workspaces = if workspaces_path.exists() {
+        WorkspacesFile::load(workspaces_path)?
+    } else {
+        WorkspacesFile::default()
+    };
+    let ws_spec = resolve_active_workspace(&workspaces, workspace_name)?.clone();
+    let workspace = WorkspaceIndex::from_spec(ws_spec);
+
+    // Filter repos.yaml to the workspace's members. If any member id is
+    // not in repos.yaml, fail with the missing ids listed.
+    let picked = filter_repos_by_workspace(&config.repos, &workspace)?;
+
+    // Build the federation.
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);
+    let fed = Arc::new(FederatedIndex::new(backend));
+
+    // Spawn per-repo indexers up to `max_concurrent_indexers` in flight, then
+    // await them all. Mirrors `load_federation`'s per-repo loop exactly —
+    // it adds each repo to the federation and projects whatever is in the
+    // per-repo DB (empty on a fresh load; populated later by the indexing
+    // pass in `run_server`).
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
+    let mut handles = Vec::with_capacity(picked.len());
+    for repo_config in picked {
+        let permit = semaphore.clone().acquire_owned().await
+            .map_err(|e| LainError::Other(format!("semaphore: {e}")))?;
+        let fed_clone = fed.clone();
+        let data_dir = config.data_dir.clone();
+        let source = config.build_source_for(repo_config)?;
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            source.fetch().await?;
+            let repo_id = source.id().clone();
+            fed_clone.add_repo(source, &data_dir).await?;
+            fed_clone.project_repo(&repo_id).await?;
+            Ok::<(), LainError>(())
+        }));
+    }
+    for h in handles {
+        h.await.map_err(|e| LainError::Other(format!("join: {e}")))??;
+    }
+
     let _ = save_manifest(&fed, &manifest_path);
     Ok(fed)
 }
