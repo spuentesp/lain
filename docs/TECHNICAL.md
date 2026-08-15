@@ -1,6 +1,6 @@
-# WIRD-mcp — Technical Reference
+# lain — Technical Reference
 
-*Deep dive into how Wird works under the hood.*
+*Deep dive into how `lain` works under the hood.*
 
 ---
 
@@ -33,17 +33,31 @@
 │  └─────────────────────────────────────────────────────────┘ │
 │                                                              │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │  Project Registry (`src/state.rs`, `src/cmds/projects.rs`)│ │
-│  │  ~/.config/lain/projects.toml + ~/.config/lain/current   │  │
+│  │  Federation engine (`src/server/federation/`)            │  │
+│  │  FederatedIndex + per-repo workers + GraphBackend       │  │
+│  │  Hot-reloaded from repos.yaml / workspaces.yaml         │  │
+│  │  via ReloadBus + Unix socket + notify watcher           │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Command Center SPA (`src/server/mcp/command_center/`) │  │
+│  │  Served at `GET /` over the HTTP transport.            │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Workspace resolution** (when `--workspace` is not given):
-1. `--workspace` flag (always wins)
-2. `lain use <name>`-set active project from registry
-3. `.lain/` in current working directory
-4. Error: "no active project; use `lain projects add <name> <path>` then `lain use <name>`"
+**Project resolution** when `--config` is not given:
+
+1. `--config <path>` flag (always wins).
+2. `./repos.yaml` in the current working directory.
+3. Error: "no --config path; pass `--config ./repos.yaml`".
+
+**Workspace resolution** when `--workspace` is not given:
+
+1. `--workspace <name>` flag (always wins).
+2. `--workspace auto` reads `~/.config/lain/active_workspace`.
+3. Federation mode loads all `workspaces.yaml` workspaces; tools that
+   need a single workspace fall back to the active one.
 
 ---
 
@@ -454,58 +468,66 @@ This allows agents to orient themselves within the repository.
 ```
 lain/
 ├── src/
-│   ├── bin/                    # Binary entry point
-│   ├── lib.rs                  # Library root
-│   ├── server/                 # Server orchestration (modular)
-│   │   ├── mod.rs              # LainServer definition
-│   │   ├── ingestion.rs        # Main ingestion pipeline
-│   │   ├── scan.rs             # Parallel file scanning
-│   │   └── jobs.rs             # Background job lifecycle
-│   ├── graph.rs                # Petgraph knowledge graph
-│   ├── overlay.rs              # Volatile in-memory overlay
-│   ├── lsp.rs                  # LSP bridge
-│   ├── nlp.rs                  # ONNX embedding
-│   ├── git.rs                  # Git sensor
-│   ├── treesitter.rs           # Static analysis
-│   ├── toolchains.rs           # Language toolchains
-│   ├── mcp/                    # MCP protocol layer
-│   │   ├── mod.rs
-│   │   ├── handler.rs          # MCP request handler
-│   │   └── front_end_monitor.html  # Diagnostics UI
-│   ├── tools/                  # Tool definitions
-│   │   ├── mod.rs              # Tool executor + registry
-│   │   └── handlers/           # Handler modules
-│   │       ├── architecture.rs
-│   │       ├── context.rs
-│   │       ├── decoration.rs
-│   │       ├── enrichment.rs
-│   │       ├── execution.rs
-│   │       ├── filesystem.rs
-│   │       ├── gitops.rs
-│   │       ├── impact.rs
-│   │       ├── metrics.rs
-│   │       ├── navigation.rs
-│   │       ├── query.rs
-│   │       ├── search.rs
-│   │       ├── testing.rs
-│   │       ├── cross_runtime.rs
-│   │       └── registry_impl.rs
-│   ├── query/                  # Graph query engine
-│   │   ├── mod.rs
-│   │   ├── spec.rs             # Query ops types
-│   │   ├── executor.rs
-│   │   └── schema.rs
-│   └── ui/                     # Interactive diagnostic UIs
-│       ├── blast-radius.html
-│       ├── call-chain.html
-│       └── coupling.html
+│   ├── main.rs                 # Dispatch: server / workspaces / repos / query / ask
+│   ├── lib.rs                  # Library root (re-exports server, cli, config)
+│   ├── server/                 # MCP server — the headline
+│   │   ├── mod.rs              # LainServer, transports, ingest pipeline
+│   │   ├── federation/         # Multi-repo coordination (config, manifest,
+│   │   │                       # repo_id, repo_source, repo_index,
+│   │   │                       # federated_index, graph_backend,
+│   │   │                       # matching, workspace, loader, health)
+│   │   ├── mcp/                # MCP protocol layer (handler.rs,
+│   │   │                       # federation_tools.rs) + command_center/ SPA
+│   │   ├── tools/              # Tool executor + handlers (architecture,
+│   │   │                       # context, decoration, enrichment, execution,
+│   │   │                       # filesystem, gitops, impact, metrics,
+│   │   │                       # navigation, query, search, testing,
+│   │   │                       # cross_runtime, registry_impl)
+│   │   ├── query/              # Graph query engine (spec, executor, schema)
+│   │   ├── ingest/             # Ingestion pipeline (ingestion.rs,
+│   │   │                       # scan.rs, jobs.rs)
+│   │   ├── graph.rs            # Petgraph knowledge graph
+│   │   ├── overlay.rs          # Volatile in-memory overlay
+│   │   ├── overlay/stream.rs   # Overlay event stream
+│   │   ├── lsp.rs              # LSP bridge
+│   │   ├── nlp.rs              # ONNX embedding
+│   │   ├── git.rs              # Git sensor
+│   │   ├── treesitter.rs       # Static analysis
+│   │   ├── toolchains.rs       # Language toolchains
+│   │   ├── sensors/            # Background sensors (LSP, co-change, …)
+│   │   ├── watcher.rs          # File watcher (extended to repos.yaml,
+│   │   │                       # workspaces.yaml)
+│   │   ├── reload.rs           # ReloadBus + rebuild task
+│   │   ├── schema.rs           # Graph schema (node / edge types)
+│   │   ├── tuning.rs           # Tuning config loader
+│   │   └── error.rs            # LainError
+│   ├── cli/                    # Thin CLI over the lib
+│   │   ├── workspaces.rs
+│   │   ├── repos.rs
+│   │   ├── query.rs
+│   │   ├── ask.rs
+│   │   ├── server.rs           # server subcommand + hot-reload socket
+│   │   └── signal.rs           # Atomic YAML writes + reload signal
+│   └── config/                 # Config types + paths
+│       └── recent_projects.rs  # ~/.config/lain/recent_projects tracking
 ├── tests/                      # Integration tests
 ├── toolchains/                 # Toolchain definitions (Rust/Go/JS/Python)
 ├── .lain/                      # Runtime data directory
-│   └── graph.bin               # Persistent graph
+│   ├── graph.bin               # Per-repo persistent graph
+│   └── federation/             # Per-federation state
 ├── Cargo.toml
 ├── README.md                   # Basic user-facing docs
-└── TECHNICAL.md                # This file
+├── docs/
+│   ├── command-center.md       # Command Center SPA walkthrough
+│   ├── hot-reload.md           # Repos/workspaces.yaml hot-reload docs
+│   ├── FEDERATION.md           # Federation mode operating guide
+│   ├── REPOS_YAML.md           # repos.yaml schema reference
+│   ├── quickstart-tools.md     # MCP tool reference
+│   ├── query-language.md       # query_graph ops-array reference
+│   ├── quickstart-query.md     # Query quickstart
+│   ├── TECHNICAL.md            # This file
+│   └── superpowers/            # Specs / plans archive
+└── install.sh
 ```
 
 ---
@@ -661,15 +683,19 @@ RepoIdentity { owner: "owner", name: "repo" }
 | `LAIN_HTTP_PORT` | `9999` | HTTP diagnostics port |
 | `RUST_LOG` | `info` | Tracing log level |
 
-### CLI Flags
+### CLI Flags (top-level)
 
 ```
---workspace <path>       Project root (required)
---transport <mode>        stdio | http | both (default: stdio)
---port <port>             HTTP port (default: 9999)
---embedding-model <path>  ONNX model path
---no-index                Skip initial indexing
+lain server --config <path>            Path to repos.yaml (default: ./repos.yaml)
+            --transport <mode>          stdio | http (default: stdio)
+            --port <port>               HTTP port (default: 9999)
+            --workspace <name>          Workspace from workspaces.yaml (or "auto")
+            --log_level <env-filter>    tracing EnvFilter (default: info)
+            --embedding-model <path>    ONNX model path
 ```
+
+The other top-level commands (`workspaces`, `repos`, `query`, `ask`)
+take their own `--config <path>` flag. See `lain <cmd> --help`.
 
 ---
 
@@ -691,49 +717,61 @@ curl -X POST http://localhost:9999/mcp \
 
 ## v0.5.0 Highlights
 
-### New agent adapters
+### Consolidated CLI surface
 
-Two new adapters ship alongside the per-agent `Init`/`install` path in `src/cmds/agents/adapters/`. Both honor `InstallScope::{User, Project}` and use `entry.mcp_section` / `entry.mcp_name` rather than hardcoded literals — the same pattern the other adapters already followed.
+The headline of `lain` is now `lain server`, plus four thin
+config/query CLIs (`workspaces`, `repos`, `query`, `ask`). The cut
+surface (`lain init`, `lain agents`, `lain hook`, `lain projects`,
+top-level `lain use`) is gone. Per-agent wiring is now the user's
+responsibility — point the agent's MCP config at
+`lain server --config ./repos.yaml --transport stdio`.
 
-- **`OpenCodeAdapter`** (`src/cmds/agents/adapters/opencode.rs`) — writes `opencode.json` (project) or `~/.config/opencode/opencode.json` (user). The MCP entry is `mcp.<name>` with an **array** `command` (verified against the OpenCode schema — a string `command` is rejected):
-  ```json
-  {
-    "mcp": {
-      "lain": {
-        "type": "local",
-        "command": ["lain", "--workspace", "auto", "--transport", "stdio"],
-        "enabled": true,
-        "timeout": 30000
-      }
-    }
-  }
-  ```
-  Bundles `AGENTS.md` for project scope. The 30000 ms timeout supersedes OpenCode's 5000 ms default, which is too short for Lain's cold-start NLP model load.
+### Project model
 
-- **`CopilotAdapter`** (`src/cmds/agents/adapters/copilot.rs`) — writes `.vscode/mcp.json` (project) or `~/.copilot/mcp-config.json` (user). Distinct from OpenCode: the entry is `servers.<name>` with a **string** `command` plus an **array** `args`:
-  ```json
-  {
-    "servers": {
-      "lain": {
-        "command": "lain",
-        "args": ["--workspace", "auto", "--transport", "stdio"]
-      }
-    }
-  }
-  ```
-  Bundles `.github/copilot-instructions.md`. The pre-existing broken `vscode_copilot` manifest row was migrated to `copilot`; the legacy identifier is no longer recognized.
+A **project** is a directory containing `repos.yaml` (and optionally
+`workspaces.yaml`). Add repos with `lain repos add`, group them with
+`lain workspaces create`, run `lain server --config ./repos.yaml`.
 
-In both adapters, `command` is a bare PATH-resolvable name (`lain`), not an absolute path, so the agent re-launches the installer's `lain` from `$PATH` rather than the per-agent adapter's compile-time path.
+### Federation as the headline
 
-### `--scope {project|user}` on `Init`
+`lain server` reads `repos.yaml`, indexes every registered repository,
+and serves the full MCP tool surface — six federation tools plus the
+per-repo analytical tools. There is no separate "federation mode"; the
+federation is just the way `lain server` always runs.
 
-The `Init` command now accepts `--scope`. `init_opencode` and `init_copilot` honor it; `init` for the other agents ignores it (Claude and Kimi are inherently user-scope, the rest are inherently project-scope). The `agents install` path already accepted both scopes for every row — that surface is unchanged.
+### Command Center
 
-### `--workspace auto`
+`lain server --transport http` serves a vanilla-JS SPA at `GET /`. The
+dashboard has a topbar (active project + workspace), a sidebar (workspace
+switcher, recent projects switcher, repo summary), tabs for Overview /
+Graph / Repos / Query / Tools, and a status bar that polls every 2 s.
+See [`docs/command-center.md`](command-center.md).
 
-`--workspace auto` (passed through by every new adapter as `["--workspace", "auto"]`) calls `ServerState::resolve_auto_workspace()` in `src/state.rs`, which runs `git2::Repository::discover(".")` against the MCP subprocess's cwd and returns the enclosing repo. This works without ceremony for Claude Code, OpenCode, and VS Code because those agents spawn the subprocess with the project's directory as `cwd`.
+### Hot reload
 
-Kimi is the exception: its plugin manager pins the subprocess's `cwd` to the plugin root, so `--workspace auto` would resolve to the plugin directory instead of the project. The init path detects this and writes a wrapper script at `bin/lain` inside the plugin root that resolves the workspace from the parent agent's cwd via `/proc/$PPID/cwd` (Linux only — the wrapper errors out on macOS), then `exec`s the real `lain` from `$PATH`. The wrapper is sourced from `src/cmds/kimi_plugin_wrapper.sh` and is the only shipped place where the sentinel `auto` is translated pre-process.
+The server watches `repos.yaml` and `workspaces.yaml`. Hand-edits are
+picked up via `notify`; CLIs (`lain repos add`, `lain workspaces create`)
+write the YAML atomically and signal the server over a Unix socket at
+`~/.local/lain/run/<repos-stem>.sock`. A single `ReloadBus` fans both
+signal sources into a rebuild task that diffs the new file against the
+live `FederatedIndex` and applies add / remove operations. State is
+observable via `get_reload_status` and `request_reload` MCP tools and
+the Command Center status bar. See [`docs/hot-reload.md`](hot-reload.md).
+
+### Single crate layout
+
+`lain` is a single binary backed by a single crate. The former
+`lain-mcp-probe` workspace member and the `lain-server` binary idea
+were internalized; the source tree is split into `src/server/` (the MCP
+server + federation + workspaces + all analytical engines),
+`src/cli/` (thin subcommands), and `src/config/` (config types).
+
+### `--scope` on the project model
+
+Workspaces are scoped to a single project; multiple servers can run
+side-by-side on different ports, one per project directory. There is no
+multi-instance owner / sidecar machinery — start another `lain server`
+and point it at a different `--config`.
 
 ---
 

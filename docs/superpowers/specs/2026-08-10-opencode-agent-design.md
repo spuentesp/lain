@@ -1,3 +1,5 @@
+> **Status:** Superseded by `docs/superpowers/specs/2026-08-14-lain-consolidation-design.md`.
+
 # Design: OpenCode as a first-class Lain agent
 
 ## Goal

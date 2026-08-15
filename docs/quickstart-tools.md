@@ -24,8 +24,11 @@ lain workspaces forget <name>            # remove a workspace
 ```
 
 A workspace is loaded by `lain server` when started with `--workspace auto`
-(or `--workspace <name>` to pin it). See `docs/FEDERATION.md#workspaces`
-for the full guide and `docs/REPOS_YAML.md` for the config schema.
+(or `--workspace <name>` to pin it). Both `repos.yaml` and
+`workspaces.yaml` are hot-reloaded while the server runs — see
+[`docs/hot-reload.md`](hot-reload.md). The full config schema is in
+[`docs/REPOS_YAML.md`](REPOS_YAML.md); the operating model for
+federation mode is in [`docs/FEDERATION.md`](FEDERATION.md).
 
 ## Initialization
 
