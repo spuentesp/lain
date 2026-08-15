@@ -1,0 +1,46 @@
+//! CLI dispatch re-exports.
+//!
+//! `main_command_factory` constructs the top-level `lain` clap
+//! `Command` so tests can inspect the rendered help text without
+//! running the binary. The binary in `src/main.rs` imports
+//! `lain::cli::{Args, Commands}` and dispatches.
+
+use clap::CommandFactory;
+
+/// Return the top-level `lain` clap `Command`. Used by the
+/// `top_level_help_lists_only_kept_subcommands` test to verify the
+/// subcommand surface, and by `src/main.rs` when no subcommand is
+/// given (default action: print help).
+///
+/// Exposed at the crate root as `lain::main_command_factory` via the
+/// `pub use` in `src/lib.rs`.
+pub fn main_command_factory() -> clap::Command {
+    crate::cli::Args::command()
+}
+
+#[cfg(test)]
+mod tests {
+    /// The top-level help text must list the kept subcommands
+    /// (`server`, `workspaces`, `repos`, `query`, `ask`) and must
+    /// NOT list the removed ones (`init`, `agents`, `projects`,
+    /// `hook`). This is a regression guard against re-introducing
+    /// the old multi-command surface during the consolidation.
+    #[test]
+    fn top_level_help_lists_only_kept_subcommands() {
+        let mut cmd = crate::main_command_factory();
+        // `render_help` returns a `StyledStr`; convert to a String so
+        // `.contains(...)` works (StyledStr has no `.contains`).
+        let help = clap::builder::Command::render_help(&mut cmd).to_string();
+        // Kept subcommands must appear.
+        assert!(help.contains("server"), "help must list `server`: {help}");
+        assert!(help.contains("workspaces"), "help must list `workspaces`: {help}");
+        assert!(help.contains("repos"), "help must list `repos`: {help}");
+        assert!(help.contains("query"), "help must list `query`: {help}");
+        assert!(help.contains("ask"), "help must list `ask`: {help}");
+        // Removed subcommands must not appear.
+        assert!(!help.contains("init"), "help must not list `init`: {help}");
+        assert!(!help.contains("agents"), "help must not list `agents`: {help}");
+        assert!(!help.contains("projects"), "help must not list `projects`: {help}");
+        assert!(!help.contains("hook"), "help must not list `hook`: {help}");
+    }
+}

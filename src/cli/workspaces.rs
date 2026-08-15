@@ -6,10 +6,92 @@
 //! auto` to pick which workspace the federation loads.
 
 use anyhow::{anyhow, Result};
+use clap::Subcommand;
 use crate::error::LainError;
 use crate::federation::workspace::{WorkspaceSource, WorkspaceSourceConfig, WorkspaceSpec, WorkspacesFile};
 use crate::state::ActiveWorkspace;
 use std::path::{Path, PathBuf};
+
+/// Subcommands for `lain workspaces`. Mirrors the actions available
+/// before the consolidation; the dispatcher in [`run`] routes each
+/// variant to the matching `run_*` function below.
+#[derive(Debug, Subcommand)]
+pub enum WorkspacesAction {
+    /// Create a new workspace.
+    Create {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        members: Vec<String>,
+    },
+    /// Add a repo to a workspace's members.
+    Add {
+        name: String,
+        #[arg(long)]
+        repo: String,
+    },
+    /// Remove a repo from a workspace's members.
+    Remove {
+        name: String,
+        #[arg(long)]
+        repo: String,
+    },
+    /// Import a workspace from another workspaces.yaml.
+    Import {
+        name: String,
+        #[arg(long)]
+        from: PathBuf,
+    },
+    /// Clone a workspace definition repo and register it.
+    Init {
+        name: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long, default_value = "main")]
+        ref_: Option<String>,
+    },
+    /// List all known workspaces.
+    List,
+    /// Show full spec of one workspace.
+    Show {
+        name: String,
+    },
+    /// Set the active workspace (writes ~/.config/lain/active_workspace).
+    Use {
+        name: String,
+    },
+    /// Print the active workspace.
+    Current,
+    /// Remove a workspace from workspaces.yaml.
+    Forget {
+        name: String,
+    },
+}
+
+/// Dispatch a `lain workspaces <action>` invocation. `config` is the
+/// resolved `--config` path (defaults to `./repos.yaml`); the
+/// individual `run_*` helpers each take `Option<&Path>` and resolve
+/// from there.
+pub async fn run(action: WorkspacesAction, config: &Path) -> Result<()> {
+    let config = Some(config);
+    match action {
+        WorkspacesAction::Create { name, description, members } => {
+            run_create(&name, description, members, config)
+        }
+        WorkspacesAction::Add { name, repo } => run_add(&name, &repo, config),
+        WorkspacesAction::Remove { name, repo } => run_remove(&name, &repo, config),
+        WorkspacesAction::Import { name, from } => run_import(&name, &from, config),
+        WorkspacesAction::Init { name, from, ref_ } => {
+            run_init(&name, &from, ref_, config).await
+        }
+        WorkspacesAction::List => run_list(config),
+        WorkspacesAction::Show { name } => run_show(&name, config),
+        WorkspacesAction::Use { name } => run_use(&name, config),
+        WorkspacesAction::Current => run_current(),
+        WorkspacesAction::Forget { name } => run_forget(&name, config),
+    }
+}
 
 /// Resolve a `workspaces.yaml` path. The CLI accepts an explicit `--config`
 /// flag; if absent, walk up from cwd looking for a `workspaces.yaml` next

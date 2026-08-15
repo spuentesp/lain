@@ -5,6 +5,11 @@ pub mod cli;
 pub mod config;
 pub mod state;
 
+// Re-export the top-level clap `Command` factory at the crate root so
+// tests and external callers can inspect the rendered help without
+// going through the binary in `src/main.rs`.
+pub use cli::dispatch::main_command_factory;
+
 // Re-export error, lsp, and the analytical modules at the crate root so
 // call sites that pre-date the `server/` migration keep working. The
 // canonical home for these modules is `crate::server::*`; new code should
