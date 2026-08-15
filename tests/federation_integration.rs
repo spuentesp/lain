@@ -324,3 +324,117 @@ async fn cold_restart_reloads_all_repos() {
     let second = load_federation(&cfg_path).await.unwrap();
     assert_eq!(second.list_repos().len(), 3);
 }
+
+// ---------------------------------------------------------------------------
+// `LainServer::set_workspace` shares a lock with the MCP dispatcher.
+//
+// Regression test for the Task 6.9 hot-reload lock split. Before the fix,
+// `LainServer::federation_workspaces` and `LainMcpServer::workspaces`
+// were two separate `Arc<RwLock<WorkspacesFile>>` cells, so writing
+// through the server slot wrote to dead space — the MCP dispatcher's
+// read lock never saw the new contents. The fix makes `LainServer` and
+// `LainMcpServer` share one lock; this test proves the live behavior
+// by building a `LainServer`, calling `set_workspace` (the rebuild
+// flow), and reading back through the same handle the MCP dispatcher
+// would use.
+// ---------------------------------------------------------------------------
+
+use lain::federation::workspace::{WorkspaceSpec, WorkspacesFile};
+use lain::server::{LainServer, Transport};
+
+#[tokio::test]
+async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
+    // Build a tiny federation with three repos so the workspace
+    // member-resolution path has something to consult.
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed: Arc<FederatedIndex> = Arc::new(FederatedIndex::new(backend));
+
+    for id in ["repo-a", "repo-b", "repo-c"] {
+        let ws = tempfile::tempdir().unwrap();
+        init_bare_git_repo(ws.path());
+        let src: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), ws.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+    }
+
+    // Start the server with workspace A (2 members).
+    let ws_a = Arc::new(WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "auth-ws".into(),
+            description: Some("initial".into()),
+            source: None,
+            members: vec!["repo-a".into(), "repo-b".into()],
+        }],
+    });
+    let server = LainServer::with_federation_and_workspaces(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        Arc::clone(&ws_a),
+    )
+    .expect("with_federation_and_workspaces");
+
+    // The server must expose the workspaces handle, and that handle
+    // is the SAME `Arc<RwLock<WorkspacesFile>>` the MCP dispatcher
+    // inside `serve()` would be given. Before the fix, the server
+    // had no workspaces_handle() and the MCP server wrapped its own
+    // private lock — the two were never comparable.
+    let server_handle = server
+        .workspaces_handle()
+        .expect("server built with workspaces must expose a handle");
+
+    // Initial state: list_workspaces through the shared lock shows 2 members.
+    {
+        let guard = server_handle.read();
+        let infos = lain::mcp::federation_tools::list_workspaces(&guard, None);
+        assert_eq!(infos.len(), 1, "expected exactly one workspace");
+        assert_eq!(infos[0].name, "auth-ws");
+        assert_eq!(infos[0].member_count, 2, "initial member_count");
+    }
+
+    // Mutate workspaces.yaml: add a 3rd member. The rebuild flow
+    // calls `LainServer::set_workspace` after re-reading the file.
+    let ws_a_prime = WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "auth-ws".into(),
+            description: Some("after rebuild".into()),
+            source: None,
+            members: vec!["repo-a".into(), "repo-b".into(), "repo-c".into()],
+        }],
+    };
+    server.set_workspace(ws_a_prime);
+
+    // The MCP dispatcher's view (read through the shared lock) must
+    // observe the new member set on the very next dispatch. Before
+    // the fix this assertion failed because the MCP server's lock
+    // was a separate cell that nobody had written to.
+    let detail = {
+        let guard = server_handle.read();
+        lain::mcp::federation_tools::get_workspace(&fed, &guard, "auth-ws")
+            .expect("get_workspace should resolve the auth-ws workspace")
+    };
+    let member_ids: Vec<&str> = detail.members.iter().map(|m| m.repo_id.as_str()).collect();
+    assert_eq!(
+        member_ids,
+        vec!["repo-a", "repo-b", "repo-c"],
+        "get_workspace must observe the 3rd member after set_workspace, got {member_ids:?}",
+    );
+
+    // The list_workspaces view must also reflect the swap.
+    let infos = {
+        let guard = server_handle.read();
+        lain::mcp::federation_tools::list_workspaces(&guard, None)
+    };
+    assert_eq!(
+        infos[0].member_count, 3,
+        "list_workspaces must reflect the swap — got {infos:?}",
+    );
+    assert_eq!(infos[0].description.as_deref(), Some("after rebuild"));
+}
+

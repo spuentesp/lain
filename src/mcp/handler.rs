@@ -675,25 +675,28 @@ impl LainMcpServer {
         Self { executor, federation: Some(federation), workspaces: None }
     }
 
-    /// Federation + workspace constructor. When workspaces is Some, the
-    /// 3 workspace tools (list_workspaces, get_active_workspace,
-    /// get_workspace) are also registered and the get_workspace tool
-    /// resolves member paths/healths from the live federation.
+    /// Federation + workspace constructor. When `workspaces` is `Some`,
+    /// the 4 workspace tools (`list_workspaces`, `get_active_workspace`,
+    /// `get_workspace`, `get_workspace_graph`) are also registered and
+    /// `get_workspace` resolves member paths/healths from the live
+    /// federation.
     ///
-    /// The workspaces file is wrapped in `Arc<RwLock<...>>` so the
-    /// rebuild task can hot-swap it via `replace_workspaces` without
-    /// restarting the server — every clone of this `LainMcpServer`
-    /// shares the same inner cell and observes the swap on its next
-    /// read.
+    /// The caller (currently `LainServer::with_federation_and_workspaces`
+    /// and its `serve()` path) provides the `Arc<RwLock<WorkspacesFile>>`
+    /// so this server shares the **same** lock the `LainServer` stores.
+    /// That way `LainServer::set_workspace` and the in-flight workspace
+    /// MCP tools read/write through one inner cell — the fix for the
+    /// Task 6.9 regression where two separate locks meant the rebuild
+    /// task wrote to a slot the MCP dispatcher never read.
     pub fn with_federation_and_workspaces(
         executor: ToolExecutor,
         federation: Arc<FederatedIndex>,
-        workspaces: crate::federation::workspace::WorkspacesFile,
+        workspaces: Arc<RwLock<crate::federation::workspace::WorkspacesFile>>,
     ) -> Self {
         Self {
             executor,
             federation: Some(federation),
-            workspaces: Some(Arc::new(RwLock::new(workspaces))),
+            workspaces: Some(workspaces),
         }
     }
 
@@ -710,6 +713,13 @@ impl LainMcpServer {
     /// after re-reading `workspaces.yaml` from disk; in-flight MCP
     /// workspace tool calls pick up the new contents on their next
     /// dispatch without needing a server restart.
+    ///
+    /// With the shared-lock fix this is the same write call as
+    /// `LainServer::set_workspace` — both write through the single
+    /// `Arc<RwLock<WorkspacesFile>>` the server and the MCP handler
+    /// hold. Prefer `LainServer::set_workspace` from code that has
+    /// a `LainServer` handle; this method is a convenience for code
+    /// that only has the `LainMcpServer`.
     pub fn replace_workspaces(&self, new: crate::federation::workspace::WorkspacesFile) {
         if let Some(slot) = &self.workspaces {
             *slot.write() = new;
@@ -1934,10 +1944,11 @@ mod tests {
                 members: vec!["repo-a".into(), "repo-b".into()],
             }],
         };
+        let ws_slot = Arc::new(RwLock::new(ws_a));
         let mcp = LainMcpServer::with_federation_and_workspaces(
             executor,
             Arc::clone(&fed),
-            ws_a,
+            Arc::clone(&ws_slot),
         );
 
         // Initial state: list_workspaces through the live lock sees 2 members.
@@ -1954,7 +1965,10 @@ mod tests {
         }
 
         // Simulate the rebuild task: a new `workspaces.yaml` adds a
-        // third repo to the existing workspace.
+        // third repo to the existing workspace. With the shared-lock
+        // fix, the rebuild flow writes through the same `Arc<RwLock<...>>`
+        // both the server and the MCP handler hold — so writing here
+        // is the same operation `LainServer::set_workspace` performs.
         let ws_a_prime = WorkspacesFile {
             default: None,
             workspaces: vec![WorkspaceSpec {
@@ -1964,7 +1978,7 @@ mod tests {
                 members: vec!["repo-a".into(), "repo-b".into(), "repo-c".into()],
             }],
         };
-        mcp.replace_workspaces(ws_a_prime);
+        *ws_slot.write() = ws_a_prime;
 
         // After swap: list_workspaces must show the new member count
         // without any restart / re-construction.
