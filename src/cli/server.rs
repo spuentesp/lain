@@ -93,11 +93,25 @@ pub async fn run_server(
     // workspace MCP tools are registered. Optional — a server with no
     // workspaces.yaml still works (no workspace tools, today's behavior).
     let workspaces = load_workspaces_for_server(config_path).ok().flatten();
+    let repos_yaml = Some(config_path.to_path_buf());
     let server = if let Some(workspaces) = workspaces {
-        LainServer::with_federation_and_workspaces(fed, transport_enum, port, workspaces)?
+        LainServer::with_federation_and_workspaces(fed, transport_enum, port, workspaces, repos_yaml.clone())?
     } else {
-        LainServer::with_federation(fed, transport_enum, port)?
+        LainServer::with_federation(fed, transport_enum, port, repos_yaml.clone())?
     };
+
+    // Record this project under `~/.config/lain/recent_projects` so the
+    // dashboard's project switcher can find it. Failures are logged and
+    // ignored — never block startup on a side-effect that is purely
+    // operator convenience.
+    if let Some(p) = repos_yaml.as_deref() {
+        if let Err(e) = crate::config::recent_projects::record(p) {
+            tracing::warn!(
+                "could not record recent project {}: {e}",
+                p.display()
+            );
+        }
+    }
     info!(
         "lain server: starting on {:?} transport (port {})",
         transport_enum, port

@@ -5,6 +5,8 @@
 //! the server's hot-reload pointer (`active_workspace`) and the CLI's
 //! `lain workspaces use` writer.
 
+pub mod recent_projects;
+
 use std::path::PathBuf;
 
 /// Return the path to the user config dir (`~/.config/lain`).

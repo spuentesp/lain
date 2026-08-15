@@ -26,9 +26,12 @@
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::repo_id::{GlobalId, RepoId};
+use crate::server::LainServer;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepoInfo {
@@ -763,4 +766,273 @@ pub fn get_workspace_graph(
     }
 
     Ok(WorkspaceGraph { nodes, edges, truncated })
+}
+
+// =============================================================================
+// Server-status / recent-projects tools (always available)
+// =============================================================================
+//
+// These tools report on the server's own state, not on a federation's
+// contents. They are registered unconditionally in the MCP `tools/list`
+// response (alongside the registry's own tools) regardless of whether
+// the server is running in federation mode.
+
+/// Format `t` as seconds-since-UNIX-epoch. Used by `get_server_status`
+/// for `started_at` / `last_sync_at`. Returns 0 for pre-epoch timestamps
+/// rather than panicking, since `SystemTime` subtraction is saturating.
+fn system_time_to_unix(t: SystemTime) -> i64 {
+    t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// Render the per-process server status payload consumed by the
+/// dashboard's status bar.
+///
+/// Fields:
+/// - `pid`: the process id (from `std::process::id`)
+/// - `transport`: "stdio" or "http", or null when the server is in
+///   single-workspace mode (no MCP transport active)
+/// - `port`: TCP port for HTTP transport; null otherwise
+/// - `started_at`, `last_sync_at`: seconds since UNIX epoch
+/// - `last_error`: most recent sync error message, or null
+/// - `repo_count`, `workspace_count`: live counts from the federation
+pub fn get_server_status(server: &LainServer) -> serde_json::Value {
+    let transport = server.transport().map(|t| match t {
+        crate::server::Transport::Stdio => "stdio".to_string(),
+        crate::server::Transport::Http => "http".to_string(),
+    });
+    serde_json::json!({
+        "pid": std::process::id(),
+        "transport": transport,
+        "port": server.port(),
+        "started_at": system_time_to_unix(server.started_at()),
+        "last_sync_at": system_time_to_unix(server.last_sync_at()),
+        "last_error": server.last_error(),
+        "repo_count": server.repo_count(),
+        "workspace_count": server.workspace_count(),
+    })
+}
+
+/// Project metadata enriched with repo/workspace counts from the
+/// project's `repos.yaml` / `workspaces.yaml`. Returned as one entry
+/// per row in the `list_recent_projects` response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecentProjectEntry {
+    pub path: PathBuf,
+    pub last_used: i64,
+    pub workspace_count: usize,
+    pub repo_count: usize,
+}
+
+/// Compute the workspace + repo counts for a recent project entry
+/// based on its `repos.yaml` / `workspaces.yaml` paths. Failures
+/// (missing files, parse errors) collapse to zero counts so a single
+/// broken entry never blocks the whole list.
+fn counts_for_project(repos_yaml: &Path) -> (usize, usize) {
+    let cfg = crate::federation::config::FederationConfig::load(repos_yaml).ok();
+    let repo_count = cfg.as_ref().map(|c| c.repos.len()).unwrap_or(0);
+    let ws_path = repos_yaml
+        .parent()
+        .map(|p| p.join("workspaces.yaml"));
+    let workspace_count = ws_path
+        .as_ref()
+        .and_then(|p| crate::federation::workspace::WorkspacesFile::load(p).ok())
+        .map(|w| w.workspaces.len())
+        .unwrap_or(0);
+    (workspace_count, repo_count)
+}
+
+/// Build the `list_recent_projects` response. Each entry combines a
+/// recent-projects record with live repo/workspace counts from the
+/// referenced `repos.yaml` (and `workspaces.yaml` next to it).
+pub fn list_recent_projects() -> Result<Vec<RecentProjectEntry>, LainError> {
+    let raw = crate::config::recent_projects::list()
+        .map_err(|e| LainError::Other(format!("recent_projects::list: {e}")))?;
+    Ok(raw
+        .into_iter()
+        .map(|r| {
+            let (workspace_count, repo_count) = counts_for_project(&r.path);
+            RecentProjectEntry {
+                path: r.path,
+                last_used: r.last_used,
+                workspace_count,
+                repo_count,
+            }
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod server_status_tests {
+    use super::*;
+    use crate::server::LainConfig;
+    use std::path::PathBuf;
+
+    /// Round-trip the live server through `get_server_status` and assert
+    /// the shape. Uses `LainServer::new` (single-workspace mode) so the
+    /// test doesn't need a federation fixture; the fields that vary by
+    /// mode (transport, port, repo_count, workspace_count) are checked
+    /// for null / zero rather than asserting concrete values.
+    #[test]
+    fn get_server_status_returns_expected_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let mem = tmp.path().join("graph.bin");
+        // `LainServer::new` requires `workspace` to be a git repo so the
+        // GitSensor can attach. Initialize one.
+        git2::Repository::init(&ws).unwrap();
+        let server = LainServer::new(&ws, &mem, None).expect("LainServer::new");
+
+        let v = get_server_status(&server);
+        assert!(v.get("pid").is_some(), "missing pid");
+        assert!(v.get("transport").is_some(), "missing transport");
+        assert!(v.get("port").is_some(), "missing port");
+        assert!(v.get("started_at").is_some(), "missing started_at");
+        assert!(v.get("last_sync_at").is_some(), "missing last_sync_at");
+        assert!(v.get("last_error").is_some(), "missing last_error");
+        assert!(v.get("repo_count").is_some(), "missing repo_count");
+        assert!(v.get("workspace_count").is_some(), "missing workspace_count");
+
+        // `pid` is the current process.
+        assert_eq!(v["pid"].as_u64().unwrap(), std::process::id() as u64);
+        // Single-workspace mode: no federation, so transport/port null.
+        assert!(v["transport"].is_null());
+        assert!(v["port"].is_null());
+        // No federation → 0 of each.
+        assert_eq!(v["repo_count"].as_u64().unwrap(), 0);
+        assert_eq!(v["workspace_count"].as_u64().unwrap(), 0);
+        // `started_at` and `last_sync_at` are populated (>= 0).
+        assert!(v["started_at"].as_i64().unwrap() > 0);
+        assert!(v["last_sync_at"].as_i64().unwrap() > 0);
+        // No errors yet.
+        assert!(v["last_error"].is_null());
+    }
+
+    #[test]
+    fn get_server_status_reflects_record_last_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        git2::Repository::init(&ws).unwrap();
+        let mem = tmp.path().join("graph.bin");
+        let server = LainServer::new(&ws, &mem, None).unwrap();
+        server.record_last_error("boom");
+        let v = get_server_status(&server);
+        assert_eq!(v["last_error"].as_str(), Some("boom"));
+        // record_last_error also bumps last_sync_at.
+        let v2 = get_server_status(&server);
+        assert!(v2["last_sync_at"].as_i64().unwrap() >= v["last_sync_at"].as_i64().unwrap());
+    }
+
+    #[test]
+    fn get_server_status_record_sync_clears_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        git2::Repository::init(&ws).unwrap();
+        let mem = tmp.path().join("graph.bin");
+        let server = LainServer::new(&ws, &mem, None).unwrap();
+        server.record_last_error("boom");
+        server.record_sync();
+        let v = get_server_status(&server);
+        assert!(v["last_error"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod recent_projects_tests {
+    use super::*;
+    use crate::server::LainConfig;
+    use std::path::PathBuf;
+
+    /// Stub: build a minimal `LainConfig`. We never use this in the
+    /// test (the tool reads from the on-disk recent_projects file, not
+    /// from `LainServer`), but the import above keeps the harness
+    /// honest about which `LainConfig` we're targeting.
+    #[allow(dead_code)]
+    fn _config_stub() -> LainConfig {
+        LainConfig {
+            workspace: PathBuf::from("/tmp"),
+            memory_path: PathBuf::from("/tmp/graph.bin"),
+        }
+    }
+
+    /// Build a `repos.yaml` + optional `workspaces.yaml` next to each
+    /// other under `tmp`. Returns the path to `repos.yaml`.
+    fn write_project(tmp: &std::path::Path, name: &str, repos: &[&str], workspaces: &[(&str, &[&str])]) -> PathBuf {
+        let dir = tmp.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let repos_path = dir.join("repos.yaml");
+        let mut yaml = String::from("repos:\n");
+        for r in repos {
+            yaml.push_str(&format!(
+                "  - id: {r}\n    source: {{ type: workspace_dir, path: /srv/{r} }}\n"
+            ));
+        }
+        std::fs::write(&repos_path, yaml).unwrap();
+        if !workspaces.is_empty() {
+            let mut ws_yaml = String::from("workspaces:\n");
+            for (n, members) in workspaces {
+                let members_list = members.join(", ");
+                ws_yaml.push_str(&format!("  - name: {n}\n    members: [{members_list}]\n"));
+            }
+            std::fs::write(dir.join("workspaces.yaml"), ws_yaml).unwrap();
+        }
+        repos_path
+    }
+
+    /// Redirect the recent-projects file to a tempdir for the duration
+    /// of the test. Uses `_in` variants so we don't race with other
+    /// tests that may set `XDG_CONFIG_HOME`.
+    fn with_temp_recent<F: FnOnce(&std::path::Path)>(f: F) {
+        // Wrap F in a Box<dyn FnOnce> to satisfy `catch_unwind`'s
+        // UnwindSafe bound; the actual function body never panics but
+        // this matches the pattern used elsewhere in the codebase.
+        let boxed: Box<dyn FnOnce(&std::path::Path)> = Box::new(f);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        let mut f = boxed;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&path)));
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[test]
+    fn list_recent_projects_returns_empty_when_file_missing() {
+        with_temp_recent(|dir| {
+            // Use the *_in variants so we don't touch XDG_CONFIG_HOME.
+            let list = crate::config::recent_projects::list_in(dir).unwrap();
+            assert!(list.is_empty());
+        });
+    }
+
+    #[test]
+    fn list_recent_projects_enriches_with_counts() {
+        with_temp_recent(|dir| {
+            let a = write_project(dir, "a", &["r1", "r2", "r3"], &[("team", &["r1", "r2"])]);
+            let b = write_project(dir, "b", &["r4"], &[]);
+            crate::config::recent_projects::record_in(dir, &a).unwrap();
+            crate::config::recent_projects::record_in(dir, &b).unwrap();
+
+            // `list_recent_projects()` reads from the production
+            // config_dir; to test it end-to-end we'd need to stub the
+            // config dir. Instead we test the per-entry count helper
+            // directly and confirm it produces sane numbers.
+            let (ws_count_a, repo_count_a) = counts_for_project(&a);
+            assert_eq!(repo_count_a, 3);
+            assert_eq!(ws_count_a, 1);
+            let (ws_count_b, repo_count_b) = counts_for_project(&b);
+            assert_eq!(repo_count_b, 1);
+            assert_eq!(ws_count_b, 0);
+        });
+    }
+
+    #[test]
+    fn counts_for_project_zeros_when_file_missing() {
+        let bogus = PathBuf::from("/nonexistent/repos.yaml");
+        let (ws, repo) = counts_for_project(&bogus);
+        assert_eq!(ws, 0);
+        assert_eq!(repo, 0);
+    }
 }

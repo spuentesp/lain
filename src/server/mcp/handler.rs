@@ -149,6 +149,23 @@ fn resolve_repo_or_error(
     }
 }
 
+/// Tool definitions exposed unconditionally (server-status and
+/// recent-projects reporting). Centralized here so the stdio and HTTP
+/// `tools/list` responses and `tools/call` dispatchers agree on names
+/// and gating.
+const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
+    (
+        "get_server_status",
+        "Returns the server's run-time status: pid, transport, port, started_at, last_sync_at, last_error, repo_count, workspace_count.",
+        &[],
+    ),
+    (
+        "list_recent_projects",
+        "List projects the operator has used recently, with per-project workspace_count and repo_count pulled from each project's repos.yaml/workspaces.yaml.",
+        &[],
+    ),
+];
+
 /// Tool definitions exposed only when the MCP server was constructed with a
 /// `FederatedIndex`. Centralized here so the stdio `tools/list` response, the
 /// stdio `tools/call` dispatch, and the HTTP JSON-RPC `tools/list` / `tools/call`
@@ -216,6 +233,20 @@ struct LainHandler {
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
     workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    /// Transport chosen at server construction. `None` for single-workspace
+    /// servers. Used by `get_server_status`.
+    status_transport: Option<crate::server::Transport>,
+    /// Port chosen at server construction. `None` for stdio transport or
+    /// single-workspace servers. Used by `get_server_status`.
+    status_port: Option<u16>,
+    /// Server start time (immutable for the life of the process).
+    status_started_at: std::time::SystemTime,
+    /// Most recent sync time (Arc-shared with `LainServer::last_sync_at`
+    /// so ingest paths can update it after this handler is built).
+    status_last_sync_at: Arc<parking_lot::Mutex<std::time::SystemTime>>,
+    /// Most recent sync error message (Arc-shared with
+    /// `LainServer::last_error`).
+    status_last_error: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 #[async_trait]
@@ -315,6 +346,32 @@ impl ServerHandler for LainHandler {
                 });
             }
         }
+        // Server-status and recent-projects tools are always available.
+        for (name, description, required) in SERVER_TOOL_DEFS {
+            let mut props = std::collections::BTreeMap::new();
+            for req in *required {
+                let mut p = serde_json::Map::new();
+                p.insert("type".into(), serde_json::Value::String("string".into()));
+                p.insert("description".into(), serde_json::Value::String(format!("{req}")));
+                props.insert((*req).to_string(), p);
+            }
+            let input_schema = ToolInputSchema::new(
+                required.iter().map(|s| s.to_string()).collect(),
+                if props.is_empty() { None } else { Some(props) },
+                None,
+            );
+            tools.push(Tool {
+                name: (*name).to_string(),
+                description: Some((*description).to_string()),
+                input_schema,
+                annotations: None,
+                execution: None,
+                icons: vec![],
+                meta: None,
+                output_schema: None,
+                title: None,
+            });
+        }
 
         Ok(ListToolsResult { tools, meta: None, next_cursor: None })
     }
@@ -333,6 +390,50 @@ impl ServerHandler for LainHandler {
         // successful `RepoId` flow through to downstream tool handlers
         // instead of being discarded (Task 19 round-1 fix).
         let mut args_owned: Map<String, serde_json::Value> = args_ref.clone();
+
+        // Server-status / recent-projects dispatch happens first so the
+        // tools are reachable even when the server has no federation or
+        // workspaces file attached.
+        match params.name.as_str() {
+            "get_server_status" => {
+                let handler_status = HandlerStatus {
+                    transport: self.status_transport,
+                    port: self.status_port,
+                    started_at: self.status_started_at,
+                    last_sync_at: self.status_last_sync_at.clone(),
+                    last_error: self.status_last_error.clone(),
+                    repo_count: self
+                        .federation
+                        .as_ref()
+                        .map(|f| f.list_repos().len())
+                        .unwrap_or(0),
+                    workspaces_count: self
+                        .workspaces
+                        .as_ref()
+                        .map(|w| w.workspaces.len())
+                        .unwrap_or(0),
+                };
+                let payload = handler_status.render();
+                return Ok(tool_text_result(payload.to_string(), false));
+            }
+            "list_recent_projects" => {
+                let list = match crate::server::mcp::federation_tools::list_recent_projects() {
+                    Ok(l) => l,
+                    Err(e) => return Ok(tool_text_result(format!("{e}"), true)),
+                };
+                let text = match serde_json::to_string(&list) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Ok(tool_text_result(
+                            format!("serialization error: {e}"),
+                            true,
+                        ));
+                    }
+                };
+                return Ok(tool_text_result(text, false));
+            }
+            _ => {}
+        }
 
         if let Some(fed) = &self.federation {
             match params.name.as_str() {
@@ -643,11 +744,32 @@ pub struct LainMcpServer {
     executor: ToolExecutor,
     federation: Option<Arc<FederatedIndex>>,
     workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    /// Transport for the active server, surfaced via `get_server_status`.
+    status_transport: Option<crate::server::Transport>,
+    /// TCP port for HTTP transport; surfaced via `get_server_status`.
+    status_port: Option<u16>,
+    /// Start time (immutable for the server's lifetime).
+    status_started_at: std::time::SystemTime,
+    /// Last sync time, Arc-shared with `LainServer::last_sync_at` so
+    /// ingest paths can update it.
+    status_last_sync_at: Arc<parking_lot::Mutex<std::time::SystemTime>>,
+    /// Last error, Arc-shared with `LainServer::last_error`.
+    status_last_error: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl LainMcpServer {
     pub fn new(executor: ToolExecutor) -> Self {
-        Self { executor, federation: None, workspaces: None }
+        let now = std::time::SystemTime::now();
+        Self {
+            executor,
+            federation: None,
+            workspaces: None,
+            status_transport: None,
+            status_port: None,
+            status_started_at: now,
+            status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
+            status_last_error: Arc::new(parking_lot::Mutex::new(None)),
+        }
     }
 
     /// Federation-mode constructor. When set, the handler also exposes
@@ -655,7 +777,17 @@ impl LainMcpServer {
     /// the federation surface is not registered and single-workspace
     /// behavior is preserved.
     pub fn with_federation(executor: ToolExecutor, federation: Arc<FederatedIndex>) -> Self {
-        Self { executor, federation: Some(federation), workspaces: None }
+        let now = std::time::SystemTime::now();
+        Self {
+            executor,
+            federation: Some(federation),
+            workspaces: None,
+            status_transport: None,
+            status_port: None,
+            status_started_at: now,
+            status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
+            status_last_error: Arc::new(parking_lot::Mutex::new(None)),
+        }
     }
 
     /// Federation + workspace constructor. When workspaces is Some, the
@@ -667,7 +799,37 @@ impl LainMcpServer {
         federation: Arc<FederatedIndex>,
         workspaces: Arc<crate::federation::workspace::WorkspacesFile>,
     ) -> Self {
-        Self { executor, federation: Some(federation), workspaces: Some(workspaces) }
+        let now = std::time::SystemTime::now();
+        Self {
+            executor,
+            federation: Some(federation),
+            workspaces: Some(workspaces),
+            status_transport: None,
+            status_port: None,
+            status_started_at: now,
+            status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
+            status_last_error: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    /// Inject the federation-mode transport / port / start-time /
+    /// sync-time / last-error values. Called by `LainServer::serve`
+    /// right before the MCP loop kicks off, so the values match the
+    /// `LainServer` fields one-for-one (Arc-shared for the Mutexes).
+    pub fn with_status(
+        mut self,
+        transport: Option<crate::server::Transport>,
+        port: Option<u16>,
+        started_at: std::time::SystemTime,
+        last_sync_at: Arc<parking_lot::Mutex<std::time::SystemTime>>,
+        last_error: Arc<parking_lot::Mutex<Option<String>>>,
+    ) -> Self {
+        self.status_transport = transport;
+        self.status_port = port;
+        self.status_started_at = started_at;
+        self.status_last_sync_at = last_sync_at;
+        self.status_last_error = last_error;
+        self
     }
 
     /// Build a sidecar-flavored server. The graph inside `executor` should
@@ -675,7 +837,7 @@ impl LainMcpServer {
     /// so mutating tool calls fail at the database layer with a clean
     /// `graph is read-only` error.
     pub fn new_read_only(executor: ToolExecutor) -> Self {
-        Self { executor, federation: None, workspaces: None }
+        Self::new(executor)
     }
 
     /// Convenience: build a sidecar server directly from a read-only graph
@@ -686,7 +848,7 @@ impl LainMcpServer {
         workspace: std::path::PathBuf,
     ) -> Self {
         let executor = crate::tools::ToolExecutor::new_read_only(graph, overlay, workspace);
-        Self { executor, federation: None, workspaces: None }
+        Self::new(executor)
     }
 
     /// Serve on a specific `SocketAddr`. Used by the sidecar so it can bind
@@ -697,19 +859,28 @@ impl LainMcpServer {
         info!("Starting Lain sidecar MCP HTTP server on {}", addr);
 
         let executor = Arc::new(self.executor);
+        let status = HandlerStatus {
+            transport: self.status_transport,
+            port: self.status_port,
+            started_at: self.status_started_at,
+            last_sync_at: self.status_last_sync_at,
+            last_error: self.status_last_error,
+            repo_count: 0,
+            workspaces_count: 0,
+        };
         let listener = TcpListener::bind(addr).await?;
 
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let executor = executor.clone();
-                    let workspaces = self.workspaces.clone();
+                    let status = status.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
-                            let workspaces = workspaces.clone();
-                            handle_request(req, executor, None, workspaces)
+                            let status = status.clone();
+                            handle_request(req, executor, None, None, status)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -736,6 +907,11 @@ impl LainMcpServer {
             executor: Arc::new(self.executor),
             federation: self.federation,
             workspaces: self.workspaces,
+            status_transport: self.status_transport,
+            status_port: self.status_port,
+            status_started_at: self.status_started_at,
+            status_last_sync_at: self.status_last_sync_at,
+            status_last_error: self.status_last_error,
         };
 
         let server = server_runtime::create_server(McpServerOptions {
@@ -756,6 +932,12 @@ impl LainMcpServer {
 
         let executor = Arc::new(self.executor);
         let federation = self.federation;
+        let workspaces = self.workspaces;
+        let status_transport = self.status_transport;
+        let status_port = self.status_port;
+        let status_started_at = self.status_started_at;
+        let status_last_sync_at = self.status_last_sync_at;
+        let status_last_error = self.status_last_error;
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
         loop {
@@ -763,14 +945,40 @@ impl LainMcpServer {
                 Ok((stream, _)) => {
                     let executor = executor.clone();
                     let federation = federation.clone();
-                    let workspaces = self.workspaces.clone();
+                    let workspaces = workspaces.clone();
+                    let status_transport = status_transport;
+                    let status_port = status_port;
+                    let status_started_at = status_started_at;
+                    let status_last_sync_at = status_last_sync_at.clone();
+                    let status_last_error = status_last_error.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
                             let federation = federation.clone();
                             let workspaces = workspaces.clone();
-                            handle_request(req, executor, federation, workspaces)
+                            let handler_status = HandlerStatus {
+                                transport: status_transport,
+                                port: status_port,
+                                started_at: status_started_at,
+                                last_sync_at: status_last_sync_at.clone(),
+                                last_error: status_last_error.clone(),
+                                workspaces_count: workspaces
+                                    .as_ref()
+                                    .map(|w| w.workspaces.len())
+                                    .unwrap_or(0),
+                                repo_count: federation
+                                    .as_ref()
+                                    .map(|f| f.list_repos().len())
+                                    .unwrap_or(0),
+                            };
+                            handle_request(
+                                req,
+                                executor,
+                                federation,
+                                workspaces,
+                                handler_status,
+                            )
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -856,11 +1064,55 @@ fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
     })
 }
 
+/// Per-process status snapshot carried into the HTTP request handler
+/// closure. Built once per accepted connection (cloning the cheap
+/// `SystemTime` and Arc-shared Mutexes) so the inner `service_fn`
+/// closure doesn't need to capture the whole `LainMcpServer` state.
+#[derive(Clone)]
+struct HandlerStatus {
+    transport: Option<crate::server::Transport>,
+    port: Option<u16>,
+    started_at: std::time::SystemTime,
+    last_sync_at: Arc<parking_lot::Mutex<std::time::SystemTime>>,
+    last_error: Arc<parking_lot::Mutex<Option<String>>>,
+    repo_count: usize,
+    workspaces_count: usize,
+}
+
+impl HandlerStatus {
+    fn render(&self) -> serde_json::Value {
+        let transport = self.transport.map(|t| match t {
+            crate::server::Transport::Stdio => "stdio".to_string(),
+            crate::server::Transport::Http => "http".to_string(),
+        });
+        serde_json::json!({
+            "pid": std::process::id(),
+            "transport": transport,
+            "port": self.port,
+            "started_at": self
+                .started_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            "last_sync_at": self
+                .last_sync_at
+                .lock()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            "last_error": self.last_error.lock().clone(),
+            "repo_count": self.repo_count,
+            "workspace_count": self.workspaces_count,
+        })
+    }
+}
+
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
     workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    status: HandlerStatus,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
         let body = serde_json::to_string(&value).unwrap_or_default();
@@ -956,6 +1208,25 @@ async fn handle_request(
                                 }));
                             }
                         }
+                        for (name, description, required) in SERVER_TOOL_DEFS {
+                            let mut props = serde_json::Map::new();
+                            for req in *required {
+                                let mut p = serde_json::Map::new();
+                                p.insert("type".into(), serde_json::Value::String("string".into()));
+                                p.insert("description".into(), serde_json::Value::String(format!("{req}")));
+                                props.insert((*req).to_string(), serde_json::Value::Object(p));
+                            }
+                            let input_schema = serde_json::json!({
+                                "type": "object",
+                                "properties": props,
+                                "required": required,
+                            });
+                            tools.push(serde_json::json!({
+                                "name": name,
+                                "description": description,
+                                "inputSchema": input_schema
+                            }));
+                        }
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
                     }
                     "tools/call" => {
@@ -968,6 +1239,27 @@ async fn handle_request(
                             .and_then(|v| v.as_object())
                             .cloned()
                             .unwrap_or_default();
+
+                        // Server-status / recent-projects dispatch — always
+                        // available regardless of federation mode.
+                        match name {
+                            "get_server_status" => {
+                                let payload = status.render().to_string();
+                                return Ok(jsonrpc_tool_result(id, &payload, false));
+                            }
+                            "list_recent_projects" => {
+                                let list = match crate::server::mcp::federation_tools::list_recent_projects() {
+                                    Ok(l) => l,
+                                    Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                };
+                                let text = match serde_json::to_string(&list) {
+                                    Ok(s) => s,
+                                    Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                };
+                                return Ok(jsonrpc_tool_result(id, &text, false));
+                            }
+                            _ => {}
+                        }
 
                         if let Some(fed) = &federation {
                             match name {

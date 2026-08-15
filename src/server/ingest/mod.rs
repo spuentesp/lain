@@ -24,6 +24,7 @@ use crate::server::git::GitSensor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
 use parking_lot::Mutex;
 use tracing::info;
 
@@ -69,6 +70,24 @@ pub struct LainServer {
     federation_transport: Option<Transport>,
     /// Port chosen at `with_federation` time. Consumed by `serve`.
     federation_port: Option<u16>,
+    /// Process start time, captured at construction. Immutable for the
+    /// life of the server; surfaced via `get_server_status`.
+    started_at: SystemTime,
+    /// Last successful sync time, updated by ingest/sync paths. The
+    /// `get_server_status` tool surfaces this so operators can see how
+    /// fresh the federation is. Wrapped in `Arc<Mutex<_>>` so `LainServer`
+    /// stays `Clone` (the executor sidecar clones the server).
+    last_sync_at: Arc<Mutex<SystemTime>>,
+    /// Most recent sync/ingest error message, if any. Cleared by
+    /// `record_sync()` and set by `record_last_error()`. Surfaced via
+    /// `get_server_status`. Wrapped in `Arc<Mutex<_>>` for the same
+    /// `Clone` reason as `last_sync_at`.
+    last_error: Arc<Mutex<Option<String>>>,
+    /// Path to the `repos.yaml` this server was launched with, if any.
+    /// `None` for single-workspace servers (no federation config). Used
+    /// to record the project in `~/.config/lain/recent_projects` and to
+    /// tag the server status payload.
+    repos_yaml: Option<PathBuf>,
 }
 
 impl LainServer {
@@ -135,6 +154,7 @@ impl LainServer {
         );
 
         info!("Lain server initialized");
+        let now = SystemTime::now();
         Ok(Self {
             config,
             graph,
@@ -150,6 +170,10 @@ impl LainServer {
             federation: None,
             federation_transport: None,
             federation_port: None,
+            started_at: now,
+            last_sync_at: Arc::new(Mutex::new(now)),
+            last_error: Arc::new(Mutex::new(None)),
+            repos_yaml: None,
         })
     }
 
@@ -170,6 +194,7 @@ impl LainServer {
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        repos_yaml: Option<PathBuf>,
     ) -> Result<Self, LainError> {
         // Build a minimal executor — same trick as `cmds/server.rs`'s
         // `build_minimal_executor`. Federation tools never reach the
@@ -219,6 +244,7 @@ impl LainServer {
 
         info!("Lain federation server initialized");
         let cross_encoder = crate::server::nlp::CrossEncoder::from_dir(&ws);
+        let now = SystemTime::now();
 
         Ok(Self {
             config: LainConfig {
@@ -238,6 +264,10 @@ impl LainServer {
             federation_workspaces: None,
             federation_transport: Some(transport),
             federation_port: Some(port),
+            started_at: now,
+            last_sync_at: Arc::new(Mutex::new(now)),
+            last_error: Arc::new(Mutex::new(None)),
+            repos_yaml,
         })
     }
 
@@ -251,6 +281,7 @@ impl LainServer {
         transport: Transport,
         port: u16,
         workspaces: Arc<WorkspacesFile>,
+        repos_yaml: Option<PathBuf>,
     ) -> Result<Self, LainError> {
         // Mostly the same wiring as `with_federation`. The differences:
         // we store the workspaces file in `federation_workspaces`, and we
@@ -295,6 +326,7 @@ impl LainServer {
 
         info!("Lain federation server initialized with workspaces");
         let cross_encoder = crate::server::nlp::CrossEncoder::from_dir(&ws);
+        let now = SystemTime::now();
 
         Ok(Self {
             config: LainConfig {
@@ -314,12 +346,82 @@ impl LainServer {
             federation_workspaces: Some(workspaces),
             federation_transport: Some(transport),
             federation_port: Some(port),
+            started_at: now,
+            last_sync_at: Arc::new(Mutex::new(now)),
+            last_error: Arc::new(Mutex::new(None)),
+            repos_yaml,
         })
     }
 
     /// Federation accessor. Returns `None` for single-workspace servers.
     pub fn federation(&self) -> Option<&Arc<FederatedIndex>> {
         self.federation.as_ref()
+    }
+
+    /// Process start time, captured at construction. Used by
+    /// `get_server_status` to report uptime.
+    pub fn started_at(&self) -> SystemTime {
+        self.started_at
+    }
+
+    /// Last successful sync time. Updated via `record_sync`; consumed by
+    /// `get_server_status`.
+    pub fn last_sync_at(&self) -> SystemTime {
+        *self.last_sync_at.lock()
+    }
+
+    /// Most recent ingest/sync error message, if any.
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().clone()
+    }
+
+    /// Mark a sync attempt as successful: clear `last_error` and bump
+    /// `last_sync_at` to now. Called by ingest/sync paths that finish
+    /// without an error; errors should call `record_last_error` instead.
+    pub fn record_sync(&self) {
+        *self.last_sync_at.lock() = SystemTime::now();
+        *self.last_error.lock() = None;
+    }
+
+    /// Record an error message from the ingest/sync paths and refresh
+    /// `last_sync_at` to the current time so the operator can see when
+    /// the last attempt was.
+    pub fn record_last_error(&self, msg: impl Into<String>) {
+        *self.last_sync_at.lock() = SystemTime::now();
+        *self.last_error.lock() = Some(msg.into());
+    }
+
+    /// Transport for the active MCP server. `None` for single-workspace
+    /// servers (not federation-mode); some for federation-mode.
+    pub fn transport(&self) -> Option<Transport> {
+        self.federation_transport
+    }
+
+    /// TCP port for HTTP federation-mode servers; `None` for stdio or
+    /// single-workspace servers.
+    pub fn port(&self) -> Option<u16> {
+        self.federation_port
+    }
+
+    /// Path to the `repos.yaml` this server was launched with, if any.
+    /// `None` for single-workspace servers.
+    pub fn repos_yaml(&self) -> Option<&Path> {
+        self.repos_yaml.as_deref()
+    }
+
+    /// Number of repos in the live federation, or 0 for single-workspace
+    /// servers.
+    pub fn repo_count(&self) -> usize {
+        self.federation.as_ref().map(|f| f.list_repos().len()).unwrap_or(0)
+    }
+
+    /// Number of workspaces in the loaded `workspaces.yaml`, or 0 when
+    /// none was supplied.
+    pub fn workspace_count(&self) -> usize {
+        self.federation_workspaces
+            .as_ref()
+            .map(|w| w.workspaces.len())
+            .unwrap_or(0)
     }
 
     /// Consume the server and run the federation-mode MCP loop on the
@@ -341,7 +443,14 @@ impl LainServer {
                 self.tool_executor, federation, ws,
             ),
             None => crate::server::mcp::handler::LainMcpServer::with_federation(self.tool_executor, federation),
-        };
+        }
+        .with_status(
+            Some(transport),
+            Some(port),
+            self.started_at,
+            Arc::clone(&self.last_sync_at),
+            Arc::clone(&self.last_error),
+        );
         match transport {
             Transport::Http => mcp
                 .run_http(port)
