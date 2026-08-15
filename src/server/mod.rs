@@ -11,6 +11,7 @@ pub mod tools;
 pub mod graph;
 pub mod schema;
 pub mod git;
+pub mod lsp;
 pub mod treesitter;
 pub mod tuning;
 pub mod error;
@@ -21,7 +22,6 @@ pub mod toolchains;
 pub mod sensors;
 pub mod watcher;
 pub mod overlay;
-pub mod reload;
 
 pub mod ingest;
 pub mod query;

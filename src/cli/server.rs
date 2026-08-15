@@ -7,10 +7,10 @@
 //! `POST /mcp` exactly like a single-workspace `lain --transport http`.
 
 use anyhow::{anyhow, Result};
-use lain::federation::health::RepoHealth;
-use lain::federation::loader::{load_federation, load_federation_with_workspace};
-use lain::server::{LainServer, Transport};
-use lain::state::ActiveWorkspace;
+use crate::federation::health::RepoHealth;
+use crate::federation::loader::{load_federation, load_federation_with_workspace};
+use crate::server::{LainServer, Transport};
+use crate::state::ActiveWorkspace;
 use std::path::Path;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -114,7 +114,7 @@ pub async fn run_server(
 /// server without it still works.
 fn load_workspaces_for_server(
     config_path: &Path,
-) -> Result<Option<Arc<lain::federation::workspace::WorkspacesFile>>, anyhow::Error> {
+) -> Result<Option<Arc<crate::federation::workspace::WorkspacesFile>>, anyhow::Error> {
     let workspaces_path = config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -122,7 +122,7 @@ fn load_workspaces_for_server(
     if !workspaces_path.exists() {
         return Ok(None);
     }
-    let workspaces = lain::federation::workspace::WorkspacesFile::load(&workspaces_path)
+    let workspaces = crate::federation::workspace::WorkspacesFile::load(&workspaces_path)
         .map_err(|e| anyhow!("load {}: {e}", workspaces_path.display()))?;
     Ok(Some(Arc::new(workspaces)))
 }
@@ -134,7 +134,7 @@ async fn load_federation_for_workspace(
     config_path: &Path,
     workspace_arg: &str,
 ) -> Result<Arc<FederatedIndex>, anyhow::Error> {
-    use lain::error::LainError;
+    use crate::error::LainError;
     let arg = workspace_arg.trim();
     let resolved_name: Option<String> = match arg {
         "" | "none" => None,  // explicit "no workspace" — today's behavior
@@ -166,7 +166,7 @@ async fn load_federation_for_workspace(
 }
 
 // Bring `FederatedIndex` into scope for the helper above.
-use lain::federation::federated_index::FederatedIndex;
+use crate::federation::federated_index::FederatedIndex;
 use std::sync::Arc;
 
 fn init_tracing(log_level: &str) {

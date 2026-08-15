@@ -154,15 +154,8 @@ pub fn run_init(
     println!("\nLAIN initialization complete!");
     println!("Restart your agent to use LAIN.");
 
-    // Auto-register the project so `lain use <name>` works later without
-    // the user having to type the path. Uses register_or_touch: if the
-    // path is already registered under any name, we just update
-    // last_used instead of creating a duplicate entry.
-    match lain::state::Projects::register_or_touch(workspace) {
-        Ok(true) => eprintln!("registered project under directory basename"),
-        Ok(false) => {} // already registered, just touched
-        Err(e) => eprintln!("Note: could not auto-register project: {}", e),
-    }
+    // (Project registry was removed in the multi-project consolidation.
+    // Operators now point lain at their repos.yaml directly.)
     Ok(())
 }
 
@@ -187,7 +180,7 @@ fn index_workspace_blocking(
                 .enable_all()
                 .build()?;
             runtime.block_on(async move {
-                let server = lain::server::LainServer::new(
+                let server = crate::server::LainServer::new(
                     &workspace_owned,
                     &memory_path_owned,
                     model_owned.as_deref(),

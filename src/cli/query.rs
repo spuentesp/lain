@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::Mutex;
-use lain::graph::GraphDatabase;
-use lain::nlp::NlpEmbedder;
-use lain::query::executor::Executor;
-use lain::query::spec::{
+use crate::graph::GraphDatabase;
+use crate::nlp::NlpEmbedder;
+use crate::query::executor::Executor;
+use crate::query::spec::{
     ConnectOp, DepthSpec, Direction, EdgeSelector, FilterOp, FindOp,
     GraphOp, GroupBy, GroupOp, LabelSelector, LimitOp, NameSelector,
     QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp, TypeSelector,

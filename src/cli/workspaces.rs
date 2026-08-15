@@ -6,9 +6,9 @@
 //! auto` to pick which workspace the federation loads.
 
 use anyhow::{anyhow, Result};
-use lain::error::LainError;
-use lain::federation::workspace::{WorkspaceSource, WorkspaceSourceConfig, WorkspaceSpec, WorkspacesFile};
-use lain::state::ActiveWorkspace;
+use crate::error::LainError;
+use crate::federation::workspace::{WorkspaceSource, WorkspaceSourceConfig, WorkspaceSpec, WorkspacesFile};
+use crate::state::ActiveWorkspace;
 use std::path::{Path, PathBuf};
 
 /// Resolve a `workspaces.yaml` path. The CLI accepts an explicit `--config`
@@ -154,7 +154,7 @@ pub async fn run_init(
                 .map(|h| PathBuf::from(h).join(".local/lain"))
                 .unwrap_or_else(|| PathBuf::from(".local/lain"))
         });
-    let source = lain::federation::workspace::WorkspaceCloneSource::new(
+    let source = crate::federation::workspace::WorkspaceCloneSource::new(
         name.to_string(),
         from_url.to_string(),
         ref_.clone(),
@@ -237,7 +237,7 @@ pub fn run_use(name: &str, config: Option<&Path>) -> Result<()> {
             "workspace '{name}' not found in {}", path.display()
         ))).into());
     }
-    ActiveWorkspace { name: name.to_string(), source_path: path.clone() }.save()
+    ActiveWorkspace { name: name.to_string(), config_path: Some(path.clone()) }.save()
         .map_err(|e| anyhow!("save active workspace: {e}"))?;
     println!("Active workspace set to '{name}' (from {}). Restart `lain server` to pick it up.", path.display());
     Ok(())

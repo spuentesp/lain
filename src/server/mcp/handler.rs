@@ -337,7 +337,7 @@ impl ServerHandler for LainHandler {
         if let Some(fed) = &self.federation {
             match params.name.as_str() {
                 "list_repos" => {
-                    let repos = crate::mcp::federation_tools::list_repos(fed);
+                    let repos = crate::server::mcp::federation_tools::list_repos(fed);
                     return Ok(tool_text_result(
                         serde_json::to_string(&repos)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -360,7 +360,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(format!("{e}"), true));
                         }
                     };
-                    return match crate::mcp::federation_tools::get_repo_info(fed, &rid) {
+                    return match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
                         Ok(info) => Ok(tool_text_result(
                             serde_json::to_string(&info)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -370,7 +370,7 @@ impl ServerHandler for LainHandler {
                     };
                 }
                 "get_federation_health" => {
-                    let health = crate::mcp::federation_tools::get_federation_health(fed);
+                    let health = crate::server::mcp::federation_tools::get_federation_health(fed);
                     return Ok(tool_text_result(
                         serde_json::to_string(&health)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -415,7 +415,7 @@ impl ServerHandler for LainHandler {
                             ));
                         }
                     };
-                    let hits = crate::mcp::federation_tools::search_org(fed, query, limit);
+                    let hits = crate::server::mcp::federation_tools::search_org(fed, query, limit);
                     return Ok(tool_text_result(
                         serde_json::to_string(&hits)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -445,7 +445,7 @@ impl ServerHandler for LainHandler {
                         Ok(r) => r,
                         Err(e) => return Ok(tool_text_result(e, true)),
                     };
-                    return match crate::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
+                    return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
                         Ok(r) => Ok(tool_text_result(
                             serde_json::to_string(&r)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -486,7 +486,7 @@ impl ServerHandler for LainHandler {
                         Ok(r) => r,
                         Err(e) => return Ok(tool_text_result(e, true)),
                     };
-                    return match crate::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
+                    return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
                         Ok(r) => Ok(tool_text_result(
                             serde_json::to_string(&r)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -508,7 +508,7 @@ impl ServerHandler for LainHandler {
             match params.name.as_str() {
                 "list_workspaces" => {
                     let active = ActiveWorkspace::load().ok().flatten();
-                    let infos = crate::mcp::federation_tools::list_workspaces(workspaces, active.as_ref());
+                    let infos = crate::server::mcp::federation_tools::list_workspaces(workspaces, active.as_ref());
                     return Ok(tool_text_result(
                         serde_json::to_string(&infos)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -518,7 +518,7 @@ impl ServerHandler for LainHandler {
                 "get_active_workspace" => {
                     let fed = self.federation.as_deref();
                     return match fed {
-                        Some(fed) => match crate::mcp::federation_tools::get_active_workspace(fed, workspaces) {
+                        Some(fed) => match crate::server::mcp::federation_tools::get_active_workspace(fed, workspaces) {
                             Ok(info) => Ok(tool_text_result(
                                 serde_json::to_string(&info)
                                     .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -549,16 +549,16 @@ impl ServerHandler for LainHandler {
                     // a federation), we fall back to "not_loaded" health
                     // for each member. The source field is dropped in
                     // this fallback path.
-                    let detail_res: Result<crate::mcp::federation_tools::WorkspaceDetail, LainError> =
+                    let detail_res: Result<crate::server::mcp::federation_tools::WorkspaceDetail, LainError> =
                         match self.federation.as_deref() {
-                            Some(fed) => crate::mcp::federation_tools::get_workspace(fed, workspaces, name),
+                            Some(fed) => crate::server::mcp::federation_tools::get_workspace(fed, workspaces, name),
                             None => {
                                 match workspaces.workspaces.iter().find(|w| w.name == name) {
-                                    Some(ws) => Ok(crate::mcp::federation_tools::WorkspaceDetail {
+                                    Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
                                         name: ws.name.clone(),
                                         description: ws.description.clone(),
                                         source: None,
-                                        members: ws.members.iter().map(|m| crate::mcp::federation_tools::WorkspaceRepoInfo {
+                                        members: ws.members.iter().map(|m| crate::server::mcp::federation_tools::WorkspaceRepoInfo {
                                             repo_id: m.clone(),
                                             path: String::new(),
                                             health: "not_loaded".into(),
@@ -580,7 +580,7 @@ impl ServerHandler for LainHandler {
                 "get_workspace_graph" => {
                     let filter = args_owned.get("filter").and_then(|v| v.as_str());
                     return match self.federation.as_deref() {
-                        Some(fed) => match crate::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
+                        Some(fed) => match crate::server::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
                             Ok(graph) => Ok(tool_text_result(
                                 serde_json::to_string(&graph)
                                     .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -972,7 +972,7 @@ async fn handle_request(
                         if let Some(fed) = &federation {
                             match name {
                                 "list_repos" => {
-                                    let repos = crate::mcp::federation_tools::list_repos(fed);
+                                    let repos = crate::server::mcp::federation_tools::list_repos(fed);
                                     let text = match serde_json::to_string(&repos) {
                                         Ok(s) => s,
                                         Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
@@ -988,7 +988,7 @@ async fn handle_request(
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
                                     };
-                                    match crate::mcp::federation_tools::get_repo_info(fed, &rid) {
+                                    match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
                                         Ok(info) => {
                                             let text = match serde_json::to_string(&info) {
                                                 Ok(s) => s,
@@ -1000,7 +1000,7 @@ async fn handle_request(
                                     }
                                 }
                                 "get_federation_health" => {
-                                    let health = crate::mcp::federation_tools::get_federation_health(fed);
+                                    let health = crate::server::mcp::federation_tools::get_federation_health(fed);
                                     let text = match serde_json::to_string(&health) {
                                         Ok(s) => s,
                                         Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
@@ -1023,7 +1023,7 @@ async fn handle_request(
                                         },
                                         _ => return Ok(jsonrpc_tool_result(id, "Missing required argument: limit", true)),
                                     };
-                                    let hits = crate::mcp::federation_tools::search_org(fed, query, limit);
+                                    let hits = crate::server::mcp::federation_tools::search_org(fed, query, limit);
                                     let text = match serde_json::to_string(&hits) {
                                         Ok(s) => s,
                                         Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
@@ -1043,7 +1043,7 @@ async fn handle_request(
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
                                     };
-                                    match crate::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
+                                    match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
                                         Ok(r) => {
                                             let text = match serde_json::to_string(&r) {
                                                 Ok(s) => s,
@@ -1071,7 +1071,7 @@ async fn handle_request(
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
                                     };
-                                    match crate::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
+                                    match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
                                         Ok(r) => {
                                             let text = match serde_json::to_string(&r) {
                                                 Ok(s) => s,
@@ -1094,7 +1094,7 @@ async fn handle_request(
                             match name {
                                 "list_workspaces" => {
                                     let active = crate::state::ActiveWorkspace::load().ok().flatten();
-                                    let infos = crate::mcp::federation_tools::list_workspaces(workspaces, active.as_ref());
+                                    let infos = crate::server::mcp::federation_tools::list_workspaces(workspaces, active.as_ref());
                                     let text = match serde_json::to_string(&infos) {
                                         Ok(s) => s,
                                         Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
@@ -1110,7 +1110,7 @@ async fn handle_request(
                                             true,
                                         )),
                                     };
-                                    return match crate::mcp::federation_tools::get_active_workspace(fed_ref, workspaces) {
+                                    return match crate::server::mcp::federation_tools::get_active_workspace(fed_ref, workspaces) {
                                         Ok(info) => {
                                             let text = match serde_json::to_string(&info) {
                                                 Ok(s) => s,
@@ -1128,18 +1128,18 @@ async fn handle_request(
                                         None => return Ok(jsonrpc_tool_result(id, "Missing required argument: name", true)),
                                     };
                                     let detail = match federation.as_deref() {
-                                        Some(fed) => crate::mcp::federation_tools::get_workspace(fed, workspaces, &name_str),
+                                        Some(fed) => crate::server::mcp::federation_tools::get_workspace(fed, workspaces, &name_str),
                                         None => {
                                             // Defensive fallback: no federation
                                             // means the workspace tools shouldn't
                                             // have been registered. Build a minimal
                                             // detail from the workspaces file.
                                             match workspaces.workspaces.iter().find(|w| w.name == name_str) {
-                                                Some(ws) => Ok(crate::mcp::federation_tools::WorkspaceDetail {
+                                                Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
                                                     name: ws.name.clone(),
                                                     description: ws.description.clone(),
                                                     source: None,
-                                                    members: ws.members.iter().map(|m| crate::mcp::federation_tools::WorkspaceRepoInfo {
+                                                    members: ws.members.iter().map(|m| crate::server::mcp::federation_tools::WorkspaceRepoInfo {
                                                         repo_id: m.clone(),
                                                         path: String::new(),
                                                         health: "not_loaded".into(),
@@ -1163,7 +1163,7 @@ async fn handle_request(
                                 "get_workspace_graph" => {
                                     let filter = args_map.get("filter").and_then(|v| v.as_str());
                                     return match federation.as_deref() {
-                                        Some(fed) => match crate::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
+                                        Some(fed) => match crate::server::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
                                             Ok(graph) => {
                                                 let text = match serde_json::to_string(&graph) {
                                                     Ok(s) => s,
@@ -1271,7 +1271,7 @@ async fn handle_request(
                 crate::tools::UiSessionData::BlastRadius { symbol, nodes } => (symbol, nodes),
                 _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
-            let mut html = include_str!("../ui/blast-radius.html").to_string();
+            let mut html = include_str!("../../ui/blast-radius.html").to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", &symbol);
             html = html.replace("NODES_PLACEHOLDER", &serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()));
             return Ok(Response::builder()
@@ -1300,7 +1300,7 @@ async fn handle_request(
                 crate::tools::UiSessionData::Coupling { symbol, files, .. } => (symbol, files, &()),
                 _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
-            let mut html = include_str!("../ui/coupling.html").to_string();
+            let mut html = include_str!("../../ui/coupling.html").to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", symbol);
             html = html.replace("FILES_PLACEHOLDER", &serde_json::to_string(files).unwrap_or_else(|_| "[]".to_string()));
             return Ok(Response::builder()
@@ -1330,7 +1330,7 @@ async fn handle_request(
                 crate::tools::UiSessionData::CallChain { from, to, path } => (from, to, path),
                 _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
-            let mut html = include_str!("../ui/call-chain.html").to_string();
+            let mut html = include_str!("../../ui/call-chain.html").to_string();
             html = html.replace("FROM_PLACEHOLDER", from);
             html = html.replace("TO_PLACEHOLDER", to);
             html = html.replace("PATH_PLACEHOLDER", &serde_json::to_string(path).unwrap_or_else(|_| "[]".to_string()));
@@ -1517,7 +1517,7 @@ mod tests {
     use super::*;
     use crate::federation::federated_index::FederatedIndex;
     use crate::federation::graph_backend::PetgraphBackend;
-    use crate::LainError;
+    use crate::error::LainError;
     use std::sync::Arc;
 
     #[test]

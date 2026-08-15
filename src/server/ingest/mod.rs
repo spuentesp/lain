@@ -212,7 +212,7 @@ impl LainServer {
         // `LainMcpServer` itself — it's a thin wrapper over `tool_executor`
         // plus `federation`, both of which we already hold — and `serve()`
         // rebuilds it before consuming self.
-        let _mcp = crate::server::mcp::LainMcpServer::with_federation(
+        let _mcp = crate::server::mcp::handler::LainMcpServer::with_federation(
             tool_executor.clone(),
             Arc::clone(&federation),
         );
@@ -287,7 +287,7 @@ impl LainServer {
             ws.to_path_buf(),
         );
 
-        let _mcp = crate::server::mcp::LainMcpServer::with_federation_and_workspaces(
+        let _mcp = crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
             tool_executor.clone(),
             Arc::clone(&federation),
             Arc::clone(&workspaces),
@@ -337,10 +337,10 @@ impl LainServer {
         let port = self.federation_port.unwrap_or(9999);
 
         let mcp = match self.federation_workspaces {
-            Some(ws) => crate::server::mcp::LainMcpServer::with_federation_and_workspaces(
+            Some(ws) => crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
                 self.tool_executor, federation, ws,
             ),
-            None => crate::server::mcp::LainMcpServer::with_federation(self.tool_executor, federation),
+            None => crate::server::mcp::handler::LainMcpServer::with_federation(self.tool_executor, federation),
         };
         match transport {
             Transport::Http => mcp
