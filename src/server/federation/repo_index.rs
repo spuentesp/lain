@@ -5,7 +5,7 @@ use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
-use crate::server::ingestion::index_one_repo;
+use crate::server::ingest::ingestion::index_one_repo;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;

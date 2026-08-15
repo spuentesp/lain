@@ -1,5 +1,5 @@
 use crate::schema::{GraphEdge, NodeType, EdgeType};
-use crate::server::LainServer;
+use super::LainServer;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 

@@ -25,3 +25,9 @@ pub mod reload;
 
 pub mod ingest;
 pub mod query;
+
+// Re-export the LainServer orchestrator + transport at `crate::server::*`
+// so existing callers (`lain::server::LainServer`, `lain::server::Transport`,
+// `crate::server::LainServer`, `crate::server::Transport`) keep working
+// after the body moved into `crate::server::ingest`.
+pub use crate::server::ingest::{LainConfig, LainServer, Transport};
