@@ -285,7 +285,10 @@ impl LainServer {
         let _mcp = crate::mcp::LainMcpServer::with_federation_and_workspaces(
             tool_executor.clone(),
             Arc::clone(&federation),
-            Arc::clone(&workspaces),
+            // Construct-time smoke probe — `LainMcpServer` wraps the
+            // value in `Arc<RwLock<...>>` internally; drop the probe
+            // here and let `serve()` build the long-lived one below.
+            (*workspaces).clone(),
         );
 
         info!("Lain federation server initialized with workspaces");
@@ -333,7 +336,15 @@ impl LainServer {
 
         let mcp = match self.federation_workspaces {
             Some(ws) => crate::mcp::LainMcpServer::with_federation_and_workspaces(
-                self.tool_executor, federation, ws,
+                self.tool_executor,
+                federation,
+                // Unwrap the `Arc<WorkspacesFile>` here: the MCP
+                // constructor wraps the value in `Arc<RwLock<...>>`
+                // so the rebuild task (Task 6.2) can swap it without
+                // a server restart. Holding the `Arc` at the
+                // `LainServer` boundary keeps the option to read the
+                // current snapshot without owning the file.
+                (*ws).clone(),
             ),
             None => crate::mcp::LainMcpServer::with_federation(self.tool_executor, federation),
         };

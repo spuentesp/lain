@@ -8,6 +8,7 @@ use crate::federation::repo_id::RepoId;
 use crate::state::ActiveWorkspace;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use rust_mcp_sdk::{
     mcp_server::{server_runtime, McpServerOptions, ServerHandler, ToMcpServerHandler},
     schema::{
@@ -213,7 +214,13 @@ const WORKSPACE_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
 struct LainHandler {
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
-    workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    /// Shared handle to the live workspaces file. Wrapped in `RwLock` so
+    /// the rebuild task (Task 6.2) can swap the contents at runtime
+    /// without restarting the MCP server. Every clone of `LainMcpServer`
+    /// shares the same inner cell, so per-connection dispatchers
+    /// (stdio) and per-request service-fn clones (HTTP) all see the
+    /// freshest `WorkspacesFile` on their next read.
+    workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
 }
 
 #[async_trait]
@@ -502,7 +509,14 @@ impl ServerHandler for LainHandler {
         // `get_workspace` cross-reference the federation (for loaded repo
         // info) when it's available; `list_workspaces` only needs the
         // workspaces file.
-        if let Some(workspaces) = &self.workspaces {
+        //
+        // The lock is acquired *once* per tool call and held for the
+        // duration of the helper invocation. Reads are cheap
+        // (parking_lot's RwLock), and a hot-swap from the rebuild task
+        // (Task 6.2) takes effect on the *next* dispatch.
+        if let Some(workspaces_slot) = &self.workspaces {
+            let workspaces_guard = workspaces_slot.read();
+            let workspaces: &crate::federation::workspace::WorkspacesFile = &workspaces_guard;
             match params.name.as_str() {
                 "list_workspaces" => {
                     let active = ActiveWorkspace::load().ok().flatten();
@@ -640,7 +654,12 @@ impl ServerHandler for LainHandler {
 pub struct LainMcpServer {
     executor: ToolExecutor,
     federation: Option<Arc<FederatedIndex>>,
-    workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    /// Shared handle to the live workspaces file. Held in an
+    /// `Arc<RwLock<WorkspacesFile>>` so the rebuild task can replace
+    /// the contents in place while the server keeps running; every
+    /// `LainMcpServer` clone (and therefore every stdio / HTTP
+    /// connection spawned from it) sees the swap on its next read.
+    workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
 }
 
 impl LainMcpServer {
@@ -660,12 +679,41 @@ impl LainMcpServer {
     /// 3 workspace tools (list_workspaces, get_active_workspace,
     /// get_workspace) are also registered and the get_workspace tool
     /// resolves member paths/healths from the live federation.
+    ///
+    /// The workspaces file is wrapped in `Arc<RwLock<...>>` so the
+    /// rebuild task can hot-swap it via `replace_workspaces` without
+    /// restarting the server — every clone of this `LainMcpServer`
+    /// shares the same inner cell and observes the swap on its next
+    /// read.
     pub fn with_federation_and_workspaces(
         executor: ToolExecutor,
         federation: Arc<FederatedIndex>,
-        workspaces: Arc<crate::federation::workspace::WorkspacesFile>,
+        workspaces: crate::federation::workspace::WorkspacesFile,
     ) -> Self {
-        Self { executor, federation: Some(federation), workspaces: Some(workspaces) }
+        Self {
+            executor,
+            federation: Some(federation),
+            workspaces: Some(Arc::new(RwLock::new(workspaces))),
+        }
+    }
+
+    /// Shared handle to the live workspaces file, if one was supplied
+    /// at construction time. Returns the `Arc<RwLock<WorkspacesFile>>`
+    /// so callers (notably the rebuild task) can read it directly or
+    /// wrap their own `replace_workspaces` flow on top of it.
+    pub fn workspaces_handle(&self) -> Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>> {
+        self.workspaces.as_ref().map(Arc::clone)
+    }
+
+    /// Atomically replace the workspaces file seen by every clone of
+    /// this `LainMcpServer`. Called by the rebuild task (Task 6.2)
+    /// after re-reading `workspaces.yaml` from disk; in-flight MCP
+    /// workspace tool calls pick up the new contents on their next
+    /// dispatch without needing a server restart.
+    pub fn replace_workspaces(&self, new: crate::federation::workspace::WorkspacesFile) {
+        if let Some(slot) = &self.workspaces {
+            *slot.write() = new;
+        }
     }
 
     /// Build a sidecar-flavored server. The graph inside `executor` should
@@ -858,7 +906,7 @@ async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
-    workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
         let body = serde_json::to_string(&value).unwrap_or_default();
@@ -1102,8 +1150,13 @@ async fn handle_request(
                         // Workspace tools: only registered when a
                         // workspaces file was supplied to the server
                         // constructor. Mirrors the stdio dispatch in
-                        // handle_call_tool_request.
-                        if let Some(workspaces) = &workspaces {
+                        // handle_call_tool_request. Read lock is taken
+                        // once per dispatch — a hot-swap from the
+                        // rebuild task (Task 6.2) takes effect on the
+                        // next request.
+                        if let Some(workspaces_slot) = &workspaces {
+                            let workspaces_guard = workspaces_slot.read();
+                            let workspaces: &crate::federation::workspace::WorkspacesFile = &workspaces_guard;
                             match name {
                                 "list_workspaces" => {
                                     let active = crate::state::ActiveWorkspace::load().ok().flatten();
@@ -1820,6 +1873,143 @@ mod tests {
                 .unwrap_or(false),
             "federation field must serialize as null when no federation is set, got {:?}",
             body.get("federation"),
+        );
+    }
+
+    /// Regression test for Task 6.9: in-flight `LainMcpServer`
+    /// instances must reflect `workspaces.yaml` edits without a
+    /// server restart. The rebuild task (Task 6.2) calls
+    /// `replace_workspaces` after re-reading the file from disk; the
+    /// workspace MCP tools (`list_workspaces`, `get_workspace`) must
+    /// see the new member set on the very next dispatch.
+    ///
+    /// This test wires a `LainMcpServer` end-to-end (real executor +
+    /// real federation), swaps the workspaces file in place, and
+    /// asserts the dispatch helpers observe the change — proving the
+    /// `Arc<RwLock<WorkspacesFile>>` is shared by every clone and
+    /// updated atomically.
+    #[tokio::test]
+    async fn lain_mcp_server_workspaces_hot_swap_reflects_in_tools() {
+        use crate::federation::graph_backend::PetgraphBackend;
+        use crate::federation::repo_id::RepoId;
+        use crate::federation::repo_source::WorkspaceDirSource;
+        use crate::federation::workspace::{WorkspaceSpec, WorkspacesFile};
+        use crate::graph::GraphDatabase;
+        use crate::overlay::VolatileOverlay;
+
+        // Set up a workspace dir + executor that doesn't drag in NLP
+        // or git/indexing work. The dispatch helpers under test don't
+        // touch any of those subsystems.
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let executor =
+            ToolExecutor::new_read_only(graph, overlay, tmp.path().to_path_buf());
+
+        // Register one repo in the federation so `get_workspace`'s
+        // member-resolution path has a real `RepoIndex` to consult.
+        let fed_tmp = tempfile::tempdir().unwrap();
+        let fed = Arc::new(FederatedIndex::new(Arc::new(
+            PetgraphBackend::new(fed_tmp.path()).unwrap(),
+        )));
+        let repo_a_src = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_a_src.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(
+                RepoId::new("repo-a").unwrap(),
+                repo_a_src.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+
+        // Start the server with workspace A containing two members.
+        let ws_a = WorkspacesFile {
+            default: None,
+            workspaces: vec![WorkspaceSpec {
+                name: "auth-ws".into(),
+                description: Some("initial".into()),
+                source: None,
+                members: vec!["repo-a".into(), "repo-b".into()],
+            }],
+        };
+        let mcp = LainMcpServer::with_federation_and_workspaces(
+            executor,
+            Arc::clone(&fed),
+            ws_a,
+        );
+
+        // Initial state: list_workspaces through the live lock sees 2 members.
+        let handle = mcp
+            .workspaces_handle()
+            .expect("server was constructed with a workspaces file");
+        {
+            let guard = handle.read();
+            let infos =
+                crate::mcp::federation_tools::list_workspaces(&guard, None);
+            assert_eq!(infos.len(), 1, "expected exactly one workspace");
+            assert_eq!(infos[0].name, "auth-ws");
+            assert_eq!(infos[0].member_count, 2, "initial member_count");
+        }
+
+        // Simulate the rebuild task: a new `workspaces.yaml` adds a
+        // third repo to the existing workspace.
+        let ws_a_prime = WorkspacesFile {
+            default: None,
+            workspaces: vec![WorkspaceSpec {
+                name: "auth-ws".into(),
+                description: Some("after rebuild".into()),
+                source: None,
+                members: vec!["repo-a".into(), "repo-b".into(), "repo-c".into()],
+            }],
+        };
+        mcp.replace_workspaces(ws_a_prime);
+
+        // After swap: list_workspaces must show the new member count
+        // without any restart / re-construction.
+        let infos = {
+            let guard = handle.read();
+            crate::mcp::federation_tools::list_workspaces(&guard, None)
+        };
+        assert_eq!(
+            infos[0].member_count, 3,
+            "list_workspaces must reflect the swap — got {infos:?}",
+        );
+        assert_eq!(infos[0].description.as_deref(), Some("after rebuild"));
+
+        // get_workspace(name) must also see the new member set.
+        let detail = {
+            let guard = handle.read();
+            crate::mcp::federation_tools::get_workspace(&fed, &guard, "auth-ws")
+                .expect("workspace should resolve")
+        };
+        let member_ids: Vec<&str> =
+            detail.members.iter().map(|m| m.repo_id.as_str()).collect();
+        assert_eq!(
+            member_ids,
+            vec!["repo-a", "repo-b", "repo-c"],
+            "get_workspace must return the post-swap member set",
+        );
+
+        // A second clone of `LainMcpServer` (as used by per-connection
+        // HTTP dispatch) must observe the swap too — they share the
+        // same inner `Arc<RwLock<...>>` cell.
+        let mcp_clone = mcp.clone();
+        let handle_clone = mcp_clone
+            .workspaces_handle()
+            .expect("clone carries the workspaces handle");
+        assert!(
+            Arc::ptr_eq(&handle, &handle_clone),
+            "clones must share the same inner Arc (got distinct allocations)",
+        );
+        let infos_clone = {
+            let guard = handle_clone.read();
+            crate::mcp::federation_tools::list_workspaces(&guard, None)
+        };
+        assert_eq!(
+            infos_clone[0].member_count, 3,
+            "clone's dispatch view must reflect the swap too",
         );
     }
 }
