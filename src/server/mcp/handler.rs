@@ -43,8 +43,10 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
     UnsyncBoxBody::new(Full::new(data).map_err(|never| match never {}))
 }
 
-const FRONT_END_HTML: &str = include_str!("front_end_monitor.html");
-const FEDERATION_DASHBOARD_HTML: &str = include_str!("federation_dashboard.html");
+// HTML dashboards (front_end_monitor.html, federation_dashboard.html) were
+// dropped in PR 1 (Task 1.3) of the consolidation. They will be re-introduced
+// as the Command Center SPA in PR 4 (Task 4.3). Until then, GET / and
+// GET /federation-dashboard.html simply fall through to the next branch.
 
 /// Wrap a string payload in a `CallToolResult` with a single text block.
 fn tool_text_result(text: String, is_error: bool) -> CallToolResult {
@@ -889,25 +891,10 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
-    // GET / -> serve diagnostic page
-    if method == Method::GET && path == "/" {
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "text/html")
-            .body(full_body(Bytes::from(FRONT_END_HTML)))
-            .unwrap());
-    }
-
-    // GET /federation-dashboard.html -> federation landing page (used by
-    // the federation-aware UI; itself a static asset that fetches
-    // /health + /mcp at runtime).
-    if method == Method::GET && path == "/federation-dashboard.html" {
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "text/html")
-            .body(full_body(Bytes::from(FEDERATION_DASHBOARD_HTML)))
-            .unwrap());
-    }
+    // GET / and GET /federation-dashboard.html previously served the
+    // front_end_monitor.html and federation_dashboard.html assets. Those
+    // were dropped in PR 1 (Task 1.3); the Command Center SPA will reclaim
+    // them in PR 4 (Task 4.3). Until then the routes fall through.
 
     // GET /health -> health check with graph stats
     if method == Method::GET && path == "/health" {
