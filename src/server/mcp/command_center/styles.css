@@ -1,0 +1,142 @@
+/* LAIN Command Center — light theme, basic layout */
+
+:root {
+  --bg: #ffffff;
+  --bg-alt: #f5f7fa;
+  --bg-sidebar: #fafbfc;
+  --fg: #1f2328;
+  --fg-muted: #57606a;
+  --accent: #0969da;
+  --accent-fg: #ffffff;
+  --border: #d0d7de;
+  --tab-active-bg: #ffffff;
+  --tab-inactive-bg: #eaeef2;
+  --statusbar-bg: #24292f;
+  --statusbar-fg: #f0f6fc;
+  --topbar-bg: #f6f8fa;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+               sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  background: var(--topbar-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: 0.05em;
+}
+
+.topbar span {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+
+.layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  padding: 0.75rem;
+  overflow-y: auto;
+}
+
+.sidebar section { margin-bottom: 1.25rem; }
+
+.sidebar h2 {
+  margin: 0 0 0.4rem 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+}
+
+.sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar li {
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.sidebar li.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs button {
+  background: var(--tab-inactive-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--fg);
+}
+
+.tabs button:hover { background: var(--tab-active-bg); }
+
+.tab {
+  flex: 1;
+  padding: 1rem;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.tab:not(:first-of-type) { display: none; }
+
+.statusbar {
+  display: flex;
+  gap: 1.25rem;
+  padding: 0.35rem 1rem;
+  background: var(--statusbar-bg);
+  color: var(--statusbar-fg);
+  font-size: 0.8rem;
+}

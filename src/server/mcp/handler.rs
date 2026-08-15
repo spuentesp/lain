@@ -1143,10 +1143,9 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
-    // GET / and GET /federation-dashboard.html previously served the
-    // front_end_monitor.html and federation_dashboard.html assets. Those
-    // were dropped in PR 1 (Task 1.3); the Command Center SPA will reclaim
-    // them in PR 4 (Task 4.3). Until then the routes fall through.
+    // GET / is now served by the Command Center SPA shell (PR 4, Task 4.3).
+    // The pre-PR-1 /federation-dashboard.html asset was dropped in PR 1
+    // (Task 1.3) and is not restored here; the SPA replaces it.
 
     // GET /health -> health check with graph stats
     if method == Method::GET && path == "/health" {
@@ -1713,6 +1712,65 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .body(full_body(body))
+            .unwrap());
+    }
+
+    // Command Center SPA shell (Task 4.3). Static assets are compiled in
+    // with `include_str!` so the binary remains self-contained and the SPA
+    // can be served without a filesystem dependency. Asset list:
+    //   GET /              -> index.html (text/html)
+    //   GET /index.html    -> index.html
+    //   GET /app.js        -> app.js (text/javascript)
+    //   GET /styles.css    -> styles.css (text/css)
+    //   GET /assets/*      -> vendored static assets under command_center/assets/
+    if method == Method::GET && (path == "/" || path == "/index.html") {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(full_body(Bytes::from_static(
+                include_str!("command_center/index.html").as_bytes(),
+            )))
+            .unwrap());
+    }
+    if method == Method::GET && path == "/app.js" {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/javascript; charset=utf-8")
+            .body(full_body(Bytes::from_static(
+                include_str!("command_center/app.js").as_bytes(),
+            )))
+            .unwrap());
+    }
+    if method == Method::GET && path == "/styles.css" {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/css; charset=utf-8")
+            .body(full_body(Bytes::from_static(
+                include_str!("command_center/styles.css").as_bytes(),
+            )))
+            .unwrap());
+    }
+    if method == Method::GET && path.starts_with("/assets/") {
+        // Whitelist the known SPA assets so an unvetted path under /assets/
+        // can't be used to exfiltrate other include_str!() targets.
+        const SPA_ASSETS: &[(&str, &str)] = &[
+            (
+                "/assets/d3.v7.min.js",
+                include_str!("command_center/assets/d3.v7.min.js"),
+            ),
+        ];
+        for (route, body) in SPA_ASSETS {
+            if path == *route {
+                return Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "text/javascript; charset=utf-8")
+                    .body(full_body(Bytes::from_static(body.as_bytes())))
+                    .unwrap());
+            }
+        }
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(full_body(Bytes::from("asset not found")))
             .unwrap());
     }
 
