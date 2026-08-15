@@ -104,12 +104,14 @@ pub fn resolve_active_workspace<'a>(
 }
 
 // Test-only mutex shared by all `mod tests` and `mod active_workspace_tests`
-// blocks in this file. cargo test runs tests in parallel; XDG_CONFIG_HOME
-// and cwd are process-global state, so parallel tests would stomp on each
-// other without serialization. Defined at file scope so both test mods
-// (which are sibling test sub-modules) can see it.
+// blocks in this file, plus any other test module that mutates
+// `XDG_CONFIG_HOME` (e.g. `recent_projects` round-trips in
+// `server::mcp::federation_tools`). cargo test runs tests in parallel;
+// XDG_CONFIG_HOME and cwd are process-global state, so parallel tests
+// would stomp on each other without serialization. `pub(crate)` so any
+// `#[cfg(test)]` module in the crate can lock against the same instance.
 #[cfg(test)]
-static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod active_workspace_tests {

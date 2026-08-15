@@ -998,6 +998,32 @@ mod recent_projects_tests {
         }
     }
 
+    /// RAII guard that points `XDG_CONFIG_HOME` at a tempdir for the
+    /// duration of a test, restoring the previous value on drop. Used
+    /// only by the production end-to-end test below; the other tests
+    /// in this module prefer the `_in` helpers which don't touch the
+    /// env var at all.
+    struct XdgGuard {
+        prev: Option<String>,
+    }
+
+    impl XdgGuard {
+        fn new(dir: &std::path::Path) -> Self {
+            let prev = std::env::var("XDG_CONFIG_HOME").ok();
+            std::env::set_var("XDG_CONFIG_HOME", dir);
+            Self { prev }
+        }
+    }
+
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
     #[test]
     fn list_recent_projects_returns_empty_when_file_missing() {
         with_temp_recent(|dir| {
@@ -1034,5 +1060,88 @@ mod recent_projects_tests {
         let (ws, repo) = counts_for_project(&bogus);
         assert_eq!(ws, 0);
         assert_eq!(repo, 0);
+    }
+
+    /// End-to-end test for the production `list_recent_projects()`
+    /// function. Exercises the full chain — `record()` writes through
+    /// `config_dir()`, which reads `XDG_CONFIG_HOME`, so we point
+    /// `XDG_CONFIG_HOME` at a tempdir. Then we call the no-arg
+    /// production function and serialize the result to JSON so the
+    /// asserted field names match what the dashboard actually parses.
+    /// Locks against `crate::state::TEST_LOCK` because
+    /// `XDG_CONFIG_HOME` is process-global; the `state::tests` mod
+    /// mutates the same env var under the same lock.
+    #[test]
+    fn list_recent_projects_production_end_to_end() {
+        let _g = crate::state::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = XdgGuard::new(tmp.path());
+
+        // Two synthetic projects with distinct repo / workspace counts.
+        let a = write_project(
+            tmp.path(),
+            "a",
+            &["r1", "r2", "r3"],
+            &[("team", &["r1", "r2"])],
+        );
+        let b = write_project(tmp.path(), "b", &["r4"], &[]);
+
+        // Use the production (no-_in) variants — they read
+        // `config_dir()`, which now resolves to `<tmp>/lain/`.
+        crate::config::recent_projects::record(&a).unwrap();
+        crate::config::recent_projects::record(&b).unwrap();
+
+        let entries = list_recent_projects().expect("list_recent_projects");
+        assert_eq!(
+            entries.len(),
+            2,
+            "expected 2 recent projects, got {:?}",
+            entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+
+        // Most-recent-first: `b` was recorded last.
+        assert_eq!(entries[0].path, b);
+        assert_eq!(entries[1].path, a);
+
+        // Counts flowed through `counts_for_project` correctly.
+        assert_eq!(entries[0].workspace_count, 0);
+        assert_eq!(entries[0].repo_count, 1);
+        assert_eq!(entries[1].workspace_count, 1);
+        assert_eq!(entries[1].repo_count, 3);
+
+        // Timestamps populated (record() stamps `now_unix`).
+        assert!(entries[0].last_used > 0);
+        assert!(entries[1].last_used > 0);
+        assert!(entries[0].last_used >= entries[1].last_used);
+
+        // Serialize to JSON and verify the field names the dashboard
+        // parses. Default serde rename keeps struct field names, so
+        // any future `#[serde(rename = ...)]` or accidental rename
+        // would surface here as a missing-key assertion failure.
+        let json = serde_json::to_value(&entries).expect("serialize entries");
+        let arr = json.as_array().expect("entries serialize as JSON array");
+        assert_eq!(arr.len(), 2);
+        for (i, item) in arr.iter().enumerate() {
+            let obj = item.as_object().expect("each entry is a JSON object");
+            for field in ["path", "last_used", "workspace_count", "repo_count"] {
+                assert!(
+                    obj.contains_key(field),
+                    "entry[{i}] missing required JSON field `{field}`; got keys {:?}",
+                    obj.keys().collect::<Vec<_>>()
+                );
+            }
+        }
+        // Spot-check concrete values in the JSON shape.
+        assert_eq!(arr[0]["path"], serde_json::json!(b.to_string_lossy()));
+        assert_eq!(arr[0]["workspace_count"], serde_json::json!(0));
+        assert_eq!(arr[0]["repo_count"], serde_json::json!(1));
+        assert_eq!(arr[1]["path"], serde_json::json!(a.to_string_lossy()));
+        assert_eq!(arr[1]["workspace_count"], serde_json::json!(1));
+        assert_eq!(arr[1]["repo_count"], serde_json::json!(3));
+        // `last_used` is an integer in both entries.
+        assert!(arr[0]["last_used"].as_i64().unwrap() > 0);
+        assert!(arr[1]["last_used"].as_i64().unwrap() > 0);
     }
 }
