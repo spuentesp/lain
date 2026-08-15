@@ -55,7 +55,6 @@ serde_json = "1.0"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 
 # Error handling
 thiserror = "1.0"
@@ -64,14 +63,10 @@ anyhow = "1.0"
 # CLI argument parsing
 clap = { version = "4.4", features = ["derive"] }
 
-# Async channels
-flume = "0.11"
-
 # Path handling
 walkdir = "2.4"
 glob = "0.3"
 dunce = "1.0"
-shell-words = "1.0"
 
 # Tree-sitter static analysis
 uuid = { version = "1.6", features = ["v4", "v5", "serde"] }
