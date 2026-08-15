@@ -821,6 +821,12 @@ pub struct RecentProjectEntry {
     pub last_used: i64,
     pub workspace_count: usize,
     pub repo_count: usize,
+    /// Active workspace name for this project, if set in the global
+    /// `~/.config/lain/active_workspace` pointer and the pointer's
+    /// `config_path` matches this entry's `path`. `None` otherwise.
+    /// Used by the Command Center's recent-projects switcher to copy
+    /// the right `lain server --workspace <name>` restart command.
+    pub active_workspace: Option<String>,
 }
 
 /// Compute the workspace + repo counts for a recent project entry
@@ -847,15 +853,29 @@ fn counts_for_project(repos_yaml: &Path) -> (usize, usize) {
 pub fn list_recent_projects() -> Result<Vec<RecentProjectEntry>, LainError> {
     let raw = crate::config::recent_projects::list()
         .map_err(|e| LainError::Other(format!("recent_projects::list: {e}")))?;
+    // The active workspace pointer is global (one per user); only the
+    // entry whose `path` matches the pointer's `config_path` sees a
+    // name. This is best-effort — if the file is missing or malformed
+    // we just leave every entry's `active_workspace` as `None`.
+    let active = crate::state::ActiveWorkspace::load().ok().flatten();
     Ok(raw
         .into_iter()
         .map(|r| {
             let (workspace_count, repo_count) = counts_for_project(&r.path);
+            let active_workspace = active
+                .as_ref()
+                .and_then(|a| {
+                    a.config_path
+                        .as_ref()
+                        .filter(|p| **p == r.path)
+                        .map(|_| a.name.clone())
+                });
             RecentProjectEntry {
                 path: r.path,
                 last_used: r.last_used,
                 workspace_count,
                 repo_count,
+                active_workspace,
             }
         })
         .collect())
@@ -1125,7 +1145,7 @@ mod recent_projects_tests {
         assert_eq!(arr.len(), 2);
         for (i, item) in arr.iter().enumerate() {
             let obj = item.as_object().expect("each entry is a JSON object");
-            for field in ["path", "last_used", "workspace_count", "repo_count"] {
+            for field in ["path", "last_used", "workspace_count", "repo_count", "active_workspace"] {
                 assert!(
                     obj.contains_key(field),
                     "entry[{i}] missing required JSON field `{field}`; got keys {:?}",
@@ -1143,5 +1163,43 @@ mod recent_projects_tests {
         // `last_used` is an integer in both entries.
         assert!(arr[0]["last_used"].as_i64().unwrap() > 0);
         assert!(arr[1]["last_used"].as_i64().unwrap() > 0);
+        // No active_workspace file is written in this test, so both
+        // entries should report `null` for `active_workspace`.
+        assert!(arr[0]["active_workspace"].is_null());
+        assert!(arr[1]["active_workspace"].is_null());
+    }
+
+    /// When the global active-workspace pointer matches one of the
+    /// recent project paths, that entry's `active_workspace` field
+    /// surfaces the workspace name. Other entries stay `null`.
+    #[test]
+    fn list_recent_projects_surfaces_active_workspace_for_matching_path() {
+        let _g = crate::state::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = XdgGuard::new(tmp.path());
+
+        let a = write_project(tmp.path(), "a", &["r1", "r2"], &[("team", &["r1", "r2"])]);
+        let b = write_project(tmp.path(), "b", &["r3"], &[]);
+        crate::config::recent_projects::record(&a).unwrap();
+        crate::config::recent_projects::record(&b).unwrap();
+
+        // Write the active-workspace pointer at the new two-line
+        // format pointed at project `a`.
+        let lain_dir = tmp.path().join("lain");
+        std::fs::create_dir_all(&lain_dir).unwrap();
+        std::fs::write(
+            lain_dir.join("active_workspace"),
+            format!("{}\n{}\n", a.display(), "team"),
+        )
+        .unwrap();
+
+        let entries = list_recent_projects().expect("list_recent_projects");
+        assert_eq!(entries.len(), 2);
+        let entry_a = entries.iter().find(|e| e.path == a).expect("entry a");
+        let entry_b = entries.iter().find(|e| e.path == b).expect("entry b");
+        assert_eq!(entry_a.active_workspace.as_deref(), Some("team"));
+        assert!(entry_b.active_workspace.is_none());
     }
 }
