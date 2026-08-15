@@ -12,12 +12,15 @@ pub mod scan;
 pub mod jobs;
 
 use crate::server::error::LainError;
+use crate::server::federation::config::RepoConfig;
 use crate::server::federation::federated_index::FederatedIndex;
+use crate::server::federation::repo_id::RepoId;
 use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::graph::GraphDatabase;
 use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::{OverlayDiff, VolatileOverlay};
+use crate::server::reload::ReloadBus;
 use crate::server::tools::ToolExecutor;
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use crate::server::git::GitSensor;
@@ -64,8 +67,10 @@ pub struct LainServer {
     federation: Option<Arc<FederatedIndex>>,
     /// Workspaces file passed to `LainMcpServer` when `with_federation_and_workspaces`
     /// is used. `Some` when a workspace is active; `None` for the
-    /// all-repos path (no workspaces.yaml).
-    federation_workspaces: Option<Arc<WorkspacesFile>>,
+    /// all-repos path (no workspaces.yaml). Held in an `Arc<Mutex<_>>`
+    /// so `LainServer::set_workspace` can swap it during a hot-reload
+    /// without violating the `Clone` invariant on `LainServer`.
+    federation_workspaces: Arc<Mutex<Option<Arc<WorkspacesFile>>>>,
     /// Transport chosen at `with_federation` time. Consumed by `serve`.
     federation_transport: Option<Transport>,
     /// Port chosen at `with_federation` time. Consumed by `serve`.
@@ -88,6 +93,12 @@ pub struct LainServer {
     /// to record the project in `~/.config/lain/recent_projects` and to
     /// tag the server status payload.
     repos_yaml: Option<PathBuf>,
+    /// Hot-reload signal bus. Always allocated (single-workspace and
+    /// federation-mode servers both hold one); the actual rebuild loop
+    /// is only spawned in federation mode. Wrapped in `Arc` so the
+    /// watcher, Unix socket listener, MCP handler, and rebuild task can
+    /// all share a single bus.
+    reload_bus: Arc<ReloadBus>,
 }
 
 impl LainServer {
@@ -160,7 +171,7 @@ impl LainServer {
             graph,
             overlay,
             embedder,
-            federation_workspaces: None,
+            federation_workspaces: Arc::new(Mutex::new(None)),
             cross_encoder,
             git,
             lsp_pool,
@@ -174,6 +185,7 @@ impl LainServer {
             last_sync_at: Arc::new(Mutex::new(now)),
             last_error: Arc::new(Mutex::new(None)),
             repos_yaml: None,
+            reload_bus: Arc::new(ReloadBus::new()),
         })
     }
 
@@ -261,13 +273,14 @@ impl LainServer {
             cross_encoder,
             overlay_revision: Arc::new(AtomicU64::new(0)),
             federation: Some(federation),
-            federation_workspaces: None,
+            federation_workspaces: Arc::new(Mutex::new(None)),
             federation_transport: Some(transport),
             federation_port: Some(port),
             started_at: now,
             last_sync_at: Arc::new(Mutex::new(now)),
             last_error: Arc::new(Mutex::new(None)),
             repos_yaml,
+            reload_bus: Arc::new(ReloadBus::new()),
         })
     }
 
@@ -343,19 +356,28 @@ impl LainServer {
             cross_encoder,
             overlay_revision: Arc::new(AtomicU64::new(0)),
             federation: Some(federation),
-            federation_workspaces: Some(workspaces),
+            federation_workspaces: Arc::new(Mutex::new(Some(workspaces))),
             federation_transport: Some(transport),
             federation_port: Some(port),
             started_at: now,
             last_sync_at: Arc::new(Mutex::new(now)),
             last_error: Arc::new(Mutex::new(None)),
             repos_yaml,
+            reload_bus: Arc::new(ReloadBus::new()),
         })
     }
 
     /// Federation accessor. Returns `None` for single-workspace servers.
     pub fn federation(&self) -> Option<&Arc<FederatedIndex>> {
         self.federation.as_ref()
+    }
+
+    /// Shared reload bus accessor. Always returns a bus; the bus is
+    /// lazily initialized on the first call when the field is missing
+    /// (only the case for `LainServer::new` before this commit — we
+    /// construct it eagerly today but the accessor is the contract).
+    pub fn reload_bus(&self) -> Arc<ReloadBus> {
+        Arc::clone(&self.reload_bus)
     }
 
     /// Process start time, captured at construction. Used by
@@ -409,6 +431,13 @@ impl LainServer {
         self.repos_yaml.as_deref()
     }
 
+    /// Borrowed accessor for `repos_yaml_path`. Alias of `repos_yaml`
+    /// kept distinct so callers that read the docs of one don't have
+    /// to scan the other.
+    pub fn repos_yaml_path(&self) -> Option<&Path> {
+        self.repos_yaml.as_deref()
+    }
+
     /// Number of repos in the live federation, or 0 for single-workspace
     /// servers.
     pub fn repo_count(&self) -> usize {
@@ -416,9 +445,12 @@ impl LainServer {
     }
 
     /// Number of workspaces in the loaded `workspaces.yaml`, or 0 when
-    /// none was supplied.
+    /// none was supplied. Reads through the `Arc<Mutex<_>>` slot so a
+    /// hot-reload that swaps `set_workspace` is reflected on the next
+    /// call.
     pub fn workspace_count(&self) -> usize {
         self.federation_workspaces
+            .lock()
             .as_ref()
             .map(|w| w.workspaces.len())
             .unwrap_or(0)
@@ -438,7 +470,8 @@ impl LainServer {
         })?;
         let port = self.federation_port.unwrap_or(9999);
 
-        let mcp = match self.federation_workspaces {
+        let workspaces = self.federation_workspaces.lock().clone();
+        let mcp = match workspaces {
             Some(ws) => crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
                 self.tool_executor, federation, ws,
             ),
@@ -492,6 +525,74 @@ impl LainServer {
 
     pub fn is_git_repo(&self) -> bool {
         self.git.lock().is_valid()
+    }
+
+    /// Add a repo to the live federation, then project its nodes/edges
+    /// into the global backend. No-op if `self.federation` is `None`
+    /// (single-workspace mode).
+    ///
+    /// `repo` is the `RepoConfig` entry as written to `repos.yaml`. The
+    /// data directory for the per-repo indexer is computed from the
+    /// server's stored `repos.yaml` path (or, when none is set, from
+    /// the default `./.lain/federation`). The `data_dir` resolution is
+    /// performed by the caller (`run_rebuild`) and passed in via the
+    /// `data_dir` argument; here we just call through to the
+    /// federation.
+    pub async fn add_repo(
+        &self,
+        repo: &RepoConfig,
+        data_dir: &Path,
+    ) -> Result<(), LainError> {
+        let fed = self.federation.as_ref().ok_or_else(|| {
+            LainError::Other("LainServer::add_repo called on a non-federation server".into())
+        })?;
+        let source = crate::server::federation::config::FederationConfig::default()
+            .build_source_for(repo)
+            .map_err(|e| LainError::Config(format!("build_source_for({}): {e}", repo.id)))?;
+        // `WorkspaceDirSource::fetch` is a no-op; `LocalCloneSource` and
+        // `ShallowCloneSource` actually clone. Hot-reload only sees
+        // already-on-disk sources (`workspace_dir`), but we still call
+        // `fetch` so adding a freshly-written `local_clone` entry also
+        // works end-to-end.
+        source.fetch().await?;
+        let repo_id = source.id().clone();
+        fed.add_repo(source, data_dir).await?;
+        fed.project_repo(&repo_id).await?;
+        self.record_sync();
+        Ok(())
+    }
+
+    /// Remove a repo from the live federation. No-op if `self.federation`
+    /// is `None` (single-workspace mode).
+    pub fn remove_repo(&self, repo_id: &str) -> Result<(), LainError> {
+        let fed = self.federation.as_ref().ok_or_else(|| {
+            LainError::Other("LainServer::remove_repo called on a non-federation server".into())
+        })?;
+        let rid = RepoId::new(repo_id)
+            .map_err(|e| LainError::Config(format!("invalid repo id '{repo_id}': {e}")))?;
+        fed.remove_repo(&rid)?;
+        self.record_sync();
+        Ok(())
+    }
+
+    /// Replace the workspace file the server exposes through MCP. Called
+    /// by `run_rebuild` after re-reading `workspaces.yaml`. Note: the
+    /// `LainMcpServer` already constructed by `serve` holds its own
+    /// copy of the workspaces file for its own lifetime; this method
+    /// updates the slot `workspace_count` reads and that subsequent
+    /// rebuilds consult. The in-flight stdio/HTTP transports continue
+    /// to use the workspaces file they were built with — a known
+    /// limitation tracked separately; the rebuild is a no-op for the
+    /// running MCP loop until the server is restarted.
+    pub fn set_workspace(&self, workspaces: Arc<WorkspacesFile>) {
+        *self.federation_workspaces.lock() = Some(workspaces);
+    }
+
+    /// Read-only accessor for the loaded workspaces file. Used by
+    /// `run_rebuild` to seed a `set_workspace` no-op diff when nothing
+    /// changed and to test the slot swap.
+    pub fn workspaces_snapshot(&self) -> Option<Arc<WorkspacesFile>> {
+        self.federation_workspaces.lock().clone()
     }
 
     pub async fn shutdown(&self) {

@@ -10,6 +10,10 @@
 //! receive a coarse `()` notification and are responsible for fetching
 //! the current `ReloadStatus` and acting on it.
 
+use crate::server::error::LainError;
+use crate::server::federation::config::FederationConfig;
+use crate::server::federation::workspace::WorkspacesFile;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
@@ -138,6 +142,117 @@ impl Default for ReloadBus {
     }
 }
 
+/// Re-load `repos.yaml` and `workspaces.yaml` next to it, diff against
+/// the live federation, and apply add/remove operations. Idempotent: a
+/// no-op diff still transitions the bus back to `Idle`.
+///
+/// The caller (`serve_for_test` or `cli::server::run_server`) is
+/// responsible for spawning a long-lived task that calls this in a
+/// loop, subscribed to `bus.subscribe()`. This function performs the
+/// *single* rebuild — no internal looping.
+pub async fn run_rebuild(
+    server: &crate::server::LainServer,
+    bus: &ReloadBus,
+) -> Result<(), LainError> {
+    bus.set_state(ReloadState::Rebuilding).await;
+
+    let repos_yaml = match server.repos_yaml_path() {
+        Some(p) => p.to_path_buf(),
+        None => {
+            // Single-workspace server — nothing to reload. Treat as a
+            // successful no-op so observers see the transition back to
+            // Idle.
+            bus.set_state(ReloadState::Idle).await;
+            return Ok(());
+        }
+    };
+
+    let result: Result<(), LainError> = (async {
+        // Re-read repos.yaml. A missing file is an error — the CLI
+        // is supposed to write the file before signalling, and a
+        // hand-edit would be present on disk by the time the watcher
+        // fires.
+        let repos_file = FederationConfig::load(&repos_yaml)?;
+
+        // Resolve the workspace file (next to repos.yaml). Optional.
+        let workspaces_path = workspaces_path_for(&repos_yaml);
+        let workspaces: Option<Arc<WorkspacesFile>> = if workspaces_path.exists() {
+            let ws = WorkspacesFile::load(&workspaces_path)
+                .map_err(|e| LainError::Config(format!("reload: {e}")))?;
+            ws.validate()?;
+            Some(Arc::new(ws))
+        } else {
+            None
+        };
+
+        // Compute the diff against the current federation. Repos are
+        // keyed by their `id` (which is `RepoId`-validated on parse).
+        let fed = server
+            .federation()
+            .ok_or_else(|| LainError::Other("rebuild: no federation on server".into()))?;
+        let prev_ids: std::collections::HashSet<String> = fed
+            .list_repos()
+            .into_iter()
+            .map(|(id, _)| id.to_string())
+            .collect();
+        let new_ids: std::collections::HashSet<String> = repos_file
+            .repos
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+
+        // Additions: build the source and delegate to LainServer.
+        let data_dir = repos_file.data_dir.clone();
+        for repo in &repos_file.repos {
+            if !prev_ids.contains(&repo.id) {
+                server
+                    .add_repo(repo, &data_dir)
+                    .await
+                    .map_err(|e| LainError::Config(format!("add_repo({}): {e}", repo.id)))?;
+            }
+        }
+
+        // Removals: drop any repo id no longer in repos.yaml.
+        for id in prev_ids.difference(&new_ids) {
+            server
+                .remove_repo(id)
+                .map_err(|e| LainError::Config(format!("remove_repo({}): {e}", id)))?;
+        }
+
+        // Update the workspaces slot. The MCP server rebuild path
+        // (cli/server.rs) consumes this through `server.workspaces_snapshot()`
+        // before tearing down the old LainMcpServer.
+        if let Some(ws) = workspaces {
+            server.set_workspace(ws);
+        }
+
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(()) => {
+            bus.set_state(ReloadState::Idle).await;
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            bus.set_state(ReloadState::Failed(msg.clone())).await;
+            Err(LainError::Other(msg))
+        }
+    }
+}
+
+/// Return the conventional workspaces.yaml path next to a given
+/// `repos.yaml`. Standalone helper for both the rebuild orchestrator
+/// and tests.
+pub fn workspaces_path_for(repos_yaml: &std::path::Path) -> PathBuf {
+    repos_yaml
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("workspaces.yaml")
+}
+
 /// Handle for receiving reload requests.
 ///
 /// `try_recv` is non-blocking: the caller (typically the rebuild task
@@ -214,5 +329,270 @@ mod tests {
             assert_eq!(s.last_error.as_deref(), Some("boom"));
             assert!(s.started_at.is_none());
         });
+    }
+
+    mod rebuild {
+        //! End-to-end rebuild tests that exercise the `LainServer`
+        //! thin wrappers (`add_repo` / `remove_repo` / `set_workspace`)
+        //! through `run_rebuild` against on-disk `repos.yaml` and
+        //! `workspaces.yaml` fixtures.
+        //!
+        //! Each test writes a one-repo `repos.yaml` pointing at a
+        //! `workspace_dir` source backed by a tempdir (no network, no
+        //! git clone), then mutates the file and asserts the live
+        //! federation reflects the change.
+        //!
+        //! The tests construct the federation directly with
+        //! `load_federation` and skip `LainServer::with_federation`'s
+        //! built-in tempdir setup so each test gets a unique data
+        //! directory and they don't collide on `lain-federation-{pid}`.
+
+        use super::*;
+        use crate::server::federation::federated_index::FederatedIndex;
+        use crate::server::federation::graph_backend::PetgraphBackend;
+        use crate::server::LainServer;
+        use crate::server::Transport;
+        use std::path::Path;
+        use std::sync::Arc;
+
+        /// Build a `LainServer` whose `federation` field points at a
+        /// freshly-loaded federation, mirroring the production path
+        /// through `load_federation`. Avoids `with_federation`'s
+        /// process-id-based tempdir so tests are independent.
+        async fn build_server(
+            repos_yaml: &Path,
+            fed: Arc<FederatedIndex>,
+        ) -> LainServer {
+            // `with_federation` builds a placeholder git repo at
+            // `/tmp/lain-federation-{pid}` and refuses to re-init one
+            // that's missing. A prior test in the same process may
+            // have torn it down between `with_federation` calls, so
+            // we proactively remove the dir if it exists.
+            let staging = std::env::temp_dir()
+                .join(format!("lain-federation-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&staging);
+            LainServer::with_federation(fed, Transport::Http, 9999, Some(repos_yaml.to_path_buf()))
+                .expect("LainServer::with_federation")
+        }
+
+        /// Build a federation + LainServer around a single
+        /// `workspace_dir` repo. Returns `(server, repos_yaml_path)`.
+        async fn server_with_workspace_dir(
+            tmp: &tempfile::TempDir,
+            repo_id: &str,
+            repo_path: &Path,
+        ) -> (LainServer, std::path::PathBuf) {
+            // Clean any stale staging dir so `with_federation` can
+            // init it fresh.
+            let staging = std::env::temp_dir()
+                .join(format!("lain-federation-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&staging);
+            let repos_yaml = tmp.path().join("repos.yaml");
+            let yaml = format!(
+                "data_dir: {}\nrepos:\n  - id: {}\n    source: {{ type: workspace_dir, path: {} }}\n",
+                tmp.path().join("federation").display(),
+                repo_id,
+                repo_path.display(),
+            );
+            std::fs::write(&repos_yaml, yaml).unwrap();
+
+            let backend: Arc<dyn crate::server::federation::graph_backend::GraphBackend> =
+                Arc::new(PetgraphBackend::new(tmp.path()).expect("PetgraphBackend::new"));
+            let fed = Arc::new(FederatedIndex::new(backend));
+            // Manually add the repo to keep the test independent of
+            // `load_federation`'s git-source quirks.
+            let cfg: FederationConfig =
+                serde_yaml::from_str(&std::fs::read_to_string(&repos_yaml).unwrap()).unwrap();
+            let source = cfg.build_source_for(&cfg.repos[0]).expect("build_source_for");
+            source.fetch().await.expect("fetch");
+            let rid = source.id().clone();
+            fed.add_repo(source, &cfg.data_dir).await.expect("add_repo");
+            fed.project_repo(&rid).await.expect("project_repo");
+
+            let server = build_server(&repos_yaml, fed).await;
+            (server, repos_yaml)
+        }
+
+        /// Write `repos_yaml` with the given list of `(id, path)`
+        /// `workspace_dir` repos. The `data_dir` is fixed under
+        /// `tmp/federation` to keep the federation state isolated per
+        /// test.
+        fn write_repos_yaml(
+            tmp: &Path,
+            repos_yaml: &Path,
+            repos: &[(&str, &Path)],
+        ) {
+            let mut yaml = format!("data_dir: {}\nrepos:\n", tmp.join("federation").display());
+            for (id, path) in repos {
+                yaml.push_str(&format!(
+                    "  - id: {}\n    source: {{ type: workspace_dir, path: {} }}\n",
+                    id,
+                    path.display(),
+                ));
+            }
+            std::fs::write(repos_yaml, yaml).unwrap();
+        }
+
+        /// Build a federation from a list of `(id, path)`
+        /// `workspace_dir` repos without touching
+        /// `load_federation` (avoids the tempdir collision).
+        async fn fed_for(
+            repos: &[(&str, &Path)],
+            data_dir: &Path,
+        ) -> Arc<FederatedIndex> {
+            let backend: Arc<dyn crate::server::federation::graph_backend::GraphBackend> =
+                Arc::new(PetgraphBackend::new(data_dir).expect("PetgraphBackend::new"));
+            let fed = Arc::new(FederatedIndex::new(backend));
+            for (id, path) in repos {
+                let cfg = FederationConfig {
+                    data_dir: data_dir.to_path_buf(),
+                    max_concurrent_indexers: 1,
+                    ready_threshold: 0.8,
+                    repos: vec![crate::server::federation::config::RepoConfig {
+                        id: (*id).to_string(),
+                        source: crate::server::federation::config::SourceConfig::WorkspaceDir {
+                            path: path.to_path_buf(),
+                        },
+                    }],
+                };
+                let source = cfg.build_source_for(&cfg.repos[0]).expect("build_source_for");
+                source.fetch().await.expect("fetch");
+                let rid = source.id().clone();
+                fed.add_repo(source, &cfg.data_dir).await.expect("add_repo");
+                fed.project_repo(&rid).await.expect("project_repo");
+            }
+            fed
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_picks_up_new_repo_in_repos_yaml() {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let (server, repos_yaml) = server_with_workspace_dir(&tmp, "repo-a", &repo_a).await;
+            assert_eq!(server.repo_count(), 1);
+
+            // Add a second workspace_dir repo to repos.yaml.
+            let repo_b = tmp.path().join("repo-b");
+            std::fs::create_dir_all(&repo_b).unwrap();
+            git2::Repository::init(&repo_b).unwrap();
+            write_repos_yaml(
+                tmp.path(),
+                &repos_yaml,
+                &[("repo-a", &repo_a), ("repo-b", &repo_b)],
+            );
+            let bus = server.reload_bus();
+            crate::server::reload::run_rebuild(&server, &bus).await.expect("run_rebuild");
+            assert_eq!(server.repo_count(), 2);
+            assert_eq!(bus.status().state, ReloadState::Idle);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_drops_repo_removed_from_repos_yaml() {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let repo_b = tmp.path().join("repo-b");
+            std::fs::create_dir_all(&repo_b).unwrap();
+            git2::Repository::init(&repo_b).unwrap();
+            write_repos_yaml(
+                tmp.path(),
+                &tmp.path().join("repos.yaml"),
+                &[("repo-a", &repo_a), ("repo-b", &repo_b)],
+            );
+            let data_dir = tmp.path().join("federation");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let fed = fed_for(
+                &[("repo-a", &repo_a), ("repo-b", &repo_b)],
+                &data_dir,
+            )
+            .await;
+            let server = build_server(tmp.path().join("repos.yaml").as_path(), fed).await;
+            assert_eq!(server.repo_count(), 2);
+
+            // Remove repo-b from repos.yaml and rebuild.
+            write_repos_yaml(
+                tmp.path(),
+                tmp.path().join("repos.yaml").as_path(),
+                &[("repo-a", &repo_a)],
+            );
+            let bus = server.reload_bus();
+            crate::server::reload::run_rebuild(&server, &bus).await.expect("run_rebuild");
+            assert_eq!(server.repo_count(), 1);
+            assert_eq!(bus.status().state, ReloadState::Idle);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_replaces_workspaces_yaml_when_present() {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let (server, _repos_yaml) = server_with_workspace_dir(&tmp, "repo-a", &repo_a).await;
+            assert_eq!(server.workspace_count(), 0);
+
+            // Add a workspaces.yaml with one workspace.
+            let ws_path = tmp.path().join("workspaces.yaml");
+            std::fs::write(
+                &ws_path,
+                "workspaces:\n  - name: w1\n    members: [repo-a]\n",
+            )
+            .unwrap();
+            let bus = server.reload_bus();
+            crate::server::reload::run_rebuild(&server, &bus).await.expect("run_rebuild");
+            assert_eq!(server.workspace_count(), 1);
+            assert_eq!(bus.status().state, ReloadState::Idle);
+            let ws = server.workspaces_snapshot().expect("workspaces");
+            assert_eq!(ws.workspaces[0].name, "w1");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn rebuild_records_failed_state_on_invalid_repos_yaml() {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let (server, repos_yaml) = server_with_workspace_dir(&tmp, "repo-a", &repo_a).await;
+
+            // Replace repos.yaml with an invalid repo id (`/`) which
+            // fails `RepoId::new`.
+            std::fs::write(&repos_yaml, "repos:\n  - id: bad/id\n").unwrap();
+            let bus = server.reload_bus();
+            let result =
+                crate::server::reload::run_rebuild(&server, &bus).await;
+            assert!(result.is_err());
+            match bus.status().state {
+                ReloadState::Failed(msg) => {
+                    assert!(!msg.is_empty(), "Failed state should carry an error message");
+                }
+                other => panic!("expected Failed state, got {:?}", other),
+            }
+            // The federation should still hold repo-a: a partial
+            // failure doesn't tear down the existing repos.
+            assert_eq!(server.repo_count(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn lain_server_set_workspace_swaps_slot() {
+            let tmp = tempfile::tempdir().unwrap();
+            let repo_a = tmp.path().join("repo-a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            git2::Repository::init(&repo_a).unwrap();
+            let (server, _) = server_with_workspace_dir(&tmp, "repo-a", &repo_a).await;
+            assert_eq!(server.workspace_count(), 0);
+            let ws = Arc::new(crate::server::federation::workspace::WorkspacesFile {
+                default: None,
+                workspaces: vec![crate::server::federation::workspace::WorkspaceSpec {
+                    name: "w1".into(),
+                    description: None,
+                    source: None,
+                    members: vec!["repo-a".into()],
+                }],
+            });
+            server.set_workspace(ws);
+            assert_eq!(server.workspace_count(), 1);
+        }
     }
 }
