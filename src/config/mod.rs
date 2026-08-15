@@ -21,3 +21,18 @@ pub fn config_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".config").join("lain")
 }
+
+/// Return the path to the lain runtime dir (`~/.local/lain/run`).
+/// Used by the hot-reload Unix socket listener to drop per-project
+/// `.sock` files. `$XDG_RUNTIME_DIR/lain` takes precedence when
+/// present (per the XDG spec); otherwise we fall back to
+/// `~/.local/lain/run`.
+pub fn run_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("lain");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local").join("lain").join("run")
+}

@@ -164,6 +164,8 @@ pub fn run_create(
     });
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    crate::cli::signal::signal_reload(&path)
+        .map_err(|e| anyhow!("signal reload after creating '{name}': {e}"))?;
     println!("Created workspace '{name}' in {}", path.display());
     Ok(())
 }
@@ -178,6 +180,8 @@ pub fn run_add(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     }
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    crate::cli::signal::signal_reload(&path)
+        .map_err(|e| anyhow!("signal reload after adding '{repo}' to '{name}': {e}"))?;
     println!("Added repo '{repo}' to workspace '{name}'");
     Ok(())
 }
@@ -190,6 +194,8 @@ pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     ws.members.retain(|m| m != repo);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    crate::cli::signal::signal_reload(&path)
+        .map_err(|e| anyhow!("signal reload after removing '{repo}' from '{name}': {e}"))?;
     println!("Removed repo '{repo}' from workspace '{name}'");
     Ok(())
 }
@@ -209,6 +215,8 @@ pub fn run_import(name: &str, from: &Path, config: Option<&Path>) -> Result<()> 
     f.workspaces.push(imported);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
+    crate::cli::signal::signal_reload(&path)
+        .map_err(|e| anyhow!("signal reload after importing '{name}': {e}"))?;
     println!("Imported workspace '{name}' into {}", path.display());
     Ok(())
 }

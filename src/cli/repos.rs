@@ -48,7 +48,10 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
             r#ref: ref_.to_string(),
         },
     });
-    write_atomic(config_path, &file)
+    write_atomic(config_path, &file)?;
+    crate::cli::signal::signal_reload(config_path)
+        .with_context(|| format!("signal reload after adding '{name}'"))?;
+    Ok(())
 }
 
 /// `lain repos list`
@@ -73,7 +76,10 @@ fn remove(config_path: &Path, name: &str) -> Result<()> {
     if file.repos.len() == before {
         anyhow::bail!("repo '{name}' not found in {}", config_path.display());
     }
-    write_atomic(config_path, &file)
+    write_atomic(config_path, &file)?;
+    crate::cli::signal::signal_reload(config_path)
+        .with_context(|| format!("signal reload after removing '{name}'"))?;
+    Ok(())
 }
 
 /// Write YAML atomically: write to a sibling temp file, then rename.

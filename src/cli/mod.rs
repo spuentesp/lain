@@ -4,6 +4,7 @@ pub mod server;
 pub mod workspaces;
 pub mod repos;
 pub mod dispatch;
+pub mod signal;
 
 pub use query::run_query;
 pub use ask::run_ask;

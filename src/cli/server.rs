@@ -112,6 +112,10 @@ pub async fn run_server(
             );
         }
     }
+
+    // Hot-reload subsystem: file watcher, Unix socket, rebuild loop.
+    spawn_hot_reload(config_path, &server).await;
+
     info!(
         "lain server: starting on {:?} transport (port {})",
         transport_enum, port
@@ -182,6 +186,67 @@ async fn load_federation_for_workspace(
 // Bring `FederatedIndex` into scope for the helper above.
 use crate::federation::federated_index::FederatedIndex;
 use std::sync::Arc;
+
+use crate::server::reload::run_rebuild;
+
+/// Spawn the long-lived hot-reload subsystem: a Unix socket listener
+/// that the CLI can ping to request a reload, a file watcher that
+/// picks up hand-edits to `repos.yaml` / `workspaces.yaml`, and a
+/// rebuild task that consumes the bus. Returns immediately after
+/// spawning — failures are logged and non-fatal so the MCP server
+/// can still come up even if the socket dir is unwritable.
+async fn spawn_hot_reload(
+    config_path: &Path,
+    server: &LainServer,
+) {
+    let bus = server.reload_bus();
+
+    // File watcher — fires `request_reload` on hand-edits.
+    let _watcher_join = crate::server::watcher::spawn_config_watcher(
+        config_path,
+        Arc::clone(&bus),
+    );
+
+    // Unix socket — CLI signals.
+    let sock_path = crate::cli::signal::socket_path_for(config_path);
+    if let Err(e) = crate::cli::signal::spawn_signal_listener_at(&sock_path, Arc::clone(&bus)).await {
+        tracing::warn!(
+            "hot reload: could not bind signal socket at {}: {e}",
+            sock_path.display()
+        );
+        // Continue: the file watcher is still up; only CLI-prompted
+        // reloads are unavailable.
+    } else {
+        tracing::info!(
+            "hot reload: signal listener at {}",
+            sock_path.display()
+        );
+    }
+
+    // Rebuild loop: subscribes to the bus and runs `run_rebuild` on
+    // every signal.
+    let server_for_loop = server.clone_for_background();
+    let bus_for_loop = Arc::clone(&bus);
+    tokio::spawn(async move {
+        let mut sub = bus_for_loop.subscribe();
+        loop {
+            match sub.try_recv() {
+                Ok(()) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                    if let Err(e) = run_rebuild(&server_for_loop, &bus_for_loop).await {
+                        tracing::warn!("hot reload: rebuild failed: {e}");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                    tracing::info!("hot reload: bus closed, rebuild loop exiting");
+                    break;
+                }
+            }
+        }
+    });
+}
 
 fn init_tracing(log_level: &str) {
     let _ = tracing_subscriber::registry()
