@@ -483,7 +483,8 @@ impl LainServer {
             self.started_at,
             Arc::clone(&self.last_sync_at),
             Arc::clone(&self.last_error),
-        );
+        )
+        .with_reload_bus(Arc::clone(&self.reload_bus));
         match transport {
             Transport::Http => mcp
                 .run_http(port)

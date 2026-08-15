@@ -847,6 +847,53 @@ fn counts_for_project(repos_yaml: &Path) -> (usize, usize) {
     (workspace_count, repo_count)
 }
 
+/// Snapshot the current reload status for the `get_reload_status` MCP
+/// tool. Returns `serde_json::Value` so the MCP handler can serialize
+/// it without owning the `ReloadStatus` enum.
+pub fn get_reload_status(
+    bus: &crate::server::reload::ReloadBus,
+) -> serde_json::Value {
+    use crate::server::reload::ReloadState;
+    let s = bus.status();
+    serde_json::json!({
+        "state": match s.state {
+            ReloadState::Idle => "idle",
+            ReloadState::Rebuilding => "rebuilding",
+            ReloadState::Failed(_) => "failed",
+        },
+        "started_at_unix": s.started_at.and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+        }),
+        "last_reload_at_unix": s.last_reload_at.and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+        }),
+        "last_error": s.last_error,
+        "pending_changes": s.pending_changes,
+    })
+}
+
+/// Ask the reload bus to schedule a rebuild. The actual rebuild runs
+/// on a dedicated tokio task (spawned by `cli::server::spawn_hot_reload`)
+/// so this tool returns immediately after queueing the signal.
+pub fn request_reload(
+    bus: &crate::server::reload::ReloadBus,
+) -> Result<serde_json::Value, LainError> {
+    bus.request_reload()
+        .map_err(|e| LainError::Other(format!("request_reload: {e}")))?;
+    Ok(serde_json::json!({
+        "accepted": true,
+        "message": "reload scheduled",
+        "queued_at_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    }))
+}
+
 /// Build the `list_recent_projects` response. Each entry combines a
 /// recent-projects record with live repo/workspace counts from the
 /// referenced `repos.yaml` (and `workspaces.yaml` next to it).

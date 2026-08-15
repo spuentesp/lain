@@ -164,6 +164,16 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "List projects the operator has used recently, with per-project workspace_count and repo_count pulled from each project's repos.yaml/workspaces.yaml.",
         &[],
     ),
+    (
+        "get_reload_status",
+        "Returns the current reload subsystem state: state (idle | rebuilding | failed), started_at, last_reload_at, last_error, pending_changes.",
+        &[],
+    ),
+    (
+        "request_reload",
+        "Schedule a hot-reload of repos.yaml and workspaces.yaml. The actual rebuild runs on a background task; the call returns immediately after queueing the signal.",
+        &[],
+    ),
 ];
 
 /// Tool definitions exposed only when the MCP server was constructed with a
@@ -247,6 +257,10 @@ struct LainHandler {
     /// Most recent sync error message (Arc-shared with
     /// `LainServer::last_error`).
     status_last_error: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Hot-reload bus (Task 6.5). `None` for servers without a
+    /// hot-reload subsystem; the `get_reload_status` and
+    /// `request_reload` tools return `not configured` in that case.
+    reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
 }
 
 #[async_trait]
@@ -431,6 +445,43 @@ impl ServerHandler for LainHandler {
                     }
                 };
                 return Ok(tool_text_result(text, false));
+            }
+            "get_reload_status" => {
+                let bus = match self.reload_bus.as_ref() {
+                    Some(b) => b,
+                    None => {
+                        return Ok(tool_text_result(
+                            "reload bus not configured on this server".to_string(),
+                            true,
+                        ));
+                    }
+                };
+                let payload =
+                    crate::server::mcp::federation_tools::get_reload_status(bus);
+                let text = serde_json::to_string(&payload).unwrap_or_else(|e| {
+                    format!("serialization error: {e}")
+                });
+                return Ok(tool_text_result(text, false));
+            }
+            "request_reload" => {
+                let bus = match self.reload_bus.as_ref() {
+                    Some(b) => b,
+                    None => {
+                        return Ok(tool_text_result(
+                            "reload bus not configured on this server".to_string(),
+                            true,
+                        ));
+                    }
+                };
+                return match crate::server::mcp::federation_tools::request_reload(bus) {
+                    Ok(payload) => Ok(tool_text_result(
+                        serde_json::to_string(&payload).unwrap_or_else(|e| {
+                            format!("serialization error: {e}")
+                        }),
+                        false,
+                    )),
+                    Err(e) => Ok(tool_text_result(format!("{e}"), true)),
+                };
             }
             _ => {}
         }
@@ -755,6 +806,10 @@ pub struct LainMcpServer {
     status_last_sync_at: Arc<parking_lot::Mutex<std::time::SystemTime>>,
     /// Last error, Arc-shared with `LainServer::last_error`.
     status_last_error: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Hot-reload bus, surfaced via `get_reload_status` /
+    /// `request_reload`. Set by `with_reload_bus` (Task 6.5); `None`
+    /// for servers that don't have a hot-reload subsystem.
+    reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
 }
 
 impl LainMcpServer {
@@ -769,6 +824,7 @@ impl LainMcpServer {
             status_started_at: now,
             status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
+            reload_bus: None,
         }
     }
 
@@ -787,6 +843,7 @@ impl LainMcpServer {
             status_started_at: now,
             status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
+            reload_bus: None,
         }
     }
 
@@ -809,7 +866,20 @@ impl LainMcpServer {
             status_started_at: now,
             status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
+            reload_bus: None,
         }
+    }
+
+    /// Inject the hot-reload bus. After this call, the
+    /// `get_reload_status` and `request_reload` MCP tools return real
+    /// values. The server constructs the bus; this is just the wiring
+    /// hook.
+    pub fn with_reload_bus(
+        mut self,
+        reload_bus: Arc<crate::server::reload::ReloadBus>,
+    ) -> Self {
+        self.reload_bus = Some(reload_bus);
+        self
     }
 
     /// Inject the federation-mode transport / port / start-time /
@@ -880,7 +950,7 @@ impl LainMcpServer {
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
                             let status = status.clone();
-                            handle_request(req, executor, None, None, status)
+                            handle_request(req, executor, None, None, status, None)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -912,6 +982,7 @@ impl LainMcpServer {
             status_started_at: self.status_started_at,
             status_last_sync_at: self.status_last_sync_at,
             status_last_error: self.status_last_error,
+            reload_bus: self.reload_bus,
         };
 
         let server = server_runtime::create_server(McpServerOptions {
@@ -938,6 +1009,7 @@ impl LainMcpServer {
         let status_started_at = self.status_started_at;
         let status_last_sync_at = self.status_last_sync_at;
         let status_last_error = self.status_last_error;
+        let reload_bus = self.reload_bus;
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
         loop {
@@ -951,6 +1023,7 @@ impl LainMcpServer {
                     let status_started_at = status_started_at;
                     let status_last_sync_at = status_last_sync_at.clone();
                     let status_last_error = status_last_error.clone();
+                    let reload_bus = reload_bus.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
@@ -978,6 +1051,7 @@ impl LainMcpServer {
                                 federation,
                                 workspaces,
                                 handler_status,
+                                reload_bus.clone(),
                             )
                         });
                         if let Err(e) = http1::Builder::new()
@@ -1113,6 +1187,7 @@ async fn handle_request(
     federation: Option<Arc<FederatedIndex>>,
     workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
     status: HandlerStatus,
+    reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
         let body = serde_json::to_string(&value).unwrap_or_default();
@@ -1256,6 +1331,49 @@ async fn handle_request(
                                     Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
                                 };
                                 return Ok(jsonrpc_tool_result(id, &text, false));
+                            }
+                            "get_reload_status" => {
+                                let bus = match reload_bus.as_ref() {
+                                    Some(b) => b,
+                                    None => {
+                                        return Ok(jsonrpc_tool_result(
+                                            id,
+                                            "reload bus not configured on this server",
+                                            true,
+                                        ));
+                                    }
+                                };
+                                let payload =
+                                    crate::server::mcp::federation_tools::get_reload_status(bus);
+                                let text = match serde_json::to_string(&payload) {
+                                    Ok(s) => s,
+                                    Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                };
+                                return Ok(jsonrpc_tool_result(id, &text, false));
+                            }
+                            "request_reload" => {
+                                let bus = match reload_bus.as_ref() {
+                                    Some(b) => b,
+                                    None => {
+                                        return Ok(jsonrpc_tool_result(
+                                            id,
+                                            "reload bus not configured on this server",
+                                            true,
+                                        ));
+                                    }
+                                };
+                                match crate::server::mcp::federation_tools::request_reload(bus) {
+                                    Ok(payload) => {
+                                        let text = match serde_json::to_string(&payload) {
+                                            Ok(s) => s,
+                                            Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                        };
+                                        return Ok(jsonrpc_tool_result(id, &text, false));
+                                    }
+                                    Err(e) => {
+                                        return Ok(jsonrpc_tool_result(id, &format!("{e}"), true));
+                                    }
+                                }
                             }
                             _ => {}
                         }
