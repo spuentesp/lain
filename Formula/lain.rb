@@ -4,11 +4,7 @@
 class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://lain.dev"
-<<<<<<< HEAD
   version "0.5.0"
-=======
-  version "0.4.0"
->>>>>>> claude/ieee-830-srs-spec-m3ajim
 
   on_macos do
     on_arm do
@@ -37,11 +33,12 @@ class Lain < Formula
 
   def caveats
     <<~EOS
-      Lain is installed but not yet configured for any agent.
-      To configure, run:
-        lain init --agent <claude|gemini|cursor|windsurf|cline|kimi>
-      For automatic detection:
-        lain init --agent auto
+      Lain is installed. To run the MCP server for a project, point it at
+      the project's repos.yaml:
+            lain server --config ./repos.yaml
+
+      For the full subcommand list (server, workspaces, repos, query, ask):
+            lain --help
     EOS
   end
 
