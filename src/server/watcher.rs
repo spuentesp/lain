@@ -13,6 +13,111 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+/// Return the set of paths the reload-aware watcher should watch given
+/// the path to `repos.yaml`. Always includes `repos.yaml`; adds
+/// `workspaces.yaml` next to it if the file exists. The watcher
+/// ignores directories and other files in the same parent.
+pub fn watch_paths_for_config(repos_yaml: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![repos_yaml.to_path_buf()];
+    let parent = repos_yaml.parent().unwrap_or_else(|| Path::new("."));
+    let ws = parent.join("workspaces.yaml");
+    if ws.exists() {
+        paths.push(ws);
+    }
+    paths
+}
+
+/// Spawn a dedicated `notify` watcher for the config files
+/// (`repos.yaml` + `workspaces.yaml`). On any Modify/Create/Remove
+/// event against those exact paths, calls `bus.request_reload()`.
+///
+/// Returns a `JoinHandle` for the watcher thread. Tests can drop it
+/// to terminate; production drops it at server shutdown.
+///
+/// Implementation note: this is a separate watcher from
+/// `FileWatcher::start` (which watches source files for the volatile
+/// overlay). The two never interact — different paths, different
+/// handlers, different channels.
+pub fn spawn_config_watcher(
+    repos_yaml: &Path,
+    bus: Arc<crate::server::reload::ReloadBus>,
+) -> std::thread::JoinHandle<()> {
+    use crate::server::reload::ReloadBus;
+
+    let targets: HashSet<PathBuf> = watch_paths_for_config(repos_yaml)
+        .into_iter()
+        .collect();
+
+    std::thread::spawn(move || {
+        let bus_clone: Arc<ReloadBus> = Arc::clone(&bus);
+        let targets_clone = targets.clone();
+
+        let mut watcher = match RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    for path in &event.paths {
+                        if targets_clone.contains(path) {
+                            if let Err(e) = bus_clone.request_reload() {
+                                warn!(
+                                    "FileWatcher (config): bus.request_reload() failed: {e}"
+                                );
+                            } else {
+                                debug!(
+                                    "FileWatcher (config): reload requested for {:?}",
+                                    path
+                                );
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!("FileWatcher (config): failed to create watcher: {e}");
+                return;
+            }
+        };
+
+        let mut registered: HashSet<PathBuf> = HashSet::new();
+        for path in &targets {
+            // Watch the parent directory (non-recursive) so file
+            // creates and deletes fire events; the callback filters
+            // by exact path. Watching the file directly misses
+            // atomic-rename sequences on some platforms.
+            let watch_root = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            if registered.insert(watch_root.clone()) {
+                if let Err(e) = watcher.watch(&watch_root, RecursiveMode::NonRecursive) {
+                    warn!(
+                        "FileWatcher (config): failed to watch {:?}: {e}",
+                        watch_root
+                    );
+                }
+            }
+        }
+
+        if registered.is_empty() {
+            warn!("FileWatcher (config): no parent directories to watch");
+        } else {
+            info!(
+                "FileWatcher (config): watching {} directories for config changes",
+                registered.len()
+            );
+        }
+
+        // Block forever; the watcher is dropped when this thread exits
+        // (i.e. when the JoinHandle is dropped by the server shutdown
+        // path).
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    })
+}
+
 /// File extensions to watch (source code files)
 const WATCHED_EXTENSIONS: &[&str] = &[
     "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h", "hpp",
@@ -772,6 +877,89 @@ mod tests {
             .expect("watcher thread should exit cleanly");
 
         drop(git);
+    }
+
+    /// Step 4: `watch_paths_for_config` returns the right paths
+    /// whether or not `workspaces.yaml` already exists.
+    #[test]
+    fn watch_paths_for_config_lists_existing_workspaces_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = tmp.path().join("repos.yaml");
+        std::fs::write(&repos, "repos: []").unwrap();
+        // No workspaces.yaml yet — only repos.yaml.
+        let paths = super::watch_paths_for_config(&repos);
+        assert_eq!(paths, vec![repos.clone()]);
+
+        // Add workspaces.yaml — now both files appear.
+        let ws = tmp.path().join("workspaces.yaml");
+        std::fs::write(&ws, "workspaces: []").unwrap();
+        let paths = super::watch_paths_for_config(&repos);
+        assert!(paths.contains(&repos));
+        assert!(paths.contains(&ws));
+        assert_eq!(paths.len(), 2);
+    }
+
+    /// Step 5: `spawn_config_watcher` reacts to `repos.yaml` modify
+    /// events by calling `bus.request_reload()`. The watcher thread
+    /// is dropped at the end of the test so the OS handles cleanup.
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_watcher_triggers_reload_on_repos_yaml_modify() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = tmp.path().join("repos.yaml");
+        std::fs::write(&repos, "repos: []").unwrap();
+
+        let bus = Arc::new(crate::server::reload::ReloadBus::new());
+        let mut sub = bus.subscribe();
+        let _join = super::spawn_config_watcher(&repos, Arc::clone(&bus));
+
+        // Give the watcher a moment to register.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Modify the file.
+        std::fs::write(&repos, "repos:\n  - id: r1\n").unwrap();
+
+        // The bus should see the reload request within 2s.
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if sub.try_recv().is_ok() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(result.unwrap_or(false), "expected reload request within 2s");
+    }
+
+    /// Step 6: `spawn_config_watcher` also reacts to `workspaces.yaml`
+    /// modify events. We create the file before the watcher so it's in
+    /// the watched set from startup.
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_watcher_triggers_reload_on_workspaces_yaml_modify() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repos = tmp.path().join("repos.yaml");
+        let ws = tmp.path().join("workspaces.yaml");
+        std::fs::write(&repos, "repos: []").unwrap();
+        std::fs::write(&ws, "workspaces: []").unwrap();
+
+        let bus = Arc::new(crate::server::reload::ReloadBus::new());
+        let mut sub = bus.subscribe();
+        let _join = super::spawn_config_watcher(&repos, Arc::clone(&bus));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        std::fs::write(&ws, "workspaces:\n  - name: w1\n    members: [r1]\n").unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if sub.try_recv().is_ok() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(result.unwrap_or(false), "expected reload request within 2s");
     }
 
     /// Step 5: a directory created after startup must trigger the
