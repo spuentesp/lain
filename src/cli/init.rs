@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::process::Command;
 
-use crate::cmds::agents::adapters::AUTO_WORKSPACE;
+use crate::cli::agents::adapters::AUTO_WORKSPACE;
 
 /// Supported agent names. Anything else is a user error and `run_init` will
 /// refuse rather than silently writing nothing.
@@ -807,7 +807,7 @@ fn init_opencode(
             scope
         );
     }
-    use crate::cmds::agents::adapters::opencode::build_opencode_lain_entry;
+    use crate::cli::agents::adapters::opencode::build_opencode_lain_entry;
 
     let target_path: std::path::PathBuf = if scope == "project" {
         workspace.join("opencode.json")
@@ -873,7 +873,7 @@ fn init_copilot(
             scope
         );
     }
-    use crate::cmds::agents::adapters::copilot::build_copilot_lain_entry;
+    use crate::cli::agents::adapters::copilot::build_copilot_lain_entry;
 
     let target_path: std::path::PathBuf = if scope == "project" {
         workspace.join(".vscode/mcp.json")
@@ -1491,9 +1491,9 @@ mod tests {
         // `claude_round_trip_under_temp_home` (in cmds::agents::tests) and
         // `opencode_adapter_*` (in cmds::agents::adapters::opencode::tests).
         // Note: as of Task 3, both `HOME_LOCK` aliases resolve to the same
-        // mutex (`crate::cmds::agents::tests::HOME_LOCK`), so we only lock
+        // mutex (`crate::cli::agents::tests::HOME_LOCK`), so we only lock
         // once — `std::sync::Mutex` is not reentrant.
-        let _home_lock_guard = crate::cmds::agents::tests::HOME_LOCK
+        let _home_lock_guard = crate::cli::agents::tests::HOME_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();

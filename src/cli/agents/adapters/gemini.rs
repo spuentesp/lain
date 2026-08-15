@@ -1,20 +1,20 @@
-//! Codex CLI adapter.
+//! Legacy Gemini CLI adapter.
 //!
-//! OpenAI's Codex uses `~/.codex/mcp.json` for MCP server configuration
-//! in the same JSON shape as the other stdio-based agents. The same
-//! adapter module covers any future config drift as long as the
-//! `mcp_section` and `mcp_name` fields in `agents/manifest.toml` stay
-//! accurate.
+//! Kept as a fallback for the `~/.gemini/settings.json` config file
+//! when Antigravity is not installed. The Antigravity adapter handles
+//! the same config target and supersedes this one once the user
+//! adopts `agy`; this adapter remains so existing Gemini CLI users do
+//! not lose coverage.
 
 use super::{expand_home, server_for, AdapterError, AgentAdapter, AUTO_WORKSPACE, InstallScope};
-use crate::cmds::agents::manifest::AgentEntry;
+use crate::cli::agents::manifest::AgentEntry;
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub struct CodexAdapter;
+pub struct GeminiAdapter;
 
-impl AgentAdapter for CodexAdapter {
-    fn id(&self) -> &'static str { "codex" }
+impl AgentAdapter for GeminiAdapter {
+    fn id(&self) -> &'static str { "gemini" }
 
     fn install(&self, entry: &AgentEntry, scope: InstallScope) -> Result<(), AdapterError> {
         let Some(path) = (match scope {

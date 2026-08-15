@@ -1,39 +1,36 @@
 use super::{expand_home, AdapterError, AgentAdapter, InstallScope};
-use crate::cmds::agents::manifest::AgentEntry;
+use crate::cli::agents::manifest::AgentEntry;
 use serde_json::{json, Value};
 use std::path::Path;
 
-/// Build the `mcp.lain` JSON value for OpenCode's `opencode.json`.
+/// Build the `servers.lain` JSON value for VS Code / Copilot.
 ///
-/// Verified against the schema at <https://opencode.ai/docs/mcp-servers>:
-/// `command` is an **Array** `[executable, arg1, arg2, ...]` — a
-/// string `command` is invalid. We always set `type: "local"`,
-/// `enabled: true`, and `timeout: 30000` (the default 5000ms is too
-/// short for Lain's cold-start NLP model load).
-pub fn build_opencode_lain_entry(embedding_model: Option<&Path>) -> Value {
-    let mut command: Vec<String> = vec![
-        "lain".to_string(),
+/// Verified from the VS Code and GitHub Copilot MCP docs: a local
+/// stdio MCP server is `servers.<name>.{ command, args }` where
+/// `command` is a string and `args` is an array. This is distinct from
+/// OpenCode's array-`command` shape. `command: "lain"` is a bare
+/// PATH-resolvable name.
+pub fn build_copilot_lain_entry(embedding_model: Option<&Path>) -> Value {
+    let mut args: Vec<String> = vec![
         "--workspace".to_string(),
         "auto".to_string(),
         "--transport".to_string(),
         "stdio".to_string(),
     ];
     if let Some(model) = embedding_model {
-        command.push("--embedding-model".to_string());
-        command.push(model.to_string_lossy().to_string());
+        args.push("--embedding-model".to_string());
+        args.push(model.to_string_lossy().to_string());
     }
     json!({
-        "type": "local",
-        "command": command,
-        "enabled": true,
-        "timeout": 30000
+        "command": "lain",
+        "args": args,
     })
 }
 
-pub struct OpenCodeAdapter;
+pub struct CopilotAdapter;
 
-impl AgentAdapter for OpenCodeAdapter {
-    fn id(&self) -> &'static str { "opencode" }
+impl AgentAdapter for CopilotAdapter {
+    fn id(&self) -> &'static str { "copilot" }
 
     fn install(&self, entry: &AgentEntry, scope: InstallScope) -> Result<(), AdapterError> {
         let Some(raw_path) = (match scope {
@@ -54,14 +51,15 @@ impl AgentAdapter for OpenCodeAdapter {
             json!({})
         };
         let root = doc.as_object_mut()
-            .ok_or_else(|| AdapterError::Shape("opencode.json root is not a JSON object".into()))?;
-        let mcp = root.entry(entry.mcp_section.clone()).or_insert_with(|| json!({}));
-        let mcp_obj = mcp.as_object_mut()
-            .ok_or_else(|| AdapterError::Shape("opencode.json `mcp` is not an object".into()))?;
+            .ok_or_else(|| AdapterError::Shape("mcp.json root is not a JSON object".into()))?;
+        let section = root.entry(entry.mcp_section.clone())
+            .or_insert_with(|| json!({}));
+        let section_obj = section.as_object_mut()
+            .ok_or_else(|| AdapterError::Shape(format!("`{}` is not an object", entry.mcp_section)))?;
         // The adapter path doesn't have an embedding-model path; the init
         // path does. Without the model, Lain runs in stub embedder mode
         // (semantic search unavailable, every other tool works).
-        mcp_obj.insert(entry.mcp_name.clone(), build_opencode_lain_entry(None));
+        section_obj.insert(entry.mcp_name.clone(), build_copilot_lain_entry(None));
         let serialized = serde_json::to_string_pretty(&doc)?;
         std::fs::write(&path, serialized)?;
         Ok(())
@@ -96,8 +94,8 @@ impl AgentAdapter for OpenCodeAdapter {
         if !path.exists() { return Ok(()); }
         let raw = std::fs::read_to_string(&path)?;
         let mut doc: Value = serde_json::from_str(&raw)?;
-        if let Some(mcp) = doc.get_mut(&entry.mcp_section).and_then(|v| v.as_object_mut()) {
-            mcp.remove(&entry.mcp_name);
+        if let Some(section) = doc.get_mut(&entry.mcp_section).and_then(|v| v.as_object_mut()) {
+            section.remove(&entry.mcp_name);
         }
         let serialized = serde_json::to_string_pretty(&doc)?;
         std::fs::write(&path, serialized)?;
@@ -106,120 +104,105 @@ impl AgentAdapter for OpenCodeAdapter {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-    use crate::cmds::agents::manifest::AgentEntry;
+    use crate::cli::agents::manifest::AgentEntry;
 
-    // Serializes tests that mutate the process-global HOME env var so they
-    // don't race each other when cargo runs the suite in parallel. Aliased to
-    // the agents-level `HOME_LOCK` so all HOME-mutating tests across the
-    // binary share one mutex (the previous per-module mutexes did not
-    // synchronize with each other, producing intermittent failures between
-    // `claude_round_trip_under_temp_home` and the opencode adapter tests).
+    // Use the SHARED `HOME_LOCK` from `cmds::agents::tests`, promoted to
+    // `pub` in the opencode fix wave. All HOME-mutating tests in the
+    // agents test tree must acquire this same lock to avoid the
+    // pre-existing race that surfaced during the opencode fix wave.
     pub use super::super::super::tests::HOME_LOCK;
 
     fn entry() -> AgentEntry {
-        // Minimal manifest row. Only the fields the adapter reads matter here.
         AgentEntry {
-            id: "opencode".to_string(),
-            display_name: "OpenCode".to_string(),
-            binary: "opencode".to_string(),
-            detect_paths: vec!["~/.config/opencode".to_string()],
-            config_user: "~/.config/opencode/opencode.json".to_string(),
-            config_project: "opencode.json".to_string(),
+            id: "copilot".to_string(),
+            display_name: "GitHub Copilot in VS Code".to_string(),
+            binary: "code".to_string(),
+            detect_paths: vec!["~/.config/Code".to_string(), "~/.vscode".to_string()],
+            config_user: "~/.copilot/mcp-config.json".to_string(),
+            config_project: ".vscode/mcp.json".to_string(),
             config_format: "jsonc".to_string(),
-            mcp_section: "mcp".to_string(),
+            mcp_section: "servers".to_string(),
             mcp_name: "lain".to_string(),
             transport: "stdio".to_string(),
             command: "lain".to_string(),
             default_args: vec![],
-            headless_probe: vec!["opencode".to_string(), "--version".to_string()],
+            headless_probe: vec!["code".to_string(), "--version".to_string()],
             format: "json".to_string(),
         }
     }
 
     #[test]
-    fn opencode_adapter_install_read_remove_round_trip() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn copilot_adapter_install_read_remove_round_trip() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        // Redirect HOME so the user-scope path lives inside the tempdir.
-        let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", tmp.path());
-        let adapter = OpenCodeAdapter;
+        let adapter = CopilotAdapter;
         let e = entry();
         adapter.install(&e, InstallScope::User).unwrap();
-        let path = tmp.path().join(".config/opencode/opencode.json");
-        assert!(path.exists(), "config file not written");
+        let path = tmp.path().join(".copilot/mcp-config.json");
+        assert!(path.exists(), "user-scope config not written");
         let body = std::fs::read_to_string(&path).unwrap();
         let doc: Value = serde_json::from_str(&body).unwrap();
-        let lain = doc.pointer("/mcp/lain").expect("mcp.lain present");
-        assert_eq!(lain.get("type").and_then(|v| v.as_str()), Some("local"));
-        let cmd = lain.get("command").and_then(|v| v.as_array()).expect("command is array");
-        let cmd_strs: Vec<String> = cmd.iter().map(|v| v.as_str().unwrap().to_string()).collect();
-        assert_eq!(cmd_strs.first().map(String::as_str), Some("lain"));
+        let lain = doc.pointer("/servers/lain").expect("servers.lain present");
+        assert_eq!(lain.get("command").and_then(|v| v.as_str()), Some("lain"));
+        let args = lain.get("args").and_then(|v| v.as_array()).expect("args is array");
+        let cmd_strs: Vec<String> = args.iter().map(|v| v.as_str().unwrap().to_string()).collect();
         assert!(cmd_strs.windows(2).any(|w| w == ["--workspace", "auto"]));
         assert!(cmd_strs.windows(2).any(|w| w == ["--transport", "stdio"]));
-        assert_eq!(lain.get("enabled"), Some(&Value::Bool(true)));
-        assert_eq!(lain.get("timeout"), Some(&json!(30000)));
-
         // Read returns the same shape.
         let read_back = adapter.read(&e, InstallScope::User).unwrap();
         assert_eq!(read_back, lain.clone());
-
-        if let Some(h) = original_home { std::env::set_var("HOME", h); }
     }
 
     #[test]
-    fn opencode_adapter_preserves_other_mcp_servers() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn copilot_adapter_preserves_other_servers() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", tmp.path());
-        let path = tmp.path().join(".config/opencode/opencode.json");
+        let path = tmp.path().join(".copilot/mcp-config.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
             serde_json::to_string_pretty(&json!({
-                "mcp": {
-                    "other-server": { "type": "local", "command": ["x"], "enabled": true }
+                "servers": {
+                    "other-server": { "command": "x", "args": ["y"] }
                 }
             }))
             .unwrap(),
         )
         .unwrap();
-        let adapter = OpenCodeAdapter;
+        let adapter = CopilotAdapter;
         let e = entry();
         adapter.install(&e, InstallScope::User).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let doc: Value = serde_json::from_str(&body).unwrap();
         assert!(
-            doc.pointer("/mcp/other-server").is_some(),
+            doc.pointer("/servers/other-server").is_some(),
             "other-server must be preserved"
         );
-        assert!(doc.pointer("/mcp/lain").is_some(), "lain must be added");
-        if let Some(h) = original_home { std::env::set_var("HOME", h); }
+        assert!(doc.pointer("/servers/lain").is_some(), "lain must be added");
     }
 
     #[test]
-    fn opencode_adapter_remove_drops_only_lain() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn copilot_adapter_remove_drops_only_lain() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", tmp.path());
-        let adapter = OpenCodeAdapter;
+        let adapter = CopilotAdapter;
         let e = entry();
         adapter.install(&e, InstallScope::User).unwrap();
-        // Pre-seed with another server so we can assert remove preserves it.
-        let path = tmp.path().join(".config/opencode/opencode.json");
+        // Pre-seed with another server.
+        let path = tmp.path().join(".copilot/mcp-config.json");
         let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        doc["mcp"]["other-server"] = json!({ "type": "local", "command": ["x"], "enabled": true });
+        doc["servers"]["other-server"] = json!({ "command": "x", "args": ["y"] });
         std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
 
         adapter.remove(&e, InstallScope::User).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let doc: Value = serde_json::from_str(&body).unwrap();
-        assert!(doc.pointer("/mcp/lain").is_none(), "lain must be removed");
-        assert!(doc.pointer("/mcp/other-server").is_some(), "other-server preserved");
-        if let Some(h) = original_home { std::env::set_var("HOME", h); }
+        assert!(doc.pointer("/servers/lain").is_none(), "lain must be removed");
+        assert!(doc.pointer("/servers/other-server").is_some(), "other-server preserved");
     }
 }

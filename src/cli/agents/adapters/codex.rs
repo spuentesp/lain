@@ -1,19 +1,20 @@
-//! Cline CLI adapter.
+//! Codex CLI adapter.
 //!
-//! Cline stores MCP servers at `~/.cline/mcp.json` with the standard
-//! `mcpServers` map. Cline is the only one of these new CLIs that does
-//! not need a Bun runtime, so the entry is the same stdio shape as
-//! Cursor and Continue.
+//! OpenAI's Codex uses `~/.codex/mcp.json` for MCP server configuration
+//! in the same JSON shape as the other stdio-based agents. The same
+//! adapter module covers any future config drift as long as the
+//! `mcp_section` and `mcp_name` fields in `agents/manifest.toml` stay
+//! accurate.
 
 use super::{expand_home, server_for, AdapterError, AgentAdapter, AUTO_WORKSPACE, InstallScope};
-use crate::cmds::agents::manifest::AgentEntry;
+use crate::cli::agents::manifest::AgentEntry;
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub struct ClineAdapter;
+pub struct CodexAdapter;
 
-impl AgentAdapter for ClineAdapter {
-    fn id(&self) -> &'static str { "cline" }
+impl AgentAdapter for CodexAdapter {
+    fn id(&self) -> &'static str { "codex" }
 
     fn install(&self, entry: &AgentEntry, scope: InstallScope) -> Result<(), AdapterError> {
         let Some(path) = (match scope {

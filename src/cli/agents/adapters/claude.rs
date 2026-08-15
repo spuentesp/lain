@@ -1,5 +1,5 @@
 use super::{expand_home, server_for, AdapterError, AgentAdapter, AUTO_WORKSPACE, InstallScope};
-use crate::cmds::agents::manifest::AgentEntry;
+use crate::cli::agents::manifest::AgentEntry;
 use serde_json::{json, Value};
 use std::path::Path;
 

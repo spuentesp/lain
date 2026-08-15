@@ -1,5 +1,5 @@
-use crate::cmds::agents::adapters::{adapter_for, InstallScope};
-use crate::cmds::agents::manifest::load_manifest;
+use crate::cli::agents::adapters::{adapter_for, InstallScope};
+use crate::cli::agents::manifest::load_manifest;
 use anyhow::Result;
 use lain_mcp_probe::{probe_http, ProbeHealth, ProbeReport};
 

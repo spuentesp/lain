@@ -22,7 +22,7 @@ pub mod kimi;
 pub mod omp;
 pub mod opencode;
 
-use crate::cmds::agents::manifest::AgentEntry;
+use crate::cli::agents::manifest::AgentEntry;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,17 +1,17 @@
-//! Continue.dev CLI (`cn`) adapter.
+//! Cursor CLI (`agent` aka `cursor-agent`) adapter.
 //!
-//! Continue stores its MCP servers inside `~/.continue/config.json`
-//! under a `mcpServers` map. Same JSON shape as Cursor and Cline.
+//! Cursor's MCP config lives at `~/.cursor/mcp.json` and uses the standard
+//! `mcpServers` map shape used by most JSON-config agents.
 
 use super::{expand_home, server_for, AdapterError, AgentAdapter, AUTO_WORKSPACE, InstallScope};
-use crate::cmds::agents::manifest::AgentEntry;
+use crate::cli::agents::manifest::AgentEntry;
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub struct ContinueAdapter;
+pub struct CursorAdapter;
 
-impl AgentAdapter for ContinueAdapter {
-    fn id(&self) -> &'static str { "continue" }
+impl AgentAdapter for CursorAdapter {
+    fn id(&self) -> &'static str { "cursor" }
 
     fn install(&self, entry: &AgentEntry, scope: InstallScope) -> Result<(), AdapterError> {
         let Some(path) = (match scope {

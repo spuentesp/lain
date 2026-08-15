@@ -1,5 +1,5 @@
-use crate::cmds::agents::adapters::{adapter_for, expand_home, InstallScope};
-use crate::cmds::agents::manifest::load_manifest;
+use crate::cli::agents::adapters::{adapter_for, expand_home, InstallScope};
+use crate::cli::agents::manifest::load_manifest;
 use anyhow::{anyhow, Result};
 
 pub fn run_remove(id: &str, scope: InstallScope) -> Result<()> {

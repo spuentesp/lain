@@ -1,20 +1,19 @@
-//! Legacy Gemini CLI adapter.
+//! Cline CLI adapter.
 //!
-//! Kept as a fallback for the `~/.gemini/settings.json` config file
-//! when Antigravity is not installed. The Antigravity adapter handles
-//! the same config target and supersedes this one once the user
-//! adopts `agy`; this adapter remains so existing Gemini CLI users do
-//! not lose coverage.
+//! Cline stores MCP servers at `~/.cline/mcp.json` with the standard
+//! `mcpServers` map. Cline is the only one of these new CLIs that does
+//! not need a Bun runtime, so the entry is the same stdio shape as
+//! Cursor and Continue.
 
 use super::{expand_home, server_for, AdapterError, AgentAdapter, AUTO_WORKSPACE, InstallScope};
-use crate::cmds::agents::manifest::AgentEntry;
+use crate::cli::agents::manifest::AgentEntry;
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub struct GeminiAdapter;
+pub struct ClineAdapter;
 
-impl AgentAdapter for GeminiAdapter {
-    fn id(&self) -> &'static str { "gemini" }
+impl AgentAdapter for ClineAdapter {
+    fn id(&self) -> &'static str { "cline" }
 
     fn install(&self, entry: &AgentEntry, scope: InstallScope) -> Result<(), AdapterError> {
         let Some(path) = (match scope {

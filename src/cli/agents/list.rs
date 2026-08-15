@@ -1,5 +1,5 @@
-use crate::cmds::agents::adapters::{adapter_for, InstallScope};
-use crate::cmds::agents::manifest::load_manifest;
+use crate::cli::agents::adapters::{adapter_for, InstallScope};
+use crate::cli::agents::manifest::load_manifest;
 use anyhow::Result;
 
 pub fn run_list() -> Result<()> {

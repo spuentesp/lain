@@ -41,14 +41,14 @@ pub mod tests {
 
     #[test]
     fn expand_home_tilde() {
-        use crate::cmds::agents::adapters::expand_home;
+        use crate::cli::agents::adapters::expand_home;
         let p = expand_home("~/foo");
         assert!(p.to_string_lossy().ends_with("/foo"));
     }
 
     #[test]
     fn render_args_substitutes_workspace() {
-        use crate::cmds::agents::adapters::render_args;
+        use crate::cli::agents::adapters::render_args;
         let out = render_args(
             &["--workspace".into(), "{{workspace}}".into(), "--transport".into(), "stdio".into()],
             "/abs/path",
@@ -58,8 +58,8 @@ pub mod tests {
 
     #[test]
     fn claude_round_trip_under_temp_home() {
-        use crate::cmds::agents::adapters::{adapter_for, InstallScope};
-        use crate::cmds::agents::manifest::load_manifest;
+        use crate::cli::agents::adapters::{adapter_for, InstallScope};
+        use crate::cli::agents::manifest::load_manifest;
         use std::env;
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -77,8 +77,8 @@ pub mod tests {
 
     #[test]
     fn run_install_all_writes_per_id() {
-        use crate::cmds::agents::adapters::InstallScope;
-        use crate::cmds::agents::install::run_install;
+        use crate::cli::agents::adapters::InstallScope;
+        use crate::cli::agents::install::run_install;
         use std::env;
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -96,7 +96,7 @@ pub mod tests {
 
     #[test]
     fn list_returns_known_ids() {
-        use crate::cmds::agents::list::run_list;
+        use crate::cli::agents::list::run_list;
         run_list().expect("list runs");
     }
 }
