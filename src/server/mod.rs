@@ -24,3 +24,4 @@ pub mod overlay;
 pub mod reload;
 
 pub mod ingest;
+pub mod query;
