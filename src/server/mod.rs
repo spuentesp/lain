@@ -25,6 +25,7 @@ pub mod overlay;
 
 pub mod ingest;
 pub mod query;
+pub mod reload;
 
 // Re-export the LainServer orchestrator + transport at `crate::server::*`
 // so existing callers (`lain::server::LainServer`, `lain::server::Transport`,
