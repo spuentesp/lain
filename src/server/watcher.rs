@@ -139,6 +139,7 @@ enum WatchCommand {
     /// Register a directory-create path the notify callback just saw.
     AddDirectory(PathBuf),
     /// Stop the watcher thread's command-receive loop.
+    #[allow(dead_code)]
     Shutdown,
 }
 

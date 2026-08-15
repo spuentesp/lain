@@ -15,7 +15,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// A named group of repos that the federation engine loads as a coherent unit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

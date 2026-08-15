@@ -11,6 +11,12 @@ pub mod ingestion;
 pub mod scan;
 pub mod jobs;
 
+/// Per-process counter that disambiguates the staging dir used by
+/// `LainServer::with_federation`. The placeholder `LainServer` builds a
+/// throwaway git repo at `/tmp/lain-federation-{pid}-{counter}` so
+/// parallel tests in the same process don't race on a shared path.
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 use crate::server::error::LainError;
 use crate::server::federation::config::RepoConfig;
 use crate::server::federation::federated_index::FederatedIndex;
@@ -212,7 +218,16 @@ impl LainServer {
         // `build_minimal_executor`. Federation tools never reach the
         // executor's underlying services, but `LainMcpServer::with_federation`
         // still requires a constructed one.
-        let ws = std::env::temp_dir().join(format!("lain-federation-{}", std::process::id()));
+        //
+        // The staging dir name includes an atomic counter so parallel
+        // tests in the same process (which all share `process::id()`)
+        // don't race on the same `/tmp/lain-federation-{pid}` path.
+        let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let ws = std::env::temp_dir().join(format!(
+            "lain-federation-{}-{}",
+            std::process::id(),
+            counter
+        ));
         std::fs::create_dir_all(&ws)?;
         if !ws.join(".git").exists() {
             git2::Repository::init(&ws)?;

@@ -152,7 +152,6 @@ async fn load_federation_for_workspace(
     config_path: &Path,
     workspace_arg: &str,
 ) -> Result<Arc<FederatedIndex>, anyhow::Error> {
-    use crate::error::LainError;
     let arg = workspace_arg.trim();
     let resolved_name: Option<String> = match arg {
         "" | "none" => None,  // explicit "no workspace" — today's behavior

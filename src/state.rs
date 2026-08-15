@@ -13,6 +13,7 @@
 use crate::config::config_dir;
 use crate::server::error::LainError;
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
 
 /// `~/.config/lain/active_workspace` — the pointer the operator writes via
