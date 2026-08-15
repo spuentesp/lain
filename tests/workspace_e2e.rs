@@ -119,6 +119,25 @@ fn write_workspaces_yaml(root: &Path, ws_name: &str, members: &[&str]) -> PathBu
     path
 }
 
+/// Write a workspaces.yaml with a single zero-member workspace. The
+/// returned `tempfile::TempDir` must be kept alive for as long as `cfg`
+/// is read; dropping it removes the file.
+fn write_workspace_with_zero_members() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("workspaces.yaml");
+    std::fs::write(
+        &path,
+        "workspaces:\n  - name: empty\n    members: []\n",
+    ).unwrap();
+    (tmp, path)
+}
+
+/// Thin wrapper over `WorkspacesFile::load` so the e2e tests can assert
+/// on a single config-error path.
+fn load_workspaces(path: &Path) -> Result<WorkspacesFile, lain::error::LainError> {
+    WorkspacesFile::load(path)
+}
+
 #[test]
 fn workspace_config_loads_and_validates_members() {
     let f = WorkspacesFile {
@@ -134,17 +153,9 @@ fn workspace_config_loads_and_validates_members() {
 }
 
 #[test]
-fn workspace_rejects_sub_two_repos() {
-    let f = WorkspacesFile {
-        default: None,
-        workspaces: vec![WorkspaceSpec {
-            name: "tiny".into(),
-            description: None,
-            source: None,
-            members: vec!["only".into()],
-        }],
-    };
-    assert!(f.validate().is_err(), "workspace with 1 member must fail validation");
+fn workspace_rejects_zero_members() {
+    let (_tmp, cfg) = write_workspace_with_zero_members();
+    assert!(load_workspaces(&cfg).is_err());
 }
 
 #[tokio::test]

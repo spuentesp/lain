@@ -66,7 +66,7 @@ impl WorkspacesFile {
         Ok(file)
     }
 
-    /// Validate structural invariants: unique workspace names, ≥2 members per
+    /// Validate structural invariants: unique workspace names, ≥1 member per
     /// workspace, valid repo id characters, default workspace exists if set.
     pub fn validate(&self) -> Result<(), LainError> {
         let mut seen_names = std::collections::HashSet::new();
@@ -77,11 +77,10 @@ impl WorkspacesFile {
                     name = ws.name
                 )));
             }
-            if ws.members.len() < 2 {
+            if ws.members.is_empty() {
                 return Err(LainError::Config(format!(
-                    "workspace '{name}' must contain >= 2 repos; got {n}",
+                    "workspace '{name}' must contain >= 1 repos; got 0",
                     name = ws.name,
-                    n = ws.members.len()
                 )));
             }
             for m in &ws.members {
@@ -376,18 +375,26 @@ workspaces:
     }
 
     #[test]
-    fn validate_rejects_sub_two_members() {
-        let f = WorkspacesFile {
-            default: None,
-            workspaces: vec![WorkspaceSpec {
-                name: "tiny".into(),
-                description: None,
-                source: None,
-                members: vec!["only".into()],
-            }],
-        };
-        let err = f.validate().unwrap_err();
-        assert!(matches!(err, LainError::Config(_)), "got: {err:?}");
+    fn workspace_with_one_member_is_valid() {
+        let yaml = r#"
+workspaces:
+  - name: solo
+    members:
+      - my-repo
+"#;
+        let file: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
+        file.validate().expect("1-repo workspace should be valid");
+    }
+
+    #[test]
+    fn workspace_with_zero_members_is_rejected() {
+        let yaml = r#"
+workspaces:
+  - name: empty
+    members: []
+"#;
+        let file: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
+        assert!(file.validate().is_err());
     }
 
     #[test]

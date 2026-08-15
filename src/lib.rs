@@ -24,6 +24,9 @@ pub mod federation {
     //! Re-export the federation engine from `server::federation`.
     pub use crate::server::federation::*;
 }
+pub mod mcp {
+    pub use crate::server::mcp::*;
+}
 pub mod graph {
     pub use crate::server::graph::*;
 }
