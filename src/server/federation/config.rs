@@ -1,11 +1,11 @@
 use crate::error::LainError;
 use crate::federation::repo_id::RepoId;
 use crate::federation::repo_source::{LocalCloneSource, RepoSource, ShallowCloneSource, WorkspaceDirSource};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FederationConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -13,20 +13,32 @@ pub struct FederationConfig {
     pub max_concurrent_indexers: usize,
     #[serde(default = "default_ready_threshold")]
     pub ready_threshold: f32,
+    #[serde(default)]
     pub repos: Vec<RepoConfig>,
+}
+
+impl Default for FederationConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            max_concurrent_indexers: default_max_concurrent_indexers(),
+            ready_threshold: default_ready_threshold(),
+            repos: Vec::new(),
+        }
+    }
 }
 
 fn default_data_dir() -> PathBuf { PathBuf::from("./.lain/federation") }
 fn default_max_concurrent_indexers() -> usize { 8 }
 fn default_ready_threshold() -> f32 { 0.8 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepoConfig {
     pub id: String,
     pub source: SourceConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceConfig {
     LocalClone { url: String, #[serde(default = "default_ref")] r#ref: String },
