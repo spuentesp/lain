@@ -1246,6 +1246,57 @@ async fn handle_request(
                 let params = json.get("params");
 
                 match rpc_method {
+                    // MCP handshake: clients (Claude Code, Kimi, Codex) send
+                    // `initialize` first. Mirror the stdio transport's
+                    // `server_info()` so HTTP clients see the same wire shape.
+                    "initialize" => {
+                        let init = InitializeResult {
+                            server_info: Implementation {
+                                name: "lain".into(),
+                                version: env!("CARGO_PKG_VERSION").into(),
+                                title: Some("Lain".into()),
+                                description: Some(
+                                    "Structural Code Intelligence for AI Agents".into(),
+                                ),
+                                icons: vec![],
+                                website_url: None,
+                            },
+                            capabilities: ServerCapabilities {
+                                tools: Some(ServerCapabilitiesTools {
+                                    list_changed: Some(false),
+                                }),
+                                ..Default::default()
+                            },
+                            meta: None,
+                            instructions: Some(
+                                "Call get_agent_strategy for your operational manual.".into(),
+                            ),
+                            protocol_version: ProtocolVersion::V2025_11_25.into(),
+                        };
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": init,
+                        })
+                    }
+                    // Client confirms it has processed our `initialize` reply.
+                    // It's a JSON-RPC notification (no `id`); return 204 No
+                    // Content as the spec recommends.
+                    "notifications/initialized" => {
+                        return Ok(Response::builder()
+                            .status(StatusCode::NO_CONTENT)
+                            .body(full_body(Bytes::new()))
+                            .unwrap());
+                    }
+                    // Liveness probe; clients use it to keep the connection
+                    // warm and to detect dead transports.
+                    "ping" => {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {},
+                        })
+                    }
                     "tools/list" => {
                         let mut tools_vec = crate::tools::registry::ToolRegistry::definitions();
                         // Append the 6 special-case tools (kept in sync with
