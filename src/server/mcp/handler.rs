@@ -5,6 +5,7 @@
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::repo_id::RepoId;
+use crate::server::LainServer;
 use crate::state::ActiveWorkspace;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
@@ -150,6 +151,70 @@ fn resolve_repo_or_error(
     }
 }
 
+/// Dispatch one of the 8 multiplayer MCP tools against the shared
+/// `LainServer`. Returns the formatted `CallToolResult` directly so the
+/// caller can `return` it. When the server was built without a presence
+/// layer (the sidecar), the tool returns a clean error result instead of
+/// panicking.
+fn dispatch_presence_tool<F>(
+    server: Option<&LainServer>,
+    name: &str,
+    args: &Map<String, serde_json::Value>,
+    runner: F,
+) -> CallToolResult
+where
+    F: Fn(&LainServer, serde_json::Value) -> Result<serde_json::Value, String>,
+{
+    let Some(server) = server else {
+        return tool_text_result(
+            format!("{name}: presence layer not configured on this server"),
+            true,
+        );
+    };
+    let value = serde_json::Value::Object(args.clone().into_iter().collect());
+    match runner(server, value) {
+        Ok(v) => {
+            let text = serde_json::to_string(&v)
+                .unwrap_or_else(|e| format!("serialization error: {e}"));
+            tool_text_result(text, false)
+        }
+        Err(e) => tool_text_result(format!("{name}: {e}"), true),
+    }
+}
+
+/// Same shape as `dispatch_presence_tool` but for the HTTP /mcp
+/// JSON-RPC path: takes the local closures so the helper can be
+/// reused without re-defining `jsonrpc_tool_result` / `jsonrpc_error`
+/// at module scope.
+fn jsonrpc_presence_tool<F>(
+    jsonrpc_tool_result: impl Fn(Option<&serde_json::Value>, &str, bool) -> Response<OverlayHttpBody>,
+    jsonrpc_error: impl Fn(Option<&serde_json::Value>, i32, String) -> Response<OverlayHttpBody>,
+    id: Option<&serde_json::Value>,
+    name: &str,
+    args: &Map<String, serde_json::Value>,
+    server: Option<&LainServer>,
+    runner: F,
+) -> Response<OverlayHttpBody>
+where
+    F: Fn(&LainServer, serde_json::Value) -> Result<serde_json::Value, String>,
+{
+    let Some(server) = server else {
+        return jsonrpc_tool_result(
+            id,
+            &format!("{name}: presence layer not configured on this server"),
+            true,
+        );
+    };
+    let value = serde_json::Value::Object(args.clone().into_iter().collect());
+    match runner(server, value) {
+        Ok(v) => match serde_json::to_string(&v) {
+            Ok(text) => jsonrpc_tool_result(id, &text, false),
+            Err(e) => jsonrpc_error(id, -32000, format!("serialization: {e}")),
+        },
+        Err(e) => jsonrpc_tool_result(id, &format!("{name}: {e}"), true),
+    }
+}
+
 /// Tool definitions exposed unconditionally (server-status and
 /// recent-projects reporting). Centralized here so the stdio and HTTP
 /// `tools/list` responses and `tools/call` dispatchers agree on names
@@ -174,6 +239,46 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "request_reload",
         "Schedule a hot-reload of repos.yaml and workspaces.yaml. The actual rebuild runs on a background task; the call returns immediately after queueing the signal.",
         &[],
+    ),
+    (
+        "register_agent",
+        "Register this agent with lain. Returns an agent_id and session_token to use on every subsequent call.",
+        &["name"],
+    ),
+    (
+        "heartbeat",
+        "Refresh the session. lain expires sessions 60 seconds after the last heartbeat.",
+        &["agent_id", "session_token"],
+    ),
+    (
+        "list_active_agents",
+        "List agents currently connected. Set include_background=true to also see cron/CI agents.",
+        &[],
+    ),
+    (
+        "who_am_i",
+        "Resolve a session_token to the agent it belongs to, plus their current claims.",
+        &["session_token"],
+    ),
+    (
+        "claim_files",
+        "Announce intent to edit (or read) files/symbols. Returns conflicts: other agents already holding claims.",
+        &["files"],
+    ),
+    (
+        "release_files",
+        "Release claims. Other agents get a notification.",
+        &["files"],
+    ),
+    (
+        "list_occupancy",
+        "Show which agents are in a file or the whole workspace.",
+        &[],
+    ),
+    (
+        "my_claims",
+        "List files this agent has claimed.",
+        &["agent_id", "session_token"],
     ),
 ];
 
@@ -269,6 +374,15 @@ struct LainHandler {
     /// hot-reload subsystem; the `get_reload_status` and
     /// `request_reload` tools return `not configured` in that case.
     reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
+    /// Shared handle to the `LainServer` orchestrator. Holds the
+    /// presence registry, occupancy map, and presence-event broadcast
+    /// sender the 8 multiplayer tools (`register_agent`, `heartbeat`,
+    /// `list_active_agents`, `who_am_i`, `claim_files`, `release_files`,
+    /// `list_occupancy`, `my_claims`) dispatch against. `None` for
+    /// sidecar / read-only servers that don't carry the presence
+    /// layer; the tools return `presence layer not configured` in
+    /// that case.
+    server: Option<Arc<LainServer>>,
 }
 
 #[async_trait]
@@ -490,6 +604,70 @@ impl ServerHandler for LainHandler {
                     )),
                     Err(e) => Ok(tool_text_result(format!("{e}"), true)),
                 };
+            }
+            "register_agent" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_register_agent,
+                ));
+            }
+            "heartbeat" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_heartbeat,
+                ));
+            }
+            "list_active_agents" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_list_active_agents,
+                ));
+            }
+            "who_am_i" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_who_am_i,
+                ));
+            }
+            "claim_files" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_claim_files,
+                ));
+            }
+            "release_files" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_release_files,
+                ));
+            }
+            "list_occupancy" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_list_occupancy,
+                ));
+            }
+            "my_claims" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_my_claims,
+                ));
             }
             _ => {}
         }
@@ -831,6 +1009,12 @@ pub struct LainMcpServer {
     /// `request_reload`. Set by `with_reload_bus` (Task 6.5); `None`
     /// for servers that don't have a hot-reload subsystem.
     reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
+    /// Shared handle to the `LainServer`. Holds the presence registry,
+    /// occupancy map, and presence-event broadcast sender that the 8
+    /// multiplayer MCP tools dispatch against. Set by `with_server`
+    /// (Task 7); `None` for sidecar / read-only servers that don't
+    /// carry the presence layer.
+    server: Option<Arc<LainServer>>,
 }
 
 impl LainMcpServer {
@@ -846,6 +1030,7 @@ impl LainMcpServer {
             status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
             reload_bus: None,
+            server: None,
         }
     }
 
@@ -865,6 +1050,7 @@ impl LainMcpServer {
             status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
             reload_bus: None,
+            server: None,
         }
     }
 
@@ -895,6 +1081,7 @@ impl LainMcpServer {
             status_last_sync_at: Arc::new(parking_lot::Mutex::new(now)),
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
             reload_bus: None,
+            server: None,
         }
     }
 
@@ -907,6 +1094,20 @@ impl LainMcpServer {
         reload_bus: Arc<crate::server::reload::ReloadBus>,
     ) -> Self {
         self.reload_bus = Some(reload_bus);
+        self
+    }
+
+    /// Inject a shared handle to the `LainServer`. After this call,
+    /// the 8 multiplayer MCP tools (`register_agent`, `heartbeat`,
+    /// `list_active_agents`, `who_am_i`, `claim_files`,
+    /// `release_files`, `list_occupancy`, `my_claims`) dispatch
+    /// against the same presence registry, occupancy map, and
+    /// presence-event broadcast sender the rest of the server uses.
+    /// The handler clones `Arc` state through this pointer so a
+    /// registration here is observed by every other consumer in the
+    /// same process.
+    pub fn with_server(mut self, server: Arc<LainServer>) -> Self {
+        self.server = Some(server);
         self
     }
 
@@ -978,7 +1179,7 @@ impl LainMcpServer {
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
                             let status = status.clone();
-                            handle_request(req, executor, None, None, status, None)
+                            handle_request(req, executor, None, None, status, None, None)
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
@@ -1011,6 +1212,7 @@ impl LainMcpServer {
             status_last_sync_at: self.status_last_sync_at,
             status_last_error: self.status_last_error,
             reload_bus: self.reload_bus,
+            server: self.server,
         };
 
         let server = server_runtime::create_server(McpServerOptions {
@@ -1038,6 +1240,7 @@ impl LainMcpServer {
         let status_last_sync_at = self.status_last_sync_at;
         let status_last_error = self.status_last_error;
         let reload_bus = self.reload_bus;
+        let server = self.server;
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
         loop {
@@ -1052,6 +1255,7 @@ impl LainMcpServer {
                     let status_last_sync_at = status_last_sync_at.clone();
                     let status_last_error = status_last_error.clone();
                     let reload_bus = reload_bus.clone();
+                    let server = server.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
@@ -1080,6 +1284,7 @@ impl LainMcpServer {
                                 workspaces,
                                 handler_status,
                                 reload_bus.clone(),
+                                server.clone(),
                             )
                         });
                         if let Err(e) = http1::Builder::new()
@@ -1219,6 +1424,10 @@ async fn handle_request(
     workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
     status: HandlerStatus,
     reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
+    // Shared `LainServer` handle; `None` for the sidecar which doesn't
+    // carry the presence layer. Presence-tool dispatches inside the
+    // JSON-RPC branch see this as `None` and return a descriptive error.
+    server: Option<Arc<LainServer>>,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
         let body = serde_json::to_string(&value).unwrap_or_default();
@@ -1472,6 +1681,66 @@ async fn handle_request(
                                         return Ok(jsonrpc_tool_result(id, &format!("{e}"), true));
                                     }
                                 }
+                            }
+                            // 8 multiplayer tools (Task 7). Dispatched
+                            // against the shared `LainServer`; if it's
+                            // missing (sidecar path) the helper returns
+                            // a clean error.
+                            "register_agent" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_register_agent,
+                                ));
+                            }
+                            "heartbeat" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_heartbeat,
+                                ));
+                            }
+                            "list_active_agents" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_list_active_agents,
+                                ));
+                            }
+                            "who_am_i" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_who_am_i,
+                                ));
+                            }
+                            "claim_files" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_claim_files,
+                                ));
+                            }
+                            "release_files" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_release_files,
+                                ));
+                            }
+                            "list_occupancy" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_list_occupancy,
+                                ));
+                            }
+                            "my_claims" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_my_claims,
+                                ));
                             }
                             _ => {}
                         }

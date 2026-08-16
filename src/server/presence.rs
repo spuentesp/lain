@@ -209,6 +209,13 @@ impl PresenceRegistry {
         }
     }
 
+    /// How long a session stays valid after its last heartbeat. The MCP
+    /// `register_agent` tool surfaces this in its `expires_at_unix` reply
+    /// so agents know when to renew.
+    pub fn expires_after(&self) -> Duration {
+        self.inner.lock().expires_after
+    }
+
     pub fn register(
         &self,
         name: String,

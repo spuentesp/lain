@@ -555,6 +555,13 @@ impl LainServer {
         &self.presence_event_tx
     }
 
+    /// How long a presence session stays valid after the last heartbeat.
+    /// The MCP `register_agent` tool surfaces this in its `expires_at_unix`
+    /// reply so agents know when to renew.
+    pub fn presence_expires_after(&self) -> std::time::Duration {
+        self.presence.expires_after()
+    }
+
     /// Process start time, captured at construction. Used by
     /// `get_server_status` to report uptime.
     pub fn started_at(&self) -> SystemTime {
@@ -634,6 +641,13 @@ impl LainServer {
     /// transport chosen at construction time. Errors out if the server
     /// was not built via `with_federation`.
     pub async fn serve(self) -> Result<(), LainError> {
+        // Clone the whole server up front so the MCP layer can hold a
+        // shared `Arc<LainServer>` for the 8 multiplayer tools while the
+        // current `self` is consumed building the MCP handler. Every
+        // inner Arc (presence registry, occupancy map, broadcast
+        // sender) is shared by the clone, so the cost is a handful of
+        // Arc bumps rather than a deep copy.
+        let server_arc = Arc::new(self.clone());
         let federation = self.federation.ok_or_else(|| {
             LainError::Other(
                 "LainServer::serve() called on a non-federation server (use LainServer::new for single-workspace)".into(),
@@ -658,7 +672,8 @@ impl LainServer {
             Arc::clone(&self.last_sync_at),
             Arc::clone(&self.last_error),
         )
-        .with_reload_bus(Arc::clone(&self.reload_bus));
+        .with_reload_bus(Arc::clone(&self.reload_bus))
+        .with_server(server_arc);
         match transport {
             Transport::Http => mcp
                 .run_http(port)
