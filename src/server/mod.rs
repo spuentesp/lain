@@ -27,6 +27,9 @@ pub mod ingest;
 pub mod query;
 pub mod reload;
 
+// Multiplayer awareness
+pub mod presence;
+
 // Re-export the LainServer orchestrator + transport at `crate::server::*`
 // so existing callers (`lain::server::LainServer`, `lain::server::Transport`,
 // `crate::server::LainServer`, `crate::server::Transport`) keep working
