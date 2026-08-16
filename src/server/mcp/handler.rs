@@ -1525,19 +1525,73 @@ async fn handle_request(
             .unwrap());
     }
 
-    // GET /events -> presence/occupancy SSE stream. The full streaming
-    // body (per-frame `event:`/`data:`/`id:` over an unbounded broadcast
-    // receiver) is wired in Task 11; for now we return a 200 with the
-    // correct `Content-Type` and a single `ready` frame so the route
-    // exists and clients can confirm the server speaks SSE.
+    // GET /events -> presence/occupancy SSE stream. Each broadcast event
+    // (`agent_joined`, `agent_left`, `heartbeat_expired`, `claim_granted`,
+    // `claim_released`, `conflict_detected`) is formatted as a single SSE
+    // frame (`event: …\ndata: …\nid: …\n\n`) and pushed into an mpsc
+    // channel; the body wrapper drains the channel so the client sees
+    // frames as they arrive. When the broadcast sender is dropped (the
+    // server is shutting down) the spawned task exits and the body
+    // returns `None`, closing the connection cleanly.
+    //
+    // For sidecar / read-only servers that don't carry the presence layer
+    // we still respond `200 text/event-stream` with a single `error`
+    // frame so EventSource clients don't immediately retry against a
+    // missing capability.
     if method == Method::GET && path == "/events" {
+        let Some(server) = server.as_ref() else {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/event-stream")
+                .header("Cache-Control", "no-cache")
+                .body(full_body(Bytes::from(
+                    "event: error\ndata: {\"reason\":\"presence layer not configured\"}\n\n",
+                )))
+                .unwrap());
+        };
+        let bus_rx = server.presence_event_tx().subscribe();
+        let last_event_id = req
+            .headers()
+            .get("last-event-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let (tx, rx) = mpsc::unbounded_channel::<std::io::Result<Bytes>>();
+        tokio::spawn(async move {
+            use crate::server::sse::serve_sse;
+            let mut stream = serve_sse(bus_rx, last_event_id);
+            // Send one synthetic `ready` frame so clients know the stream
+            // is live before the first real broadcast event arrives.
+            if tx
+                .send(Ok(Bytes::from_static(b"event: ready\ndata: {}\n\n")))
+                .is_err()
+            {
+                return;
+            }
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(frame) => {
+                        let sse = format!(
+                            "event: {}\ndata: {}\nid: {}\n\n",
+                            frame.event, frame.data, frame.id
+                        );
+                        if tx.send(Ok(Bytes::from(sse))).is_err() {
+                            // Receiver dropped — client disconnected.
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // SseFrame's error type is Infallible; the match
+                        // arm is here for completeness.
+                        break;
+                    }
+                }
+            }
+        });
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/event-stream")
             .header("Cache-Control", "no-cache")
-            .body(full_body(Bytes::from(
-                crate::server::sse::sse_placeholder_body(),
-            )))
+            .body(UnsyncBoxBody::new(OverlaySubscribeBody { rx }))
             .unwrap());
     }
 

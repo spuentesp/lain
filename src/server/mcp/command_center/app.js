@@ -145,6 +145,90 @@ async function renderRecentProjects() {
   }
 }
 
+// ── Sidebar: agents online (Task 9) ─────────────────────────────────────────
+
+async function renderAgentsOnline() {
+  const ul = document.getElementById('agents-online');
+  if (!ul) return;
+  ul.innerHTML = '';
+  let list;
+  try {
+    const result = await mcpCall('list_active_agents', {include_background: false});
+    list = parseJson(result) || [];
+  } catch (e) {
+    ul.innerHTML = `<li class="error">list_active_agents failed: ${escapeHtml(e.message)}</li>`;
+    return;
+  }
+  if (!Array.isArray(list) || list.length === 0) {
+    ul.innerHTML = '<li class="muted">no agents online</li>';
+    return;
+  }
+  for (const a of list) {
+    const li = document.createElement('li');
+    li.className = 'agent-row';
+    li.dataset.agentId = a.agent_id;
+    li.innerHTML = `
+      <strong>${escapeHtml(a.name)}</strong>
+      <span class="kind">${escapeHtml(a.kind || '')}</span>
+      <span class="mode">${escapeHtml(a.mode || '')}</span>
+      <span class="claims">${a.claims_count ?? 0} claims</span>
+    `;
+    ul.appendChild(li);
+  }
+}
+
+// ── Sidebar: rooms (claimed files, Task 9) ──────────────────────────────────
+
+async function renderRooms() {
+  const ul = document.getElementById('rooms-list');
+  if (!ul) return;
+  ul.innerHTML = '';
+  let list;
+  try {
+    const result = await mcpCall('list_occupancy', {});
+    list = parseJson(result) || [];
+  } catch (e) {
+    ul.innerHTML = `<li class="error">list_occupancy failed: ${escapeHtml(e.message)}</li>`;
+    return;
+  }
+  if (!Array.isArray(list) || list.length === 0) {
+    ul.innerHTML = '<li class="muted">no active rooms</li>';
+    return;
+  }
+  for (const room of list) {
+    const li = document.createElement('li');
+    const names = (room.agent_names || []).join(', ') || '(none)';
+    li.innerHTML = `<code>${escapeHtml(room.path)}</code>: ${escapeHtml(names)}`;
+    ul.appendChild(li);
+  }
+}
+
+// ── Live SSE subscription (Task 9) ──────────────────────────────────────────
+
+function subscribePresenceEvents() {
+  try {
+    const ev = new EventSource('/events');
+    const rerender = (which) => {
+      if (which === 'agents' || which === 'both') renderAgentsOnline();
+      if (which === 'rooms' || which === 'both') renderRooms();
+    };
+    ev.addEventListener('agent_joined', () => rerender('agents'));
+    ev.addEventListener('agent_left', () => rerender('agents'));
+    ev.addEventListener('heartbeat_expired', () => rerender('agents'));
+    ev.addEventListener('claim_granted', () => rerender('both'));
+    ev.addEventListener('claim_released', () => rerender('both'));
+    ev.addEventListener('conflict_detected', () => rerender('rooms'));
+    ev.addEventListener('ready', () => rerender('both'));
+    ev.addEventListener('error', () => {
+      // EventSource auto-reconnects on transient errors; log once so the
+      // operator can see a dead stream in the JS console.
+      console.warn('presence SSE connection error; EventSource will retry');
+    });
+  } catch (e) {
+    console.warn('failed to open /events EventSource:', e.message);
+  }
+}
+
 // ── Topbar: active project ─────────────────────────────────────────────────
 
 async function renderActiveProject() {
@@ -458,7 +542,13 @@ async function init() {
     renderActiveProject(),
     renderStatusBar(),
     renderOverviewTab(),
+    renderAgentsOnline(),
+    renderRooms(),
   ]);
+
+  // Live presence: open the EventSource once the initial render has run so
+  // the panels have data before the first event redraws them.
+  subscribePresenceEvents();
 
   // Status bar poll.
   setInterval(renderStatusBar, 2000);

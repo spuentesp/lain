@@ -349,3 +349,43 @@ table.repo-table th {
   color: var(--accent-fg);
   border-color: var(--accent);
 }
+
+/* ── Sidebar: agents online + rooms (Task 9) ─────────────────────────── */
+
+.agent-row {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  padding: 0.3em 0;
+  flex-wrap: wrap;
+}
+
+.agent-row .kind,
+.agent-row .mode {
+  font-size: 0.75em;
+  color: #888;
+}
+
+.agent-row .claims {
+  font-size: 0.75em;
+  color: #666;
+  margin-left: auto;
+}
+
+.rooms-panel code {
+  background: #f4f4f4;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+.rooms-panel li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  padding: 0.3rem 0.4rem;
+  margin-bottom: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
