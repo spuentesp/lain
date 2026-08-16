@@ -100,6 +100,8 @@ struct McpResponse {
 #[derive(Debug, Deserialize)]
 struct McpResult {
     content: Vec<McpContent>,
+    #[serde(default, rename = "isError")]
+    is_error: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,16 +140,27 @@ fn text_of(r: McpResult) -> Result<serde_json::Value> {
 
 fn register_if_needed(url: &str, name: &str, kind: &str) -> Result<HookSession> {
     if let Some(s) = read_session(name) {
-        // Heartbeat (ignore failure — server may be restarting).
-        let _ = post_mcp(
+        // Heartbeat. If the server has lost the session (e.g. it restarted
+        // and `.lain` was cleared) the heartbeat returns `isError: true`
+        // with non-JSON text like "heartbeat: unknown agent"; treat that
+        // as a stale session and re-register instead of returning a dead
+        // agent_id that claim/release will fail against.
+        let stale = match post_mcp(
             url,
             "tools/call",
             serde_json::json!({
                 "name": "heartbeat",
                 "arguments": { "agent_id": s.agent_id, "session_token": s.session_token }
             }),
-        );
-        return Ok(s);
+        ) {
+            Ok(r) => r.is_error,
+            Err(_) => true,
+        };
+        if !stale {
+            return Ok(s);
+        }
+        // Drop stale session file before re-registering so we don't loop.
+        let _ = std::fs::remove_file(session_path(name));
     }
     let pid = std::process::id();
     let result = post_mcp(
