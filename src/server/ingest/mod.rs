@@ -31,6 +31,7 @@ use crate::server::reload::ReloadBus;
 use crate::server::tools::ToolExecutor;
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use crate::server::git::GitSensor;
+use crate::server::attribution::AttributionWatcher;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -326,6 +327,27 @@ impl LainServer {
             }
         });
 
+        // Attribution watcher: subscribe to the workspace (the parent of
+        // `repos.yaml`, which is the directory the operator launched us
+        // from) for inotify events and auto-claim edits to the agent that
+        // wrote them. The handle is intentionally dropped — the watcher
+        // thread lives for the lifetime of the process and exits when its
+        // `notify::RecommendedWatcher` is dropped (which happens when the
+        // channel closes on server shutdown). For graceful shutdown we'd
+        // store the handle and abort it; not needed for MVP.
+        let attribution_root = repos_yaml
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let _attribution_handle = AttributionWatcher::new(
+            presence.clone(),
+            occupancy.clone(),
+            presence_event_tx.clone(),
+            attribution_root,
+        )
+        .start();
+
         Ok(Self {
             config: LainConfig {
                 workspace: ws,
@@ -454,6 +476,21 @@ impl LainServer {
                 }
             }
         });
+
+        // Attribution watcher: same wiring as `with_federation`. See that
+        // constructor for the rationale on the path resolution.
+        let attribution_root = repos_yaml
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let _attribution_handle = AttributionWatcher::new(
+            presence.clone(),
+            occupancy.clone(),
+            presence_event_tx.clone(),
+            attribution_root,
+        )
+        .start();
 
         Ok(Self {
             config: LainConfig {
