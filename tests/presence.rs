@@ -193,3 +193,28 @@ async fn lain_server_exposes_presence_and_occupancy() {
     assert!(server.presence.list_active(true).is_empty());
     assert!(server.occupancy.list_all().is_empty());
 }
+
+/// `serve_sse` must convert each broadcast `PresenceEvent` into an
+/// `SseFrame` carrying the variant name and the agent id so a browser
+/// `EventSource` consumer can dispatch on `event` and pull the id out of
+/// `data`. We drop the `futures::StreamExt` import from the brief because
+/// `futures` is not a dependency — `SseStream` exposes `.next()` directly
+/// so callers don't need the trait.
+#[tokio::test]
+async fn sse_broadcasts_presence_events() {
+    use lain::server::presence::PresenceEvent;
+    use lain::server::sse::serve_sse;
+
+    let (tx, _rx) = tokio::sync::broadcast::channel::<PresenceEvent>(16);
+    let mut stream = serve_sse(tx.subscribe(), None);
+
+    tx.send(PresenceEvent::AgentLeft(AgentId("x".into()))).unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+        .await
+        .expect("event arrived")
+        .expect("some event")
+        .expect("not an error");
+    assert!(event.data.contains("AgentLeft"));
+    assert!(event.data.contains("x"));
+}

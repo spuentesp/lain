@@ -1264,6 +1264,22 @@ async fn handle_request(
             .unwrap());
     }
 
+    // GET /events -> presence/occupancy SSE stream. The full streaming
+    // body (per-frame `event:`/`data:`/`id:` over an unbounded broadcast
+    // receiver) is wired in Task 11; for now we return a 200 with the
+    // correct `Content-Type` and a single `ready` frame so the route
+    // exists and clients can confirm the server speaks SSE.
+    if method == Method::GET && path == "/events" {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .body(full_body(Bytes::from(
+                crate::server::sse::sse_placeholder_body(),
+            )))
+            .unwrap());
+    }
+
     // POST /mcp -> JSON-RPC
     if method == Method::POST && path == "/mcp" {
         let body = req.collect().await?;

@@ -11,7 +11,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(transparent)]
 pub struct AgentId(pub String);
 
 impl AgentId {
@@ -33,7 +34,7 @@ pub fn new_session_token() -> String {
     out
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum AgentKind {
     ClaudeCode,
     Kimi,
@@ -63,7 +64,7 @@ impl AgentKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum AgentMode {
     Interactive,
     Background,
@@ -84,22 +85,23 @@ impl AgentMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum ClaimIntent {
     Read,
     Edit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Claim {
     pub agent_id: AgentId,
     pub path: PathBuf,
     pub symbols: Vec<String>,
     pub intent: ClaimIntent,
+    #[serde(skip)]
     pub claimed_at: SystemTime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ConflictEntry {
     pub agent_id: AgentId,
     pub name: String,
@@ -107,20 +109,20 @@ pub struct ConflictEntry {
     pub symbols: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SymbolOccupancy {
     pub symbol: String,
     pub agents: Vec<AgentId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct OccupancyEntry {
     pub path: PathBuf,
     pub agents: Vec<AgentId>,
     pub symbols: Vec<SymbolOccupancy>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentSession {
     pub id: AgentId,
     pub name: String,
@@ -129,7 +131,9 @@ pub struct AgentSession {
     pub pid: Option<u32>,
     pub parent_session_id: Option<AgentId>,
     pub session_token: String,
+    #[serde(skip)]
     pub started_at: SystemTime,
+    #[serde(skip)]
     pub last_heartbeat: SystemTime,
 }
 
@@ -474,7 +478,7 @@ impl Default for OccupancyMap {
 /// - `HeartbeatExpired` — the expiry loop dropped a stale session.
 /// - `ClaimGranted` / `ClaimReleased` — occupancy map changes.
 /// - `ConflictDetected` — an occupancy claim came back with conflicts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum PresenceEvent {
     AgentJoined(AgentSession),
     AgentLeft(AgentId),
