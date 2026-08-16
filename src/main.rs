@@ -21,7 +21,16 @@ async fn main() -> Result<()> {
             port,
             log_level,
             workspace,
-        }) => lain::cli::server::run_server(&config, &transport, port, &log_level, &workspace).await,
+            no_process_attribution,
+        }) => lain::cli::server::run_server(
+            &config,
+            &transport,
+            port,
+            &log_level,
+            &workspace,
+            no_process_attribution,
+        )
+        .await,
         Some(Commands::Workspaces { config, action }) => {
             lain::cli::workspaces::run(action, &config).await
         }

@@ -53,6 +53,13 @@ pub enum Commands {
         /// Active workspace. One of: "auto", "", or a workspace name.
         #[arg(long, default_value = "auto")]
         workspace: String,
+        /// Disable process-based attribution. lain falls back to the
+        /// single-agent heuristic + git polling. Useful on systems
+        /// where `/proc/<pid>/fd` or `lsof` is unreliable (some macOS
+        /// configurations, containerized environments without `/proc`
+        /// access) or for operators who want attribution off entirely.
+        #[arg(long)]
+        no_process_attribution: bool,
     },
     /// Manage `workspaces.yaml` for the project.
     Workspaces {

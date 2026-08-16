@@ -31,7 +31,7 @@ use crate::server::reload::ReloadBus;
 use crate::server::tools::ToolExecutor;
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use crate::server::git::GitSensor;
-use crate::server::attribution::AttributionWatcher;
+use crate::server::attribution::{AttributionBackend, AttributionWatcher, NoopBackend, ProcFsBackend};
 use crate::config::state_path_for_workspace;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +46,20 @@ use tracing::info;
 pub struct LainConfig {
     pub workspace: PathBuf,
     pub memory_path: PathBuf,
+}
+
+/// Pick the platform-appropriate default [`AttributionBackend`] for
+/// constructors that don't take an explicit backend (i.e. the
+/// `LainServer::new` / `with_federation` / `with_federation_and_workspaces`
+/// constructors — every test and embedder that isn't the `lain server`
+/// CLI). The CLI uses the `_with_attribution` variants and picks its
+/// own backend based on platform + `--no-process-attribution`.
+fn default_attribution_backend() -> Arc<dyn AttributionBackend> {
+    if cfg!(target_os = "linux") {
+        Arc::new(ProcFsBackend)
+    } else {
+        Arc::new(NoopBackend)
+    }
 }
 
 /// MCP transport for federation-mode servers. Stdio for local agents,
@@ -132,6 +146,13 @@ pub struct LainServer {
     /// event is dropped (the registry/occupancy state itself remains
     /// consistent on the server side).
     pub presence_event_tx: broadcast::Sender<PresenceEvent>,
+    /// Strategy used by the background attribution watcher to map a
+    /// workspace path to the PID that wrote it. The `lain server` CLI
+    /// picks this at startup based on platform (`ProcFsBackend` on
+    /// Linux, `LsofBackend` on macOS) and the `--no-process-attribution`
+    /// flag (which forces `NoopBackend`). Stored here so it is shared
+    /// with the [`AttributionWatcher`] the constructor spawns.
+    pub attribution: Arc<dyn AttributionBackend>,
 }
 
 impl LainServer {
@@ -223,6 +244,7 @@ impl LainServer {
             presence: Arc::new(PresenceRegistry::new()),
             occupancy: Arc::new(OccupancyMap::new()),
             presence_event_tx,
+            attribution: default_attribution_backend(),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists. Idempotent: missing file is a no-op.
@@ -247,11 +269,37 @@ impl LainServer {
     /// placeholder wiring is sufficient.
     ///
     /// Pair with `serve()` to start the MCP loop on the chosen transport.
+    ///
+    /// This shim picks a platform-default [`AttributionBackend`]
+    /// (procfs on Linux, noop elsewhere). Callers that need a specific
+    /// backend — notably the `lain server` CLI, which has to honor
+    /// `--no-process-attribution` and pick `LsofBackend` on macOS —
+    /// should use `with_federation_with_attribution` instead.
     pub fn with_federation(
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
         repos_yaml: Option<PathBuf>,
+    ) -> Result<Self, LainError> {
+        Self::with_federation_with_attribution(
+            federation,
+            transport,
+            port,
+            repos_yaml,
+            default_attribution_backend(),
+        )
+    }
+
+    /// Same as [`Self::with_federation`] but lets the caller supply an
+    /// explicit [`AttributionBackend`]. The chosen backend is stored on
+    /// the server (in `self.attribution`) and handed to the background
+    /// [`AttributionWatcher`] so it has the same view as the CLI.
+    pub fn with_federation_with_attribution(
+        federation: Arc<FederatedIndex>,
+        transport: Transport,
+        port: u16,
+        repos_yaml: Option<PathBuf>,
+        attribution: Arc<dyn AttributionBackend>,
     ) -> Result<Self, LainError> {
         // Build a minimal executor — same trick as `cmds/server.rs`'s
         // `build_minimal_executor`. Federation tools never reach the
@@ -361,7 +409,8 @@ impl LainServer {
             .and_then(Path::parent)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        let _attribution_handle = AttributionWatcher::new(
+        let _attribution_handle = AttributionWatcher::new_with_backend(
+            attribution.clone(),
             presence.clone(),
             occupancy.clone(),
             presence_event_tx.clone(),
@@ -395,6 +444,7 @@ impl LainServer {
             presence,
             occupancy,
             presence_event_tx,
+            attribution: default_attribution_backend(),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists, and install a persist callback so every
@@ -412,12 +462,37 @@ impl LainServer {
     /// `get_workspace_graph`) against the supplied `WorkspacesFile`. Used
     /// when the server is started with `--workspace <name>` and a
     /// `workspaces.yaml` is present next to `repos.yaml`.
+    ///
+    /// This shim picks a platform-default [`AttributionBackend`] (see
+    /// [`Self::with_federation`] for details). Callers that need a
+    /// specific backend — notably the `lain server` CLI — should use
+    /// [`Self::with_federation_and_workspaces_with_attribution`].
     pub fn with_federation_and_workspaces(
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
         workspaces: Arc<WorkspacesFile>,
         repos_yaml: Option<PathBuf>,
+    ) -> Result<Self, LainError> {
+        Self::with_federation_and_workspaces_with_attribution(
+            federation,
+            transport,
+            port,
+            workspaces,
+            repos_yaml,
+            default_attribution_backend(),
+        )
+    }
+
+    /// Same as [`Self::with_federation_and_workspaces`] but lets the
+    /// caller supply an explicit [`AttributionBackend`].
+    pub fn with_federation_and_workspaces_with_attribution(
+        federation: Arc<FederatedIndex>,
+        transport: Transport,
+        port: u16,
+        workspaces: Arc<WorkspacesFile>,
+        repos_yaml: Option<PathBuf>,
+        attribution: Arc<dyn AttributionBackend>,
     ) -> Result<Self, LainError> {
         // Mostly the same wiring as `with_federation`. The differences:
         // we store the workspaces file in `federation_workspaces`, and we
@@ -526,7 +601,8 @@ impl LainServer {
             .and_then(Path::parent)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        let _attribution_handle = AttributionWatcher::new(
+        let _attribution_handle = AttributionWatcher::new_with_backend(
+            attribution.clone(),
             presence.clone(),
             occupancy.clone(),
             presence_event_tx.clone(),
@@ -560,6 +636,7 @@ impl LainServer {
             presence,
             occupancy,
             presence_event_tx,
+            attribution: default_attribution_backend(),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists, and install a persist callback. See the
@@ -601,6 +678,14 @@ impl LainServer {
     /// their own consumers.
     pub fn presence_event_tx(&self) -> &broadcast::Sender<PresenceEvent> {
         &self.presence_event_tx
+    }
+
+    /// Borrowed handle to the [`AttributionBackend`] this server was
+    /// constructed with. Surfaced for diagnostics and tests; the
+    /// background [`AttributionWatcher`] already shares the same `Arc`
+    /// so callers don't need to plumb it further.
+    pub fn attribution(&self) -> &Arc<dyn AttributionBackend> {
+        &self.attribution
     }
 
     /// How long a presence session stays valid after the last heartbeat.

@@ -9,9 +9,13 @@
 use anyhow::{anyhow, Result};
 use crate::federation::health::RepoHealth;
 use crate::federation::loader::{load_federation, load_federation_with_workspace};
-use crate::server::{LainServer, Transport};
+use crate::server::{
+    attribution::{AttributionBackend, LsofBackend, NoopBackend, ProcFsBackend},
+    LainServer, Transport,
+};
 use crate::state::ActiveWorkspace;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -24,13 +28,15 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 /// `workspace_arg` selects the active workspace: "auto" resolves via
 /// `~/.config/lain/active_workspace`, "" loads every repo in
 /// `repos.yaml` (today's behavior), and any other value names a workspace
-/// from `workspaces.yaml` next to `repos.yaml`.
+/// from `workspaces.yaml` next to `repos.yaml`. `no_process_attribution`
+/// forces the no-op [`AttributionBackend`] regardless of platform.
 pub async fn run_server(
     config_path: &Path,
     transport: &str,
     port: u16,
     log_level: &str,
     workspace_arg: &str,
+    no_process_attribution: bool,
 ) -> Result<()> {
     init_tracing(log_level);
 
@@ -89,15 +95,48 @@ pub async fn run_server(
         }
     };
 
+    // Pick the attribution backend based on the platform and the
+    // `--no-process-attribution` flag. The CLI is the only place that
+    // knows about the flag, so it's the only place that can decide
+    // between `ProcFsBackend` (Linux default), `LsofBackend` (macOS
+    // default), and `NoopBackend` (Windows default or explicit
+    // opt-out). Tests and embedders that go through `with_federation*`
+    // directly still get a cfg-based default and never see this
+    // dispatch.
+    let attribution: Arc<dyn AttributionBackend> = if no_process_attribution {
+        info!("attribution: --no-process-attribution set; using NoopBackend");
+        Arc::new(NoopBackend)
+    } else if cfg!(target_os = "linux") {
+        Arc::new(ProcFsBackend)
+    } else if cfg!(target_os = "macos") {
+        Arc::new(LsofBackend)
+    } else {
+        Arc::new(NoopBackend)
+    };
+    info!("attribution: using backend '{}'", attribution.name());
+
     // If a workspaces file exists next to repos.yaml, load it so the
     // workspace MCP tools are registered. Optional — a server with no
     // workspaces.yaml still works (no workspace tools, today's behavior).
     let workspaces = load_workspaces_for_server(config_path).ok().flatten();
     let repos_yaml = Some(config_path.to_path_buf());
     let server = if let Some(workspaces) = workspaces {
-        LainServer::with_federation_and_workspaces(fed, transport_enum, port, workspaces, repos_yaml.clone())?
+        LainServer::with_federation_and_workspaces_with_attribution(
+            fed,
+            transport_enum,
+            port,
+            workspaces,
+            repos_yaml.clone(),
+            attribution,
+        )?
     } else {
-        LainServer::with_federation(fed, transport_enum, port, repos_yaml.clone())?
+        LainServer::with_federation_with_attribution(
+            fed,
+            transport_enum,
+            port,
+            repos_yaml.clone(),
+            attribution,
+        )?
     };
 
     // Record this project under `~/.config/lain/recent_projects` so the
@@ -184,7 +223,6 @@ async fn load_federation_for_workspace(
 
 // Bring `FederatedIndex` into scope for the helper above.
 use crate::federation::federated_index::FederatedIndex;
-use std::sync::Arc;
 
 use crate::server::reload::run_rebuild;
 
