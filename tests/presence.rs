@@ -174,3 +174,22 @@ fn list_all_returns_all_claimed_paths() {
     assert!(paths.contains(&std::path::PathBuf::from("auth.rs")));
     assert!(paths.contains(&std::path::PathBuf::from("db.rs")));
 }
+
+/// `LainServer::new` (single-workspace path) must carry an empty
+/// `PresenceRegistry` and `OccupancyMap` so the MCP/SSE layer can hand
+/// them out without conditional checks. The expiry loop is only spawned
+/// by the federation constructors; this test exercises the simpler path.
+#[tokio::test]
+async fn lain_server_exposes_presence_and_occupancy() {
+    use lain::server::LainServer;
+    // Build a single-workspace server (uses the placeholder ingestion)
+    let tmp = tempfile::tempdir().unwrap();
+    // `GitSensor::new` calls `git2::Repository::open`, which requires an
+    // initialized repo — a bare `.git` directory is not enough.
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    assert!(server.presence.list_active(true).is_empty());
+    assert!(server.occupancy.list_all().is_empty());
+}

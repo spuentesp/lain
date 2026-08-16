@@ -463,3 +463,23 @@ impl OccupancyMap {
 impl Default for OccupancyMap {
     fn default() -> Self { Self::new() }
 }
+
+/// Broadcast events emitted by the presence layer. `LainServer` owns the
+/// sender; SSE handlers (Task 6) and any in-process subscribers clone the
+/// receiver to stream these to clients.
+///
+/// Variants:
+/// - `AgentJoined` — a new session was registered.
+/// - `AgentLeft` — a session was explicitly removed (not via expiry).
+/// - `HeartbeatExpired` — the expiry loop dropped a stale session.
+/// - `ClaimGranted` / `ClaimReleased` — occupancy map changes.
+/// - `ConflictDetected` — an occupancy claim came back with conflicts.
+#[derive(Debug, Clone)]
+pub enum PresenceEvent {
+    AgentJoined(AgentSession),
+    AgentLeft(AgentId),
+    HeartbeatExpired(AgentId),
+    ClaimGranted { agent_id: AgentId, path: PathBuf },
+    ClaimReleased { agent_id: AgentId, path: PathBuf },
+    ConflictDetected { agent_id: AgentId, conflicts: Vec<ConflictEntry> },
+}

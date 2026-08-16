@@ -26,6 +26,7 @@ use crate::server::graph::GraphDatabase;
 use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::{OverlayDiff, VolatileOverlay};
+use crate::server::presence::{OccupancyMap, PresenceEvent, PresenceRegistry};
 use crate::server::reload::ReloadBus;
 use crate::server::tools::ToolExecutor;
 use crate::server::tuning::{load_tuning_config, TuningConfig};
@@ -35,6 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::broadcast;
 use tracing::info;
 
 /// Server configuration
@@ -113,6 +115,21 @@ pub struct LainServer {
     /// watcher, Unix socket listener, MCP handler, and rebuild task can
     /// all share a single bus.
     reload_bus: Arc<ReloadBus>,
+    /// Presence registry: which agents are connected, plus their heartbeat.
+    /// Wrapped in `Arc` so the MCP dispatcher, attribution watcher, and SSE
+    /// endpoint can share the same registry without juggling lifetimes.
+    /// Spawned via `PresenceRegistry::new()` (default 60s expiry).
+    pub presence: Arc<PresenceRegistry>,
+    /// Occupancy map: which files/symbols each agent has claimed. Wrapped
+    /// in `Arc` for the same reason as `presence`.
+    pub occupancy: Arc<OccupancyMap>,
+    /// Broadcast sender for `PresenceEvent`s. Subscribers (SSE handler in
+    /// Task 6, attribution watcher, etc.) clone the receiver and stream
+    /// events to clients. Capacity 256 is generous for an interactive
+    /// session; if a slow consumer falls behind, `send` returns Err and the
+    /// event is dropped (the registry/occupancy state itself remains
+    /// consistent on the server side).
+    pub presence_event_tx: broadcast::Sender<PresenceEvent>,
 }
 
 impl LainServer {
@@ -180,6 +197,7 @@ impl LainServer {
 
         info!("Lain server initialized");
         let now = SystemTime::now();
+        let (presence_event_tx, _) = broadcast::channel(256);
         Ok(Self {
             config,
             graph,
@@ -200,6 +218,9 @@ impl LainServer {
             last_error: Arc::new(Mutex::new(None)),
             repos_yaml: None,
             reload_bus: Arc::new(ReloadBus::new()),
+            presence: Arc::new(PresenceRegistry::new()),
+            occupancy: Arc::new(OccupancyMap::new()),
+            presence_event_tx,
         })
     }
 
@@ -281,6 +302,30 @@ impl LainServer {
         let cross_encoder = crate::server::nlp::CrossEncoder::from_dir(&ws);
         let now = SystemTime::now();
 
+        // Presence layer: allocate registry + occupancy map, build a
+        // broadcast channel for `PresenceEvent`s, and spawn the heartbeat
+        // expiry loop. The expiry task fires every 5 seconds; on each tick
+        // it drops stale sessions from the registry and emits a
+        // `HeartbeatExpired` event on the broadcast bus. The `JoinHandle`
+        // is intentionally dropped — the task lives for the lifetime of
+        // the process. (For graceful shutdown we'd store the handle and
+        // abort it; not needed for MVP.)
+        let presence = Arc::new(PresenceRegistry::new());
+        let occupancy = Arc::new(OccupancyMap::new());
+        let (presence_event_tx, _) = broadcast::channel(256);
+        let presence_for_expiry = presence.clone();
+        let expiry_tx = presence_event_tx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                let released = presence_for_expiry.expire_stale();
+                for id in &released {
+                    let _ = expiry_tx.send(PresenceEvent::HeartbeatExpired(id.clone()));
+                }
+            }
+        });
+
         Ok(Self {
             config: LainConfig {
                 workspace: ws,
@@ -304,6 +349,9 @@ impl LainServer {
             last_error: Arc::new(Mutex::new(None)),
             repos_yaml,
             reload_bus: Arc::new(ReloadBus::new()),
+            presence,
+            occupancy,
+            presence_event_tx,
         })
     }
 
@@ -389,6 +437,24 @@ impl LainServer {
         let cross_encoder = crate::server::nlp::CrossEncoder::from_dir(&ws);
         let now = SystemTime::now();
 
+        // Presence layer: same wiring as `with_federation`. See that
+        // constructor for the rationale on each piece.
+        let presence = Arc::new(PresenceRegistry::new());
+        let occupancy = Arc::new(OccupancyMap::new());
+        let (presence_event_tx, _) = broadcast::channel(256);
+        let presence_for_expiry = presence.clone();
+        let expiry_tx = presence_event_tx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                let released = presence_for_expiry.expire_stale();
+                for id in &released {
+                    let _ = expiry_tx.send(PresenceEvent::HeartbeatExpired(id.clone()));
+                }
+            }
+        });
+
         Ok(Self {
             config: LainConfig {
                 workspace: ws,
@@ -412,6 +478,9 @@ impl LainServer {
             last_error: Arc::new(Mutex::new(None)),
             repos_yaml,
             reload_bus: Arc::new(ReloadBus::new()),
+            presence,
+            occupancy,
+            presence_event_tx,
         })
     }
 
@@ -426,6 +495,27 @@ impl LainServer {
     /// construct it eagerly today but the accessor is the contract).
     pub fn reload_bus(&self) -> Arc<ReloadBus> {
         Arc::clone(&self.reload_bus)
+    }
+
+    /// Borrowed handle to the presence registry. The field itself is
+    /// already `pub`, but this accessor keeps the contract consistent
+    /// with the other `Arc`-sharing accessors (`reload_bus`,
+    /// `workspaces_handle`).
+    pub fn presence(&self) -> &Arc<PresenceRegistry> {
+        &self.presence
+    }
+
+    /// Borrowed handle to the occupancy map. Same rationale as
+    /// `presence()`.
+    pub fn occupancy(&self) -> &Arc<OccupancyMap> {
+        &self.occupancy
+    }
+
+    /// Borrowed handle to the `PresenceEvent` broadcast sender. Subscribers
+    /// clone the receiver side (`tx.subscribe()`) to stream events to
+    /// their own consumers.
+    pub fn presence_event_tx(&self) -> &broadcast::Sender<PresenceEvent> {
+        &self.presence_event_tx
     }
 
     /// Process start time, captured at construction. Used by
