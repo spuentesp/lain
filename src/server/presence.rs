@@ -156,3 +156,124 @@ impl AgentSession {
         }
     }
 }
+
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeartbeatError {
+    UnknownAgent,
+    WrongToken,
+}
+
+impl std::fmt::Display for HeartbeatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeartbeatError::UnknownAgent => write!(f, "unknown agent"),
+            HeartbeatError::WrongToken => write!(f, "wrong session token"),
+        }
+    }
+}
+
+impl std::error::Error for HeartbeatError {}
+
+#[derive(Debug)]
+struct PresenceState {
+    sessions: HashMap<AgentId, AgentSession>,
+    by_token: HashMap<String, AgentId>,
+    expires_after: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct PresenceRegistry {
+    inner: std::sync::Arc<Mutex<PresenceState>>,
+}
+
+impl PresenceRegistry {
+    pub fn new() -> Self {
+        Self::with_expiry(Duration::from_secs(60))
+    }
+
+    pub fn with_expiry(expires_after: Duration) -> Self {
+        Self {
+            inner: std::sync::Arc::new(Mutex::new(PresenceState {
+                sessions: HashMap::new(),
+                by_token: HashMap::new(),
+                expires_after,
+            })),
+        }
+    }
+
+    pub fn register(
+        &self,
+        name: String,
+        kind: AgentKind,
+        mode: AgentMode,
+        pid: Option<u32>,
+        parent_session_id: Option<AgentId>,
+    ) -> AgentSession {
+        let id = new_agent_id();
+        let session = AgentSession::new(id.clone(), name, kind, mode, pid, parent_session_id);
+        let mut s = self.inner.lock();
+        s.by_token.insert(session.session_token.clone(), session.id.clone());
+        s.sessions.insert(session.id.clone(), session.clone());
+        session
+    }
+
+    pub fn heartbeat(&self, agent_id: &AgentId, session_token: &str) -> Result<(), HeartbeatError> {
+        let mut s = self.inner.lock();
+        let session = s.sessions.get_mut(agent_id).ok_or(HeartbeatError::UnknownAgent)?;
+        if session.session_token != session_token {
+            return Err(HeartbeatError::WrongToken);
+        }
+        session.last_heartbeat = SystemTime::now();
+        Ok(())
+    }
+
+    pub fn expire_stale(&self) -> Vec<AgentId> {
+        let now = SystemTime::now();
+        let expires_after = self.inner.lock().expires_after;
+        let mut s = self.inner.lock();
+        let stale: Vec<AgentId> = s.sessions.iter()
+            .filter(|(_, sess)| now.duration_since(sess.last_heartbeat).unwrap_or_default() >= expires_after)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            if let Some(sess) = s.sessions.remove(id) {
+                s.by_token.remove(&sess.session_token);
+            }
+        }
+        stale
+    }
+
+    pub fn list_active(&self, include_background: bool) -> Vec<AgentSession> {
+        let s = self.inner.lock();
+        s.sessions.values()
+            .filter(|sess| include_background || sess.mode == AgentMode::Interactive)
+            .cloned()
+            .collect()
+    }
+
+    pub fn get(&self, id: &AgentId) -> Option<AgentSession> {
+        self.inner.lock().sessions.get(id).cloned()
+    }
+
+    pub fn remove(&self, id: &AgentId) -> Option<AgentSession> {
+        let mut s = self.inner.lock();
+        let removed = s.sessions.remove(id);
+        if let Some(ref sess) = removed {
+            s.by_token.remove(&sess.session_token);
+        }
+        removed
+    }
+
+    pub fn by_token(&self, token: &str) -> Option<AgentSession> {
+        let s = self.inner.lock();
+        s.by_token.get(token).and_then(|id| s.sessions.get(id).cloned())
+    }
+}
+
+impl Default for PresenceRegistry {
+    fn default() -> Self { Self::new() }
+}
