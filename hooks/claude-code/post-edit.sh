@@ -17,5 +17,5 @@ LAIN_URL="${LAIN_URL:-http://localhost:9999/mcp}"
 
 if ! command -v lain >/dev/null 2>&1; then exit 0; fi
 
-lain hooks release --url "$LAIN_URL" --path "$FILE_PATH" --agent-name "claude-code" --agent-kind "claude-code" || true
+lain hooks release --url "$LAIN_URL" --path "$FILE_PATH" --agent-name "${LAIN_AGENT_NAME:-claude-code}" --agent-kind "claude-code" || true
 exit 0

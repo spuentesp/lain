@@ -25,7 +25,7 @@ if ! command -v lain >/dev/null 2>&1; then
   exit 0
 fi
 
-if ! lain hooks claim --url "$LAIN_URL" --path "$FILE_PATH" --agent-name "claude-code" --agent-kind "claude-code" --intent edit; then
+if ! lain hooks claim --url "$LAIN_URL" --path "$FILE_PATH" --agent-name "${LAIN_AGENT_NAME:-claude-code}" --agent-kind "claude-code" --intent edit; then
   # Infrastructure failure (lain unreachable, etc.) — let Claude edit anyway.
   exit 0
 fi
