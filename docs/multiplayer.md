@@ -97,3 +97,21 @@ If an agent forgets to call `claim_files`, lain still knows:
 2. **`/proc/<pid>/fd`** looks for the writer's PID. If a registered agent has that PID, lain auto-claims on their behalf.
 3. **Single-agent fallback**: if only one agent is connected, edits are attributed to them.
 4. **Audit log**: unattributed edits are logged to stderr so the operator can investigate.
+
+## Stability & persistence
+
+Symbol IDs include a BLAKE3 content hash. Claims carry an optional `ttl_seconds` that bounds them even with active heartbeats. State (`PresenceRegistry` + `OccupancyMap`) is persisted to `~/.local/lain/state/<config-stem>.json` on every mutation and restored on `lain server` startup, so claims survive restarts.
+
+For attribution portability, lain selects the backend at startup:
+
+| OS | Backend | Notes |
+|---|---|---|
+| Linux | `ProcFsBackend` | Walks `/proc/<pid>/fd` for the writer's pid. |
+| macOS | `LsofBackend` | Shells out to `lsof -F p`. Falls back to `NoopBackend` if `lsof` is missing. |
+| Windows | `NoopBackend` | Always returns `None`. lain falls back to git polling + single-agent heuristic. |
+
+Disable process attribution entirely with `--no-process-attribution`:
+
+```bash
+lain server --config ./repos.yaml --transport http --port 9999 --no-process-attribution
+```
