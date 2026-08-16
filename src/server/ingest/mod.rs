@@ -26,12 +26,13 @@ use crate::server::graph::GraphDatabase;
 use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::{OverlayDiff, VolatileOverlay};
-use crate::server::presence::{OccupancyMap, PresenceEvent, PresenceRegistry};
+use crate::server::presence::{save_pair as save_presence_pair, load_pair as load_presence_pair, OccupancyMap, PresenceEvent, PresenceRegistry};
 use crate::server::reload::ReloadBus;
 use crate::server::tools::ToolExecutor;
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use crate::server::git::GitSensor;
 use crate::server::attribution::AttributionWatcher;
+use crate::config::state_path_for_workspace;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -199,7 +200,7 @@ impl LainServer {
         info!("Lain server initialized");
         let now = SystemTime::now();
         let (presence_event_tx, _) = broadcast::channel(256);
-        Ok(Self {
+        let server = Self {
             config,
             graph,
             overlay,
@@ -222,7 +223,15 @@ impl LainServer {
             presence: Arc::new(PresenceRegistry::new()),
             occupancy: Arc::new(OccupancyMap::new()),
             presence_event_tx,
-        })
+        };
+        // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
+        // when the file exists. Idempotent: missing file is a no-op.
+        // JSON / IO errors here propagate so a corrupted snapshot
+        // surfaces at construction rather than half-hydrating the
+        // registry mid-session.
+        server.load_state()?;
+        server.install_persist_callback();
+        Ok(server)
     }
 
     /// Federation-aware constructor. Builds a `LainServer` whose tool surface
@@ -348,7 +357,7 @@ impl LainServer {
         )
         .start();
 
-        Ok(Self {
+        let server = Self {
             config: LainConfig {
                 workspace: ws,
                 memory_path: mem_path,
@@ -374,7 +383,16 @@ impl LainServer {
             presence,
             occupancy,
             presence_event_tx,
-        })
+        };
+        // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
+        // when the file exists, and install a persist callback so every
+        // subsequent mutation (claim, release, register, expire) flushes
+        // back to disk. Same rationale as `LainServer::new`: errors here
+        // propagate so a corrupted snapshot surfaces at construction
+        // instead of half-hydrating the registry.
+        server.load_state()?;
+        server.install_persist_callback();
+        Ok(server)
     }
 
     /// Same as `with_federation` but also registers the workspace MCP
@@ -492,7 +510,7 @@ impl LainServer {
         )
         .start();
 
-        Ok(Self {
+        let server = Self {
             config: LainConfig {
                 workspace: ws,
                 memory_path: mem_path,
@@ -518,7 +536,13 @@ impl LainServer {
             presence,
             occupancy,
             presence_event_tx,
-        })
+        };
+        // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
+        // when the file exists, and install a persist callback. See the
+        // matching comment in `LainServer::new` for rationale.
+        server.load_state()?;
+        server.install_persist_callback();
+        Ok(server)
     }
 
     /// Federation accessor. Returns `None` for single-workspace servers.
@@ -808,5 +832,66 @@ impl LainServer {
     pub async fn shutdown(&self) {
         info!("Shutting down Lain server...");
         self.lsp_pool.shutdown_all().await;
+    }
+
+    /// Path on disk where this server's `PresenceRegistry` +
+    /// `OccupancyMap` JSON snapshot is persisted. Derived from the
+    /// workspace dir (last path component, sanitized). Used by
+    /// `save_state` / `load_state`; exposed for tests / operators.
+    pub fn state_path(&self) -> PathBuf {
+        state_path_for_workspace(&self.config.workspace)
+    }
+
+    /// Persist the live `PresenceRegistry` + `OccupancyMap` to the
+    /// server's state file. Called by the persist callback installed
+    /// in the three constructors, so callers do not need to invoke
+    /// it directly — but it remains a `pub` method so `cron`-style
+    /// background ops can force a flush.
+    pub fn save_state(&self) -> Result<(), LainError> {
+        let path = self.state_path();
+        save_presence_pair(&path, &self.presence, &self.occupancy)
+            .map_err(|e| LainError::Other(format!("save_state({}): {e}", path.display())))
+    }
+
+    /// Hydrate the live `PresenceRegistry` + `OccupancyMap` from the
+    /// server's state file, if any. Idempotent: missing file is a
+    /// no-op. Used by the three constructors right after the
+    /// registries are built.
+    pub fn load_state(&self) -> Result<(), LainError> {
+        let path = self.state_path();
+        load_presence_pair(&path, &self.presence, &self.occupancy)
+            .map_err(|e| LainError::Other(format!("load_state({}): {e}", path.display())))
+    }
+
+    /// Install a persist callback on `presence` and `occupancy` that
+    /// drives `save_state` on every mutation. Called once from each
+    /// constructor, immediately after the registries are built and
+    /// after `load_state` has hydrated them.
+    fn install_persist_callback(&self) {
+        let path = self.state_path();
+        let presence = Arc::clone(&self.presence);
+        let occupancy = Arc::clone(&self.occupancy);
+        let cb = move || {
+            if let Err(e) = save_presence_pair(&path, &presence, &occupancy) {
+                tracing::warn!("persist failed: {e}");
+            }
+        };
+        self.presence.set_persist_callback(cb.clone());
+        // `set_persist_callback` takes `impl Fn()`, so rebuild for the
+        // second setter rather than trying to share an Arc<dyn Fn()>;
+        // each closure captures only `Send + Sync` data so both
+        // callbacks are independent and cheap to construct.
+        let presence2 = Arc::clone(&self.presence);
+        let occupancy2 = Arc::clone(&self.occupancy);
+        let path2 = self.state_path();
+        let cb2 = move || {
+            if let Err(e) = save_presence_pair(&path2, &presence2, &occupancy2) {
+                tracing::warn!("persist failed: {e}");
+            }
+        };
+        self.occupancy.set_persist_callback(cb2);
+        // Touch the first closure so the compiler does not warn about
+        // an unused binding; both callbacks are installed above.
+        let _ = cb;
     }
 }

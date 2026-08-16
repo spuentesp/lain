@@ -44,3 +44,42 @@ pub fn run_dir() -> PathBuf {
 pub fn hooks_dir() -> PathBuf {
     config_dir().join("hooks")
 }
+
+/// Return the path to the lain state dir (`~/.local/lain/state`).
+/// `LainServer::save_state` / `load_state` write and read the
+/// `PresenceRegistry` + `OccupancyMap` JSON snapshot here, one file
+/// per workspace (`<workspace-stem>.json`). `$XDG_STATE_HOME/lain`
+/// takes precedence when present (per the XDG spec).
+pub fn state_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("lain");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local").join("lain").join("state")
+}
+
+/// Resolve the persisted-state file for a given workspace. The
+/// filename is `<config-stem>.json` where `config_stem` is the last
+/// path component of the workspace, sanitized to only alphanumerics
+/// + `-_` (punctuation becomes `-`). This keeps the state filename
+/// stable across relaunches with the same workspace, without needing
+/// to embed absolute paths.
+pub fn state_path_for_workspace(workspace: &std::path::Path) -> PathBuf {
+    let stem = workspace
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("default");
+    let cleaned: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    state_dir().join(format!("{}.json", cleaned))
+}

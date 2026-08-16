@@ -456,3 +456,46 @@ fn symbol_hash_zero_is_distinct_from_real_hash() {
     let r = SymbolHash::from_bytes(b"");
     assert_ne!(z, r);
 }
+
+// --- Task 2 brief: PresenceRegistry + OccupancyMap persistence ---
+
+/// Round-trip a freshly-populated pair of registries through the JSON
+/// persistence helpers. The first pair is mutated in-memory, serialized
+/// to a temp file via `save_pair`, and a second pair is hydrated via
+/// `load_pair`. After hydration the recovered registry carries one
+/// active session and the recovered occupancy map has the original
+/// claim attached to the same agent id.
+#[test]
+fn persistence_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stem = "test-stem";
+    let path = tmp.path().join(format!("{stem}.json"));
+
+    // Round 1: register an agent, claim a file, save.
+    let reg1 = PresenceRegistry::new();
+    let occ1 = OccupancyMap::new();
+    let agent = reg1.register(
+        "a".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    occ1.claim(
+        &agent.id,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("foo.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+        }],
+    );
+    save_pair(&path, &reg1, &occ1).unwrap();
+
+    // Round 2: load into a fresh registry.
+    let reg2 = PresenceRegistry::new();
+    let occ2 = OccupancyMap::new();
+    load_pair(&path, &reg2, &occ2).unwrap();
+
+    assert_eq!(reg2.list_active(true).len(), 1);
+    assert_eq!(occ2.list_for_agent(&agent.id).len(), 1);
+}

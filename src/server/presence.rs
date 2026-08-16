@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct AgentId(pub String);
 
@@ -34,7 +34,7 @@ pub fn new_session_token() -> String {
     out
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentKind {
     ClaudeCode,
     Kimi,
@@ -64,7 +64,7 @@ impl AgentKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentMode {
     Interactive,
     Background,
@@ -85,7 +85,7 @@ impl AgentMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClaimIntent {
     Read,
     Edit,
@@ -133,7 +133,15 @@ impl<'de> serde::Deserialize<'de> for SymbolHash {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// `SystemTime::default()` is not in `std`; provide a fixed UNIX_EPOCH
+/// default for the timestamps that we deliberately leave out of the
+/// persisted JSON (started_at, last_heartbeat, claimed_at). Hydrating
+/// the registries from disk leaves these at UNIX_EPOCH; downstream code
+/// that cares about real timestamps (the federation expiry loop) reloads
+/// them via the live `heartbeat` flow, not via persistence.
+fn epoch() -> SystemTime { SystemTime::UNIX_EPOCH }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
     pub agent_id: AgentId,
     pub path: PathBuf,
@@ -145,7 +153,7 @@ pub struct Claim {
     /// tree-sitter bodies through.
     pub content_hash: Option<SymbolHash>,
     pub intent: ClaimIntent,
-    #[serde(skip)]
+    #[serde(skip_serializing, default = "epoch")]
     pub claimed_at: SystemTime,
     /// Optional expiry timestamp (PR 10 Task 3 hook). `None` means
     /// "no expiry set"; the federation expiry loop will ignore it.
@@ -173,7 +181,7 @@ pub struct OccupancyEntry {
     pub symbols: Vec<SymbolOccupancy>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentSession {
     pub id: AgentId,
     pub name: String,
@@ -182,9 +190,9 @@ pub struct AgentSession {
     pub pid: Option<u32>,
     pub parent_session_id: Option<AgentId>,
     pub session_token: String,
-    #[serde(skip)]
+    #[serde(skip_serializing, default = "epoch")]
     pub started_at: SystemTime,
-    #[serde(skip)]
+    #[serde(skip_serializing, default = "epoch")]
     pub last_heartbeat: SystemTime,
 }
 
@@ -240,9 +248,35 @@ struct PresenceState {
     expires_after: Duration,
 }
 
-#[derive(Debug, Clone)]
+/// Callback type fired on each `PresenceRegistry` mutation. Wrapped
+/// behind `Option<Arc<...>>` so registries constructed without
+/// persistence (default `PresenceRegistry::new`) pay no allocation
+/// cost beyond a single Arc + None slot.
+type PersistFn = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone)]
 pub struct PresenceRegistry {
     inner: std::sync::Arc<Mutex<PresenceState>>,
+    /// Optional persist callback. Set via `set_persist_callback` from
+    /// the `LainServer` constructors after the registries are built;
+    /// fires on every mutation that changes the persisted shape
+    /// (`register`, `expire_stale`, `remove`). Mutations guarded by
+    /// `heartbeat` are not persisted (heartbeat fields are
+    /// `#[serde(skip_serializing)]`).
+    persist_cb: std::sync::Arc<parking_lot::Mutex<Option<PersistFn>>>,
+}
+
+impl std::fmt::Debug for PresenceRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Manual Debug impl: `dyn Fn() + Send + Sync` doesn't implement
+        // Debug, so we can't derive. Surface the inner counters so a
+        // `{:?}` print still conveys state for tests / logs.
+        let s = self.inner.lock();
+        f.debug_struct("PresenceRegistry")
+            .field("sessions", &s.sessions.len())
+            .field("expires_after_secs", &s.expires_after.as_secs())
+            .finish()
+    }
 }
 
 impl PresenceRegistry {
@@ -257,7 +291,26 @@ impl PresenceRegistry {
                 by_token: HashMap::new(),
                 expires_after,
             })),
+            persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         }
+    }
+
+    /// Install a callback fired on every mutation that should be
+    /// persisted. Called once per `LainServer` constructor; replacing
+    /// a previously set callback is supported but unusual.
+    pub fn set_persist_callback<F>(&self, cb: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        let mut slot = self.persist_cb.lock();
+        *slot = Some(std::sync::Arc::new(cb));
+    }
+
+    /// Clone the (optional) persist callback out of the slot. Returns
+    /// `None` when no callback has been installed; callers always
+    /// no-op in that case.
+    fn cloned_persist_cb(&self) -> Option<PersistFn> {
+        self.persist_cb.lock().clone()
     }
 
     /// How long a session stays valid after its last heartbeat. The MCP
@@ -277,9 +330,12 @@ impl PresenceRegistry {
     ) -> AgentSession {
         let id = new_agent_id();
         let session = AgentSession::new(id.clone(), name, kind, mode, pid, parent_session_id);
-        let mut s = self.inner.lock();
-        s.by_token.insert(session.session_token.clone(), session.id.clone());
-        s.sessions.insert(session.id.clone(), session.clone());
+        {
+            let mut s = self.inner.lock();
+            s.by_token.insert(session.session_token.clone(), session.id.clone());
+            s.sessions.insert(session.id.clone(), session.clone());
+        }
+        if let Some(cb) = self.cloned_persist_cb() { cb(); }
         session
     }
 
@@ -296,15 +352,21 @@ impl PresenceRegistry {
     pub fn expire_stale(&self) -> Vec<AgentId> {
         let now = SystemTime::now();
         let expires_after = self.inner.lock().expires_after;
-        let mut s = self.inner.lock();
-        let stale: Vec<AgentId> = s.sessions.iter()
-            .filter(|(_, sess)| now.duration_since(sess.last_heartbeat).unwrap_or_default() >= expires_after)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &stale {
-            if let Some(sess) = s.sessions.remove(id) {
-                s.by_token.remove(&sess.session_token);
+        let stale: Vec<AgentId> = {
+            let mut s = self.inner.lock();
+            let stale: Vec<AgentId> = s.sessions.iter()
+                .filter(|(_, sess)| now.duration_since(sess.last_heartbeat).unwrap_or_default() >= expires_after)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &stale {
+                if let Some(sess) = s.sessions.remove(id) {
+                    s.by_token.remove(&sess.session_token);
+                }
             }
+            stale
+        };
+        if !stale.is_empty() {
+            if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
         stale
     }
@@ -322,10 +384,16 @@ impl PresenceRegistry {
     }
 
     pub fn remove(&self, id: &AgentId) -> Option<AgentSession> {
-        let mut s = self.inner.lock();
-        let removed = s.sessions.remove(id);
-        if let Some(ref sess) = removed {
-            s.by_token.remove(&sess.session_token);
+        let removed = {
+            let mut s = self.inner.lock();
+            let removed = s.sessions.remove(id);
+            if let Some(ref sess) = removed {
+                s.by_token.remove(&sess.session_token);
+            }
+            removed
+        };
+        if removed.is_some() {
+            if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
         removed
     }
@@ -371,131 +439,185 @@ struct OccupancyState {
     by_agent: HashMap<AgentId, Vec<Claim>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OccupancyMap {
     inner: std::sync::Arc<Mutex<OccupancyState>>,
+    /// Optional persist callback. Same shape as the registry's
+    /// `persist_cb`; fires on `claim`, `release`, and `release_all_for`
+    /// when the call actually mutates state (calls that grant no claims
+    /// or release no paths do not fire).
+    persist_cb: std::sync::Arc<parking_lot::Mutex<Option<PersistFn>>>,
+}
+
+impl std::fmt::Debug for OccupancyMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Manual Debug impl: see `PresenceRegistry` for rationale.
+        let s = self.inner.lock();
+        f.debug_struct("OccupancyMap")
+            .field("files", &s.by_file.len())
+            .field("agents", &s.by_agent.len())
+            .finish()
+    }
 }
 
 impl OccupancyMap {
     pub fn new() -> Self {
-        Self { inner: std::sync::Arc::new(Mutex::new(OccupancyState::default())) }
+        Self {
+            inner: std::sync::Arc::new(Mutex::new(OccupancyState::default())),
+            persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    /// Install a callback fired on every mutation that should be
+    /// persisted. Same semantics as
+    /// `PresenceRegistry::set_persist_callback`.
+    pub fn set_persist_callback<F>(&self, cb: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        let mut slot = self.persist_cb.lock();
+        *slot = Some(std::sync::Arc::new(cb));
+    }
+
+    /// Clone the (optional) persist callback out of the slot. Returns
+    /// `None` when no callback has been installed; callers always
+    /// no-op in that case.
+    fn cloned_persist_cb(&self) -> Option<PersistFn> {
+        self.persist_cb.lock().clone()
     }
 
     pub fn claim(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
-        let mut s = self.inner.lock();
-        let mut granted = Vec::new();
-        let mut conflicts = Vec::new();
+        let (granted, conflicts) = {
+            let mut s = self.inner.lock();
+            let mut granted = Vec::new();
+            let mut conflicts = Vec::new();
 
-        for req in requests {
-            let entry = s.by_file.entry(req.path.clone()).or_default();
-            let mut req_conflicts: Vec<ConflictEntry> = Vec::new();
+            for req in requests {
+                let entry = s.by_file.entry(req.path.clone()).or_default();
+                let mut req_conflicts: Vec<ConflictEntry> = Vec::new();
 
-            // File-level collision: any other agent on this file conflicts with a
-            // file-level claim (empty symbols).
-            if req.symbols.is_empty() {
-                for other in entry.agents.iter().filter(|a| *a != agent_id) {
-                    req_conflicts.push(ConflictEntry {
-                        agent_id: other.clone(),
-                        name: "<unknown>".into(),
-                        path: req.path.clone(),
-                        symbols: vec![],
-                    });
-                }
-            } else {
-                // Symbol-level collision: for each requested symbol, any other
-                // agent on that symbol conflicts.
-                for sym in &req.symbols {
-                    if let Some(others) = entry.symbols.get(sym) {
-                        for other in others.iter().filter(|a| *a != agent_id) {
-                            req_conflicts.push(ConflictEntry {
-                                agent_id: other.clone(),
-                                name: "<unknown>".into(),
-                                path: req.path.clone(),
-                                symbols: vec![sym.clone()],
-                            });
+                // File-level collision: any other agent on this file conflicts with a
+                // file-level claim (empty symbols).
+                if req.symbols.is_empty() {
+                    for other in entry.agents.iter().filter(|a| *a != agent_id) {
+                        req_conflicts.push(ConflictEntry {
+                            agent_id: other.clone(),
+                            name: "<unknown>".into(),
+                            path: req.path.clone(),
+                            symbols: vec![],
+                        });
+                    }
+                } else {
+                    // Symbol-level collision: for each requested symbol, any other
+                    // agent on that symbol conflicts.
+                    for sym in &req.symbols {
+                        if let Some(others) = entry.symbols.get(sym) {
+                            for other in others.iter().filter(|a| *a != agent_id) {
+                                req_conflicts.push(ConflictEntry {
+                                    agent_id: other.clone(),
+                                    name: "<unknown>".into(),
+                                    path: req.path.clone(),
+                                    symbols: vec![sym.clone()],
+                                });
+                            }
                         }
                     }
+                    // Also conflict if ANYONE has a file-level (empty symbols) claim on this file.
+                    for other in entry.agents.iter().filter(|a| entry.symbols.get("__file_level__").map(|s| s.contains(a)).unwrap_or(false)).filter(|a| *a != agent_id) {
+                        req_conflicts.push(ConflictEntry {
+                            agent_id: other.clone(),
+                            name: "<unknown>".into(),
+                            path: req.path.clone(),
+                            symbols: vec![],
+                        });
+                    }
                 }
-                // Also conflict if ANYONE has a file-level (empty symbols) claim on this file.
-                for other in entry.agents.iter().filter(|a| entry.symbols.get("__file_level__").map(|s| s.contains(a)).unwrap_or(false)).filter(|a| *a != agent_id) {
-                    req_conflicts.push(ConflictEntry {
-                        agent_id: other.clone(),
-                        name: "<unknown>".into(),
+
+                if req_conflicts.is_empty() {
+                    // Apply: add agent to file; add to symbol sets.
+                    entry.agents.insert(agent_id.clone());
+                    for sym in &req.symbols {
+                        entry.symbols.entry(sym.clone()).or_default().insert(agent_id.clone());
+                    }
+                    if req.symbols.is_empty() {
+                        entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
+                    }
+                    let now = SystemTime::now();
+                    // File-level claim (no specific symbols) carries no
+                    // content hash; symbol-level claims get a placeholder
+                    // hash for now — PR 11 will compute real bodies.
+                    let content_hash = if req.symbols.is_empty() {
+                        None
+                    } else {
+                        Some(SymbolHash::zero())
+                    };
+                    s.by_agent.entry(agent_id.clone()).or_default().push(Claim {
+                        agent_id: agent_id.clone(),
                         path: req.path.clone(),
-                        symbols: vec![],
+                        symbols: req.symbols.clone(),
+                        content_hash,
+                        intent: req.intent.clone(),
+                        claimed_at: now,
+                        expires_at: None,
                     });
-                }
-            }
-
-            if req_conflicts.is_empty() {
-                // Apply: add agent to file; add to symbol sets.
-                entry.agents.insert(agent_id.clone());
-                for sym in &req.symbols {
-                    entry.symbols.entry(sym.clone()).or_default().insert(agent_id.clone());
-                }
-                if req.symbols.is_empty() {
-                    entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
-                }
-                let now = SystemTime::now();
-                // File-level claim (no specific symbols) carries no
-                // content hash; symbol-level claims get a placeholder
-                // hash for now — PR 11 will compute real bodies.
-                let content_hash = if req.symbols.is_empty() {
-                    None
+                    granted.push(req);
                 } else {
-                    Some(SymbolHash::zero())
-                };
-                s.by_agent.entry(agent_id.clone()).or_default().push(Claim {
-                    agent_id: agent_id.clone(),
-                    path: req.path.clone(),
-                    symbols: req.symbols.clone(),
-                    content_hash,
-                    intent: req.intent.clone(),
-                    claimed_at: now,
-                    expires_at: None,
-                });
-                granted.push(req);
-            } else {
-                conflicts.extend(req_conflicts);
+                    conflicts.extend(req_conflicts);
+                }
             }
-        }
 
+            (granted, conflicts)
+        };
+        if !granted.is_empty() {
+            if let Some(cb) = self.cloned_persist_cb() { cb(); }
+        }
         ClaimResult { granted, conflicts }
     }
 
     pub fn release(&self, agent_id: &AgentId, paths: &[PathBuf]) -> Vec<PathBuf> {
-        let mut s = self.inner.lock();
-        let mut released = Vec::new();
-        for path in paths {
-            if let Some(entry) = s.by_file.get_mut(path) {
-                entry.agents.remove(agent_id);
-                let syms_to_remove: Vec<String> = entry.symbols.iter()
-                    .filter(|(_, agents)| agents.contains(agent_id))
-                    .map(|(s, _)| s.clone())
-                    .collect();
-                for s in syms_to_remove {
-                    if let Some(set) = entry.symbols.get_mut(&s) {
-                        set.remove(agent_id);
-                        if set.is_empty() { entry.symbols.remove(&s); }
+        let released = {
+            let mut s = self.inner.lock();
+            let mut released = Vec::new();
+            for path in paths {
+                if let Some(entry) = s.by_file.get_mut(path) {
+                    entry.agents.remove(agent_id);
+                    let syms_to_remove: Vec<String> = entry.symbols.iter()
+                        .filter(|(_, agents)| agents.contains(agent_id))
+                        .map(|(s, _)| s.clone())
+                        .collect();
+                    for s in syms_to_remove {
+                        if let Some(set) = entry.symbols.get_mut(&s) {
+                            set.remove(agent_id);
+                            if set.is_empty() { entry.symbols.remove(&s); }
+                        }
                     }
+                    if entry.agents.is_empty() && entry.symbols.is_empty() {
+                        s.by_file.remove(path);
+                    }
+                    released.push(path.clone());
                 }
-                if entry.agents.is_empty() && entry.symbols.is_empty() {
-                    s.by_file.remove(path);
-                }
-                released.push(path.clone());
             }
-        }
-        if let Some(claims) = s.by_agent.get_mut(agent_id) {
-            claims.retain(|c| !released.contains(&c.path));
+            if let Some(claims) = s.by_agent.get_mut(agent_id) {
+                claims.retain(|c| !released.contains(&c.path));
+            }
+            released
+        };
+        if !released.is_empty() {
+            if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
         released
     }
 
     pub fn release_all_for(&self, agent_id: &AgentId) -> Vec<PathBuf> {
-        let s = self.inner.lock();
-        let paths: Vec<PathBuf> = s.by_agent.get(agent_id).map(|cs| cs.iter().map(|c| c.path.clone()).collect()).unwrap_or_default();
-        drop(s);
-        self.release(agent_id, &paths)
+        let paths: Vec<PathBuf> = {
+            let s = self.inner.lock();
+            s.by_agent.get(agent_id).map(|cs| cs.iter().map(|c| c.path.clone()).collect()).unwrap_or_default()
+        };
+        let released = self.release(agent_id, &paths);
+        // `self.release` already fired the persist callback when
+        // `released` is non-empty, so we don't double-fire here.
+        let _ = paths;
+        released
     }
 
     pub fn list_for_path(&self, path: &Path) -> Option<OccupancyEntry> {
@@ -554,4 +676,130 @@ pub enum PresenceEvent {
     ClaimGranted { agent_id: AgentId, path: PathBuf },
     ClaimReleased { agent_id: AgentId, path: PathBuf },
     ConflictDetected { agent_id: AgentId, conflicts: Vec<ConflictEntry> },
+}
+
+// ---------------------------------------------------------------------------
+// Persistence: PresenceRegistry + OccupancyMap <-> JSON
+// ---------------------------------------------------------------------------
+//
+// Why free functions (not methods):
+// - Both `PresenceRegistry` and `OccupancyMap` are `Arc<Mutex<...>>` wrappers.
+//   Adding a method that takes a path clutters the type's contract with a
+//   filesystem concern; the persistence layer is genuinely orthogonal to the
+//   in-memory data structure.
+// - `LainServer` is the natural owner of the state path (it knows the
+//   workspace) and the natural caller; it can either drive the helpers
+//   explicitly via `save_state`/`load_state` or hand a closure that captures
+//   the path to the registries' `set_persist_callback` setters.
+//
+// Why the persist hooks don't capture `LainServer`:
+// - The hook closures need to be `'static + Send + Sync`. Capturing an
+//   `Arc<LainServer>` works in principle but creates a ref cycle (server ->
+//   registry -> closure -> server). Holding just the `Path` + clones of the
+//   `Arc<PresenceRegistry>` / `Arc<OccupancyMap>` keeps the lifecycle
+//   straighforward: as long as the registries live, the closure is valid.
+
+/// On-disk schema for `PresenceRegistry` + `OccupancyMap`. Fields are
+/// `Vec<(K, V)>` rather than maps because serde-json's `HashMap`
+/// representation is non-deterministic across runs; with tuples the
+/// emitted file is stable to hand-inspection.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedState {
+    /// `(agent_id_string, session)`.
+    sessions: Vec<(String, AgentSession)>,
+    /// `(path, file_level_agents, [(symbol, agents)])`. The
+    /// `__file_level__` sentinel that lives in the in-memory symbol
+    /// map is filtered out before serialization; the file-level agents
+    /// list is derived directly from `FileOccupancy::agents`.
+    occupancy_by_file: Vec<(PathBuf, Vec<String>, Vec<(String, Vec<String>)>)>,
+    /// `(agent_id_string, [claim])`. Mirrored into `by_file` on load.
+    occupancy_by_agent: Vec<(String, Vec<Claim>)>,
+}
+
+/// Serialize the in-memory presence registry + occupancy map to a JSON
+/// file at `path`. The write is atomic: serialise to `path.tmp` first,
+/// then `rename` over `path`. Returns a string error on any IO / JSON
+/// failure; callers wrap as needed.
+pub fn save_pair(
+    path: &Path,
+    reg: &PresenceRegistry,
+    occ: &OccupancyMap,
+) -> Result<(), String> {
+    let state = {
+        let s = reg.inner.lock();
+        let o = occ.inner.lock();
+        PersistedState {
+            sessions: s.sessions.iter()
+                .map(|(k, v)| (k.0.clone(), v.clone()))
+                .collect(),
+            occupancy_by_file: o.by_file.iter().map(|(p, fo)| {
+                let agents: Vec<String> = fo.agents.iter().map(|a| a.0.clone()).collect();
+                let symbols: Vec<(String, Vec<String>)> = fo.symbols.iter()
+                    .filter(|(sym, _)| sym.as_str() != "__file_level__")
+                    .map(|(sym, agents)| (sym.clone(), agents.iter().map(|a| a.0.clone()).collect()))
+                    .collect();
+                (p.clone(), agents, symbols)
+            }).collect(),
+            occupancy_by_agent: o.by_agent.iter()
+                .map(|(k, v)| (k.0.clone(), v.clone()))
+                .collect(),
+        }
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(&state)
+        .map_err(|e| format!("serialize PersistedState: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &json)
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Hydrate `reg` and `occ` from a JSON file previously written by
+/// `save_pair`. When `path` does not exist this is a no-op (idempotent
+/// loader: the registries stay as constructed).
+///
+/// On a successful read, prior contents of `reg` / `occ` are **not**
+/// wiped before merge — callers should pass freshly-constructed
+/// registries. Same string-error convention as `save_pair`.
+pub fn load_pair(
+    path: &Path,
+    reg: &PresenceRegistry,
+    occ: &OccupancyMap,
+) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let json = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let state: PersistedState = serde_json::from_str(&json)
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+
+    let mut s = reg.inner.lock();
+    let mut o = occ.inner.lock();
+    for (k, sess) in state.sessions {
+        s.sessions.insert(AgentId(k.clone()), sess.clone());
+        s.by_token.insert(sess.session_token, AgentId(k));
+    }
+    for (path_str, agents, symbols) in state.occupancy_by_file {
+        let pb = PathBuf::from(path_str);
+        let entry = o.by_file.entry(pb).or_default();
+        for a in agents {
+            entry.agents.insert(AgentId(a));
+        }
+        for (sym, agent_ids) in symbols {
+            let set = entry.symbols.entry(sym).or_default();
+            for a in agent_ids {
+                set.insert(AgentId(a));
+            }
+        }
+    }
+    for (k, claims) in state.occupancy_by_agent {
+        o.by_agent.insert(AgentId(k), claims);
+    }
+    Ok(())
 }
