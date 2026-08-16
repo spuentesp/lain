@@ -31,7 +31,7 @@ use crate::server::reload::ReloadBus;
 use crate::server::tools::ToolExecutor;
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use crate::server::git::GitSensor;
-use crate::server::attribution::{AttributionBackend, AttributionWatcher, NoopBackend, ProcFsBackend};
+use crate::server::attribution::{AttributionBackend, AttributionWatcher, LsofBackend, NoopBackend, ProcFsBackend};
 use crate::config::state_path_for_workspace;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +57,8 @@ pub struct LainConfig {
 fn default_attribution_backend() -> Arc<dyn AttributionBackend> {
     if cfg!(target_os = "linux") {
         Arc::new(ProcFsBackend)
+    } else if cfg!(target_os = "macos") {
+        Arc::new(LsofBackend)
     } else {
         Arc::new(NoopBackend)
     }
