@@ -277,3 +277,182 @@ impl PresenceRegistry {
 impl Default for PresenceRegistry {
     fn default() -> Self { Self::new() }
 }
+
+use std::collections::HashSet;
+use std::path::Path;
+
+#[derive(Debug, Clone)]
+pub struct ClaimRequest {
+    pub path: PathBuf,
+    pub symbols: Vec<String>,
+    pub intent: ClaimIntent,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimResult {
+    pub granted: Vec<ClaimRequest>,
+    pub conflicts: Vec<ConflictEntry>,
+}
+
+#[derive(Debug, Default)]
+struct FileOccupancy {
+    agents: HashSet<AgentId>,
+    /// Per-symbol agent set. An entry exists only if any agent has claimed
+    /// that specific symbol. If no agent has claimed a symbol, the entry is
+    /// absent — not present with an empty set.
+    symbols: HashMap<String, HashSet<AgentId>>,
+}
+
+#[derive(Debug, Default)]
+struct OccupancyState {
+    by_file: HashMap<PathBuf, FileOccupancy>,
+    by_agent: HashMap<AgentId, Vec<Claim>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OccupancyMap {
+    inner: std::sync::Arc<Mutex<OccupancyState>>,
+}
+
+impl OccupancyMap {
+    pub fn new() -> Self {
+        Self { inner: std::sync::Arc::new(Mutex::new(OccupancyState::default())) }
+    }
+
+    pub fn claim(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
+        let mut s = self.inner.lock();
+        let mut granted = Vec::new();
+        let mut conflicts = Vec::new();
+
+        for req in requests {
+            let entry = s.by_file.entry(req.path.clone()).or_default();
+            let mut req_conflicts: Vec<ConflictEntry> = Vec::new();
+
+            // File-level collision: any other agent on this file conflicts with a
+            // file-level claim (empty symbols).
+            if req.symbols.is_empty() {
+                for other in entry.agents.iter().filter(|a| *a != agent_id) {
+                    req_conflicts.push(ConflictEntry {
+                        agent_id: other.clone(),
+                        name: "<unknown>".into(),
+                        path: req.path.clone(),
+                        symbols: vec![],
+                    });
+                }
+            } else {
+                // Symbol-level collision: for each requested symbol, any other
+                // agent on that symbol conflicts.
+                for sym in &req.symbols {
+                    if let Some(others) = entry.symbols.get(sym) {
+                        for other in others.iter().filter(|a| *a != agent_id) {
+                            req_conflicts.push(ConflictEntry {
+                                agent_id: other.clone(),
+                                name: "<unknown>".into(),
+                                path: req.path.clone(),
+                                symbols: vec![sym.clone()],
+                            });
+                        }
+                    }
+                }
+                // Also conflict if ANYONE has a file-level (empty symbols) claim on this file.
+                for other in entry.agents.iter().filter(|a| entry.symbols.get("__file_level__").map(|s| s.contains(a)).unwrap_or(false) || entry.symbols.is_empty() && false).filter(|a| *a != agent_id) {
+                    req_conflicts.push(ConflictEntry {
+                        agent_id: other.clone(),
+                        name: "<unknown>".into(),
+                        path: req.path.clone(),
+                        symbols: vec![],
+                    });
+                }
+            }
+
+            if req_conflicts.is_empty() {
+                // Apply: add agent to file; add to symbol sets.
+                entry.agents.insert(agent_id.clone());
+                for sym in &req.symbols {
+                    entry.symbols.entry(sym.clone()).or_default().insert(agent_id.clone());
+                }
+                if req.symbols.is_empty() {
+                    entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
+                }
+                let now = SystemTime::now();
+                s.by_agent.entry(agent_id.clone()).or_default().push(Claim {
+                    agent_id: agent_id.clone(),
+                    path: req.path.clone(),
+                    symbols: req.symbols.clone(),
+                    intent: req.intent.clone(),
+                    claimed_at: now,
+                });
+                granted.push(req);
+            } else {
+                conflicts.extend(req_conflicts);
+            }
+        }
+
+        ClaimResult { granted, conflicts }
+    }
+
+    pub fn release(&self, agent_id: &AgentId, paths: &[PathBuf]) -> Vec<PathBuf> {
+        let mut s = self.inner.lock();
+        let mut released = Vec::new();
+        for path in paths {
+            if let Some(entry) = s.by_file.get_mut(path) {
+                entry.agents.remove(agent_id);
+                let syms_to_remove: Vec<String> = entry.symbols.iter()
+                    .filter(|(_, agents)| agents.contains(agent_id))
+                    .map(|(s, _)| s.clone())
+                    .collect();
+                for s in syms_to_remove {
+                    if let Some(set) = entry.symbols.get_mut(&s) {
+                        set.remove(agent_id);
+                        if set.is_empty() { entry.symbols.remove(&s); }
+                    }
+                }
+                if entry.agents.is_empty() && entry.symbols.is_empty() {
+                    s.by_file.remove(path);
+                }
+                released.push(path.clone());
+            }
+        }
+        if let Some(claims) = s.by_agent.get_mut(agent_id) {
+            claims.retain(|c| !released.contains(&c.path));
+        }
+        released
+    }
+
+    pub fn release_all_for(&self, agent_id: &AgentId) -> Vec<PathBuf> {
+        let s = self.inner.lock();
+        let paths: Vec<PathBuf> = s.by_agent.get(agent_id).map(|cs| cs.iter().map(|c| c.path.clone()).collect()).unwrap_or_default();
+        drop(s);
+        self.release(agent_id, &paths)
+    }
+
+    pub fn list_for_path(&self, path: &Path) -> Option<OccupancyEntry> {
+        let s = self.inner.lock();
+        s.by_file.get(path).map(|entry| {
+            let mut symbols: Vec<SymbolOccupancy> = entry.symbols.iter()
+                .filter(|(s, _)| s.as_str() != "__file_level__")
+                .map(|(sym, agents)| SymbolOccupancy { symbol: sym.clone(), agents: agents.iter().cloned().collect() })
+                .collect();
+            symbols.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+            OccupancyEntry {
+                path: path.to_path_buf(),
+                agents: entry.agents.iter().cloned().collect(),
+                symbols,
+            }
+        })
+    }
+
+    pub fn list_all(&self) -> Vec<OccupancyEntry> {
+        let s = self.inner.lock();
+        s.by_file.keys().filter_map(|p| self.list_for_path(p)).collect()
+    }
+
+    pub fn list_for_agent(&self, agent_id: &AgentId) -> Vec<Claim> {
+        let s = self.inner.lock();
+        s.by_agent.get(agent_id).cloned().unwrap_or_default()
+    }
+}
+
+impl Default for OccupancyMap {
+    fn default() -> Self { Self::new() }
+}

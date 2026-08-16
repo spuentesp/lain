@@ -54,3 +54,110 @@ fn by_token_resolves_session_token() {
     assert_eq!(reg.by_token(&s.session_token).map(|x| x.id), Some(s.id));
     assert!(reg.by_token("missing").is_none());
 }
+
+#[test]
+fn claim_grants_empty_path_when_unoccupied() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let agent = AgentId("a".into());
+    let result = occ.claim(&agent, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+    }]);
+    assert_eq!(result.granted.len(), 1);
+    assert_eq!(result.conflicts.len(), 0);
+}
+
+#[test]
+fn claim_reports_conflict_on_overlap() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+    occ.claim(&alice, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+    }]);
+    let result = occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+    }]);
+    assert_eq!(result.granted.len(), 0);
+    assert_eq!(result.conflicts.len(), 1);
+    assert_eq!(result.conflicts[0].agent_id, alice);
+}
+
+#[test]
+fn claim_different_symbols_on_same_file_no_conflict() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+    occ.claim(&alice, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+    }]);
+    let result = occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["validate".into()],
+        intent: ClaimIntent::Edit,
+    }]);
+    assert_eq!(result.granted.len(), 1);
+    assert_eq!(result.conflicts.len(), 0);
+}
+
+#[test]
+fn claim_file_level_no_symbols_overlaps_with_anything_on_file() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+    occ.claim(&alice, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+    }]);
+    let result = occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["anything".into()],
+        intent: ClaimIntent::Edit,
+    }]);
+    assert_eq!(result.granted.len(), 0);
+    assert_eq!(result.conflicts.len(), 1);
+}
+
+#[test]
+fn release_returns_removed_paths() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    occ.claim(&alice, vec![
+        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit },
+        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Read },
+    ]);
+    let released = occ.release(&alice, &[std::path::PathBuf::from("auth.rs")]);
+    assert_eq!(released, vec![std::path::PathBuf::from("auth.rs")]);
+    assert_eq!(occ.list_for_agent(&alice).len(), 1);
+}
+
+#[test]
+fn release_all_for_clears_agent() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    occ.claim(&alice, vec![
+        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec![], intent: ClaimIntent::Edit },
+        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit },
+    ]);
+    let released = occ.release_all_for(&alice);
+    assert_eq!(released.len(), 2);
+    assert_eq!(occ.list_for_agent(&alice).len(), 0);
+}
+
+#[test]
+fn list_for_path_shows_all_agents() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit }]);
+    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["validate".into()], intent: ClaimIntent::Edit }]);
+    let entry = occ.list_for_path(&std::path::PathBuf::from("auth.rs")).unwrap();
+    assert_eq!(entry.agents.len(), 2);
+    assert_eq!(entry.symbols.len(), 2);
+}
