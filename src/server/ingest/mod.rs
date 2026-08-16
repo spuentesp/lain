@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tracing::info;
 
 /// Server configuration
@@ -73,10 +73,18 @@ pub struct LainServer {
     federation: Option<Arc<FederatedIndex>>,
     /// Workspaces file passed to `LainMcpServer` when `with_federation_and_workspaces`
     /// is used. `Some` when a workspace is active; `None` for the
-    /// all-repos path (no workspaces.yaml). Held in an `Arc<Mutex<_>>`
-    /// so `LainServer::set_workspace` can swap it during a hot-reload
-    /// without violating the `Clone` invariant on `LainServer`.
-    federation_workspaces: Arc<Mutex<Option<Arc<WorkspacesFile>>>>,
+    /// all-repos path (no workspaces.yaml).
+    ///
+    /// The cell is wrapped in `Arc<RwLock<WorkspacesFile>>` and the
+    /// *same* `Arc` is handed to `LainMcpServer` during `serve()`. This
+    /// is what makes hot-reload of `workspaces.yaml` visible to the
+    /// in-flight MCP dispatcher without restarting the server:
+    /// `run_rebuild` writes `*lock = new_workspaces`, and the next
+    /// `list_workspaces` / `get_workspace` dispatch reads through the
+    /// same lock. Without the shared `Arc`, the LainMcpServer captures
+    /// its own `Arc<WorkspacesFile>` snapshot at construction time and
+    /// stale data is served indefinitely.
+    federation_workspaces: Option<Arc<RwLock<WorkspacesFile>>>,
     /// Transport chosen at `with_federation` time. Consumed by `serve`.
     federation_transport: Option<Transport>,
     /// Port chosen at `with_federation` time. Consumed by `serve`.
@@ -177,7 +185,7 @@ impl LainServer {
             graph,
             overlay,
             embedder,
-            federation_workspaces: Arc::new(Mutex::new(None)),
+            federation_workspaces: None,
             cross_encoder,
             git,
             lsp_pool,
@@ -288,7 +296,7 @@ impl LainServer {
             cross_encoder,
             overlay_revision: Arc::new(AtomicU64::new(0)),
             federation: Some(federation),
-            federation_workspaces: Arc::new(Mutex::new(None)),
+            federation_workspaces: None,
             federation_transport: Some(transport),
             federation_port: Some(port),
             started_at: now,
@@ -315,7 +323,18 @@ impl LainServer {
         // we store the workspaces file in `federation_workspaces`, and we
         // build the LainMcpServer with the workspaces-aware constructor
         // eagerly so any wiring problems surface at construction time.
-        let ws = std::env::temp_dir().join(format!("lain-federation-{}", std::process::id()));
+        //
+        // Use the same pid+counter staging-path pattern as
+        // `with_federation` so this constructor plays nicely with
+        // parallel tests in the same process — a previous test may
+        // have torn the dir down between calls. See the comment on
+        // `STAGING_COUNTER` for context.
+        let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let ws = std::env::temp_dir().join(format!(
+            "lain-federation-{}-{}",
+            std::process::id(),
+            counter
+        ));
         std::fs::create_dir_all(&ws)?;
         if !ws.join(".git").exists() {
             git2::Repository::init(&ws)?;
@@ -346,10 +365,24 @@ impl LainServer {
             ws.to_path_buf(),
         );
 
+        // Wrap the workspaces file in an `Arc<RwLock<...>>` and share
+        // the SAME `Arc` with both `federation_workspaces` below and
+        // the `LainMcpServer` we build next. This is the single source
+        // of truth for the workspace MCP tools: `set_workspace` (Task
+        // 6.2 rebuild flow) writes through this lock, and every
+        // dispatch the in-flight MCP server handles reads through the
+        // same lock. Without sharing the lock, the LainMcpServer would
+        // capture its own snapshot of `WorkspacesFile` at construction
+        // time and the rebuild path's updates would never reach the
+        // dispatcher — leading to the long-running "stale workspace"
+        // bug.
+        let workspaces_lock: Arc<RwLock<WorkspacesFile>> =
+            Arc::new(RwLock::new((*workspaces).clone()));
+
         let _mcp = crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
             tool_executor.clone(),
             Arc::clone(&federation),
-            Arc::clone(&workspaces),
+            Arc::clone(&workspaces_lock),
         );
 
         info!("Lain federation server initialized with workspaces");
@@ -371,7 +404,7 @@ impl LainServer {
             cross_encoder,
             overlay_revision: Arc::new(AtomicU64::new(0)),
             federation: Some(federation),
-            federation_workspaces: Arc::new(Mutex::new(Some(workspaces))),
+            federation_workspaces: Some(workspaces_lock),
             federation_transport: Some(transport),
             federation_port: Some(port),
             started_at: now,
@@ -460,14 +493,13 @@ impl LainServer {
     }
 
     /// Number of workspaces in the loaded `workspaces.yaml`, or 0 when
-    /// none was supplied. Reads through the `Arc<Mutex<_>>` slot so a
+    /// none was supplied. Reads through the `Arc<RwLock<...>>` slot so a
     /// hot-reload that swaps `set_workspace` is reflected on the next
     /// call.
     pub fn workspace_count(&self) -> usize {
         self.federation_workspaces
-            .lock()
             .as_ref()
-            .map(|w| w.workspaces.len())
+            .map(|w| w.read().workspaces.len())
             .unwrap_or(0)
     }
 
@@ -485,7 +517,7 @@ impl LainServer {
         })?;
         let port = self.federation_port.unwrap_or(9999);
 
-        let workspaces = self.federation_workspaces.lock().clone();
+        let workspaces = self.federation_workspaces.as_ref().map(Arc::clone);
         let mcp = match workspaces {
             Some(ws) => crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
                 self.tool_executor, federation, ws,
@@ -592,23 +624,43 @@ impl LainServer {
     }
 
     /// Replace the workspace file the server exposes through MCP. Called
-    /// by `run_rebuild` after re-reading `workspaces.yaml`. Note: the
-    /// `LainMcpServer` already constructed by `serve` holds its own
-    /// copy of the workspaces file for its own lifetime; this method
-    /// updates the slot `workspace_count` reads and that subsequent
-    /// rebuilds consult. The in-flight stdio/HTTP transports continue
-    /// to use the workspaces file they were built with — a known
-    /// limitation tracked separately; the rebuild is a no-op for the
-    /// running MCP loop until the server is restarted.
+    /// by `run_rebuild` after re-reading `workspaces.yaml`. Writes
+    /// through the SAME `Arc<RwLock<WorkspacesFile>>` the
+    /// `LainMcpServer` constructed by `serve` is holding, so the very
+    /// next dispatch of `list_workspaces` / `get_workspace` /
+    /// `get_workspace_graph` observes the new contents without a
+    /// server restart.
+    ///
+    /// No-op for single-workspace servers (no workspaces file).
     pub fn set_workspace(&self, workspaces: Arc<WorkspacesFile>) {
-        *self.federation_workspaces.lock() = Some(workspaces);
+        if let Some(slot) = &self.federation_workspaces {
+            *slot.write() = (*workspaces).clone();
+        }
     }
 
-    /// Read-only accessor for the loaded workspaces file. Used by
+    /// Cheap snapshot of the loaded workspaces file. Used by
     /// `run_rebuild` to seed a `set_workspace` no-op diff when nothing
-    /// changed and to test the slot swap.
+    /// changed and to test the slot swap. Clones the inner
+    /// `WorkspacesFile`, so callers should avoid calling this in tight
+    /// loops; reads are cheap on the lock side.
     pub fn workspaces_snapshot(&self) -> Option<Arc<WorkspacesFile>> {
-        self.federation_workspaces.lock().clone()
+        self.federation_workspaces
+            .as_ref()
+            .map(|slot| Arc::new(slot.read().clone()))
+    }
+
+    /// Shared handle to the live workspaces lock, or `None` for
+    /// single-workspace servers. This is the SAME
+    /// `Arc<RwLock<WorkspacesFile>>` the `LainMcpServer` constructed
+    /// by `serve()` holds inside its `workspaces` field, so callers
+    /// can verify the hot-reload fix end-to-end: a `set_workspace`
+    /// followed by a `handle.read()` on any thread (including from a
+    /// JSON-RPC dispatch) sees the new value without any
+    /// synchronization beyond the rwlock's own barriers. Compared with
+    /// `Arc::ptr_eq` against the `LainMcpServer`'s `workspaces` field
+    /// it confirms the single-source-of-truth wiring.
+    pub fn workspaces_handle(&self) -> Option<Arc<RwLock<WorkspacesFile>>> {
+        self.federation_workspaces.as_ref().map(Arc::clone)
     }
 
     pub async fn shutdown(&self) {

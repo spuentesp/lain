@@ -25,6 +25,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper::body::{Bytes, Frame};
 use hyper_util::rt::TokioIo;
+use parking_lot::RwLock;
 use serde_json::Map;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -242,7 +243,14 @@ const WORKSPACE_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
 struct LainHandler {
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
-    workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    /// Workspaces file shared with `LainServer` via `Arc<RwLock<...>>`
+    /// so a `set_workspace` call in the rebuild loop is observed by
+    /// the very next dispatch. Reading the lock on every call (rather
+    /// than cloning the inner `WorkspacesFile`) keeps the response
+    /// perfectly in sync with what `run_rebuild` last wrote; for the
+    /// expected hot-reload cadence the read guard is uncontended and
+    /// a no-op.
+    workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
     /// Transport chosen at server construction. `None` for single-workspace
     /// servers. Used by `get_server_status`.
     status_transport: Option<crate::server::Transport>,
@@ -424,7 +432,7 @@ impl ServerHandler for LainHandler {
                     workspaces_count: self
                         .workspaces
                         .as_ref()
-                        .map(|w| w.workspaces.len())
+                        .map(|w| w.read().workspaces.len())
                         .unwrap_or(0),
                 };
                 let payload = handler_status.render();
@@ -656,7 +664,15 @@ impl ServerHandler for LainHandler {
         // `get_workspace` cross-reference the federation (for loaded repo
         // info) when it's available; `list_workspaces` only needs the
         // workspaces file.
-        if let Some(workspaces) = &self.workspaces {
+        //
+        // Read through `RwLock::read()` on every dispatch (rather than
+        // cloning the inner `WorkspacesFile`) so a `set_workspace`
+        // call from the rebuild loop is observed by the very next
+        // `list_workspaces` / `get_workspace` / `get_workspace_graph`
+        // call. The synchronous helpers below complete in microseconds,
+        // so the read guard never blocks the writers in `set_workspace`.
+        if let Some(workspaces_lock) = &self.workspaces {
+            let workspaces: &crate::federation::workspace::WorkspacesFile = &*workspaces_lock.read();
             match params.name.as_str() {
                 "list_workspaces" => {
                     let active = ActiveWorkspace::load().ok().flatten();
@@ -794,7 +810,12 @@ impl ServerHandler for LainHandler {
 pub struct LainMcpServer {
     executor: ToolExecutor,
     federation: Option<Arc<FederatedIndex>>,
-    workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    /// Workspaces file. Wrapped in `Arc<RwLock<...>>` and **shared**
+    /// with `LainServer` so a hot-reload swap (`LainServer::set_workspace`)
+    /// is visible to the in-flight dispatcher without restarting the
+    /// server. The same `Arc` is handed to `LainHandler`; the handler
+    /// reads through the lock on every dispatch.
+    workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
     /// Transport for the active server, surfaced via `get_server_status`.
     status_transport: Option<crate::server::Transport>,
     /// TCP port for HTTP transport; surfaced via `get_server_status`.
@@ -851,10 +872,17 @@ impl LainMcpServer {
     /// 3 workspace tools (list_workspaces, get_active_workspace,
     /// get_workspace) are also registered and the get_workspace tool
     /// resolves member paths/healths from the live federation.
+    ///
+    /// `workspaces` is the same `Arc<RwLock<WorkspacesFile>>` the
+    /// `LainServer` is holding, so a `set_workspace` call from the
+    /// rebuild loop is observed by the next dispatch without
+    /// restarting the server. The handler reads through `lock.read()`
+    /// on every call; the synchronous helpers finish in microseconds
+    /// so the read guard is never held long enough to block writers.
     pub fn with_federation_and_workspaces(
         executor: ToolExecutor,
         federation: Arc<FederatedIndex>,
-        workspaces: Arc<crate::federation::workspace::WorkspacesFile>,
+        workspaces: Arc<RwLock<crate::federation::workspace::WorkspacesFile>>,
     ) -> Self {
         let now = std::time::SystemTime::now();
         Self {
@@ -1038,7 +1066,7 @@ impl LainMcpServer {
                                 last_error: status_last_error.clone(),
                                 workspaces_count: workspaces
                                     .as_ref()
-                                    .map(|w| w.workspaces.len())
+                                    .map(|w| w.read().workspaces.len())
                                     .unwrap_or(0),
                                 repo_count: federation
                                     .as_ref()
@@ -1185,7 +1213,10 @@ async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
-    workspaces: Option<Arc<crate::federation::workspace::WorkspacesFile>>,
+    // `Arc<RwLock<WorkspacesFile>>` shared with the `LainServer`'s
+    // hot-reload slot. The handler reads through the lock on every
+    // dispatch so a `set_workspace` call is observed immediately.
+    workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
     status: HandlerStatus,
     reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
@@ -1550,7 +1581,13 @@ async fn handle_request(
                         // workspaces file was supplied to the server
                         // constructor. Mirrors the stdio dispatch in
                         // handle_call_tool_request.
-                        if let Some(workspaces) = &workspaces {
+                        //
+                        // Read through the shared lock so a
+                        // `set_workspace` swap from the rebuild
+                        // loop is reflected on the very next request
+                        // hitting this connection.
+                        if let Some(workspaces_lock) = &workspaces {
+                            let workspaces: &crate::federation::workspace::WorkspacesFile = &*workspaces_lock.read();
                             match name {
                                 "list_workspaces" => {
                                     let active = crate::state::ActiveWorkspace::load().ok().flatten();

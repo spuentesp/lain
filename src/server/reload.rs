@@ -531,6 +531,26 @@ mod tests {
             std::fs::create_dir_all(&repo_a).unwrap();
             git2::Repository::init(&repo_a).unwrap();
             let (server, _repos_yaml) = server_with_workspace_dir(&tmp, "repo-a", &repo_a).await;
+            // Migrating the test off `with_federation`: with the
+            // shared-lock fix, `set_workspace` is only meaningful for
+            // servers whose `federation_workspaces` slot is `Some`,
+            // i.e., those built via `with_federation_and_workspaces`.
+            // `run_rebuild` itself calls `set_workspace` (Task 6.2) so
+            // we need the slot to be present for the rebuild path to
+            // push through; rebuild a fresh server here with an empty
+            // initial `WorkspacesFile`.
+            let fed = server.federation().unwrap().clone();
+            let server = LainServer::with_federation_and_workspaces(
+                fed,
+                Transport::Http,
+                9999,
+                Arc::new(crate::server::federation::workspace::WorkspacesFile {
+                    default: None,
+                    workspaces: vec![],
+                }),
+                Some(_repos_yaml.clone()),
+            )
+            .expect("with_federation_and_workspaces");
             assert_eq!(server.workspace_count(), 0);
 
             // Add a workspaces.yaml with one workspace.
@@ -580,7 +600,24 @@ mod tests {
             let repo_a = tmp.path().join("repo-a");
             std::fs::create_dir_all(&repo_a).unwrap();
             git2::Repository::init(&repo_a).unwrap();
-            let (server, _) = server_with_workspace_dir(&tmp, "repo-a", &repo_a).await;
+            let (server, repos_yaml) = server_with_workspace_dir(&tmp, "repo-a", &repo_a).await;
+            // `set_workspace` only writes to a slot that exists. A
+            // server built via `with_federation` (no workspaces) has
+            // `None` and the write is a no-op. Build the workspace-
+            // aware variant so `set_workspace` actually pushes
+            // through the lock the LainMcpServer holds.
+            let fed = server.federation().unwrap().clone();
+            let server = LainServer::with_federation_and_workspaces(
+                fed,
+                Transport::Http,
+                9999,
+                Arc::new(crate::server::federation::workspace::WorkspacesFile {
+                    default: None,
+                    workspaces: vec![],
+                }),
+                Some(repos_yaml.clone()),
+            )
+            .expect("with_federation_and_workspaces");
             assert_eq!(server.workspace_count(), 0);
             let ws = Arc::new(crate::server::federation::workspace::WorkspacesFile {
                 default: None,
