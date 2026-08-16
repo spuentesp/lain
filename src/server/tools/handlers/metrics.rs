@@ -5,6 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
+use crate::server::presence::OccupancyMap;
 use crate::server::tools::utils::read_body_summary;
 use crate::server::tools::utils::{build_enriched_text, cosine_similarity, resolve_node};
 use std::sync::Arc;
@@ -200,8 +201,9 @@ fn get_embedding(
 }
 
 pub fn explain_symbol(
-    graph: &GraphDatabase, 
+    graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    occupancy: &OccupancyMap,
     symbol: &str
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
@@ -209,7 +211,7 @@ pub fn explain_symbol(
     let mut lines = Vec::new();
     lines.push(format!("## Explanation for '{}' ({:?})", symbol, node.node_type));
     lines.push(format!("**Path:** {}", node.path));
-    
+
     if let Some(sig) = &node.signature {
         lines.push(format!("**Signature:** `{}`", sig));
     }
@@ -231,13 +233,13 @@ pub fn explain_symbol(
 
     lines.push(String::new());
     lines.push("### Structural Context".to_string());
-    
+
     let depth = node.depth_from_main.map(|d| d.to_string()).unwrap_or_else(|| "N/A".to_string());
     let anchor = node.anchor_score.map(|s| format!("{:.3}", s)).unwrap_or_else(|| "N/A".to_string());
-    
+
     lines.push(format!("- **Context Depth:** {} (Lower is closer to entry point)", depth));
     lines.push(format!("- **Anchor Score:** {} (Higher means more foundational)", anchor));
-    
+
     let partners = graph.get_co_change_partners(&node.path)?;
     if !partners.is_empty() {
         lines.push(String::new());
@@ -292,6 +294,52 @@ pub fn explain_symbol(
                 names.push(format!("(+{} more)", incoming.len() - 8));
             }
             lines.push(format!("- **Called by:** {}", names.join(", ")));
+        }
+    }
+
+    // Multiplayer occupancy: if any agent has claimed the file this
+    // symbol lives in, surface the claim so the asking agent knows
+    // somebody else is in the same area. Emitted as a fenced `json`
+    // block (alongside the Markdown sections) so downstream tooling
+    // can pattern-match a stable token ("### Occupancy") rather than
+    // parse free-form prose. Only emitted when there's actually a
+    // claim — no point appending an empty section.
+    if let Some(entry) = occupancy.list_for_path(std::path::Path::new(&node.path)) {
+        if !entry.agents.is_empty() {
+            // `list_for_agent` returns claims keyed by agent, so we
+            // walk it to find this file's intent for each agent on it.
+            // An Edit intent overrides Read — if any of the agent's
+            // claims on the file is Edit, surface Edit (the
+            // collaborator is mutating, so the asker should pause).
+            let mut intent = "read";
+            for agent_id in &entry.agents {
+                let claims = occupancy.list_for_agent(agent_id);
+                for c in &claims {
+                    if c.path == node.path
+                        && matches!(c.intent, crate::server::presence::ClaimIntent::Edit)
+                    {
+                        intent = "edit";
+                        break;
+                    }
+                }
+                if intent == "edit" {
+                    break;
+                }
+            }
+            let agents: Vec<String> = entry
+                .agents
+                .iter()
+                .map(|a| a.as_str().to_string())
+                .collect();
+            let payload = serde_json::json!({
+                "agents": agents,
+                "intent": intent,
+            });
+            lines.push(String::new());
+            lines.push("### Occupancy".to_string());
+            lines.push("```json".to_string());
+            lines.push(serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()));
+            lines.push("```".to_string());
         }
     }
 

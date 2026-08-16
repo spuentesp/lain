@@ -3,6 +3,7 @@
 use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::presence::{OccupancyMap, PresenceRegistry};
 use crate::server::tools::handlers::query::{describe_schema, query_graph};
 use parking_lot::Mutex;
 use serde_json::Map;
@@ -45,22 +46,35 @@ fn test_embedder_and_cache() -> (NlpEmbedder, Arc<Mutex<HashMap<String, Vec<f32>
     (embedder, cache)
 }
 
+/// Empty multiplayer registries for the existing tests — none of them
+/// assert against the `occupancy` payload, they only care that the
+/// `query_graph` JSON result is well-formed.
+fn empty_presence() -> (PresenceRegistry, OccupancyMap) {
+    (PresenceRegistry::new(), OccupancyMap::new())
+}
+
 #[test]
 fn test_query_graph_default() {
     let graph = make_test_graph();
     let (embedder, cache) = test_embedder_and_cache();
+    let (presence, occupancy) = empty_presence();
 
-    let result = query_graph(&graph, &embedder, &cache, None);
+    let result = query_graph(&graph, &embedder, &cache, &presence, &occupancy, None);
     assert!(result.is_ok());
     let text = result.unwrap();
     // Should be valid JSON
     assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
+    // `occupancy.active_agents` is always present (empty list when no agents).
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(v.get("occupancy").is_some(), "occupancy key missing");
+    assert_eq!(v["occupancy"]["active_agents"].as_array().unwrap().len(), 0);
 }
 
 #[test]
 fn test_query_graph_with_query_arg() {
     let graph = make_test_graph();
     let (embedder, cache) = test_embedder_and_cache();
+    let (presence, occupancy) = empty_presence();
 
     let mut args = Map::new();
     args.insert(
@@ -72,7 +86,7 @@ fn test_query_graph_with_query_arg() {
         }),
     );
 
-    let result = query_graph(&graph, &embedder, &cache, Some(&args));
+    let result = query_graph(&graph, &embedder, &cache, &presence, &occupancy, Some(&args));
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
@@ -82,6 +96,7 @@ fn test_query_graph_with_query_arg() {
 fn test_query_graph_with_empty_ops() {
     let graph = make_test_graph();
     let (embedder, cache) = test_embedder_and_cache();
+    let (presence, occupancy) = empty_presence();
 
     let mut args = Map::new();
     args.insert(
@@ -91,7 +106,7 @@ fn test_query_graph_with_empty_ops() {
         }),
     );
 
-    let result = query_graph(&graph, &embedder, &cache, Some(&args));
+    let result = query_graph(&graph, &embedder, &cache, &presence, &occupancy, Some(&args));
     assert!(result.is_ok());
 }
 

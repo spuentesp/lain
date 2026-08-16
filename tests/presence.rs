@@ -1,5 +1,45 @@
 use lain::server::presence::*;
 
+// --- Task 8 brief: existing tools surface occupancy ---
+
+/// `query_graph` (Task 8) carries an `occupancy: {active_agents: [...]}`
+/// payload so the calling agent can see who's in the workspace before
+/// they act on the result. The handler reads through `LainServer`'s
+/// `presence` / `occupancy` fields, so wiring them at construction
+/// time is enough — this test asserts the underlying helper the
+/// handler uses (`list_for_path`) is reachable through the server, and
+/// that registering + claiming populates it as expected. The handler's
+/// actual JSON shape is covered by `query_graph_includes_occupancy_json`
+/// in `tools/handlers/query_tests.rs`.
+#[tokio::test]
+async fn query_graph_includes_occupancy() {
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // `LainServer::new` -> `GitSensor::new` calls `git2::Repository::open`,
+    // which requires a real initialized repo — a bare `.git` directory
+    // is not enough. Use `git2::Repository::init` (same fix Task 4 used).
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+
+    // Register an agent and claim the file.
+    let agent = server.presence.register("alice".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    let _ = server.occupancy.claim(&agent.id, vec![ClaimRequest {
+        path: std::path::PathBuf::from("a.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+    }]);
+
+    // Verify the claim is observable through the helper the
+    // `query_graph` handler uses to build its `occupancy.active_agents`
+    // payload. Same handler, same code path as the production tool.
+    let entry = server.occupancy.list_for_path(&std::path::PathBuf::from("a.rs"));
+    assert!(entry.is_some(), "expected an occupancy entry for a.rs after claim");
+    assert_eq!(entry.unwrap().agents, vec![agent.id.clone()]);
+}
+
 #[test]
 fn register_assigns_unique_ids_and_session_tokens() {
     let reg = PresenceRegistry::new();

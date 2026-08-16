@@ -547,7 +547,7 @@ impl ToolHandler for ExplainSymbolHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::metrics::explain_symbol(&ctx.graph, &ctx.overlay, &symbol)
+        handlers::metrics::explain_symbol(&ctx.graph, &ctx.overlay, &ctx.occupancy, &symbol)
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
@@ -600,7 +600,14 @@ impl ToolHandler for QueryGraphHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::query::query_graph(&ctx.graph, &ctx.embedder, &ctx.embedding_cache, Some(args))
+        handlers::query::query_graph(
+            &ctx.graph,
+            &ctx.embedder,
+            &ctx.embedding_cache,
+            &ctx.presence,
+            &ctx.occupancy,
+            Some(args),
+        )
     }
 }
 inventory::submit!(ToolHandlerEntry(&QueryGraphHandler));

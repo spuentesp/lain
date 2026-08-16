@@ -1,6 +1,7 @@
 //! Tests for tools/handlers/metrics.rs
 
 use crate::nlp::NlpEmbedder;
+use crate::server::presence::OccupancyMap;
 use crate::server::tools::handlers::metrics::{find_anchors, get_anchor_score, get_context_depth, find_dead_code, explain_symbol, suggest_refactor_targets};
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
@@ -115,7 +116,8 @@ fn test_explain_symbol_existing() {
     node.anchor_score = Some(0.3);
     overlay.insert_node(node);
 
-    let result = explain_symbol(&graph, &overlay, "documented_fn");
+    let occupancy = OccupancyMap::new();
+    let result = explain_symbol(&graph, &overlay, &occupancy, "documented_fn");
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("documented_fn"));
@@ -128,7 +130,8 @@ fn test_explain_symbol_not_found() {
     let (graph, overlay) = make_test_graph_with_nodes();
 
     // find_dead_code returns empty (not error), but explain_symbol should error
-    let result = explain_symbol(&graph, &overlay, "nonexistent_node_xyz");
+    let occupancy = OccupancyMap::new();
+    let result = explain_symbol(&graph, &overlay, &occupancy, "nonexistent_node_xyz");
     assert!(result.is_err());
 }
 

@@ -699,11 +699,48 @@ impl ServerHandler for LainHandler {
                         }
                     };
                     return match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
-                        Ok(info) => Ok(tool_text_result(
-                            serde_json::to_string(&info)
-                                .unwrap_or_else(|e| format!("serialization error: {e}")),
-                            false,
-                        )),
+                        Ok(info) => {
+                            // Enrich the JSON with `active_edits`: the
+                            // count of unique agents with at least one
+                            // claim (any intent) touching this repo's
+                            // workspace. Sourced from the `LainServer`
+                            // orchestrator when the MCP server was built
+                            // with `with_server`; for sidecar / read-only
+                            // servers the count is 0.
+                            let mut value: serde_json::Value =
+                                serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
+                            let active_edits = self
+                                .server
+                                .as_ref()
+                                .map(|s| {
+                                    let occupancy = s.occupancy();
+                                    let active = s.presence().list_active(false);
+                                    active
+                                        .iter()
+                                        .filter(|sess| {
+                                            let claims = occupancy.list_for_agent(&sess.id);
+                                            // "Active edits" = any claim
+                                            // on this repo's working set.
+                                            // The MVP filter is any claim
+                                            // at all; per-repo path
+                                            // mapping is a follow-up.
+                                            !claims.is_empty()
+                                        })
+                                        .count()
+                                })
+                                .unwrap_or(0);
+                            if let Some(obj) = value.as_object_mut() {
+                                obj.insert(
+                                    "active_edits".to_string(),
+                                    serde_json::Value::Number(active_edits.into()),
+                                );
+                            }
+                            Ok(tool_text_result(
+                                serde_json::to_string(&value)
+                                    .unwrap_or_else(|e| format!("serialization error: {e}")),
+                                false,
+                            ))
+                        }
                         Err(e) => Ok(tool_text_result(format!("{e}"), true)),
                     };
                 }
@@ -1106,7 +1143,22 @@ impl LainMcpServer {
     /// The handler clones `Arc` state through this pointer so a
     /// registration here is observed by every other consumer in the
     /// same process.
+    ///
+    /// Also pushes the live `Arc<PresenceRegistry>` / `Arc<OccupancyMap>`
+    /// into the underlying executor's `ToolContext` so the regular
+    /// tools (`query_graph`, `explain_symbol`, `get_repo_info`) surface
+    /// the same multiplayer state the dedicated tools see. Without
+    /// this push the `ToolContext` would still carry the empty defaults
+    /// from `ToolExecutor::new` and `query_graph` would report
+    /// `active_agents: []` even after agents register.
     pub fn with_server(mut self, server: Arc<LainServer>) -> Self {
+        let presence = Arc::clone(server.presence());
+        let occupancy = Arc::clone(server.occupancy());
+        // `executor.ctx` is `pub`; mutate it in place so handlers reading
+        // through `&ctx.presence` / `&ctx.occupancy` observe the live
+        // registries.
+        self.executor.ctx.presence = presence;
+        self.executor.ctx.occupancy = occupancy;
         self.server = Some(server);
         self
     }
@@ -1766,7 +1818,32 @@ async fn handle_request(
                                     };
                                     match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
                                         Ok(info) => {
-                                            let text = match serde_json::to_string(&info) {
+                                            // Mirror the stdio dispatch:
+                                            // count interactive agents with
+                                            // at least one claim and inject
+                                            // the number as `active_edits`.
+                                            let mut value: serde_json::Value =
+                                                serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
+                                            let active_edits = server
+                                                .as_ref()
+                                                .map(|s| {
+                                                    let occupancy = s.occupancy();
+                                                    let active = s.presence().list_active(false);
+                                                    active
+                                                        .iter()
+                                                        .filter(|sess| {
+                                                            !occupancy.list_for_agent(&sess.id).is_empty()
+                                                        })
+                                                        .count()
+                                                })
+                                                .unwrap_or(0);
+                                            if let Some(obj) = value.as_object_mut() {
+                                                obj.insert(
+                                                    "active_edits".to_string(),
+                                                    serde_json::Value::Number(active_edits.into()),
+                                                );
+                                            }
+                                            let text = match serde_json::to_string(&value) {
                                                 Ok(s) => s,
                                                 Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
                                             };

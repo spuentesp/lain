@@ -13,6 +13,7 @@ use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
+use crate::server::presence::{OccupancyMap, PresenceRegistry};
 use crate::server::tools::UiSession;
 use crate::tuning::TuningConfig;
 use async_trait::async_trait;
@@ -41,6 +42,18 @@ pub struct ToolContext {
     /// (`run_build`, `run_tests`, `run_clippy`) so they don't fail just
     /// because the binary was launched from a different directory.
     pub workspace: std::path::PathBuf,
+    /// Presence registry shared with the `LainServer` orchestrator.
+    /// Tools that surface multiplayer state (`query_graph`,
+    /// `explain_symbol`) read this to attach an `occupancy` summary
+    /// to their result. Initialized to an empty registry; the
+    /// `LainMcpServer::with_server` wiring hook swaps in the live
+    /// `Arc<PresenceRegistry>` from the constructed `LainServer` so
+    /// all tool handlers see the same state as the dedicated
+    /// `register_agent` / `claim_files` MCP tools.
+    pub presence: Arc<PresenceRegistry>,
+    /// Occupancy map shared with the `LainServer` orchestrator. Same
+    /// wiring story as `presence` — see above.
+    pub occupancy: Arc<OccupancyMap>,
 }
 
 impl ToolContext {
@@ -71,7 +84,29 @@ impl ToolContext {
             job_webhooks,
             diagnostics_port: crate::server::tools::DIAGNOSTICS_PORT,
             workspace: std::path::PathBuf::from("."),
+            // Default to empty registries so standalone / sidecar
+            // executors (which don't carry a `LainServer`) still
+            // construct successfully. `LainMcpServer::with_server`
+            // replaces these with the live `Arc`s once the
+            // orchestrator is built.
+            presence: Arc::new(PresenceRegistry::new()),
+            occupancy: Arc::new(OccupancyMap::new()),
         }
+    }
+
+    /// Replace the default empty presence + occupancy registries with
+    /// the live `Arc`s from the constructed `LainServer`. Called by
+    /// `LainMcpServer::with_server` after the orchestrator is built so
+    /// the handler dispatch path observes the same multiplayer state
+    /// the dedicated `register_agent` / `claim_files` tools do.
+    pub fn with_presence_and_occupancy(
+        mut self,
+        presence: Arc<PresenceRegistry>,
+        occupancy: Arc<OccupancyMap>,
+    ) -> Self {
+        self.presence = presence;
+        self.occupancy = occupancy;
+        self
     }
 
     pub fn with_workspace(mut self, workspace: std::path::PathBuf) -> Self {
