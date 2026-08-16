@@ -1,10 +1,11 @@
 //! `lain` — local MCP server for cross-repo and per-repo code analysis.
 //!
 //! This binary is a thin dispatcher over the clap-derived [`Args`] /
-//! [`Commands`] enum in [`lain::cli`]. The five kept subcommands
-//! are: `server`, `workspaces`, `repos`, `query`, `ask`. `Init`,
-//! `Agents`, `Hook`, `Projects`, and the old top-level `Use` are
-//! gone after the consolidation.
+//! [`Commands`] enum in [`lain::cli`]. The kept subcommands are:
+//! `server`, `workspaces`, `repos`, `query`, `ask`, `hooks`. `Init`,
+//! `Agents`, `Projects`, and the old top-level `Use` are gone after
+//! the consolidation. `hooks` is the agent pre-edit hook entry point
+//! (claim/release against the server's presence registry).
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
@@ -45,6 +46,7 @@ async fn main() -> Result<()> {
             // accepted for surface parity and ignored at dispatch.
             lain::cli::ask::run_ask()
         }
+        Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
         None => {
             // No subcommand: print help.
             let mut cmd = Args::command();

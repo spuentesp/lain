@@ -5,6 +5,7 @@ pub mod workspaces;
 pub mod repos;
 pub mod dispatch;
 pub mod signal;
+pub mod hooks;
 
 pub use query::run_query;
 pub use ask::run_ask;
@@ -15,10 +16,12 @@ use std::path::PathBuf;
 
 /// Top-level `lain` CLI surface — kept subcommands only.
 ///
-/// After the consolidation `Init`, `Agents`, `Hook`, `Projects`, and
-/// `Use` (as a top-level verb) are gone. Federation / repo /
-/// per-repo concerns are reached via `Server` + `Repos`. Workspaces
-/// keep their own subcommand tree (managed in `cli::workspaces`).
+/// After the consolidation `Init`, `Agents`, `Projects`, and `Use`
+/// (as a top-level verb) are gone. Federation / repo / per-repo
+/// concerns are reached via `Server` + `Repos`. Workspaces keep
+/// their own subcommand tree (managed in `cli::workspaces`).
+/// `Hooks` is the agent pre-edit hook entry point (claim/release
+/// against the server's presence registry).
 #[derive(Parser, Debug)]
 #[command(
     name = "lain",
@@ -76,5 +79,10 @@ pub enum Commands {
         #[arg(long, default_value = "./repos.yaml")]
         config: PathBuf,
         question: String,
+    },
+    /// Agent pre-edit hook entry point (claim/release files).
+    Hooks {
+        #[command(subcommand)]
+        action: crate::cli::hooks::HooksAction,
     },
 }

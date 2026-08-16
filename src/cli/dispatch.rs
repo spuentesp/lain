@@ -7,6 +7,8 @@
 
 use clap::CommandFactory;
 
+use crate::cli::hooks::HooksAction;
+
 /// Return the top-level `lain` clap `Command`. Used by the
 /// `top_level_help_lists_only_kept_subcommands` test to verify the
 /// subcommand surface, and by `src/main.rs` when no subcommand is
@@ -18,13 +20,39 @@ pub fn main_command_factory() -> clap::Command {
     crate::cli::Args::command()
 }
 
+/// Dispatch a `lain hooks <claim|release>` invocation.
+pub fn run(action: HooksAction) -> anyhow::Result<()> {
+    match action {
+        HooksAction::Claim {
+            url,
+            path,
+            symbol,
+            intent,
+            agent_name,
+            agent_kind,
+        } => crate::cli::hooks::claim(&url, &path, &symbol, &intent, &agent_name, &agent_kind)
+            .map_err(|e| anyhow::anyhow!("{e}")),
+        HooksAction::Release {
+            url,
+            path,
+            symbol,
+            agent_name,
+            agent_kind,
+        } => crate::cli::hooks::release(&url, &path, &symbol, &agent_name, &agent_kind)
+            .map_err(|e| anyhow::anyhow!("{e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// The top-level help text must list the kept subcommands
-    /// (`server`, `workspaces`, `repos`, `query`, `ask`) and must
-    /// NOT list the removed ones (`init`, `agents`, `projects`,
-    /// `hook`). This is a regression guard against re-introducing
-    /// the old multi-command surface during the consolidation.
+    /// (`server`, `workspaces`, `repos`, `query`, `ask`, `hooks`)
+    /// and must NOT list the removed ones (`init`, `agents`,
+    /// `projects`). `hooks` is now a kept subcommand (agent
+    /// pre-edit hook entry point — see `cli::hooks`), so the
+    /// pre-consolidation guard against the bare `hook` token is
+    /// dropped. This is still a regression guard against
+    /// re-introducing the old multi-command surface.
     #[test]
     fn top_level_help_lists_only_kept_subcommands() {
         let mut cmd = crate::main_command_factory();
@@ -37,10 +65,10 @@ mod tests {
         assert!(help.contains("repos"), "help must list `repos`: {help}");
         assert!(help.contains("query"), "help must list `query`: {help}");
         assert!(help.contains("ask"), "help must list `ask`: {help}");
+        assert!(help.contains("hooks"), "help must list `hooks`: {help}");
         // Removed subcommands must not appear.
         assert!(!help.contains("init"), "help must not list `init`: {help}");
         assert!(!help.contains("agents"), "help must not list `agents`: {help}");
         assert!(!help.contains("projects"), "help must not list `projects`: {help}");
-        assert!(!help.contains("hook"), "help must not list `hook`: {help}");
     }
 }
