@@ -355,7 +355,7 @@ impl OccupancyMap {
                     }
                 }
                 // Also conflict if ANYONE has a file-level (empty symbols) claim on this file.
-                for other in entry.agents.iter().filter(|a| entry.symbols.get("__file_level__").map(|s| s.contains(a)).unwrap_or(false) || entry.symbols.is_empty() && false).filter(|a| *a != agent_id) {
+                for other in entry.agents.iter().filter(|a| entry.symbols.get("__file_level__").map(|s| s.contains(a)).unwrap_or(false)).filter(|a| *a != agent_id) {
                     req_conflicts.push(ConflictEntry {
                         agent_id: other.clone(),
                         name: "<unknown>".into(),
@@ -443,8 +443,15 @@ impl OccupancyMap {
     }
 
     pub fn list_all(&self) -> Vec<OccupancyEntry> {
-        let s = self.inner.lock();
-        s.by_file.keys().filter_map(|p| self.list_for_path(p)).collect()
+        // Snapshot the path set under the lock, then drop it before calling
+        // `list_for_path`, which acquires the lock for itself. Mutex is not
+        // reentrant, so calling back into `self.list_for_path` while holding
+        // `s` would deadlock on the first iteration.
+        let paths: Vec<std::path::PathBuf> = {
+            let s = self.inner.lock();
+            s.by_file.keys().cloned().collect()
+        };
+        paths.iter().filter_map(|p| self.list_for_path(p)).collect()
     }
 
     pub fn list_for_agent(&self, agent_id: &AgentId) -> Vec<Claim> {

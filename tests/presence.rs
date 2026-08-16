@@ -161,3 +161,16 @@ fn list_for_path_shows_all_agents() {
     assert_eq!(entry.agents.len(), 2);
     assert_eq!(entry.symbols.len(), 2);
 }
+
+#[test]
+fn list_all_returns_all_claimed_paths() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit }]);
+    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit }]);
+
+    let entries = occ.list_all();
+    let paths: std::collections::HashSet<_> = entries.iter().map(|e| e.path.clone()).collect();
+    assert_eq!(paths.len(), 2);
+    assert!(paths.contains(&std::path::PathBuf::from("auth.rs")));
+    assert!(paths.contains(&std::path::PathBuf::from("db.rs")));
+}
