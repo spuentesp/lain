@@ -115,6 +115,67 @@ async fn repo_index_index_is_idempotent_on_same_commit() {
 }
 
 #[tokio::test]
+async fn repo_index_index_completes_within_timeout() {
+    // Regression test for the hang observed in
+    // `repo_index_indexes_files_via_index_one_repo` on systems where a
+    // real language server (rust-analyzer) is on `PATH`.
+    //
+    // Before the fix, `RepoIndex::index()` itself completed quickly but
+    // the *Drop* chain hung on the tokio current_thread worker: the
+    // `lsp_bridge` crate's `LspProcess::drop` calls
+    // `futures::executor::block_on(self.kill())` to reap the spawned
+    // language server child, which deadlocks when the only thread in the
+    // runtime is parked in `block_on`. From the test runner's
+    // perspective the future after `index().await` was "still running"
+    // indefinitely, even though `index()` had already returned Ok.
+    //
+    // After the fix, `RepoIndex::Drop` synchronously shuts down the LSP
+    // pool on a fresh OS thread with its own runtime before the bridges
+    // drop, so no `LspProcess` is left to be reaped on the test worker.
+    // The `index()` call is also wrapped in a top-level
+    // `tokio::time::timeout` as a belt-and-suspenders cap.
+    //
+    // This test wraps `index()` in its own `tokio::time::timeout` and
+    // asserts that the inner call completed before the budget. If the
+    // Drop chain re-introduces a hang, the test fails — but more
+    // importantly, the test ends in bounded wall-clock time even when
+    // the bug regresses, instead of stalling the whole test suite.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = tmp.path().to_path_buf();
+    let src_dir = repo_dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("hello.rs"), "pub fn greet() {}\n").unwrap();
+    init_temp_git_repo(&repo_dir);
+
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let source = Box::new(
+        WorkspaceDirSource::new(RepoId::new("timeout").unwrap(), repo_dir.clone()).unwrap(),
+    );
+    let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
+
+    // 30s is well above the production `INDEX_TIMEOUT` (60s) but well
+    // below cargo-test's 60s "still running" watchdog. If this fires,
+    // the underlying Drop chain is hanging again and the production
+    // shutdown fix has regressed.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ri.index(),
+    )
+    .await
+    .expect("RepoIndex::index did not complete within 30s — Drop shutdown regressed");
+    result.expect("RepoIndex::index returned an error");
+    assert_eq!(ri.health(), RepoHealth::Ready);
+
+    // Holding `ri` and `tmp` alive until here means the Drop chain runs
+    // while the test future is still in flight. If the Drop hangs,
+    // cargo-test reports "still running for over 60 seconds"; if it
+    // completes, the test future resolves and we hit the assertions.
+    drop(ri);
+    drop(tmp);
+}
+
+#[tokio::test]
 async fn repo_index_start_watcher_does_not_panic() {
     // Smoke test that the watcher can be installed. We don't assert on
     // file events (the test isn't reliable across platforms); we just

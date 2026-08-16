@@ -296,8 +296,21 @@ impl LspMultiplexer {
     }
 
     pub async fn shutdown(&mut self) {
-        if let Err(e) = self.bridge.shutdown().await {
-            warn!("LSP bridge shutdown error: {}", e);
+        // Bound the bridge shutdown with a short timeout. `LspServer::stop`
+        // calls `tokio::process::Child::kill()` and awaits the LSP
+        // `shutdown` request; both can hang if the language server child
+        // is unresponsive. A 5s budget is enough for a healthy process
+        // (SIGKILL is synchronous) and short enough that one stuck
+        // server can't block the rest of the federation shutdown.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.bridge.shutdown(),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("LSP bridge shutdown error: {}", e),
+            Err(_) => warn!("LSP bridge shutdown timed out after 5s; abandoning"),
         }
     }
 }
