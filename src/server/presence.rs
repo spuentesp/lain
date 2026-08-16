@@ -91,14 +91,65 @@ pub enum ClaimIntent {
     Edit,
 }
 
+/// Content hash for a symbol body, computed as BLAKE3-256 over the raw
+/// source slice. Lets the federation layer track a symbol across index
+/// rebuilds: if the body (and therefore the hash) changes, downstream
+/// caches and conflict checks treat it as a different symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SymbolHash(pub [u8; 32]);
+
+impl SymbolHash {
+    /// Compute the BLAKE3-256 hash of `b` and wrap it.
+    pub fn from_bytes(b: &[u8]) -> Self {
+        let mut out = [0u8; 32];
+        let hash = blake3::hash(b);
+        out.copy_from_slice(hash.as_bytes());
+        Self(out)
+    }
+
+    /// Placeholder for "no real body hash yet" — distinct from any
+    /// real hash because `blake3::hash(b"")` is not the all-zero array.
+    pub fn zero() -> Self {
+        Self([0u8; 32])
+    }
+}
+
+impl serde::Serialize for SymbolHash {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(self.0))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SymbolHash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::custom("bad SymbolHash length"));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(Self(out))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Claim {
     pub agent_id: AgentId,
     pub path: PathBuf,
     pub symbols: Vec<String>,
+    /// `None` for a file-level claim (no specific symbol hash).
+    /// `Some(hash)` carries the BLAKE3-256 of the symbol body.
+    /// Placeholder during PR 10: file-level -> `None`,
+    /// symbol-level -> `Some(SymbolHash::zero())` until PR 11 wires
+    /// tree-sitter bodies through.
+    pub content_hash: Option<SymbolHash>,
     pub intent: ClaimIntent,
     #[serde(skip)]
     pub claimed_at: SystemTime,
+    /// Optional expiry timestamp (PR 10 Task 3 hook). `None` means
+    /// "no expiry set"; the federation expiry loop will ignore it.
+    pub expires_at: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -386,12 +437,22 @@ impl OccupancyMap {
                     entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
                 }
                 let now = SystemTime::now();
+                // File-level claim (no specific symbols) carries no
+                // content hash; symbol-level claims get a placeholder
+                // hash for now — PR 11 will compute real bodies.
+                let content_hash = if req.symbols.is_empty() {
+                    None
+                } else {
+                    Some(SymbolHash::zero())
+                };
                 s.by_agent.entry(agent_id.clone()).or_default().push(Claim {
                     agent_id: agent_id.clone(),
                     path: req.path.clone(),
                     symbols: req.symbols.clone(),
+                    content_hash,
                     intent: req.intent.clone(),
                     claimed_at: now,
+                    expires_at: None,
                 });
                 granted.push(req);
             } else {

@@ -431,3 +431,28 @@ fn config_dir_contains_hooks_subdir_helper() {
     // We don't create the dir; we just check the path computation.
     assert!(hooks.ends_with("hooks"));
 }
+
+// --- Task 1 brief: SymbolHash content hashing ---
+
+/// `SymbolHash::from_bytes` must be deterministic and collision-free
+/// across distinct inputs — BLAKE3-256 over the same byte slice yields
+/// the same hash, and distinct slices yield distinct hashes.
+#[test]
+fn symbol_hash_from_bytes_roundtrips() {
+    let h = SymbolHash::from_bytes(b"hello");
+    let h2 = SymbolHash::from_bytes(b"hello");
+    assert_eq!(h, h2);
+    let h3 = SymbolHash::from_bytes(b"world");
+    assert_ne!(h, h3);
+}
+
+/// `SymbolHash::zero()` is the all-zero 32-byte array, which is NOT
+/// the BLAKE3 hash of the empty string — they're distinct bit
+/// patterns, and the placeholder must remain distinguishable from any
+/// real body hash so downstream code can tell "unset" from "computed".
+#[test]
+fn symbol_hash_zero_is_distinct_from_real_hash() {
+    let z = SymbolHash::zero();
+    let r = SymbolHash::from_bytes(b"");
+    assert_ne!(z, r);
+}
