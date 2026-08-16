@@ -6,7 +6,7 @@
 //! scripts invoked by Claude / Cursor / Copilot etc. call this binary
 //! to register the agent and claim files before editing.
 
-use crate::config::config_dir;
+use crate::config::hooks_dir;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ struct HookSession {
 }
 
 fn session_path(agent_name: &str) -> PathBuf {
-    config_dir().join("hooks").join(format!("{agent_name}.session"))
+    hooks_dir().join(format!("{agent_name}.session"))
 }
 
 fn read_session(agent_name: &str) -> Option<HookSession> {

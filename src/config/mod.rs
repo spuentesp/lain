@@ -36,3 +36,11 @@ pub fn run_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".local").join("lain").join("run")
 }
+
+/// Return the path to the lain hooks dir (`<config_dir>/hooks`).
+/// Per-agent pre-edit hook scripts cache their session token JSON
+/// here so subsequent hook invocations can heartbeat without a
+/// full `register_agent` round-trip.
+pub fn hooks_dir() -> PathBuf {
+    config_dir().join("hooks")
+}
