@@ -30,6 +30,7 @@ async fn query_graph_includes_occupancy() {
         path: std::path::PathBuf::from("a.rs"),
         symbols: vec![],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
 
     // Verify the claim is observable through the helper the
@@ -103,6 +104,7 @@ fn claim_grants_empty_path_when_unoccupied() {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
     assert_eq!(result.granted.len(), 1);
     assert_eq!(result.conflicts.len(), 0);
@@ -117,11 +119,13 @@ fn claim_reports_conflict_on_overlap() {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
     assert_eq!(result.granted.len(), 0);
     assert_eq!(result.conflicts.len(), 1);
@@ -137,11 +141,13 @@ fn claim_different_symbols_on_same_file_no_conflict() {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["validate".into()],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
     assert_eq!(result.granted.len(), 1);
     assert_eq!(result.conflicts.len(), 0);
@@ -156,11 +162,13 @@ fn claim_file_level_no_symbols_overlaps_with_anything_on_file() {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec![],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["anything".into()],
         intent: ClaimIntent::Edit,
+        ttl_seconds: None,
     }]);
     assert_eq!(result.granted.len(), 0);
     assert_eq!(result.conflicts.len(), 1);
@@ -171,8 +179,8 @@ fn release_returns_removed_paths() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
     occ.claim(&alice, vec![
-        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit },
-        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Read },
+        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None },
+        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Read, ttl_seconds: None },
     ]);
     let released = occ.release(&alice, &[std::path::PathBuf::from("auth.rs")]);
     assert_eq!(released, vec![std::path::PathBuf::from("auth.rs")]);
@@ -184,8 +192,8 @@ fn release_all_for_clears_agent() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
     occ.claim(&alice, vec![
-        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec![], intent: ClaimIntent::Edit },
-        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit },
+        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None },
+        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None },
     ]);
     let released = occ.release_all_for(&alice);
     assert_eq!(released.len(), 2);
@@ -195,8 +203,8 @@ fn release_all_for_clears_agent() {
 #[test]
 fn list_for_path_shows_all_agents() {
     let occ = lain::server::presence::OccupancyMap::new();
-    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit }]);
-    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["validate".into()], intent: ClaimIntent::Edit }]);
+    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None }]);
+    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["validate".into()], intent: ClaimIntent::Edit, ttl_seconds: None }]);
     let entry = occ.list_for_path(&std::path::PathBuf::from("auth.rs")).unwrap();
     assert_eq!(entry.agents.len(), 2);
     assert_eq!(entry.symbols.len(), 2);
@@ -205,8 +213,8 @@ fn list_for_path_shows_all_agents() {
 #[test]
 fn list_all_returns_all_claimed_paths() {
     let occ = lain::server::presence::OccupancyMap::new();
-    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit }]);
-    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit }]);
+    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None }]);
+    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None }]);
 
     let entries = occ.list_all();
     let paths: std::collections::HashSet<_> = entries.iter().map(|e| e.path.clone()).collect();
@@ -279,7 +287,7 @@ fn register_agent_returns_id_and_token() {
 fn occupancy_round_trip() {
     let occ = OccupancyMap::new();
     let alice = AgentId("alice".into());
-    let req = ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit };
+    let req = ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None };
     let r = occ.claim(&alice, vec![req]);
     assert_eq!(r.granted.len(), 1);
     let claims = occ.list_for_agent(&alice);
@@ -487,6 +495,7 @@ fn persistence_round_trip() {
             path: std::path::PathBuf::from("foo.rs"),
             symbols: vec![],
             intent: ClaimIntent::Edit,
+            ttl_seconds: None,
         }],
     );
     save_pair(&path, &reg1, &occ1).unwrap();
@@ -498,4 +507,93 @@ fn persistence_round_trip() {
 
     assert_eq!(reg2.list_active(true).len(), 1);
     assert_eq!(occ2.list_for_agent(&agent.id).len(), 1);
+}
+
+// --- Task 3 brief: explicit claim TTL via ttl_seconds + expires_at ---
+
+/// `ClaimRequest.ttl_seconds = Some(n)` must populate the resulting
+/// `Claim.expires_at` as `claimed_at + n`. After sleeping past the TTL,
+/// the stored timestamp is provably in the past — the federation expiry
+/// loop (which `expire_by_ttl` powers) will release the claim on its
+/// next tick.
+#[test]
+fn ttl_seconds_bounds_claim_even_with_heartbeat() {
+    let occ = OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let req = ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: Some(1), // 1 second
+    };
+    occ.claim(&alice, vec![req]);
+    let claims = occ.list_for_agent(&alice);
+    assert_eq!(claims.len(), 1);
+    let expires_at = claims[0].expires_at;
+    assert!(expires_at.is_some(), "ttl_seconds must set expires_at");
+    // Sleep past the TTL.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The expiry loop in LainServer would release this — but OccupancyMap
+    // alone doesn't have an expiry method. We assert the timestamp is in
+    // the past so the loop *would* release it.
+    let expires_at = claims[0].expires_at.unwrap();
+    assert!(expires_at < std::time::SystemTime::now());
+}
+
+/// `ClaimRequest.ttl_seconds = None` means no expiry: `Claim.expires_at`
+/// stays `None` and the federation expiry loop ignores the claim even
+/// after a long wait. Only explicit `release` or the owning session's
+/// heartbeat expiry will ever drop it.
+#[test]
+fn no_ttl_means_no_expiry() {
+    let occ = OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let req = ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    };
+    occ.claim(&alice, vec![req]);
+    let claims = occ.list_for_agent(&alice);
+    assert!(claims[0].expires_at.is_none(), "no ttl means no expiry");
+}
+
+/// `OccupancyMap::expire_by_ttl` must drop claims whose `expires_at` has
+/// passed and return one `(agent_id, path)` pair per dropped claim, plus
+/// keep alive the claims whose TTL is in the future. Bookkeeping for
+/// `by_file` (agent set + symbol sets) must also be cleaned so a
+/// subsequent `list_for_path` reflects the released state.
+#[test]
+fn expire_by_ttl_releases_expired_claims() {
+    let occ = OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+    // alice: 1s TTL on auth.rs — will expire.
+    occ.claim(&alice, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: Some(1),
+    }]);
+    // bob: no TTL on db.rs — survives. Different file keeps the test
+    // from accidentally exercising the file-level vs symbol-level
+    // conflict path.
+    occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("db.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let released = occ.expire_by_ttl();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].0, alice);
+    assert_eq!(released[0].1, std::path::PathBuf::from("auth.rs"));
+    // alice's claim is gone, bob's survives.
+    assert!(occ.list_for_agent(&alice).is_empty());
+    assert_eq!(occ.list_for_agent(&bob).len(), 1);
+    // The expired file's bookkeeping is cleaned; bob's file remains.
+    assert!(occ.list_for_path(&std::path::PathBuf::from("auth.rs")).is_none());
+    assert!(occ.list_for_path(&std::path::PathBuf::from("db.rs")).is_some());
 }

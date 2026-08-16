@@ -416,6 +416,13 @@ pub struct ClaimRequest {
     pub path: PathBuf,
     pub symbols: Vec<String>,
     pub intent: ClaimIntent,
+    /// Optional explicit TTL in seconds. When `Some(n)`, the resulting
+    /// `Claim` carries `expires_at = claimed_at + n` and the expiry
+    /// loop in `LainServer` will release the claim once `expires_at`
+    /// passes regardless of heartbeat. When `None`, the claim has no
+    /// TTL of its own and is only released explicitly or when the
+    /// owning agent's session expires.
+    pub ttl_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -551,6 +558,12 @@ impl OccupancyMap {
                     } else {
                         Some(SymbolHash::zero())
                     };
+                    // Translate the request's optional TTL into an absolute
+                    // expiry timestamp. `None` means "no expiry set" and the
+                    // claim is only released explicitly or when the agent's
+                    // session expires.
+                    let expires_at = req.ttl_seconds
+                        .map(|s| now + std::time::Duration::from_secs(s));
                     s.by_agent.entry(agent_id.clone()).or_default().push(Claim {
                         agent_id: agent_id.clone(),
                         path: req.path.clone(),
@@ -558,7 +571,7 @@ impl OccupancyMap {
                         content_hash,
                         intent: req.intent.clone(),
                         claimed_at: now,
-                        expires_at: None,
+                        expires_at,
                     });
                     granted.push(req);
                 } else {
@@ -617,6 +630,76 @@ impl OccupancyMap {
         // `self.release` already fired the persist callback when
         // `released` is non-empty, so we don't double-fire here.
         let _ = paths;
+        released
+    }
+
+    /// Drop every claim whose `expires_at` is in the past and return the
+    /// `(agent_id, path)` pairs that were removed so callers can fire
+    /// `ClaimReleased` events. Mirrors the bookkeeping that `release`
+    /// does: agent is unlinked from `by_file`'s agent set and the
+    /// relevant symbol sets, and `by_file` entries are dropped when
+    /// empty. Returns an empty vec when nothing expired.
+    ///
+    /// The persist callback fires (at most once) when the result vec
+    /// is non-empty, matching the contract of `release` and
+    /// `release_all_for`.
+    pub fn expire_by_ttl(&self) -> Vec<(AgentId, PathBuf)> {
+        let now = SystemTime::now();
+        let released = {
+            let mut s = self.inner.lock();
+            let mut released: Vec<(AgentId, PathBuf)> = Vec::new();
+
+            // Collect the claims to drop first so we don't mutate
+            // `by_agent` while iterating it. Also capture the symbol
+            // sets each released claim touched so we can clean up
+            // `by_file`.
+            let mut to_drop: Vec<(AgentId, PathBuf, Vec<String>)> = Vec::new();
+            for (agent_id, claims) in s.by_agent.iter() {
+                for c in claims.iter() {
+                    if let Some(exp) = c.expires_at {
+                        if exp <= now {
+                            to_drop.push((agent_id.clone(), c.path.clone(), c.symbols.clone()));
+                        }
+                    }
+                }
+            }
+
+            for (agent_id, path, symbols) in &to_drop {
+                if let Some(entry) = s.by_file.get_mut(path) {
+                    entry.agents.remove(agent_id);
+                    // Remove the agent from any symbol set it claimed.
+                    // For file-level claims (`symbols` empty) the
+                    // bookkeeping lives under the `__file_level__`
+                    // sentinel.
+                    let symbol_keys: Vec<String> = if symbols.is_empty() {
+                        vec!["__file_level__".into()]
+                    } else {
+                        symbols.clone()
+                    };
+                    for sym in &symbol_keys {
+                        if let Some(set) = entry.symbols.get_mut(sym) {
+                            set.remove(agent_id);
+                            if set.is_empty() { entry.symbols.remove(sym); }
+                        }
+                    }
+                    if entry.agents.is_empty() && entry.symbols.is_empty() {
+                        s.by_file.remove(path);
+                    }
+                }
+                if let Some(claims) = s.by_agent.get_mut(agent_id) {
+                    claims.retain(|c| !(c.path == *path && c.expires_at.map(|e| e <= now).unwrap_or(false)));
+                    if claims.is_empty() {
+                        s.by_agent.remove(agent_id);
+                    }
+                }
+                released.push((agent_id.clone(), path.clone()));
+            }
+
+            released
+        };
+        if !released.is_empty() {
+            if let Some(cb) = self.cloned_persist_cb() { cb(); }
+        }
         released
     }
 

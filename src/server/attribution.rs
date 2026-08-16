@@ -136,6 +136,7 @@ fn attribute_edit(
                 path: path.to_path_buf(),
                 symbols: vec![],
                 intent: ClaimIntent::Edit,
+                ttl_seconds: None,
             }],
         );
         if !result.granted.is_empty() {

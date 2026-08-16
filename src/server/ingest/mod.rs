@@ -324,6 +324,7 @@ impl LainServer {
         let occupancy = Arc::new(OccupancyMap::new());
         let (presence_event_tx, _) = broadcast::channel(256);
         let presence_for_expiry = presence.clone();
+        let occupancy_for_expiry = occupancy.clone();
         let expiry_tx = presence_event_tx.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -332,6 +333,17 @@ impl LainServer {
                 let released = presence_for_expiry.expire_stale();
                 for id in &released {
                     let _ = expiry_tx.send(PresenceEvent::HeartbeatExpired(id.clone()));
+                }
+                // Per-claim TTL: drop any claim whose `expires_at`
+                // (set via `ClaimRequest.ttl_seconds`) has passed and
+                // notify subscribers so the SSE stream and any UI
+                // surfaces see the release.
+                let released_claims = occupancy_for_expiry.expire_by_ttl();
+                for (agent_id, path) in &released_claims {
+                    let _ = expiry_tx.send(PresenceEvent::ClaimReleased {
+                        agent_id: agent_id.clone(),
+                        path: path.clone(),
+                    });
                 }
             }
         });
@@ -483,6 +495,7 @@ impl LainServer {
         let occupancy = Arc::new(OccupancyMap::new());
         let (presence_event_tx, _) = broadcast::channel(256);
         let presence_for_expiry = presence.clone();
+        let occupancy_for_expiry = occupancy.clone();
         let expiry_tx = presence_event_tx.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -491,6 +504,17 @@ impl LainServer {
                 let released = presence_for_expiry.expire_stale();
                 for id in &released {
                     let _ = expiry_tx.send(PresenceEvent::HeartbeatExpired(id.clone()));
+                }
+                // Per-claim TTL: drop any claim whose `expires_at`
+                // (set via `ClaimRequest.ttl_seconds`) has passed and
+                // notify subscribers so the SSE stream and any UI
+                // surfaces see the release.
+                let released_claims = occupancy_for_expiry.expire_by_ttl();
+                for (agent_id, path) in &released_claims {
+                    let _ = expiry_tx.send(PresenceEvent::ClaimReleased {
+                        agent_id: agent_id.clone(),
+                        path: path.clone(),
+                    });
                 }
             }
         });

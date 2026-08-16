@@ -120,6 +120,7 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         path: std::path::PathBuf::from(f.path),
         symbols: f.symbols.unwrap_or_default(),
         intent: f.intent.as_deref().map(|s| if s == "read" { ClaimIntent::Read } else { ClaimIntent::Edit }).unwrap_or(ClaimIntent::Edit),
+        ttl_seconds: None,
     }).collect();
     let result = server.occupancy.claim(&session.id, requests);
     if !result.granted.is_empty() {
