@@ -1,55 +1,43 @@
-# Kimi plugin template
+# Kimi Pre-Edit Hook for lain
 
-This directory ships the **template** for lain's Kimi Code plugin. It is
-**not** used at runtime — Kimi reads the manifest from the user's home
-directory (`~/.kimi-code/plugins/managed/lain/`), which the operator
-installs by editing the agent's MCP config to point at
-`lain server --config ./repos.yaml --transport stdio`.
+This hook auto-claims files in `lain` before Kimi edits them. Kimi's hook
+config lives in `~/.kimi-code/config.toml` (TOML, with `[[hooks]]` arrays).
 
-## Layout
+## Config path (verified)
 
-| Path | Purpose |
-| --- | --- |
-| `kimi.plugin.json` | Template manifest with `REPLACE_ME_AT_INSTALL` placeholders. **Reference only** — never copied verbatim. |
-| `skills/lain/SKILL.md` | The canonical skill markdown, bundled into the binary via `include_str!` and written to `~/.kimi-code/plugins/managed/lain/skills/lain/SKILL.md` at install time. |
+- `~/.kimi-code/config.toml` — TOML with a top-level `[[hooks]]` array. Each
+  entry has `event`, `command`, and `timeout`.
 
-## How substitution works
+## Install
 
-`REPLACE_ME_AT_INSTALL` is a literal sentinel that `init_kimi` replaces
-with the resolved path before writing the runtime manifest:
+1. Make sure `lain` is on `$PATH` and a `lain server` is running with HTTP
+   transport.
+2. Set `LAIN_URL` if lain is not on `http://localhost:9999/mcp`.
+3. Append to `~/.kimi-code/config.toml` (preserving existing content):
 
-| Placeholder | Replacement |
-| --- | --- |
-| `--workspace REPLACE_ME_AT_INSTALL` | `--workspace <workspace path passed to `lain init`>` |
-| `--embedding-model REPLACE_ME_AT_INSTALL` | `--embedding-model <path to the ONNX model>` (omitted if no model exists) |
-
-The `lain` command in the manifest stays as a PATH-resolvable name; the
-Kimi plugin manager rejects absolute paths in the `command` field.
-
-## Why this isn't done at build time
-
-Paths vary per install — the user's workspace and ONNX model location
-aren't known when the binary is built. The template lives in the repo
-for visibility (so contributors can see the manifest shape); the
-runtime copy lives in the user's home directory.
-
-## Verification
-
-After running `lain init --agent kimi`, check the install worked:
-
-```sh
-# Manifest should have no remaining placeholders.
-if grep -q REPLACE_ME_AT_INSTALL ~/.kimi-code/plugins/managed/lain/kimi.plugin.json; then
-  echo "WARNING: install did not substitute placeholders"
-else
-  echo "ok"
-fi
-
-# Skill file should match the bundled source.
-ls -la ~/.kimi-code/plugins/managed/lain/skills/lain/SKILL.md
-
-# Plugin should be registered.
-cat ~/.kimi-code/plugins/installed.json | jq '.plugins[] | select(.id=="lain")'
+```toml
+# lain: claim files before edit
+[[hooks]]
+event = "PreToolUse"
+command = "/path/to/hooks/kimi/pre-edit.sh"
+timeout = 10
 ```
 
-Restart Kimi Code (or open a new window) to pick up the plugin.
+Replace `/path/to/hooks/...` with the absolute path in this repo.
+
+## Behavior
+
+- **pre-edit.sh**: Calls `lain hooks claim` to register Kimi as an agent and
+  claim the file. Conflicts are surfaced to Kimi on stderr. Lain unreachable
+  → exit 0 (don't break Kimi's workflow).
+
+## Defaults
+
+- `--agent-name` = `kimi`
+- `--agent-kind` = `kimi`
+
+## Multiple Kimi windows
+
+All Kimi sessions share the same agent name (`kimi`) and persistent session
+token. If you need per-window tracking, set `LAIN_AGENT_NAME` differently per
+shell.
