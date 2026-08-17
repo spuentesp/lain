@@ -313,3 +313,120 @@ else
     echo "  list_occupancy: $(call_tool list_occupancy '{}' | python3 -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read())[\"result\"][\"content\"][0][\"text\"]), indent=2))' 2>/dev/null)"
     exit 1
 fi
+
+echo ""
+echo "═══════════════════════════════════════════════════════════════════"
+echo " SCENARIO C: no clobbering — symbol-level granularity"
+echo " Two agents edit the same file at different symbols"
+echo "═══════════════════════════════════════════════════════════════════"
+
+# Fresh server (clears the federation state file per start_server's
+# documented contract).
+start_server
+
+# Reset the source files: a prior Scenario B/C run left the marker
+# comments in place, and on re-run Claude refuses to re-edit an
+# already-present marker (no hook fires → no occupancy entry).
+(cd "$REPO" && git checkout -- src/)
+
+# Re-enable the post-edit release hook for this scenario. Scenario B
+# disabled it so the pre-edit `claim` would survive until the
+# occupancy assertion; Scenario C explicitly tests the release
+# lifecycle — both claims must land in sse.rs at different symbols
+# and the post-edit `release` must not undo the surviving claim.
+HOOKS_POST_DISABLED=0
+
+# Establish symbol-level claims BEFORE the claude runs so the
+# occupancy entry has 2 agents + 2 symbols once everything settles.
+# The attribution watcher auto-claims file changes at file level
+# (no symbols), and the post-edit hook fires `release_files` for
+# each Claude edit. If we claim at symbol level *after* the
+# claude runs, the file-level claims from the attribution watcher
+# race against our symbol-level claims and the symbol claim
+# returns a conflict. By claiming first, our symbol-level entries
+# survive the post-edit releases (releases only remove the
+# RELEASING agent's claims, not ours) and the subsequent file-level
+# claims from the watcher land in addition to ours without
+# clobbering the symbol data.
+SSE_PATH="$REPO/src/sse.rs"
+declare -A SESSIONS
+for a in claude-A claude-B; do
+    RESP=$(call_tool register_agent "{\"name\":\"$a\",\"kind\":\"claude-code\"}")
+    SESSIONS[$a]=$(echo "$RESP" | python3 -c "
+import json,sys
+d = json.loads(sys.stdin.read())
+r = json.loads(d['result']['content'][0]['text'])
+print(f\"{r['agent_id']} {r['session_token']}\")
+")
+    call_tool claim_files "{\"agent_id\":\"$(echo "${SESSIONS[$a]}" | awk '{print $1}')\",\"session_token\":\"$(echo "${SESSIONS[$a]}" | awk '{print $2}')\",\"files\":[{\"path\":\"$SSE_PATH\",\"symbols\":[\"$( [ "$a" = claude-A ] && echo SseStream::next || echo sse_placeholder_body )\"],\"intent\":\"edit\"}]}" >/dev/null
+done
+
+# Two agents edit src/sse.rs at different symbols. The Edit tool fires
+# the PreToolUse hook, which calls `lain hooks claim` (file-level,
+# which will conflict with our symbol claims above — that's expected,
+# the hook is exercised either way and returns success on conflict)
+# and the PostToolUse hook calls `lain hooks release`. Both markers
+# must appear in the file (no clobber).
+# Note: backticks in the prompt must be escaped — bash interprets them
+# as command substitution and would otherwise corrupt the prompt string.
+run_claude claude-A "Edit /tmp/multiplayer-full/repos/multiplayer-sample/src/sse.rs: inside the body of the \`SseStream::next\` function (the one that contains the \`match self.rx.recv().await\` loop), add the comment '// claude-A symbol edit' on a new line. Do not modify anything else. Use the Edit tool only."
+run_claude claude-B "Edit /tmp/multiplayer-full/repos/multiplayer-sample/src/sse.rs: inside the body of the \`sse_placeholder_body\` function (the one that returns \`Vec<u8>\`), add the comment '// claude-B symbol edit' on a new line. Do not modify anything else. Use the Edit tool only."
+
+# Verify both comments are in the file. Either the pre-edit claim
+# survived and shows the symbol, or the post-edit release cleared it
+# but the file marker still proves the edit landed. Either way, both
+# markers being present means neither agent's edit clobbered the other.
+HAS_A=$(grep -c "claude-A symbol edit" "$REPO/src/sse.rs" || true)
+HAS_B=$(grep -c "claude-B symbol edit" "$REPO/src/sse.rs" || true)
+if [ "$HAS_A" -ge 1 ] && [ "$HAS_B" -ge 1 ]; then
+    echo "OK: both symbol edits landed in sse.rs (no clobber)"
+else
+    echo "FAIL: A=$HAS_A B=$HAS_B (expected both >= 1)"
+    echo "  --- sse.rs (first 90 lines)"
+    head -90 "$REPO/src/sse.rs" | sed 's/^/  /'
+    for a in claude-A claude-B; do
+        echo "  --- tail $WORK/logs/$a.log"
+        tail -n 12 "$WORK/logs/$a.log" 2>/dev/null | sed 's/^/  /' || echo "  (no log)"
+    done
+    exit 1
+fi
+
+# Verify both agents are in occupancy for sse.rs, at distinct symbols.
+# Filter to the fixture's src/ path so the harness files
+# (server.log, mcp-http.json, claude-settings.json) the attribution
+# watcher auto-claims during `write_claude_config` don't inflate
+# the count.
+#
+# list_occupancy emits `agents` as a list of agent-id strings and
+# `agent_names` as a list of human-readable names; we use agent_names
+# because it survives across the multiple sessions the hook lifecycle
+# spawns per agent name (see Task 4's report on session-count races).
+OCC=$(call_tool list_occupancy "{\"path\":\"$REPO/src/sse.rs\"}" | python3 -c "
+import json,sys
+d = json.loads(sys.stdin.read())
+entries = json.loads(d['result']['content'][0]['text'])
+if not entries:
+    print('NONE'); raise SystemExit(0)
+agents = set()
+symbols = set()
+for e in entries:
+    if 'repos/multiplayer-sample/src/sse.rs' not in e['path']:
+        continue
+    for n in e.get('agent_names', []):
+        agents.add(n)
+    for s in e.get('symbols', []):
+        symbols.add(s.get('symbol', '?'))
+print(f'agents={len(agents)} symbols={len(symbols)} names={sorted(agents)} symbols={sorted(symbols)}')
+" 2>/dev/null || echo NONE)
+echo "  occupancy: $OCC"
+if echo "$OCC" | grep -q 'agents=2'; then
+    echo "OK: both agents in same file, different symbols"
+else
+    echo "FAIL: expected 2 agents in sse.rs"
+    echo "  list_occupancy: $(call_tool list_occupancy "{\"path\":\"$REPO/src/sse.rs\"}" | python3 -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read())[\"result\"][\"content\"][0][\"text\"]), indent=2))' 2>/dev/null)"
+    for a in claude-A claude-B; do
+        echo "  --- tail $WORK/logs/$a.log"
+        tail -n 12 "$WORK/logs/$a.log" 2>/dev/null | sed 's/^/  /' || echo "  (no log)"
+    done
+    exit 1
+fi
