@@ -437,6 +437,7 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
         Transport::Stdio,
         0,
         Arc::clone(&ws_a),
+        None,
     )
     .expect("with_federation_and_workspaces");
 
@@ -460,7 +461,7 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
 
     // Mutate workspaces.yaml: add a 3rd member. The rebuild flow
     // calls `LainServer::set_workspace` after re-reading the file.
-    let ws_a_prime = WorkspacesFile {
+    let ws_a_prime = Arc::new(WorkspacesFile {
         default: None,
         workspaces: vec![WorkspaceSpec {
             name: "auth-ws".into(),
@@ -468,7 +469,7 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
             source: None,
             members: vec!["repo-a".into(), "repo-b".into(), "repo-c".into()],
         }],
-    };
+    });
     server.set_workspace(ws_a_prime);
 
     // The MCP dispatcher's view (read through the shared lock) must
