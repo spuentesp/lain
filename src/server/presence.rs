@@ -147,10 +147,14 @@ pub struct Claim {
     pub path: PathBuf,
     pub symbols: Vec<String>,
     /// `None` for a file-level claim (no specific symbol hash).
-    /// `Some(hash)` carries the BLAKE3-256 of the symbol body.
-    /// Placeholder during PR 10: file-level -> `None`,
-    /// symbol-level -> `Some(SymbolHash::zero())` until PR 11 wires
-    /// tree-sitter bodies through.
+    /// `Some(hash)` carries the BLAKE3-256 of the symbol body's
+    /// exact byte range as recorded by the tree-sitter extractor
+    /// (`byte_start..byte_end` in `SymbolDef`). Editing any byte
+    /// inside that range flips the hash; bytes outside the range
+    /// don't. Symbol-level claims fall back to
+    /// `Some(SymbolHash::zero())` only when the file can't be read,
+    /// isn't UTF-8, isn't supported by the extractor, or doesn't
+    /// define the symbol.
     pub content_hash: Option<SymbolHash>,
     pub intent: ClaimIntent,
     #[serde(skip_serializing, default = "epoch")]
@@ -1022,16 +1026,18 @@ pub fn load_pair(
 }
 
 /// Compute the BLAKE3-256 `SymbolHash` of the body bytes for `symbol`
-/// in `path`. The body is the source range covered by the symbol's
-/// tree-sitter definition (`line_start..=line_end`, joined by newline);
-/// for a symbol whose end line is the last line of the file, the
-/// file's trailing newline is preserved too — without it `src.lines()`
-/// strips it and the hash would diverge from `BLAKE3(file_bytes)`
-/// whenever the symbol spans the whole file.
+/// in `path`. The body is the exact byte range of the symbol's
+/// tree-sitter definition (`byte_start..byte_end`), sliced directly
+/// from the file's raw bytes — no line splitting, no CRLF normalization,
+/// no `String` round-trip. This way two symbols on one line get
+/// distinct hashes, and editing one symbol doesn't shift another
+/// symbol's hash.
 ///
 /// Returns `None` when the file is unreadable, not valid UTF-8, the
-/// language isn't supported by the tree-sitter extractor, or the
-/// symbol isn't defined in the file. Callers fall back to
+/// language isn't supported by the tree-sitter extractor, the symbol
+/// isn't defined in the file, or the recorded byte range falls
+/// outside the file (which shouldn't happen for a freshly parsed
+/// file but is defended against anyway). Callers fall back to
 /// `Some(SymbolHash::zero())` when they need a non-None hash for
 /// `Claim.content_hash`.
 fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
@@ -1039,17 +1045,10 @@ fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
     let src = std::str::from_utf8(&bytes).ok()?;
     let defs = crate::server::treesitter::extract_definitions(path, &src);
     let def = defs.into_iter().find(|d| d.name == symbol)?;
-    let lines: Vec<&str> = src.lines().collect();
-    let start = def.line_start as usize;
-    let end = def.line_end as usize;
-    if start > end || end >= lines.len() {
+    let start = def.byte_start as usize;
+    let end = def.byte_end as usize;
+    if start > end || end > bytes.len() {
         return None;
     }
-    let mut body = lines[start..=end].join("\n");
-    // Preserve the file's trailing newline when the symbol ends on
-    // the last line — `src.lines()` strips it.
-    if end + 1 == lines.len() && bytes.ends_with(b"\n") {
-        body.push('\n');
-    }
-    Some(SymbolHash::from_bytes(body.as_bytes()))
+    Some(SymbolHash::from_bytes(&bytes[start..end]))
 }

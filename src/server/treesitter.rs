@@ -270,6 +270,14 @@ pub struct SymbolDef {
     pub line_start: u32,
     /// 0-indexed line where the definition ends (inclusive).
     pub line_end: u32,
+    /// Byte offset of the first byte of the definition, straight from
+    /// the tree-sitter node. Lets callers hash the exact byte range
+    /// without re-deriving it from line numbers (which would normalize
+    /// CRLF, drop trailing newlines, or conflate multiple definitions
+    /// on one line).
+    pub byte_start: u32,
+    /// Byte offset one past the last byte of the definition.
+    pub byte_end: u32,
     /// True if the symbol is marked `#[deprecated]`.
     pub is_deprecated: bool,
     /// Optional labels attached to the symbol (e.g. "test", "async").
@@ -339,6 +347,8 @@ fn extract_definitions_rust(source: &str) -> Vec<SymbolDef> {
                             kind: kind.clone(),
                             line_start,
                             line_end,
+                            byte_start: node.start_byte() as u32,
+                            byte_end: node.end_byte() as u32,
                             is_deprecated,
                             labels,
                         });
@@ -437,6 +447,8 @@ fn extract_definitions_python(source: &str) -> Vec<SymbolDef> {
                             kind: NodeType::Function,
                             line_start: child.start_position().row as u32,
                             line_end: child.end_position().row as u32,
+                            byte_start: child.start_byte() as u32,
+                            byte_end: child.end_byte() as u32,
                             is_deprecated: false,
                             labels: Vec::new(),
                         });
@@ -449,6 +461,8 @@ fn extract_definitions_python(source: &str) -> Vec<SymbolDef> {
                             kind: NodeType::Class,
                             line_start: child.start_position().row as u32,
                             line_end: child.end_position().row as u32,
+                            byte_start: child.start_byte() as u32,
+                            byte_end: child.end_byte() as u32,
                             is_deprecated: false,
                             labels: Vec::new(),
                         });
@@ -497,6 +511,8 @@ fn extract_definitions_js(source: &str) -> Vec<SymbolDef> {
                             kind: NodeType::Function,
                             line_start: child.start_position().row as u32,
                             line_end: child.end_position().row as u32,
+                            byte_start: child.start_byte() as u32,
+                            byte_end: child.end_byte() as u32,
                             is_deprecated: false,
                             labels: Vec::new(),
                         });
@@ -509,6 +525,8 @@ fn extract_definitions_js(source: &str) -> Vec<SymbolDef> {
                             kind: NodeType::Class,
                             line_start: child.start_position().row as u32,
                             line_end: child.end_position().row as u32,
+                            byte_start: child.start_byte() as u32,
+                            byte_end: child.end_byte() as u32,
                             is_deprecated: false,
                             labels: Vec::new(),
                         });

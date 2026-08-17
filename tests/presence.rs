@@ -864,11 +864,11 @@ fn run_register_agent_for_test(
 
 /// Symbol-level claims must populate `content_hash` with a real
 /// BLAKE3 hash of the symbol's body (not the all-zero placeholder).
-/// When the file is readable and the symbol is defined by the
-/// tree-sitter extractor, the hash must equal `from_bytes` of the
-/// symbol's body bytes — for a single-function file the body *is*
-/// the file (including the trailing newline that `src.lines()`
-/// strips).
+/// The body is the exact byte range covered by the tree-sitter
+/// definition node (`byte_start..byte_end` in `SymbolDef`) — for a
+/// single-function file that's the function minus any trailing
+/// newline, since tree-sitter's `end_byte` for a `function_item`
+/// stops at the closing brace.
 #[test]
 fn symbol_level_claim_records_nonzero_content_hash() {
     let occ = OccupancyMap::new();
@@ -889,7 +889,7 @@ fn symbol_level_claim_records_nonzero_content_hash() {
     // The hash must be non-zero (the placeholder), and re-computing the same
     // body must yield the same hash.
     assert_ne!(hash, SymbolHash::zero());
-    let again = SymbolHash::from_bytes(b"pub fn login() -> &'static str { \"A\" }\n");
+    let again = SymbolHash::from_bytes(b"pub fn login() -> &'static str { \"A\" }");
     assert_eq!(hash, again);
 }
 
