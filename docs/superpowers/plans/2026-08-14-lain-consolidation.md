@@ -1,3 +1,6 @@
+> **Status:** Superseded by `docs/superpowers/plans/2026-08-15-lain-multiplayer-awareness.md` (PRs 8/9/10/11) + `docs/superpowers/plans/2026-08-18-multiplayer-e2e-verification.md` (PR 11).
+> The multiplayer work re-built the surface (presence + occupancy + attribution + SSE + hooks) that this plan deleted as "multi-user coordination." This plan is preserved for historical reference but is NOT the plan of record.
+
 # Lain Consolidation — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -1,3 +1,5 @@
+> **Note:** This document supersedes `docs/superpowers/plans/2026-08-14-lain-consolidation.md` for the multiplayer layer. The 2026-08-14 plan deleted `hook.rs`, `projects.rs`, and the owner/sidecar/lock machinery as "multi-user coordination"; the multiplayer work (PRs 8–11) rebuilt those surfaces with single-user + multiple-agents semantics.
+
 # Multiplayer Awareness
 
 > lain 0.5+ ships an always-on multiplayer layer so multiple agents (Claude,

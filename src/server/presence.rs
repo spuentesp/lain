@@ -155,6 +155,14 @@ pub struct Claim {
     pub intent: ClaimIntent,
     #[serde(skip_serializing, default = "epoch")]
     pub claimed_at: SystemTime,
+    /// Wall-clock time of the most recent touch (claim grant or
+    /// heartbeat refresh) on this claim. Surfaced in conflict reports
+    /// so callers can answer *when* a conflicting claim was recorded,
+    /// not just *who* is holding it. Defaults to `claimed_at` on
+    /// construction and is serialized as epoch on persistence reload
+    /// (same durability story as `claimed_at`: live state wins).
+    #[serde(skip_serializing, default = "epoch")]
+    pub last_touched_unix: SystemTime,
     /// Optional expiry timestamp (PR 10 Task 3 hook). `None` means
     /// "no expiry set"; the federation expiry loop will ignore it.
     pub expires_at: Option<SystemTime>,
@@ -166,6 +174,18 @@ pub struct ConflictEntry {
     pub name: String,
     pub path: PathBuf,
     pub symbols: Vec<String>,
+    /// Intent of the *existing* claim the conflict is reported
+    /// against. Under the current read-vs-edit filter this is
+    /// always `ClaimIntent::Edit` (reads never conflict), but
+    /// surfacing it makes the conflict JSON self-describing for
+    /// downstream renderers — they can branch on `intent` without
+    /// re-deriving the semantics from `name` or `path`.
+    pub intent: ClaimIntent,
+    /// When the conflicting claim was last touched (typically claim
+    /// grant time). Serialized as a UNIX-epoch second count in the
+    /// MCP conflict JSON so callers can show "alice has been holding
+    /// this for 5m".
+    pub last_touched_unix: SystemTime,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -438,6 +458,49 @@ struct FileOccupancy {
     /// that specific symbol. If no agent has claimed a symbol, the entry is
     /// absent — not present with an empty set.
     symbols: HashMap<String, HashSet<AgentId>>,
+    /// Per-symbol intent tracking. Outer key is the symbol name (or
+    /// the `__file_level__` sentinel for file-level claims); inner
+    /// map records the `ClaimIntent` each agent recorded when they
+    /// claimed that scope. Powers the read-vs-edit conflict filter:
+    /// a Read claim is non-conflicting against any existing intent;
+    /// only Edit-vs-Edit (or Edit vs file-level Edit) yields a
+    /// conflict.
+    intents: HashMap<String, HashMap<AgentId, ClaimIntent>>,
+    /// Per-symbol last-touched timestamp, in the same shape as
+    /// `intents`. Used to populate the `last_touched_unix` field on
+    /// `ConflictEntry` so callers can tell when the conflicting
+    /// claim was first (or most recently) recorded.
+    last_touched: HashMap<String, HashMap<AgentId, SystemTime>>,
+}
+
+impl FileOccupancy {
+    /// Intent that `agent` recorded for `sym` (or `__file_level__`).
+    /// Returns `None` if the agent never claimed that scope — which is
+    /// the same condition that drives the existing agent/symbol
+    /// bookkeeping, so the two never disagree.
+    fn intent_for(&self, agent: &AgentId, sym: &str) -> Option<ClaimIntent> {
+        self.intents.get(sym).and_then(|m| m.get(agent)).cloned()
+    }
+
+    /// Last-touched timestamp for `agent` on `sym`. Mirrors
+    /// `intent_for`. Falls back to `UNIX_EPOCH` when absent — callers
+    /// turn this directly into a `ConflictEntry.last_touched_unix`
+    /// via `Option::unwrap_or_default()`-style plumbing.
+    fn last_touched_for(&self, agent: &AgentId, sym: &str) -> Option<SystemTime> {
+        self.last_touched.get(sym).and_then(|m| m.get(agent)).copied()
+    }
+
+    /// Timestamp for `agent`'s file-level claim on this file. Only
+    /// used when the incoming request is itself file-level and we
+    /// want to surface when the other agent first recorded the
+    /// whole-file claim. Agents with no file-level claim fall back
+    /// to `UNIX_EPOCH`; the conflict entry's `name` field is still
+    /// `"<unknown>"` so callers can tell the difference between "no
+    /// record" and "no claim".
+    fn last_touched_unix_for(&self, agent: &AgentId) -> SystemTime {
+        self.last_touched_for(agent, "__file_level__")
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -503,53 +566,92 @@ impl OccupancyMap {
                 let entry = s.by_file.entry(req.path.clone()).or_default();
                 let mut req_conflicts: Vec<ConflictEntry> = Vec::new();
 
-                // File-level collision: any other agent on this file conflicts with a
-                // file-level claim (empty symbols).
-                if req.symbols.is_empty() {
-                    for other in entry.agents.iter().filter(|a| *a != agent_id) {
-                        req_conflicts.push(ConflictEntry {
-                            agent_id: other.clone(),
-                            name: "<unknown>".into(),
-                            path: req.path.clone(),
-                            symbols: vec![],
-                        });
-                    }
-                } else {
-                    // Symbol-level collision: for each requested symbol, any other
-                    // agent on that symbol conflicts.
-                    for sym in &req.symbols {
-                        if let Some(others) = entry.symbols.get(sym) {
-                            for other in others.iter().filter(|a| *a != agent_id) {
-                                req_conflicts.push(ConflictEntry {
-                                    agent_id: other.clone(),
-                                    name: "<unknown>".into(),
-                                    path: req.path.clone(),
-                                    symbols: vec![sym.clone()],
-                                });
+                // Read claims never produce a conflict — wishlist
+                // item #5. They still update the agent/symbol
+                // bookkeeping below so the granting agent becomes
+                // observable for occupancy listings.
+                if req.intent == ClaimIntent::Edit {
+                    // File-level collision: any other agent on this file
+                    // (regardless of their intent) conflicts with a
+                    // file-level Edit claim — we're going to rewrite the
+                    // whole file. Symbol- and intent-aware filtering
+                    // applies only to the symbol-level branch below.
+                    if req.symbols.is_empty() {
+                        for other in entry.agents.iter().filter(|a| *a != agent_id) {
+                            req_conflicts.push(ConflictEntry {
+                                agent_id: other.clone(),
+                                name: "<unknown>".into(),
+                                path: req.path.clone(),
+                                symbols: vec![],
+                                intent: ClaimIntent::Edit,
+                                last_touched_unix: entry.last_touched_unix_for(other),
+                            });
+                        }
+                    } else {
+                        // Symbol-level Edit: per-symbol conflict with
+                        // existing Edit claims on the same symbol, and a
+                        // single file-level conflict with any other agent
+                        // whose file-level claim is Edit (they're
+                        // rewriting the whole file).
+                        for sym in &req.symbols {
+                            if let Some(others) = entry.symbols.get(sym) {
+                                for other in others.iter().filter(|a| *a != agent_id) {
+                                    if entry.intent_for(other, sym) == Some(ClaimIntent::Edit) {
+                                        req_conflicts.push(ConflictEntry {
+                                            agent_id: other.clone(),
+                                            name: "<unknown>".into(),
+                                            path: req.path.clone(),
+                                            symbols: vec![sym.clone()],
+                                            intent: ClaimIntent::Edit,
+                                            last_touched_unix: entry
+                                                .last_touched_for(other, sym)
+                                                .unwrap_or(SystemTime::UNIX_EPOCH),
+                                        });
+                                    }
+                                }
                             }
                         }
-                    }
-                    // Also conflict if ANYONE has a file-level (empty symbols) claim on this file.
-                    for other in entry.agents.iter().filter(|a| entry.symbols.get("__file_level__").map(|s| s.contains(a)).unwrap_or(false)).filter(|a| *a != agent_id) {
-                        req_conflicts.push(ConflictEntry {
-                            agent_id: other.clone(),
-                            name: "<unknown>".into(),
-                            path: req.path.clone(),
-                            symbols: vec![],
-                        });
+                        // File-level existing claim: treat as a single
+                        // file-level conflict (symbols: vec![]) so the
+                        // caller sees one entry instead of one per
+                        // requested symbol. Only fire when the existing
+                        // file-level intent is Edit — a file-level Read
+                        // is non-conflicting just like a symbol-level
+                        // Read.
+                        if let Some(file_level_agents) = entry.symbols.get("__file_level__") {
+                            for other in file_level_agents.iter().filter(|a| *a != agent_id).cloned().collect::<Vec<_>>() {
+                                if entry.intent_for(&other, "__file_level__") == Some(ClaimIntent::Edit) {
+                                    req_conflicts.push(ConflictEntry {
+                                        agent_id: other.clone(),
+                                        name: "<unknown>".into(),
+                                        path: req.path.clone(),
+                                        symbols: vec![],
+                                        intent: ClaimIntent::Edit,
+                                        last_touched_unix: entry.last_touched_unix_for(&other),
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
 
                 if req_conflicts.is_empty() {
-                    // Apply: add agent to file; add to symbol sets.
+                    let now = SystemTime::now();
+                    // Apply: add agent to file; add to symbol sets; record
+                    // intent and last-touched under each scope (real
+                    // symbol name or the `__file_level__` sentinel).
                     entry.agents.insert(agent_id.clone());
-                    for sym in &req.symbols {
-                        entry.symbols.entry(sym.clone()).or_default().insert(agent_id.clone());
-                    }
                     if req.symbols.is_empty() {
                         entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
+                        entry.intents.entry("__file_level__".into()).or_default().insert(agent_id.clone(), req.intent.clone());
+                        entry.last_touched.entry("__file_level__".into()).or_default().insert(agent_id.clone(), now);
+                    } else {
+                        for sym in &req.symbols {
+                            entry.symbols.entry(sym.clone()).or_default().insert(agent_id.clone());
+                            entry.intents.entry(sym.clone()).or_default().insert(agent_id.clone(), req.intent.clone());
+                            entry.last_touched.entry(sym.clone()).or_default().insert(agent_id.clone(), now);
+                        }
                     }
-                    let now = SystemTime::now();
                     // File-level claim (no specific symbols) carries no
                     // content hash; symbol-level claims get a placeholder
                     // hash for now — PR 11 will compute real bodies.
@@ -571,6 +673,7 @@ impl OccupancyMap {
                         content_hash,
                         intent: req.intent.clone(),
                         claimed_at: now,
+                        last_touched_unix: now,
                         expires_at,
                     });
                     granted.push(req);
@@ -602,6 +705,20 @@ impl OccupancyMap {
                         if let Some(set) = entry.symbols.get_mut(&s) {
                             set.remove(agent_id);
                             if set.is_empty() { entry.symbols.remove(&s); }
+                        }
+                        // Mirror the same key into the parallel
+                        // intent / timestamp tracks so they don't
+                        // outlive a now-empty symbol set. Without
+                        // this, `intents_for(other, sym)` could
+                        // return a stale intent for a scope the
+                        // agent no longer holds.
+                        if let Some(m) = entry.intents.get_mut(&s) {
+                            m.remove(agent_id);
+                            if m.is_empty() { entry.intents.remove(&s); }
+                        }
+                        if let Some(m) = entry.last_touched.get_mut(&s) {
+                            m.remove(agent_id);
+                            if m.is_empty() { entry.last_touched.remove(&s); }
                         }
                     }
                     if entry.agents.is_empty() && entry.symbols.is_empty() {
@@ -680,6 +797,19 @@ impl OccupancyMap {
                         if let Some(set) = entry.symbols.get_mut(sym) {
                             set.remove(agent_id);
                             if set.is_empty() { entry.symbols.remove(sym); }
+                        }
+                        // Same shadow cleanup as in `release`: the
+                        // intent / timestamp tracks must agree with
+                        // `symbols` or risk leaving stale (agent,
+                        // scope) pairs reachable to
+                        // `intent_for` / `last_touched_for`.
+                        if let Some(m) = entry.intents.get_mut(sym) {
+                            m.remove(agent_id);
+                            if m.is_empty() { entry.intents.remove(sym); }
+                        }
+                        if let Some(m) = entry.last_touched.get_mut(sym) {
+                            m.remove(agent_id);
+                            if m.is_empty() { entry.last_touched.remove(sym); }
                         }
                     }
                     if entry.agents.is_empty() && entry.symbols.is_empty() {

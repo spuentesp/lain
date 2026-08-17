@@ -1,32 +1,47 @@
 #!/usr/bin/env bash
 # Agy (Antigravity CLI) pre-edit hook for file write/edit tools.
-# Reads the file path from stdin and claims it via lain.
-# Exit codes: 0 = OK (including conflicts — Agy decides what to do)
-#             1 = infrastructure failure (lain unreachable, malformed response)
+# Reads the file path from stdin (Agy passes JSON) and claims it via lain.
+# Always exits 0 — failure must NEVER block Agy. Stderr is for diagnostics.
+#
+# Identity resolution order:
+#   1. $LAIN_AGENT_NAME (explicit override)
+#   2. Orca env vars (ORCA_PANE_KEY / ORCA_TAB_ID / ORCA_WORKTREE_ID)
+#   3. Fallback: "<basename>-<ppid>" (stable for the parent Agy process)
 
-set -uo pipefail
+set +e  # disable errexit for the rest of the script — must exit 0
+trap 'exit 0' ERR  # any error → silent exit 0
 
 FILE_PATH="${1:-}"
 if [ -z "$FILE_PATH" ]; then
-  # Try to read from stdin (Agy passes JSON).
-  STDIN_JSON="$(cat 2>/dev/null || true)"
-  if [ -n "$STDIN_JSON" ]; then
-    FILE_PATH="$(printf '%s' "$STDIN_JSON" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  fi
+    STDIN_JSON="$(cat 2>/dev/null || true)"
+    if [ -n "$STDIN_JSON" ]; then
+        FILE_PATH="$(printf '%s' "$STDIN_JSON" | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    fi
 fi
 
-if [ -z "$FILE_PATH" ]; then
-  exit 0
-fi
+if [ -z "$FILE_PATH" ]; then exit 0; fi
 
 LAIN_URL="${LAIN_URL:-http://localhost:9999/mcp}"
 
-if ! command -v lain >/dev/null 2>&1; then
-  exit 0
+# Identity resolution.
+if [ -n "$LAIN_AGENT_NAME" ]; then
+    AGENT_NAME="$LAIN_AGENT_NAME"
+elif [ -n "$ORCA_PANE_KEY" ] || [ -n "$ORCA_TAB_ID" ] || [ -n "$ORCA_WORKTREE_ID" ]; then
+    AGENT_NAME="orca-${ORCA_PANE_KEY:-?}-${ORCA_TAB_ID:-?}-${ORCA_WORKTREE_ID:-?}"
+else
+    AGENT_NAME="agy-${PPID:-?}"
 fi
 
-if ! lain hooks claim --url "$LAIN_URL" --path "$FILE_PATH" --agent-name "agy" --agent-kind "agy" --intent edit; then
-  # Infrastructure failure (lain unreachable, etc.) — let Agy edit anyway.
-  exit 0
+if ! command -v lain >/dev/null 2>&1; then
+    echo "lain not on PATH; skipping claim" >&2
+    exit 0
 fi
+
+# Always exit 0 — capture stderr for diagnostics but never propagate.
+lain hooks claim \
+    --url "$LAIN_URL" \
+    --path "$FILE_PATH" \
+    --agent-name "$AGENT_NAME" \
+    --agent-kind "agy" \
+    --intent edit 2>&1 | head -1 >&2
 exit 0

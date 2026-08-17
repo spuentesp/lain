@@ -147,6 +147,8 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
             "name": c.name,
             "path": c.path.to_string_lossy(),
             "symbols": c.symbols,
+            "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+            "last_touched_unix": system_time_to_unix_secs(c.last_touched_unix),
         })).collect::<Vec<_>>(),
     }))
 }
