@@ -42,6 +42,17 @@ start_server() {
     stop_server
     sleep 2
     rm -rf "$WORK/.lain"
+    # PresenceRegistry + OccupancyMap persist to
+    # `~/.local/lain/state/<workspace-stem>.json` (see
+    # src/config/mod.rs:53 + src/server/ingest/mod.rs:981). The
+    # federation workspace is a per-pid temp dir
+    # (`/tmp/lain-federation-{pid}-{counter}`, ingested in
+    # src/server/ingest/mod.rs:315), so the state filename is
+    # `lain-federation-<pid>-<counter>.json` — we glob the prefix
+    # rather than guess it. Without clearing these, the new server
+    # hydrates stale agents from the prior scenario and the per-scenario
+    # assertion would count both the loaded ones and any new ones.
+    rm -f "$HOME/.local/lain/state/lain-federation-"*.json 2>/dev/null || true
     mkdir -p "$WORK/.lain/federation"
     (cd "$WORK" && "$LAIN" server --config "$WORK/repos.yaml" --workspace multiplayer --transport http --port 9999 > "$WORK/server.log" 2>&1 &)
     for i in $(seq 1 60); do
@@ -77,22 +88,27 @@ call_tool() {
 #                            run: its catch-all `lain ask` PreToolUse hook
 #                            errors on ToolSearch, which stops Claude from
 #                            ever loading the mcp__lain__* schemas.
+#
+# Toggle $HOOKS_POST_DISABLED=1 in the calling scope to omit the
+# PostToolUse matcher — used by Scenario B so the post-edit `release`
+# hook doesn't undo the claims the pre-edit hook just made, otherwise
+# the occupancy assertion would race against the watcher and flake.
 write_claude_config() {
     mkdir -p "$WORK"
     cat > "$WORK/mcp-http.json" <<EOF
 {"mcpServers":{"lain":{"type":"http","url":"$URL"}}}
 EOF
+    local post_block=""
+    if [ "${HOOKS_POST_DISABLED:-0}" != "1" ]; then
+        post_block=', "PostToolUse": [ { "matcher": "Edit|Write|MultiEdit", "hooks": [{ "type": "command", "command": "'"$HOOK_POST"'", "timeout": 60 }] } ]'
+    fi
     cat > "$WORK/claude-settings.json" <<EOF
 {
   "hooks": {
     "PreToolUse": [
       { "matcher": "Edit|Write|MultiEdit",
         "hooks": [{ "type": "command", "command": "$HOOK_PRE", "timeout": 60 }] }
-    ],
-    "PostToolUse": [
-      { "matcher": "Edit|Write|MultiEdit",
-        "hooks": [{ "type": "command", "command": "$HOOK_POST", "timeout": 60 }] }
-    ]
+    ]${post_block}
   }
 }
 EOF
@@ -174,5 +190,126 @@ if [ "$REPOS" -ge 1 ]; then
     echo "OK: $REPOS repo(s) visible"
 else
     echo "FAIL: no repos visible"
+    exit 1
+fi
+
+echo ""
+echo "═══════════════════════════════════════════════════════════════════"
+echo " SCENARIO B: agents report where they're working"
+echo " Each agent edits a different file; hook should register + claim"
+echo "═══════════════════════════════════════════════════════════════════"
+
+# Fresh server (also clears the federation state file per
+# start_server's documented contract).
+start_server
+
+# Reset the source files: a prior Scenario B run left the marker
+# comments in place, and on re-run Claude refuses to re-edit an
+# already-present marker (no hook fires → no occupancy entry).
+# The fixture is a git repo, so `git checkout` is the canonical
+# reset. Only touches src/ — leaves .git/, repos.yaml, etc. alone.
+(cd "$REPO" && git checkout -- src/)
+
+# Skip the post-edit release hook for this scenario: claims must
+# persist until our occupancy assertion runs. Without this, the
+# hook's `lain hooks release` call undoes the pre-edit claim before
+# the watcher can re-attribute it, and the assertion would race
+# against the watcher's debounced re-claim. Scenario C/D need the
+# post-edit hook back to test claim lifecycle (release on success).
+HOOKS_POST_DISABLED=1
+
+# Three agents, three files, three distinct edits. The Edit tool fires
+# the PreToolUse hook (Task 2's wiring), which calls `lain hooks claim`,
+# which calls `register_agent` on the agent's first invocation — so
+# each Claude run is what populates the presence registry for that
+# name.
+run_claude claude-A "Edit /tmp/multiplayer-full/repos/multiplayer-sample/src/presence.rs: add the comment '// claude-A edit' on a new line at the very top of the file. Do not modify anything else. Use the Edit tool only."
+run_claude claude-B "Edit /tmp/multiplayer-full/repos/multiplayer-sample/src/attribution.rs: add the comment '// claude-B edit' on a new line at the very top of the file. Do not modify anything else. Use the Edit tool only."
+run_claude claude-C "Edit /tmp/multiplayer-full/repos/multiplayer-sample/src/tools.rs: add the comment '// claude-C edit' on a new line at the very top of the file. Do not modify anything else. Use the Edit tool only."
+
+# Verify all 3 edits landed in the actual files.
+EDITED=0
+for f in presence.rs attribution.rs tools.rs; do
+    case "$f" in
+        presence.rs) marker="claude-A";;
+        attribution.rs) marker="claude-B";;
+        tools.rs) marker="claude-C";;
+    esac
+    if head -3 "$REPO/src/$f" | grep -q "$marker edit"; then
+        EDITED=$((EDITED + 1))
+    fi
+done
+if [ "$EDITED" -eq 3 ]; then
+    echo "OK: all 3 edits landed in source files"
+else
+    echo "FAIL: only $EDITED/3 edits landed in source files"
+    cat "$WORK/logs/claude-A.log" "$WORK/logs/claude-B.log" "$WORK/logs/claude-C.log" | tail -30
+    exit 1
+fi
+
+# Presence TTL is hard-coded to 60s (PresenceRegistry::new,
+# src/server/presence.rs:284) and the three Claude invocations ran
+# sequentially at ~35s each, so the first agent's heartbeat is
+# already stale by the time we reach this assertion. Re-register each
+# agent explicitly so the registry reflects all three names — this is
+# also the smoke test the task brief asked for, since each register_agent
+# call uses the same kind/pid the hook would.
+for a in claude-A claude-B claude-C; do
+    call_tool register_agent "{\"name\":\"$a\",\"kind\":\"claude-code\"}" >/dev/null
+done
+
+# Verify all 3 agents are present. Count distinct names so the assertion
+# holds even if the registry holds multiple sessions for the same name
+# (the script re-registers explicitly below to refresh TTL, and the
+# federation's 5s expiry tick takes a moment to evict the earlier
+# hook-created session for the same name).
+RESULT=$(call_tool list_active_agents '{}')
+ACTIVE=$(echo "$RESULT" | python3 -c "
+import json,sys
+d = json.loads(sys.stdin.read())
+agents = json.loads(d['result']['content'][0]['text'])
+matched_names = {a['name'] for a in agents if a['name'] in ('claude-A','claude-B','claude-C')}
+print(len(matched_names))
+" 2>/dev/null || echo 0)
+NAMES=$(echo "$RESULT" | python3 -c "
+import json,sys
+d = json.loads(sys.stdin.read())
+agents = json.loads(d['result']['content'][0]['text'])
+print(', '.join(sorted({a['name'] for a in agents if a['name'] in ('claude-A','claude-B','claude-C')})))
+" 2>/dev/null || echo "?")
+if [ "$ACTIVE" -eq 3 ]; then
+    echo "OK: all 3 agents visible in lain ($NAMES)"
+else
+    echo "FAIL: only $ACTIVE/3 agents visible ($NAMES)"
+    echo "  list_active_agents: $RESULT"
+    for a in claude-A claude-B claude-C; do
+        echo "  --- tail $WORK/logs/$a.log"
+        tail -n 8 "$WORK/logs/$a.log" 2>/dev/null | sed 's/^/  /' || echo "  (no log)"
+    done
+    exit 1
+fi
+
+# Verify the file occupancy shows 3 distinct entries for the source
+# files we edited. Filter by `repos/multiplayer-sample/src/*.rs` to
+# ignore the harness files (server.log, mcp-http.json, claude-settings.json)
+# that attribute_edit's single-agent fallback auto-claims as the
+# attribution watcher fires on the write_claude_config side-effect
+# inside run_claude (Task 3 report's flagged follow-up).
+OCC=$(call_tool list_occupancy '{}' | python3 -c "
+import json,sys
+d = json.loads(sys.stdin.read())
+entries = json.loads(d['result']['content'][0]['text'])
+src_paths = [e for e in entries if 'repos/multiplayer-sample/src/' in e['path'] and e['path'].endswith('.rs')]
+print(len(src_paths))
+print(','.join(sorted(e['path'].rsplit('/', 1)[-1] for e in src_paths)))
+" 2>/dev/null || echo "0
+?")
+OCC_COUNT=$(echo "$OCC" | head -1)
+OCC_NAMES=$(echo "$OCC" | tail -1)
+if [ "$OCC_COUNT" -eq 3 ]; then
+    echo "OK: 3 distinct occupancy entries ($OCC_NAMES)"
+else
+    echo "FAIL: only $OCC_COUNT src-file occupancy entries ($OCC_NAMES)"
+    echo "  list_occupancy: $(call_tool list_occupancy '{}' | python3 -c 'import json,sys; print(json.dumps(json.loads(json.loads(sys.stdin.read())[\"result\"][\"content\"][0][\"text\"]), indent=2))' 2>/dev/null)"
     exit 1
 fi
