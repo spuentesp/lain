@@ -82,11 +82,13 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;
     let claims = server.occupancy.list_for_agent(&session.id);
+    let parent_session_id = session.parent_session_id.as_ref().map(|p| p.as_str().to_string());
     Ok(json!({
         "agent_id": session.id.as_str(),
         "name": session.name,
         "kind": session.kind.as_str(),
         "mode": session.mode.as_str(),
+        "parent_session_id": parent_session_id,
         "claims": claims.into_iter().map(|c| json!({
             "path": c.path.to_string_lossy(),
             "symbols": c.symbols,
@@ -94,6 +96,39 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
             "claimed_at": system_time_to_unix_secs(c.claimed_at),
         })).collect::<Vec<_>>(),
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListSubagentsArgs {
+    pub session_token: String,
+}
+
+/// `list_subagents` answers the parent agent's question: "which active
+/// subagents are currently registered as mine?" The caller's session is
+/// resolved via `session_token`; we then enumerate every active session
+/// (including background agents — a parent may legitimately want to see
+/// a cron-driven subagent too) and return those whose `parent_session_id`
+/// matches the caller's `agent_id`. The JSON shape is the same one a
+/// subagent sees on its own `who_am_i` minus `claims`, making it usable
+/// as a lightweight rendering input from the parent's side.
+pub fn run_list_subagents(server: &LainServer, args: Value) -> Result<Value, String> {
+    let a: ListSubagentsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;
+    let parent_id = session.id.clone();
+    let mut children: Vec<Value> = Vec::new();
+    for child in server.presence.list_active(true) {
+        if child.parent_session_id.as_ref() == Some(&parent_id) {
+            children.push(json!({
+                "agent_id": child.id.as_str(),
+                "name": child.name,
+                "kind": child.kind.as_str(),
+                "mode": child.mode.as_str(),
+                "started_at_unix": system_time_to_unix_secs(child.started_at),
+                "last_heartbeat_unix": system_time_to_unix_secs(child.last_heartbeat),
+            }));
+        }
+    }
+    Ok(json!({ "parent": parent_id.as_str(), "subagents": children }))
 }
 
 #[derive(Debug, Deserialize)]

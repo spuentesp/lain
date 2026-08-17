@@ -261,6 +261,11 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         &["session_token"],
     ),
     (
+        "list_subagents",
+        "List active subagents whose parent_session_id matches the caller's session. Args: session_token. Returns: { parent, subagents: [{ agent_id, name, kind, mode, started_at_unix, last_heartbeat_unix }] }",
+        &["session_token"],
+    ),
+    (
         "claim_files",
         "Announce intent to edit (or read) files/symbols. Returns conflicts: other agents already holding claims.",
         &["files"],
@@ -635,6 +640,14 @@ impl ServerHandler for LainHandler {
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_who_am_i,
+                ));
+            }
+            "list_subagents" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_list_subagents,
                 ));
             }
             "claim_files" => {
@@ -1818,6 +1831,13 @@ async fn handle_request(
                                     &jsonrpc_tool_result, &jsonrpc_error,
                                     id, name, &args_map, server.as_deref(),
                                     crate::server::mcp::presence_tools::run_who_am_i,
+                                ));
+                            }
+                            "list_subagents" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_list_subagents,
                                 ));
                             }
                             "claim_files" => {

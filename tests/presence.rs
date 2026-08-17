@@ -673,3 +673,96 @@ fn edit_claim_still_conflicts_with_existing_edit_claim() {
     assert_eq!(c.symbols, vec!["login".to_string()]);
     assert!(c.last_touched_unix <= SystemTime::now());
 }
+
+// --- Task 2 brief: parent_session_id surfaces in who_am_i, list_subagents works ---
+
+/// `AgentSession::parent_session_id` is set at construction. A parent
+/// has `None`; a subagent has `Some(parent_id)`. The brief's example
+/// uses `AgentSession::new` directly because the field is public and
+/// the production wiring is verified by the dispatchers round-trip
+/// test below.
+#[test]
+fn parent_session_id_round_trips_on_agent_session() {
+    let parent_id = AgentId("parent-id".into());
+    let parent = AgentSession::new(
+        parent_id.clone(),
+        "parent".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    assert_eq!(parent.parent_session_id, None);
+
+    let sub = AgentSession::new(
+        AgentId("sub-id".into()),
+        "sub".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        Some(parent_id.clone()),
+    );
+    assert_eq!(sub.parent_session_id, Some(parent_id));
+}
+
+/// `who_am_i` must surface `parent_session_id` in its JSON payload so
+/// a subagent can introspect its lineage without a second registry
+/// call. The opposite case (`None`) is also asserted so existing top-
+/// level agents that never set a parent still see a clean `null`.
+#[tokio::test]
+async fn who_am_i_includes_parent_session_id() {
+    use lain::server::mcp::presence_tools::{run_list_subagents, run_register_agent, run_who_am_i};
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+
+    // Register a parent (no parent_session_id).
+    let parent_reg = run_register_agent(
+        &server,
+        serde_json::json!({"name": "parent"}),
+    ).unwrap();
+    let parent_id = parent_reg["agent_id"].as_str().unwrap().to_string();
+    let parent_token = parent_reg["session_token"].as_str().unwrap().to_string();
+
+    // Register a subagent that names the parent.
+    let sub_reg = run_register_agent(
+        &server,
+        serde_json::json!({"name": "sub", "parent_session_id": parent_id}),
+    ).unwrap();
+    let sub_id = sub_reg["agent_id"].as_str().unwrap().to_string();
+    let sub_token = sub_reg["session_token"].as_str().unwrap().to_string();
+
+    // who_am_i on the parent: parent_session_id is null.
+    let v = run_who_am_i(&server, serde_json::json!({"session_token": parent_token})).unwrap();
+    assert!(v["parent_session_id"].is_null(), "top-level agent has no parent");
+    assert_eq!(v["agent_id"].as_str().unwrap(), parent_id);
+
+    // who_am_i on the subagent: parent_session_id matches the parent.
+    let v = run_who_am_i(&server, serde_json::json!({"session_token": sub_token})).unwrap();
+    assert_eq!(v["parent_session_id"].as_str().unwrap(), parent_id);
+    assert_eq!(v["agent_id"].as_str().unwrap(), sub_id);
+
+    // list_subagents from the parent's POV returns the sub and only the sub.
+    let v = run_list_subagents(&server, serde_json::json!({"session_token": parent_token})).unwrap();
+    assert_eq!(v["parent"].as_str().unwrap(), parent_id);
+    let subs = v["subagents"].as_array().unwrap();
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0]["agent_id"].as_str().unwrap(), sub_id);
+    assert_eq!(subs[0]["name"].as_str().unwrap(), "sub");
+    assert_eq!(subs[0]["kind"].as_str().unwrap(), "unknown"); // default kind when none provided
+    assert!(subs[0]["started_at_unix"].as_u64().unwrap() > 0);
+    assert!(subs[0]["last_heartbeat_unix"].as_u64().unwrap() > 0);
+
+    // list_subagents from the sub's POV returns nothing (no grandchildren).
+    let v = run_list_subagents(&server, serde_json::json!({"session_token": sub_token})).unwrap();
+    assert_eq!(v["parent"].as_str().unwrap(), sub_id);
+    assert_eq!(v["subagents"].as_array().unwrap().len(), 0);
+
+    // list_subagents with an unknown token errors cleanly.
+    let err = run_list_subagents(&server, serde_json::json!({"session_token": "nope"})).unwrap_err();
+    assert!(err.contains("unknown session token"), "{err}");
+}
