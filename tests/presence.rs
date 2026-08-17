@@ -1,4 +1,5 @@
 use lain::server::presence::*;
+use std::time::SystemTime;
 
 // --- Task 8 brief: existing tools surface occupancy ---
 
@@ -596,4 +597,79 @@ fn expire_by_ttl_releases_expired_claims() {
     // The expired file's bookkeeping is cleaned; bob's file remains.
     assert!(occ.list_for_path(&std::path::PathBuf::from("auth.rs")).is_none());
     assert!(occ.list_for_path(&std::path::PathBuf::from("db.rs")).is_some());
+}
+
+// --- Task 3 (parent plan): conflict shape says *what*, not just *that* ---
+
+/// `Claim` gains a `last_touched_unix` timestamp that must be populated
+/// at claim time and never exceed "now" on the system clock. It is the
+/// trust signal that downstream conflict reporting carries — agents
+/// want to know *when* a conflict was last touched, not just *who* is
+/// holding the conflicting claim.
+#[test]
+fn claim_recorded_last_touched_unix() {
+    let occ = OccupancyMap::new();
+    let agent = AgentId("alice".into());
+    let req = ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    };
+    occ.claim(&agent, vec![req]);
+    let claims = occ.list_for_agent(&agent);
+    assert!(claims[0].last_touched_unix <= SystemTime::now());
+}
+
+/// An incoming read claim must not be flagged as a conflict against an
+/// existing edit claim — reads are non-destructive and the wishlist
+/// (item #5) explicitly asked for this filter. The bob agent should
+/// walk away with a granted claim and zero conflicts.
+#[test]
+fn read_claim_does_not_conflict_with_edit_claim() {
+    let occ = OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+    occ.claim(&alice, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    let result = occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Read, // <-- read, not edit
+        ttl_seconds: None,
+    }]);
+    assert_eq!(result.granted.len(), 1, "read claim should NOT conflict with edit");
+    assert_eq!(result.conflicts.len(), 0);
+}
+
+/// Edit-vs-edit must still conflict as before — the read-vs-edit filter
+/// is *additive* loosening, not a blanket "no conflicts" rule. The
+/// surviving conflict entry also carries `last_touched_unix` so the
+/// caller knows when the conflicting claim was first recorded.
+#[test]
+fn edit_claim_still_conflicts_with_existing_edit_claim() {
+    let occ = OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+    occ.claim(&alice, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    let result = occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    assert_eq!(result.granted.len(), 0, "edit-vs-edit conflict should still hold");
+    assert_eq!(result.conflicts.len(), 1);
+    let c = &result.conflicts[0];
+    assert_eq!(c.symbols, vec!["login".to_string()]);
+    assert!(c.last_touched_unix <= SystemTime::now());
 }
