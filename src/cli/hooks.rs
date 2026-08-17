@@ -35,6 +35,10 @@ pub enum HooksAction {
         /// Agent kind (`"claude"`, `"cursor"`, `"other"`, ...).
         #[arg(long, default_value = "other")]
         agent_kind: String,
+        /// Optional parent session id — used by subagents to declare the
+        /// parent agent that spawned them. Empty string means "no parent".
+        #[arg(long, default_value = "")]
+        parent_session_id: String,
     },
     /// Release a file the agent no longer needs.
     Release {
@@ -53,6 +57,9 @@ pub enum HooksAction {
         /// Agent kind (`"claude"`, `"cursor"`, `"other"`, ...).
         #[arg(long, default_value = "other")]
         agent_kind: String,
+        /// Optional parent session id (mirrors `claim` for symmetry).
+        #[arg(long, default_value = "")]
+        parent_session_id: String,
     },
 }
 
@@ -138,7 +145,12 @@ fn text_of(r: McpResult) -> Result<serde_json::Value> {
     serde_json::from_str(&text).context("parse result text")
 }
 
-fn register_if_needed(url: &str, name: &str, kind: &str) -> Result<HookSession> {
+fn register_if_needed(
+    url: &str,
+    name: &str,
+    kind: &str,
+    parent_session_id: Option<&str>,
+) -> Result<HookSession> {
     if let Some(s) = read_session(name) {
         // Heartbeat. If the server has lost the session (e.g. it restarted
         // and `.lain` was cleared) the heartbeat returns `isError: true`
@@ -163,12 +175,20 @@ fn register_if_needed(url: &str, name: &str, kind: &str) -> Result<HookSession> 
         let _ = std::fs::remove_file(session_path(name));
     }
     let pid = std::process::id();
+    let mut args = serde_json::json!({
+        "name": name,
+        "kind": kind,
+        "pid": pid,
+    });
+    if let Some(parent) = parent_session_id {
+        args["parent_session_id"] = serde_json::Value::String(parent.to_string());
+    }
     let result = post_mcp(
         url,
         "tools/call",
         serde_json::json!({
             "name": "register_agent",
-            "arguments": { "name": name, "kind": kind, "pid": pid }
+            "arguments": args
         }),
     )?;
     let text = text_of(result)?;
@@ -194,7 +214,7 @@ fn chrono_now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// `lain hooks claim --url … --path … [--symbol …] [--intent …]`
+/// `lain hooks claim --url … --path … [--symbol …] [--intent …] [--parent-session-id …]`
 pub fn claim(
     url: &str,
     path: &str,
@@ -202,8 +222,14 @@ pub fn claim(
     intent: &str,
     agent_name: &str,
     agent_kind: &str,
+    parent_session_id: &str,
 ) -> Result<()> {
-    let sess = register_if_needed(url, agent_name, agent_kind)?;
+    let parent = if parent_session_id.is_empty() {
+        None
+    } else {
+        Some(parent_session_id)
+    };
+    let sess = register_if_needed(url, agent_name, agent_kind, parent)?;
     let mut files = serde_json::Map::new();
     files.insert("path".into(), serde_json::Value::String(path.to_string()));
     if !symbol.is_empty() {
@@ -214,11 +240,14 @@ pub fn claim(
         serde_json::Value::String(intent.to_string()),
     );
     let files_arr = serde_json::Value::Array(vec![serde_json::Value::Object(files)]);
-    let args = serde_json::json!({
+    let mut args = serde_json::json!({
         "agent_id": sess.agent_id,
         "session_token": sess.session_token,
         "files": files_arr,
     });
+    if let Some(parent) = parent {
+        args["parent_session_id"] = serde_json::Value::String(parent.to_string());
+    }
     let result = post_mcp(
         url,
         "tools/call",
@@ -237,20 +266,29 @@ pub fn claim(
     Ok(())
 }
 
-/// `lain hooks release --url … --path …`
+/// `lain hooks release --url … --path … [--parent-session-id …]`
 pub fn release(
     url: &str,
     path: &str,
     _symbol: &str,
     agent_name: &str,
     agent_kind: &str,
+    parent_session_id: &str,
 ) -> Result<()> {
-    let sess = register_if_needed(url, agent_name, agent_kind)?;
-    let args = serde_json::json!({
+    let parent = if parent_session_id.is_empty() {
+        None
+    } else {
+        Some(parent_session_id)
+    };
+    let sess = register_if_needed(url, agent_name, agent_kind, parent)?;
+    let mut args = serde_json::json!({
         "agent_id": sess.agent_id,
         "session_token": sess.session_token,
         "files": [{"path": path}],
     });
+    if let Some(parent) = parent {
+        args["parent_session_id"] = serde_json::Value::String(parent.to_string());
+    }
     let result = post_mcp(
         url,
         "tools/call",

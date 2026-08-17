@@ -30,16 +30,33 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
             intent,
             agent_name,
             agent_kind,
-        } => crate::cli::hooks::claim(&url, &path, &symbol, &intent, &agent_name, &agent_kind)
-            .map_err(|e| anyhow::anyhow!("{e}")),
+            parent_session_id,
+        } => crate::cli::hooks::claim(
+            &url,
+            &path,
+            &symbol,
+            &intent,
+            &agent_name,
+            &agent_kind,
+            &parent_session_id,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}")),
         HooksAction::Release {
             url,
             path,
             symbol,
             agent_name,
             agent_kind,
-        } => crate::cli::hooks::release(&url, &path, &symbol, &agent_name, &agent_kind)
-            .map_err(|e| anyhow::anyhow!("{e}")),
+            parent_session_id,
+        } => crate::cli::hooks::release(
+            &url,
+            &path,
+            &symbol,
+            &agent_name,
+            &agent_kind,
+            &parent_session_id,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 
