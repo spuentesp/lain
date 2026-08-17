@@ -9,6 +9,19 @@ pub mod recent_projects;
 
 use std::path::PathBuf;
 
+/// Return the git short SHA this binary was built from.
+///
+/// Populated by `build.rs` at compile time via
+/// `cargo:rustc-env=LAIN_GIT_SHA=…`. Falls back to `"unknown"` if
+/// the build happened outside a git checkout (e.g. a vendored
+/// tarball) or if the `build.rs` lookup failed.
+///
+/// Surfaced by `lain doctor` so operators can confirm "which commit
+/// is the binary I have on PATH actually built from?"
+pub fn lain_git_sha() -> &'static str {
+    option_env!("LAIN_GIT_SHA").unwrap_or("unknown")
+}
+
 /// Return the path to the user config dir (`~/.config/lain`).
 pub fn config_dir() -> PathBuf {
     // XDG: $XDG_CONFIG_HOME or ~/.config. lain doesn't have other XDG-aware

@@ -2,10 +2,12 @@
 //!
 //! This binary is a thin dispatcher over the clap-derived [`Args`] /
 //! [`Commands`] enum in [`lain::cli`]. The kept subcommands are:
-//! `server`, `workspaces`, `repos`, `query`, `ask`, `hooks`. `Init`,
-//! `Agents`, `Projects`, and the old top-level `Use` are gone after
-//! the consolidation. `hooks` is the agent pre-edit hook entry point
-//! (claim/release against the server's presence registry).
+//! `server`, `workspaces`, `repos`, `query`, `ask`, `hooks`, `doctor`.
+//! `Init`, `Agents`, `Projects`, and the old top-level `Use` are gone
+//! after the consolidation. `hooks` is the agent pre-edit hook entry
+//! point (claim/release against the server's presence registry).
+//! `doctor` is the "one version of truth" diagnostic for the
+//! installation — binary version + git sha + on-disk state.
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
@@ -56,6 +58,13 @@ async fn main() -> Result<()> {
             lain::cli::ask::run_ask()
         }
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
+        Some(Commands::Doctor) => {
+            // `doctor` returns its own exit code (0 clean, 1 hard
+            // failure). Anything else (e.g. a network error from
+            // reqwest) collapses to 2 so we don't silently lie about
+            // a clean install.
+            std::process::exit(lain::cli::doctor::run_doctor().unwrap_or(2));
+        }
         None => {
             // No subcommand: print help.
             let mut cmd = Args::command();

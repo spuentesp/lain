@@ -6,6 +6,7 @@ pub mod repos;
 pub mod dispatch;
 pub mod signal;
 pub mod hooks;
+pub mod doctor;
 
 pub use query::run_query;
 pub use ask::run_ask;
@@ -92,4 +93,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::cli::hooks::HooksAction,
     },
+    /// Run installation / version diagnostics — the
+    /// "one-version-of-truth" page operators can paste into bug
+    /// reports. Always exits 0 on a clean install, 1 on hard
+    /// failures (missing hook script, un-creatable dirs).
+    Doctor,
 }
