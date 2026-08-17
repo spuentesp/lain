@@ -2,88 +2,106 @@
 
 LAIN builds a map of how all the code in your project connects — what calls what, what depends on what, which files tend to change together. Then it lets your AI coding assistant ask questions about that map. So instead of the AI just looking at one file and guessing, it can ask "if I change this function, what else breaks?" and get a real answer. It plugs into any AI agent that supports MCP and runs in the background while you work.
 
-<img width="1511" height="767" alt="Screenshot 2026-04-29 at 9 18 15 PM" src="https://github.com/user-attachments/assets/3bfbfe83-6813-416a-8dfc-c1c17959a00d" />
+<img width="1511" height="767" alt="Screenshot 2026-04-29 at 9 18 15 PM" src="https://github.com/user-attachments/assets/3bfbfe83-6813-416a-8dfc-c1c17959a00d" />
 
 
-## TL,DR:
+## TL;DR
 
 ```bash
-# One-line install (interactive - will ask you to configure and add to PATH)
+# Install (interactive — will add `lain` to PATH)
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
 
-# After install: reload your shell (or open a new terminal)
-source ~/.zshrc   # or ~/.bashrc
-
-# Or non-interactive (skips prompts, auto-adds to PATH)
+# Or non-interactive
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --workspace . --transport both --yes
+  bash /dev/stdin --yes
+
+# Configure your project
+mkdir -p ~/projects/biller && cd ~/projects/biller
+lain repos add auth-svc    https://github.com/acme/auth-svc.git
+lain repos add billing-svc https://github.com/acme/billing-svc.git
+lain workspaces create biller-core --members auth-svc,billing-svc
+
+# Run the server
+lain server --config ./repos.yaml --transport http --port 9999
+# Open http://localhost:9999 — that's the Command Center.
 ```
+
 ## What is Lain?
 
-Lain is a persistent code-intelligence MCP server. It builds a queryable knowledge graph of your codebase — symbols and their relationships extracted via LSP and tree-sitter, augmented with git co-change history and optional semantic embeddings — and exposes that graph through MCP tools. The value over LSP-only or RAG-based approaches is cross-file structural reasoning: blast radius for proposed changes, transitive dependency traces, anchor identification, co-change correlation, and contextual build failure decoration so agents can reason about callers rather than just the failing line. Written in Rust, persists across sessions, stays fresh during editing via a file watcher that updates a volatile overlay layered on top of the static graph.
+Lain is a persistent code-intelligence MCP server. The headline is
+`lain server`: a long-running process that reads a `repos.yaml` config,
+indexes every registered repository (locally, by clone, or by shallow
+fetch), and answers structural questions across them through MCP
+tools. The server also serves a Command Center dashboard at `GET /` for
+humans who want to inspect the federation, edit the config, run
+queries, and exercise the MCP tool surface directly.
+
+The value over LSP-only or RAG-based approaches is cross-file
+structural reasoning: blast radius for proposed changes, transitive
+dependency traces, anchor identification, co-change correlation, and
+contextual build failure decoration so agents can reason about callers
+rather than just the failing line. Written in Rust, persists across
+sessions, stays fresh during editing via a file watcher that updates a
+volatile overlay layered on top of the static graph, and hot-reloads
+its `repos.yaml` / `workspaces.yaml` config without a restart.
+
+---
+
+## The five commands
+
+After install, `lain` exposes exactly five subcommands:
+
+| Command | Purpose |
+|---------|---------|
+| `lain server` | Start the MCP server (the headline). Reads `repos.yaml`, serves MCP tools + the Command Center dashboard. Hot-reloads the config when it changes. |
+| `lain workspaces` | Manage `workspaces.yaml`. Create, list, show, activate (`use`), forget named groups of repos. |
+| `lain repos` | Manage `repos.yaml`. Add, list, remove a repo entry. |
+| `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
+| `lain ask` | Single-user LLM-assisted query (uses `semantic_search` + `explain_symbol` heuristics). |
+
+The cut surface (`init`, `agents`, `hook`, `projects`, top-level
+`use`) is gone — those concerns are reached through the five commands
+above. `server` plus the two config CLIs (`workspaces`, `repos`)
+cover everything the prior surface did, scoped to a single project
+directory that owns a `repos.yaml`.
 
 ---
 
 ## Installation
 
-### Quick Install (recommended - interactive)
+### Quick install (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
 ```
 
-The installer will **ask you** to configure:
-- Workspace path
-- MCP transport mode (stdio, http, or both)
-- HTTP port (if using http/both)
-- Target agent (auto-detects Claude Code, Cursor, Windsurf, Cline)
-- Whether to download the ONNX model for semantic search
-
-After you confirm your settings, it will:
-1. Download and install LAIN to `~/.local/lain`
-2. Optionally download the ONNX model (~120MB)
-3. Run `lain init` with your configuration
-4. Add LAIN to your agent's settings
+The installer downloads the `lain` binary to `~/.local/lain`. After that,
+configure your agent's MCP config to launch `lain server --config
+./repos.yaml --transport stdio` — see [Wire your agent](#wire-your-agent).
 
 **Non-interactive install (with options):**
 
 ```bash
-# Install with specific workspace and download ONNX model for semantic search
+# Skip all prompts
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --workspace . --transport both --download-model --yes
+  bash /dev/stdin --yes
 
-# Install for specific agent
+# Download ONNX model for semantic search (all-MiniLM-L6-v2, ~120MB)
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --agent cursor --yes
-
-# See all options
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --help
+  bash /dev/stdin --download-model --yes
 ```
 
-**Install options:**
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--workspace PATH` | Workspace path for LAIN | `.` |
-| `--transport MODE` | MCP transport: stdio, http, both | `stdio` |
-| `--port PORT` | HTTP port for MCP server | `9999` |
-| `--agent AGENT` | Target agent: auto, claude, cursor, windsurf, cline | `auto` |
-| `--embedding-model PATH` | Path to ONNX embedding model | - |
-| `--download-model` | Download default ONNX model (all-MiniLM-L6-v2.onnx, ~120MB) | - |
-| `-y, --yes` | Skip all confirmation prompts | - |
-
-**After installation:**
+After installation:
 
 ```bash
-# Reload your shell (the installer adds to ~/.zshrc or ~/.bashrc automatically)
-source ~/.zshrc   # or ~/.bashrc, then open a new terminal
+# Reload your shell (the installer adds to ~/.zshrc or ~/.bashrc)
+source ~/.zshrc   # or ~/.bashrc
 
-# Verify installation
+# Verify
 lain --version
 
-# Query the graph
-lain query "find Function | limit 5"
+# Show the five commands
+lain --help
 ```
 
 ### Homebrew
@@ -92,138 +110,159 @@ lain query "find Function | limit 5"
 brew tap spuentesp/lain https://github.com/spuentesp/lain
 brew install lain
 
-# Initialize
-lain init
-```
-
-### Pre-built Binary
-
-Download the latest release for your platform from [GitHub releases](https://github.com/spuentesp/lain/releases), then:
-
-```bash
-# Make executable
-chmod +x lain
-
-# Run directly
-./lain --workspace /path/to/your/project --transport stdio
+# Run the server for your project
+lain server --config ./repos.yaml
 ```
 
 ### Build from Source
 
 ```bash
-# Clone the repo
 git clone https://github.com/spuentesp/lain.git
 cd lain
+cargo build --release    # requires Rust 1.75+
 
-# Build (requires Rust 1.75+)
-cargo build --release
-
-# Binary will be at ./target/release/lain
+# Binary at ./target/release/lain
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Install LAIN
+### 1. Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
 ```
 
-### 2. Initialize for Claude Code (or other agents)
+### 2. Configure your project
+
+A project is a directory containing `repos.yaml` (and optionally
+`workspaces.yaml`).
 
 ```bash
-# Auto-detect agent (Claude Code, Cursor, Windsurf, Cline)
-lain init
-
-# Or specify agent explicitly
-lain init --agent claude
+mkdir -p ~/projects/biller && cd ~/projects/biller
+lain repos add auth-svc    https://github.com/acme/auth-svc.git
+lain repos add billing-svc https://github.com/acme/billing-svc.git
+lain workspaces create biller-core --members auth-svc,billing-svc
 ```
 
-For per-agent installation across Kimi, Claude, Cursor, Continue,
-Windsurf, Cline, Codex, OMP, and Gemini, see `docs/agent-installation.md`.
-
-For multi-instance wiring (one `owner` plus N `sidecars` on the same
-workspace), see `docs/agent-installation.md#sidecar-mode`.
-
-### 3. Run
+### 3. Run the server
 
 ```bash
-# Standard mode (for Claude Code)
-lain --workspace /path/to/project --transport stdio
-
-# With HTTP diagnostics (web UI at http://localhost:9999)
-lain --workspace /path/to/project --transport both --port 9999
-
-# With semantic search (requires ONNX model)
-lain --workspace /path/to/project --embedding-model ~/.local/lain/models/all-MiniLM-L6-v2.onnx
+lain server --config ./repos.yaml --transport http --port 9999
+# Open http://localhost:9999 in your browser for the Command Center.
 ```
 
-### 4. (optional) Manage multiple projects
+### 4. Wire your agent
 
-If you work on several repos, register them so `lain` works without `--workspace`:
+Add the following to your agent's MCP config (URL/format depends on the
+agent):
 
-```bash
-lain projects add lain    ~/code/lain           # registers under basename
-lain projects add other  ~/code/other-thing   # arbitrary name
-lain projects list                              # see registered projects
-lain use lain                                   # mark as active
-
-# Now `lain query "..."` and `lain init` use the active project
-# without typing the path each time.
+```json
+{
+  "mcpServers": {
+    "lain": {
+      "command": "lain",
+      "args": ["server", "--config", "./repos.yaml", "--transport", "stdio"]
+    }
+  }
+}
 ```
 
-`lain init` auto-registers the project under its directory basename, so
-first-time use is frictionless.
+That's it. The next time your agent starts, it sees the federation, the
+active workspace, and the full MCP tool surface.
 
-### 5. (optional) Group repos into workspaces
+---
 
-For federation mode, declare named groups of repos in `workspaces.yaml`
-and load only the subset you care about. Workspaces are switchable on
-server restart; switching hot-reload is not supported (intentional — see
-the spec for rationale).
+## Command Center
 
-```bash
-# Declare a workspace (one-time)
-lain workspaces create backend-team --members auth-svc,billing-svc,db-client
+When `lain server` runs with `--transport http`, it serves the Command
+Center dashboard at `GET /`. It's a self-contained vanilla-JS SPA that
+talks back to the running server over the same JSON-RPC endpoint the
+MCP tools use. No separate API, no auth portal.
 
-# Activate it (writes ~/.config/lain/active_workspace)
-lain workspaces use backend-team
+Tabs:
 
-# Run the server scoped to that workspace
-lain server --config repos.yaml --workspace auto --transport http --port 9999
-```
+- **Overview** — `get_health` + `get_federation_health` in one view.
+- **Graph** — D3 force-directed graph of the active workspace.
+- **Repos** — per-repo table (id, path, health, node/edge counts).
+- **Query** — runs `query_graph` against the federation.
+- **Tools** — auto-generated MCP tool tester. Calls `tools/list`, then
+  renders a form per tool by introspecting its `inputSchema`. *Copy as
+  cURL* copies a `curl -X POST http://localhost:9999/mcp ...` snippet
+  to the clipboard.
 
-See `docs/FEDERATION.md#workspaces` for the full guide and the new MCP
-tools (`list_workspaces`, `get_active_workspace`, `get_workspace`,
-`get_workspace_graph`).
+The status bar in the footer polls every 2 s for `get_server_status`
+and `get_reload_status` so hand-edits to `repos.yaml` /
+`workspaces.yaml` show up live.
 
-### 4. Verify
+See [`docs/command-center.md`](docs/command-center.md) for the full
+walkthrough.
 
-```bash
-# Check health and LSP status
-curl -s -X POST http://localhost:9999/mcp -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_health","arguments":{}},"id":1}'
+---
 
-# Query the graph directly
-lain query "find Function | limit 5"
-```
+## Hot Reload
+
+`lain server` watches `repos.yaml` and `workspaces.yaml` and rebuilds
+its federation state when they change — no restart needed. Both the
+`notify` watcher (for hand-edits) and the CLI (via `lain repos add`
+or `lain workspaces create`) trigger the same `ReloadBus`.
+
+When you run `lain repos add my-repo …`, the CLI writes the YAML
+atomically (write to temp file, then `rename`), then signals the
+running server over a Unix socket at
+`~/.local/lain/run/<repos-stem>.sock`. The server's rebuild task
+diffs the new file against the live federation and applies add / remove
+operations against `FederatedIndex`. `get_reload_status` reports the
+state (`idle` / `rebuilding` / `failed`); the Command Center status
+bar shows it live.
+
+See [`docs/hot-reload.md`](docs/hot-reload.md) for the full picture
+(internals, observability, failure modes, caveats).
+
+---
+
+## Multi-project
+
+A **project** is a directory containing `repos.yaml` (and optionally
+`workspaces.yaml`). Each project has its own server: change to the
+project directory and run `lain server --config ./repos.yaml`, or
+keep multiple servers running on different ports. The Command Center
+shows recently-used projects in the sidebar with a *Copy restart cmd*
+button that copies the right `lain server --config <path> --workspace
+<name>` line to the clipboard.
+
+Workspaces are scoped to a single project. Pick one with
+`lain workspaces use <name>`; the active name is written to
+`~/.config/lain/active_workspace` and is honored at server start via
+`--workspace auto`.
 
 ---
 
 ## Federation mode
 
-For org-wide structural questions — "who else uses this function?", "what depends on this service?" — run `lain server --config repos.yaml` to index N repos and answer cross-repo queries. Federation mode exposes six MCP tools (`list_repos`, `get_repo_info`, `get_federation_health`, `search_org`, `get_cross_repo_blast_radius`, and `get_cross_repo_blast_radius_for_repo`) that answer questions spanning repos. See [`docs/FEDERATION.md`](docs/FEDERATION.md) for the full guide and [`docs/REPOS_YAML.md`](docs/REPOS_YAML.md) for the config schema.
+For org-wide structural questions — "who else uses this function?",
+"what depends on this service?" — run `lain server --config
+./repos.yaml`. Federation mode exposes six MCP tools (`list_repos`,
+`get_repo_info`, `get_federation_health`, `search_org`,
+`get_cross_repo_blast_radius`,
+`get_cross_repo_blast_radius_for_repo`) that answer questions
+spanning repos. See [`docs/FEDERATION.md`](docs/FEDERATION.md) for
+the full guide and [`docs/REPOS_YAML.md`](docs/REPOS_YAML.md) for the
+config schema.
 
 ---
 
 ## Key Features
 
-- **Federation mode** — index N repos and answer org-wide structural questions across them
+- **Federation mode** — index N repos and answer org-wide structural questions across them.
+- **Command Center** — vanilla-JS SPA at `GET /` for human inspection, config editing, query running, and MCP tool testing.
+- **Hot reload** — `repos.yaml` / `workspaces.yaml` changes apply without restarting the server.
 
 ### Query Language (`query_graph`)
+
 JSON-based ops array for flexible graph traversals:
+
 ```json
 {
   "ops": [
@@ -235,49 +274,46 @@ JSON-based ops array for flexible graph traversals:
   ]
 }
 ```
-Available ops: `find`, `connect`, `filter`, `semantic_filter`, `group`, `sort`, `limit`
+
+Available ops: `find`, `connect`, `filter`, `semantic_filter`, `group`,
+`sort`, `limit`.
 
 ### Dependency Intelligence
-- **`get_call_chain`** — Shortest path between two functions
-- **`get_blast_radius`** — Everything affected by a change
-- **`trace_dependency`** — What a symbol depends on
-- **`get_coupling_radar`** — Files that change together
+
+- **`get_call_chain`** — Shortest path between two functions.
+- **`get_blast_radius`** — Everything affected by a change.
+- **`trace_dependency`** — What a symbol depends on.
+- **`get_coupling_radar`** — Files that change together.
 
 ### Architectural Analysis
-- **`find_anchors`** — Most-called, most-stable symbols (architectural pillars)
-- **`list_entry_points`** — Find `main()`, route handlers, app initialization
-- **`get_context_depth`** — How far from an entry point (abstraction layers)
-- **`explore_architecture`** — High-level tree of modules and files
+
+- **`find_anchors`** — Most-called, most-stable symbols (architectural pillars).
+- **`list_entry_points`** — Find `main()`, route handlers, app initialization.
+- **`get_context_depth`** — How far from an entry point (abstraction layers).
+- **`explore_architecture`** — High-level tree of modules and files.
 
 ### Search
+
 - **`semantic_search`** — Find code by meaning, not just names. Uses local ONNX embeddings with hybrid scoring (cosine similarity + stemmed token-overlap) and shows body excerpts in the response. BGE-small-en-v1.5 is the recommended model (better than MiniLM for technical corpora); use a query prefix to enable BGE-style asymmetric retrieval.
 
 ### Code Health
-- **`find_dead_code`** — Potentially unreachable code (filters trait defaults, common names)
-- **`suggest_refactor_targets`** — High-coupling, low-stability nodes
 
-### Build Integration
-Lain enriches build failures with architectural context:
-- **`run_build`** — Build with Rust/Go/JS/Python toolchain error parsing
-- **`run_tests`** — Tests with error enrichment
-- **`run_clippy`** — cargo clippy with context
+- **`find_dead_code`** — Potentially unreachable code (filters trait defaults, common names).
+- **`suggest_refactor_targets`** — High-coupling, low-stability nodes.
 
 ### Project Management
-- **`lain projects add <name> <path>`** — register a project
-- **`lain projects list`** — show registered projects
-- **`lain projects forget <name>`** — remove a project
-- **`lain projects current`** — show the active project
-- **`lain use <name>`** — set the active project (so `lain` without `--workspace` uses it)
 
-### Code Health
-- **`find_dead_code`** — Potentially unreachable code (filters trait defaults, common names)
-- **`suggest_refactor_targets`** — High-coupling, low-stability nodes
+A project is a directory containing `repos.yaml` (and optionally
+`workspaces.yaml`). Manage it directly with the CLI:
 
-### Build Integration
-Lain enriches build failures with architectural context:
-- **`run_build`** — Build with Rust/Go/JS/Python toolchain error parsing
-- **`run_tests`** — Tests with error enrichment
-- **`run_clippy`** — cargo clippy with context
+- **`lain repos add <name> <url>`** — register a repo in `repos.yaml`.
+- **`lain repos list`** — show registered repos.
+- **`lain repos remove <name>`** — unregister a repo.
+- **`lain workspaces create <name> --members a,b,c`** — declare a named workspace.
+- **`lain workspaces list`** — show all workspaces.
+- **`lain workspaces use <name>`** — activate a workspace (writes `~/.config/lain/active_workspace`).
+- **`lain workspaces current`** — print the active workspace.
+- **`lain workspaces forget <name>`** — remove a workspace.
 
 ---
 
@@ -285,22 +321,17 @@ Lain enriches build failures with architectural context:
 
 | Requirement | Details |
 |-------------|---------|
-| Rust | 1.75 or newer |
+| Rust (build only) | 1.75 or newer |
 | Git | Required for co-change analysis |
-| ONNX Model | Optional — for semantic search |
+| ONNX Model | Optional — for `semantic_search` |
 
 ### Optional: Semantic Search
 
-For `semantic_search` to work, you need an ONNX embedding model. The easiest way to set this up is using the provided install script:
+For `semantic_search` to work, you need an ONNX embedding model. The
+easiest setup uses the provided install script with `--download-model`.
+Otherwise, drop a model into `.lain/models/`:
 
 ```bash
-./scripts/install.sh
-```
-
-Alternatively, you can set it up manually:
-
-```bash
-# Create model directory
 mkdir -p .lain/models
 
 # Option A: bge-small-en-v1.5 (recommended — better MTEB scores, 384d, ~120MB)
@@ -316,28 +347,21 @@ curl -L https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/ma
   -o .lain/models/tokenizer.json
 ```
 
-Set the model path:
+Export the model path so the server picks it up:
+
 ```bash
 export LAIN_EMBEDDING_MODEL=$PWD/.lain/models/model.onnx
-# or
-./lain --embedding-model ./.lain/models/model.onnx ...
 ```
 
-For BGE-style asymmetric retrieval (better for short queries), set the
-query prefix in `.lain/tuning.toml`:
+For BGE-style asymmetric retrieval (better for short queries), set
+the query prefix in `.lain/tuning.toml`:
 
 ```toml
 query_prefix = "Represent this sentence for searching relevant passages: "
 ```
 
-Tune the CPU thread usage (default auto-detects, min(cores, 4)):
-
-```toml
-[ingestion]
-nlp_max_threads = 0  # 0 = auto, or set to a number
-```
-
-Without the model, `semantic_search` returns "unavailable" but all other features work.
+Without the model, `semantic_search` returns "unavailable" but all
+other features work.
 
 ---
 
@@ -346,83 +370,50 @@ Without the model, `semantic_search` returns "unavailable" but all other feature
 | Mode | Command | Use Case |
 |------|---------|----------|
 | `stdio` | `--transport stdio` | Claude Code, MCP clients |
-| `http` | `--transport http --port 9999` | Web diagnostics dashboard |
-| `both` | `--transport both --port 9999` | Both stdio + diagnostics |
+| `http` | `--transport http --port 9999` | Command Center dashboard + curl-driven MCP |
+
+The HTTP transport is no longer combined with stdio in a single
+`both` mode — start two `lain server` processes (or use the HTTP
+transport and exercise tools via `curl` against `/mcp`).
 
 ---
 
 ## Troubleshooting
 
-**LSP servers not ready?**
+**Hand-edit not picked up?**
+
+The hot-reload watcher is non-recursive and uses atomic rename.
+Editing the file in place (`vim repos.yaml`) triggers a notify event
+within ~1 s. If you've moved the file across directories, save it
+back into the same directory.
+
+**Repo stuck in `indexing` / `degraded` / `unavailable` / `missing`?**
+
 ```bash
-# Install missing language servers
-curl -X POST http://localhost:9999/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"install_language_server","arguments":{"language":"rust"}},"id":2}'
+# Check federation health
+curl -s -X POST http://localhost:9999/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_federation_health","arguments":{}},"id":1}'
 ```
 
-**Graph stale?**
+The Command Center's Overview tab shows the same numbers in a single
+view.
+
+**Force a reload:**
+
 ```bash
-# Sync to current git HEAD
-curl -X POST http://localhost:9999/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"sync_state","arguments":{}},"id":3}'
+curl -s -X POST http://localhost:9999/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"request_reload","arguments":{}},"id":1}'
 ```
 
 **View all available tools:**
+
 ```bash
 curl -s -X POST http://localhost:9999/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_agent_strategy","arguments":{}},"id":4}'
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_agent_strategy","arguments":{}},"id":1}'
 ```
-
----
-
-## Recent Improvements (0.4.x and 0.5.0)
-
-## v0.5.0
-- **New first-class agent: `opencode`** — `OpenCodeAdapter` writes `opencode.json` (project) or `~/.config/opencode/opencode.json` (user) with the verified `mcp.<name>.{ type: "local", command: ["lain", ...], enabled: true, timeout: 30000 }` array-command shape, and bundles `AGENTS.md` for project scope.
-- **New first-class agent: `copilot`** (GitHub Copilot in VS Code) — `CopilotAdapter` writes `.vscode/mcp.json` (project) or `~/.copilot/mcp-config.json` (user) with the verified `servers.<name>.{ command: "lain", args: [...] }` shape (string `command` + array `args`, distinct from OpenCode), and bundles `.github/copilot-instructions.md`. The pre-existing broken `vscode_copilot` row was migrated to `copilot`.
-- **`--scope {project|user}` on `Init`**: per-project (default, travels with the repo) or user-global. Currently honored by `init_opencode` and `init_copilot`; other agents ignore it.
-- **`--workspace auto`** resolves the git root from the MCP subprocess's cwd via `git2::Repository::discover(".")`. Works for Claude Code, OpenCode, and VS Code out of the box; Kimi ships a `/proc/$PPID/cwd` wrapper because its plugin manager pins the subprocess's cwd.
-- **Bug fixes since 0.4.2**: Claude Code MCP now writes to `~/.claude.json` via `claude mcp add` (the old `mcpServers` block in `~/.claude/settings.json` was silently ignored); adapter commands are bare PATH-resolvable names everywhere; `entry.mcp_section` / `entry.mcp_name` are used in install/read/remove (no hardcoded literals); file-watcher tolerates inaccessible subdirs; LSP timeouts; awareness-doc skip-when-`--yes`-is-false; expanded Claude `LAIN.md`.
-
-## v0.4.2
-- `lain init --agent kimi` installs `~/.kimi-code/plugins/managed/lain/` with `kimi.plugin.json` + `skills/lain/SKILL.md` + registers in `installed.json` (source=`local-path`).
-- `lain init --agent gemini` now writes `GEMINI.md` (canonical filename per gemini-cli docs). The previous `LAIN.md` was silently ignored.
-
-Beyond the headline features above, recent versions added:
-
-- **Hybrid semantic scoring**: `semantic_search` now combines cosine similarity with **stemmed token-overlap** (query "running" matches symbols named `index`, `indexed`, `indexes`, etc.)
-- **Body excerpts in responses**: both `semantic_search` and `explain_symbol` now show the actual code, not just metadata. A developer asking "what is this?" sees the implementation.
-- **Call Graph section**: `explain_symbol` shows callers and callees alongside the source excerpt.
-- **Anchor percentile normalization**: anchor scores are now bounded to [0, 100] via min-max within the candidate set, so the search ranking formula is consistent across reindexes and corpus growth.
-- **Batched inference API**: `NlpEmbedder::embed_batch()` is available for larger models / GPU where batching helps (not used on CPU for bge-small since the per-call overhead dominates).
-- **Configurable ONNX thread count**: `.lain/tuning.toml` has `nlp_max_threads` (0 = auto-detect, or set explicitly). Bumped from 1 to 4-8 threads gives 4-5× faster cold queries.
-- **Cross-encoder reranker** (opt-in): `cross-encoder/ms-marco-MiniLM-L6-v2` can rerank the top-K bi-encoder candidates. Off by default; enable with `cross_encoder_top_k = 20`.
-- **Volatile embedding persistence**: cold-query embeddings are written back to `graph.bin` so subsequent process starts don't re-embed the same nodes. Cold-query latency on a 1500-node corpus drops from 29 s to ~5–10 s.
-- **Project registry**: `lain projects add/list/forget/current/use` manages multiple repos so you don't have to type `--workspace` every time.
-
----
-
-## A/B Testing Results
-
-A simple A/B test was run on the `asciinema_fix_pty_bug` (a small fork i made from https://github.com/asciinema/asciinema.git ) across **5 passes, 4 times** using a script. Median numbers are reported.
-
-| Metric | with_lain | without_lain |
-|--------|-----------|--------------|
-| Pass rate | 5/5 (100%) | 5/5 (100%) |
-| Median duration | 39.3s | 54.1s |
-| Median tokens in | 35,488 | 41,731 |
-
-**Key observations:**
-
-- Both conditions passed 100% — the bug fix worked in both conditions, with variation per run.
-- `with_lain` used fewer input tokens (~35k vs ~42k median), a difference of ~7k tokens per run.
-
-**About the bug:** The failing test (`pty::tests::spawn_extra_env` on macOS) stems from `handle_child()` setting env vars via `env::set_var()` before `execvp()`. The shell's interpretation of `echo -n $VAR` varies across platforms — sometimes `-n` is treated as a literal argument. The fix: use `printf "%s" "$ASCIINEMA_TEST_FOO"` instead, portable across all Unix-like systems.
-
-> This was a test I did for A/B comparison — not a rigorous evaluation.
 
 ---
 

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/lain-mcp-probe"]
+members = ["."]
 
 [package]
 name = "lain"
@@ -51,11 +51,14 @@ lsp-types = "0.97"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+hex = "0.4"
+
+# Hashing
+blake3 = "1"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 
 # Error handling
 thiserror = "1.0"
@@ -64,14 +67,10 @@ anyhow = "1.0"
 # CLI argument parsing
 clap = { version = "4.4", features = ["derive"] }
 
-# Async channels
-flume = "0.11"
-
 # Path handling
 walkdir = "2.4"
 glob = "0.3"
 dunce = "1.0"
-shell-words = "1.0"
 
 # Tree-sitter static analysis
 uuid = { version = "1.6", features = ["v4", "v5", "serde"] }
@@ -97,15 +96,6 @@ rayon = "1.10"
 async-recursion = "1.1.1"
 reqwest = { version = "0.11", features = ["json", "rustls-tls", "blocking"] }
 
-# MCP probe for `lain agents verify`
-lain-mcp-probe = { path = "crates/lain-mcp-probe" }
-
-# Unix process checks (for single-instance guard)
-libc = "0.2"
-
-# File locking (flock) for workspace owner/sidecar coordination
-fs2 = "0.4"
-
 # Tree-sitter static analysis
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
@@ -116,7 +106,6 @@ tree-sitter-javascript = "0.21"
 tempfile = "3.8"
 proptest = { version = "1.5", features = ["std"] }
 inventory = "0.1"
-fs2 = "0.4"
 
 [lib]
 name = "lain"
@@ -127,10 +116,6 @@ path = "src/lib.rs"
 # integration tests in `tests/`. Has no effect on production binaries; gated
 # helpers are compiled out unless `--features test-utils` is passed.
 test-utils = []
-
-[[test]]
-name = "agent_install"
-path = "tests/e2e/agent_install.rs"
 
 [profile.release]
 opt-level = 3

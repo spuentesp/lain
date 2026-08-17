@@ -1,19 +1,26 @@
 # Federation Mode
 
-Federation mode is the multi-repo mode of `lain`. Where single-workspace
-mode (`lain --workspace ./myrepo`) builds a code graph for one repository,
-federation mode starts a long-running MCP server that knows about N
-repositories at once and answers org-wide questions across them: who
-defines a given function, who calls it, what other services depend on it,
-and which repos are degraded right now. Federation is **additive**: the
-single-workspace CLI is unchanged, and federation is opted into via the
-`lain server` subcommand.
+Federation mode is the multi-repo mode of `lain`. Run it with:
 
-This document is the central reference for federation mode. The schema of
-the `repos.yaml` config lives in [`docs/REPOS_YAML.md`](REPOS_YAML.md);
+```bash
+lain server --config ./repos.yaml --transport http --port 9999
+# Open http://localhost:9999 — the Command Center dashboard.
+```
+
+A federation knows about N repositories at once and answers org-wide
+questions across them: who defines a given function, who calls it,
+what other services depend on it, and which repos are degraded right
+now. Federation is the headline of `lain`: a single long-running
+process that owns the index, the workspaces, and the MCP tool surface.
+
+This document is the central reference for federation mode. The schema
+of the `repos.yaml` config lives in [`docs/REPOS_YAML.md`](REPOS_YAML.md);
 this doc covers the operating model, the MCP tools, the resolver rules,
 performance, and troubleshooting. The on-disk state format and the
-petgraph backend live in [`docs/TECHNICAL.md`](TECHNICAL.md).
+petgraph backend live in [`docs/TECHNICAL.md`](TECHNICAL.md). Hot-reload
+of `repos.yaml` / `workspaces.yaml` is documented in
+[`docs/hot-reload.md`](hot-reload.md); the Command Center dashboard is
+in [`docs/command-center.md`](command-center.md).
 
 ---
 
@@ -21,12 +28,11 @@ petgraph backend live in [`docs/TECHNICAL.md`](TECHNICAL.md).
 
 | Mode | Use it when |
 |---|---|
-| Single-workspace (`lain --workspace <path>`) | You're working on one repo. You want per-repo tools (`query`, `ask`, `coupling`, `blast_radius`, `call_chain`, etc.) bound to that repo. You don't need cross-repo answers. |
-| Federation (`lain server --config repos.yaml`) | You have many repos and want to ask org-wide questions: "which repos define a function named `verify_token`?", "what does repo A's `shared` library affect in repo B and C?", "is every repo healthy right now?". The federation server exposes a different tool surface — it does not register the per-repo tools. |
+| Single-workspace (`lain server --config ./repos.yaml --workspace <name>` with a one-member workspace) | You want to scope answers to one repo's subgraph. |
+| Federation (`lain server --config repos.yaml`) | You have many repos and want to ask org-wide questions: "which repos define a function named `verify_token`?", "what does repo A's `shared` library affect in repo B and C?", "is every repo healthy right now?". |
 
-If you only ever need answers from one repo at a time, stay on
-single-workspace mode. The federation tools are read-only and do not
-let you mutate the underlying graphs.
+The federation tools are read-only and do not let you mutate the
+underlying graphs.
 
 ---
 
@@ -76,6 +82,9 @@ Flags (all have defaults):
 - `--transport <http|stdio>` — default `http`
 - `--port <u16>` — default `9999`, only meaningful for HTTP
 - `--log_level <env-filter>` — default `info`; passed to `tracing`'s `EnvFilter`
+- `--workspace <name>` — optional; pin to a workspace declared in
+  `workspaces.yaml`. Use `auto` to read the operator's
+  `~/.config/lain/active_workspace` pointer.
 
 The loader reads the config, builds per-repo sources, and indexes each
 repo up to `max_concurrent_indexers` at a time. After loading, the
@@ -85,12 +94,18 @@ only sees whatever is already in the per-repo DB). A failed `index()`
 demotes that repo to `Degraded` and the federation still comes up so
 partial results remain queryable.
 
+While the server runs, the Command Center dashboard is at `GET /` on
+the HTTP port. The status bar shows pid, transport, repo/workspace
+counts, and the reload state in real time. See
+[`docs/command-center.md`](command-center.md).
+
 ### 3. Wait for it to be ready
 
 The federation is considered ready when `ready_threshold` (default 80%)
 of the registered repos have `health: "ready"`. Until then, individual
 repos will report `indexing`, `degraded`, `unavailable`, or `missing`.
-Watch the logs; you can also poll `get_federation_health` over MCP.
+Watch the logs, the Command Center Overview tab, or poll
+`get_federation_health` over MCP.
 
 ---
 
@@ -513,9 +528,11 @@ exists in exactly one repo and isn't a high-fanout hub.
 
 Workspaces are named groups of repos that the federation engine indexes
 together as a coherent unit. A workspace = a subset of `repos.yaml`'s
-repos, switchable on server restart. Workspaces are documented in
-`docs/superpowers/specs/2026-08-12-lain-workspaces-design.md`; this
-section is a quick reference.
+repos, picked at server start via `--workspace <name>` (or `auto` to
+read the operator's `~/.config/lain/active_workspace` pointer). The
+workspace config lives in `workspaces.yaml` next to `repos.yaml`; see
+the [Workspaces spec](../superpowers/specs/2026-08-12-lain-workspaces-design.md)
+for the full design. This section is a quick reference.
 
 ### When to use workspaces
 
@@ -537,13 +554,14 @@ section is a quick reference.
 3. Start the server: `lain server --config repos.yaml --workspace auto
    --transport http --port 9999`. The federation loads only
    `backend-team`'s members. All 6 federation tools operate scoped.
-4. Switching is restart-only. Run `lain workspaces use <other>` and
-   bounce the server.
+4. Workspace switching is restart-only — `workspaces.yaml` edits are
+   hot-reloaded (see [`docs/hot-reload.md`](hot-reload.md)) but the
+   *active* workspace is read once at startup.
 
 ### Workspace CLI
 
 ```
-lain workspaces create / add / remove / import / init / list / show / use / current / forget
+lain workspaces create / list / show / use / current / forget
 ```
 
 See `lain workspaces --help`.
@@ -554,23 +572,24 @@ In addition to the 6 federation tools (scoped to the workspace's repos):
 - `list_workspaces` — all known workspaces + which is active
 - `get_active_workspace` — the active workspace's name + members
 - `get_workspace(name)` — full detail on one workspace
-- `get_workspace_graph(filter?)` — node + edge data for the dashboard graph
 
-### Federation dashboard
+### Command Center
 
-`/federation-dashboard.html` (when running `lain server --transport
-http`) gains three sections when a workspace is active:
+When `lain server --transport http` is running, the Command Center at
+`GET /` shows:
 - Active workspace panel (name + members + their paths/healths)
 - Config panel (paths + repo counts)
 - Per-workspace D3 force-directed graph view (Functions/Methods/Classes
   + Calls/Imports, color by `repo_id`, dashed lines for cross-repo
   Calls)
 
+See [`docs/command-center.md`](command-center.md).
+
 ### Agents
 
 `get_agent_strategy` (a built-in MCP tool) includes a "Workspace mode"
-section that documents the new tools + the `repo_id` resolution rule
-when scoped.
+section that documents the workspace tools + the `repo_id` resolution
+rule when scoped.
 
 ## Migration
 
@@ -578,10 +597,11 @@ Federation mode is additive on top of single-workspace mode.
 
 ### Single-workspace users
 
-Nothing changes. `lain --workspace ./myrepo` (and the equivalent
-single-workspace tool surface) works exactly as before. The federation
-subcommand, federation config schema, and federation MCP tools are all
-new; they don't replace anything.
+Run the same directory under a one-member `repos.yaml` and start the
+server with `lain server --config ./repos.yaml --transport stdio`.
+Federation-only tools (`list_repos`, `get_federation_health`, etc.)
+still work; per-repo tools (`query`, `coupling`, `blast_radius`, etc.)
+work via the workspace's single repo.
 
 ### Federation users coming from single-workspace
 
@@ -596,14 +616,6 @@ The HTTP `/health` endpoint is shared between modes. Federation mode
 attaches a `federation` field describing per-repo health, total
 counts, and the memory estimate; single-workspace mode reports
 `federation: null`. The rest of the `/health` payload is unchanged.
-
-### Backward compatibility
-
-- `lain --workspace <path>` — unchanged.
-- All existing per-repo tools (`query`, `ask`, `coupling`,
-  `blast_radius`, `call_chain`, etc.) — unchanged. They are still
-  available in single-workspace mode and not registered in federation
-  mode. Federation mode replaces them with the cross-repo tool set.
 
 ---
 

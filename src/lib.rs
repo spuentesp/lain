@@ -1,65 +1,72 @@
-//! Lain
-//!
-//! A structural memory and code intelligence engine for AI agents that provides:
-//! - Graph-based code relationships via Petgraph
-//! - Semantic search via local NLP embeddings
-//! - Real-time Git state tracking
-//! - Multi-language LSP support
-//! - MCP protocol server
+//! Lain — local MCP server for cross-repo and per-repo code analysis.
 
-pub mod error;
-pub mod federation;
-pub mod graph;
-pub mod git;
-pub mod lock;
-pub mod lsp;
-pub mod mcp;
-pub mod mode;
-pub mod nlp;
-pub mod overlay;
-pub mod query;
-pub mod schema;
-pub mod sensors;
 pub mod server;
-pub mod sidecar;
+pub mod cli;
+pub mod config;
 pub mod state;
-pub mod tools;
-pub mod treesitter;
-pub mod toolchains;
-pub mod tuning;
-pub mod watcher;
 
-#[cfg(test)]
-mod overlay_tests;
-#[cfg(test)]
-mod git_tests;
-#[cfg(test)]
-mod error_tests;
-#[cfg(test)]
-mod schema_tests;
-#[cfg(test)]
-mod tuning_tests;
-#[cfg(test)]
-mod graph_tests;
-#[cfg(test)]
-#[path = "federation/repo_source_tests.rs"]
-mod repo_source_tests;
-#[cfg(test)]
-#[path = "federation/graph_backend_tests.rs"]
-mod graph_backend_tests;
-#[cfg(test)]
-#[path = "federation/matching_tests.rs"]
-mod matching_tests;
-#[cfg(test)]
-#[path = "federation/federated_index_tests.rs"]
-mod federated_index_tests;
-#[cfg(test)]
-#[path = "federation/manifest_tests.rs"]
-mod manifest_tests;
-#[cfg(test)]
-#[path = "federation/loader_tests.rs"]
-mod loader_tests;
+// Re-export the top-level clap `Command` factory at the crate root so
+// tests and external callers can inspect the rendered help without
+// going through the binary in `src/main.rs`.
+pub use cli::dispatch::main_command_factory;
 
-pub use error::LainError;
-pub use mcp::LainMcpServer;
+// Re-export error, lsp, and the analytical modules at the crate root so
+// call sites that pre-date the `server/` migration keep working. The
+// canonical home for these modules is `crate::server::*`; new code should
+// import from there.
+pub mod error {
+    pub use crate::server::error::*;
+}
+pub mod lsp {
+    pub use crate::server::lsp::*;
+}
+pub mod federation {
+    //! Re-export the federation engine from `server::federation`.
+    pub use crate::server::federation::*;
+}
+pub mod mcp {
+    pub use crate::server::mcp::*;
+}
+pub mod graph {
+    pub use crate::server::graph::*;
+}
+pub mod git {
+    pub use crate::server::git::*;
+}
+pub mod schema {
+    pub use crate::server::schema::*;
+}
+pub mod tuning {
+    pub use crate::server::tuning::*;
+}
+
+// Crate-root re-exports for modules that pre-date the `server/` move.
+// `crate::tools`, `crate::overlay`, etc. all live under `crate::server::`
+// now; these aliases keep the older import paths working until callers
+// migrate.
+pub mod tools {
+    pub use crate::server::tools::*;
+}
+pub mod overlay {
+    pub use crate::server::overlay::*;
+}
+pub mod nlp {
+    pub use crate::server::nlp::*;
+}
+pub mod query {
+    pub use crate::server::query::*;
+}
+pub mod toolchains {
+    pub use crate::server::toolchains::*;
+}
+pub mod sensors {
+    pub use crate::server::sensors::*;
+}
+pub mod watcher {
+    pub use crate::server::watcher::*;
+}
+pub mod treesitter {
+    pub use crate::server::treesitter::*;
+}
+
 pub use server::LainServer;

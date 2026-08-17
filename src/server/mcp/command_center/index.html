@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LAIN — Command Center</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>LAIN</h1>
+    <span id="active-project">project: ...</span>
+    <span id="active-workspace">workspace: ...</span>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <section><h2>Workspaces</h2><ul id="workspaces"></ul></section>
+      <section><h2>Repos</h2><ul id="repos"></ul></section>
+      <section><h2>Recent projects</h2><ul id="recent-projects"></ul></section>
+      <section class="presence-panel">
+        <h2>Agents online</h2>
+        <ul id="agents-online"></ul>
+      </section>
+      <section class="rooms-panel">
+        <h2>Rooms (claimed files)</h2>
+        <ul id="rooms-list"></ul>
+      </section>
+    </aside>
+    <main>
+      <nav class="tabs">
+        <button data-tab="overview">Overview</button>
+        <button data-tab="graph">Graph</button>
+        <button data-tab="repos">Repos</button>
+        <button data-tab="query">Query</button>
+        <button data-tab="tools">Tools</button>
+      </nav>
+      <section id="tab-overview" class="tab"></section>
+      <section id="tab-graph" class="tab"></section>
+      <section id="tab-repos" class="tab"></section>
+      <section id="tab-query" class="tab"></section>
+      <section id="tab-tools" class="tab"></section>
+    </main>
+  </div>
+  <footer class="statusbar">
+    <span id="status-pid">pid: ...</span>
+    <span id="status-transport">transport: ...</span>
+    <span id="status-repos">repos: ...</span>
+    <span id="status-reload">last sync: ...</span>
+  </footer>
+  <script src="/assets/d3.v7.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

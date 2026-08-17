@@ -1,3 +1,5 @@
+> **Status:** Superseded by `docs/superpowers/specs/2026-08-14-lain-consolidation-design.md`.
+
 # Agent End-to-End DST-Style Test Harness
 
 **Date:** 2026-08-09

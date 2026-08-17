@@ -1,14 +1,18 @@
 # `repos.yaml` Configuration Reference
 
 `repos.yaml` is the config file `lain server` reads to know which repos to
-index in **federation mode**. Federation mode is the additive multi-repo
-alternative to single-workspace mode (`lain --workspace ./myrepo`, which is
-unchanged). Every repo entry tells `lain` *where* the code lives and *how*
-to keep it up to date.
+index in **federation mode**. Every repo entry tells `lain` *where* the
+code lives and *how* to keep it up to date. The file lives in a project
+directory next to `workspaces.yaml`; together they form the project's
+federation config.
+
+The server watches `repos.yaml` (and `workspaces.yaml`) and rebuilds
+its federation state when they change — see
+[`docs/hot-reload.md`](hot-reload.md) for the full picture.
 
 This document is the single source of truth for the `repos.yaml` schema.
-The Rust types that parse it live in `src/federation/config.rs`; whenever
-they change, this file must change too.
+The Rust types that parse it live in `src/server/federation/config.rs`;
+whenever they change, this file must change too.
 
 ---
 
@@ -22,6 +26,8 @@ lain server --config /etc/lain/repos.yaml --transport http --port 9999
 - `--transport http|stdio` (default `http`)
 - `--port <u16>` (default `9999`)
 - `--log_level <EnvFilter>` (default `info`)
+- `--workspace <name>` (optional) — pin to a workspace declared in
+  `workspaces.yaml`. `auto` reads `~/.config/lain/active_workspace`.
 
 If the file is missing, malformed, or contains an unknown `source.type`,
 `lain server` exits with a `LainError::Config` message and a non-zero code.
@@ -78,9 +84,7 @@ snake_case variants. Each variant has its own fields.
 ### `workspace_dir`
 
 Point at a repo that is **already on disk**. No `git` operations are
-performed — lain indexes the directory as-is. This is the back-compat
-path: every test that uses `lain --workspace ./myrepo` translates 1:1 to
-a `workspace_dir` entry.
+performed — lain indexes the directory as-is.
 
 ```yaml
 - id: hello-rust

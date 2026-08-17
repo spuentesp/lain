@@ -2,23 +2,33 @@
 
 Quick reference for LAIN MCP tools.
 
-> Haven't installed Lain into your agent yet? See
-> `docs/agent-installation.md` — `lain agents install <agent>` and
-> `lain agents verify --all`.
+> Haven't configured Lain for your project yet? See the Quick Start
+> in `README.md` — `lain repos add`, `lain workspaces create`, and
+> `lain server --config ./repos.yaml`.
 
 ## Project Management (CLI)
 
-Multi-project support lives in the CLI, not as MCP tools. Use these to register and switch between projects:
+A project is a directory containing `repos.yaml` (and optionally
+`workspaces.yaml`). Manage it directly with the CLI:
 
 ```bash
-lain projects add <name> <path>    # register a project (run after `lain init`)
-lain projects list                 # show registered projects with last-used
-lain projects forget <name>        # remove from registry
-lain projects current              # print active project name
-lain use <name>                    # set active project (used when --workspace omitted)
+lain repos add <name> <url>             # register a repo in repos.yaml
+lain repos list                          # show registered repos
+lain repos remove <name>                 # unregister a repo
+lain workspaces create <name> --members a,b,c   # declare a named workspace
+lain workspaces list                     # show all workspaces
+lain workspaces show <name>              # print one workspace
+lain workspaces use <name>                # activate a workspace (writes ~/.config/lain/active_workspace)
+lain workspaces current                  # print the active workspace
+lain workspaces forget <name>            # remove a workspace
 ```
 
-`lain init` auto-registers the project under its directory basename. Workspace resolution priority: `--workspace` flag → active project → `.lain/` in cwd.
+A workspace is loaded by `lain server` when started with `--workspace auto`
+(or `--workspace <name>` to pin it). Both `repos.yaml` and
+`workspaces.yaml` are hot-reloaded while the server runs — see
+[`docs/hot-reload.md`](hot-reload.md). The full config schema is in
+[`docs/REPOS_YAML.md`](REPOS_YAML.md); the operating model for
+federation mode is in [`docs/FEDERATION.md`](FEDERATION.md).
 
 ## Initialization
 
