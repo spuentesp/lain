@@ -131,3 +131,32 @@ subagent should appear in `lain` as a distinct session whose
 The subagent can introspect its parent via `who_am_i` (which now
 includes `parent_session_id`). The parent can enumerate its subagents
 via `list_subagents` (passing its own session token).
+
+## Commit-time overlap detection
+
+The MCP tool `detect_overlap` finds symbol-level conflicts between two git refs in the active workspace:
+
+```bash
+lain detect_overlap --base HEAD~1 --head HEAD --workspace backend
+```
+
+Returns:
+
+```json
+{
+  "base": "abc123",
+  "head": "def456",
+  "files": [
+    {
+      "path": "src/auth.rs",
+      "symbols_base": ["login", "validate"],
+      "symbols_head": ["login", "logout"],
+      "overlap": ["login"],
+      "severity": "high"
+    }
+  ],
+  "total_overlaps": 1
+}
+```
+
+Pair with `hooks/claude-code/pre-commit.sh` (configured as Claude Code's `PreToolUse` on `Bash` for `git commit`) to refuse commits that would conflict with the previous ref. Catches the real damage — merge conflicts — at the right moment.
