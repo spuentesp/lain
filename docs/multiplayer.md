@@ -117,3 +117,17 @@ Disable process attribution entirely with `--no-process-attribution`:
 ```bash
 lain server --config ./repos.yaml --transport http --port 9999 --no-process-attribution
 ```
+
+## Subagents
+
+When an agent spawns subagents (e.g., Claude Code's Task tool), each
+subagent should appear in `lain` as a distinct session whose
+`parent_session_id` points to the spawning session. To wire this:
+
+1. The parent registers first (no `parent_session_id`); capture its `agent_id`.
+2. Spawn the subagent with the environment variable `LAIN_PARENT_AGENT_ID=<parent.agent_id>` set.
+3. The subagent's `PreToolUse` hook passes that through `lain hooks claim --parent-session-id "$LAIN_PARENT_AGENT_ID"`.
+
+The subagent can introspect its parent via `who_am_i` (which now
+includes `parent_session_id`). The parent can enumerate its subagents
+via `list_subagents` (passing its own session token).
