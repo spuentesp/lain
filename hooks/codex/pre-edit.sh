@@ -4,9 +4,10 @@
 # Always exits 0 — failure must NEVER block Codex. Stderr is for diagnostics.
 #
 # Identity resolution order:
-#   1. $LAIN_AGENT_NAME (explicit override)
-#   2. Orca env vars (ORCA_PANE_KEY / ORCA_TAB_ID / ORCA_WORKTREE_ID)
-#   3. Fallback: "<basename>-<ppid>" (stable for the parent Codex process)
+#   1. $LAIN_AGENT_NAME (explicit lain override)
+#   2. Generic agent env vars any framework may set:
+#      CLAUDE_AGENT_NAME, MCP_CLIENT_NAME, AGENT_NAME (and per-kind if set)
+#   3. Fallback: "<kind>-<ppid>-<hostname-short>" (stable for parent process)
 
 set +e  # disable errexit for the rest of the script — must exit 0
 trap 'exit 0' ERR  # any error → silent exit 0
@@ -26,10 +27,15 @@ LAIN_URL="${LAIN_URL:-http://localhost:9999/mcp}"
 # Identity resolution.
 if [ -n "$LAIN_AGENT_NAME" ]; then
     AGENT_NAME="$LAIN_AGENT_NAME"
-elif [ -n "$ORCA_PANE_KEY" ] || [ -n "$ORCA_TAB_ID" ] || [ -n "$ORCA_WORKTREE_ID" ]; then
-    AGENT_NAME="orca-${ORCA_PANE_KEY:-?}-${ORCA_TAB_ID:-?}-${ORCA_WORKTREE_ID:-?}"
+elif [ -n "$CLAUDE_AGENT_NAME" ]; then
+    AGENT_NAME="claude-code-$CLAUDE_AGENT_NAME"
+elif [ -n "$MCP_CLIENT_NAME" ]; then
+    AGENT_NAME="$MCP_CLIENT_NAME"
+elif [ -n "$AGENT_NAME" ]; then
+    AGENT_NAME="$AGENT_NAME"
 else
-    AGENT_NAME="codex-${PPID:-?}"
+    SHORT_HOST=$(hostname -s 2>/dev/null || echo "host")
+    AGENT_NAME="codex-${PPID:-?}-${SHORT_HOST}"
 fi
 
 if ! command -v lain >/dev/null 2>&1; then

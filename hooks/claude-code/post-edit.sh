@@ -17,12 +17,18 @@ if [ -z "$FILE_PATH" ]; then exit 0; fi
 
 LAIN_URL="${LAIN_URL:-http://localhost:9999/mcp}"
 
+# Identity resolution.
 if [ -n "$LAIN_AGENT_NAME" ]; then
     AGENT_NAME="$LAIN_AGENT_NAME"
-elif [ -n "$ORCA_PANE_KEY" ] || [ -n "$ORCA_TAB_ID" ] || [ -n "$ORCA_WORKTREE_ID" ]; then
-    AGENT_NAME="orca-${ORCA_PANE_KEY:-?}-${ORCA_TAB_ID:-?}-${ORCA_WORKTREE_ID:-?}"
+elif [ -n "$CLAUDE_AGENT_NAME" ]; then
+    AGENT_NAME="claude-code-$CLAUDE_AGENT_NAME"
+elif [ -n "$MCP_CLIENT_NAME" ]; then
+    AGENT_NAME="$MCP_CLIENT_NAME"
+elif [ -n "$AGENT_NAME" ]; then
+    AGENT_NAME="$AGENT_NAME"
 else
-    AGENT_NAME="claude-code-${PPID:-?}"
+    SHORT_HOST=$(hostname -s 2>/dev/null || echo "host")
+    AGENT_NAME="claude-code-${PPID:-?}-${SHORT_HOST}"
 fi
 
 if ! command -v lain >/dev/null 2>&1; then exit 0; fi

@@ -23,12 +23,12 @@ edit through, with a stderr note at most.
 `docs/hooks.md` says all sessions of one agent kind share one session file and
 "appear as ONE agent" unless I manually set `LAIN_AGENT_NAME` per shell. That's
 exactly backwards for the actual failure mode — I *am* one of several Claude
-Code consoles on this machine right now, and the thing that already knows
-that is Orca (`ORCA_PANE_KEY`, `ORCA_TAB_ID`, `ORCA_WORKTREE_ID` are already
-in my environment). I shouldn't have to hand-roll a name; `lain hooks claim`
-should read those vars if present and fall back to a PID-derived identity
-otherwise. Two coordination systems on one machine that don't share identity
-is worse than either alone.
+Code consoles on this machine right now, and there are plenty of signals lain
+itself could already use to tell them apart (parent process tree, short
+hostname, generic agent env vars set by any framework). I shouldn't have to
+hand-roll a name; `lain hooks claim` should derive an identity from those
+signals and fall back to a PID-derived one otherwise. Two coordination
+systems on one machine that don't share identity is worse than either alone.
 
 ## 3. Zero-daemon path for the common case
 
@@ -103,10 +103,7 @@ opt-in-by-registration, so an agent that doesn't participate costs nothing.
   line per edit (`{agent, path, symbols, action, ts}`). Cheap to append, cheap
   to `tail -f`, human-readable, and a crashed agent just stops appending —
   nothing needs cleanup.
-- **Piggyback on identity that already exists.** Orca already assigns
-  `ORCA_PANE_KEY`/`ORCA_TAB_ID`/`ORCA_WORKTREE_ID` per console on this
-  machine; a coordination layer here doesn't need its own registration
-  handshake at all — read those vars for identity when present.
+
 - **Push conflict detection to commit-time, not edit-time.** For agents in
   separate worktrees (the common case for longer tasks), what matters is
   catching overlap before merge, not during editing. A `git diff` /
@@ -119,7 +116,7 @@ opt-in-by-registration, so an agent that doesn't participate costs nothing.
 ## Status (2026-08-19)
 
 - **#1 fail open** → addressed in PR 12 (`hooks/claude-code/{pre,post}-edit.sh` and `hooks/{kimi,agy,codex}/pre-edit.sh` now use `set +e` + `trap 'exit 0' ERR`).
-- **#2 identity auto-detect** → addressed in PR 12 (hooks now read `LAIN_AGENT_NAME` → Orca env vars → fallback to `<kind>-<ppid>`).
+- **#2 identity auto-detect** → addressed in PR 12 (hooks now read `LAIN_AGENT_NAME` → generic agent env vars `CLAUDE_AGENT_NAME` / `MCP_CLIENT_NAME` / `AGENT_NAME` → fallback to `<kind>-<ppid>-<host>`).
 - **#5 conflict shape** → addressed in PR 12 (`OccupancyMap::claim` filters read-vs-edit; conflicts carry `intent` + `last_touched_unix`).
 - **#6 one version of truth** → addressed in PR 12 (`lain doctor` runs 5 checks and prints a single diagnostic).
 - **#7 reconcile roadmaps** → addressed in PR 12 (the 2026-08-14 plan file is marked superseded; `docs/multiplayer.md` notes the supersession).
