@@ -171,7 +171,6 @@ pub struct Claim {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConflictEntry {
     pub agent_id: AgentId,
-    pub name: String,
     pub path: PathBuf,
     pub symbols: Vec<String>,
     /// Intent of the *existing* claim the conflict is reported
@@ -179,13 +178,15 @@ pub struct ConflictEntry {
     /// always `ClaimIntent::Edit` (reads never conflict), but
     /// surfacing it makes the conflict JSON self-describing for
     /// downstream renderers — they can branch on `intent` without
-    /// re-deriving the semantics from `name` or `path`.
+    /// re-deriving the semantics from `path`.
     pub intent: ClaimIntent,
     /// When the conflicting claim was last touched (typically claim
     /// grant time). Serialized as a UNIX-epoch second count in the
     /// MCP conflict JSON so callers can show "alice has been holding
-    /// this for 5m".
-    pub last_touched_unix: SystemTime,
+    /// this for 5m" — and so the value is still meaningful when the
+    /// conflicting agent's session has expired (the `name` field
+    /// would be lost in that case, so we never carried one).
+    pub last_seen_unix: SystemTime,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -467,7 +468,7 @@ struct FileOccupancy {
     /// conflict.
     intents: HashMap<String, HashMap<AgentId, ClaimIntent>>,
     /// Per-symbol last-touched timestamp, in the same shape as
-    /// `intents`. Used to populate the `last_touched_unix` field on
+    /// `intents`. Used to populate the `last_seen_unix` field on
     /// `ConflictEntry` so callers can tell when the conflicting
     /// claim was first (or most recently) recorded.
     last_touched: HashMap<String, HashMap<AgentId, SystemTime>>,
@@ -484,7 +485,7 @@ impl FileOccupancy {
 
     /// Last-touched timestamp for `agent` on `sym`. Mirrors
     /// `intent_for`. Falls back to `UNIX_EPOCH` when absent — callers
-    /// turn this directly into a `ConflictEntry.last_touched_unix`
+    /// turn this directly into a `ConflictEntry.last_seen_unix`
     /// via `Option::unwrap_or_default()`-style plumbing.
     fn last_touched_for(&self, agent: &AgentId, sym: &str) -> Option<SystemTime> {
         self.last_touched.get(sym).and_then(|m| m.get(agent)).copied()
@@ -494,9 +495,9 @@ impl FileOccupancy {
     /// used when the incoming request is itself file-level and we
     /// want to surface when the other agent first recorded the
     /// whole-file claim. Agents with no file-level claim fall back
-    /// to `UNIX_EPOCH`; the conflict entry's `name` field is still
-    /// `"<unknown>"` so callers can tell the difference between "no
-    /// record" and "no claim".
+    /// to `UNIX_EPOCH`; the conflict entry's `last_seen_unix` field
+    /// lets callers tell the difference between a real claim
+    /// (`> UNIX_EPOCH`) and the no-claim fallback.
     fn last_touched_unix_for(&self, agent: &AgentId) -> SystemTime {
         self.last_touched_for(agent, "__file_level__")
             .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -580,11 +581,10 @@ impl OccupancyMap {
                         for other in entry.agents.iter().filter(|a| *a != agent_id) {
                             req_conflicts.push(ConflictEntry {
                                 agent_id: other.clone(),
-                                name: "<unknown>".into(),
                                 path: req.path.clone(),
                                 symbols: vec![],
                                 intent: ClaimIntent::Edit,
-                                last_touched_unix: entry.last_touched_unix_for(other),
+                                last_seen_unix: entry.last_touched_unix_for(other),
                             });
                         }
                     } else {
@@ -599,11 +599,10 @@ impl OccupancyMap {
                                     if entry.intent_for(other, sym) == Some(ClaimIntent::Edit) {
                                         req_conflicts.push(ConflictEntry {
                                             agent_id: other.clone(),
-                                            name: "<unknown>".into(),
                                             path: req.path.clone(),
                                             symbols: vec![sym.clone()],
                                             intent: ClaimIntent::Edit,
-                                            last_touched_unix: entry
+                                            last_seen_unix: entry
                                                 .last_touched_for(other, sym)
                                                 .unwrap_or(SystemTime::UNIX_EPOCH),
                                         });
@@ -623,11 +622,10 @@ impl OccupancyMap {
                                 if entry.intent_for(&other, "__file_level__") == Some(ClaimIntent::Edit) {
                                     req_conflicts.push(ConflictEntry {
                                         agent_id: other.clone(),
-                                        name: "<unknown>".into(),
                                         path: req.path.clone(),
                                         symbols: vec![],
                                         intent: ClaimIntent::Edit,
-                                        last_touched_unix: entry.last_touched_unix_for(&other),
+                                        last_seen_unix: entry.last_touched_unix_for(&other),
                                     });
                                 }
                             }

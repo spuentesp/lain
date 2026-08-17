@@ -11,6 +11,7 @@ use crate::server::presence::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::SystemTime;
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterAgentArgs {
@@ -179,11 +180,10 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         })).collect::<Vec<_>>(),
         "conflicts": result.conflicts.iter().map(|c| json!({
             "agent_id": c.agent_id.as_str(),
-            "name": c.name,
             "path": c.path.to_string_lossy(),
             "symbols": c.symbols,
             "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
-            "last_touched_unix": system_time_to_unix_secs(c.last_touched_unix),
+            "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
         })).collect::<Vec<_>>(),
     }))
 }
@@ -231,11 +231,20 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         server.occupancy.list_all()
     };
     let out: Vec<Value> = entries.into_iter().map(|e| {
-        let names: Vec<String> = e.agents.iter().filter_map(|id| server.presence.get(id).map(|s| s.name)).collect();
+        // `last_seen_unix` is the heartbeat of the first live agent
+        // currently holding any claim on this path. The caller can
+        // resolve the name via `list_active_agents` / `who_am_i` —
+        // `agent_names` (which conflated "live" with "named") was
+        // dropped because it would be silently empty for sessions
+        // that had expired but still had artifacts on disk.
+        let last_seen_unix: Option<u64> = e.agents.iter()
+            .filter_map(|id| server.presence.get(id))
+            .next()
+            .map(|s| system_time_to_unix_secs(s.last_heartbeat));
         json!({
             "path": e.path.to_string_lossy(),
             "agents": e.agents.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
-            "agent_names": names,
+            "last_seen_unix": last_seen_unix,
             "symbols": e.symbols.iter().map(|s| json!({
                 "symbol": s.symbol,
                 "agents": s.agents.iter().map(|a| a.as_str()).collect::<Vec<_>>(),

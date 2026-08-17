@@ -398,11 +398,17 @@ async fn presence_tool_dispatchers_round_trip() {
     assert_eq!(v.as_array().unwrap().len(), 1);
     assert_eq!(v[0]["path"].as_str().unwrap(), "auth.rs");
 
-    // 7. list_occupancy shows the file with both alice (we'll see
-    //    that in agent_names after list_all).
+    // 7. list_occupancy shows the file with alice (bob's claim was
+    //    rejected as a conflict, so only alice is on the file).
+    //    `last_seen_unix` surfaces the heartbeat of the first live
+    //    agent (the field replaces the older `agent_names` payload).
     let v = run_list_occupancy(&server_arc, serde_json::json!({})).unwrap();
     let arr = v.as_array().unwrap();
     assert!(!arr.is_empty());
+    let entry = &arr[0];
+    assert_eq!(entry["agents"].as_array().unwrap().len(), 1);
+    let lsu = entry["last_seen_unix"].as_u64().unwrap();
+    assert!(lsu > 0, "live session must surface last_seen_unix");
 
     // 8. release_files releases auth.rs and fires ClaimReleased.
     let v = run_release_files(
@@ -648,7 +654,7 @@ fn read_claim_does_not_conflict_with_edit_claim() {
 
 /// Edit-vs-edit must still conflict as before — the read-vs-edit filter
 /// is *additive* loosening, not a blanket "no conflicts" rule. The
-/// surviving conflict entry also carries `last_touched_unix` so the
+/// surviving conflict entry also carries `last_seen_unix` so the
 /// caller knows when the conflicting claim was first recorded.
 #[test]
 fn edit_claim_still_conflicts_with_existing_edit_claim() {
@@ -671,7 +677,7 @@ fn edit_claim_still_conflicts_with_existing_edit_claim() {
     assert_eq!(result.conflicts.len(), 1);
     let c = &result.conflicts[0];
     assert_eq!(c.symbols, vec!["login".to_string()]);
-    assert!(c.last_touched_unix <= SystemTime::now());
+    assert!(c.last_seen_unix <= SystemTime::now());
 }
 
 // --- Task 2 brief: parent_session_id surfaces in who_am_i, list_subagents works ---
@@ -765,4 +771,91 @@ async fn who_am_i_includes_parent_session_id() {
     // list_subagents with an unknown token errors cleanly.
     let err = run_list_subagents(&server, serde_json::json!({"session_token": "nope"})).unwrap_err();
     assert!(err.contains("unknown session token"), "{err}");
+}
+
+// --- Task 1 brief: ConflictEntry drops fragile `name`; carries agent_id + last_seen_unix ---
+
+/// `ConflictEntry` exposes `agent_id` + `last_seen_unix` (never the
+/// misleading `"<unknown>"` string that the old `name` field could
+/// carry). The struct must be constructible with the new fields and
+/// the resulting entry must round-trip them back out.
+#[test]
+fn conflict_entry_carries_agent_id_and_last_seen_unix() {
+    let bob = AgentId("bob".into());
+    let now = SystemTime::now();
+    let entry = ConflictEntry {
+        agent_id: bob.clone(),
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        last_seen_unix: now,
+    };
+    assert_eq!(entry.agent_id, bob);
+    assert_eq!(entry.intent, ClaimIntent::Edit);
+    assert_eq!(entry.last_seen_unix, now);
+}
+
+/// `run_claim_files` conflict JSON must carry `agent_id` +
+/// `last_seen_unix` + `intent`, and must NOT carry a `name` field
+/// (the old `<unknown>` literal was the trigger for this fixup).
+#[test]
+fn run_claim_files_conflict_json_has_no_unknown_name_field() {
+    use lain::server::mcp::presence_tools::run_claim_files;
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server_arc = std::sync::Arc::new(server);
+
+    // Register two agents, each holding a valid session token.
+    let alice = run_register_agent_for_test(&server_arc, "alice");
+    let bob = run_register_agent_for_test(&server_arc, "bob");
+
+    // Alice claims auth.rs first.
+    let v = run_claim_files(
+        &server_arc,
+        serde_json::json!({
+            "agent_id": alice.0,
+            "session_token": alice.1,
+            "files": [{"path": "auth.rs", "symbols": ["login"]}],
+        }),
+    ).unwrap();
+    assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
+
+    // Bob tries the same scope — must conflict.
+    let v = run_claim_files(
+        &server_arc,
+        serde_json::json!({
+            "agent_id": bob.0,
+            "session_token": bob.1,
+            "files": [{"path": "auth.rs", "symbols": ["login"]}],
+        }),
+    ).unwrap();
+    assert_eq!(v["granted"].as_array().unwrap().len(), 0);
+    let conflicts = v["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let c = &conflicts[0];
+    // The new conflict JSON shape: agent_id, no name, last_seen_unix.
+    assert!(c.get("name").is_none(), "fragile `name` field must be dropped");
+    assert!(c["agent_id"].is_string());
+    assert!(c["last_seen_unix"].as_u64().unwrap() > 0);
+    assert!(c["intent"].as_str().unwrap() == "edit");
+    assert_eq!(c["path"].as_str().unwrap(), "auth.rs");
+    assert_eq!(c["symbols"].as_array().unwrap().len(), 1);
+}
+
+/// Tiny helper: register an agent and return `(agent_id, token)`.
+/// Lives at the bottom of the file so the imports stay near the top.
+fn run_register_agent_for_test(
+    server: &std::sync::Arc<lain::server::LainServer>,
+    name: &str,
+) -> (String, String) {
+    use lain::server::mcp::presence_tools::run_register_agent;
+    let v = run_register_agent(server, serde_json::json!({"name": name})).unwrap();
+    let id = v["agent_id"].as_str().unwrap().to_string();
+    let token = v["session_token"].as_str().unwrap().to_string();
+    (id, token)
 }
