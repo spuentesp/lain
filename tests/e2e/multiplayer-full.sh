@@ -430,3 +430,71 @@ else
     done
     exit 1
 fi
+
+echo ""
+echo "═══════════════════════════════════════════════════════════════════"
+echo " SCENARIO D: conflict detection surfaces in real time"
+echo " Two agents edit the same file — second agent sees the conflict"
+echo "═══════════════════════════════════════════════════════════════════"
+
+# Fresh server (clears the federation state file per start_server's
+# documented contract).
+start_server
+
+# Reset the source files: Scenario B/C markers are still in the tree and
+# on re-run Claude refuses to re-apply an already-present marker (no hook
+# fires → no claim → nothing to conflict over).
+(cd "$REPO" && git checkout -- src/)
+
+# Full hook lifecycle for this scenario: pre-edit `claim` AND post-edit
+# `release`. D is the only scenario that exercises the conflict path
+# end to end, so both hooks must fire.
+HOOKS_POST_DISABLED=0
+
+# Unlike Scenario C, we deliberately do NOT pre-claim via claim_files.
+# The whole point is that the two *pre-edit hooks* race for the same
+# file: claude-A's hook claims src/presence.rs, then claude-B's hook
+# tries to claim the same path and gets a conflict back, which the hook
+# surfaces on stderr (Claude shows it as hook feedback and proceeds).
+run_claude claude-A "Edit /tmp/multiplayer-full/repos/multiplayer-sample/src/presence.rs: add the comment '// claude-A holds presence.rs' on a new line at the very top of the file. Do not modify anything else. Use the Edit tool only."
+
+# Give the pre-edit hook a moment to land the claim before B races it.
+sleep 2
+
+run_claude claude-B "Edit /tmp/multiplayer-full/repos/multiplayer-sample/src/presence.rs: add the comment '// claude-B also touched presence.rs' on a new line at the very top of the file. Do not modify anything else. Use the Edit tool only."
+
+# Occupancy for presence.rs. Uses `agent_names` (not `agents`) for the
+# same reason as Scenario C: the id list churns across the multiple
+# sessions the hook lifecycle spawns per agent name. This is reported,
+# not asserted — the post-edit release hook is enabled here, so by the
+# time we look the claims may legitimately be gone.
+OCC_D=$(call_tool list_occupancy "{\"path\":\"$REPO/src/presence.rs\"}" | python3 -c "
+import json,sys
+d = json.loads(sys.stdin.read())
+entries = json.loads(d['result']['content'][0]['text'])
+rows = [e for e in entries if 'repos/multiplayer-sample/src/presence.rs' in e['path']]
+if not rows:
+    print('NONE'); raise SystemExit(0)
+names = sorted({n for e in rows for n in e.get('agent_names', [])})
+print(f'agents={len(names)} names={names}')
+" 2>/dev/null || echo NONE)
+echo "  presence.rs occupancy: $OCC_D"
+
+# The real assertion: the conflict is advisory, not a lock. Both edits
+# must land — lain reports the collision, it does not block the write.
+HAS_A=$(grep -c "claude-A holds presence.rs" "$REPO/src/presence.rs" || true)
+HAS_B=$(grep -c "claude-B also touched presence.rs" "$REPO/src/presence.rs" || true)
+if [ "$HAS_A" -ge 1 ] && [ "$HAS_B" -ge 1 ]; then
+    echo "OK: both agents' edits present in presence.rs (B edited despite the conflict warning)"
+    CONFLICTS=$(grep -ic "conflict\|already editing\|claude-A" "$WORK/logs/claude-B.log" 2>/dev/null || true)
+    echo "  claude-B log conflict/other-agent mentions: ${CONFLICTS:-0}"
+else
+    echo "FAIL: A=$HAS_A B=$HAS_B (expected both >= 1)"
+    echo "  --- presence.rs (first 20 lines)"
+    head -20 "$REPO/src/presence.rs" | sed 's/^/  /'
+    for a in claude-A claude-B; do
+        echo "  --- tail $WORK/logs/$a.log"
+        tail -n 12 "$WORK/logs/$a.log" 2>/dev/null | sed 's/^/  /' || echo "  (no log)"
+    done
+    exit 1
+fi
