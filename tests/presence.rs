@@ -859,3 +859,70 @@ fn run_register_agent_for_test(
     let token = v["session_token"].as_str().unwrap().to_string();
     (id, token)
 }
+
+// --- Task 1 brief: real SymbolHash from file bytes ---
+
+/// Symbol-level claims must populate `content_hash` with a real
+/// BLAKE3 hash of the symbol's body (not the all-zero placeholder).
+/// When the file is readable and the symbol is defined by the
+/// tree-sitter extractor, the hash must equal `from_bytes` of the
+/// symbol's body bytes — for a single-function file the body *is*
+/// the file (including the trailing newline that `src.lines()`
+/// strips).
+#[test]
+fn symbol_level_claim_records_nonzero_content_hash() {
+    let occ = OccupancyMap::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("auth.rs");
+    std::fs::write(&path, "pub fn login() -> &'static str { \"A\" }\n").unwrap();
+    let agent = AgentId("alice".into());
+    let req = ClaimRequest {
+        path: path.clone(),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    };
+    occ.claim(&agent, vec![req]);
+    let claims = occ.list_for_agent(&agent);
+    assert_eq!(claims.len(), 1);
+    let hash = claims[0].content_hash.expect("symbol-level claim must have content_hash");
+    // The hash must be non-zero (the placeholder), and re-computing the same
+    // body must yield the same hash.
+    assert_ne!(hash, SymbolHash::zero());
+    let again = SymbolHash::from_bytes(b"pub fn login() -> &'static str { \"A\" }\n");
+    assert_eq!(hash, again);
+}
+
+/// When the file body changes between two symbol claims, the
+/// `content_hash` must change too — that's the whole point of the
+/// "hash survives rebuilds" story (federation tracks the same symbol
+/// across rebuilds when the body is unchanged, and re-issues a fresh
+/// hash when it isn't).
+#[test]
+fn symbol_level_claim_hash_changes_when_body_changes() {
+    let occ = OccupancyMap::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("auth.rs");
+    std::fs::write(&path, "pub fn login() -> &'static str { \"A\" }\n").unwrap();
+    let agent = AgentId("alice".into());
+    occ.claim(&agent, vec![ClaimRequest {
+        path: path.clone(),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    let hash1 = occ.list_for_agent(&agent)[0].content_hash.unwrap();
+
+    std::fs::write(&path, "pub fn login() -> &'static str { \"B\" }\n").unwrap();
+    occ.claim(&agent, vec![ClaimRequest {
+        path: path.clone(),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    let claims = occ.list_for_agent(&agent);
+    assert_eq!(claims.len(), 2, "agent should now hold two claim records");
+    let hash2 = claims[1].content_hash.unwrap();
+
+    assert_ne!(hash1, hash2);
+}

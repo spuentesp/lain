@@ -651,12 +651,18 @@ impl OccupancyMap {
                         }
                     }
                     // File-level claim (no specific symbols) carries no
-                    // content hash; symbol-level claims get a placeholder
-                    // hash for now — PR 11 will compute real bodies.
+                    // content hash; symbol-level claims hash the symbol's
+                    // body bytes via the tree-sitter extractor. When the
+                    // symbol can't be located (unsupported file type,
+                    // unreadable file, etc.) we fall back to the all-zero
+                    // placeholder so existing consumers still see
+                    // `Some(SymbolHash)`.
                     let content_hash = if req.symbols.is_empty() {
                         None
                     } else {
-                        Some(SymbolHash::zero())
+                        let sym = req.symbols.first().map(|s| s.as_str()).unwrap_or("");
+                        compute_symbol_hash(&req.path, sym)
+                            .or_else(|| Some(SymbolHash::zero()))
                     };
                     // Translate the request's optional TTL into an absolute
                     // expiry timestamp. `None` means "no expiry set" and the
@@ -1013,4 +1019,37 @@ pub fn load_pair(
         o.by_agent.insert(AgentId(k), claims);
     }
     Ok(())
+}
+
+/// Compute the BLAKE3-256 `SymbolHash` of the body bytes for `symbol`
+/// in `path`. The body is the source range covered by the symbol's
+/// tree-sitter definition (`line_start..=line_end`, joined by newline);
+/// for a symbol whose end line is the last line of the file, the
+/// file's trailing newline is preserved too — without it `src.lines()`
+/// strips it and the hash would diverge from `BLAKE3(file_bytes)`
+/// whenever the symbol spans the whole file.
+///
+/// Returns `None` when the file is unreadable, not valid UTF-8, the
+/// language isn't supported by the tree-sitter extractor, or the
+/// symbol isn't defined in the file. Callers fall back to
+/// `Some(SymbolHash::zero())` when they need a non-None hash for
+/// `Claim.content_hash`.
+fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
+    let bytes = std::fs::read(path).ok()?;
+    let src = std::str::from_utf8(&bytes).ok()?;
+    let defs = crate::server::treesitter::extract_definitions(path, &src);
+    let def = defs.into_iter().find(|d| d.name == symbol)?;
+    let lines: Vec<&str> = src.lines().collect();
+    let start = def.line_start as usize;
+    let end = def.line_end as usize;
+    if start > end || end >= lines.len() {
+        return None;
+    }
+    let mut body = lines[start..=end].join("\n");
+    // Preserve the file's trailing newline when the symbol ends on
+    // the last line — `src.lines()` strips it.
+    if end + 1 == lines.len() && bytes.ends_with(b"\n") {
+        body.push('\n');
+    }
+    Some(SymbolHash::from_bytes(body.as_bytes()))
 }
