@@ -500,3 +500,202 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
     assert_eq!(infos[0].description.as_deref(), Some("after rebuild"));
 }
 
+
+// ---------------------------------------------------------------------------
+// `detect_overlap` — commit-time symbol overlap between two git refs.
+//
+// The tool answers "if I merge <head> into <base>, which symbols did both
+// sides touch?" It resolves the named federation workspace to its member
+// repos, runs `git diff --name-only <base> <head>` in each member's
+// worktree, then extracts the symbol set of every touched file at both
+// refs (via `git show <ref>:<path>` + tree-sitter) and intersects them.
+// ---------------------------------------------------------------------------
+
+/// Initialize a git repo at `dir` with a committable local identity. Unlike
+/// `init_bare_git_repo` this configures `user.name` / `user.email` so the
+/// test can create real commits, which `detect_overlap` needs in order to
+/// diff two refs.
+fn init_committable_git_repo(dir: &std::path::Path) {
+    let repo = git2::Repository::init(dir).expect("git2::Repository::init");
+    let mut cfg = repo.config().expect("repo config");
+    cfg.set_str("user.email", "test@example.com").unwrap();
+    cfg.set_str("user.name", "Overlap Test").unwrap();
+}
+
+/// Run `git <args>` in `dir`, asserting success, and return stdout.
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("git failed to start");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[tokio::test]
+async fn detect_overlap_reports_shared_symbols() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed: Arc<FederatedIndex> = Arc::new(FederatedIndex::new(backend));
+
+    // The member repo lives in its own tempdir so the PetgraphBackend's
+    // graph bin (under `tmp`) is not swept into the repo's worktree.
+    let ws_repo = tempfile::tempdir().unwrap();
+    let repo_dir = ws_repo.path().to_path_buf();
+    init_committable_git_repo(&repo_dir);
+
+    // Base commit: `login` + `logout`.
+    std::fs::write(
+        repo_dir.join("auth.rs"),
+        "pub fn login() -> &'static str { \"A\" }\npub fn logout() {}\n",
+    )
+    .unwrap();
+    git_out(&repo_dir, &["add", "auth.rs"]);
+    git_out(&repo_dir, &["commit", "--quiet", "-m", "base"]);
+    let base_oid = git_out(&repo_dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // Head commit: `login` body changes (shared symbol → overlap), `logout`
+    // is deleted, `refresh` is new, and a brand-new file `token.rs` appears
+    // (no base-side symbols → no overlap).
+    std::fs::write(
+        repo_dir.join("auth.rs"),
+        "pub fn login() -> &'static str { \"B\" }\npub fn refresh() {}\n",
+    )
+    .unwrap();
+    std::fs::write(repo_dir.join("token.rs"), "pub fn mint() -> u32 { 7 }\n").unwrap();
+    git_out(&repo_dir, &["add", "auth.rs", "token.rs"]);
+    git_out(&repo_dir, &["commit", "--quiet", "-m", "head"]);
+
+    // Register the repo with the federation and declare a workspace over it.
+    let src: Box<dyn RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("auth-svc").unwrap(), repo_dir.clone()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    let workspaces = Arc::new(WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "auth-ws".into(),
+            description: None,
+            source: None,
+            members: vec!["auth-svc".into()],
+        }],
+    });
+    let server = LainServer::with_federation_and_workspaces(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        workspaces,
+        None,
+    )
+    .expect("with_federation_and_workspaces");
+
+    let out = lain::mcp::presence_tools::run_detect_overlap(
+        &server,
+        serde_json::json!({
+            "base": base_oid,
+            "head": "HEAD",
+            "workspace": "auth-ws",
+        }),
+    )
+    .expect("detect_overlap should succeed");
+
+    assert_eq!(out["base"].as_str(), Some(base_oid.as_str()));
+    assert_eq!(out["head"].as_str(), Some("HEAD"));
+    assert_eq!(
+        out["total_overlaps"].as_u64(),
+        Some(1),
+        "only `login` is touched on both sides — got {out}"
+    );
+
+    let files = out["files"].as_array().expect("files must be an array");
+    assert_eq!(files.len(), 2, "auth.rs + token.rs — got {files:?}");
+
+    let auth = files
+        .iter()
+        .find(|f| f["path"] == "auth.rs")
+        .expect("auth.rs entry missing");
+    assert_eq!(auth["repo"].as_str(), Some("auth-svc"));
+    assert_eq!(
+        auth["symbols_base"].as_array().unwrap(),
+        &vec![
+            serde_json::json!("login"),
+            serde_json::json!("logout")
+        ],
+    );
+    assert_eq!(
+        auth["symbols_head"].as_array().unwrap(),
+        &vec![
+            serde_json::json!("login"),
+            serde_json::json!("refresh")
+        ],
+    );
+    assert_eq!(
+        auth["overlap"].as_array().unwrap(),
+        &vec![serde_json::json!("login")],
+    );
+    assert_eq!(auth["severity"].as_str(), Some("high"));
+
+    let token = files
+        .iter()
+        .find(|f| f["path"] == "token.rs")
+        .expect("token.rs entry missing");
+    assert!(
+        token["symbols_base"].as_array().unwrap().is_empty(),
+        "token.rs did not exist at base — got {token}"
+    );
+    assert_eq!(
+        token["symbols_head"].as_array().unwrap(),
+        &vec![serde_json::json!("mint")],
+    );
+    assert!(token["overlap"].as_array().unwrap().is_empty());
+    assert_eq!(token["severity"].as_str(), Some("none"));
+}
+
+#[tokio::test]
+async fn detect_overlap_rejects_unknown_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed: Arc<FederatedIndex> = Arc::new(FederatedIndex::new(backend));
+
+    let ws_repo = tempfile::tempdir().unwrap();
+    init_bare_git_repo(ws_repo.path());
+    let src: Box<dyn RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("solo").unwrap(), ws_repo.path().to_path_buf())
+            .unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    let workspaces = Arc::new(WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "solo-ws".into(),
+            description: None,
+            source: None,
+            members: vec!["solo".into()],
+        }],
+    });
+    let server = LainServer::with_federation_and_workspaces(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        workspaces,
+        None,
+    )
+    .expect("with_federation_and_workspaces");
+
+    let err = lain::mcp::presence_tools::run_detect_overlap(
+        &server,
+        serde_json::json!({ "base": "HEAD~1", "workspace": "nope" }),
+    )
+    .expect_err("unknown workspace must be an error");
+    assert!(
+        err.contains("nope"),
+        "error should name the missing workspace — got {err}"
+    );
+}

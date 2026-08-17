@@ -1,8 +1,11 @@
-//! Eight MCP tools for the multiplayer layer.
+//! MCP tools for the multiplayer layer.
 //!
-//! All tools read or mutate `PresenceRegistry` + `OccupancyMap` on the
+//! Most tools read or mutate `PresenceRegistry` + `OccupancyMap` on the
 //! `LainServer`. Tools that mutate state return the new state; tools
-//! that read return JSON the agent can render.
+//! that read return JSON the agent can render. `detect_overlap` is the
+//! one exception: it consults git and the federation's repo roots rather
+//! than live presence state, because it answers a commit-time question
+//! ("did two refs touch the same symbols?") rather than a live one.
 
 use crate::server::ingest::LainServer;
 use crate::server::presence::{
@@ -280,3 +283,169 @@ fn system_time_to_unix_secs(t: std::time::SystemTime) -> u64 {
 }
 
 fn system_time_to_unix_secs_delta(d: std::time::Duration) -> u64 { d.as_secs() }
+
+// ── detect_overlap ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct DetectOverlapArgs {
+    /// Ref to compare against — normally the merge target's tip or the
+    /// merge base.
+    pub base: String,
+    /// Ref carrying the local work. Defaults to `HEAD`.
+    pub head: Option<String>,
+    /// Federation workspace whose member repos are scanned.
+    pub workspace: String,
+}
+
+/// Compare the symbol sets of two git refs and report what both sides
+/// touched.
+///
+/// Unlike `list_occupancy`, which answers "who is in this file *right
+/// now*", this is the commit-time check: for every file that differs
+/// between `base` and `head`, extract the symbols defined at each ref and
+/// return the intersection. A non-empty intersection means the two refs
+/// edited the same definition and a textual merge is likely to either
+/// conflict or silently drop one side's change.
+///
+/// Symbols come from tree-sitter (`extract_definitions`) run over the file
+/// content at each ref, not from the federation graph — the graph only
+/// holds the indexed working state, so it cannot answer "what did this
+/// file look like at `base`".
+pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, String> {
+    let a: DetectOverlapArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    let head = a.head.clone().unwrap_or_else(|| "HEAD".to_string());
+
+    let fed = server
+        .federation()
+        .ok_or("federation not configured on this server")?;
+    let workspaces = server
+        .workspaces_snapshot()
+        .ok_or("no workspaces file loaded on this server")?;
+    let spec = workspaces
+        .workspaces
+        .iter()
+        .find(|w| w.name == a.workspace)
+        .ok_or_else(|| format!("unknown workspace {}", a.workspace))?;
+
+    // Resolve every member to its on-disk worktree root. Members listed in
+    // workspaces.yaml but not loaded into the federation are skipped —
+    // there is no path to run git in.
+    let mut roots: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for member in &spec.members {
+        let Ok(id) = crate::federation::repo_id::RepoId::new(member) else {
+            continue;
+        };
+        if let Some(repo) = fed.get_repo(&id) {
+            roots.push((member.clone(), repo.source().local_path().to_path_buf()));
+        }
+    }
+    if roots.is_empty() {
+        return Err(format!(
+            "workspace {} has no loaded member repos",
+            a.workspace
+        ));
+    }
+
+    let mut out_files: Vec<Value> = Vec::new();
+    let mut total_overlaps = 0usize;
+    let mut diff_errors: Vec<String> = Vec::new();
+
+    for (repo_id, root) in &roots {
+        let paths = match git_diff_names(root, &a.base, &head) {
+            Ok(p) => p,
+            // A ref that resolves in one member repo usually does not
+            // resolve in the others, so a failed diff is the normal case
+            // for a multi-repo workspace. Record it and keep going; only a
+            // workspace where *every* member failed is a hard error.
+            Err(e) => {
+                diff_errors.push(format!("{repo_id}: {e}"));
+                continue;
+            }
+        };
+        for path in paths {
+            let symbols_base = symbols_at_ref(root, &a.base, &path);
+            let symbols_head = symbols_at_ref(root, &head, &path);
+            let overlap: Vec<String> = symbols_base
+                .iter()
+                .filter(|s| symbols_head.contains(*s))
+                .cloned()
+                .collect();
+            total_overlaps += overlap.len();
+            out_files.push(json!({
+                "repo": repo_id,
+                "path": path,
+                "symbols_base": symbols_base,
+                "symbols_head": symbols_head,
+                "severity": if overlap.is_empty() { "none" } else { "high" },
+                "overlap": overlap,
+            }));
+        }
+    }
+
+    if out_files.is_empty() && diff_errors.len() == roots.len() {
+        return Err(format!(
+            "git diff {}..{} failed in every member repo: {}",
+            a.base,
+            head,
+            diff_errors.join("; ")
+        ));
+    }
+
+    Ok(json!({
+        "base": a.base,
+        "head": head,
+        "files": out_files,
+        "total_overlaps": total_overlaps,
+    }))
+}
+
+/// `git diff --name-only <base> <head>` in `root`, one repo-relative path
+/// per line. The two-argument form (rather than `<base>..<head>`) is used
+/// so a ref containing `..` cannot be misparsed as a range.
+fn git_diff_names(
+    root: &std::path::Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["diff", "--name-only", base, head])
+        .output()
+        .map_err(|e| format!("git diff failed to start: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Sorted, de-duplicated names of every symbol tree-sitter can see in
+/// `path` as of `git_ref`. An empty vec covers three cases that all mean
+/// "nothing to overlap here": the file did not exist at that ref, it was
+/// unreadable or binary, or its language has no extractor.
+fn symbols_at_ref(root: &std::path::Path, git_ref: &str, path: &str) -> Vec<String> {
+    let Ok(out) = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["show", &format!("{git_ref}:{path}")])
+        .output()
+    else {
+        return vec![];
+    };
+    if !out.status.success() {
+        return vec![];
+    }
+    let Ok(source) = String::from_utf8(out.stdout) else {
+        return vec![];
+    };
+    let mut names: Vec<String> =
+        crate::server::treesitter::extract_definitions(std::path::Path::new(path), &source)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+    names.sort();
+    names.dedup();
+    names
+}

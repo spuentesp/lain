@@ -285,6 +285,11 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "List files this agent has claimed.",
         &["agent_id", "session_token"],
     ),
+    (
+        "detect_overlap",
+        "Detect symbol-level overlap between two git refs in a workspace. Args: base (required), head (defaults to HEAD), workspace (required). Returns { base, head, total_overlaps, files: [{ repo, path, symbols_base, symbols_head, overlap, severity }] } — a non-empty overlap means both refs edited the same definition.",
+        &["base", "workspace"],
+    ),
 ];
 
 /// Tool definitions exposed only when the MCP server was constructed with a
@@ -381,9 +386,11 @@ struct LainHandler {
     reload_bus: Option<Arc<crate::server::reload::ReloadBus>>,
     /// Shared handle to the `LainServer` orchestrator. Holds the
     /// presence registry, occupancy map, and presence-event broadcast
-    /// sender the 8 multiplayer tools (`register_agent`, `heartbeat`,
-    /// `list_active_agents`, `who_am_i`, `claim_files`, `release_files`,
-    /// `list_occupancy`, `my_claims`) dispatch against. `None` for
+    /// sender the multiplayer tools (`register_agent`, `heartbeat`,
+    /// `list_active_agents`, `who_am_i`, `list_subagents`, `claim_files`,
+    /// `release_files`, `list_occupancy`, `my_claims`) dispatch against,
+    /// plus the federation and workspaces handles `detect_overlap`
+    /// needs to resolve a workspace to its repo roots. `None` for
     /// sidecar / read-only servers that don't carry the presence
     /// layer; the tools return `presence layer not configured` in
     /// that case.
@@ -680,6 +687,14 @@ impl ServerHandler for LainHandler {
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_my_claims,
+                ));
+            }
+            "detect_overlap" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_detect_overlap,
                 ));
             }
             _ => {}
@@ -1148,10 +1163,10 @@ impl LainMcpServer {
     }
 
     /// Inject a shared handle to the `LainServer`. After this call,
-    /// the 8 multiplayer MCP tools (`register_agent`, `heartbeat`,
-    /// `list_active_agents`, `who_am_i`, `claim_files`,
-    /// `release_files`, `list_occupancy`, `my_claims`) dispatch
-    /// against the same presence registry, occupancy map, and
+    /// the multiplayer MCP tools (`register_agent`, `heartbeat`,
+    /// `list_active_agents`, `who_am_i`, `list_subagents`, `claim_files`,
+    /// `release_files`, `list_occupancy`, `my_claims`, `detect_overlap`)
+    /// dispatch against the same presence registry, occupancy map, and
     /// presence-event broadcast sender the rest of the server uses.
     /// The handler clones `Arc` state through this pointer so a
     /// registration here is observed by every other consumer in the
@@ -1866,6 +1881,13 @@ async fn handle_request(
                                     &jsonrpc_tool_result, &jsonrpc_error,
                                     id, name, &args_map, server.as_deref(),
                                     crate::server::mcp::presence_tools::run_my_claims,
+                                ));
+                            }
+                            "detect_overlap" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_detect_overlap,
                                 ));
                             }
                             _ => {}
