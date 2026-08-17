@@ -25,11 +25,23 @@ else
     AGENT_NAME="claude-code-${PPID:-?}"
 fi
 
+# Parent session ID forwarded by subagent orchestrators.
+if [ -n "$LAIN_PARENT_AGENT_ID" ]; then
+    PARENT_SESSION_ID="$LAIN_PARENT_AGENT_ID"
+else
+    PARENT_SESSION_ID=""
+fi
+
 if ! command -v lain >/dev/null 2>&1; then exit 0; fi
 
-lain hooks release \
-    --url "$LAIN_URL" \
-    --path "$FILE_PATH" \
-    --agent-name "$AGENT_NAME" \
-    --agent-kind "claude-code" 2>&1 | head -1 >&2
+RELEASE_ARGS=(
+    --url "$LAIN_URL"
+    --path "$FILE_PATH"
+    --agent-name "$AGENT_NAME"
+    --agent-kind "claude-code"
+)
+if [ -n "$PARENT_SESSION_ID" ]; then
+    RELEASE_ARGS+=(--parent-session-id "$PARENT_SESSION_ID")
+fi
+lain hooks release "${RELEASE_ARGS[@]}" 2>&1 | head -1 >&2
 exit 0
