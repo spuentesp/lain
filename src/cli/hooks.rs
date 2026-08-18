@@ -491,20 +491,14 @@ pub fn lock(
 ///
 /// Removes the filesystem sentinel for `path` regardless of holder.
 /// Idempotent — ENOENT is treated as success. We compute the sentinel
-/// path directly via `presence_lock::lock_path_for` rather than
-/// keeping the `FileLock` from the matching `lock` invocation, since
-/// the CLI does not persist state between invocations.
+/// path via `presence_lock::lock_path_for` and remove it via
+/// `presence_lock::release_lock_at`, both of which are path-only
+/// entry points designed for callers (like this CLI) that don't hold
+/// a `FileLock` handle from the matching `lock` invocation.
 pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()> {
     let lock_path = presence_lock::lock_path_for(Path::new(workspace_root), Path::new(path));
-    match std::fs::remove_file(&lock_path) {
-        Ok(()) => {
-            println!("released {}", lock_path.display());
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("released {} (already absent)", lock_path.display());
-            Ok(())
-        }
-        Err(e) => Err(anyhow::anyhow!("remove {}: {e}", lock_path.display())),
-    }
+    presence_lock::release_lock_at(&lock_path)
+        .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
+    println!("released {}", lock_path.display());
+    Ok(())
 }

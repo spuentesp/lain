@@ -265,7 +265,17 @@ impl FileLock {
 /// did not exist (release is idempotent). Other I/O errors
 /// (permissions, etc.) are surfaced to the caller.
 pub fn release_lock(lock: &FileLock) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(&lock.path) {
+    release_lock_at(&lock.path)
+}
+
+/// Remove the lock file at `lock_path`. Idempotent — ENOENT is
+/// treated as success. Other I/O errors are surfaced. Exists as a
+/// path-only entry point for callers (e.g. the `lain hooks unlock`
+/// CLI) that don't hold a `FileLock` handle from the matching `lock`
+/// invocation. The existing [`release_lock`] is a thin wrapper that
+/// forwards to this function.
+pub fn release_lock_at(lock_path: &Path) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(lock_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
