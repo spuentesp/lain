@@ -80,6 +80,25 @@ fn main() -> Result<()> {
             // accepted for surface parity and ignored at dispatch.
             lain::cli::ask::run_ask()
         }
+        Some(Commands::Mcp {
+            workspace,
+            embedding_model,
+        }) => {
+            // `lain mcp` — single-repo MCP server on stdio. Walks up
+            // for `.git` if `--workspace` is not given, then serves
+            // the per-repo tool surface (no federation). Wishlist #11
+            // (option A): stable MCP config
+            // `{"command":"lain","args":["mcp"]}` that doesn't
+            // depend on `repos.yaml`.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for mcp subcommand")?;
+            rt.block_on(lain::cli::mcp::run_mcp(
+                workspace.as_deref(),
+                embedding_model.as_deref(),
+            ))
+        }
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
         Some(Commands::Doctor) => {
             // `doctor` returns its own exit code (0 clean, 1 hard

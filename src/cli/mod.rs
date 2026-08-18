@@ -7,6 +7,7 @@ pub mod dispatch;
 pub mod signal;
 pub mod hooks;
 pub mod doctor;
+pub mod mcp;
 
 pub use query::run_query;
 pub use ask::run_ask;
@@ -96,6 +97,26 @@ pub enum Commands {
         #[arg(long, default_value = "./repos.yaml")]
         config: PathBuf,
         question: String,
+    },
+    /// Start a single-repo MCP server on stdio. Walks up from the
+    /// current directory for `.git` and serves the per-repo tool
+    /// surface directly. Wishlist #11: this is the stable MCP
+    /// config — `{"command":"lain","args":["mcp"]}` — that
+    /// doesn't depend on a `repos.yaml` or the federation plumbing.
+    /// Optional `--workspace PATH` overrides the walk-up; the
+    /// `embedding_model` flag works the same as in `Server`.
+    Mcp {
+        /// Workspace root (the directory containing `.git/`).
+        /// When omitted, walks up from the current directory until
+        /// it finds a `.git` marker and uses that parent. This
+        /// matches the zero-config use case (run from anywhere
+        /// inside a clone and it Just Works).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Path to the ONNX bi-encoder model directory. See
+        /// `lain server --help` for details.
+        #[arg(long)]
+        embedding_model: Option<PathBuf>,
     },
     /// Agent pre-edit hook entry point (claim/release files).
     Hooks {
