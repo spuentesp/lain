@@ -12,6 +12,7 @@ use crate::server::presence::{
     AgentId, AgentKind, AgentMode, ClaimIntent, ClaimRequest, OccupancyEntry,
     PresenceEvent,
 };
+use crate::server::schema::NodeType;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::SystemTime;
@@ -311,6 +312,10 @@ pub struct DetectOverlapArgs {
 /// content at each ref, not from the federation graph — the graph only
 /// holds the indexed working state, so it cannot answer "what did this
 /// file look like at `base`".
+///
+/// Each file carries a `severity` of `"none"` / `"low"` / `"medium"` /
+/// `"high"`, graded by `overlap_severity` from the kinds of the shared
+/// symbols rather than merely by whether any were shared.
 pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: DetectOverlapArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let head = a.head.clone().unwrap_or_else(|| "HEAD".to_string());
@@ -363,21 +368,27 @@ pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, Str
             }
         };
         for path in paths {
-            let symbols_base = symbols_at_ref(root, &a.base, &path);
-            let symbols_head = symbols_at_ref(root, &head, &path);
-            let overlap: Vec<String> = symbols_base
+            let defs_base = symbols_at_ref(root, &a.base, &path);
+            let defs_head = symbols_at_ref(root, &head, &path);
+            // Overlap is matched on the symbol *name* (as before); the kind is
+            // carried along only to weight the severity. The base side's kind
+            // wins when a name changed kind between refs — that rename is
+            // itself the riskier reading.
+            let head_names: std::collections::HashSet<&str> =
+                defs_head.iter().map(|(n, _)| n.as_str()).collect();
+            let overlap: Vec<(String, NodeType)> = defs_base
                 .iter()
-                .filter(|s| symbols_head.contains(*s))
+                .filter(|(n, _)| head_names.contains(n.as_str()))
                 .cloned()
                 .collect();
             total_overlaps += overlap.len();
             out_files.push(json!({
                 "repo": repo_id,
                 "path": path,
-                "symbols_base": symbols_base,
-                "symbols_head": symbols_head,
-                "severity": if overlap.is_empty() { "none" } else { "high" },
-                "overlap": overlap,
+                "symbols_base": defs_base.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                "symbols_head": defs_head.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                "severity": overlap_severity(&overlap),
+                "overlap": overlap.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             }));
         }
     }
@@ -397,6 +408,60 @@ pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, Str
         "files": out_files,
         "total_overlaps": total_overlaps,
     }))
+}
+
+/// How much a single shared symbol contributes to a file's severity score.
+///
+/// The ranking is "how likely is a textual merge to silently lose one side's
+/// work": bodies of functions and methods carry the most logic, type
+/// definitions next, fields/properties after that, and containers/imports
+/// least. Every kind is worth at least 1, so a non-empty overlap can never
+/// score 0 and be mistaken for "none".
+fn symbol_weight(kind: &NodeType) -> u32 {
+    match kind {
+        // Behaviour: two refs editing the same body is the classic silent-drop.
+        NodeType::Function | NodeType::Method => 4,
+        // Type definitions: a shared shape usually means a shared contract.
+        NodeType::Struct | NodeType::Enum | NodeType::Trait | NodeType::Class
+        | NodeType::Interface | NodeType::Schema => 3,
+        // Members: narrower blast radius than a whole type.
+        NodeType::Property | NodeType::Variable => 2,
+        // Containers, constants, imports and cross-runtime markers: usually
+        // co-edited incidentally.
+        NodeType::File | NodeType::Namespace | NodeType::Module | NodeType::Package
+        | NodeType::Constant | NodeType::HttpRoute | NodeType::Topic
+        | NodeType::Resource => 1,
+    }
+}
+
+/// Graduated severity for one file's symbol overlap.
+///
+/// `"none"` when nothing is shared. Otherwise the per-symbol weights from
+/// `symbol_weight` (1–4) are summed:
+///
+/// - `>= 6` → `"high"`: at least two behaviour-carrying symbols (4+4, 4+3,
+///   3+3), or a long tail of smaller ones — a merge here needs eyes on it.
+/// - `>= 3` → `"medium"`: one shared function/type (4 or 3), or a pair of
+///   members (2+2).
+/// - otherwise → `"low"`: one or two incidental symbols (1, 2, 1+1).
+///
+/// The value space is additive: `"none"` and `"high"` keep their original
+/// meaning for existing callers, and `"low"` / `"medium"` slot in between.
+pub fn overlap_severity(overlap: &[(String, NodeType)]) -> &'static str {
+    if overlap.is_empty() {
+        return "none";
+    }
+    let weighted: u32 = overlap.iter().map(|(_, kind)| symbol_weight(kind)).sum();
+    if weighted >= 6 {
+        "high"
+    } else if weighted >= 3 {
+        "medium"
+    } else {
+        // Weights are all >= 1, so a non-empty overlap lands here only for
+        // genuinely small scores — but this arm is also the defensive floor
+        // that keeps a non-empty overlap from ever reporting "none".
+        "low"
+    }
 }
 
 /// `git diff --name-only <base> <head>` in `root`, one repo-relative path
@@ -422,11 +487,20 @@ fn git_diff_names(
         .collect())
 }
 
-/// Sorted, de-duplicated names of every symbol tree-sitter can see in
-/// `path` as of `git_ref`. An empty vec covers three cases that all mean
-/// "nothing to overlap here": the file did not exist at that ref, it was
-/// unreadable or binary, or its language has no extractor.
-fn symbols_at_ref(root: &std::path::Path, git_ref: &str, path: &str) -> Vec<String> {
+/// Sorted, de-duplicated `(name, kind)` pairs for every symbol tree-sitter
+/// can see in `path` as of `git_ref`. An empty vec covers three cases that
+/// all mean "nothing to overlap here": the file did not exist at that ref, it
+/// was unreadable or binary, or its language has no extractor.
+///
+/// The kind rides along so `overlap_severity` can weight a shared function
+/// more heavily than a shared module. De-duplication is by name only: two
+/// definitions sharing a name in one file (a `struct Foo` plus its `impl`-block
+/// helpers, say) collapse to the first kind seen after the sort.
+fn symbols_at_ref(
+    root: &std::path::Path,
+    git_ref: &str,
+    path: &str,
+) -> Vec<(String, NodeType)> {
     let Ok(out) = std::process::Command::new("git")
         .current_dir(root)
         .args(["show", &format!("{git_ref}:{path}")])
@@ -440,12 +514,12 @@ fn symbols_at_ref(root: &std::path::Path, git_ref: &str, path: &str) -> Vec<Stri
     let Ok(source) = String::from_utf8(out.stdout) else {
         return vec![];
     };
-    let mut names: Vec<String> =
+    let mut defs: Vec<(String, NodeType)> =
         crate::server::treesitter::extract_definitions(std::path::Path::new(path), &source)
             .into_iter()
-            .map(|d| d.name)
+            .map(|d| (d.name, d.kind))
             .collect();
-    names.sort();
-    names.dedup();
-    names
+    defs.sort_by(|a, b| a.0.cmp(&b.0));
+    defs.dedup_by(|a, b| a.0 == b.0);
+    defs
 }

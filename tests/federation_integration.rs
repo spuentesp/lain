@@ -639,7 +639,14 @@ async fn detect_overlap_reports_shared_symbols() {
         auth["overlap"].as_array().unwrap(),
         &vec![serde_json::json!("login")],
     );
-    assert_eq!(auth["severity"].as_str(), Some("high"));
+    // One shared function weighs 4 → "medium" under the graduated scale
+    // (>= 6 high, >= 3 medium, else low). Accept "high" too so the assertion
+    // stays about "this is a real conflict signal" rather than the exact band.
+    assert!(
+        matches!(auth["severity"].as_str(), Some("high") | Some("medium")),
+        "expected high or medium severity for shared fn, got: {}",
+        auth["severity"]
+    );
 
     let token = files
         .iter()
@@ -697,5 +704,150 @@ async fn detect_overlap_rejects_unknown_workspace() {
     assert!(
         err.contains("nope"),
         "error should name the missing workspace — got {err}"
+    );
+}
+
+/// Two shared functions (4 + 4 = 8) must clear the `high` threshold, so the
+/// top band stays reachable through the real git + tree-sitter pipeline and
+/// not just in the weighting unit test below.
+#[tokio::test]
+async fn detect_overlap_two_shared_functions_is_high() {
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed: Arc<FederatedIndex> = Arc::new(FederatedIndex::new(backend));
+
+    let ws_repo = tempfile::tempdir().unwrap();
+    let repo_dir = ws_repo.path().to_path_buf();
+    init_committable_git_repo(&repo_dir);
+
+    std::fs::write(
+        repo_dir.join("auth.rs"),
+        "pub fn login() -> &'static str { \"A\" }\npub fn logout() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    git_out(&repo_dir, &["add", "auth.rs"]);
+    git_out(&repo_dir, &["commit", "--quiet", "-m", "base"]);
+    let base_oid = git_out(&repo_dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // Both functions survive with changed bodies → both overlap.
+    std::fs::write(
+        repo_dir.join("auth.rs"),
+        "pub fn login() -> &'static str { \"B\" }\npub fn logout() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    git_out(&repo_dir, &["add", "auth.rs"]);
+    git_out(&repo_dir, &["commit", "--quiet", "-m", "head"]);
+
+    let src: Box<dyn RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("auth-svc").unwrap(), repo_dir.clone()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    let workspaces = Arc::new(WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "auth-ws".into(),
+            description: None,
+            source: None,
+            members: vec!["auth-svc".into()],
+        }],
+    });
+    let server = LainServer::with_federation_and_workspaces(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        workspaces,
+        None,
+    )
+    .expect("with_federation_and_workspaces");
+
+    let out = lain::mcp::presence_tools::run_detect_overlap(
+        &server,
+        serde_json::json!({
+            "base": base_oid,
+            "head": "HEAD",
+            "workspace": "auth-ws",
+        }),
+    )
+    .expect("detect_overlap should succeed");
+
+    assert_eq!(out["total_overlaps"].as_u64(), Some(2), "got {out}");
+    let auth = out["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "auth.rs")
+        .expect("auth.rs entry missing");
+    assert_eq!(
+        auth["severity"].as_str(),
+        Some("high"),
+        "two shared functions weigh 8 → high, got {auth}"
+    );
+}
+
+/// The graduated bands, exercised directly on the weighting function.
+///
+/// The `low` band cannot be reached through the git pipeline today: the
+/// tree-sitter extractors only emit `Function`, `Struct`, `Trait`, `Enum` and
+/// `Class`, all of which weigh 3–4, so a single shared symbol already scores
+/// `medium`. `low` is reachable as soon as an extractor starts emitting
+/// members/containers (`Property`, `Variable`, `Module`, `Constant`, …), and
+/// this test pins the behaviour for that day.
+#[test]
+fn overlap_severity_bands() {
+    use lain::mcp::presence_tools::overlap_severity;
+    use lain::schema::NodeType;
+
+    // Empty overlap is unchanged: "none".
+    assert_eq!(overlap_severity(&[]), "none");
+
+    // Weight 1 and 2 → low.
+    assert_eq!(
+        overlap_severity(&[("logging".to_string(), NodeType::Module)]),
+        "low"
+    );
+    assert_eq!(
+        overlap_severity(&[("timeout_ms".to_string(), NodeType::Property)]),
+        "low"
+    );
+    assert_eq!(
+        overlap_severity(&[
+            ("logging".to_string(), NodeType::Module),
+            ("MAX".to_string(), NodeType::Constant),
+        ]),
+        "low"
+    );
+
+    // Weight 3–5 → medium: one type, one function, or a pair of members.
+    assert_eq!(
+        overlap_severity(&[("Config".to_string(), NodeType::Struct)]),
+        "medium"
+    );
+    assert_eq!(
+        overlap_severity(&[("login".to_string(), NodeType::Function)]),
+        "medium"
+    );
+    assert_eq!(
+        overlap_severity(&[
+            ("a".to_string(), NodeType::Property),
+            ("b".to_string(), NodeType::Variable),
+        ]),
+        "medium"
+    );
+
+    // Weight >= 6 → high.
+    assert_eq!(
+        overlap_severity(&[
+            ("login".to_string(), NodeType::Function),
+            ("logout".to_string(), NodeType::Function),
+        ]),
+        "high"
+    );
+    assert_eq!(
+        overlap_severity(&[
+            ("login".to_string(), NodeType::Function),
+            ("Config".to_string(), NodeType::Struct),
+        ]),
+        "high"
     );
 }
