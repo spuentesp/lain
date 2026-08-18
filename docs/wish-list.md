@@ -113,13 +113,12 @@ opt-in-by-registration, so an agent that doesn't participate costs nothing.
 
 ---
 
-## Status (2026-08-19)
+## Status (2026-08-19, refreshed 2026-08-20)
 
 - **#1 fail open** → addressed in PR 12 (`hooks/claude-code/{pre,post}-edit.sh` and `hooks/{kimi,agy,codex}/pre-edit.sh` now use `set +e` + `trap 'exit 0' ERR`).
 - **#2 identity auto-detect** → addressed in PR 12 (hooks now read `LAIN_AGENT_NAME` → generic agent env vars `CLAUDE_AGENT_NAME` / `MCP_CLIENT_NAME` / `AGENT_NAME` → fallback to `<kind>-<ppid>-<host>`).
+- **#3 zero-daemon path** → addressed in PR 18`feat(cli): zero-daemon fallback for hooks claim/release`. `lain hooks claim|release` now probes `--url/health` with a 200ms timeout; when no server is reachable, the call falls through to the filesystem lock layer (`<workspace>/.lain/locks/<sanitized>.json`). Subagents editing in a parent-less process tree no longer need `register_agent` + `heartbeat` for one edit.
+- **#4 stateless claims** → addressed in PR 18 (same commit as #3). Subagents and short-lived agents can now claim without going through `register_agent` → `heartbeat` → `release_files`; the filesystem lock layer carries the coordination when the daemon isn't running.
 - **#5 conflict shape** → addressed in PR 12 (`OccupancyMap::claim` filters read-vs-edit; conflicts carry `intent` + `last_touched_unix`).
 - **#6 one version of truth** → addressed in PR 12 (`lain doctor` runs 5 checks and prints a single diagnostic).
 - **#7 reconcile roadmaps** → addressed in PR 12 (the 2026-08-14 plan file is marked superseded; `docs/multiplayer.md` notes the supersession).
-
-- **#3 zero-daemon path** → deferred. The lighter-weight alternatives (filesystem-as-lock, commit-time detection) are better; will plan separately.
-- **#4 stateless claims** → deferred pending the filesystem-lock layer.
