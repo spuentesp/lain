@@ -254,6 +254,7 @@ fn build_federation_server(
     attribution: Arc<dyn AttributionBackend>,
     embedding_model: Option<&Path>,
     workspaces: Option<Arc<WorkspacesFile>>,
+    reindex_timeout: Option<std::time::Duration>,
 ) -> Result<LainServer, LainError> {
     // Staging workspace: a throwaway git repo under /tmp. The counter
     // ensures parallel tests in the same process don't race.
@@ -290,17 +291,20 @@ fn build_federation_server(
     // tools (list_repos, search_org, get_federation_health,
     // get_cross_repo_blast_radius*) need the federation handle.
     let workspaces_lock = workspaces.map(|ws| Arc::new(RwLock::new((*ws).clone())));
-    let _mcp = match workspaces_lock.as_ref() {
+    let mcp = match workspaces_lock.as_ref() {
         Some(lock) => crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
             tool_executor.clone(),
             Arc::clone(&federation),
             Arc::clone(lock),
-        ),
+        )
+        .with_reindex_timeout(reindex_timeout),
         None => crate::server::mcp::handler::LainMcpServer::with_federation(
             tool_executor.clone(),
             Arc::clone(&federation),
-        ),
+        )
+        .with_reindex_timeout(reindex_timeout),
     };
+    let _mcp = mcp;
     if workspaces_lock.is_some() {
         info!("Lain federation server initialized with workspaces");
     } else {
@@ -349,6 +353,9 @@ fn build_federation_server(
         presence,
         occupancy,
         presence_event_tx,
+        last_outcome: Arc::new(parking_lot::Mutex::new(
+            crate::server::refresh::RefreshOutcome::skipped(),
+        )),
         attribution: default_attribution_backend(),
     };
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
@@ -382,6 +389,13 @@ pub struct LainServer {
     pub lsp_pool: Arc<LspPool>,
     pub tool_executor: ToolExecutor,
     pub tuning: Arc<TuningConfig>,
+    /// Outcome of the most recent startup re-index. Written by the
+    /// re-index spawn in `LainMcpServer::run_stdio` / `run_http`;
+    /// read by `ToolExecutor::get_health` and (in step 3) by the tool
+    /// dispatcher for the failure banner. Step 1 of the staleness
+    /// fix: the failure was previously invisible because it went to
+    /// `tracing::warn` and `lain mcp` never inits tracing.
+    pub last_outcome: Arc<parking_lot::Mutex<crate::server::refresh::RefreshOutcome>>,
     /// Monotonic counter used as the `revision` field of every
     /// `OverlayDiff` this process broadcasts.
     overlay_revision: Arc<AtomicU64>,
@@ -544,6 +558,9 @@ impl LainServer {
             presence: Arc::new(PresenceRegistry::new()),
             occupancy: Arc::new(OccupancyMap::new()),
             presence_event_tx,
+            last_outcome: Arc::new(parking_lot::Mutex::new(
+                crate::server::refresh::RefreshOutcome::skipped(),
+            )),
             attribution: default_attribution_backend(),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
@@ -616,6 +633,7 @@ impl LainServer {
             attribution,
             embedding_model,
             None,
+            None,
         )
     }
 
@@ -668,6 +686,7 @@ impl LainServer {
             attribution,
             embedding_model,
             Some(workspaces),
+            None,
         )
     }
 

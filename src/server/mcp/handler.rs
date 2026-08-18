@@ -1080,6 +1080,10 @@ pub struct LainMcpServer {
     /// (Task 7); `None` for sidecar / read-only servers that don't
     /// carry the presence layer.
     server: Option<Arc<LainServer>>,
+    /// Override for the startup re-index timeout. `None` means
+    /// "use `LAIN_REINDEX_TIMEOUT` env, falling back to the
+    /// placeholder default of 300s." Step 1 of the staleness fix.
+    reindex_timeout: Option<std::time::Duration>,
 }
 
 impl LainMcpServer {
@@ -1096,6 +1100,7 @@ impl LainMcpServer {
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
             reload_bus: None,
             server: None,
+            reindex_timeout: None,
         }
     }
 
@@ -1116,6 +1121,7 @@ impl LainMcpServer {
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
             reload_bus: None,
             server: None,
+            reindex_timeout: None,
         }
     }
 
@@ -1147,6 +1153,7 @@ impl LainMcpServer {
             status_last_error: Arc::new(parking_lot::Mutex::new(None)),
             reload_bus: None,
             server: None,
+            reindex_timeout: None,
         }
     }
 
@@ -1182,12 +1189,21 @@ impl LainMcpServer {
     pub fn with_server(mut self, server: Arc<LainServer>) -> Self {
         let presence = Arc::clone(server.presence());
         let occupancy = Arc::clone(server.occupancy());
+        let last_outcome = Arc::clone(&server.last_outcome);
         // `executor.ctx` is `pub`; mutate it in place so handlers reading
         // through `&ctx.presence` / `&ctx.occupancy` observe the live
         // registries.
         self.executor.ctx.presence = presence;
         self.executor.ctx.occupancy = occupancy;
+        self.executor.ctx.last_outcome = last_outcome;
         self.server = Some(server);
+        self
+    }
+
+    /// Override the startup re-index timeout. `None` means
+    /// `LAIN_REINDEX_TIMEOUT` env (default 300s).
+    pub fn with_reindex_timeout(mut self, t: Option<std::time::Duration>) -> Self {
+        self.reindex_timeout = t;
         self
     }
 
@@ -1291,34 +1307,45 @@ impl LainMcpServer {
         // `explain_symbol` reporting a path that no longer exists)
         // both trace to skipping this on startup.
         //
-        // The re-index is wrapped in a 90s budget — past that we give
-        // up and let the server keep running with the existing graph
-        // (which is the pre-fix behavior). 90s is generous: a small
-        // repo re-indexes in a few seconds, a large monorepo in tens.
-        // A genuine hang (e.g. an LSP server that won't start) is
-        // bounded rather than blocking the spawn task forever.
+        // The re-index is wrapped in a timeout budget (default 300s;
+        // override via `LAIN_REINDEX_TIMEOUT` env or the
+        // `--reindex-timeout` flag). Past that we give up and let the
+        // server keep running with the existing graph. A genuine hang
+        // (e.g. an LSP server that won't start) is bounded rather than
+        // blocking the spawn task forever.
+        //
+        // The outcome is written to `server.last_outcome` so
+        // `get_health` can surface failures — the previous code
+        // logged only to `tracing::warn` and stderr, neither of
+        // which a stdio MCP client surfaces to the model.
         if let Some(server) = self.server.clone() {
+            let last_outcome = server.last_outcome.clone();
+            let reindex_timeout = self.reindex_timeout;
             tokio::spawn(async move {
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(90),
+                let started = std::time::SystemTime::now();
+                let timeout = reindex_timeout.unwrap_or_else(
+                    crate::server::refresh::parse_reindex_timeout
+                );
+                let outcome = match tokio::time::timeout(
+                    timeout,
                     server.build_core_memory(),
                 )
-                .await;
-                match result {
-                    Ok(Ok(())) => tracing::info!("startup re-index complete"),
+                .await
+                {
+                    Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
                     Ok(Err(e)) => {
-                        // `lain mcp` doesn't init tracing, so write the
-                        // error to stderr directly. Operators see a
-                        // one-line diagnostic and can dig deeper with
-                        // RUST_LOG.
                         eprintln!("startup re-index failed: {e}");
-                        tracing::warn!("startup re-index failed: {e}");
+                        crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
                     }
                     Err(_) => {
-                        eprintln!("startup re-index timed out after 90s; using existing graph");
-                        tracing::warn!("startup re-index timed out after 90s");
+                        eprintln!(
+                            "startup re-index timed out after {}s; using existing graph",
+                            timeout.as_secs()
+                        );
+                        crate::server::refresh::RefreshOutcome::timeout(started)
                     }
-                }
+                };
+                *last_outcome.lock() = outcome;
             });
         }
 
@@ -1353,20 +1380,26 @@ impl LainMcpServer {
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
-        // Re-index on startup. See `run_stdio` for the rationale —
-        // including the 90s budget that bounds a hang.
+        // Re-index on startup. See `run_stdio` for the rationale.
         if let Some(server) = self.server.clone() {
+            let last_outcome = server.last_outcome.clone();
+            let reindex_timeout = self.reindex_timeout;
             tokio::spawn(async move {
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(90),
+                let started = std::time::SystemTime::now();
+                let timeout = reindex_timeout.unwrap_or_else(
+                    crate::server::refresh::parse_reindex_timeout
+                );
+                let outcome = match tokio::time::timeout(
+                    timeout,
                     server.build_core_memory(),
                 )
-                .await;
-                match result {
-                    Ok(Ok(())) => tracing::info!("startup re-index complete"),
-                    Ok(Err(e)) => tracing::warn!("startup re-index failed: {e}"),
-                    Err(_) => tracing::warn!("startup re-index timed out after 90s"),
-                }
+                .await
+                {
+                    Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
+                    Ok(Err(e)) => crate::server::refresh::RefreshOutcome::failed(started, e.to_string()),
+                    Err(_) => crate::server::refresh::RefreshOutcome::timeout(started),
+                };
+                *last_outcome.lock() = outcome;
             });
         }
 

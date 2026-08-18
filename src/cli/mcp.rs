@@ -31,7 +31,13 @@ use std::path::{Path, PathBuf};
 /// `.git` marker, then uses that parent as the workspace root.
 /// `embedding_model` is passed through to `LainServer::new` — see
 /// `lain server --help` for the model directory format.
-pub async fn run_mcp(workspace_arg: Option<&Path>, embedding_model: Option<&Path>) -> Result<()> {
+/// `reindex_timeout` overrides `LAIN_REINDEX_TIMEOUT`; step 1 of the
+/// staleness fix.
+pub async fn run_mcp(
+    workspace_arg: Option<&Path>,
+    embedding_model: Option<&Path>,
+    reindex_timeout: Option<std::time::Duration>,
+) -> Result<()> {
     let workspace = match workspace_arg {
         Some(p) => p.to_path_buf(),
         None => find_git_workspace_root()
@@ -56,9 +62,12 @@ pub async fn run_mcp(workspace_arg: Option<&Path>, embedding_model: Option<&Path
 
     // Hand the executor's tool surface to a federation-free
     // `LainMcpServer`. Single-workspace mode — per-repo tools run
-    // against `server.tool_executor.graph` directly.
+    // against `server.tool_executor.graph` directly. The re-index
+    // timeout is wired through to run_stdio so the spawn honors
+    // it (or the env var if None).
     let mcp = crate::server::mcp::handler::LainMcpServer::new(server.tool_executor.clone())
-        .with_server(std::sync::Arc::new(server));
+        .with_server(std::sync::Arc::new(server))
+        .with_reindex_timeout(reindex_timeout);
     mcp.run_stdio()
         .await
         .map_err(|e| anyhow!("MCP stdio run failed: {e}"))?;

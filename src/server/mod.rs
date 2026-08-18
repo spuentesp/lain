@@ -5,6 +5,7 @@
 
 pub mod federation;
 pub mod mcp;
+pub mod refresh;
 pub mod tools;
 
 // Core

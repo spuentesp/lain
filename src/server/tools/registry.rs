@@ -54,6 +54,16 @@ pub struct ToolContext {
     /// Occupancy map shared with the `LainServer` orchestrator. Same
     /// wiring story as `presence` — see above.
     pub occupancy: Arc<OccupancyMap>,
+    /// Last-refresh outcome shared with the `LainServer` orchestrator.
+    /// The startup re-index spawn in `LainMcpServer::run_stdio` /
+    /// `run_http` writes the timeout / failure result here; `get_health`
+    /// reads it to surface the staleness banner to MCP clients (which
+    /// can't see stderr or `tracing::warn`). Step 1 of the staleness
+    /// fix: the failure was previously invisible. Initialized to a
+    /// default `Skipped`; the `LainMcpServer::with_server` wiring hook
+    /// swaps in the live `Arc<Mutex<RefreshOutcome>>` from the
+    /// constructed `LainServer`.
+    pub last_outcome: Arc<parking_lot::Mutex<crate::server::refresh::RefreshOutcome>>,
 }
 
 impl ToolContext {
@@ -91,6 +101,14 @@ impl ToolContext {
             // orchestrator is built.
             presence: Arc::new(PresenceRegistry::new()),
             occupancy: Arc::new(OccupancyMap::new()),
+            // Default to Skipped so a standalone / sidecar executor
+            // (which never runs the spawn) still returns a valid
+            // outcome. `LainMcpServer::with_server` swaps in the
+            // live `Arc<Mutex<RefreshOutcome>>` from the constructed
+            // `LainServer` once the orchestrator is built.
+            last_outcome: Arc::new(parking_lot::Mutex::new(
+                crate::server::refresh::RefreshOutcome::skipped(),
+            )),
         }
     }
 

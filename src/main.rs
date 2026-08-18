@@ -83,6 +83,7 @@ fn main() -> Result<()> {
         Some(Commands::Mcp {
             workspace,
             embedding_model,
+            reindex_timeout,
         }) => {
             // `lain mcp` — single-repo MCP server on stdio. Walks up
             // for `.git` if `--workspace` is not given, then serves
@@ -97,6 +98,7 @@ fn main() -> Result<()> {
             rt.block_on(lain::cli::mcp::run_mcp(
                 workspace.as_deref(),
                 embedding_model.as_deref(),
+                reindex_timeout.map(std::time::Duration::from_secs),
             ))
         }
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),

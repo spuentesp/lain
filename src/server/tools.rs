@@ -411,6 +411,15 @@ impl ToolExecutor {
             workspace_display, nodes, edges, overlay_stats.node_count, commit_status, embedder_status
         );
 
+        // Last refresh outcome (from the spawn in run_stdio / run_http).
+        // Step 1 of the staleness fix: the re-index failure was previously
+        // invisible because it only went to tracing::warn and stderr,
+        // neither of which a stdio MCP client surfaces to the model.
+        // This is the in-tool-output visibility path.
+        if let Some(line) = self.ctx.last_outcome.lock().banner_line() {
+            output.push_str(&format!("- **{line}**\n"));
+        }
+
         // Edge-type histogram — operators need this to tell whether the
         // call graph (Calls, Uses) is populated, or whether the indexer
         // only produced the cheaper-to-extract structural edges

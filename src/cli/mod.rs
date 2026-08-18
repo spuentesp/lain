@@ -117,6 +117,13 @@ pub enum Commands {
         /// `lain server --help` for details.
         #[arg(long)]
         embedding_model: Option<PathBuf>,
+        /// Override the startup re-index timeout (seconds). Step 1
+        /// of the staleness fix. `None` means "use `LAIN_REINDEX_TIMEOUT`
+        /// env, falling back to 300s (5min) — the user picks the
+        /// actual default by measuring a real full index, not by
+        /// guessing."
+        #[arg(long)]
+        reindex_timeout: Option<u64>,
     },
     /// Agent pre-edit hook entry point (claim/release files).
     Hooks {
