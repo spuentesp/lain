@@ -97,7 +97,7 @@ fn test_get_call_sites_existing() {
     let (graph, overlay) = make_test_graph();
 
     // callee is called by caller
-    let result = get_call_sites(&graph, &overlay, "callee");
+    let result = get_call_sites(std::path::Path::new(""), &graph, &overlay, "callee");
     assert!(result.is_ok());
     let text = result.unwrap();
     // Should show caller as a call site for callee
@@ -108,7 +108,7 @@ fn test_get_call_sites_existing() {
 fn test_get_call_sites_not_found() {
     let (graph, overlay) = make_test_graph();
 
-    let result = get_call_sites(&graph, &overlay, "nonexistent");
+    let result = get_call_sites(std::path::Path::new(""), &graph, &overlay, "nonexistent");
     assert!(result.is_err());
 }
 
@@ -117,7 +117,7 @@ fn test_get_call_sites_no_callers() {
     let (graph, overlay) = make_test_graph();
 
     // "caller" has no incoming calls in our test graph
-    let result = get_call_sites(&graph, &overlay, "caller");
+    let result = get_call_sites(std::path::Path::new(""), &graph, &overlay, "caller");
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("No call sites") || text.contains("caller"));

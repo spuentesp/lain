@@ -232,6 +232,12 @@ pub fn explain_symbol(
 
     let mut lines = Vec::new();
     lines.push(format!("## Explanation for '{}' ({:?})", symbol, node.node_type));
+    // Scoped to the file this answer is about. The index is commit-driven, so
+    // a file edited and not yet committed is invisible to it — the reader needs
+    // to know that here, not from a separate health call they will not make.
+    if let Some(note) = graph.freshness(workspace, &node.path).note(&node.path) {
+        lines.push(note);
+    }
     lines.push(format!("**Path:** {}", node.path));
 
     if let Some(sig) = &node.signature {

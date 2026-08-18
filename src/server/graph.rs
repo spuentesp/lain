@@ -73,6 +73,55 @@ pub struct GraphDatabase {
     read_only: bool,
 }
 
+/// How current the graph is for one file.
+///
+/// The index is driven by git commits, so a file edited but not yet committed
+/// is invisible to it. That is the common case while an agent is working, and
+/// the graph cannot detect it from commit history alone — only by comparing the
+/// file on disk against when it was last scanned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Freshness {
+    /// The file has not changed since it was indexed.
+    Fresh,
+    /// The file was modified after it was last scanned. Answers about it may
+    /// omit new symbols or still show ones that were removed.
+    Dirty { modified_ago: std::time::Duration },
+    /// No nodes for this path — never indexed, or not tracked by git.
+    Absent,
+}
+
+impl Freshness {
+    /// One line to prepend to a tool response, or `None` when the file is
+    /// current and there is nothing worth saying.
+    ///
+    /// Scoped to the file backing the answer rather than the whole graph: a
+    /// global "N commits behind" banner on every response is noise that trains
+    /// the reader to ignore it, while "this file changed 4m ago" is a fact they
+    /// can act on.
+    pub fn note(&self, path: &str) -> Option<String> {
+        match self {
+            Freshness::Fresh => None,
+            Freshness::Dirty { modified_ago } => {
+                let secs = modified_ago.as_secs();
+                let ago = if secs < 90 {
+                    format!("{secs}s")
+                } else if secs < 5400 {
+                    format!("{}m", secs / 60)
+                } else {
+                    format!("{}h", secs / 3600)
+                };
+                Some(format!(
+                    "⚠ {path} was modified {ago} ago, after it was last indexed — \
+                     this answer may be missing recent changes."
+                ))
+            }
+            Freshness::Absent => Some(format!(
+                "⚠ {path} is not in the graph — it may be untracked by git, or not yet indexed."
+            )),
+        }
+    }
+}
+
 impl GraphDatabase {
     pub fn new(memory_path: &Path) -> Result<Self, LainError> {
         let db = Self {
@@ -304,6 +353,56 @@ impl GraphDatabase {
             }
         }
         Ok(removed)
+    }
+
+    /// How current the graph is for `path` (a graph key, i.e. workspace-relative).
+    ///
+    /// Uses `last_lsp_sync`, the wall-clock second at which the scan read the
+    /// file, which every node already carries — so this needs no extra state.
+    /// A file whose mtime is newer than that was edited after being scanned.
+    ///
+    /// Both sides are whole seconds, so an edit landing in the same second as
+    /// the scan reads as `Fresh`. That is an acceptable miss for a hint.
+    pub fn freshness(&self, workspace: &Path, path: &str) -> Freshness {
+        let Some(indices) = self.path_index.get(path).map(|r| r.value().clone()) else {
+            return Freshness::Absent;
+        };
+        let last_scan = {
+            let graph = self.graph.read();
+            indices
+                .iter()
+                .filter_map(|idx| graph.node_weight(*idx))
+                .filter_map(|n| n.last_lsp_sync)
+                .max()
+        };
+        let Some(last_scan) = last_scan else {
+            return Freshness::Absent;
+        };
+
+        let resolved = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            workspace.join(path)
+        };
+        let Ok(mtime) = std::fs::metadata(&resolved).and_then(|m| m.modified()) else {
+            // Gone from disk. The orphan sweep reclaims it on the next complete
+            // pass; until then say nothing rather than guess.
+            return Freshness::Fresh;
+        };
+        let mtime_secs = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if mtime_secs > last_scan {
+            Freshness::Dirty {
+                modified_ago: std::time::SystemTime::now()
+                    .duration_since(mtime)
+                    .unwrap_or_default(),
+            }
+        } else {
+            Freshness::Fresh
+        }
     }
 
     /// Drop every node whose file is no longer tracked, and report how many.
@@ -1125,5 +1224,69 @@ mod remove_by_id_tests {
         g.remove_nodes_by_ids(&[id]).unwrap();
 
         assert!(g.find_node_by_path("src/solo.rs").is_none(), "path entry cleared");
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    fn node_at(path: &str, scanned_at: i64) -> GraphNode {
+        let mut n = GraphNode::new(NodeType::Function, "f".into(), path.into());
+        n.last_lsp_sync = Some(scanned_at);
+        n
+    }
+
+    #[test]
+    fn absent_when_path_has_no_nodes() {
+        let tmp = std::env::temp_dir().join("lain_test_fresh_absent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+        assert_eq!(g.freshness(Path::new("/nowhere"), "src/nope.rs"), Freshness::Absent);
+    }
+
+    /// The signal that matters: a file edited but not committed is invisible to
+    /// a commit-driven index, so mtime is the only thing that reveals it.
+    #[test]
+    fn dirty_when_file_is_newer_than_the_scan() {
+        let ws = std::env::temp_dir().join("lain_test_fresh_dirty_ws");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/a.rs"), "fn f() {}").unwrap();
+
+        let tmp = std::env::temp_dir().join("lain_test_fresh_dirty");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+        // Scanned long ago; the file on disk is from just now.
+        g.insert_nodes_batch(&[node_at("src/a.rs", 1)]).unwrap();
+
+        match g.freshness(&ws, "src/a.rs") {
+            Freshness::Dirty { .. } => {}
+            other => panic!("expected Dirty, got {other:?}"),
+        }
+        assert!(g.freshness(&ws, "src/a.rs").note("src/a.rs").is_some());
+    }
+
+    #[test]
+    fn fresh_when_scan_is_newer_than_the_file() {
+        let ws = std::env::temp_dir().join("lain_test_fresh_ok_ws");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/b.rs"), "fn f() {}").unwrap();
+
+        let tmp = std::env::temp_dir().join("lain_test_fresh_ok");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+        let far_future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 3600;
+        g.insert_nodes_batch(&[node_at("src/b.rs", far_future)]).unwrap();
+
+        assert_eq!(g.freshness(&ws, "src/b.rs"), Freshness::Fresh);
+        // A current file must produce no banner — a note on every answer is
+        // noise, and noise gets ignored.
+        assert!(g.freshness(&ws, "src/b.rs").note("src/b.rs").is_none());
     }
 }

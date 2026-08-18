@@ -39,7 +39,14 @@ pub fn resolve_node(
     if let Some(n) = graph.find_node_by_path(handle) { return Ok(n); }
     if let Some(n) = graph.find_node_by_path(&canonical_handle) { return Ok(n); }
 
-    Err(LainError::NotFound(format!("Node not found for handle: {}", handle)))
+    // The graph indexes committed state, so a symbol written but not yet
+    // committed is genuinely absent rather than misplaced. Saying so turns a
+    // dead end into a next step; the bare message reads as "does not exist".
+    Err(LainError::NotFound(format!(
+        "Node not found for handle: {handle} — the graph indexes committed code, \
+         so a symbol added since the last commit will not appear until it is \
+         committed and re-indexed"
+    )))
 }
 
 /// Resolves a node at a specific location using the "Overlay Mask" pattern

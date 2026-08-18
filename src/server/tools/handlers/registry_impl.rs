@@ -876,7 +876,7 @@ impl ToolHandler for GetCallSitesHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::context::get_call_sites(&ctx.graph, &ctx.overlay, &symbol)
+        handlers::context::get_call_sites(&ctx.workspace, &ctx.graph, &ctx.overlay, &symbol)
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCallSitesHandler));

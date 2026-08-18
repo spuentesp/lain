@@ -132,11 +132,13 @@ fn read_file_range(path: &str, start: usize, end: usize, _ctx: usize) -> Result<
 }
 
 pub fn get_call_sites(
+    workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
+    let freshness = graph.freshness(workspace, &node.path);
     let target_id = &node.id;
 
     // Find all callers (edges of type Calls pointing to this node)
@@ -146,10 +148,23 @@ pub fn get_call_sites(
         .collect::<Vec<_>>();
 
     if callers.is_empty() {
-        return Ok(format!("No call sites found for '{}'", symbol));
+        // A leaf really has no callers; a stale file only looks like one. These
+        // read identically to a caller acting on the answer, so distinguish them.
+        return Ok(match freshness.note(&node.path) {
+            Some(note) => format!(
+                "{note}\nNo call sites found for '{symbol}' in the graph — \
+                 callers added since the last index would not appear."
+            ),
+            None => format!("No call sites found for '{symbol}' ({symbol} is a leaf)"),
+        });
     }
 
-    let mut result = format!("Call sites for '{}' ({} found):\n\n", symbol, callers.len());
+    let mut result = String::new();
+    if let Some(note) = freshness.note(&node.path) {
+        result.push_str(&note);
+        result.push('\n');
+    }
+    result.push_str(&format!("Call sites for '{}' ({} found):\n\n", symbol, callers.len()));
 
     for caller in callers {
         let loc = if let (Some(ls), Some(le)) = (caller.line_start, caller.line_end) {
