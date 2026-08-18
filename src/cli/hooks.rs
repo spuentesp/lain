@@ -492,12 +492,15 @@ fn server_reachable(url: &str, timeout: Duration) -> bool {
     false
 }
 
-/// Walk up from `path` until we find a `.git` directory or an existing
-/// `.lain/` directory; return that ancestor. Falls back to the file's
-/// parent directory if neither marker is found within 16 levels — keeps
-/// the sentinel colocated with the file even in tarball-only layouts.
-/// Used by the zero-daemon fallback so two agents claiming the same
-/// path land in the same `<workspace>/.lain/locks/<sanitized>.json`.
+/// Walk up from `path` until we find a `.git` directory; return that
+/// ancestor. Falls back to the file's parent directory if no marker
+/// is found within 16 levels. `.git` is the only anchor — a previous
+/// version honored `.lain/` too, but the zero-daemon fallback
+/// creates `<workspace>/.lain/locks/` for any project root and that
+/// collides with the "is this a workspace root?" check, leaving
+/// stale `.lain` directories in system temp dirs that break later
+/// test runs. `.git` is the right anchor: it's never created by
+/// lain itself, so the walk-up can't be confused by our own state.
 fn find_workspace_root(path: &Path) -> PathBuf {
     let mut current = path
         .canonicalize()
@@ -506,7 +509,7 @@ fn find_workspace_root(path: &Path) -> PathBuf {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| path.to_path_buf());
     for _ in 0..16 {
-        if current.join(".git").exists() || current.join(".lain").exists() {
+        if current.join(".git").exists() {
             return current;
         }
         match current.parent() {
@@ -804,11 +807,13 @@ mod tests {
     /// `find_workspace_root` is what keeps two agents on the same
     /// machine from writing to different sentinel files for the same
     /// source path. A file under `.git/`'s parent must resolve to that
-    /// parent; a file with no markers in the tree must fall back to its
-    /// immediate parent dir (the lock still works, just less widely
-    /// shared).
+    /// parent; a file with no `.git` in the tree must fall back to
+    /// its immediate parent dir. (`.lain/` is intentionally NOT an
+    /// anchor — see `find_workspace_root` doc comment; honoring it
+    /// broke a test that was running after a zero-daemon hook run
+    /// had littered `.lain/locks/` into a system temp dir.)
     #[test]
-    fn find_workspace_root_walks_up_to_git_or_lain() {
+    fn find_workspace_root_walks_up_to_git() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Create a fake git repo layout.
@@ -826,6 +831,30 @@ mod tests {
         assert_eq!(
             with_git.canonicalize().unwrap(),
             root.canonicalize().unwrap()
+        );
+    }
+
+    /// A `.lain/` directory at any ancestor must NOT be treated as a
+    /// workspace anchor — `.lain/locks/` is exactly what the
+    /// zero-daemon fallback writes, so a previous run can leave a
+    /// `.lain/` in a system temp dir that would otherwise mislead
+    /// `find_workspace_root` for the next test. Only `.git` is a
+    /// valid anchor.
+    #[test]
+    fn find_workspace_root_ignores_dot_lain_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src/sub")).unwrap();
+        std::fs::write(root.join("src/sub/file.rs"), "fn x() {}").unwrap();
+        // A `.lain` directory exists, but no `.git`. `find_workspace_root`
+        // must NOT treat `.lain` as a workspace anchor — it falls
+        // through to the file's parent (src/sub).
+        std::fs::create_dir_all(root.join(".lain/locks")).unwrap();
+        let no_marker = find_workspace_root(&root.join("src/sub/file.rs"));
+        assert_eq!(
+            no_marker.canonicalize().unwrap(),
+            root.join("src/sub").canonicalize().unwrap(),
+            "`.lain` must not be honored as a workspace anchor"
         );
     }
 }

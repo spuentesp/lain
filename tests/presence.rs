@@ -680,6 +680,83 @@ fn edit_claim_still_conflicts_with_existing_edit_claim() {
     assert!(c.last_seen_unix <= SystemTime::now());
 }
 
+/// Residual defect after the first read-vs-edit pass: a holder with
+/// only a *symbol-level* Read claim (no file-level claim) was
+/// still blocking a file-level Edit from another agent, and the
+/// conflict entry's `intent` field was hardcoded to `Edit` instead
+/// of the holder's real `Read` intent. This test pins both: a
+/// file-level Edit on a file where the only other agent has a
+/// symbol-level Read must be granted, with zero conflicts, and
+/// when we *do* conflict (any symbol-level Edit by the holder),
+/// the reported intent must be the holder's actual intent.
+#[test]
+fn file_level_edit_does_not_conflict_with_symbol_level_read() {
+    let occ = OccupancyMap::new();
+    let xena = AgentId("xena".into());
+    let yuri = AgentId("yuri".into());
+
+    // xena claims a single symbol with intent=Read. No file-level claim.
+    occ.claim(&xena, vec![ClaimRequest {
+        path: std::path::PathBuf::from("t1.rs"),
+        symbols: vec!["func_x".into()],
+        intent: ClaimIntent::Read,
+        ttl_seconds: None,
+    }]);
+
+    // yuri does a file-level Edit. xena's symbol-level Read is a
+    // non-event per wishlist #5.
+    let result = occ.claim(&yuri, vec![ClaimRequest {
+        path: std::path::PathBuf::from("t1.rs"),
+        symbols: vec![], // file-level
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    assert_eq!(
+        result.granted.len(),
+        1,
+        "yuri's file-level Edit must be granted (xena only holds a Read)"
+    );
+    assert_eq!(
+        result.conflicts.len(),
+        0,
+        "xena's symbol-level Read must not conflict with yuri's Edit"
+    );
+}
+
+/// When the holder *does* have a symbol-level Edit (not just Read),
+/// the file-level Edit from another agent is a real conflict, and
+/// the reported `intent` is the holder's actual `Edit` (not a
+/// synthetic default).
+#[test]
+fn file_level_edit_conflicts_with_symbol_level_edit_and_reports_real_intent() {
+    let occ = OccupancyMap::new();
+    let xena = AgentId("xena".into());
+    let yuri = AgentId("yuri".into());
+
+    // xena claims a symbol with intent=Edit (no file-level).
+    occ.claim(&xena, vec![ClaimRequest {
+        path: std::path::PathBuf::from("t1.rs"),
+        symbols: vec!["func_x".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+
+    let result = occ.claim(&yuri, vec![ClaimRequest {
+        path: std::path::PathBuf::from("t1.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+    }]);
+    assert_eq!(result.granted.len(), 0, "file-level Edit blocks on symbol-level Edit");
+    assert_eq!(result.conflicts.len(), 1);
+    let c = &result.conflicts[0];
+    assert_eq!(
+        c.intent,
+        ClaimIntent::Edit,
+        "conflict entry's intent must reflect xena's real Edit intent"
+    );
+}
+
 // --- Task 2 brief: parent_session_id surfaces in who_am_i, list_subagents works ---
 
 /// `AgentSession::parent_session_id` is set at construction. A parent

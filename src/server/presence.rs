@@ -495,6 +495,35 @@ impl FileOccupancy {
         self.intents.get(sym).and_then(|m| m.get(agent)).cloned()
     }
 
+    /// Resolve `agent`'s strongest intent at *any* symbol scope
+    /// (excluding `__file_level__`). Returns `Some(Edit)` if the agent
+    /// has any symbol-level Edit claim, `Some(Read)` if every
+    /// symbol-level claim is Read, and `None` if the agent has no
+    /// symbol-level claims at all. Used by the file-level Edit
+    /// conflict branch to decide whether a holder with only
+    /// symbol-level claims should be treated as "actively editing
+    /// here" (Edit → conflict) or "just observing" (Read → no
+    /// conflict per wishlist #5).
+    fn any_symbol_intent(&self, agent: &AgentId) -> Option<ClaimIntent> {
+        let mut saw_read = false;
+        for (sym, per_agent) in &self.intents {
+            if sym == "__file_level__" {
+                continue;
+            }
+            if let Some(intent) = per_agent.get(agent) {
+                if *intent == ClaimIntent::Edit {
+                    return Some(ClaimIntent::Edit);
+                }
+                saw_read = true;
+            }
+        }
+        if saw_read {
+            Some(ClaimIntent::Read)
+        } else {
+            None
+        }
+    }
+
     /// Last-touched timestamp for `agent` on `sym`. Mirrors
     /// `intent_for`. Falls back to `UNIX_EPOCH` when absent — callers
     /// turn this directly into a `ConflictEntry.last_seen_unix`
@@ -643,19 +672,27 @@ impl OccupancyMap {
                 // observable for occupancy listings.
                 if req.intent == ClaimIntent::Edit {
                     // File-level Edit collision: only conflicts with
-                    // another agent's Edit-intent claim. A Read claim is
-                    // a non-event per wishlist #5 — even if alice has
-                    // claimed the whole file with intent=read and bob
-                    // (us) wants to do intent=edit, alice's observation
-                    // isn't invalidated by our edit. (If alice has *no*
-                    // file-level claim but has a symbol-level one, the
-                    // default-Edit fallback below keeps the conservative
-                    // behavior — symbol-level claims imply the holder
-                    // has edited or will edit that symbol.)
+                    // another agent's Edit-intent claim — at any scope
+                    // (file-level OR symbol-level). A Read claim is a
+                    // non-event per wishlist #5; if alice has only
+                    // symbol-level Read claims and bob (us) wants to do
+                    // file-level Edit, alice's observation isn't
+                    // invalidated by our edit. (This was a residual
+                    // defect after the first read-vs-edit pass: the
+                    // lookup fell back to `Edit` for symbol-only
+                    // holders, which both blocked a legitimate edit and
+                    // reported a wrong intent on the conflict entry.)
                     if req.symbols.is_empty() {
                         for other in entry.agents.iter().filter(|a| *a != agent_id) {
+                            // Resolve the holder's *strongest* intent
+                            // at any scope: file-level first, then any
+                            // symbol-level. Read everywhere → Read
+                            // (no conflict). Any Edit → Edit (conflict,
+                            // and the reported intent is the actual
+                            // holder intent, not a synthetic default).
                             let other_intent = entry
                                 .intent_for(other, "__file_level__")
+                                .or_else(|| entry.any_symbol_intent(other))
                                 .unwrap_or(ClaimIntent::Edit);
                             if other_intent != ClaimIntent::Edit {
                                 continue;
