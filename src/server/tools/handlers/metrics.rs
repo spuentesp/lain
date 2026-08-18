@@ -13,14 +13,33 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 
 pub fn find_anchors(
-    graph: &GraphDatabase, 
+    graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     limit: usize
 ) -> Result<String, LainError> {
     let mut anchors = graph.find_anchors(limit)?;
-    
+
+    // Composition fix: callers do `find_anchors` → `get_blast_radius`
+    // (or `get_call_sites`). `get_blast_radius` follows `Calls` edges,
+    // which enum/struct/trait nodes don't have — so a type at the top
+    // of the anchor list is a dead end for the headline workflow.
+    // Filter to callable symbols (Function/Method) so the strategy
+    // guide's "find_anchors → get_blast_radius" actually works.
+    anchors.retain(|n| {
+        matches!(
+            n.node_type,
+            crate::server::schema::NodeType::Function | crate::server::schema::NodeType::Method
+        )
+    });
+
     let overlay_anchors = overlay.get_all_nodes().into_iter()
         .filter(|n| n.anchor_score.is_some())
+        .filter(|n| {
+            matches!(
+                n.node_type,
+                crate::server::schema::NodeType::Function | crate::server::schema::NodeType::Method
+            )
+        })
         .collect::<Vec<_>>();
 
     let mut seen_ids: std::collections::HashSet<String> = anchors.iter().map(|a| a.id.clone()).collect();

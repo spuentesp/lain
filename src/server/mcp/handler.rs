@@ -1280,6 +1280,48 @@ impl LainMcpServer {
     pub async fn run_stdio(self) -> SdkResult<()> {
         info!("Starting Lain MCP server on stdio");
 
+        // Re-index the underlying graph if it's stale (HEAD commit
+        // differs from the last_indexed commit). Runs in the background
+        // so the MCP server starts immediately — tools fired while
+        // indexing is in flight see the previous snapshot, but the
+        // graph is current by the time the user asks their second
+        // question. `build_core_memory` itself short-circuits when the
+        // graph is already current, so this is a no-op on a clean
+        // start. The user's two concrete failures (stale `graph.bin`,
+        // `explain_symbol` reporting a path that no longer exists)
+        // both trace to skipping this on startup.
+        //
+        // The re-index is wrapped in a 90s budget — past that we give
+        // up and let the server keep running with the existing graph
+        // (which is the pre-fix behavior). 90s is generous: a small
+        // repo re-indexes in a few seconds, a large monorepo in tens.
+        // A genuine hang (e.g. an LSP server that won't start) is
+        // bounded rather than blocking the spawn task forever.
+        if let Some(server) = self.server.clone() {
+            tokio::spawn(async move {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(90),
+                    server.build_core_memory(),
+                )
+                .await;
+                match result {
+                    Ok(Ok(())) => tracing::info!("startup re-index complete"),
+                    Ok(Err(e)) => {
+                        // `lain mcp` doesn't init tracing, so write the
+                        // error to stderr directly. Operators see a
+                        // one-line diagnostic and can dig deeper with
+                        // RUST_LOG.
+                        eprintln!("startup re-index failed: {e}");
+                        tracing::warn!("startup re-index failed: {e}");
+                    }
+                    Err(_) => {
+                        eprintln!("startup re-index timed out after 90s; using existing graph");
+                        tracing::warn!("startup re-index timed out after 90s");
+                    }
+                }
+            });
+        }
+
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
         let handler = LainHandler {
@@ -1310,6 +1352,23 @@ impl LainMcpServer {
     /// Run with HTTP transport (for MCP clients and browser diagnostics)
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
+
+        // Re-index on startup. See `run_stdio` for the rationale —
+        // including the 90s budget that bounds a hang.
+        if let Some(server) = self.server.clone() {
+            tokio::spawn(async move {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(90),
+                    server.build_core_memory(),
+                )
+                .await;
+                match result {
+                    Ok(Ok(())) => tracing::info!("startup re-index complete"),
+                    Ok(Err(e)) => tracing::warn!("startup re-index failed: {e}"),
+                    Err(_) => tracing::warn!("startup re-index timed out after 90s"),
+                }
+            });
+        }
 
         let executor = Arc::new(self.executor);
         let federation = self.federation;

@@ -386,9 +386,29 @@ impl ToolExecutor {
         // is indexing the project they expected.
         let workspace_display = self.ctx.workspace.display().to_string();
 
+        // "X commits behind HEAD" — without it the bare SHA is a
+        // confident-but-meaningless number. Run `git rev-list --count`
+        // against the workspace; on failure (no git, not a repo) fall
+        // back to the SHA-only display.
+        let commit_status = match std::process::Command::new("git")
+            .args(["-C", self.ctx.workspace.to_str().unwrap_or(".")])
+            .args(["rev-list", "--count", &format!("{}..HEAD", last_commit)])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let count = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if count == "0" {
+                    format!("{} (current)", last_commit)
+                } else {
+                    format!("{} ({} commits behind HEAD)", last_commit, count)
+                }
+            }
+            _ => last_commit.clone(),
+        };
+
         let mut output = format!(
             "## Lain Server Health\n\n- **Workspace:** {}\n- **Status:** Operational ✅\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
-            workspace_display, nodes, edges, overlay_stats.node_count, last_commit, embedder_status
+            workspace_display, nodes, edges, overlay_stats.node_count, commit_status, embedder_status
         );
 
         output.push_str("\n### Language Support\n");

@@ -10,8 +10,13 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 impl LainServer {
-    /// The "Sane" Ingestion Pipeline: Map -> Reduce -> Resolve -> Enrich
-    pub async fn build_core_memory(&mut self) -> Result<(), LainError> {
+    /// The "Sane" Ingestion Pipeline: Map -> Reduce -> Resolve -> Enrich.
+    /// `&self` (not `&mut self`) because every field this method writes
+    /// to is `Arc`-shared (graph, presence, occupancy, broadcast) or
+    /// `Arc<Mutex<…>>` (git, lsp) — so calling it on a clone of the
+    /// `LainServer` is safe and the writes are visible to the original
+    /// `Arc<LainServer>` the MCP layer holds.
+    pub async fn build_core_memory(&self) -> Result<(), LainError> {
         // Defensive gate: sidecar processes should never call build_core_memory,
         // but if a future refactor routes them here, bail out cleanly instead
         // of corrupting the shared on-disk graph.
