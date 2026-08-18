@@ -26,8 +26,6 @@ http-body-util = "0.1"
 # Async trait for MCP server handlers
 async-trait = "0.1"
 
-# Tauri dependency for desktop app
-
 # Git integration
 git2 = "0.19"
 
@@ -112,10 +110,9 @@ name = "lain"
 path = "src/lib.rs"
 
 [features]
-# Enables shared test helpers (e.g. `federation_index_for_test`) for use from
-# integration tests in `tests/`. Has no effect on production binaries; gated
-# helpers are compiled out unless `--features test-utils` is passed.
-test-utils = []
+# No features defined yet. (The `test-utils` feature was removed in
+# the docs/dead-code sweep — the only thing it gated was a
+# `PetgraphBackend::db()` helper that no test actually used.)
 
 [profile.release]
 opt-level = 3
