@@ -14,6 +14,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Subcommands for `lain hooks`.
 #[derive(Debug, Subcommand)]
@@ -301,6 +302,14 @@ fn chrono_now_unix() -> u64 {
 }
 
 /// `lain hooks claim --url … --path … [--symbol …] [--intent …] [--parent-session-id …]`
+///
+/// Falls back to the filesystem lock layer when no lain server is reachable
+/// at `--url`. The wishlist calls this out as the zero-daemon path:
+/// subagents and short-lived agents shouldn't have to go through
+/// `register_agent` + `heartbeat` just for one edit. When the server is
+/// down the filesystem sentinel still serialises edits between agents on
+/// the same machine; when the server is up, the in-memory `OccupancyMap`
+/// is authoritative and the filesystem write happens as a side-effect.
 pub fn claim(
     url: &str,
     path: &str,
@@ -310,6 +319,9 @@ pub fn claim(
     agent_kind: &str,
     parent_session_id: &str,
 ) -> Result<()> {
+    if !server_reachable(url, Duration::from_millis(200)) {
+        return claim_filesystem(path, symbol, intent, agent_name, agent_kind);
+    }
     let parent = if parent_session_id.is_empty() {
         None
     } else {
@@ -353,6 +365,10 @@ pub fn claim(
 }
 
 /// `lain hooks release --url … --path … [--parent-session-id …]`
+///
+/// Same zero-daemon fallback as `claim`: when no server is reachable,
+/// remove the filesystem sentinel directly. Idempotent — ENOENT is
+/// treated as success.
 pub fn release(
     url: &str,
     path: &str,
@@ -361,6 +377,9 @@ pub fn release(
     agent_kind: &str,
     parent_session_id: &str,
 ) -> Result<()> {
+    if !server_reachable(url, Duration::from_millis(200)) {
+        return release_filesystem(path);
+    }
     let parent = if parent_session_id.is_empty() {
         None
     } else {
@@ -386,6 +405,126 @@ pub fn release(
     let parsed = text_of(result)?;
     let released = parsed["released"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: released {released} file(s)");
+    Ok(())
+}
+
+/// Probe whether a lain server is reachable at `--url`. Cheap — a single
+/// `GET /health` with a short timeout. Used by `claim`/`release` to
+/// decide between the in-memory MCP layer (full coordination) and the
+/// filesystem lock fallback (zero daemon). Treats any non-2xx response
+/// as "server not up" so a server that's up but unhealthy (e.g. mid
+/// startup, returning 503) cleanly falls back rather than hanging the
+/// hook.
+fn server_reachable(url: &str, timeout: Duration) -> bool {
+    let endpoint = mcp_endpoint(url);
+    let health_url = format!("{}/health", endpoint.trim_end_matches("/mcp"));
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match client.get(&health_url).send() {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+/// Walk up from `path` until we find a `.git` directory or an existing
+/// `.lain/` directory; return that ancestor. Falls back to the file's
+/// parent directory if neither marker is found within 16 levels — keeps
+/// the sentinel colocated with the file even in tarball-only layouts.
+/// Used by the zero-daemon fallback so two agents claiming the same
+/// path land in the same `<workspace>/.lain/locks/<sanitized>.json`.
+fn find_workspace_root(path: &Path) -> PathBuf {
+    let mut current = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| path.to_path_buf());
+    for _ in 0..16 {
+        if current.join(".git").exists() || current.join(".lain").exists() {
+            return current;
+        }
+        match current.parent() {
+            Some(p) => current = p.to_path_buf(),
+            None => break,
+        }
+    }
+    // Fallback: file's parent dir. The lock sentinel still works, just
+    // scoped to the immediate directory.
+    path.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Filesystem-only counterpart to the in-memory `claim_files` MCP tool.
+/// No server round trip, no `register_agent` heartbeat — just an
+/// `O_EXCL` write under `<workspace>/.lain/locks/`. The wishlist (#3,
+/// #4) wants subagents and one-shot edits to be able to coordinate
+/// without a running daemon; this is the path that makes that work.
+fn claim_filesystem(
+    path: &str,
+    _symbol: &str,
+    intent: &str,
+    agent_name: &str,
+    agent_kind: &str,
+) -> Result<()> {
+    let file_path = Path::new(path);
+    let workspace_root = find_workspace_root(file_path);
+    let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
+    let kind = AgentKind::parse(agent_kind);
+    let parsed_intent = match intent {
+        "read" => ClaimIntent::Read,
+        _ => ClaimIntent::Edit,
+    };
+    match presence_lock::try_lock(&workspace_root, file_path, &agent_id, kind, parsed_intent) {
+        Ok(lock) => {
+            println!(
+                "lain hook: filesystem claim granted at {}",
+                lock.path.display()
+            );
+            Ok(())
+        }
+        Err(conflict) => {
+            let mtime_unix = conflict
+                .mtime()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let body = serde_json::json!({
+                "holder": conflict.agent_id().as_str(),
+                "kind": conflict.kind().as_str(),
+                "intent": match conflict.intent() {
+                    ClaimIntent::Read => "read",
+                    ClaimIntent::Edit => "edit",
+                },
+                "mtime_unix": mtime_unix,
+                "path": path,
+            });
+            eprintln!("{}", serde_json::to_string(&body)?);
+            Err(anyhow::anyhow!(
+                "filesystem claim for {} held by {}",
+                path,
+                conflict.agent_id().as_str()
+            ))
+        }
+    }
+}
+
+/// Filesystem-only counterpart to the in-memory `release_files` MCP
+/// tool. Idempotent — ENOENT is treated as success. No-op if the
+/// sentinel path doesn't resolve to anything on disk (e.g. the file
+/// wasn't claimed via the filesystem layer in the first place).
+fn release_filesystem(path: &str) -> Result<()> {
+    let file_path = Path::new(path);
+    let workspace_root = find_workspace_root(file_path);
+    let lock_path = presence_lock::lock_path_for(&workspace_root, file_path);
+    presence_lock::release_lock_at(&lock_path)
+        .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
+    println!("released {}", lock_path.display());
     Ok(())
 }
 
@@ -527,7 +666,8 @@ pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::mcp_endpoint;
+    use super::{find_workspace_root, mcp_endpoint, server_reachable};
+    use std::time::Duration;
 
     /// `mcp_endpoint` is the bridge between the `--url` flag (bare server
     /// URL, the new convention) and the post-MCP path that `post_mcp`
@@ -551,6 +691,47 @@ mod tests {
         assert_eq!(
             mcp_endpoint("https lain.example.com/proxy"),
             "https lain.example.com/proxy/mcp"
+        );
+    }
+
+    /// `server_reachable` is the gate between the in-memory MCP layer
+    /// and the filesystem fallback. With nothing listening on the URL
+    /// it must return false fast (within the timeout). With a live
+    /// server it must return true.
+    #[test]
+    fn server_reachable_is_false_when_no_server() {
+        // Pick an unlikely port — 1 is reserved, will not be listening.
+        assert!(!server_reachable(
+            "http://127.0.0.1:1",
+            Duration::from_millis(50),
+        ));
+    }
+
+    /// `find_workspace_root` is what keeps two agents on the same
+    /// machine from writing to different sentinel files for the same
+    /// source path. A file under `.git/`'s parent must resolve to that
+    /// parent; a file with no markers in the tree must fall back to its
+    /// immediate parent dir (the lock still works, just less widely
+    /// shared).
+    #[test]
+    fn find_workspace_root_walks_up_to_git_or_lain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Create a fake git repo layout.
+        std::fs::create_dir_all(root.join("src/sub")).unwrap();
+        std::fs::write(root.join("src/sub/file.rs"), "fn x() {}").unwrap();
+        // No .git yet — should fall back to file's parent (src/sub).
+        let no_marker = find_workspace_root(&root.join("src/sub/file.rs"));
+        assert_eq!(
+            no_marker.canonicalize().unwrap(),
+            root.join("src/sub").canonicalize().unwrap()
+        );
+        // Now drop a .git marker one level up — root should win.
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let with_git = find_workspace_root(&root.join("src/sub/file.rs"));
+        assert_eq!(
+            with_git.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
         );
     }
 }

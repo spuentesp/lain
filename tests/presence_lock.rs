@@ -101,3 +101,84 @@ fn refresh_lock_keeps_lock_alive() {
     assert!(mtime_after > mtime_before);
     release_lock(&lock).unwrap();
 }
+
+/// End-to-end exercise of the zero-daemon `claim`/`release` flow.
+///
+/// `lain::cli::hooks::claim` and `::release` probe the server at
+/// `--url` first; when nothing's listening they fall through to the
+/// filesystem lock layer. This test stands up no server and verifies
+/// the two functions still grant, conflict, and release correctly —
+/// the wishlist's #3 and #4 ("zero-daemon path" / "stateless claims").
+#[test]
+fn zero_daemon_claim_and_release_work_without_a_server() {
+    use lain::cli::hooks::{claim, release};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    let file_path = ws.join("foo.rs");
+    std::fs::write(&file_path, "fn x() {}").unwrap();
+
+    // Port 1 is reserved by IANA — nothing should be listening here.
+    let dead_url = "http://127.0.0.1:1";
+
+    // First agent claims — should succeed via the filesystem fallback.
+    claim(
+        dead_url,
+        file_path.to_str().unwrap(),
+        "",
+        "edit",
+        "agent-a",
+        "claude-code",
+        "",
+    )
+    .expect("zero-daemon claim must succeed when no server is running");
+
+    // Second agent claims the same path — must observe a conflict.
+    let conflict = claim(
+        dead_url,
+        file_path.to_str().unwrap(),
+        "",
+        "edit",
+        "agent-b",
+        "kimi",
+        "",
+    );
+    assert!(
+        conflict.is_err(),
+        "second agent must see a filesystem conflict, got Ok"
+    );
+
+    // Release — idempotent. First call removes the sentinel; second is
+    // a no-op (ENOENT-as-success). Both must succeed so a hook that
+    // fires twice doesn't break the agent.
+    release(
+        dead_url,
+        file_path.to_str().unwrap(),
+        "",
+        "agent-a",
+        "claude-code",
+        "",
+    )
+    .expect("first release must succeed");
+    release(
+        dead_url,
+        file_path.to_str().unwrap(),
+        "",
+        "agent-a",
+        "claude-code",
+        "",
+    )
+    .expect("second release must be idempotent");
+
+    // After release, the second agent can claim cleanly.
+    claim(
+        dead_url,
+        file_path.to_str().unwrap(),
+        "",
+        "edit",
+        "agent-b",
+        "kimi",
+        "",
+    )
+    .expect("agent-b must be able to claim after agent-a released");
+}
