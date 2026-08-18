@@ -785,69 +785,7 @@ async fn detect_overlap_two_shared_functions_is_high() {
     );
 }
 
-/// The graduated bands, exercised directly on the weighting function.
-///
-/// The `low` band cannot be reached through the git pipeline today: the
-/// tree-sitter extractors only emit `Function`, `Struct`, `Trait`, `Enum` and
-/// `Class`, all of which weigh 3–4, so a single shared symbol already scores
-/// `medium`. `low` is reachable as soon as an extractor starts emitting
-/// members/containers (`Property`, `Variable`, `Module`, `Constant`, …), and
-/// this test pins the behaviour for that day.
-#[test]
-fn overlap_severity_bands() {
-    use lain::mcp::presence_tools::overlap_severity;
-    use lain::schema::NodeType;
-
-    // Empty overlap is unchanged: "none".
-    assert_eq!(overlap_severity(&[]), "none");
-
-    // Weight 1 and 2 → low.
-    assert_eq!(
-        overlap_severity(&[("logging".to_string(), NodeType::Module)]),
-        "low"
-    );
-    assert_eq!(
-        overlap_severity(&[("timeout_ms".to_string(), NodeType::Property)]),
-        "low"
-    );
-    assert_eq!(
-        overlap_severity(&[
-            ("logging".to_string(), NodeType::Module),
-            ("MAX".to_string(), NodeType::Constant),
-        ]),
-        "low"
-    );
-
-    // Weight 3–5 → medium: one type, one function, or a pair of members.
-    assert_eq!(
-        overlap_severity(&[("Config".to_string(), NodeType::Struct)]),
-        "medium"
-    );
-    assert_eq!(
-        overlap_severity(&[("login".to_string(), NodeType::Function)]),
-        "medium"
-    );
-    assert_eq!(
-        overlap_severity(&[
-            ("a".to_string(), NodeType::Property),
-            ("b".to_string(), NodeType::Variable),
-        ]),
-        "medium"
-    );
-
-    // Weight >= 6 → high.
-    assert_eq!(
-        overlap_severity(&[
-            ("login".to_string(), NodeType::Function),
-            ("logout".to_string(), NodeType::Function),
-        ]),
-        "high"
-    );
-    assert_eq!(
-        overlap_severity(&[
-            ("login".to_string(), NodeType::Function),
-            ("Config".to_string(), NodeType::Struct),
-        ]),
-        "high"
-    );
-}
+// Note: graduated-band unit pinning (`none|low|medium|high`) lives in
+// `src/server/mcp/presence_tools.rs`'s `#[cfg(test)] mod`, where
+// `overlap_severity` is private. The end-to-end MCP path here exercises
+// the `medium` and `high` bands via real git + tree-sitter.

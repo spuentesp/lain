@@ -446,7 +446,7 @@ fn symbol_weight(kind: &NodeType) -> u32 {
 ///
 /// The value space is additive: `"none"` and `"high"` keep their original
 /// meaning for existing callers, and `"low"` / `"medium"` slot in between.
-pub fn overlap_severity(overlap: &[(String, NodeType)]) -> &'static str {
+fn overlap_severity(overlap: &[(String, NodeType)]) -> &'static str {
     if overlap.is_empty() {
         return "none";
     }
@@ -521,4 +521,73 @@ fn symbols_at_ref(
     defs.sort_by(|a, b| a.0.cmp(&b.0));
     defs.dedup_by(|a, b| a.0 == b.0);
     defs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::schema::NodeType;
+
+    /// Pins every band of `overlap_severity` directly. Lives in a unit
+    /// test (rather than the integration test file) so `overlap_severity`
+    /// can stay private; integration tests don't need to call it because
+    /// the real `detect_overlap` MCP tool already exercises every band
+    /// end-to-end (`detect_overlap_reports_shared_symbols` for
+    /// medium/high, `detect_overlap_two_shared_functions_is_high` for
+    /// high, and the empty-overlap case for none).
+    #[test]
+    fn overlap_severity_bands() {
+        // Empty overlap → none.
+        assert_eq!(overlap_severity(&[]), "none");
+
+        // Weight 1 and 2 → low.
+        assert_eq!(
+            overlap_severity(&[("logging".to_string(), NodeType::Module)]),
+            "low"
+        );
+        assert_eq!(
+            overlap_severity(&[("timeout_ms".to_string(), NodeType::Property)]),
+            "low"
+        );
+        assert_eq!(
+            overlap_severity(&[
+                ("logging".to_string(), NodeType::Module),
+                ("MAX".to_string(), NodeType::Constant),
+            ]),
+            "low"
+        );
+
+        // Weight 3–5 → medium: one type, one function, or a pair of members.
+        assert_eq!(
+            overlap_severity(&[("Config".to_string(), NodeType::Struct)]),
+            "medium"
+        );
+        assert_eq!(
+            overlap_severity(&[("login".to_string(), NodeType::Function)]),
+            "medium"
+        );
+        assert_eq!(
+            overlap_severity(&[
+                ("a".to_string(), NodeType::Property),
+                ("b".to_string(), NodeType::Variable),
+            ]),
+            "medium"
+        );
+
+        // Weight >= 6 → high.
+        assert_eq!(
+            overlap_severity(&[
+                ("login".to_string(), NodeType::Function),
+                ("logout".to_string(), NodeType::Function),
+            ]),
+            "high"
+        );
+        assert_eq!(
+            overlap_severity(&[
+                ("login".to_string(), NodeType::Function),
+                ("Config".to_string(), NodeType::Struct),
+            ]),
+            "high"
+        );
+    }
 }
