@@ -64,6 +64,279 @@ fn default_attribution_backend() -> Arc<dyn AttributionBackend> {
     }
 }
 
+/// Allocate a unique staging dir for federation-mode servers. The
+/// placeholder `LainServer` builds a throwaway git repo at
+/// `/tmp/lain-federation-{pid}-{counter}` so parallel tests in the
+/// same process don't race on a shared path.
+fn allocate_staging_dir() -> Result<PathBuf, LainError> {
+    let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "lain-federation-{}-{}",
+        std::process::id(),
+        counter
+    ));
+    std::fs::create_dir_all(&dir)?;
+    if !dir.join(".git").exists() {
+        git2::Repository::init(&dir)?;
+    }
+    Ok(dir)
+}
+
+/// Initialize `<ws>/.lain/graph.bin` and return the on-disk path.
+/// Removes any stale file so a prior process's graph doesn't leak in.
+fn init_workspace_state(ws: &Path) -> Result<PathBuf, LainError> {
+    let mem_dir = ws.join(".lain");
+    std::fs::create_dir_all(&mem_dir)?;
+    let mem_path = mem_dir.join("graph.bin");
+    let _ = std::fs::remove_file(&mem_path);
+    Ok(mem_path)
+}
+
+/// When the federation has exactly one repo, return that repo's
+/// indexed `GraphDatabase` so the per-repo structural tools work.
+/// Otherwise return the placeholder. The single-repo path
+/// unblocks `find_anchors` / `explain_symbol` / `get_blast_radius`
+/// / `query_graph` / `get_function_callers` / `get_function_callees`
+/// without waiting for the round-2 federation-aware handler refactor
+/// (which is the open follow-up for multi-repo).
+fn bind_to_single_repo_graph(
+    federation: &FederatedIndex,
+    placeholder: GraphDatabase,
+) -> GraphDatabase {
+    if federation.list_repos().len() != 1 {
+        return placeholder;
+    }
+    let only_id = federation
+        .list_repos()
+        .into_iter()
+        .next()
+        .map(|(id, _)| id)
+        .expect("single-repo federation has exactly one id");
+    match federation.get_repo(&only_id) {
+        Some(repo) => {
+            info!(
+                "single-repo federation: binding per-repo tools to {}",
+                only_id.as_str()
+            );
+            repo.db().clone()
+        }
+        None => placeholder,
+    }
+}
+
+/// Build the `NlpEmbedder` + `CrossEncoder` pair. When `model_path`
+/// is `Some`, loads the ONNX bi-encoder; otherwise runs in stub
+/// mode (no `semantic_search` results, but the rest of the tool
+/// surface works). The cross-encoder is read from
+/// `$LAIN_CROSS_ENCODER` or `~/.local/lain/models/cross-encoder`.
+fn build_embedder_pair(
+    model_path: Option<&Path>,
+    tuning: &TuningConfig,
+) -> Result<(NlpEmbedder, CrossEncoder), LainError> {
+    let embedder = if let Some(p) = model_path {
+        let tokenizer = p.join("tokenizer.json");
+        NlpEmbedder::with_max_threads(p, &tokenizer, tuning.ingestion.nlp_max_threads)?
+    } else {
+        NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
+    };
+    if embedder.is_stub() {
+        info!("NLP embedder running in stub mode (no --embedding-model set)");
+    } else if let Some(p) = model_path {
+        info!("NLP embedder loaded from {}", p.display());
+    }
+    let cross_dir = std::env::var("LAIN_CROSS_ENCODER")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(home).join(".local/lain/models/cross-encoder")
+        });
+    let cross = CrossEncoder::from_dir_with_threads(&cross_dir, tuning.ingestion.nlp_max_threads);
+    if cross.is_active() {
+        info!("Cross-encoder reranker active (from {:?})", cross_dir);
+    } else {
+        info!("Cross-encoder reranker disabled (no model at {:?})", cross_dir);
+    }
+    Ok((embedder, cross))
+}
+
+/// Spawn the background task that prunes expired sessions + claim
+/// TTLs every 5 seconds and broadcasts `PresenceEvent` notifications.
+/// The `JoinHandle` is intentionally dropped — the task lives for
+/// the lifetime of the process. (For graceful shutdown we'd store
+/// the handle and abort it; not needed for MVP.)
+fn spawn_presence_expiry_loop(
+    presence: Arc<PresenceRegistry>,
+    occupancy: Arc<OccupancyMap>,
+    tx: broadcast::Sender<PresenceEvent>,
+) {
+    let p = presence.clone();
+    let o = occupancy.clone();
+    let t = tx.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            for id in p.expire_stale() {
+                let _ = t.send(PresenceEvent::HeartbeatExpired(id));
+            }
+            for (agent_id, path) in o.expire_by_ttl() {
+                let _ = t.send(PresenceEvent::ClaimReleased {
+                    agent_id,
+                    path,
+                });
+            }
+        }
+    });
+}
+
+/// Start the attribution watcher (inotify on `repos.yaml`'s parent
+/// dir for live edit attribution). The handle is dropped — the
+/// thread lives until the channel closes.
+fn start_attribution_watcher(
+    attribution: Arc<dyn AttributionBackend>,
+    presence: Arc<PresenceRegistry>,
+    occupancy: Arc<OccupancyMap>,
+    tx: broadcast::Sender<PresenceEvent>,
+    repos_yaml: Option<&Path>,
+) {
+    let root = repos_yaml
+        .and_then(Path::parent)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = AttributionWatcher::new_with_backend(
+        attribution,
+        presence,
+        occupancy,
+        tx,
+        root,
+    )
+    .start();
+}
+
+/// Build a federation-mode `LainServer`. Both
+/// `with_federation_with_attribution` and
+/// `with_federation_and_workspaces_with_attribution` delegate here
+/// — the only difference is whether `workspaces` is `Some` (which
+/// adds the workspace MCP tool surface) or `None` (all-repos mode).
+/// The 4 thin public wrappers above are kept for backwards compat
+/// with the public API; the real work is here.
+fn build_federation_server(
+    federation: Arc<FederatedIndex>,
+    transport: Transport,
+    port: u16,
+    repos_yaml: Option<PathBuf>,
+    attribution: Arc<dyn AttributionBackend>,
+    embedding_model: Option<&Path>,
+    workspaces: Option<Arc<WorkspacesFile>>,
+) -> Result<LainServer, LainError> {
+    // Staging workspace: a throwaway git repo under /tmp. The counter
+    // ensures parallel tests in the same process don't race.
+    let ws = allocate_staging_dir()?;
+    let mem_path = init_workspace_state(&ws)?;
+
+    // Graph: open the placeholder, then (single-repo federation) swap
+    // it for the real repo's indexed graph. See `bind_to_single_repo_graph`
+    // for the multi-repo caveat.
+    let mut graph = GraphDatabase::new(&mem_path)?;
+    graph = bind_to_single_repo_graph(&federation, graph);
+
+    let overlay = VolatileOverlay::new();
+    let tuning = Arc::new(load_tuning_config(&ws));
+    let (embedder, cross_encoder) = build_embedder_pair(embedding_model, &tuning)?;
+    let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
+    let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
+
+    let tool_executor = ToolExecutor::new(
+        graph.clone(),
+        overlay.clone(),
+        embedder.clone(),
+        cross_encoder.clone(),
+        Arc::clone(&git),
+        Arc::clone(&lsp_pool),
+        Arc::clone(&tuning),
+        ws.to_path_buf(),
+    );
+
+    // Build the LainMcpServer eagerly so any wiring problems surface
+    // at construction. The 8 multiplayer tools (presence, occupancy,
+    // list_active_agents, who_am_i, list_subagents, claim_files,
+    // release_files, my_claims) need a server handle; federation
+    // tools (list_repos, search_org, get_federation_health,
+    // get_cross_repo_blast_radius*) need the federation handle.
+    let workspaces_lock = workspaces.map(|ws| Arc::new(RwLock::new((*ws).clone())));
+    let _mcp = match workspaces_lock.as_ref() {
+        Some(lock) => crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
+            tool_executor.clone(),
+            Arc::clone(&federation),
+            Arc::clone(lock),
+        ),
+        None => crate::server::mcp::handler::LainMcpServer::with_federation(
+            tool_executor.clone(),
+            Arc::clone(&federation),
+        ),
+    };
+    if workspaces_lock.is_some() {
+        info!("Lain federation server initialized with workspaces");
+    } else {
+        info!("Lain federation server initialized");
+    }
+
+    // Presence layer: registry + occupancy + broadcast channel.
+    // The expiry loop prunes stale sessions + claim TTLs and
+    // broadcasts `PresenceEvent` notifications.
+    let presence = Arc::new(PresenceRegistry::new());
+    let occupancy = Arc::new(OccupancyMap::new());
+    let (presence_event_tx, _) = broadcast::channel(256);
+    spawn_presence_expiry_loop(presence.clone(), occupancy.clone(), presence_event_tx.clone());
+    start_attribution_watcher(
+        attribution,
+        presence.clone(),
+        occupancy.clone(),
+        presence_event_tx.clone(),
+        repos_yaml.as_deref(),
+    );
+
+    let now = SystemTime::now();
+    let server = LainServer {
+        config: LainConfig {
+            workspace: ws,
+            memory_path: mem_path,
+        },
+        graph,
+        overlay,
+        embedder,
+        cross_encoder,
+        git,
+        lsp_pool,
+        tool_executor,
+        tuning,
+        overlay_revision: Arc::new(AtomicU64::new(0)),
+        federation: Some(federation),
+        federation_workspaces: workspaces_lock,
+        federation_transport: Some(transport),
+        federation_port: Some(port),
+        started_at: now,
+        last_sync_at: Arc::new(Mutex::new(now)),
+        last_error: Arc::new(Mutex::new(None)),
+        repos_yaml,
+        reload_bus: Arc::new(ReloadBus::new()),
+        presence,
+        occupancy,
+        presence_event_tx,
+        attribution: default_attribution_backend(),
+    };
+    // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
+    // when the file exists, and install a persist callback so every
+    // subsequent mutation (claim, release, register, expire) flushes
+    // back to disk. Same rationale as `LainServer::new`: errors here
+    // propagate so a corrupted snapshot surfaces at construction
+    // instead of half-hydrating the registry mid-session.
+    server.load_state()?;
+    server.install_persist_callback();
+    Ok(server)
+}
+
 /// MCP transport for federation-mode servers. Stdio for local agents,
 /// Http for network-reachable deployments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,208 +583,15 @@ impl LainServer {
         attribution: Arc<dyn AttributionBackend>,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
-        // Build a minimal executor — same trick as `cmds/server.rs`'s
-        // `build_minimal_executor`. Federation tools never reach the
-        // executor's underlying services, but `LainMcpServer::with_federation`
-        // still requires a constructed one.
-        //
-        // The staging dir name includes an atomic counter so parallel
-        // tests in the same process (which all share `process::id()`)
-        // don't race on the same `/tmp/lain-federation-{pid}` path.
-        let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let ws = std::env::temp_dir().join(format!(
-            "lain-federation-{}-{}",
-            std::process::id(),
-            counter
-        ));
-        std::fs::create_dir_all(&ws)?;
-        if !ws.join(".git").exists() {
-            git2::Repository::init(&ws)?;
-        }
-        let mem_dir = ws.join(".lain");
-        std::fs::create_dir_all(&mem_dir)?;
-        let mem_path = mem_dir.join("graph.bin");
-        // Ensure no stale file from a previous run leaks in.
-        let _ = std::fs::remove_file(&mem_path);
-
-        let graph = GraphDatabase::new(&mem_path)?;
-        // **Single-repo federation binding fix.** When the federation
-        // has exactly one repo, swap the placeholder `graph` for that
-        // repo's real indexed `GraphDatabase`. This unblocks the
-        // per-repo structural tools (`find_anchors`, `explain_symbol`,
-        // `get_blast_radius`, `query_graph`, `get_function_callers`,
-        // `get_function_callees`) which previously read from the
-        // empty staging dir and returned 0 anchors / "node not found"
-        // even when `list_repos` and `search_org` (federation-level
-        // tools) reported a fully-populated 3000+ node graph. The
-        // placeholder remains the source of truth for multi-repo
-        // federations — those still need the round-2 refactor that
-        // makes the per-repo handlers federation-aware.
-        let graph = if federation.list_repos().len() == 1 {
-            let only_id = federation
-                .list_repos()
-                .into_iter()
-                .next()
-                .map(|(id, _)| id)
-                .expect("single-repo federation has exactly one id");
-            match federation.get_repo(&only_id) {
-                Some(repo) => {
-                    info!(
-                        "single-repo federation: binding per-repo tools to {}",
-                        only_id.as_str()
-                    );
-                    repo.db().clone()
-                }
-                None => graph,
-            }
-        } else {
-            graph
-        };
-        let overlay = VolatileOverlay::new();
-        let embedder = if let Some(model_path) = embedding_model {
-            let tokenizer_path = model_path.join("tokenizer.json");
-            crate::server::nlp::NlpEmbedder::with_max_threads(
-                model_path,
-                &tokenizer_path,
-                0,
-            )?
-        } else {
-            crate::server::nlp::NlpEmbedder::new()?
-        };
-        if embedder.is_stub() {
-            info!("NLP embedder running in stub mode (no --embedding-model set)");
-        } else {
-            info!(
-                "NLP embedder loaded from {}",
-                embedding_model
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default()
-            );
-        }
-        let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
-        let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
-        let tuning = Arc::new(load_tuning_config(&ws));
-
-        let tool_executor = ToolExecutor::new(
-            graph.clone(),
-            overlay.clone(),
-            embedder.clone(),
-            crate::server::nlp::CrossEncoder::from_dir(&ws),
-            Arc::clone(&git),
-            Arc::clone(&lsp_pool),
-            Arc::clone(&tuning),
-            ws.to_path_buf(),
-        );
-
-        // Build the federation-aware MCP server eagerly so any wiring
-        // problems surface at construction time. We don't store the
-        // `LainMcpServer` itself — it's a thin wrapper over `tool_executor`
-        // plus `federation`, both of which we already hold — and `serve()`
-        // rebuilds it before consuming self.
-        let _mcp = crate::server::mcp::handler::LainMcpServer::with_federation(
-            tool_executor.clone(),
-            Arc::clone(&federation),
-        );
-
-        info!("Lain federation server initialized");
-        let cross_encoder = crate::server::nlp::CrossEncoder::from_dir(&ws);
-        let now = SystemTime::now();
-
-        // Presence layer: allocate registry + occupancy map, build a
-        // broadcast channel for `PresenceEvent`s, and spawn the heartbeat
-        // expiry loop. The expiry task fires every 5 seconds; on each tick
-        // it drops stale sessions from the registry and emits a
-        // `HeartbeatExpired` event on the broadcast bus. The `JoinHandle`
-        // is intentionally dropped — the task lives for the lifetime of
-        // the process. (For graceful shutdown we'd store the handle and
-        // abort it; not needed for MVP.)
-        let presence = Arc::new(PresenceRegistry::new());
-        let occupancy = Arc::new(OccupancyMap::new());
-        let (presence_event_tx, _) = broadcast::channel(256);
-        let presence_for_expiry = presence.clone();
-        let occupancy_for_expiry = occupancy.clone();
-        let expiry_tx = presence_event_tx.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                tick.tick().await;
-                let released = presence_for_expiry.expire_stale();
-                for id in &released {
-                    let _ = expiry_tx.send(PresenceEvent::HeartbeatExpired(id.clone()));
-                }
-                // Per-claim TTL: drop any claim whose `expires_at`
-                // (set via `ClaimRequest.ttl_seconds`) has passed and
-                // notify subscribers so the SSE stream and any UI
-                // surfaces see the release.
-                let released_claims = occupancy_for_expiry.expire_by_ttl();
-                for (agent_id, path) in &released_claims {
-                    let _ = expiry_tx.send(PresenceEvent::ClaimReleased {
-                        agent_id: agent_id.clone(),
-                        path: path.clone(),
-                    });
-                }
-            }
-        });
-
-        // Attribution watcher: subscribe to the workspace (the parent of
-        // `repos.yaml`, which is the directory the operator launched us
-        // from) for inotify events and auto-claim edits to the agent that
-        // wrote them. The handle is intentionally dropped — the watcher
-        // thread lives for the lifetime of the process and exits when its
-        // `notify::RecommendedWatcher` is dropped (which happens when the
-        // channel closes on server shutdown). For graceful shutdown we'd
-        // store the handle and abort it; not needed for MVP.
-        let attribution_root = repos_yaml
-            .as_deref()
-            .and_then(Path::parent)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let _attribution_handle = AttributionWatcher::new_with_backend(
-            attribution.clone(),
-            presence.clone(),
-            occupancy.clone(),
-            presence_event_tx.clone(),
-            attribution_root,
-        )
-        .start();
-
-        let server = Self {
-            config: LainConfig {
-                workspace: ws,
-                memory_path: mem_path,
-            },
-            graph,
-            overlay,
-            embedder,
-            git,
-            lsp_pool,
-            tool_executor,
-            tuning,
-            cross_encoder,
-            overlay_revision: Arc::new(AtomicU64::new(0)),
-            federation: Some(federation),
-            federation_workspaces: None,
-            federation_transport: Some(transport),
-            federation_port: Some(port),
-            started_at: now,
-            last_sync_at: Arc::new(Mutex::new(now)),
-            last_error: Arc::new(Mutex::new(None)),
+        build_federation_server(
+            federation,
+            transport,
+            port,
             repos_yaml,
-            reload_bus: Arc::new(ReloadBus::new()),
-            presence,
-            occupancy,
-            presence_event_tx,
-            attribution: default_attribution_backend(),
-        };
-        // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
-        // when the file exists, and install a persist callback so every
-        // subsequent mutation (claim, release, register, expire) flushes
-        // back to disk. Same rationale as `LainServer::new`: errors here
-        // propagate so a corrupted snapshot surfaces at construction
-        // instead of half-hydrating the registry.
-        server.load_state()?;
-        server.install_persist_callback();
-        Ok(server)
+            attribution,
+            embedding_model,
+            None,
+        )
     }
 
     /// Same as `with_federation` but also registers the workspace MCP
@@ -555,204 +635,15 @@ impl LainServer {
         attribution: Arc<dyn AttributionBackend>,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
-        // Mostly the same wiring as `with_federation`. The differences:
-        // we store the workspaces file in `federation_workspaces`, and we
-        // build the LainMcpServer with the workspaces-aware constructor
-        // eagerly so any wiring problems surface at construction time.
-        //
-        // Use the same pid+counter staging-path pattern as
-        // `with_federation` so this constructor plays nicely with
-        // parallel tests in the same process — a previous test may
-        // have torn the dir down between calls. See the comment on
-        // `STAGING_COUNTER` for context.
-        let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let ws = std::env::temp_dir().join(format!(
-            "lain-federation-{}-{}",
-            std::process::id(),
-            counter
-        ));
-        std::fs::create_dir_all(&ws)?;
-        if !ws.join(".git").exists() {
-            git2::Repository::init(&ws)?;
-        }
-        let mem_dir = ws.join(".lain");
-        std::fs::create_dir_all(&mem_dir)?;
-        let mem_path = mem_dir.join("graph.bin");
-        let _ = std::fs::remove_file(&mem_path);
-
-        let graph = GraphDatabase::new(&mem_path)?;
-        // **Single-repo federation binding fix.** When the federation
-        // has exactly one repo, swap the placeholder `graph` for that
-        // repo's real indexed `GraphDatabase`. This unblocks the
-        // per-repo structural tools (`find_anchors`, `explain_symbol`,
-        // `get_blast_radius`, `query_graph`, `get_function_callers`,
-        // `get_function_callees`) which previously read from the
-        // empty staging dir and returned 0 anchors / "node not found"
-        // even when `list_repos` and `search_org` (federation-level
-        // tools) reported a fully-populated 3000+ node graph. The
-        // placeholder remains the source of truth for multi-repo
-        // federations — those still need the round-2 refactor that
-        // makes the per-repo handlers federation-aware.
-        let graph = if federation.list_repos().len() == 1 {
-            let only_id = federation
-                .list_repos()
-                .into_iter()
-                .next()
-                .map(|(id, _)| id)
-                .expect("single-repo federation has exactly one id");
-            match federation.get_repo(&only_id) {
-                Some(repo) => {
-                    info!(
-                        "single-repo federation: binding per-repo tools to {}",
-                        only_id.as_str()
-                    );
-                    repo.db().clone()
-                }
-                None => graph,
-            }
-        } else {
-            graph
-        };
-        let overlay = VolatileOverlay::new();
-        let embedder = if let Some(model_path) = embedding_model {
-            let tokenizer_path = model_path.join("tokenizer.json");
-            crate::server::nlp::NlpEmbedder::with_max_threads(
-                model_path,
-                &tokenizer_path,
-                0,
-            )?
-        } else {
-            crate::server::nlp::NlpEmbedder::new()?
-        };
-        if embedder.is_stub() {
-            info!("NLP embedder running in stub mode (no --embedding-model set)");
-        } else {
-            info!(
-                "NLP embedder loaded from {}",
-                embedding_model
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default()
-            );
-        }
-        let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
-        let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
-        let tuning = Arc::new(load_tuning_config(&ws));
-
-        let tool_executor = ToolExecutor::new(
-            graph.clone(),
-            overlay.clone(),
-            embedder.clone(),
-            crate::server::nlp::CrossEncoder::from_dir(&ws),
-            Arc::clone(&git),
-            Arc::clone(&lsp_pool),
-            Arc::clone(&tuning),
-            ws.to_path_buf(),
-        );
-
-        // Wrap the workspaces file in an `Arc<RwLock<...>>` and share
-        // the SAME `Arc` with both `federation_workspaces` below and
-        // the `LainMcpServer` we build next. This is the single source
-        // of truth for the workspace MCP tools: `set_workspace` (Task
-        // 6.2 rebuild flow) writes through this lock, and every
-        // dispatch the in-flight MCP server handles reads through the
-        // same lock. Without sharing the lock, the LainMcpServer would
-        // capture its own snapshot of `WorkspacesFile` at construction
-        // time and the rebuild path's updates would never reach the
-        // dispatcher — leading to the long-running "stale workspace"
-        // bug.
-        let workspaces_lock: Arc<RwLock<WorkspacesFile>> =
-            Arc::new(RwLock::new((*workspaces).clone()));
-
-        let _mcp = crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
-            tool_executor.clone(),
-            Arc::clone(&federation),
-            Arc::clone(&workspaces_lock),
-        );
-
-        info!("Lain federation server initialized with workspaces");
-        let cross_encoder = crate::server::nlp::CrossEncoder::from_dir(&ws);
-        let now = SystemTime::now();
-
-        // Presence layer: same wiring as `with_federation`. See that
-        // constructor for the rationale on each piece.
-        let presence = Arc::new(PresenceRegistry::new());
-        let occupancy = Arc::new(OccupancyMap::new());
-        let (presence_event_tx, _) = broadcast::channel(256);
-        let presence_for_expiry = presence.clone();
-        let occupancy_for_expiry = occupancy.clone();
-        let expiry_tx = presence_event_tx.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                tick.tick().await;
-                let released = presence_for_expiry.expire_stale();
-                for id in &released {
-                    let _ = expiry_tx.send(PresenceEvent::HeartbeatExpired(id.clone()));
-                }
-                // Per-claim TTL: drop any claim whose `expires_at`
-                // (set via `ClaimRequest.ttl_seconds`) has passed and
-                // notify subscribers so the SSE stream and any UI
-                // surfaces see the release.
-                let released_claims = occupancy_for_expiry.expire_by_ttl();
-                for (agent_id, path) in &released_claims {
-                    let _ = expiry_tx.send(PresenceEvent::ClaimReleased {
-                        agent_id: agent_id.clone(),
-                        path: path.clone(),
-                    });
-                }
-            }
-        });
-
-        // Attribution watcher: same wiring as `with_federation`. See that
-        // constructor for the rationale on the path resolution.
-        let attribution_root = repos_yaml
-            .as_deref()
-            .and_then(Path::parent)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let _attribution_handle = AttributionWatcher::new_with_backend(
-            attribution.clone(),
-            presence.clone(),
-            occupancy.clone(),
-            presence_event_tx.clone(),
-            attribution_root,
-        )
-        .start();
-
-        let server = Self {
-            config: LainConfig {
-                workspace: ws,
-                memory_path: mem_path,
-            },
-            graph,
-            overlay,
-            embedder,
-            git,
-            lsp_pool,
-            tool_executor,
-            tuning,
-            cross_encoder,
-            overlay_revision: Arc::new(AtomicU64::new(0)),
-            federation: Some(federation),
-            federation_workspaces: Some(workspaces_lock),
-            federation_transport: Some(transport),
-            federation_port: Some(port),
-            started_at: now,
-            last_sync_at: Arc::new(Mutex::new(now)),
-            last_error: Arc::new(Mutex::new(None)),
+        build_federation_server(
+            federation,
+            transport,
+            port,
             repos_yaml,
-            reload_bus: Arc::new(ReloadBus::new()),
-            presence,
-            occupancy,
-            presence_event_tx,
-            attribution: default_attribution_backend(),
-        };
-        // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
-        // when the file exists, and install a persist callback. See the
-        // matching comment in `LainServer::new` for rationale.
-        server.load_state()?;
-        server.install_persist_callback();
-        Ok(server)
+            attribution,
+            embedding_model,
+            Some(workspaces),
+        )
     }
 
     /// Federation accessor. Returns `None` for single-workspace servers.
