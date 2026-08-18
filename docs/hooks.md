@@ -16,7 +16,7 @@ Pick your agent and follow the README in its directory:
 ## Common setup
 
 1. `lain server` must be running on HTTP (e.g., `lain server --config ./repos.yaml --transport http --port 9999`).
-2. Set `LAIN_URL` if not using the default (`http://localhost:9999/mcp`).
+2. Set `LAIN_URL` if not using the default (`http://localhost:9999` — bare server URL; the MCP `/mcp` path is appended automatically by the CLI).
 3. Each agent's hook calls `lain hooks claim --url $LAIN_URL --path <file>`. The first invocation auto-registers the agent and caches the session token to `~/.config/lain/hooks/<agent>.session`.
 
 ## Verification

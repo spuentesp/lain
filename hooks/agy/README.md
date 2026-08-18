@@ -23,7 +23,7 @@ expects a JSON config containing a `hooks` map with `PreToolUse` entries.
 
 1. Make sure `lain` is on `$PATH` and a `lain server` is running with HTTP
    transport.
-2. Set `LAIN_URL` if lain is not on `http://localhost:9999/mcp`.
+2. Set `LAIN_URL` if lain is not on `http://localhost:9999` (bare URL; the MCP `/mcp` path is appended automatically).
 3. Edit Agy's MCP/hooks config (path above) to register the pre-edit hook,
    pointing at the absolute path of `pre-edit.sh` in this repo.
 

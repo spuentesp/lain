@@ -12,7 +12,7 @@ config lives in `~/.kimi-code/config.toml` (TOML, with `[[hooks]]` arrays).
 
 1. Make sure `lain` is on `$PATH` and a `lain server` is running with HTTP
    transport.
-2. Set `LAIN_URL` if lain is not on `http://localhost:9999/mcp`.
+2. Set `LAIN_URL` if lain is not on `http://localhost:9999` (bare URL; the MCP `/mcp` path is appended automatically).
 3. Append to `~/.kimi-code/config.toml` (preserving existing content):
 
 ```toml

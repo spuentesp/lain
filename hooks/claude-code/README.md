@@ -5,7 +5,7 @@ These hooks auto-claim files in `lain` before Claude Code edits them, and releas
 ## Install
 
 1. Make sure `lain` is on `$PATH` and a `lain server` is running with HTTP transport.
-2. Set `LAIN_URL` (default: `http://localhost:9999/mcp`).
+2. Set `LAIN_URL` (default: `http://localhost:9999`). The MCP `/mcp` path is appended automatically by the CLI; passing `http://localhost:9999/mcp` also still works.
 3. Add to `~/.claude/settings.json` (project or user):
 
 ```json

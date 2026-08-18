@@ -12,7 +12,7 @@ set +e
 trap 'exit 0' ERR
 
 # Resolve LAIN_URL — default to localhost:9999.
-LAIN_URL="${LAIN_URL:-http://localhost:9999/mcp}"
+LAIN_URL="${LAIN_URL:-http://localhost:9999}"
 HOOK_PREV_COMMIT="${HOOK_PREV_COMMIT:-HEAD~1}"
 
 if ! command -v lain >/dev/null 2>&1; then

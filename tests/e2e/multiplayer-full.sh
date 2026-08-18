@@ -13,7 +13,7 @@ set -euo pipefail
 
 ROOT="${ROOT:-/home/sebastian/lain/.worktrees/consolidation}"
 LAIN="$ROOT/target/release/lain"
-URL="${URL:-http://localhost:9999/mcp}"
+URL="${URL:-http://localhost:9999}"
 HOOK_PRE="$ROOT/hooks/claude-code/pre-edit.sh"
 HOOK_POST="$ROOT/hooks/claude-code/post-edit.sh"
 CLAUDE="${CLAUDE:-/home/sebastian/.local/bin/claude}"

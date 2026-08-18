@@ -17,7 +17,7 @@ TOML form is canonical on this host.
 
 1. Make sure `lain` is on `$PATH` and a `lain server` is running with HTTP
    transport.
-2. Set `LAIN_URL` if lain is not on `http://localhost:9999/mcp`.
+2. Set `LAIN_URL` if lain is not on `http://localhost:9999` (bare URL; the MCP `/mcp` path is appended automatically).
 3. Append to `~/.codex/config.toml` (preserving existing content):
 
 ```toml

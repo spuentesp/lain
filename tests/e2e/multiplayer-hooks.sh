@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="${ROOT:-/home/sebastian/lain/.worktrees/consolidation}"
 LAIN="$ROOT/target/release/lain"
 PORT="${PORT:-19999}"
-LAIN_URL="http://localhost:$PORT/mcp"
+LAIN_URL="http://localhost:$PORT"
 
 TMPDIR="$(mktemp -d)"
 trap "rm -rf $TMPDIR; pkill -f 'lain server.*$PORT' 2>/dev/null || true" EXIT

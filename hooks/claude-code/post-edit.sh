@@ -15,7 +15,7 @@ fi
 
 if [ -z "$FILE_PATH" ]; then exit 0; fi
 
-LAIN_URL="${LAIN_URL:-http://localhost:9999/mcp}"
+LAIN_URL="${LAIN_URL:-http://localhost:9999}"
 
 # Identity resolution.
 if [ -n "$LAIN_AGENT_NAME" ]; then
