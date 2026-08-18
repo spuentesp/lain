@@ -20,7 +20,10 @@ pub fn main_command_factory() -> clap::Command {
     crate::cli::Args::command()
 }
 
-/// Dispatch a `lain hooks <claim|release>` invocation.
+/// Dispatch a `lain hooks <claim|release|overlap-check|lock|unlock>`
+/// invocation. Each arm maps the clap-shaped struct straight onto the
+/// free function in `crate::cli::hooks`, so this file stays a thin
+/// routing layer.
 pub fn run(action: HooksAction) -> anyhow::Result<()> {
     match action {
         HooksAction::Claim {
@@ -57,6 +60,40 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
             &parent_session_id,
         )
         .map_err(|e| anyhow::anyhow!("{e}")),
+        HooksAction::OverlapCheck {
+            url,
+            base,
+            head,
+            workspace,
+        } => crate::cli::hooks::overlap_check(
+            &url,
+            &base,
+            head.as_deref(),
+            &workspace,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}")),
+        HooksAction::Lock {
+            workspace_root,
+            path,
+            agent_name,
+            agent_kind,
+            intent,
+            ttl_seconds,
+        } => crate::cli::hooks::lock(
+            &workspace_root,
+            &path,
+            &agent_name,
+            &agent_kind,
+            &intent,
+            ttl_seconds,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}")),
+        HooksAction::Unlock {
+            workspace_root,
+            path,
+            agent_name,
+        } => crate::cli::hooks::unlock(&workspace_root, &path, &agent_name)
+            .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 

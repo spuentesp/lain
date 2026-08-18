@@ -7,10 +7,13 @@
 //! to register the agent and claim files before editing.
 
 use crate::config::hooks_dir;
+use crate::server::presence::{AgentId, AgentKind, ClaimIntent};
+use crate::server::presence_lock;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Subcommands for `lain hooks`.
 #[derive(Debug, Subcommand)]
@@ -60,6 +63,66 @@ pub enum HooksAction {
         /// Optional parent session id (mirrors `claim` for symmetry).
         #[arg(long, default_value = "")]
         parent_session_id: String,
+    },
+    /// Detect symbol-level overlap between two git refs in a federation
+    /// workspace. Used by the pre-commit hook to refuse a commit that
+    /// would touch symbols also touched by `--base`.
+    OverlapCheck {
+        /// Lain server MCP URL (e.g. http://localhost:9999/mcp).
+        #[arg(long)]
+        url: String,
+        /// Base ref — commit SHA, branch name, or `HEAD~N`. Resolved
+        /// to a full SHA before being sent to the server.
+        #[arg(long)]
+        base: String,
+        /// Head ref carrying the local work. Defaults to `HEAD` when
+        /// omitted (matches the MCP tool's own default).
+        #[arg(long)]
+        head: Option<String>,
+        /// Federation workspace name to scan for overlap.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Acquire a filesystem lock sentinel for `path` under
+    /// `workspace_root`. Best-effort; conflict does not roll back —
+    /// the conflict holder is printed to stderr and the process exits
+    /// non-zero so the caller can decide whether to continue.
+    Lock {
+        /// Workspace root (the directory containing `.lain/`).
+        #[arg(long)]
+        workspace_root: String,
+        /// Absolute path of the file being claimed.
+        #[arg(long)]
+        path: String,
+        /// Stable agent name (used to derive a deterministic `AgentId`).
+        #[arg(long)]
+        agent_name: String,
+        /// Agent kind (`"claude-code"`, `"kimi"`, `"other"`, ...).
+        #[arg(long, default_value = "other")]
+        agent_kind: String,
+        /// Intent — `"edit"` or `"read"`.
+        #[arg(long, default_value = "edit")]
+        intent: String,
+        /// Advisory TTL in seconds. `presence_lock::try_lock` uses a
+        /// 5s TTL internally; this flag is accepted so the pre-commit
+        /// hook and other callers can forward it, but is not yet
+        /// plumbed through to the lock layer.
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
+    },
+    /// Remove the filesystem lock sentinel for `path` under
+    /// `workspace_root`. Idempotent — ENOENT is treated as success.
+    Unlock {
+        /// Workspace root (the directory containing `.lain/`).
+        #[arg(long)]
+        workspace_root: String,
+        /// Absolute path of the file being released.
+        #[arg(long)]
+        path: String,
+        /// Stable agent name (informational; the sentinel is removed
+        /// regardless of holder).
+        #[arg(long)]
+        agent_name: String,
     },
 }
 
@@ -301,4 +364,147 @@ pub fn release(
     let released = parsed["released"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: released {released} file(s)");
     Ok(())
+}
+
+/// Resolve a git ref to its full SHA via `git rev-parse`. The MCP
+/// `detect_overlap` tool accepts refs as-is, but resolving here gives
+/// the user a clearer error message when the ref is bad *before*
+/// paying for the HTTP round-trip, and avoids any ambiguity between
+/// "HEAD~1" (rev) and "HEAD" (ref) inside the server's git calls.
+fn git_rev_parse_full(ref_str: &str) -> Result<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", ref_str])
+        .output()
+        .context("failed to run git rev-parse")?;
+    if !out.status.success() {
+        return Err(anyhow::anyhow!(
+            "git rev-parse {} failed: {}",
+            ref_str,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `lain hooks overlap-check --url … --base … [--head …] --workspace …`
+///
+/// Resolves `base` (and optional `head`) to full SHAs, then proxies
+/// to the server's `detect_overlap` MCP tool. The JSON returned by
+/// the server is written verbatim to stdout so shell scripts (e.g.
+/// the pre-commit hook) can parse `total_overlaps` and the per-file
+/// details directly. Exits non-zero on infrastructure failure so the
+/// pre-commit hook can distinguish "no overlap" from "could not run".
+pub fn overlap_check(
+    url: &str,
+    base: &str,
+    head: Option<&str>,
+    workspace: &str,
+) -> Result<()> {
+    let base_sha = git_rev_parse_full(base)
+        .with_context(|| format!("resolving base ref {base:?}"))?;
+    let head_input = head.unwrap_or("HEAD");
+    let head_sha = git_rev_parse_full(head_input)
+        .with_context(|| format!("resolving head ref {head_input:?}"))?;
+    let result = post_mcp(
+        url,
+        "tools/call",
+        serde_json::json!({
+            "name": "detect_overlap",
+            "arguments": {
+                "base": base_sha,
+                "head": head_sha,
+                "workspace": workspace,
+            }
+        }),
+    )?;
+    let parsed = text_of(result)?;
+    println!("{}", serde_json::to_string(&parsed)?);
+    Ok(())
+}
+
+/// `lain hooks lock --workspace-root … --path … --agent-name … …`
+///
+/// Direct, filesystem-only counterpart to `Claim`. Does NOT contact
+/// the lain server: it just writes `<root>/.lain/locks/<sanitized>.json`
+/// via `presence_lock::try_lock`. Used by automation that needs the
+/// hint layer (operator-readable sentinel, no-daemon coordination)
+/// without paying for a full `register_agent` + `claim_files` round
+/// trip.
+///
+/// On success: prints the lock file path to stdout, exits 0.
+/// On conflict: prints holder / kind / intent / mtime as JSON to
+/// stderr and returns Err so the caller sees a non-zero exit code.
+/// `ttl_seconds` is accepted for forward-compatibility but not
+/// plumbed through to `try_lock` (which uses a fixed 5s TTL).
+pub fn lock(
+    workspace_root: &str,
+    path: &str,
+    agent_name: &str,
+    agent_kind: &str,
+    intent: &str,
+    _ttl_seconds: Option<u64>,
+) -> Result<()> {
+    let workspace = Path::new(workspace_root);
+    let file_path = Path::new(path);
+    let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
+    let kind = AgentKind::parse(agent_kind);
+    let parsed_intent = match intent {
+        "read" => ClaimIntent::Read,
+        _ => ClaimIntent::Edit,
+    };
+    match presence_lock::try_lock(workspace, file_path, &agent_id, kind, parsed_intent) {
+        Ok(lock) => {
+            println!("{}", lock.path.display());
+            Ok(())
+        }
+        Err(conflict) => {
+            let mtime_unix = conflict
+                .mtime()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let body = serde_json::json!({
+                "holder": conflict.agent_id().as_str(),
+                "kind": conflict.kind().as_str(),
+                "intent": match conflict.intent() {
+                    ClaimIntent::Read => "read",
+                    ClaimIntent::Edit => "edit",
+                },
+                "mtime_unix": mtime_unix,
+                "path": file_path,
+            });
+            // Print to stderr and return Err so the dispatcher exits
+            // non-zero. The pre-commit hook treats any non-zero exit
+            // as "infrastructure failure — pass through"; humans
+            // running the CLI by hand get a clear conflict message.
+            eprintln!("{}", serde_json::to_string(&body)?);
+            Err(anyhow::anyhow!(
+                "lock for {} already held by {}",
+                file_path.display(),
+                conflict.agent_id().as_str()
+            ))
+        }
+    }
+}
+
+/// `lain hooks unlock --workspace-root … --path … --agent-name …`
+///
+/// Removes the filesystem sentinel for `path` regardless of holder.
+/// Idempotent — ENOENT is treated as success. We compute the sentinel
+/// path directly via `presence_lock::lock_path_for` rather than
+/// keeping the `FileLock` from the matching `lock` invocation, since
+/// the CLI does not persist state between invocations.
+pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()> {
+    let lock_path = presence_lock::lock_path_for(Path::new(workspace_root), Path::new(path));
+    match std::fs::remove_file(&lock_path) {
+        Ok(()) => {
+            println!("released {}", lock_path.display());
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("released {} (already absent)", lock_path.display());
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("remove {}: {e}", lock_path.display())),
+    }
 }

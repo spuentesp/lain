@@ -181,8 +181,10 @@ fn try_lock_once(
 }
 
 /// `<workspace_root>/.lain/locks/<sanitized>.json`. Pure path
-/// computation; no I/O.
-fn lock_path_for(workspace_root: &Path, path: &Path) -> PathBuf {
+/// computation; no I/O. Public so the `lain hooks lock|unlock` CLI
+/// subcommands can compute the same path without keeping a `FileLock`
+/// handle around between invocations.
+pub fn lock_path_for(workspace_root: &Path, path: &Path) -> PathBuf {
     workspace_root
         .join(".lain")
         .join("locks")
