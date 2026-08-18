@@ -644,6 +644,26 @@ impl GraphDatabase {
         (graph.node_count(), graph.edge_count())
     }
 
+    /// Edge counts grouped by `EdgeType`. Used by `get_health` to
+    /// surface the edge-type histogram so operators can tell at a
+    /// glance whether the indexer produced the `Calls` and `Uses`
+    /// edges (vs. just the cheaper-to-extract `Contains` /
+    /// `CoChangedWith` from the static tree-sitter + git phases).
+    /// Without this, the only signal that the call graph is empty
+    /// is "every impact query returns nothing," which is the exact
+    /// failure the user reported as Bug 2.
+    pub fn edge_counts_by_type(&self) -> std::collections::BTreeMap<String, usize> {
+        use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+        use std::collections::BTreeMap;
+        let graph = self.graph.read();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for edge in graph.edge_references() {
+            let key = format!("{:?}", edge.weight().edge_type);
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
+    }
+
     pub fn get_node_at_location(&self, path: &str, line: u32) -> Option<GraphNode> {
         let graph = self.graph.read();
 

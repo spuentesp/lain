@@ -411,6 +411,22 @@ impl ToolExecutor {
             workspace_display, nodes, edges, overlay_stats.node_count, commit_status, embedder_status
         );
 
+        // Edge-type histogram — operators need this to tell whether the
+        // call graph (Calls, Uses) is populated, or whether the indexer
+        // only produced the cheaper-to-extract structural edges
+        // (Contains, CoChangedWith, etc.). Without it, "every impact
+        // query returns nothing" looks like a tool bug but is in fact
+        // a missing-data bug; the histogram makes the data
+        // visible. Sorted alphabetically by EdgeType Debug name for
+        // stable output across runs.
+        let edge_hist = self.ctx.graph.edge_counts_by_type();
+        if !edge_hist.is_empty() {
+            output.push_str("\n### Edge counts by type\n");
+            for (kind, count) in &edge_hist {
+                output.push_str(&format!("- **{kind}**: {count}\n"));
+            }
+        }
+
         output.push_str("\n### Language Support\n");
         let langs = {
             let lsp = self.ctx.lsp_pool.next();
