@@ -522,6 +522,13 @@ pub struct OccupancyMap {
     /// when the call actually mutates state (calls that grant no claims
     /// or release no paths do not fire).
     persist_cb: std::sync::Arc<parking_lot::Mutex<Option<PersistFn>>>,
+    /// Workspace root for the filesystem-as-lock side-effect
+    /// (`presence_lock::try_lock`). Set via `set_workspace_root` after
+    /// construction; `None` means "no filesystem layer" (used in tests
+    /// and by anything that doesn't have a workspace to anchor).
+    /// `claim` reads this under a small lock so the side-effect
+    /// doesn't race with a `set_workspace_root` swap.
+    workspace_root: std::sync::Arc<parking_lot::Mutex<Option<PathBuf>>>,
 }
 
 impl std::fmt::Debug for OccupancyMap {
@@ -540,6 +547,7 @@ impl OccupancyMap {
         Self {
             inner: std::sync::Arc::new(Mutex::new(OccupancyState::default())),
             persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            workspace_root: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -554,6 +562,24 @@ impl OccupancyMap {
         *slot = Some(std::sync::Arc::new(cb));
     }
 
+    /// Set the workspace root so `claim` can write the
+    /// filesystem-as-lock side-effect under
+    /// `<workspace>/.lain/locks/<file>.json`. Called once per
+    /// `LainServer` constructor, mirroring `set_persist_callback`.
+    /// When unset (e.g. unit tests, federation paths without a
+    /// workspace anchor), `claim` skips the filesystem write entirely.
+    pub fn set_workspace_root(&self, workspace_root: &Path) {
+        let mut slot = self.workspace_root.lock();
+        *slot = Some(workspace_root.to_path_buf());
+    }
+
+    /// Snapshot the workspace root, if configured. Used by
+    /// `OccupancyMap::claim` to fetch the path under the small lock
+    /// rather than holding the lock across the `try_lock` call.
+    fn workspace_root_snapshot(&self) -> Option<PathBuf> {
+        self.workspace_root.lock().clone()
+    }
+
     /// Clone the (optional) persist callback out of the slot. Returns
     /// `None` when no callback has been installed; callers always
     /// no-op in that case.
@@ -562,6 +588,34 @@ impl OccupancyMap {
     }
 
     pub fn claim(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
+        self.claim_in_memory(agent_id, requests)
+    }
+
+    /// Same as [`Self::claim`] but additionally writes the filesystem
+    /// lock side-effect for each granted path. Preferred entry point
+    /// when the full `AgentSession` is available (e.g. the MCP
+    /// `claim_files` handler has already resolved the session via
+    /// `by_token`). The lock write is best-effort: failures are logged
+    /// and the in-memory claim stands regardless — the in-memory
+    /// `OccupancyMap` remains authoritative when a `lain` server is
+    /// running.
+    pub fn claim_with_session(
+        &self,
+        session: &AgentSession,
+        requests: Vec<ClaimRequest>,
+    ) -> ClaimResult {
+        let result = self.claim_in_memory(&session.id, requests);
+        if !result.granted.is_empty() {
+            self.write_lock_files(session, &result.granted);
+        }
+        result
+    }
+
+    /// In-memory-only claim implementation. Extracted so both
+    /// `claim` (no FS side-effect, agent-id-only callers) and
+    /// `claim_with_session` (FS side-effect + full session) share
+    /// the same conflict / book-keeping logic.
+    fn claim_in_memory(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
         let (granted, conflicts) = {
             let mut s = self.inner.lock();
             let mut granted = Vec::new();
@@ -839,6 +893,44 @@ impl OccupancyMap {
             if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
         released
+    }
+
+    /// Best-effort write of `<workspace>/.lain/locks/<file>.json` for
+    /// each path that was just granted. Called by
+    /// `claim_with_session` after the in-memory bookkeeping settles.
+    /// No-op when no workspace root is configured (unit tests,
+    /// federation paths).
+    ///
+    /// The in-memory state is *not* rolled back if `try_lock` reports
+    /// a conflict or an I/O error — both are logged via `tracing::warn`
+    /// and the claim stands. Operators reading the lock file directly
+    /// see the holder; readers going through `lain` see the in-memory
+    /// state. PR 17 does not track `FileLock` handles for release on
+    /// `release()` — stale locks age out via the 5s TTL on the next
+    /// `try_lock` from another agent (see `presence_lock::LOCK_TTL`).
+    fn write_lock_files(&self, session: &AgentSession, granted: &[ClaimRequest]) {
+        let Some(workspace) = self.workspace_root_snapshot() else {
+            return;
+        };
+        for req in granted {
+            match crate::server::presence_lock::try_lock(
+                &workspace,
+                &req.path,
+                &session.id,
+                session.kind.clone(),
+                req.intent.clone(),
+            ) {
+                Ok(_lock) => {}
+                Err(conflict) => {
+                    tracing::warn!(
+                        "filesystem lock for {:?} already held by {} (k={:?}); in-memory claim stands",
+                        req.path,
+                        conflict.agent_id().as_str(),
+                        conflict.kind(),
+                    );
+                }
+            }
+        }
     }
 
     pub fn list_for_path(&self, path: &Path) -> Option<OccupancyEntry> {

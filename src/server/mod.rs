@@ -30,6 +30,7 @@ pub mod reload;
 // Multiplayer awareness
 pub mod attribution;
 pub mod presence;
+pub mod presence_lock;
 pub mod sse;
 
 // Re-export the LainServer orchestrator + transport at `crate::server::*`

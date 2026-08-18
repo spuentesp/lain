@@ -1001,6 +1001,12 @@ impl LainServer {
             }
         };
         self.occupancy.set_persist_callback(cb2);
+        // Filesystem-as-lock side-effect: anchor the occupancy map to
+        // the workspace so `claim_with_session` can write
+        // `<workspace>/.lain/locks/<file>.json`. Mirrors the persist
+        // callback above; called from all three constructors via
+        // `install_persist_callback`.
+        self.occupancy.set_workspace_root(&self.config.workspace);
         // Touch the first closure so the compiler does not warn about
         // an unused binding; both callbacks are installed above.
         let _ = cb;

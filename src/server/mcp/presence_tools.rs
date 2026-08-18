@@ -161,7 +161,7 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         intent: f.intent.as_deref().map(|s| if s == "read" { ClaimIntent::Read } else { ClaimIntent::Edit }).unwrap_or(ClaimIntent::Edit),
         ttl_seconds: None,
     }).collect();
-    let result = server.occupancy.claim(&session.id, requests);
+    let result = server.occupancy.claim_with_session(&session, requests);
     if !result.granted.is_empty() {
         for g in &result.granted {
             let _ = server.presence_event_tx.send(PresenceEvent::ClaimGranted {
