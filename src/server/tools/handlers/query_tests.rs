@@ -110,6 +110,80 @@ fn test_query_graph_with_empty_ops() {
     assert!(result.is_ok());
 }
 
+/// Pin the schema documented in `docs/query-language.md`. Each op
+/// in the `ops` array must have a discriminator key `op` (one of
+/// `find`, `connect`, `filter`, `semantic_filter`, `group`, `sort`,
+/// `limit`) — the per-op type is selected by serde via
+/// `#[serde(tag = "op", rename_all = "lowercase")]`. A misread
+/// variant shape (e.g. `{"find": "Function"}` with the type name
+/// as a key instead of `{"op": "find", "type": "Function"}`) must
+/// fail with a serde `missing field 'op'` error, which is the
+/// right diagnostic for an agent that got the schema wrong.
+///
+/// This test also documents that the wishlist's example
+/// `{"ops":[{"find":"Function"},{"limit":3}]}` is a misread of the
+/// docs — the real format is `{"op":"find","type":"Function"}`.
+#[test]
+fn test_query_graph_schema_matches_docs() {
+    let graph = make_test_graph();
+    let (embedder, cache) = test_embedder_and_cache();
+    let (presence, occupancy) = empty_presence();
+
+    // Documented format: discriminator `op` + per-op fields. Must
+    // succeed.
+    let mut good_args = Map::new();
+    good_args.insert(
+        "query".to_string(),
+        serde_json::json!({
+            "ops": [
+                {"op": "find", "type": "Function"},
+                {"op": "limit", "count": 3}
+            ]
+        }),
+    );
+    let result = query_graph(
+        &graph,
+        &embedder,
+        &cache,
+        &presence,
+        &occupancy,
+        Some(&good_args),
+    );
+    assert!(
+        result.is_ok(),
+        "documented query_graph schema must work; got {:?}",
+        result.err()
+    );
+
+    // Misread format: type name as key, no `op` discriminator.
+    // The serde error must clearly say `missing field 'op'` so an
+    // agent that got the schema wrong can self-correct.
+    let mut bad_args = Map::new();
+    bad_args.insert(
+        "query".to_string(),
+        serde_json::json!({
+            "ops": [
+                {"find": "Function"},
+                {"limit": {"count": 3}}
+            ]
+        }),
+    );
+    let result = query_graph(
+        &graph,
+        &embedder,
+        &cache,
+        &presence,
+        &occupancy,
+        Some(&bad_args),
+    );
+    let err = result.err().expect("misread format must error");
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("missing field") && err_text.contains("op"),
+        "serde error must mention 'op' so agents can self-correct; got: {err_text}"
+    );
+}
+
 #[test]
 fn test_describe_schema() {
     let result = describe_schema();
