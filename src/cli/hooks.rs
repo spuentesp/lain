@@ -20,7 +20,10 @@ use std::process::Command;
 pub enum HooksAction {
     /// Claim a file (and optional symbol) for the agent's editing session.
     Claim {
-        /// Lain server MCP URL (e.g. http://localhost:9999/mcp).
+        /// Lain server URL (bare, e.g. `http://localhost:9999`). The MCP
+        /// `/mcp` path is appended automatically; a value that already
+        /// ends in `/mcp` is accepted unchanged for backwards
+        /// compatibility with older hook scripts.
         #[arg(long)]
         url: String,
         /// Absolute file path being claimed.
@@ -45,7 +48,10 @@ pub enum HooksAction {
     },
     /// Release a file the agent no longer needs.
     Release {
-        /// Lain server MCP URL (e.g. http://localhost:9999/mcp).
+        /// Lain server URL (bare, e.g. `http://localhost:9999`). The MCP
+        /// `/mcp` path is appended automatically; a value that already
+        /// ends in `/mcp` is accepted unchanged for backwards
+        /// compatibility with older hook scripts.
         #[arg(long)]
         url: String,
         /// Absolute file path being released.
@@ -68,7 +74,10 @@ pub enum HooksAction {
     /// workspace. Used by the pre-commit hook to refuse a commit that
     /// would touch symbols also touched by `--base`.
     OverlapCheck {
-        /// Lain server MCP URL (e.g. http://localhost:9999/mcp).
+        /// Lain server URL (bare, e.g. `http://localhost:9999`). The MCP
+        /// `/mcp` path is appended automatically; a value that already
+        /// ends in `/mcp` is accepted unchanged for backwards
+        /// compatibility with older hook scripts.
         #[arg(long)]
         url: String,
         /// Base ref — commit SHA, branch name, or `HEAD~N`. Resolved
@@ -173,7 +182,27 @@ struct McpContent {
     text: String,
 }
 
+/// Normalize the `--url` flag value to the canonical MCP endpoint URL.
+///
+/// Accepts both shapes for backwards compatibility with the project-wide
+/// `LAIN_URL=http://localhost:9999/mcp` default:
+/// - bare server URL (`http://localhost:9999`) → `http://localhost:9999/mcp`
+/// - full MCP URL (`http://localhost:9999/mcp`) → unchanged
+/// - full MCP URL with trailing slash (`http://localhost:9999/mcp/`) → strip
+///
+/// The hook scripts and e2e tests now pass the bare form; older callers
+/// that still pass the full form continue to work.
+fn mcp_endpoint(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/mcp") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/mcp")
+    }
+}
+
 fn post_mcp(url: &str, method: &'static str, params: serde_json::Value) -> Result<McpResult> {
+    let endpoint = mcp_endpoint(url);
     let req = McpRequest {
         jsonrpc: "2.0",
         method,
@@ -181,7 +210,7 @@ fn post_mcp(url: &str, method: &'static str, params: serde_json::Value) -> Resul
         id: 1,
     };
     let client = reqwest::blocking::Client::new();
-    let resp = client.post(url).json(&req).send().context("HTTP send")?;
+    let resp = client.post(&endpoint).json(&req).send().context("HTTP send")?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {} from lain server", resp.status());
     }
@@ -494,4 +523,34 @@ pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()>
         .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
     println!("released {}", lock_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mcp_endpoint;
+
+    /// `mcp_endpoint` is the bridge between the `--url` flag (bare server
+    /// URL, the new convention) and the post-MCP path that `post_mcp`
+    /// needs. Both shapes must round-trip cleanly so existing hook
+    /// scripts with `LAIN_URL=http://localhost:9999/mcp` keep working
+    /// after the refactor.
+    #[test]
+    fn mcp_endpoint_handles_both_shapes() {
+        // Bare URL → append /mcp.
+        assert_eq!(mcp_endpoint("http://localhost:9999"), "http://localhost:9999/mcp");
+        // Full URL → unchanged.
+        assert_eq!(mcp_endpoint("http://localhost:9999/mcp"), "http://localhost:9999/mcp");
+        // Trailing slash on either shape → normalized.
+        assert_eq!(mcp_endpoint("http://localhost:9999/"), "http://localhost:9999/mcp");
+        assert_eq!(mcp_endpoint("http://localhost:9999/mcp/"), "http://localhost:9999/mcp");
+        // Custom host/port + path prefix.
+        assert_eq!(
+            mcp_endpoint("http lain.local:8080"),
+            "http lain.local:8080/mcp"
+        );
+        assert_eq!(
+            mcp_endpoint("https lain.example.com/proxy"),
+            "https lain.example.com/proxy/mcp"
+        );
+    }
 }
