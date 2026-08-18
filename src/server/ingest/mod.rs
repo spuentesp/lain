@@ -43,8 +43,27 @@ use tracing::info;
 
 /// Server configuration
 #[derive(Clone)]
+/// Server configuration
 pub struct LainConfig {
+    /// Data-anchor directory. In single-workspace mode (built via
+    /// `LainServer::new`) this is the user's actual workspace — what
+    /// `tuning.toml` / `.git/` / `.lsp/` / the tool executor's
+    /// workspace all point at. In federation mode (built via
+    /// `with_federation*`) this is the placeholder staging dir at
+    /// `/tmp/lain-federation-{pid}-{counter}` — federation tools
+    /// don't read it (they go through the `FederatedIndex` handle),
+    /// per-repo structural tools are bound to the single-repo's real
+    /// graph via the binding fix, and git/LSP are placeholders too.
+    ///
+    /// The state-file stem (used by `state_path()`) is *not* derived
+    /// from this field in federation mode — `repos_yaml` is preferred
+    /// so restarts pick up the same state. See `state_path()`.
     pub workspace: PathBuf,
+    /// Path to `<workspace>/.lain/graph.bin` — the sled database
+    /// backing `ctx.graph`. Always `<workspace>/.lain/graph.bin` in
+    /// both single-workspace and federation modes; `workspace` is
+    /// the staging dir in federation mode (so this is the staging
+    /// dir's graph path, which the placeholder executor opens).
     pub memory_path: PathBuf,
 }
 
