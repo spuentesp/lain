@@ -7,7 +7,7 @@ use crate::schema::{GraphNode, NodeType};
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Helper to resolve a handle (name, path, or ID) to a node
 pub fn resolve_node(
@@ -138,7 +138,7 @@ pub fn opt_str_arg(args: &Map<String, Value>, key: &str) -> String {
 /// because terms like `bincode`, `Tokenizer`, `LSP` only appear in the
 /// implementation, not in the signature or docstring. Without this, the
 /// embedder has no signal that `GraphDatabase::save` is about persistence.
-pub fn build_enriched_text(node: &GraphNode) -> String {
+pub fn build_enriched_text(node: &GraphNode, workspace: &Path) -> String {
     let mut parts = vec![node.name.clone()];
 
     // Add signature (function parameters, return types)
@@ -164,7 +164,7 @@ pub fn build_enriched_text(node: &GraphNode) -> String {
     // effective limit while preserving meaningful behavior signals).
     if let (Some(start), Some(end)) = (node.line_start, node.line_end) {
         if end > start && (end - start) < 200 {
-            if let Ok(body) = read_body_excerpt(&node.path, start, end, 200) {
+            if let Ok(body) = read_body_excerpt(workspace, &node.path, start, end, 200) {
                 if !body.is_empty() {
                     parts.push(body);
                 }
@@ -177,7 +177,26 @@ pub fn build_enriched_text(node: &GraphNode) -> String {
 
 /// Read lines [start, end) from `path`, collapse to single-line whitespace,
 /// and keep the first `max_tokens` whitespace-separated tokens.
-fn read_body_excerpt(path: &str, start: u32, end: u32, max_tokens: usize) -> std::io::Result<String> {
+/// Read a slice of a source file.
+///
+/// `path` is a graph key, which is workspace-relative (see `graph::graph_path`),
+/// so it must be resolved against `workspace` rather than the process cwd.
+/// Reading it directly worked only while the server happened to be launched
+/// from the workspace root, and silently returned nothing otherwise — losing
+/// the source excerpt from `explain_symbol` and the body text from embeddings.
+fn read_body_excerpt(
+    workspace: &Path,
+    path: &str,
+    start: u32,
+    end: u32,
+    max_tokens: usize,
+) -> std::io::Result<String> {
+    let resolved = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        workspace.join(path)
+    };
+    let path = resolved.as_path();
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     let f = File::open(path)?;
@@ -317,13 +336,13 @@ pub fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
 /// modules with deep config classes run hundreds of lines); we still
 /// want to show their bodies. Above 2000 lines, fall back to the
 /// first 200 lines via read_body_excerpt's internal cap.
-pub fn read_body_summary(node: &GraphNode, max_chars: usize) -> Option<String> {
+pub fn read_body_summary(node: &GraphNode, max_chars: usize, workspace: &Path) -> Option<String> {
     let start = node.line_start?;
     let end = node.line_end?;
     if end <= start || (end - start) > 2000 {
         return None;
     }
-    let body = read_body_excerpt(&node.path, start, end, 30).ok()?;
+    let body = read_body_excerpt(workspace, &node.path, start, end, 30).ok()?;
     let trimmed: String = body.chars().take(max_chars).collect();
     if trimmed.is_empty() {
         None

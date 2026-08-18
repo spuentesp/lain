@@ -385,6 +385,9 @@ impl LainServer {
         let nlp_prewarm_count = self.tuning.ingestion.nlp_prewarm_count;
         let nlp_batch_size = self.tuning.ingestion.nlp_batch_size;
         let nlp_budget_per_pass = self.tuning.ingestion.nlp_budget_per_pass;
+        // The NLP pass runs detached, so it needs its own copy of the
+        // workspace root to resolve workspace-relative node paths.
+        let ws_for_nlp = self.config.workspace.clone();
         tokio::spawn(async move {
             let all_nodes = graph_clone.get_all_nodes();
             // Top anchors get embedded first (pre-warm)
@@ -403,7 +406,7 @@ impl LainServer {
             for node in &prewarm {
                 if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                     if gn.embedding.is_none() {
-                        let text = crate::tools::utils::build_enriched_text(&gn);
+                        let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                         if let Ok(emb) = embedder_clone.embed(&text) {
                             gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
                             if graph_clone.insert_node(&gn).is_ok() {
@@ -424,7 +427,7 @@ impl LainServer {
                 for node in &to_embed {
                     if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                         if gn.embedding.is_none() {
-                            let text = crate::tools::utils::build_enriched_text(&gn);
+                            let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                             if let Ok(emb) = embedder_clone.embed(&text) {
                                 gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
                                 let _ = graph_clone.insert_node(&gn);

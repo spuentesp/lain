@@ -305,6 +305,7 @@ impl ToolHandler for SemanticSearchHandler {
         let query = required_str_arg(args, "query")?;
         let limit = usize_arg(args, "limit").unwrap_or(10);
         handlers::search::semantic_search(
+            &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             &ctx.embedder,
@@ -488,6 +489,7 @@ impl ToolHandler for FindDeadCodeHandler {
     ) -> Result<String, LainError> {
         let like = args.get("like").and_then(|v| v.as_str());
         handlers::metrics::find_dead_code(
+            &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             like,
@@ -519,7 +521,7 @@ impl ToolHandler for ExplainSymbolHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::metrics::explain_symbol(&ctx.graph, &ctx.overlay, &ctx.occupancy, &symbol)
+        handlers::metrics::explain_symbol(&ctx.workspace, &ctx.graph, &ctx.overlay, &ctx.occupancy, &symbol)
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
@@ -573,6 +575,7 @@ impl ToolHandler for QueryGraphHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         handlers::query::query_graph(
+            &ctx.workspace,
             &ctx.graph,
             &ctx.embedder,
             &ctx.embedding_cache,

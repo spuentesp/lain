@@ -8,7 +8,7 @@ use crate::overlay::VolatileOverlay;
 #[test]
 fn test_build_enriched_text_name_only() {
     let node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
-    let result = build_enriched_text(&node);
+    let result = build_enriched_text(&node, std::path::Path::new(""));
     assert_eq!(result, "test_fn | /src/lib.rs");
 }
 
@@ -16,7 +16,7 @@ fn test_build_enriched_text_name_only() {
 fn test_build_enriched_text_with_signature() {
     let mut node = GraphNode::new(NodeType::Function, "add".to_string(), "/src/math.rs".to_string());
     node.signature = Some("(a: i32, b: i32) -> i32".to_string());
-    let result = build_enriched_text(&node);
+    let result = build_enriched_text(&node, std::path::Path::new(""));
     assert!(result.contains("add"));
     assert!(result.contains("(a: i32, b: i32) -> i32"));
     assert!(result.contains("/src/math.rs"));
@@ -26,7 +26,7 @@ fn test_build_enriched_text_with_signature() {
 fn test_build_enriched_text_with_docstring() {
     let mut node = GraphNode::new(NodeType::Function, "process".to_string(), "/src/main.rs".to_string());
     node.docstring = Some("Processes the input queue".to_string());
-    let result = build_enriched_text(&node);
+    let result = build_enriched_text(&node, std::path::Path::new(""));
     assert!(result.contains("process"));
     assert!(result.contains("Processes the input queue"));
     assert!(result.contains("/src/main.rs"));
@@ -37,7 +37,7 @@ fn test_build_enriched_text_all_fields() {
     let mut node = GraphNode::new(NodeType::Function, "full_fn".to_string(), "/src/full.rs".to_string());
     node.signature = Some("(x: String) -> Result<(), Error>".to_string());
     node.docstring = Some("Full documentation here".to_string());
-    let result = build_enriched_text(&node);
+    let result = build_enriched_text(&node, std::path::Path::new(""));
     let parts: Vec<&str> = result.split(" | ").collect();
     assert_eq!(parts.len(), 4);
     assert_eq!(parts[0], "full_fn");

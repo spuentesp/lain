@@ -98,7 +98,7 @@ fn test_find_dead_code() {
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
 
-    let result = find_dead_code(&graph, &overlay, None, &embedder, &cache);
+    let result = find_dead_code(std::path::Path::new(""), &graph, &overlay, None, &embedder, &cache);
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("dead code") || text.contains("Found"));
@@ -117,7 +117,7 @@ fn test_explain_symbol_existing() {
     overlay.insert_node(node);
 
     let occupancy = OccupancyMap::new();
-    let result = explain_symbol(&graph, &overlay, &occupancy, "documented_fn");
+    let result = explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "documented_fn");
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("documented_fn"));
@@ -131,7 +131,7 @@ fn test_explain_symbol_not_found() {
 
     // find_dead_code returns empty (not error), but explain_symbol should error
     let occupancy = OccupancyMap::new();
-    let result = explain_symbol(&graph, &overlay, &occupancy, "nonexistent_node_xyz");
+    let result = explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "nonexistent_node_xyz");
     assert!(result.is_err());
 }
 

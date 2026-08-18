@@ -127,6 +127,7 @@ fn is_likely_false_positive(node: &crate::schema::GraphNode) -> bool {
 }
 
 pub fn find_dead_code(
+    workspace: &std::path::Path,
     graph: &GraphDatabase,
     _overlay: &VolatileOverlay,
     like: Option<&str>,
@@ -162,7 +163,7 @@ pub fn find_dead_code(
         let threshold = 0.3; // semantic similarity threshold
 
         results.into_iter().filter(|n| {
-            let node_emb = get_embedding(n, embedder, embedding_cache);
+            let node_emb = get_embedding(n, embedder, embedding_cache, workspace);
             if let Some(emb) = node_emb {
                 cosine_similarity(&query_emb, &emb) > threshold
             } else {
@@ -202,6 +203,7 @@ fn get_embedding(
     node: &crate::schema::GraphNode,
     embedder: &NlpEmbedder,
     cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    workspace: &std::path::Path,
 ) -> Option<Vec<f32>> {
     // Check cache
     if let Some(emb) = cache.lock().get(&node.id).cloned() {
@@ -215,11 +217,12 @@ fn get_embedding(
         }
     }
     // On-demand embed
-    let text = build_enriched_text(node);
+    let text = build_enriched_text(node, workspace);
     embedder.embed(&text).ok()
 }
 
 pub fn explain_symbol(
+    workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     occupancy: &OccupancyMap,
@@ -242,7 +245,7 @@ pub fn explain_symbol(
     // Show the actual code so the user can see what the symbol looks
     // like, not just metadata about it. Single-user value: a developer
     // asking "what is this?" wants the implementation, not path + score.
-    if let Some(excerpt) = read_body_summary(&node, 200) {
+    if let Some(excerpt) = read_body_summary(&node, 200, workspace) {
         lines.push(String::new());
         lines.push("### Source".to_string());
         lines.push("```".to_string());

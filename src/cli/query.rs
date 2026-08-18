@@ -25,7 +25,7 @@ pub fn run_query(expression: &str, workspace: &std::path::Path) -> Result<()> {
 
     let embedder = NlpEmbedder::new()?;
     let cache = Arc::new(Mutex::new(HashMap::new()));
-    let mut executor = Executor::new(&graph, &embedder, &cache);
+    let mut executor = Executor::new(&graph, &embedder, &cache, workspace);
     let spec = parse_query_string(expression);
 
     match executor.execute(&spec) {

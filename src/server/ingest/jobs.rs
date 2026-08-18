@@ -177,12 +177,13 @@ impl LainServer {
                 let graph_clone = self.graph.clone();
                 let embedder_clone = self.embedder.clone();
                 let ids = refreshed_ids.clone();
+                let ws_for_nlp = self.config.workspace.clone();
                 tokio::spawn(async move {
                     let mut count = 0;
                     for id in ids.iter().take(MAX_EMBED_PER_PASS) {
                         if let Ok(Some(mut gn)) = graph_clone.get_node(id) {
                             if gn.embedding.is_none() {
-                                let text = crate::tools::utils::build_enriched_text(&gn);
+                                let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                                 if let Ok(emb) = embedder_clone.embed(&text) {
                                     gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
                                     if graph_clone.insert_node(&gn).is_ok() {

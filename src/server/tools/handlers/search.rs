@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub fn semantic_search(
+    workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
@@ -100,7 +101,7 @@ pub fn semantic_search(
             // reuse these 200 instead of recomputing, so cold cost amortizes
             // across the session rather than every call.
             volatile_embed_count += 1;
-            let text = build_enriched_text(node);
+            let text = build_enriched_text(node, workspace);
             embedder.embed(&text).ok()
         } else {
             None
@@ -135,7 +136,7 @@ pub fn semantic_search(
             // "GraphDatabase") surface even when the cosine score alone
             // is borderline.
             let lex = if tuning.lexical_weight > 0.0 {
-                let text = build_enriched_text(node);
+                let text = build_enriched_text(node, workspace);
                 token_recall(query, &text)
             } else {
                 0.0
@@ -189,7 +190,7 @@ pub fn semantic_search(
         let k = tuning.cross_encoder_top_k.min(scored.len());
         let mut reranked: Vec<Scored> = Vec::with_capacity(k);
         for (node, hybrid) in scored.iter().take(k) {
-            let text = build_enriched_text(node);
+            let text = build_enriched_text(node, workspace);
             let ce_score = cross_encoder.score(query, &text).unwrap_or(0.0);
             reranked.push(Scored { node, hybrid: *hybrid, score: ce_score, kind: ScoreKind::CrossLogit });
         }
@@ -215,7 +216,7 @@ pub fn semantic_search(
             let sig = s.node.signature.as_ref().map(|x| format!(" | {}", x)).unwrap_or_default();
             // Short body excerpt so behavior-shaped terms (e.g. `bincode`
             // in GraphDatabase::save_to_disk) appear in the response text.
-            let body = read_body_summary(s.node, 80)
+            let body = read_body_summary(s.node, 80, workspace)
                 .map(|b| format!(" | {}", b))
                 .unwrap_or_default();
             // Label depends on which score drives the ranking. Cross-encoder

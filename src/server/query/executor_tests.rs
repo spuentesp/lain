@@ -56,7 +56,7 @@ fn make_test_executor_params() -> (NlpEmbedder, Arc<Mutex<HashMap<String, Vec<f3
 fn test_executor_new() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
     // Just verify executor can be created and used (nodes_visited is private)
     let spec = QuerySpec::new(vec![]);
     let result = exec.execute(&spec);
@@ -67,7 +67,7 @@ fn test_executor_new() {
 fn test_execute_find_all_functions() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -90,7 +90,7 @@ fn test_execute_find_all_functions() {
 fn test_execute_find_by_name() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -113,7 +113,7 @@ fn test_execute_find_by_name() {
 fn test_execute_find_empty_result() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -135,7 +135,7 @@ fn test_execute_find_empty_result() {
 fn test_execute_connect_outgoing() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -164,7 +164,7 @@ fn test_execute_connect_outgoing() {
 fn test_execute_connect_depth_2() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -191,7 +191,7 @@ fn test_execute_connect_depth_2() {
 fn test_execute_connect_incoming() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -218,7 +218,7 @@ fn test_execute_connect_incoming() {
 fn test_execute_connect_incoming_depth_2() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -245,7 +245,7 @@ fn test_execute_connect_incoming_depth_2() {
 fn test_execute_connect_no_start_nodes() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -270,7 +270,7 @@ fn test_execute_connect_no_start_nodes() {
 fn test_execute_named_query_via_spec() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     // Use named field in QuerySpec directly
     let mut spec = QuerySpec::new(vec![
@@ -294,7 +294,7 @@ fn test_execute_named_query_via_spec() {
 fn test_execute_filter_by_name() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -319,7 +319,7 @@ fn test_execute_filter_by_name() {
 fn test_execute_limit() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -339,7 +339,7 @@ fn test_execute_limit() {
 fn test_execute_limit_with_offset() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -359,7 +359,7 @@ fn test_execute_limit_with_offset() {
 fn test_execute_sort_by_name_asc() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -382,7 +382,7 @@ fn test_execute_sort_by_name_asc() {
 fn test_execute_sort_by_name_desc() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -405,7 +405,7 @@ fn test_execute_sort_by_name_desc() {
 fn test_execute_group_by_type() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -425,7 +425,7 @@ fn test_execute_group_by_type() {
 fn test_execute_chain_find_connect_filter() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -457,7 +457,7 @@ fn test_execute_chain_find_connect_filter() {
 fn test_execute_empty_ops() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![]);
     let result = exec.execute(&spec);
@@ -470,7 +470,7 @@ fn test_execute_empty_ops() {
 fn test_execute_meta_timing() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -498,7 +498,7 @@ fn test_execute_with_label_filter_deprecated() {
     graph.upsert_node(node).unwrap();
 
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
             type_selector: Some(TypeSelector::Single("Function".to_string())),
@@ -518,7 +518,7 @@ fn test_execute_with_label_filter_deprecated() {
 fn test_execute_connect_edge_selector_or() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -545,7 +545,7 @@ fn test_execute_connect_edge_selector_or() {
 fn test_executor_query_with_edge_not_matching() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -571,7 +571,7 @@ fn test_executor_query_with_edge_not_matching() {
 fn test_execute_find_with_path_filter() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -593,7 +593,7 @@ fn test_execute_find_with_path_filter() {
 fn test_bfs_traverse_does_not_include_start() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -622,7 +622,7 @@ fn test_bfs_traverse_does_not_include_start() {
 fn test_execute_with_startswith_name_selector() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -643,7 +643,7 @@ fn test_execute_with_startswith_name_selector() {
 fn test_execute_with_endswith_name_selector() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -664,7 +664,7 @@ fn test_execute_with_endswith_name_selector() {
 fn test_execute_connect_not_edge_selector() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -692,7 +692,7 @@ fn test_execute_connect_not_edge_selector() {
 fn test_execute_find_multiple_types() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -712,7 +712,7 @@ fn test_execute_find_multiple_types() {
 fn test_execute_filter_no_matching() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -736,7 +736,7 @@ fn test_execute_filter_no_matching() {
 fn test_execute_limit_exceeds_count() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
@@ -767,7 +767,7 @@ fn test_execute_with_label_filter_not() {
     graph.upsert_node(node2).unwrap();
 
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp {
             type_selector: Some(TypeSelector::Single("Function".to_string())),
@@ -788,7 +788,7 @@ fn test_execute_with_label_filter_not() {
 fn test_execute_connect_chain_single_depth() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     // main -> a -> b, depth=1 should only give a
     let spec = QuerySpec::new(vec![
@@ -816,7 +816,7 @@ fn test_execute_connect_chain_single_depth() {
 fn test_execute_connect_to_leaf_node() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::new(&graph, &embedder, &cache);
+    let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
     // c is leaf, has no outgoing calls
     let spec = QuerySpec::new(vec![
