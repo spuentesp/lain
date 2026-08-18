@@ -83,6 +83,46 @@ pub fn get_bool_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<bool
         .and_then(|v| v.as_bool())
 }
 
+/// Extract a string argument from the args map. Returns an empty
+/// string when the key is missing or the value isn't a string.
+/// Use [`required_str_arg`] when an empty fallback would be wrong.
+pub fn str_arg(args: &Map<String, Value>, key: &str) -> String {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Extract a required string argument. Returns `LainError::NotFound`
+/// when the key is missing or the value isn't a string.
+pub fn required_str_arg(args: &Map<String, Value>, key: &str) -> Result<String, LainError> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| LainError::NotFound(format!("Missing required argument: {}", key)))
+}
+
+/// Extract an optional usize argument.
+pub fn usize_arg(args: &Map<String, Value>, key: &str) -> Option<usize> {
+    args.get(key).and_then(|v| v.as_u64()).map(|n| n as usize)
+}
+
+/// Extract an optional bool argument.
+pub fn bool_arg(args: &Map<String, Value>, key: &str) -> Option<bool> {
+    args.get(key).and_then(|v| v.as_bool())
+}
+
+/// Extract an optional u32 argument.
+pub fn u32_arg(args: &Map<String, Value>, key: &str) -> Option<u32> {
+    args.get(key).and_then(|v| v.as_u64()).map(|n| n as u32)
+}
+
+/// Extract an optional string argument, returning an empty string
+/// when missing. Equivalent to `str_arg(args, key)`.
+pub fn opt_str_arg(args: &Map<String, Value>, key: &str) -> String {
+    str_arg(args, key)
+}
+
 /// Build enriched text for embedding: name + signature + docstring + path
 /// + the first ~200 tokens of the source body (when a line range is known).
 ///

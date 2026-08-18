@@ -8,47 +8,19 @@
 use crate::error::LainError;
 use crate::server::tools::handlers;
 use crate::server::tools::registry::{ToolCapability, ToolContext, ToolHandler, ToolHandlerEntry};
+use crate::server::tools::utils::{
+    bool_arg, opt_str_arg, required_str_arg, str_arg, u32_arg, usize_arg,
+};
 use async_trait::async_trait;
 use inventory;
 use serde_json::{Map, Value};
 
-// ─── Helper macros ────────────────────────────────────────────────────────────
+// ─── Handler macros ────────────────────────────────────────────────────────────
 
-/// Helper to extract a string argument from the args map.
-fn str_arg(args: &Map<String, Value>, key: &str) -> String {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Helper to extract a required string argument.
-fn required_str_arg(args: &Map<String, Value>, key: &str) -> Result<String, LainError> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| LainError::NotFound(format!("Missing required argument: {}", key)))
-}
-
-/// Helper to extract an optional usize argument.
-fn usize_arg(args: &Map<String, Value>, key: &str) -> Option<usize> {
-    args.get(key).and_then(|v| v.as_u64()).map(|n| n as usize)
-}
-
-/// Helper to extract an optional bool argument.
-fn bool_arg(args: &Map<String, Value>, key: &str) -> Option<bool> {
-    args.get(key).and_then(|v| v.as_bool())
-}
-
-/// Helper to extract an optional u32 argument.
-fn u32_arg(args: &Map<String, Value>, key: &str) -> Option<u32> {
-    args.get(key).and_then(|v| v.as_u64()).map(|n| n as u32)
-}
-
-/// Helper to extract an optional string argument (returns empty string if missing).
-fn opt_str_arg(args: &Map<String, Value>, key: &str) -> String {
-    str_arg(args, key)
-}
+// Arg-extraction helpers (`str_arg`, `required_str_arg`, `usize_arg`,
+// `bool_arg`, `u32_arg`, `opt_str_arg`) are imported from
+// `crate::server::tools::utils` so handler modules and integration
+// tests share one canonical set.
 
 // ─── Architecture handlers ─────────────────────────────────────────────────────
 
