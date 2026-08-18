@@ -295,18 +295,25 @@ impl GraphDatabase {
                 }
                 new_entries.push((path.clone(), fresh));
             }
-        }
 
-        for id in &removed_ids {
-            self.index_map.remove(id);
-        }
-        // One swap per path: readers see the old set or the new set, never a
-        // half-filled one.
-        for (path, indices) in new_entries {
-            if indices.is_empty() {
-                self.path_index.remove(&path);
-            } else {
-                self.path_index.insert(path, indices);
+            // Swap the indexes while still holding the graph write lock.
+            // Doing it after releasing the lock left a window in which
+            // `path_index` still pointed at NodeIndex values already removed
+            // from the graph, so a concurrent reader resolved every one of
+            // them to `None` and concluded the file had no nodes at all. That
+            // was observable: two tools in the same batch disagreed about
+            // whether a file was in the graph. Readers that consult
+            // `path_index` under the graph read lock now see the old pair or
+            // the new pair, never a mix.
+            for id in &removed_ids {
+                self.index_map.remove(id);
+            }
+            for (path, indices) in new_entries {
+                if indices.is_empty() {
+                    self.path_index.remove(&path);
+                } else {
+                    self.path_index.insert(path, indices);
+                }
             }
         }
 
@@ -364,11 +371,14 @@ impl GraphDatabase {
     /// Both sides are whole seconds, so an edit landing in the same second as
     /// the scan reads as `Fresh`. That is an acceptable miss for a hint.
     pub fn freshness(&self, workspace: &Path, path: &str) -> Freshness {
-        let Some(indices) = self.path_index.get(path).map(|r| r.value().clone()) else {
-            return Freshness::Absent;
-        };
+        // Hold the graph lock across the `path_index` read: the writer updates
+        // both under this same lock, so this observes a consistent pair rather
+        // than an index that has outlived the nodes it points at.
         let last_scan = {
             let graph = self.graph.read();
+            let Some(indices) = self.path_index.get(path).map(|r| r.value().clone()) else {
+                return Freshness::Absent;
+            };
             indices
                 .iter()
                 .filter_map(|idx| graph.node_weight(*idx))
