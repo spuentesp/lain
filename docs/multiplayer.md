@@ -152,7 +152,7 @@ Returns:
       "symbols_base": ["login", "validate"],
       "symbols_head": ["login", "logout"],
       "overlap": ["login"],
-      "severity": "high"
+      "severity": "medium"
     }
   ],
   "total_overlaps": 1
