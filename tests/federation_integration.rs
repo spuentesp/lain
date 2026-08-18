@@ -789,3 +789,164 @@ async fn detect_overlap_two_shared_functions_is_high() {
 // `src/server/mcp/presence_tools.rs`'s `#[cfg(test)] mod`, where
 // `overlap_severity` is private. The end-to-end MCP path here exercises
 // the `medium` and `high` bands via real git + tree-sitter.
+
+// ---------------------------------------------------------------------------
+// Single-repo federation: per-repo structural tools must see the real graph
+// (not the placeholder staging dir).
+//
+// Before this fix, `with_federation` built the executor's
+// `ToolContext::graph` from a fresh `GraphDatabase::new(<staging
+// dir>/.lain/graph.bin)` — an empty sled DB that the executor's per-repo
+// tool handlers (`find_anchors`, `explain_symbol`, `get_blast_radius`,
+// `query_graph`, `get_function_callers`, `get_function_callees`) then
+// queried. Result: in a real federation with thousands of nodes, the
+// per-repo tools reported "0 anchors" / "node not found" while the
+// federation-level tools (`list_repos`, `search_org`) reported a
+// fully-populated graph. Confident false negatives.
+//
+// The fix: when the federation has exactly one repo, the executor's
+// graph is that repo's indexed `GraphDatabase`. Multi-repo
+// federations still bind to the placeholder and need the round-2
+// federation-aware handler refactor; this test pins the single-repo
+// case so the regression can't reappear silently.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
+    // Repo with a tiny Rust crate — `find_anchors` should find at
+    // least one node (`hello`) in the file/module hierarchy even
+    // without a full LSP pass.
+    let repo = tempfile::tempdir().unwrap();
+    let repo_path = repo.path().to_path_buf();
+    write_tiny_rust_crate(&repo_path, "alpha");
+    init_bare_git_repo(&repo_path);
+    // Commit the tiny crate so the default branch (master) exists
+    // AND `git.get_all_tracked_files()` returns the crate's files
+    // (an empty `--allow-empty` commit would yield 0 files and the
+    // indexer would short-circuit before populating the graph).
+    {
+        let status = std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap()])
+            .args(["-c", "user.email=test@x"])
+            .args(["-c", "user.name=t"])
+            .args(["add", "-A"])
+            .status()
+            .expect("git add");
+        assert!(status.success(), "git add failed: {status:?}");
+        let status = std::process::Command::new("git")
+            .args(["-C", repo_path.to_str().unwrap()])
+            .args(["-c", "user.email=test@x"])
+            .args(["-c", "user.name=t"])
+            .args(["commit", "-m", "init alpha"])
+            .status()
+            .expect("git commit");
+        assert!(status.success(), "git commit failed: {status:?}");
+    }
+
+    // Build a single-repo federation via a temp repos.yaml.
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let cfg_path: PathBuf = cfg_dir.path().join("repos.yaml");
+    let yaml = format!(
+        "repos:\n- id: alpha\n  source:\n    type: workspace_dir\n    path: {}\n    ref: HEAD\ndata_dir: {}\nready_threshold: 0.5\n",
+        repo_path.display(),
+        cfg_dir.path().join("data").display(),
+    );
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let fed = load_federation(&cfg_path).await.unwrap();
+    assert_eq!(fed.list_repos().len(), 1, "federation must have exactly one repo");
+
+    // Index the repo: `load_federation` + `add_repo` only sets up
+    // the sled DB; the actual indexed content is materialized by
+    // `RepoIndex::index` (tree-sitter extract → LSP hydrate →
+    // git co-change). `project_repo` then mirrors those nodes
+    // into the federation's in-memory backend for cross-repo
+    // queries. Without `index` the per-repo db is empty and the
+    // test is meaningless.
+    let alpha_id_proj = RepoId::new("alpha").unwrap();
+    let alpha_repo = fed.get_repo(&alpha_id_proj).expect("alpha present");
+    alpha_repo.index().await.expect("index alpha");
+    fed.project_repo(&alpha_id_proj).await.expect("project_repo");
+
+    // Build a LainServer in federation mode. The single-repo
+    // fix should bind `tool_executor.graph` to the federation's
+    // indexed repo graph. Clone the Arc so we can still read
+    // `fed.get_repo(...).db()` below to compare against the
+    // executor's view.
+    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None)
+        .expect("with_federation");
+
+    // The per-repo tool's view of the world. `find_anchors` calls
+    // `graph.find_anchors(limit)` which is the very first read of
+    // the executor's `ctx.graph`. Before the fix this returned 0
+    // because the executor was bound to the empty staging DB.
+    let raw = lain::server::tools::handlers::metrics::find_anchors(
+        server.tool_executor.graph(),
+        server.tool_executor.overlay(),
+        10,
+    )
+    .expect("find_anchors should not error");
+    // The exact text varies (anchors vs "No anchors"), but it must
+    // NOT be the "0 anchors in empty staging" failure that the
+    // pre-fix server returned. The test asserts the graph is
+    // reachable from the executor by counting nodes.
+    let alpha_id = RepoId::new("alpha").unwrap();
+    let alpha_repo = fed
+        .get_repo(&alpha_id)
+        .expect("alpha repo present");
+    let repo_graph = alpha_repo.db();
+    let executor_count = server.tool_executor.graph().node_count();
+    let real_count = repo_graph.node_count();
+    assert_eq!(
+        executor_count, real_count,
+        "single-repo executor must share the repo's indexed graph (executor={executor_count}, real={real_count})"
+    );
+    // Also: the placeholder is NOT empty (we wrote one Rust file
+    // with one function), so the equality test above would already
+    // pass. The additional sanity check is that we don't get
+    // the historical "0 anchors in empty staging" output.
+    assert!(
+        real_count > 0,
+        "indexed repo should have at least one node; got {real_count}"
+    );
+    // Suppress the unused-warning for the `raw` capture while
+    // keeping the find_anchors call as a smoke test of the
+    // dispatch path. (The real assertion is on graph identity.)
+    let _ = raw;
+}
+
+#[tokio::test]
+async fn multi_repo_federation_falls_back_to_placeholder() {
+    // Two repos → multi-repo federation → the placeholder graph
+    // still binds the executor. Per-repo tools still won't work,
+    // but the executor must construct cleanly and the placeholder
+    // must be the SAME empty DB regardless of repo count. This
+    // pins the "only the single-repo path got the fix" contract.
+    let ws_a = tempfile::tempdir().unwrap();
+    let ws_b = tempfile::tempdir().unwrap();
+    init_bare_git_repo(ws_a.path());
+    init_bare_git_repo(ws_b.path());
+
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let cfg_path: PathBuf = cfg_dir.path().join("repos.yaml");
+    let yaml = format!(
+        "repos:\n- id: a\n  source:\n    type: workspace_dir\n    path: {}\n    ref: HEAD\n- id: b\n  source:\n    type: workspace_dir\n    path: {}\n    ref: HEAD\ndata_dir: {}\nready_threshold: 0.5\n",
+        ws_a.path().display(),
+        ws_b.path().display(),
+        cfg_dir.path().join("data").display(),
+    );
+    std::fs::write(&cfg_path, yaml).unwrap();
+    let fed = load_federation(&cfg_path).await.unwrap();
+    assert_eq!(fed.list_repos().len(), 2);
+
+    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None)
+        .expect("with_federation");
+
+    // The placeholder path: the executor's graph is fresh and
+    // empty (0 nodes), not bound to either repo. This is the
+    // known limitation the next round-2 refactor will address.
+    assert_eq!(
+        server.tool_executor.graph().node_count(),
+        0,
+        "multi-repo federation still binds the placeholder; round-2 will fix this"
+    );
+}

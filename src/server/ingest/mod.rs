@@ -328,6 +328,38 @@ impl LainServer {
         let _ = std::fs::remove_file(&mem_path);
 
         let graph = GraphDatabase::new(&mem_path)?;
+        // **Single-repo federation binding fix.** When the federation
+        // has exactly one repo, swap the placeholder `graph` for that
+        // repo's real indexed `GraphDatabase`. This unblocks the
+        // per-repo structural tools (`find_anchors`, `explain_symbol`,
+        // `get_blast_radius`, `query_graph`, `get_function_callers`,
+        // `get_function_callees`) which previously read from the
+        // empty staging dir and returned 0 anchors / "node not found"
+        // even when `list_repos` and `search_org` (federation-level
+        // tools) reported a fully-populated 3000+ node graph. The
+        // placeholder remains the source of truth for multi-repo
+        // federations — those still need the round-2 refactor that
+        // makes the per-repo handlers federation-aware.
+        let graph = if federation.list_repos().len() == 1 {
+            let only_id = federation
+                .list_repos()
+                .into_iter()
+                .next()
+                .map(|(id, _)| id)
+                .expect("single-repo federation has exactly one id");
+            match federation.get_repo(&only_id) {
+                Some(repo) => {
+                    info!(
+                        "single-repo federation: binding per-repo tools to {}",
+                        only_id.as_str()
+                    );
+                    repo.db().clone()
+                }
+                None => graph,
+            }
+        } else {
+            graph
+        };
         let overlay = VolatileOverlay::new();
         let embedder = NlpEmbedder::new()?;
         if embedder.is_stub() {
@@ -522,6 +554,38 @@ impl LainServer {
         let _ = std::fs::remove_file(&mem_path);
 
         let graph = GraphDatabase::new(&mem_path)?;
+        // **Single-repo federation binding fix.** When the federation
+        // has exactly one repo, swap the placeholder `graph` for that
+        // repo's real indexed `GraphDatabase`. This unblocks the
+        // per-repo structural tools (`find_anchors`, `explain_symbol`,
+        // `get_blast_radius`, `query_graph`, `get_function_callers`,
+        // `get_function_callees`) which previously read from the
+        // empty staging dir and returned 0 anchors / "node not found"
+        // even when `list_repos` and `search_org` (federation-level
+        // tools) reported a fully-populated 3000+ node graph. The
+        // placeholder remains the source of truth for multi-repo
+        // federations — those still need the round-2 refactor that
+        // makes the per-repo handlers federation-aware.
+        let graph = if federation.list_repos().len() == 1 {
+            let only_id = federation
+                .list_repos()
+                .into_iter()
+                .next()
+                .map(|(id, _)| id)
+                .expect("single-repo federation has exactly one id");
+            match federation.get_repo(&only_id) {
+                Some(repo) => {
+                    info!(
+                        "single-repo federation: binding per-repo tools to {}",
+                        only_id.as_str()
+                    );
+                    repo.db().clone()
+                }
+                None => graph,
+            }
+        } else {
+            graph
+        };
         let overlay = VolatileOverlay::new();
         let embedder = NlpEmbedder::new()?;
         if embedder.is_stub() {
