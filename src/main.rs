@@ -8,13 +8,21 @@
 //! point (claim/release against the server's presence registry).
 //! `doctor` is the "one version of truth" diagnostic for the
 //! installation — binary version + git sha + on-disk state.
+//!
+//! `main` is sync. Only the `server` subcommand needs a tokio runtime,
+//! and we build a fresh one for it on demand rather than wrapping the
+//! whole binary in `#[tokio::main]`. Running every subcommand inside a
+//! tokio runtime was masking a reqwest-blocking panic: `reqwest::blocking`
+//! builds its own internal runtime, and dropping a nested runtime from
+//! inside the outer `#[tokio::main]` context aborts the process. Hooks
+//! and `doctor` are pure sync code; they don't need (and shouldn't have)
+//! a tokio runtime in scope.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use lain::cli::{Args, Commands};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Some(Commands::Server {
@@ -24,17 +32,30 @@ async fn main() -> Result<()> {
             log_level,
             workspace,
             no_process_attribution,
-        }) => lain::cli::server::run_server(
-            &config,
-            &transport,
-            port,
-            &log_level,
-            &workspace,
-            no_process_attribution,
-        )
-        .await,
+        }) => {
+            // The server is the only subcommand that needs a tokio
+            // runtime. Build one on demand rather than wrapping the
+            // whole binary.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for server subcommand")?;
+            rt.block_on(lain::cli::server::run_server(
+                &config,
+                &transport,
+                port,
+                &log_level,
+                &workspace,
+                no_process_attribution,
+            ))
+        }
         Some(Commands::Workspaces { config, action }) => {
-            lain::cli::workspaces::run(action, &config).await
+            // workspaces is sync; wrap the single async call.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for workspaces subcommand")?;
+            rt.block_on(lain::cli::workspaces::run(action, &config))
         }
         Some(Commands::Repos { config, action }) => lain::cli::repos::run(action, &config),
         Some(Commands::Query { config, expression }) => {

@@ -61,8 +61,10 @@ echo "OK: agent-b saw conflict"
 
 # 6. Verify server state via curl. Note: MCP wraps tool output inside the
 #    "content[0].text" string, so quote chars are JSON-escaped (\") — use
-#    python3 to parse rather than grep on escaped text.
-ACTIVE=$(curl -s -X POST "$LAIN_URL" -H 'Content-Type: application/json' \
+#    python3 to parse rather than grep on escaped text. `LAIN_URL` is the
+#    bare server URL per the new convention; append `/mcp` for direct
+#    JSON-RPC calls (the `lain hooks` CLI does this internally).
+ACTIVE=$(curl -s -X POST "$LAIN_URL/mcp" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_active_agents","arguments":{}},"id":1}' \
   | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]["content"][0]["text"]; print(len(json.loads(r)))')
 if [ "$ACTIVE" -lt 2 ]; then
@@ -76,7 +78,7 @@ echo "OK: 2 active agents in server"
 echo "OK: agent-a released auth.rs"
 
 # 8. Verify occupancy.
-OCC=$(curl -s -X POST "$LAIN_URL" -H 'Content-Type: application/json' \
+OCC=$(curl -s -X POST "$LAIN_URL/mcp" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_occupancy","arguments":{"path":"'$TMPDIR/repos/auth-svc/auth.rs'"}},"id":1}' \
   | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]["content"][0]["text"]; print(len(json.loads(r)))')
 echo "OK: occupancy query returned $OCC entry/entries"

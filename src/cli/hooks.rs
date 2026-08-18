@@ -408,27 +408,45 @@ pub fn release(
     Ok(())
 }
 
-/// Probe whether a lain server is reachable at `--url`. Cheap — a single
-/// `GET /health` with a short timeout. Used by `claim`/`release` to
-/// decide between the in-memory MCP layer (full coordination) and the
-/// filesystem lock fallback (zero daemon). Treats any non-2xx response
-/// as "server not up" so a server that's up but unhealthy (e.g. mid
-/// startup, returning 503) cleanly falls back rather than hanging the
-/// hook.
+/// Probe whether a lain server is reachable at `--url`. Cheap TCP-level
+/// `connect_timeout` against the URL's host:port — no HTTP round-trip,
+/// no reqwest runtime to drop inside the surrounding `#[tokio::main]`.
+/// Used by `claim`/`release` to decide between the in-memory MCP layer
+/// (full coordination) and the filesystem lock fallback (zero daemon).
+/// Returns false on any parse, DNS, or connect failure; the caller then
+/// falls back to filesystem and the hook stays fail-open.
 fn server_reachable(url: &str, timeout: Duration) -> bool {
     let endpoint = mcp_endpoint(url);
     let health_url = format!("{}/health", endpoint.trim_end_matches("/mcp"));
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .build()
-    {
-        Ok(c) => c,
+    // Pull host:port out of the URL. We deliberately don't bother with
+    // the path / query — only the host:port matters for the TCP probe.
+    let scheme_end = health_url.find("://").map(|i| i + 3).unwrap_or(0);
+    let authority = &health_url[scheme_end..];
+    let authority = authority
+        .split('/')
+        .next()
+        .unwrap_or(authority)
+        .split('?')
+        .next()
+        .unwrap_or(authority);
+    let host_port = match authority.rsplit_once(':') {
+        Some((h, p)) => {
+            // Strip brackets from IPv6 literals; otherwise leave as-is.
+            let h = h.trim_start_matches('[').trim_end_matches(']');
+            format!("{h}:{p}")
+        }
+        None => return false,
+    };
+    let addrs = match std::net::ToSocketAddrs::to_socket_addrs(&host_port) {
+        Ok(a) => a,
         Err(_) => return false,
     };
-    match client.get(&health_url).send() {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
+    for addr in addrs {
+        if std::net::TcpStream::connect_timeout(&addr, timeout).is_ok() {
+            return true;
+        }
     }
+    false
 }
 
 /// Walk up from `path` until we find a `.git` directory or an existing

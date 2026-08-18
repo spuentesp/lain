@@ -28,17 +28,31 @@ pub fn socket_path_for(repos_yaml: &Path) -> PathBuf {
 }
 
 /// Tell the server (if running) to reload. Returns `Ok(())` whether
-/// or not the server is up — a missing socket is not an error.
+/// or not the server is up — a missing or refused socket is not an
+/// error. (A refused socket is usually a stale file left over from a
+/// previous run; treating it as "not running" keeps the CLI's atomic
+/// YAML write useful and prevents tests / hooks from breaking on
+/// leftover state.)
 pub fn signal_reload(repos_yaml: &Path) -> anyhow::Result<()> {
     let sock = socket_path_for(repos_yaml);
     if !sock.exists() {
-        // Server not running. The YAML file was already written
-        // atomically, so a later server start picks it up.
         return Ok(());
     }
-    let mut stream = std::os::unix::net::UnixStream::connect(&sock)?;
-    stream.write_all(b"reload\n")?;
-    Ok(())
+    match std::os::unix::net::UnixStream::connect(&sock) {
+        Ok(mut stream) => {
+            stream.write_all(b"reload\n")?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
+            || e.kind() == std::io::ErrorKind::NotFound =>
+        {
+            // Stale socket from a previous run; clean up so the next
+            // call short-circuits on the `!sock.exists()` check.
+            let _ = std::fs::remove_file(&sock);
+            Ok(())
+        }
+        Err(e) => Err(anyhow::Error::from(e)),
+    }
 }
 
 /// Spawn a Unix socket listener at `path`. On receipt of `"reload\n"`,
