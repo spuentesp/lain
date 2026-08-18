@@ -32,6 +32,7 @@ fn main() -> Result<()> {
             log_level,
             workspace,
             no_process_attribution,
+            embedding_model,
         }) => {
             // The server is the only subcommand that needs a tokio
             // runtime. Build one on demand rather than wrapping the
@@ -47,6 +48,7 @@ fn main() -> Result<()> {
                 &log_level,
                 &workspace,
                 no_process_attribution,
+                embedding_model.as_deref(),
             ))
         }
         Some(Commands::Workspaces { config, action }) => {

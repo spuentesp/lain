@@ -282,6 +282,7 @@ impl LainServer {
         transport: Transport,
         port: u16,
         repos_yaml: Option<PathBuf>,
+        embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
         Self::with_federation_with_attribution(
             federation,
@@ -289,6 +290,7 @@ impl LainServer {
             port,
             repos_yaml,
             default_attribution_backend(),
+            embedding_model,
         )
     }
 
@@ -296,12 +298,17 @@ impl LainServer {
     /// explicit [`AttributionBackend`]. The chosen backend is stored on
     /// the server (in `self.attribution`) and handed to the background
     /// [`AttributionWatcher`] so it has the same view as the CLI.
+    /// `embedding_model` is an optional path to an ONNX bi-encoder
+    /// model dir; when `Some`, `semantic_search` becomes live; when
+    /// `None`, the embedder runs in stub mode and the tool returns an
+    /// empty result.
     pub fn with_federation_with_attribution(
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
         repos_yaml: Option<PathBuf>,
         attribution: Arc<dyn AttributionBackend>,
+        embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
         // Build a minimal executor — same trick as `cmds/server.rs`'s
         // `build_minimal_executor`. Federation tools never reach the
@@ -361,9 +368,25 @@ impl LainServer {
             graph
         };
         let overlay = VolatileOverlay::new();
-        let embedder = NlpEmbedder::new()?;
+        let embedder = if let Some(model_path) = embedding_model {
+            let tokenizer_path = model_path.join("tokenizer.json");
+            crate::server::nlp::NlpEmbedder::with_max_threads(
+                model_path,
+                &tokenizer_path,
+                0,
+            )?
+        } else {
+            crate::server::nlp::NlpEmbedder::new()?
+        };
         if embedder.is_stub() {
-            info!("NLP embedder running in stub mode (federation placeholder)");
+            info!("NLP embedder running in stub mode (no --embedding-model set)");
+        } else {
+            info!(
+                "NLP embedder loaded from {}",
+                embedding_model
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            );
         }
         let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
         let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
@@ -507,6 +530,7 @@ impl LainServer {
         port: u16,
         workspaces: Arc<WorkspacesFile>,
         repos_yaml: Option<PathBuf>,
+        embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
         Self::with_federation_and_workspaces_with_attribution(
             federation,
@@ -515,11 +539,13 @@ impl LainServer {
             workspaces,
             repos_yaml,
             default_attribution_backend(),
+            embedding_model,
         )
     }
 
     /// Same as [`Self::with_federation_and_workspaces`] but lets the
-    /// caller supply an explicit [`AttributionBackend`].
+    /// caller supply an explicit [`AttributionBackend`]. See
+    /// [`Self::with_federation_with_attribution`] for `embedding_model`.
     pub fn with_federation_and_workspaces_with_attribution(
         federation: Arc<FederatedIndex>,
         transport: Transport,
@@ -527,6 +553,7 @@ impl LainServer {
         workspaces: Arc<WorkspacesFile>,
         repos_yaml: Option<PathBuf>,
         attribution: Arc<dyn AttributionBackend>,
+        embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
         // Mostly the same wiring as `with_federation`. The differences:
         // we store the workspaces file in `federation_workspaces`, and we
@@ -587,9 +614,25 @@ impl LainServer {
             graph
         };
         let overlay = VolatileOverlay::new();
-        let embedder = NlpEmbedder::new()?;
+        let embedder = if let Some(model_path) = embedding_model {
+            let tokenizer_path = model_path.join("tokenizer.json");
+            crate::server::nlp::NlpEmbedder::with_max_threads(
+                model_path,
+                &tokenizer_path,
+                0,
+            )?
+        } else {
+            crate::server::nlp::NlpEmbedder::new()?
+        };
         if embedder.is_stub() {
-            info!("NLP embedder running in stub mode (federation placeholder)");
+            info!("NLP embedder running in stub mode (no --embedding-model set)");
+        } else {
+            info!(
+                "NLP embedder loaded from {}",
+                embedding_model
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            );
         }
         let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
         let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);

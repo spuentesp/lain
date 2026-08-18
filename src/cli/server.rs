@@ -37,6 +37,7 @@ pub async fn run_server(
     log_level: &str,
     workspace_arg: &str,
     no_process_attribution: bool,
+    embedding_model: Option<&Path>,
 ) -> Result<()> {
     init_tracing(log_level);
 
@@ -128,6 +129,7 @@ pub async fn run_server(
             workspaces,
             repos_yaml.clone(),
             attribution,
+            embedding_model,
         )?
     } else {
         LainServer::with_federation_with_attribution(
@@ -136,6 +138,7 @@ pub async fn run_server(
             port,
             repos_yaml.clone(),
             attribution,
+            embedding_model,
         )?
     };
 

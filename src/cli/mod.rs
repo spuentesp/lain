@@ -61,6 +61,15 @@ pub enum Commands {
         /// access) or for operators who want attribution off entirely.
         #[arg(long)]
         no_process_attribution: bool,
+        /// Path to the ONNX bi-encoder model directory (contains
+        /// `model.onnx` and `tokenizer.json`). When set, the
+        /// `semantic_search` tool becomes live; when unset, the
+        /// embedder runs in stub mode and the tool returns an empty
+        /// result with a clear `NLP Model: Not loaded` warning. The
+        /// on-disk model is small (~90 MB) and is the only thing
+        /// blocking semantic_search in the federation-mode launch.
+        #[arg(long)]
+        embedding_model: Option<PathBuf>,
     },
     /// Manage `workspaces.yaml` for the project.
     Workspaces {

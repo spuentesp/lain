@@ -371,7 +371,7 @@ mod tests {
             let staging = std::env::temp_dir()
                 .join(format!("lain-federation-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&staging);
-            LainServer::with_federation(fed, Transport::Http, 9999, Some(repos_yaml.to_path_buf()))
+            LainServer::with_federation(fed, Transport::Http, 9999, Some(repos_yaml.to_path_buf()), None)
                 .expect("LainServer::with_federation")
         }
 
@@ -549,6 +549,7 @@ mod tests {
                     workspaces: vec![],
                 }),
                 Some(_repos_yaml.clone()),
+                None, // hot-reload doesn't change the embedding model
             )
             .expect("with_federation_and_workspaces");
             assert_eq!(server.workspace_count(), 0);
@@ -616,6 +617,7 @@ mod tests {
                     workspaces: vec![],
                 }),
                 Some(repos_yaml.clone()),
+                None, // hot-reload doesn't change the embedding model
             )
             .expect("with_federation_and_workspaces");
             assert_eq!(server.workspace_count(), 0);

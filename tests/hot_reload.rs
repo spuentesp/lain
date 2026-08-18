@@ -34,6 +34,7 @@ async fn add_repo_to_workspace_is_visible_to_list_repos() {
         lain::server::Transport::Http,
         9999,
         Some(repos_yaml.clone()),
+        None, // no embedding model in tests
     )
     .expect("LainServer::with_federation");
     assert_eq!(server.repo_count(), 1);
@@ -148,6 +149,7 @@ async fn lain_server_reload_bus_returns_same_handle() {
         lain::server::Transport::Http,
         9999,
         Some(repos_yaml.clone()),
+        None, // no embedding model in tests
     )
     .unwrap();
     let bus = server.reload_bus();
@@ -220,6 +222,7 @@ async fn set_workspace_stress_visible_to_shared_lock() {
         9999,
         Arc::clone(&initial_ws),
         Some(repos_yaml.clone()),
+        None, // no embedding model in tests
     )
     .expect("LainServer::with_federation_and_workspaces");
 
@@ -414,6 +417,7 @@ async fn set_workspace_publishes_to_shared_workspaces_handle() {
         9999,
         Arc::clone(&initial),
         Some(repos_yaml.clone()),
+        None, // no embedding model in tests
     )
     .expect("LainServer::with_federation_and_workspaces");
 

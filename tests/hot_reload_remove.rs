@@ -41,6 +41,7 @@ async fn remove_repo_from_workspace_makes_it_invisible_to_list_repos() {
         lain::server::Transport::Http,
         9999,
         Some(repos_yaml.clone()),
+        None, // no embedding model in tests
     )
     .expect("LainServer::with_federation");
     assert_eq!(server.repo_count(), 2);

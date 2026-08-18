@@ -438,6 +438,7 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
         0,
         Arc::clone(&ws_a),
         None,
+        None, // no embedding model in tests
     )
     .expect("with_federation_and_workspaces");
 
@@ -592,6 +593,7 @@ async fn detect_overlap_reports_shared_symbols() {
         0,
         workspaces,
         None,
+        None, // no embedding model in tests
     )
     .expect("with_federation_and_workspaces");
 
@@ -693,6 +695,7 @@ async fn detect_overlap_rejects_unknown_workspace() {
         0,
         workspaces,
         None,
+        None, // no embedding model in tests
     )
     .expect("with_federation_and_workspaces");
 
@@ -758,6 +761,7 @@ async fn detect_overlap_two_shared_functions_is_high() {
         0,
         workspaces,
         None,
+        None, // no embedding model in tests
     )
     .expect("with_federation_and_workspaces");
 
@@ -872,7 +876,7 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     // indexed repo graph. Clone the Arc so we can still read
     // `fed.get_repo(...).db()` below to compare against the
     // executor's view.
-    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None)
+    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
         .expect("with_federation");
 
     // The per-repo tool's view of the world. `find_anchors` calls
@@ -938,7 +942,7 @@ async fn multi_repo_federation_falls_back_to_placeholder() {
     let fed = load_federation(&cfg_path).await.unwrap();
     assert_eq!(fed.list_repos().len(), 2);
 
-    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None)
+    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
         .expect("with_federation");
 
     // The placeholder path: the executor's graph is fresh and
