@@ -641,7 +641,19 @@ pub async fn index_one_repo(
                 }
 
                 if batch_nodes.len() >= INGEST_BATCH_SIZE {
-                    if let Err(e) = db.insert_nodes_batch(&batch_nodes) {
+                    // Replace, so a re-scan drops what a file no longer
+                    // defines. Mirrors the single-workspace pipeline; without
+                    // it a federated repo accumulates a node for every symbol
+                    // ever deleted or moved. Scan results arrive whole-file and
+                    // this runs between chunks, so each path here has all of
+                    // its nodes in this batch.
+                    let paths: Vec<String> = batch_nodes
+                        .iter()
+                        .map(|n| n.path.clone())
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
                         warn!("[federation] Batch node write error: {}", e);
                     }
                     if let Err(e) = db.insert_edges_batch(&batch_edges) {
@@ -659,7 +671,13 @@ pub async fn index_one_repo(
     }
 
     if !batch_nodes.is_empty() {
-        if let Err(e) = db.insert_nodes_batch(&batch_nodes) {
+        let paths: Vec<String> = batch_nodes
+            .iter()
+            .map(|n| n.path.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
             warn!("[federation] Final batch node write error: {}", e);
         }
         if let Err(e) = db.insert_edges_batch(&batch_edges) {
@@ -839,6 +857,33 @@ pub async fn index_one_repo(
     // Enrichment: anchor scores + depths
     db.calculate_anchor_scores()?;
     db.calculate_depths()?;
+
+    // Orphan sweep. This function has no scan-phase timeout and no
+    // max-files cap, and the reduce loop always drains the JoinSet, so
+    // reaching this point means the pass covered every changed file —
+    // there is no partial case to gate on here, unlike the
+    // single-workspace pipeline.
+    match git.get_all_tracked_files() {
+        Ok(tracked_paths) => {
+            // Reduced with the same helper the scanner mints node paths with:
+            // git returns absolute paths, and comparing those to relative node
+            // keys marks every node an orphan rather than raising an error.
+            let tracked: HashSet<String> = tracked_paths
+                .iter()
+                .map(|p| crate::graph::graph_path(path, p))
+                .collect();
+            if tracked.is_empty() {
+                warn!("[federation] Skipping orphan sweep for {:?}: no tracked files", path);
+            } else {
+                match db.prune_orphans(&tracked) {
+                    Ok(0) => info!("[federation] {:?}: orphan sweep found nothing", path),
+                    Ok(n) => info!("[federation] {:?}: orphan sweep pruned {n} nodes", path),
+                    Err(e) => warn!("[federation] {:?}: orphan sweep failed: {e}", path),
+                }
+            }
+        }
+        Err(e) => warn!("[federation] Skipping orphan sweep for {:?}: {e}", path),
+    }
 
     db.set_last_commit(latest_commit)?;
     db.save_to_disk_sync()?;
