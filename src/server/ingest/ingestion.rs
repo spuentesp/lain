@@ -87,6 +87,20 @@ impl LainServer {
 
         let mut scanned = 0usize;
         let mut failed = 0usize;
+        // True when this pass did NOT cover every changed file: either the
+        // scan-phase timeout aborted the remaining tasks, or `max_files_per_scan`
+        // capped the input. A partial pass must persist whatever it produced but
+        // must NOT advance `set_last_commit` — otherwise the graph claims to be
+        // current at HEAD while missing files, which is worse than being visibly
+        // behind. See the guarded `set_last_commit` at the end of this function.
+        let mut partial = files.len() > files_to_scan.len();
+        if partial {
+            warn!(
+                "Scan capped at max_files_per_scan={} of {} changed files;                  this pass is partial and will not advance the indexed-commit marker",
+                files_to_scan.len(),
+                files.len()
+            );
+        }
         let scan_timeout = std::time::Duration::from_secs(self.tuning.ingestion.scan_timeout_secs);
 
         while let Some(res) = set.join_next().await {
@@ -94,6 +108,7 @@ impl LainServer {
             if scan_start.elapsed() >= scan_timeout {
                 warn!("Scan phase timed out after {:?}, aborting {} remaining tasks",
                       scan_timeout, set.len());
+                partial = true;
                 set.abort_all();
                 break;
             }
@@ -126,6 +141,15 @@ impl LainServer {
                         }
                         if let Err(e) = self.graph.insert_edges_batch(&batch_edges) {
                             warn!("Batch edge write error: {}", e);
+                        }
+                        // Durably persist the flush. The in-memory inserts above
+                        // are lost if the outer re-index timeout drops this task,
+                        // which is why a 90s budget could never converge: every
+                        // batch of parsing was discarded. Writing here means a
+                        // killed run still leaves progress on disk and successive
+                        // runs converge instead of restarting from the same graph.
+                        if let Err(e) = self.graph.save_to_disk().await {
+                            warn!("Batch persist error: {}", e);
                         }
                         batch_nodes.clear();
                         batch_edges.clear();
@@ -394,7 +418,19 @@ impl LainServer {
             info!("NLP lazy enrichment pass complete.");
         });
 
-        self.graph.set_last_commit(latest_commit)?;
+        // Only claim "fully indexed through <commit>" when this pass actually
+        // covered every changed file. A partial pass still persists its nodes and
+        // edges below, so the work is kept and the next run resumes from it — but
+        // the marker stays behind so `get_health` keeps reporting the true
+        // commits-behind count instead of silently claiming to be current.
+        if partial {
+            warn!(
+                "Partial index pass ({} files scanned, {} failed);                  leaving indexed-commit marker unchanged",
+                scanned, failed
+            );
+        } else {
+            self.graph.set_last_commit(latest_commit)?;
+        }
         self.graph.save_to_disk().await?;
 
         let duration = scan_start.elapsed();
