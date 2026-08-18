@@ -16,6 +16,13 @@ pub trait GraphBackend: Send + Sync {
         name: &str,
     ) -> Result<(), LainError>;
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError>;
+    /// Remove nodes by global id, with their incident edges.
+    ///
+    /// `project_repo` upserts a repo's nodes but had no way to retract one, so
+    /// the federated view kept every symbol a repo ever had. Deleting a
+    /// function left it answering `search_org` forever even after the per-repo
+    /// graph had correctly dropped it.
+    fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError>;
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError>;
     fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError>;
     /// Return every node currently in the backend. Used by
@@ -115,6 +122,17 @@ impl GraphBackend for PetgraphBackend {
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.db.upsert_edge(edge)?;
         self.db.save_to_disk_sync()
+    }
+
+    fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError> {
+        let removed = self.db.remove_nodes_by_ids(global_ids)?;
+        for id in global_ids {
+            self.index.remove(id);
+        }
+        if removed > 0 {
+            self.db.save_to_disk_sync()?;
+        }
+        Ok(removed)
     }
 
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError> {

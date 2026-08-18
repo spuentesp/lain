@@ -23,6 +23,21 @@ impl GraphBackend for HashMapBackend {
         self.nodes.write().unwrap().insert(node.id.clone(), node);
         Ok(())
     }
+    fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError> {
+        let mut nodes = self.nodes.write().unwrap();
+        let mut removed = 0usize;
+        for id in global_ids {
+            if nodes.remove(id).is_some() {
+                removed += 1;
+            }
+        }
+        drop(nodes);
+        self.edges
+            .write()
+            .unwrap()
+            .retain(|e| !global_ids.contains(&e.source_id) && !global_ids.contains(&e.target_id));
+        Ok(removed)
+    }
     fn upsert_node_global(
         &self,
         global_id: &str,

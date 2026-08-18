@@ -264,6 +264,48 @@ impl GraphDatabase {
         Ok(removed_ids.len())
     }
 
+    /// Remove nodes by id, with their incident edges. Companion to
+    /// [`Self::replace_nodes_for_paths`] for callers that key by id rather than
+    /// by file — the federated backend rewrites every node to a global id, and
+    /// two repos can share a path, so path is not a usable key there.
+    pub fn remove_nodes_by_ids(&self, ids: &[String]) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        let mut removed = 0usize;
+        let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
+        {
+            let mut graph = self.graph.write();
+            for id in ids {
+                let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
+                    continue;
+                };
+                if let Some(node) = graph.node_weight(idx) {
+                    cleared_paths.push((node.path.clone(), idx));
+                }
+                if graph.remove_node(idx).is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        for id in ids {
+            self.index_map.remove(id);
+        }
+        // Keep path_index consistent with the graph, or later lookups resolve
+        // through a vacated slot.
+        for (path, idx) in cleared_paths {
+            let now_empty = if let Some(mut entry) = self.path_index.get_mut(&path) {
+                entry.retain(|i| *i != idx);
+                entry.is_empty()
+            } else {
+                false
+            };
+            if now_empty {
+                self.path_index.remove(&path);
+            }
+        }
+        Ok(removed)
+    }
+
     /// Drop every node whose file is no longer tracked, and report how many.
     ///
     /// This is a net, not the mechanism: per-file replacement during a scan and
@@ -1040,5 +1082,48 @@ mod replace_tests {
         assert_eq!(removed, 1);
         assert!(g.find_node_by_name("live").is_some());
         assert!(g.find_node_by_name("dead").is_none());
+    }
+}
+
+#[cfg(test)]
+mod remove_by_id_tests {
+    use super::*;
+
+    /// The federated backend keys by global id, and two repos can share a file
+    /// path, so removal there cannot go through the path index.
+    #[test]
+    fn remove_nodes_by_ids_drops_only_the_named_nodes() {
+        let tmp = std::env::temp_dir().join("lain_test_rm_by_id");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/x.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/x.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let removed = g.remove_nodes_by_ids(&[a_id]).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(g.find_node_by_name("a").is_none());
+        assert!(g.find_node_by_name("b").is_some(), "sibling in same file survives");
+        assert!(g.get_node(&b_id).unwrap().is_some(), "survivor still resolves by id");
+    }
+
+    /// Removing the last node for a path must clear the path entry too, or a
+    /// later lookup resolves through a vacated slot.
+    #[test]
+    fn remove_nodes_by_ids_clears_emptied_path_entry() {
+        let tmp = std::env::temp_dir().join("lain_test_rm_path_clear");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+
+        let only = GraphNode::new(NodeType::Function, "only".into(), "src/solo.rs".into());
+        let id = only.id.clone();
+        g.insert_nodes_batch(&[only]).unwrap();
+
+        g.remove_nodes_by_ids(&[id]).unwrap();
+
+        assert!(g.find_node_by_path("src/solo.rs").is_none(), "path entry cleared");
     }
 }

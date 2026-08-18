@@ -94,11 +94,35 @@ impl FederatedIndex {
         let nodes = repo.nodes();
 
         // Re-key every node to its global id and upsert into the backend.
+        let mut live: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(nodes.len());
         for n in &nodes {
             let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name);
             let mut rewritten = n.clone();
             rewritten.id = gid.as_str().to_string();
+            live.insert(gid.as_str().to_string());
             self.backend.upsert_node(rewritten)?;
+        }
+
+        // Retract what this repo no longer has. Projection was upsert-only, so
+        // the federated view accumulated every symbol a repo ever contained: a
+        // deleted function kept answering `search_org` long after the per-repo
+        // graph had dropped it. Scoped by the repo's global-id prefix, which is
+        // unambiguous because `RepoId` forbids `:`.
+        let prefix = format!("{}:", id.as_str());
+        let stale: Vec<String> = self
+            .backend
+            .list_nodes()?
+            .into_iter()
+            .map(|n| n.id)
+            .filter(|gid| gid.starts_with(&prefix) && !live.contains(gid))
+            .collect();
+        if !stale.is_empty() {
+            let removed = self.backend.remove_nodes(&stale)?;
+            tracing::info!(
+                "federation: retracted {removed} stale node(s) for repo '{}'",
+                id.as_str()
+            );
         }
 
         // Cross-repo matching: gather every other repo's nodes once, then for
