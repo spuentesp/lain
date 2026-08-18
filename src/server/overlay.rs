@@ -416,9 +416,12 @@ pub async fn subscribe(owner_url: String, overlay: VolatileOverlay) -> ! {
 
 /// Normalize the configured owner URL to the HTTP singleton root.
 ///
-/// Agent configurations conventionally use `http://localhost:9999/mcp`,
-/// while the overlay endpoints are rooted at `/overlay`. Strip only that
-/// optional MCP suffix and any trailing slash before appending an endpoint.
+/// Agent configurations conventionally use `http://localhost:9999` (bare
+/// server URL) or `http://localhost:9999/mcp` (full MCP endpoint); the
+/// `lain hooks` CLI accepts either shape and appends `/mcp` when given
+/// the bare form. The overlay endpoints are rooted at `/overlay`, so we
+/// strip any optional MCP suffix and any trailing slash before
+/// appending an endpoint.
 fn owner_base_url(owner_url: &str) -> String {
     let trimmed = owner_url.trim().trim_end_matches('/');
     trimmed
