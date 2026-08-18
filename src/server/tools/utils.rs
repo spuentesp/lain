@@ -201,25 +201,19 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// rules that matter for code search:
 ///   running  → run       (drop -ing if stem ≥ 3 chars)
 ///   indexed  → index     (drop -ed if stem ≥ 3 chars)
-///   queries  → queri     (no, leave alone — we'd want -y replacement)
 ///   tokens   → token     (drop -s if stem ≥ 3 chars and not -ss/-us)
 ///   boxes    → box       (drop -es if stem ≥ 3 chars)
 ///   files    → file      (drop -s if stem ≥ 3 chars)
-/// The point isn't linguistic accuracy, it's collapsing the surface forms
-/// that show up in code identifiers (`fn index`, called as `indexed`,
-/// `indexing`, `indexes`, `indices`) so lexical recall picks them all up.
+/// Used by `lex_tokens` below to collapse surface forms so queries
+/// like "indexing" match symbols named `fn index`.
 pub fn stem(word: &str) -> String {
     let w = word.to_ascii_lowercase();
     if w.len() < 4 {
         return w;
     }
-    // Order matters: longest suffixes first so we don't double-strip.
-    // -ing: drop if stem ≥ 3 chars ("indexing" → "index", "running" → "runn")
     if w.len() > 5 && w.ends_with("ing") {
         return w[..w.len() - 3].to_string();
     }
-    // -ies → -y for consonant-stem ("queries" → "query", "bodies" → "body")
-    // Skip vowel-stem ("ties", "lies") which don't alternate
     if w.len() > 4 && w.ends_with("ies") {
         let stem = &w[..w.len() - 3];
         if let Some(c) = stem.chars().last() {
@@ -228,13 +222,9 @@ pub fn stem(word: &str) -> String {
             }
         }
     }
-    // -ed: drop if stem ≥ 3 chars ("indexed" → "index", "loaded" → "load")
     if w.len() > 4 && w.ends_with("ed") {
         return w[..w.len() - 2].to_string();
     }
-    // -es: drop ONLY when preceded by s/x/z/ch/sh (the "boxes/watches"
-    // pattern). Plain "es" after other letters ("files", "names") is
-    // just a plural -s and gets handled by the next rule.
     if w.len() > 4 && w.ends_with("es") {
         let stem = &w[..w.len() - 2];
         if let Some(c) = stem.chars().last() {
@@ -246,9 +236,7 @@ pub fn stem(word: &str) -> String {
         if last_two == "ch" || last_two == "sh" {
             return stem.to_string();
         }
-        // fall through to -s stripping
     }
-    // -s: drop plural/verb -s (but preserve -ss and -us)
     if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") && !w.ends_with("us") {
         return w[..w.len() - 1].to_string();
     }
@@ -256,11 +244,9 @@ pub fn stem(word: &str) -> String {
 }
 
 /// Tokenize text for lexical scoring: lowercase, split on non-alphanumeric
-/// boundaries, drop tokens shorter than 2 chars and pure-numeric tokens
-/// (which add noise from line numbers, array indices, etc.), then stem
-/// each remaining token so "runs"/"running"/"ran" all collapse to the same
-/// form. Stemming is what lets queries like "indexing" match symbols
-/// named `fn index` even though the surface forms differ.
+/// boundaries, drop pure-numeric tokens, then stem each remaining token
+/// so "runs"/"running"/"ran" all collapse to the same form. Used by
+/// `token_recall` to compute per-candidate lexical coverage.
 pub fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for raw in text.split(|c: char| !c.is_alphanumeric()) {
@@ -306,8 +292,7 @@ pub fn read_body_summary(node: &GraphNode, max_chars: usize) -> Option<String> {
 /// Recall is preferred over Jaccard for search ranking because it directly
 /// answers "did we cover the user's query?" — a candidate that mentions 2
 /// of 3 query terms scores 0.67, while a candidate that mentions 2 of 50
-/// unrelated terms plus those 2 still scores 0.67 (the "unrelated" terms
-/// don't penalize the candidate).
+/// unrelated terms plus those 2 still scores 0.67.
 pub fn token_recall(query: &str, candidate: &str) -> f32 {
     let q = lex_tokens(query);
     if q.is_empty() {
