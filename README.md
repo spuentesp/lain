@@ -54,10 +54,13 @@ After install, `lain` exposes exactly five subcommands:
 | Command | Purpose |
 |---------|---------|
 | `lain server` | Start the MCP server (the headline). Reads `repos.yaml`, serves MCP tools + the Command Center dashboard. Hot-reloads the config when it changes. |
+| `lain mcp` | Single-repo MCP server on stdio. Walks up from cwd for `.git` — the stable "drop in a clone and run" entrypoint. No `repos.yaml` required. |
 | `lain workspaces` | Manage `workspaces.yaml`. Create, list, show, activate (`use`), forget named groups of repos. |
 | `lain repos` | Manage `repos.yaml`. Add, list, remove a repo entry. |
 | `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
 | `lain ask` | Single-user LLM-assisted query (uses `semantic_search` + `explain_symbol` heuristics). |
+| `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
+| `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs, presence registry, and (if `LAIN_URL` set) server reachability. |
 
 The cut surface (`init`, `agents`, `hook`, `projects`, top-level
 `use`) is gone — those concerns are reached through the five commands
@@ -156,7 +159,22 @@ lain server --config ./repos.yaml --transport http --port 9999
 ### 4. Wire your agent
 
 Add the following to your agent's MCP config (URL/format depends on the
-agent):
+agent). **The single-repo form is the recommended default** — it
+walks up from the working directory for `.git`, no `repos.yaml` needed:
+
+```json
+{
+  "mcpServers": {
+    "lain": {
+      "command": "lain",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+If you want the federation tool surface (`list_repos`, `search_org`,
+`get_cross_repo_blast_radius`) too, point at a `repos.yaml` instead:
 
 ```json
 {
@@ -169,8 +187,9 @@ agent):
 }
 ```
 
-That's it. The next time your agent starts, it sees the federation, the
-active workspace, and the full MCP tool surface.
+That's it. The next time your agent starts, it sees the workspace
+(single-repo form) or the federation, the active workspace, and the
+full MCP tool surface.
 
 ---
 
