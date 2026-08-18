@@ -15,7 +15,6 @@ use crate::server::presence::{
 use crate::server::schema::NodeType;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::SystemTime;
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterAgentArgs {

@@ -7,9 +7,8 @@
 //! adding `claim_with_session` there would just duplicate what the in-
 //! memory layer already tests.
 
-use lain::server::presence::AgentId;
+use lain::server::presence::{AgentId, AgentKind, ClaimIntent};
 use lain::server::presence_lock::{release_lock, try_lock};
-use lain::server::presence::{AgentKind, ClaimIntent};
 
 fn make_agent(id: &str) -> AgentId {
     AgentId(format!("{id}-{}", std::process::id()).into())
