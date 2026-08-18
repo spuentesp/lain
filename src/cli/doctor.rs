@@ -130,10 +130,27 @@ pub fn run_doctor() -> Result<i32> {
     let hd = hooks_dir();
     let hd_ok = hd.exists() || std::fs::create_dir_all(&hd).is_ok();
     if hd_ok {
+        // Wishlist #12e: reap session-token JSON files older than
+        // 30 days. The CLI uses 7 days; the MCP tool dispatch path
+        // does NOT reap (it must stay fast and side-effect-free).
+        // `lain doctor` is the natural place — it's a periodic
+        // operator-facing check that already enumerates the dir.
+        let reaped = crate::config::prune_old_sessions(std::time::Duration::from_secs(
+            30 * 24 * 3600,
+        ))
+        .unwrap_or(0);
         let count = std::fs::read_dir(&hd).map(|d| d.count()).unwrap_or(0);
+        let reap_note = if reaped > 0 {
+            format!(" — reaped {reaped} stale session file(s) older than 30 days")
+        } else {
+            String::new()
+        };
         if !emit(
             Severity::Ok,
-            format!("hooks dir present: {} ({count} cached sessions)", hd.display()),
+            format!(
+                "hooks dir present: {} ({count} cached sessions){reap_note}",
+                hd.display()
+            ),
         ) {
             failures += 1;
         }
