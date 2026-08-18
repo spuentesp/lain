@@ -98,10 +98,10 @@ pub enum HooksAction {
         #[arg(long)]
         agent_name: String,
         /// Agent kind (`"claude-code"`, `"kimi"`, `"other"`, ...).
-        #[arg(long, default_value = "other")]
+        #[arg(long)]
         agent_kind: String,
         /// Intent — `"edit"` or `"read"`.
-        #[arg(long, default_value = "edit")]
+        #[arg(long)]
         intent: String,
     },
     /// Remove the filesystem lock sentinel for `path` under
