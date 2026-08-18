@@ -61,5 +61,9 @@ CLAIM_ARGS=(
 if [ -n "$PARENT_SESSION_ID" ]; then
     CLAIM_ARGS+=(--parent-session-id "$PARENT_SESSION_ID")
 fi
-lain hooks claim "${CLAIM_ARGS[@]}" 2>&1 | head -1 >&2
+# Pipe the full output (summary line + conflict JSON) to stderr.
+# Wishlist #5 fix: `| head -1` was discarding the conflict payload
+# (intent, last_touched_unix, holder id), so the agent only ever saw
+# "lain hook: 0 granted, 1 conflict(s)" with no detail to act on.
+lain hooks claim "${CLAIM_ARGS[@]}" >&2
 exit 0

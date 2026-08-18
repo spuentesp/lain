@@ -137,8 +137,36 @@ struct HookSession {
     registered_at_unix: u64,
 }
 
+/// Sanitize an agent name so it can be used as a single path segment
+/// without escaping the hooks dir. The wishlist call-out was a real
+/// traversal: `ORCA_WORKTREE_ID=dc0ac63e-…::/home/sebastian/lain` got
+/// passed through and `create_dir_all` cheerfully mirrored `/home/`
+/// inside `~/.config/lain/hooks/`. Strategy: keep alphanumerics,
+/// `_`, `-`, `.`; collapse everything else to `_`; cap length at 96
+/// chars; if the result is empty or starts with `.`, prefix with
+/// `_` so it's not a hidden file. Deterministic — same name always
+/// maps to the same filename.
+fn sanitize_agent_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().min(96));
+    for ch in name.chars() {
+        let c = match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            c if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' => c,
+            _ => '_',
+        };
+        out.push(c);
+        if out.len() >= 96 {
+            break;
+        }
+    }
+    if out.is_empty() || out.starts_with('.') {
+        out.insert(0, '_');
+    }
+    out
+}
+
 fn session_path(agent_name: &str) -> PathBuf {
-    hooks_dir().join(format!("{agent_name}.session"))
+    hooks_dir().join(format!("{}.session", sanitize_agent_name(agent_name)))
 }
 
 fn read_session(agent_name: &str) -> Option<HookSession> {
@@ -202,6 +230,21 @@ fn mcp_endpoint(url: &str) -> String {
     }
 }
 
+/// Build the shared reqwest blocking client used by every MCP call.
+/// Wired up once with a short total request timeout so a wedged
+/// server can't hang the agent hook for the OS's full TCP connect
+/// timeout (~75s on Linux). Wishlist #1 (fail open) is meaningless if
+/// the hook hangs for a minute before falling through to exit 0.
+/// Orca's own hook uses `--connect-timeout 0.5 --max-time 1.5` on
+/// curl; we mirror that with a 2-second ceiling.
+fn mcp_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
 fn post_mcp(url: &str, method: &'static str, params: serde_json::Value) -> Result<McpResult> {
     let endpoint = mcp_endpoint(url);
     let req = McpRequest {
@@ -210,7 +253,7 @@ fn post_mcp(url: &str, method: &'static str, params: serde_json::Value) -> Resul
         params,
         id: 1,
     };
-    let client = reqwest::blocking::Client::new();
+    let client = mcp_client();
     let resp = client.post(&endpoint).json(&req).send().context("HTTP send")?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {} from lain server", resp.status());
@@ -684,7 +727,7 @@ pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{find_workspace_root, mcp_endpoint, server_reachable};
+    use super::{find_workspace_root, mcp_endpoint, sanitize_agent_name, server_reachable};
     use std::time::Duration;
 
     /// `mcp_endpoint` is the bridge between the `--url` flag (bare server
@@ -709,6 +752,39 @@ mod tests {
         assert_eq!(
             mcp_endpoint("https lain.example.com/proxy"),
             "https lain.example.com/proxy/mcp"
+        );
+    }
+
+    /// `sanitize_agent_name` is the fix for the path-traversal defect
+    /// surfaced during the e2e review: `ORCA_WORKTREE_ID=…::/home/...`
+    /// used to escape the hooks dir. Path separators and
+    /// filesystem-hostile chars must collapse to `_`; the result must
+    /// be a single path segment (no `..`, no leading `.`).
+    #[test]
+    fn sanitize_agent_name_neutralises_traversal_and_weird_chars() {
+        assert_eq!(
+            sanitize_agent_name("../../../../etc/passwd"),
+            "_.._.._.._.._etc_passwd"
+        );
+        assert_eq!(
+            sanitize_agent_name("ORCA_WORKTREE_ID=dc0ac63e-…::/home/sebastian/lain"),
+            "ORCA_WORKTREE_ID_dc0ac63e-____home_sebastian_lain"
+        );
+        assert_eq!(
+            sanitize_agent_name("claude-code"),
+            "claude-code"
+        );
+        // Empty and hidden-file names get a leading underscore so they
+        // don't disappear or look like dotfiles.
+        assert_eq!(sanitize_agent_name(""), "_");
+        assert_eq!(sanitize_agent_name("...."), "_....");
+        // Caps length at 96 chars to avoid runaway filenames.
+        let huge = "a".repeat(500);
+        assert_eq!(sanitize_agent_name(&huge).len(), 96);
+        // Slashes, backslashes, colons, nulls → all become `_`.
+        assert_eq!(
+            sanitize_agent_name("a/b\\c:d*e?f\"g<h>i|j\0k"),
+            "a_b_c_d_e_f_g_h_i_j_k"
         );
     }
 

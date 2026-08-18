@@ -49,5 +49,9 @@ RELEASE_ARGS=(
 if [ -n "$PARENT_SESSION_ID" ]; then
     RELEASE_ARGS+=(--parent-session-id "$PARENT_SESSION_ID")
 fi
-lain hooks release "${RELEASE_ARGS[@]}" 2>&1 | head -1 >&2
+# Pipe the full release output (summary line + any JSON) to stderr.
+# `| head -1` was previously used here too, but for release there is
+# no conflict payload so dropping it is harmless — and consistent with
+# the pre-edit hooks (wishlist #5 fix).
+lain hooks release "${RELEASE_ARGS[@]}" >&2
 exit 0

@@ -66,23 +66,44 @@ pub fn run_doctor() -> Result<i32> {
         failures += 1;
     }
 
-    // Check 2: hook scripts present on disk. The Claude Code hook is the
-    // reference one — every agent's pre-edit integration points at the
-    // same `hooks/<kind>/pre-edit.sh` layout, but Claude Code is the
-    // one we ship out of the box and is what users hit first.
-    let hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Check 2: hook scripts present on disk. The Claude Code hook is
+    // the reference one — every agent's pre-edit integration points
+    // at the same `hooks/<kind>/pre-edit.sh` layout. For dev builds
+    // they're at `$CARGO_MANIFEST_DIR/hooks/`; for installed binaries
+    // they ship next to the binary itself (the install layout puts
+    // them in `$bindir/../share/lain/hooks/`, but a flat `cargo
+    // install --path .` lands them next to the executable). Check
+    // both, plus the legacy single-file dev path, before failing —
+    // a `[FAIL]` here on a release binary was a long-standing bug
+    // (wishlist #6's "one version of truth" promise).
+    let source_hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("hooks/claude-code/pre-edit.sh");
-    if hook.exists() {
+    let installed_hook = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("../share/lain/hooks/claude-code/pre-edit.sh")))
+        .unwrap_or_else(|| std::path::PathBuf::from("<no install path>"));
+    let flat_hook = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("hooks/claude-code/pre-edit.sh")))
+        .unwrap_or_else(|| std::path::PathBuf::from("<no flat path>"));
+    let candidates = [&source_hook, &installed_hook, &flat_hook];
+    let found = candidates.iter().find(|p| p.exists());
+    if let Some(p) = found {
         if !emit(
             Severity::Ok,
-            format!("claude-code hook script present: {}", hook.display()),
+            format!("claude-code hook script present: {}", p.display()),
         ) {
             failures += 1;
         }
     } else {
         emit(
             Severity::Fail,
-            format!("claude-code hook script MISSING: {}", hook.display()),
+            format!(
+                "claude-code hook script MISSING. Looked at: {} ; {} ; {}",
+                source_hook.display(),
+                installed_hook.display(),
+                flat_hook.display()
+            ),
         );
         failures += 1;
     }
@@ -124,14 +145,15 @@ pub fn run_doctor() -> Result<i32> {
         failures += 1;
     }
 
-    // Check 5: presence registry constructs cleanly. This catches the
-    // "the binary imports but cannot instantiate the core data
-    // structure" regression class — useful after refactors of
-    // `server::presence`.
+    // Check 5: presence registry constructs cleanly. This is a
+    // tautology at the moment — `PresenceRegistry::new()` cannot
+    // fail. Kept as a sentinel so future refactors of
+    // `server::presence` that introduce a fallible `try_new` get
+    // surfaced here for free. (`emit` is unconditional; the
+    // previous `if !emit(...)` pattern was dead code since the
+    // Ok arm is the only one reachable.)
     let _reg = PresenceRegistry::new();
-    if !emit(Severity::Ok, "presence registry constructs cleanly") {
-        failures += 1;
-    }
+    emit(Severity::Ok, "presence registry constructs cleanly");
 
     // Check 6: server reachability — soft check. Only runs when an
     // env var names the server; otherwise silent. We strip a trailing

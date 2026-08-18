@@ -49,8 +49,16 @@ pub struct HeartbeatArgs {
 
 pub fn run_heartbeat(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: HeartbeatArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    server.presence.heartbeat(&AgentId(a.agent_id), &a.session_token)
+    let agent_id = AgentId(a.agent_id);
+    server.presence.heartbeat(&agent_id, &a.session_token)
         .map_err(|e| e.to_string())?;
+    // Wishlist #5 fix: refresh the staleness clock on every claim the
+    // agent holds so `last_seen_unix` actually advances with heartbeats
+    // instead of being frozen at `claimed_at`. The presence and
+    // occupancy registries have separate locks, so this is two
+    // separate calls; the staleness clock now advances as long as both
+    // succeed (the presence call above already errored on auth).
+    server.occupancy.touch(&agent_id);
     Ok(json!({ "ok": true }))
 }
 

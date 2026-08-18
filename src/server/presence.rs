@@ -495,15 +495,19 @@ impl FileOccupancy {
         self.last_touched.get(sym).and_then(|m| m.get(agent)).copied()
     }
 
-    /// Timestamp for `agent`'s file-level claim on this file. Only
-    /// used when the incoming request is itself file-level and we
-    /// want to surface when the other agent first recorded the
-    /// whole-file claim. Agents with no file-level claim fall back
-    /// to `UNIX_EPOCH`; the conflict entry's `last_seen_unix` field
-    /// lets callers tell the difference between a real claim
-    /// (`> UNIX_EPOCH`) and the no-claim fallback.
+    /// Most recent `last_touched` timestamp for `agent` on this file
+    /// across **all** scopes (file-level + every symbol they claimed).
+    /// Used to populate the `last_seen_unix` field on a conflict entry
+    /// so the caller can tell "the other agent is actively here"
+    /// (`> UNIX_EPOCH`) from "no claim" (`== UNIX_EPOCH`). Wishlist #5
+    /// fix: previously this only looked up the file-level key, so an
+    /// agent that only had symbol-level claims reported `1970` and the
+    /// staleness signal was useless exactly when it mattered.
     fn last_touched_unix_for(&self, agent: &AgentId) -> SystemTime {
-        self.last_touched_for(agent, "__file_level__")
+        self.last_touched
+            .values()
+            .filter_map(|per_agent| per_agent.get(agent).copied())
+            .max()
             .unwrap_or(SystemTime::UNIX_EPOCH)
     }
 }
@@ -630,18 +634,29 @@ impl OccupancyMap {
                 // bookkeeping below so the granting agent becomes
                 // observable for occupancy listings.
                 if req.intent == ClaimIntent::Edit {
-                    // File-level collision: any other agent on this file
-                    // (regardless of their intent) conflicts with a
-                    // file-level Edit claim — we're going to rewrite the
-                    // whole file. Symbol- and intent-aware filtering
-                    // applies only to the symbol-level branch below.
+                    // File-level Edit collision: only conflicts with
+                    // another agent's Edit-intent claim. A Read claim is
+                    // a non-event per wishlist #5 — even if alice has
+                    // claimed the whole file with intent=read and bob
+                    // (us) wants to do intent=edit, alice's observation
+                    // isn't invalidated by our edit. (If alice has *no*
+                    // file-level claim but has a symbol-level one, the
+                    // default-Edit fallback below keeps the conservative
+                    // behavior — symbol-level claims imply the holder
+                    // has edited or will edit that symbol.)
                     if req.symbols.is_empty() {
                         for other in entry.agents.iter().filter(|a| *a != agent_id) {
+                            let other_intent = entry
+                                .intent_for(other, "__file_level__")
+                                .unwrap_or(ClaimIntent::Edit);
+                            if other_intent != ClaimIntent::Edit {
+                                continue;
+                            }
                             req_conflicts.push(ConflictEntry {
                                 agent_id: other.clone(),
                                 path: req.path.clone(),
                                 symbols: vec![],
-                                intent: ClaimIntent::Edit,
+                                intent: other_intent,
                                 last_seen_unix: entry.last_touched_unix_for(other),
                             });
                         }
@@ -750,6 +765,27 @@ impl OccupancyMap {
             if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
         ClaimResult { granted, conflicts }
+    }
+
+    /// Refresh the `last_touched` timestamp on every claim this agent
+    /// holds. Wired up by the MCP `heartbeat` handler so the staleness
+    /// clock advances on each heartbeat instead of being frozen at
+    /// `claimed_at`. Wishlist #5 fix: without this, conflict entries'
+    /// `last_seen_unix` is identical to when the agent first claimed,
+    /// and a "long-held" claim looks identical to a "just-stale" one.
+    /// Separate from `PresenceRegistry::heartbeat` because the
+    /// `OccupancyMap` has its own lock; the handler in `mcp/handler.rs`
+    /// calls both under a single `Arc<LainServer>` coordination.
+    pub fn touch(&self, agent_id: &AgentId) {
+        let now = SystemTime::now();
+        let mut s = self.inner.lock();
+        for entry in s.by_file.values_mut() {
+            for per_agent in entry.last_touched.values_mut() {
+                if per_agent.contains_key(agent_id) {
+                    per_agent.insert(agent_id.clone(), now);
+                }
+            }
+        }
     }
 
     pub fn release(&self, agent_id: &AgentId, paths: &[PathBuf]) -> Vec<PathBuf> {

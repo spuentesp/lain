@@ -946,11 +946,24 @@ impl LainServer {
     }
 
     /// Path on disk where this server's `PresenceRegistry` +
-    /// `OccupancyMap` JSON snapshot is persisted. Derived from the
-    /// workspace dir (last path component, sanitized). Used by
-    /// `save_state` / `load_state`; exposed for tests / operators.
+    /// `OccupancyMap` JSON snapshot is persisted. Derived from a
+    /// *stable* identifier — for federation servers, the
+    /// `repos.yaml` path the operator launched with; for single-workspace
+    /// servers, the workspace dir itself.
+    ///
+    /// Wishlist #4 fix: previously this derived from the per-process
+    /// `/tmp/lain-federation-{pid}-{counter}` staging dir, which meant
+    /// every restart picked a brand-new state file and `load_state`
+    /// silently hydrated nothing. `persistence_e2e.rs` still passed
+    /// because it hardcodes the stem in `save_pair` / `load_pair`.
+    /// Operators on this machine accumulated 370 stale `.json` files
+    /// in `~/.local/lain/state/` before the fix landed.
     pub fn state_path(&self) -> PathBuf {
-        state_path_for_workspace(&self.config.workspace)
+        if let Some(repos) = self.repos_yaml.as_deref() {
+            state_path_for_workspace(repos)
+        } else {
+            state_path_for_workspace(&self.config.workspace)
+        }
     }
 
     /// Persist the live `PresenceRegistry` + `OccupancyMap` to the
