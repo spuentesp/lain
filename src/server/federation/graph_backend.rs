@@ -28,7 +28,17 @@ pub trait GraphBackend: Send + Sync {
     /// cross-repo graph view. Not a hot path (called once per dashboard
     /// render) so the per-call overhead is acceptable.
     fn all_edges(&self) -> Result<Vec<GraphEdge>, LainError>;
-    fn traverse(&self, start: &str, edge: EdgeType, depth: Range<u32>) -> Result<Vec<GraphNode>, LainError>;
+    /// BFS along edges of `edge` starting at `start`. `direction`
+    /// controls whether we follow outgoing edges (the default — "what
+    /// does X depend on") or incoming edges ("what depends on X" —
+    /// the *blast radius* semantic).
+    fn traverse(
+        &self,
+        start: &str,
+        edge: EdgeType,
+        depth: Range<u32>,
+        direction: petgraph::Direction,
+    ) -> Result<Vec<GraphNode>, LainError>;
     fn find_path(&self, from: &str, to: &str) -> Result<Vec<GraphNode>, LainError>;
     fn subgraph_around(&self, center: &str, radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError>;
     fn node_count(&self) -> usize;
@@ -128,8 +138,14 @@ impl GraphBackend for PetgraphBackend {
         Ok(self.db.all_edges())
     }
 
-    fn traverse(&self, start: &str, edge: EdgeType, depth: Range<u32>) -> Result<Vec<GraphNode>, LainError> {
-        self.db.traverse(start, edge, depth)
+    fn traverse(
+        &self,
+        start: &str,
+        edge: EdgeType,
+        depth: Range<u32>,
+        direction: petgraph::Direction,
+    ) -> Result<Vec<GraphNode>, LainError> {
+        self.db.traverse(start, edge, depth, direction)
     }
 
     fn find_path(&self, from: &str, to: &str) -> Result<Vec<GraphNode>, LainError> {

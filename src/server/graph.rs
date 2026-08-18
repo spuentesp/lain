@@ -184,7 +184,13 @@ impl GraphDatabase {
         self.get_node(id)
     }
 
-    pub fn traverse(&self, start: &str, edge_type: EdgeType, depth: std::ops::Range<u32>) -> Result<Vec<GraphNode>, LainError> {
+    pub fn traverse(
+        &self,
+        start: &str,
+        edge_type: EdgeType,
+        depth: std::ops::Range<u32>,
+        direction: Direction,
+    ) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let Some(start_idx) = self.index_map.get(start).map(|r| *r.value()) else {
             return Ok(Vec::new());
@@ -202,11 +208,21 @@ impl GraphDatabase {
             if current_depth >= max_depth {
                 continue;
             }
-            for graph_edge in graph.edges_directed(current, Direction::Outgoing) {
+            for graph_edge in graph.edges_directed(current, direction) {
                 if graph_edge.weight().edge_type != edge_type {
                     continue;
                 }
-                let next = graph_edge.target();
+                // The "other end" of an edge relative to `current`:
+                //   - Outgoing: edges are `current → other`; other end
+                //     is `.target()`.
+                //   - Incoming: edges are `other → current`; other end
+                //     is `.source()`. (`.target()` is `current` itself
+                //     in that case, which would loop us back to where
+                //     we started.)
+                let next = match direction {
+                    petgraph::Direction::Outgoing => graph_edge.target(),
+                    petgraph::Direction::Incoming => graph_edge.source(),
+                };
                 if !visited.insert(next) {
                     continue;
                 }

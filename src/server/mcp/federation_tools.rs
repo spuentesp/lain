@@ -13,7 +13,8 @@
 //!   symbols (matched on `name` or `path`), sorted by `(repo_id, name)` and
 //!   truncated to a caller-supplied limit.
 //! - `get_cross_repo_blast_radius` — the headline tool. Resolves a symbol
-//!   across the federation, then traverses outgoing `Calls` edges in the
+//!   across the federation, then traverses *incoming* `Calls` edges
+//!   (callers, not callees — "if I change X, what breaks?") in the
 //!   federated graph and groups the visited nodes by repo.
 //! - `get_cross_repo_blast_radius_for_repo` — same as above but the caller
 //!   disambiguates the repo explicitly, bypassing `resolve_symbol`.
@@ -271,7 +272,17 @@ pub fn get_cross_repo_blast_radius_for_repo(
         .ok_or_else(|| {
             LainError::NotFound(format!("symbol {symbol} not found in repo {repo_id}"))
         })?;
-    let traversed = fed.backend().traverse(&seed.id, EdgeType::Calls, depth)?;
+    // Blast radius = "what depends on this symbol" = the *callers* of
+    // `seed`, not the callees. We traverse incoming `Calls` edges so a
+    // blast-radius report answers the question an agent actually asks
+    // ("if I change X, what breaks?") rather than the inverse
+    // dependency walk. Wishlist #12c fix.
+    let traversed = fed.backend().traverse(
+        &seed.id,
+        EdgeType::Calls,
+        depth,
+        petgraph::Direction::Incoming,
+    )?;
     let mut by_repo: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut total = 0usize;
     let mut truncated = false;
@@ -414,18 +425,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_repo_blast_radius_outgoing_edges_group_by_repo() {
-        // Companion to `cross_repo_blast_radius_groups_by_repo`. Builds a
-        // fixture where the seed has OUTGOING `Calls` edges, so traverse
-        // actually visits nodes and exercises the by-repo grouping. Includes:
-        //   - one direct consumer in repo-b (depth 1)
-        //   - one transitive consumer in repo-b (depth 2 via direct_consumer)
-        //   - one outgoing Calls edge in repo-a from `shared` to itself
-        //     (`self_call`) — confirms by_repo buckets are repo-correct
-        //   - one INCOMING edge to the seed from repo-a's `other_caller` —
-        //     traverse is outgoing-only, so this must be ignored
-        //   - one INCOMING edge to repo-b's `shared` from repo-b's
-        //     `caller_of_shared` — must be ignored (different seed id)
+    async fn cross_repo_blast_radius_incoming_edges_group_by_repo() {
+        // Wishlist #12c fix: blast radius now traverses INCOMING
+        // `Calls` edges (callers of the seed), not outgoing. The
+        // fixture is identical shape to the pre-fix outgoing test
+        // but the expected `by_repo` mapping is the *callers* of
+        // the seed, not the callees. Includes:
+        //   - one direct caller in repo-a (depth 1, other_caller)
+        //   - one transitive caller in repo-a (depth 2 via other_caller)
+        //   - one INCOMING edge to repo-b's `shared` from `caller_of_shared`
+        //     (depth 1, repo-b bucket) — different node id, but the
+        //     traverse follows the edge since it points at `shared`
+        //   - one OUTGOING edge in repo-a from `shared` to `self_call`
+        //     — must be ignored (blast radius is callers, not callees)
+        //   - one OUTGOING edge in repo-a from `shared` to
+        //     `direct_consumer` — must be ignored
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         let backend = fed.backend();
@@ -436,8 +450,9 @@ mod tests {
         backend.upsert_node_global("repo-b:Function:src/z.rs:transitive_consumer", crate::schema::NodeType::Function, "src/z.rs", "transitive_consumer").unwrap();
         backend.upsert_node_global("repo-a:Function:src/x.rs:self_call", crate::schema::NodeType::Function, "src/x.rs", "self_call").unwrap();
         backend.upsert_node_global("repo-a:Function:src/w.rs:other_caller", crate::schema::NodeType::Function, "src/w.rs", "other_caller").unwrap();
+        backend.upsert_node_global("repo-a:Function:src/v.rs:transitive_caller", crate::schema::NodeType::Function, "src/v.rs", "transitive_caller").unwrap();
         backend.upsert_node_global("repo-b:Function:src/y.rs:caller_of_shared", crate::schema::NodeType::Function, "src/y.rs", "caller_of_shared").unwrap();
-        // Outgoing edges from the seed (repo-a's `shared`):
+        // Outgoing noise — must be ignored (blast radius is callers):
         backend.upsert_edge(crate::schema::GraphEdge::new(
             crate::schema::EdgeType::Calls,
             "repo-a:Function:src/x.rs:shared".into(),
@@ -448,31 +463,43 @@ mod tests {
             "repo-a:Function:src/x.rs:shared".into(),
             "repo-a:Function:src/x.rs:self_call".into(),
         )).unwrap();
-        // Outgoing edge from direct_consumer (depth 2):
-        backend.upsert_edge(crate::schema::GraphEdge::new(
-            crate::schema::EdgeType::Calls,
-            "repo-b:Function:src/y.rs:direct_consumer".into(),
-            "repo-b:Function:src/z.rs:transitive_consumer".into(),
-        )).unwrap();
-        // Incoming noise — must be ignored:
+        // Incoming edges to the seed (repo-a's `shared`):
         backend.upsert_edge(crate::schema::GraphEdge::new(
             crate::schema::EdgeType::Calls,
             "repo-a:Function:src/w.rs:other_caller".into(),
             "repo-a:Function:src/x.rs:shared".into(),
         )).unwrap();
+        // Incoming edge to repo-b's `shared`:
         backend.upsert_edge(crate::schema::GraphEdge::new(
             crate::schema::EdgeType::Calls,
             "repo-b:Function:src/y.rs:caller_of_shared".into(),
             "repo-b:Function:src/x.rs:shared".into(),
         )).unwrap();
+        // Transitive caller (depth 2) of repo-a's `shared`:
+        backend.upsert_edge(crate::schema::GraphEdge::new(
+            crate::schema::EdgeType::Calls,
+            "repo-a:Function:src/v.rs:transitive_caller".into(),
+            "repo-a:Function:src/w.rs:other_caller".into(),
+        )).unwrap();
 
+        // Resolve via repo-a's `shared` (the seed). Callers at depths
+        // 1 and 2: other_caller (depth 1, repo-a), transitive_caller
+        // (depth 2 via other_caller, repo-a). caller_of_shared is a
+        // caller of repo-b's `shared` (a DIFFERENT global id), not of
+        // repo-a's, so it must NOT appear in the seed's blast radius.
         let result = get_cross_repo_blast_radius_for_repo(&fed, "repo-a", "shared", 1..3).unwrap();
         // Seed at depth 0 is excluded by `traverse` (min_depth=1).
-        // Visited at depths 1 and 2: direct_consumer, self_call,
-        // transitive_consumer. Bucket per repo:
-        assert_eq!(result.by_repo.get("repo-a").map(|v| v.len()).unwrap_or(0), 1);
-        assert_eq!(result.by_repo.get("repo-b").map(|v| v.len()).unwrap_or(0), 2);
-        assert_eq!(result.total_count, 3);
+        // `by_repo` should reflect *callers* of repo-a's `shared`:
+        //   - repo-a: other_caller (direct) + transitive_caller (via
+        //     other_caller) = 2
+        assert_eq!(result.by_repo.get("repo-a").map(|v| v.len()).unwrap_or(0), 2);
+        // repo-b has no callers of repo-a's `shared` (caller_of_shared
+        // points at repo-b's `shared`, which is a different global id).
+        assert_eq!(
+            result.by_repo.get("repo-b").map(|v| v.len()).unwrap_or(0),
+            0
+        );
+        assert_eq!(result.total_count, 2);
         assert!(!result.truncated);
         // Sanity-check the actual node ids in each bucket.
         let repo_a_ids: std::collections::HashSet<_> = result
@@ -480,22 +507,33 @@ mod tests {
             .get("repo-a")
             .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
-        let repo_b_ids: std::collections::HashSet<_> = result
+        assert!(repo_a_ids.contains("repo-a:Function:src/w.rs:other_caller"));
+        assert!(repo_a_ids.contains("repo-a:Function:src/v.rs:transitive_caller"));
+        // The pre-fix outgoing-direction result was direct_consumer
+        // and self_call. Those must NOT appear in the by_repo buckets
+        // — blast radius is callers, not callees.
+        assert!(!result
             .by_repo
-            .get("repo-b")
-            .map(|v| v.iter().cloned().collect())
-            .unwrap_or_default();
-        assert!(repo_a_ids.contains("repo-a:Function:src/x.rs:self_call"));
-        assert!(repo_b_ids.contains("repo-b:Function:src/y.rs:direct_consumer"));
-        assert!(repo_b_ids.contains("repo-b:Function:src/z.rs:transitive_consumer"));
+            .values()
+            .any(|v| v.iter().any(|id| id.contains("direct_consumer"))));
+        assert!(!result
+            .by_repo
+            .values()
+            .any(|v| v.iter().any(|id| id.contains("self_call"))));
+        // caller_of_shared is a caller of repo-b's `shared`, not of
+        // repo-a's. It must not leak into the seed's blast radius.
+        assert!(!result
+            .by_repo
+            .values()
+            .any(|v| v.iter().any(|id| id.contains("caller_of_shared"))));
     }
 
     #[tokio::test]
     async fn cross_repo_blast_radius_resolves_via_resolve_symbol() {
         // The non-`_for_repo` variant calls `resolve_symbol` first. With a
         // single repo owning `lonely`, resolve_symbol returns its RepoId
-        // and the function continues. We add an outgoing edge so the
-        // result is non-empty.
+        // and the function continues. We add an INCOMING edge so the
+        // result is non-empty (blast radius is callers, post #12c).
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         let backend = fed.backend();
@@ -504,11 +542,11 @@ mod tests {
         // `backend.find_nodes_by_name`, so direct backend insertion is
         // enough to populate the symbol index for this test.
         backend.upsert_node_global("repo-only:Function:src/x.rs:lonely", crate::schema::NodeType::Function, "src/x.rs", "lonely").unwrap();
-        backend.upsert_node_global("repo-only:Function:src/y.rs:consumer", crate::schema::NodeType::Function, "src/y.rs", "consumer").unwrap();
+        backend.upsert_node_global("repo-only:Function:src/y.rs:caller_of_lonely", crate::schema::NodeType::Function, "src/y.rs", "caller_of_lonely").unwrap();
         backend.upsert_edge(crate::schema::GraphEdge::new(
             crate::schema::EdgeType::Calls,
+            "repo-only:Function:src/y.rs:caller_of_lonely".into(),
             "repo-only:Function:src/x.rs:lonely".into(),
-            "repo-only:Function:src/y.rs:consumer".into(),
         )).unwrap();
         let result = get_cross_repo_blast_radius(&fed, "lonely", 1..3).unwrap();
         assert_eq!(result.by_repo.get("repo-only").map(|v| v.len()).unwrap_or(0), 1);

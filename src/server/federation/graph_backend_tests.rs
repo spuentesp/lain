@@ -57,7 +57,13 @@ impl GraphBackend for HashMapBackend {
     fn all_edges(&self) -> Result<Vec<GraphEdge>, LainError> {
         Ok(self.edges.read().unwrap().clone())
     }
-    fn traverse(&self, _start: &str, _edge: EdgeType, _depth: Range<u32>) -> Result<Vec<GraphNode>, LainError> {
+    fn traverse(
+        &self,
+        _start: &str,
+        _edge: EdgeType,
+        _depth: Range<u32>,
+        _direction: petgraph::Direction,
+    ) -> Result<Vec<GraphNode>, LainError> {
         Ok(Vec::new())
     }
     fn find_path(&self, _from: &str, _to: &str) -> Result<Vec<GraphNode>, LainError> {
