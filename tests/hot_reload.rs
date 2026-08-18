@@ -4,7 +4,7 @@
 //!
 //! Mirrors the spec's "what is hot-reloaded" promise in Task 6.6.
 
-use lain::server::reload::{ReloadBus, ReloadState};
+use lain::server::reload::ReloadState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

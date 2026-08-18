@@ -99,9 +99,6 @@ pub fn prune_old_sessions(max_age: std::time::Duration) -> std::io::Result<usize
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::time::Duration;
-
     /// `prune_old_sessions` must delete `*.session` files whose mtime
     /// is older than the threshold and leave everything else alone
     /// (non-session files, fresh session files, missing dir).

@@ -969,8 +969,6 @@ pub fn list_recent_projects() -> Result<Vec<RecentProjectEntry>, LainError> {
 #[cfg(test)]
 mod server_status_tests {
     use super::*;
-    use crate::server::LainConfig;
-    use std::path::PathBuf;
 
     /// Round-trip the live server through `get_server_status` and assert
     /// the shape. Uses `LainServer::new` (single-workspace mode) so the
@@ -1096,8 +1094,7 @@ mod recent_projects_tests {
         let boxed: Box<dyn FnOnce(&std::path::Path)> = Box::new(f);
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().to_path_buf();
-        let mut f = boxed;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&path)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| boxed(&path)));
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }

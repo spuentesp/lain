@@ -670,7 +670,7 @@ mod tests {
     fn directory_discovery_skips_ignored_and_inaccessible() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (tmp, repo) = build_repo_layout();
+        let (_tmp, repo) = build_repo_layout();
         let blocked = repo.join("blocked");
 
         // Make `blocked` unreadable. RAII guard restores mode to `0o755`
@@ -794,7 +794,7 @@ mod tests {
     async fn readable_events_after_inaccessible_sibling() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (tmp, repo) = build_repo_layout();
+        let (_tmp, repo) = build_repo_layout();
         let blocked = repo.join("blocked");
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
             .expect("chmod 000");
@@ -976,7 +976,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn newly_created_directory_is_registered() {
-        let (tmp, repo) = build_repo_layout();
+        let (_tmp, repo) = build_repo_layout();
 
         let git = Arc::new(Mutex::new(
             GitSensor::new(&repo).expect("GitSensor::new"),

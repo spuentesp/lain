@@ -90,8 +90,6 @@ fn find_git_workspace_root() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// `find_git_workspace_root` returns the directory containing
     /// `.git` when started from inside a clone. Uses a tempdir
     /// hierarchy (`root/.git` + `root/src/sub/file.rs`) so the test

@@ -50,7 +50,7 @@ async fn remove_repo_from_workspace_makes_it_invisible_to_list_repos() {
 
     let server_for_loop = server.clone_for_background();
     let bus_for_loop = Arc::clone(&bus);
-    let rebuild_task = tokio::spawn(async move {
+    let _rebuild_task = tokio::spawn(async move {
         let mut sub = bus_for_loop.subscribe();
         loop {
             match sub.try_recv() {

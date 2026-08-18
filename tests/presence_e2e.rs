@@ -1,4 +1,4 @@
-use lain::server::presence::{AgentId, AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
+use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
 use lain::server::attribution::AttributionWatcher;
 use std::process::Command;
 use std::sync::Arc;

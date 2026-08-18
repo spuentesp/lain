@@ -13,8 +13,7 @@
 use crate::config::config_dir;
 use crate::server::error::LainError;
 use serde::{Deserialize, Serialize};
-#[allow(unused_imports)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// `~/.config/lain/active_workspace` — the pointer the operator writes via
 /// `lain workspaces use <name>`. `config_path` is the `workspaces.yaml`
@@ -117,6 +116,7 @@ pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod active_workspace_tests {
     use super::*;
+    use std::path::Path;
 
     /// Run a closure with XDG_CONFIG_HOME pointed at a tempdir, restoring
     /// the original env var on drop. Used so tests don't touch the user's
