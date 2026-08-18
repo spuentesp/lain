@@ -78,14 +78,12 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
             agent_name,
             agent_kind,
             intent,
-            ttl_seconds,
         } => crate::cli::hooks::lock(
             &workspace_root,
             &path,
             &agent_name,
             &agent_kind,
             &intent,
-            ttl_seconds,
         )
         .map_err(|e| anyhow::anyhow!("{e}")),
         HooksAction::Unlock {

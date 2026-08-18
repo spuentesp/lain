@@ -103,12 +103,6 @@ pub enum HooksAction {
         /// Intent — `"edit"` or `"read"`.
         #[arg(long, default_value = "edit")]
         intent: String,
-        /// Advisory TTL in seconds. `presence_lock::try_lock` uses a
-        /// 5s TTL internally; this flag is accepted so the pre-commit
-        /// hook and other callers can forward it, but is not yet
-        /// plumbed through to the lock layer.
-        #[arg(long)]
-        ttl_seconds: Option<u64>,
     },
     /// Remove the filesystem lock sentinel for `path` under
     /// `workspace_root`. Idempotent — ENOENT is treated as success.
@@ -434,15 +428,14 @@ pub fn overlap_check(
 /// On success: prints the lock file path to stdout, exits 0.
 /// On conflict: prints holder / kind / intent / mtime as JSON to
 /// stderr and returns Err so the caller sees a non-zero exit code.
-/// `ttl_seconds` is accepted for forward-compatibility but not
-/// plumbed through to `try_lock` (which uses a fixed 5s TTL).
+/// The lock TTL is fixed at 5 seconds by `presence_lock::LOCK_TTL`;
+/// stale locks (mtime older than that) can be taken by another agent.
 pub fn lock(
     workspace_root: &str,
     path: &str,
     agent_name: &str,
     agent_kind: &str,
     intent: &str,
-    _ttl_seconds: Option<u64>,
 ) -> Result<()> {
     let workspace = Path::new(workspace_root);
     let file_path = Path::new(path);
