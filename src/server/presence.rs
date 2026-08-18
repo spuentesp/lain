@@ -215,9 +215,17 @@ pub struct AgentSession {
     pub pid: Option<u32>,
     pub parent_session_id: Option<AgentId>,
     pub session_token: String,
-    #[serde(skip_serializing, default = "epoch")]
+    /// Wall-clock time when the agent first registered. Persisted so
+    /// `list_active_agents` and the SSE stream show the original
+    /// start time across a server restart, not the restart time.
     pub started_at: SystemTime,
-    #[serde(skip_serializing, default = "epoch")]
+    /// Wall-clock time of the agent's last heartbeat. Persisted so
+    /// the federation expiry loop does **not** expire a freshly-loaded
+    /// session on its first tick: previously this field was
+    /// `#[serde(skip_serializing)]`, which made the deserialised
+    /// value `UNIX_EPOCH` and the next `expire_stale` call
+    /// (`now - UNIX_EPOCH` ≫ 60s) immediately removed every
+    /// hydrated session. Wishlist #4 / defect #4 fix.
     pub last_heartbeat: SystemTime,
 }
 
