@@ -67,6 +67,12 @@ pub struct LainConfig {
     pub memory_path: PathBuf,
 }
 
+/// Capacity of the `PresenceEvent` broadcast bus. Generous for an
+/// interactive session; if a slow consumer falls behind, `send`
+/// returns Err and the event is dropped (the registry/occupancy
+/// state itself remains consistent on the server side).
+const PRESENCE_EVENT_CHANNEL_CAPACITY: usize = 256;
+
 /// Pick the platform-appropriate default [`AttributionBackend`] for
 /// constructors that don't take an explicit backend (i.e. the
 /// `LainServer::new` / `with_federation` / `with_federation_and_workspaces`
@@ -306,7 +312,7 @@ fn build_federation_server(
     // broadcasts `PresenceEvent` notifications.
     let presence = Arc::new(PresenceRegistry::new());
     let occupancy = Arc::new(OccupancyMap::new());
-    let (presence_event_tx, _) = broadcast::channel(256);
+    let (presence_event_tx, _) = broadcast::channel(PRESENCE_EVENT_CHANNEL_CAPACITY);
     spawn_presence_expiry_loop(presence.clone(), occupancy.clone(), presence_event_tx.clone());
     start_attribution_watcher(
         attribution,
@@ -514,7 +520,7 @@ impl LainServer {
 
         info!("Lain server initialized");
         let now = SystemTime::now();
-        let (presence_event_tx, _) = broadcast::channel(256);
+        let (presence_event_tx, _) = broadcast::channel(PRESENCE_EVENT_CHANNEL_CAPACITY);
         let server = Self {
             config,
             graph,
