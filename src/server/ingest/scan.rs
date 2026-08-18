@@ -39,9 +39,11 @@ pub async fn scan_file_structure(
     git_sync: i64,
     commit_hash: String,
 ) -> Result<FileScanResult, LainError> {
-    let relative_path = path.strip_prefix(&workspace)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    // The canonical graph key for this file. Every node minted below and
+    // every ref emitted for the resolve phase uses this exact string — if a
+    // producer and a consumer disagree on the form, the resolve phase finds
+    // nothing and every Calls edge silently disappears.
+    let relative_path = crate::graph::graph_path(&workspace, &path);
 
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -105,7 +107,7 @@ pub async fn scan_file_structure(
     // 4. Recursive symbols (no more per-symbol lock acquisition)
     let symbols_result = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_document_symbols_hierarchical(&path).await
+        lsp.get_document_symbols_hierarchical(&path, &workspace).await
     };
 
     match symbols_result {
@@ -115,6 +117,7 @@ pub async fn scan_file_structure(
                 // Fall back to tree-sitter so the graph isn't empty.
                 add_tree_sitter_definitions(
                     &path,
+                    &relative_path,
                     &mut nodes,
                     &mut edges,
                     &file_id,
@@ -142,6 +145,7 @@ pub async fn scan_file_structure(
             // Fall back to tree-sitter so `find Function` etc. still works.
             add_tree_sitter_definitions(
                 &path,
+                &relative_path,
                 &mut nodes,
                 &mut edges,
                 &file_id,
@@ -155,7 +159,7 @@ pub async fn scan_file_structure(
     // Tree-sitter static analysis: extract call, type-usage refs, and string literals from source
     // Read file once — reuse content for both extractors
     let (static_refs, pattern_refs) = if let Ok(content) = tokio::fs::read_to_string(&path).await {
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = relative_path.clone();
         let static_refs: Vec<StaticFileRef> = crate::treesitter::extract_refs(&path, &content)
             .into_iter()
             .map(|r| StaticFileRef {
@@ -247,6 +251,7 @@ pub async fn process_symbol_recursive_enriched(
 /// `get_node_at_location(file, line)` can resolve tree-sitter refs back to them.
 fn add_tree_sitter_definitions(
     path: &Path,
+    graph_key: &str,
     nodes: &mut Vec<GraphNode>,
     edges: &mut Vec<GraphEdge>,
     file_id: &str,
@@ -259,7 +264,7 @@ fn add_tree_sitter_definitions(
     };
     let defs = crate::treesitter::extract_definitions(path, &content);
     for def in defs {
-        let mut node = GraphNode::new(def.kind, def.name.clone(), path.to_string_lossy().to_string())
+        let mut node = GraphNode::new(def.kind, def.name.clone(), graph_key.to_string())
             .with_location(def.line_start, def.line_end);
         node.last_lsp_sync = Some(lsp_sync);
         node.last_git_sync = Some(git_sync);

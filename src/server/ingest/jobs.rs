@@ -83,7 +83,7 @@ impl LainServer {
                 let lsp = self.lsp_pool.next();
                 let mut lsp = lsp.lock().await;
 
-                match lsp.get_document_symbols_hierarchical(path).await {
+                match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
                     Ok(symbols) => {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)

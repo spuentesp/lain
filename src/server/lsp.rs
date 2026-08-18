@@ -135,7 +135,11 @@ impl LspMultiplexer {
     }
 
     /// Get hierarchical document symbols
-    pub async fn get_document_symbols_hierarchical(&mut self, path: &Path) -> Result<Vec<HierarchicalSymbol>, LainError> {
+    pub async fn get_document_symbols_hierarchical(
+        &mut self,
+        path: &Path,
+        workspace: &Path,
+    ) -> Result<Vec<HierarchicalSymbol>, LainError> {
         let server_id = self.ensure_server(path).await?;
         let uri = format!("file://{}", path.display());
 
@@ -161,10 +165,15 @@ impl LspMultiplexer {
             tokio::time::sleep(tick).await;
         }
 
-        Ok(self.process_lsp_symbols(symbols, path))
+        Ok(self.process_lsp_symbols(symbols, path, workspace))
     }
 
-    fn process_lsp_symbols(&self, symbols: Vec<DocumentSymbol>, path: &Path) -> Vec<HierarchicalSymbol> {
+    fn process_lsp_symbols(
+        &self,
+        symbols: Vec<DocumentSymbol>,
+        path: &Path,
+        workspace: &Path,
+    ) -> Vec<HierarchicalSymbol> {
         let mut results = Vec::new();
         for sym in symbols {
             if is_noisy_symbol(&sym.kind) {
@@ -175,7 +184,7 @@ impl LspMultiplexer {
             let mut node = GraphNode::new(
                 node_type,
                 sym.name.clone(),
-                path.to_string_lossy().to_string(),
+                crate::graph::graph_path(workspace, path),
             )
             .with_location(sym.range.start.line, sym.range.end.line);
 
@@ -191,7 +200,7 @@ impl LspMultiplexer {
             }
 
             let children = if let Some(child_syms) = sym.children {
-                self.process_lsp_symbols(child_syms, path)
+                self.process_lsp_symbols(child_syms, path, workspace)
             } else {
                 Vec::new()
             };

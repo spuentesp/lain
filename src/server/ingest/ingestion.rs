@@ -180,7 +180,7 @@ impl LainServer {
         info!("Resolving topology: Linking {} external references...", all_external_refs.len());
         let mut call_edges = Vec::new();
         for (source_id, ref_loc) in all_external_refs {
-            let path_str = ref_loc.path.to_string_lossy().to_string();
+            let path_str = crate::graph::graph_path(&self.config.workspace, &ref_loc.path);
             if let Some(target_node) = self.graph.get_node_at_location(&path_str, ref_loc.line) {
                 if target_node.id != source_id {
                     call_edges.push(GraphEdge::new(EdgeType::Calls, source_id, target_node.id));
@@ -460,7 +460,7 @@ impl LainServer {
         let symbols = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
-            match lsp.get_document_symbols_hierarchical(path).await {
+            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("No LSP symbols for changed file {:?}: {}", path, e);
@@ -631,7 +631,7 @@ pub async fn index_one_repo(
     // Resolve phase: link external references to internal nodes (CALLS)
     let mut call_edges: Vec<GraphEdge> = Vec::new();
     for (source_id, ref_loc) in all_external_refs {
-        let path_str = ref_loc.path.to_string_lossy().to_string();
+        let path_str = crate::graph::graph_path(path, &ref_loc.path);
         if let Some(target_node) = db.get_node_at_location(&path_str, ref_loc.line) {
             if target_node.id != source_id {
                 call_edges.push(GraphEdge::new(EdgeType::Calls, source_id, target_node.id));

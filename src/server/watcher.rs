@@ -547,7 +547,7 @@ async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn st
     let symbols = {
         let lsp = server.lsp_pool.next();
         let mut lsp = lsp.lock().await;
-        match lsp.get_document_symbols_hierarchical(path).await {
+        match lsp.get_document_symbols_hierarchical(path, &server.config.workspace).await {
             Ok(s) => s,
             Err(e) => {
                 debug!("FileWatcher: No LSP symbols for {:?}: {}", path, e);

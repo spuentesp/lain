@@ -14,12 +14,49 @@ use serde::{Deserialize, Serialize};
 use petgraph::stable_graph::{StableGraph, NodeIndex};
 use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use petgraph::Direction;
+use tracing::warn;
+
+/// Bumped whenever the meaning of `GraphNode.path` changes. Version 2 is
+/// the switch from mixed absolute/relative paths to a single
+/// workspace-relative form. A graph written by an older lain deserializes
+/// fine (the bincode layout is unchanged) but its keys are absolute, so
+/// merging it into a v2 graph would double every node instead of updating
+/// it. `load_from_disk` therefore discards anything that isn't v2 and lets
+/// the caller rebuild from source.
+pub const PATH_FORMAT_VERSION: u32 = 2;
+
+/// The canonical graph key for a file: workspace-relative, forward-slashed.
+///
+/// Every site that mints or looks up a path key goes through this. That is
+/// the property the orphan sweep depends on — producer keys (from the
+/// scanner) and consumer keys (from `git.get_all_tracked_files`, which
+/// returns absolute paths) are only comparable because both sides are
+/// reduced here first. Checking for a mismatch defensively would not work:
+/// an absolute-vs-relative set difference looks like "every node is an
+/// orphan", not like an error.
+///
+/// Paths outside `workspace` (out-of-tree dependencies surfaced by LSP) are
+/// kept in their own string form rather than being forced into a bogus
+/// relative path; they are stable, just not workspace-relative.
+pub fn graph_path(workspace: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(workspace).unwrap_or(path);
+    let s = rel.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '/' {
+        s.into_owned()
+    } else {
+        s.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct GraphState {
     graph: StableGraph<GraphNode, GraphEdge>,
     index_map: HashMap<String, NodeIndex>,
     last_commit: Option<String>,
+    /// Absent in graphs written before the canonical-path change; serde
+    /// defaults it to 0, which fails the version check and forces a rebuild.
+    #[serde(default)]
+    path_format_version: u32,
 }
 
 #[derive(Clone)]
@@ -694,6 +731,7 @@ impl GraphDatabase {
         // Clone state under lock (fast)
         let (data, tmp_path, persistence_path) = {
             let state = GraphState {
+                path_format_version: PATH_FORMAT_VERSION,
                 graph: self.graph.read().clone(),
                 index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
                 last_commit: self.last_commit.read().clone(),
@@ -718,6 +756,7 @@ impl GraphDatabase {
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
         let state = GraphState {
+                path_format_version: PATH_FORMAT_VERSION,
             graph: self.graph.read().clone(),
             index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
             last_commit: self.last_commit.read().clone(),
@@ -737,7 +776,35 @@ impl GraphDatabase {
         // the static sidecar view from the owner's on-disk snapshot. Only
         // *mutations* are gated by `check_writable`.
         let data = std::fs::read(&self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
-        let state: GraphState = bincode::deserialize(&data).map_err(|e| LainError::Database(e.to_string()))?;
+
+        // Fail soft. A graph we cannot read is not a fatal condition: the
+        // source tree is the source of truth and the caller re-indexes. This
+        // path used to `?` the deserialize error straight out of
+        // `GraphDatabase::new`, which turned any format change into a startup
+        // crash instead of a rebuild.
+        let state: GraphState = match bincode::deserialize(&data) {
+            Ok(state) => state,
+            Err(e) => {
+                warn!(
+                    "Ignoring unreadable graph at {}: {e}. Starting empty; \
+                     the next index pass will rebuild it.",
+                    self.persistence_path.display()
+                );
+                return Ok(());
+            }
+        };
+
+        if state.path_format_version != PATH_FORMAT_VERSION {
+            warn!(
+                "Ignoring graph at {} written with path format v{} (this build expects v{}). \
+                 Starting empty; the next index pass will rebuild it. Its node ids encode a \
+                 different path convention, so merging would duplicate every node.",
+                self.persistence_path.display(),
+                state.path_format_version,
+                PATH_FORMAT_VERSION
+            );
+            return Ok(());
+        }
 
         let mut path_index = HashMap::new();
         for (idx, node) in state.graph.node_references() {
@@ -759,6 +826,7 @@ impl GraphDatabase {
 
     pub fn export_to_json(&self) -> Result<String, LainError> {
         let state = GraphState {
+                path_format_version: PATH_FORMAT_VERSION,
             graph: self.graph.read().clone(),
             index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
             last_commit: self.last_commit.read().clone(),

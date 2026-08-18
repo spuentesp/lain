@@ -31,7 +31,12 @@ pub fn resolve_node(
     if let Some(n) = overlay_names.iter().find(|n| n.name == canonical_handle) { return Ok(n.clone()); }
     // 4. Try Graph by Name
     if let Some(n) = graph.find_node_by_name(&canonical_handle) { return Ok(n); }
-    // 5. Try Graph by Path
+    // 5. Try Graph by Path. Try the handle verbatim first: graph keys are
+    //    workspace-relative, and a caller asking about "src/cli/hooks.rs" is
+    //    already using the canonical form — canonicalizing it to an absolute
+    //    path would match nothing. The canonicalized form stays as a fallback
+    //    for absolute handles and out-of-tree nodes.
+    if let Some(n) = graph.find_node_by_path(handle) { return Ok(n); }
     if let Some(n) = graph.find_node_by_path(&canonical_handle) { return Ok(n); }
 
     Err(LainError::NotFound(format!("Node not found for handle: {}", handle)))
@@ -59,8 +64,10 @@ pub fn resolve_node_at_location(
         if match_node.is_some() { return match_node; }
     }
 
-    // 2. Fallback to Static Backbone
-    graph.get_node_at_location(&canonical_path, line)
+    // 2. Fallback to Static Backbone. Same ordering rationale as
+    //    `resolve_node`: the verbatim (already-relative) form first.
+    graph.get_node_at_location(path, line)
+        .or_else(|| graph.get_node_at_location(&canonical_path, line))
 }
 
 /// Extract string argument
