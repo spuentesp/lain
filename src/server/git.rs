@@ -313,16 +313,23 @@ impl GitSensor {
         let mut revwalk = self.repo.revwalk()?;
         revwalk.push_head()?;
 
-        let mut found_start = false;
+        // A revwalk from HEAD yields newest-first, so the commits we want are
+        // the ones *before* `since_hash` appears — stop as soon as we reach it.
+        // This previously skipped until it saw `since_hash` and then collected
+        // everything after, which is the whole history *older* than the last
+        // indexed commit: the exact inverse of the intended set. Incremental
+        // updates therefore never saw recent edits (a symbol deleted after the
+        // last index kept answering queries) while re-scanning ancient history
+        // on every pass.
+        //
+        // If `since_hash` is never found — a rebase, a branch switch, a
+        // force-push — the walk runs to the root and every commit is returned,
+        // which degrades to a full re-scan. The old code returned nothing in
+        // that case, silently freezing the graph.
         for oid in revwalk.flatten() {
             let oid_str = oid.to_string();
-
-            // Skip until we find the starting hash
-            if !found_start {
-                if oid_str == since_hash {
-                    found_start = true;
-                }
-                continue;
+            if oid_str == since_hash {
+                break;
             }
 
             let commit = self.repo.find_commit(oid)?;
@@ -375,6 +382,13 @@ impl GitSensor {
         for commit in commits {
             for file in commit.files {
                 let full_path = self.workspace.join(&file);
+                // Skip paths the commits touched that are no longer on disk:
+                // deleted files, and the old half of a rename. Handing them to
+                // the scanner just produces read errors, and their nodes are
+                // reclaimed by the orphan sweep after a complete pass.
+                if !full_path.is_file() {
+                    continue;
+                }
                 if !self.repo.is_path_ignored(&full_path)? {
                     files.insert(full_path);
                 }

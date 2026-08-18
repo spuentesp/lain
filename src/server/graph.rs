@@ -170,6 +170,140 @@ impl GraphDatabase {
         Ok(())
     }
 
+    /// Replace every node recorded under `paths` with `nodes`, so a re-scan
+    /// of a file is idempotent instead of additive.
+    ///
+    /// Without this the graph only ever grows: a symbol deleted from a file,
+    /// a file deleted from the repo, or a file moved to a new path all leave
+    /// their nodes behind forever. Those orphans are not merely inert — name
+    /// resolution can pick one, and since it carries no live edges the caller
+    /// gets a confident answer with a stale path and no callers.
+    ///
+    /// Atomicity: removals and insertions happen inside one graph write lock,
+    /// and each path's `path_index` entry is swapped in a single operation
+    /// rather than cleared and refilled. A concurrent reader therefore never
+    /// observes a file with zero symbols — which matters because lain's whole
+    /// premise is several agents querying while one indexes.
+    ///
+    /// `Namespace` nodes are never removed: their key is a directory shared by
+    /// every file beneath it, so scoping them to a file would delete a module
+    /// each time any one of its files was scanned.
+    ///
+    /// Passing a path with no corresponding entries in `nodes` deletes that
+    /// path's nodes outright — the deleted-file case.
+    ///
+    /// Returns the number of nodes removed.
+    pub fn replace_nodes_for_paths(
+        &self,
+        paths: &[String],
+        nodes: &[GraphNode],
+    ) -> Result<usize, LainError> {
+        use std::collections::HashMap as StdHashMap;
+
+        self.check_writable()?;
+
+        // Group incoming nodes by their own path key so each path's index
+        // entry can be swapped wholesale below.
+        let mut by_path: StdHashMap<&str, Vec<&GraphNode>> = StdHashMap::new();
+        for node in nodes {
+            by_path.entry(node.path.as_str()).or_default().push(node);
+        }
+
+        let mut removed_ids: Vec<String> = Vec::new();
+        let mut new_entries: Vec<(String, Vec<NodeIndex>)> = Vec::new();
+
+        {
+            let mut graph = self.graph.write();
+
+            for path in paths {
+                // Drop the old nodes for this path, keeping Namespace nodes.
+                let old = self
+                    .path_index
+                    .get(path)
+                    .map(|r| r.value().clone())
+                    .unwrap_or_default();
+                let mut kept: Vec<NodeIndex> = Vec::new();
+                for idx in old {
+                    match graph.node_weight(idx) {
+                        Some(n) if n.node_type == NodeType::Namespace => {
+                            kept.push(idx);
+                        }
+                        Some(n) => {
+                            removed_ids.push(n.id.clone());
+                            graph.remove_node(idx); // incident edges go with it
+                        }
+                        // index pointed at a vacated slot; nothing to remove
+                        None => {}
+                    }
+                }
+
+                // Add this path's replacements in the same locked section.
+                let mut fresh = kept;
+                for node in by_path.get(path.as_str()).into_iter().flatten() {
+                    let idx = graph.add_node((*node).clone());
+                    self.index_map.insert(node.id.clone(), idx);
+                    fresh.push(idx);
+                }
+                new_entries.push((path.clone(), fresh));
+            }
+        }
+
+        for id in &removed_ids {
+            self.index_map.remove(id);
+        }
+        // One swap per path: readers see the old set or the new set, never a
+        // half-filled one.
+        for (path, indices) in new_entries {
+            if indices.is_empty() {
+                self.path_index.remove(&path);
+            } else {
+                self.path_index.insert(path, indices);
+            }
+        }
+
+        Ok(removed_ids.len())
+    }
+
+    /// Drop every node whose file is no longer tracked, and report how many.
+    ///
+    /// This is a net, not the mechanism: per-file replacement during a scan and
+    /// explicit handling of git-reported deletions are what keep the graph
+    /// honest. The sweep catches what those miss (a file removed outside git's
+    /// view, an interrupted earlier run) and clears any backlog inherited from
+    /// builds that never deleted anything.
+    ///
+    /// `tracked` must be built with [`graph_path`], the same helper the scanner
+    /// mints node paths with. That is the actual safety property here, and it
+    /// cannot be replaced by a check: `git.get_all_tracked_files` returns
+    /// absolute paths, and comparing those against relative node keys does not
+    /// look like an error — it looks like every node being an orphan, and the
+    /// sweep would delete the entire graph. Routing both sides through one
+    /// helper makes the mismatch unrepresentable.
+    ///
+    /// Callers must skip the sweep when `tracked` is empty (git failed) and
+    /// when the index pass was partial (files simply not visited yet).
+    /// Deliberately has no "refuses to delete more than N%" tripwire: the first
+    /// sweep against a graph built by an older lain legitimately drops about
+    /// half of it, so a ratio guard would block exactly the cleanup wanted.
+    pub fn prune_orphans(&self, tracked: &HashSet<String>) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        // Iterate the per-path index rather than every node: distinct paths are
+        // a fraction of node count, and each stale one drops as a whole bucket.
+        let stale: Vec<String> = self
+            .path_index
+            .iter()
+            .map(|r| r.key().clone())
+            .filter(|key| !tracked.contains(key))
+            .collect();
+
+        let mut removed = 0usize;
+        for key in stale {
+            removed += self.replace_nodes_for_paths(&[key], &[])?;
+        }
+        Ok(removed)
+    }
+
     pub fn upsert_nodes_batch(&self, new_nodes: Vec<GraphNode>) -> Result<(), LainError> {
         for node in new_nodes {
             self.upsert_node(node)?;
@@ -832,5 +966,79 @@ impl GraphDatabase {
             last_commit: self.last_commit.read().clone(),
         };
         serde_json::to_string_pretty(&state).map_err(|e| LainError::Database(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    /// Re-scanning a file must drop the symbols it no longer defines. Before
+    /// `replace_nodes_for_paths` the graph only ever grew, so a deleted
+    /// function kept answering queries — with a stale path and no live edges.
+    #[test]
+    fn replace_drops_symbols_the_file_no_longer_defines() {
+        let g = db("lain_test_replace_drop");
+        let alpha = GraphNode::new(NodeType::Function, "alpha".into(), "src/probe.rs".into());
+        let beta = GraphNode::new(NodeType::Function, "beta".into(), "src/probe.rs".into());
+        g.insert_nodes_batch(&[alpha.clone(), beta]).unwrap();
+        assert!(g.find_node_by_name("beta").is_some(), "precondition");
+
+        let removed = g
+            .replace_nodes_for_paths(&["src/probe.rs".to_string()], &[alpha])
+            .unwrap();
+
+        assert_eq!(removed, 2, "both old nodes removed before reinsert");
+        assert!(g.find_node_by_name("alpha").is_some(), "alpha survives");
+        assert!(g.find_node_by_name("beta").is_none(), "beta is gone");
+    }
+
+    /// A path with no replacement nodes is the deleted-file case.
+    #[test]
+    fn replace_with_no_nodes_deletes_the_file() {
+        let g = db("lain_test_replace_del");
+        let gone = GraphNode::new(NodeType::Function, "gone".into(), "src/gone.rs".into());
+        let keep = GraphNode::new(NodeType::Function, "keep".into(), "src/keep.rs".into());
+        g.insert_nodes_batch(&[gone, keep]).unwrap();
+
+        g.replace_nodes_for_paths(&["src/gone.rs".to_string()], &[]).unwrap();
+
+        assert!(g.find_node_by_name("gone").is_none());
+        assert!(g.find_node_by_name("keep").is_some(), "other files untouched");
+    }
+
+    /// Namespace nodes are directory-scoped and shared by every file beneath
+    /// them, so a per-file replace must leave them alone.
+    #[test]
+    fn replace_preserves_namespace_nodes() {
+        let g = db("lain_test_replace_ns");
+        let ns = GraphNode::new(NodeType::Namespace, "src".into(), "src".into());
+        g.insert_nodes_batch(&[ns]).unwrap();
+
+        g.replace_nodes_for_paths(&["src".to_string()], &[]).unwrap();
+
+        assert!(g.find_node_by_name("src").is_some(), "namespace must survive");
+    }
+
+    /// The sweep drops files git no longer tracks and leaves the rest alone.
+    #[test]
+    fn prune_orphans_removes_untracked_only() {
+        let g = db("lain_test_prune");
+        let live = GraphNode::new(NodeType::Function, "live".into(), "src/live.rs".into());
+        let dead = GraphNode::new(NodeType::Function, "dead".into(), "src/dead.rs".into());
+        g.insert_nodes_batch(&[live, dead]).unwrap();
+
+        let tracked: HashSet<String> = ["src/live.rs".to_string()].into_iter().collect();
+        let removed = g.prune_orphans(&tracked).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(g.find_node_by_name("live").is_some());
+        assert!(g.find_node_by_name("dead").is_none());
     }
 }

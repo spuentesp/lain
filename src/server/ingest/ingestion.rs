@@ -136,7 +136,20 @@ impl LainServer {
                     // Incremental flush every batch_size files
                     if batch_nodes.len() >= batch_size {
                         info!("Flush phase 1: writing {} nodes ({} files scanned)", batch_nodes.len(), scanned);
-                        if let Err(e) = self.graph.insert_nodes_batch(&batch_nodes) {
+                        // Replace rather than insert, so a re-scan drops the
+                        // symbols a file no longer defines instead of layering
+                        // new nodes on top of stale ones. Scan results arrive
+                        // whole-file and this flush runs between chunks, so
+                        // every path here has all of its nodes in this batch.
+                        // One call per flush, not per file: per-file would take
+                        // a write lock hundreds of times while readers query.
+                        let paths: Vec<String> = batch_nodes
+                            .iter()
+                            .map(|n| n.path.clone())
+                            .collect::<HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                             warn!("Batch node write error: {}", e);
                         }
                         if let Err(e) = self.graph.insert_edges_batch(&batch_edges) {
@@ -165,7 +178,13 @@ impl LainServer {
         // Final partial flush
         if !batch_nodes.is_empty() {
             info!("Flush phase 1 (final): writing {} nodes", batch_nodes.len());
-            if let Err(e) = self.graph.insert_nodes_batch(&batch_nodes) {
+            let paths: Vec<String> = batch_nodes
+                .iter()
+                .map(|n| n.path.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                 warn!("Final batch node write error: {}", e);
             }
             if let Err(e) = self.graph.insert_edges_batch(&batch_edges) {
@@ -417,6 +436,36 @@ impl LainServer {
             }
             info!("NLP lazy enrichment pass complete.");
         });
+
+        // Orphan sweep. Reclaims nodes whose file is no longer tracked: files
+        // deleted or renamed outside this pass's view, and any backlog left by
+        // builds that never deleted anything. Gated on a complete pass — after
+        // a partial one, "not scanned this round" is indistinguishable from
+        // "gone", and sweeping would delete live nodes.
+        if !partial {
+            match self.git.lock().get_all_tracked_files() {
+                Ok(tracked_paths) => {
+                    // Reduced with the same helper the scanner mints node paths
+                    // with. Comparing git's absolute paths against relative node
+                    // keys would mark every node an orphan, and that reads as a
+                    // full sweep rather than as an error.
+                    let tracked: HashSet<String> = tracked_paths
+                        .iter()
+                        .map(|p| crate::graph::graph_path(&self.config.workspace, p))
+                        .collect();
+                    if tracked.is_empty() {
+                        warn!("Skipping orphan sweep: git reported no tracked files");
+                    } else {
+                        match self.graph.prune_orphans(&tracked) {
+                            Ok(0) => info!("Orphan sweep: nothing to prune"),
+                            Ok(n) => info!("Orphan sweep: pruned {n} nodes for untracked files"),
+                            Err(e) => warn!("Orphan sweep failed: {e}"),
+                        }
+                    }
+                }
+                Err(e) => warn!("Skipping orphan sweep: cannot list tracked files: {e}"),
+            }
+        }
 
         // Only claim "fully indexed through <commit>" when this pass actually
         // covered every changed file. A partial pass still persists its nodes and
