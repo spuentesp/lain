@@ -954,3 +954,256 @@ async fn multi_repo_federation_falls_back_to_placeholder() {
         "multi-repo federation still binds the placeholder; round-2 will fix this"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PR 1 revision-surface + world_state end-to-end coverage (Task 1.8).
+//
+// Two tests exercise the full `agent-A queries → agent-B edits →
+// agent-A claims with plan_revision` flow that the spec promises. They
+// complement the Task 1.6 retract integration test (which only covered
+// the Retracted arm) by pinning the two remaining arms of
+// `compute_world_state` end-to-end:
+//
+//   * `Edited` — a symbol the caller is about to claim was mutated by
+//     an overlay diff since the caller's `plan_revision`. The filter in
+//     `compute_world_state` retains overlay diffs whose name is in the
+//     request set, so the test mutates the SAME symbol it then claims.
+//
+//   * `BeyondCurrent` — the caller's `plan_revision` is newer than
+//     anything the overlay has assigned. The handler returns a
+//     `WorldState` with `note: Some("plan_revision beyond current —
+//     server may have restarted")` (verbatim from `presence_tools.rs`)
+//     and `changed_symbols: vec![]`. The TooOld arm is structurally
+//     identical and not re-pinned here.
+//
+// Setup mirrors `tests/retract_detection.rs::build_federation_server`:
+// a `PetgraphBackend` rooted at a tempdir, wrapped in a
+// `FederatedIndex`, then handed to `LainServer::with_federation`. The
+// overlay inside that server is the live `VolatileOverlay` we read
+// `current_revision()` from and insert nodes into; the backend is the
+// static-graph surface the retract detector consults.
+// ---------------------------------------------------------------------------
+
+use lain::federation::repo_id::GlobalId;
+use lain::schema::NodeType;
+use lain::server::mcp::presence_tools::{run_claim_files, run_register_agent};
+
+/// Build a federation-backed `LainServer` whose backend is a fresh
+/// `PetgraphBackend` rooted at `tmp`. Mirrors the helper in
+/// `tests/retract_detection.rs` so both suites share the same
+/// "federation with no repos loaded, manual backend writes" shape.
+fn build_pr1_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<dyn GraphBackend>) {
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp).expect("PetgraphBackend::new"));
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+    let server = LainServer::with_federation(fed, Transport::Stdio, 0, None, None)
+        .expect("LainServer::with_federation");
+    (Arc::new(server), backend)
+}
+
+/// Insert a node with name `verify_token` into the federation backend
+/// using the global id format `repo:Kind:path:name`. Mirrors what
+/// `project_repo` writes during a re-index so the retract detector
+/// (Task 1.6) sees the symbol as present in the static graph.
+fn seed_static_graph(backend: &dyn GraphBackend, repo_id: &str, name: &str) {
+    let repo = RepoId::new(repo_id).expect("RepoId::new");
+    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", name);
+    backend
+        .upsert_node_global(gid.as_str(), NodeType::Function, "src/auth.rs", name)
+        .expect("upsert_node_global");
+}
+
+/// Register an agent against `server` and return `(agent_id, session_token)`.
+fn register(server: &Arc<LainServer>, name: &str) -> (String, String) {
+    let v = run_register_agent(server, serde_json::json!({"name": name}))
+        .expect("register_agent");
+    let agent_id = v["agent_id"].as_str().expect("agent_id").to_string();
+    let token = v["session_token"].as_str().expect("session_token").to_string();
+    (agent_id, token)
+}
+
+/// PR 1 Task 1.8 cover: agent-A queries `verify_token` at revision X,
+/// agent-B inserts a new node into the overlay (revision bumps), and
+/// agent-A's subsequent `claim_files` with `plan_revision = X` reports
+/// the bump as an `Edited` entry in `world_state.changed_symbols`.
+///
+/// Pins the contract that `compute_world_state`'s overlay-diff branch
+/// surfaces a symbol that was mutated since the caller's
+/// `plan_revision`, not just symbols that disappeared from the static
+/// graph (which the Task 1.6 retract test already covers).
+#[tokio::test]
+async fn agent_a_query_then_agent_b_edit_then_agent_a_claim_sees_delta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (server, backend) = build_pr1_federation_server(tmp.path());
+
+    // 1. Federation has `verify_token` indexed in the static graph.
+    seed_static_graph(&*backend, "auth-svc", "verify_token");
+    assert!(
+        backend
+            .find_nodes_by_name("verify_token")
+            .expect("find_nodes_by_name")
+            .iter()
+            .any(|n| n.name == "verify_token"),
+        "static graph must contain verify_token after seeding"
+    );
+
+    // 2. Warm the revision log: a fresh overlay's first insert sets
+    //    `floor_revision = 1`, so a `plan_revision = 0` lookup would
+    //    trip `TooOld` (not what this test covers — the TooOld arm
+    //    mirrors the BeyondCurrent contract and is structurally
+    //    identical). Insert one no-op node first so the buffer's
+    //    floor is established, then capture agent-A's pinned plan.
+    server.overlay.insert_node(lain::schema::GraphNode::new(
+        NodeType::Function,
+        "warmup".into(),
+        "src/_warmup.rs".into(),
+    ));
+    let rev_before_edit = server.overlay.current_revision();
+    assert!(
+        rev_before_edit >= 1,
+        "overlay floor must be >= 1 after the warmup insert; got {rev_before_edit}"
+    );
+
+    // 3. agent-B inserts `verify_token` into the overlay — the node
+    //    surfaces as `added` in the next `diffs_since(X)` lookup, the
+    //    revision bumps, and the broadcast bus broadcasts the diff
+    //    (we go directly via `overlay.insert_node` to avoid
+    //    flakiness from a subscriber task's timing).
+    let edited_node =
+        lain::schema::GraphNode::new(NodeType::Function, "verify_token".into(), "src/auth.rs".into());
+    server.overlay.insert_node(edited_node);
+    let rev_after_edit = server.overlay.current_revision();
+    assert!(
+        rev_after_edit > rev_before_edit,
+        "overlay revision must advance after insert_node; before={rev_before_edit} after={rev_after_edit}"
+    );
+
+    // 4. Register agent-A and call `claim_files` with the *stale*
+    //    `plan_revision`. The handler must populate `world_state` with
+    //    the `Edited` entry corresponding to agent-B's diff.
+    let (agent_id, token) = register(&server, "alice");
+    let args = serde_json::json!({
+        "agent_id": agent_id,
+        "session_token": token,
+        "files": [{
+            "path": "src/auth.rs",
+            "symbols": ["verify_token"],
+            "intent": "edit",
+            "plan_revision": rev_before_edit,
+        }],
+    });
+    let resp = run_claim_files(&server, args).expect("claim_files should succeed");
+
+    // 5. Assert: granted, world_state present, `Edited` entry for
+    //    `verify_token` whose `at_revision` matches the post-edit
+    //    overlay revision. The non-vacuous assertions match the
+    //    brief's spec.
+    assert_eq!(
+        resp["granted"].as_array().unwrap().len(),
+        1,
+        "claim must be granted; resp={resp}"
+    );
+    let ws = &resp["world_state"];
+    assert!(
+        !ws.is_null(),
+        "world_state must be Some when plan_revision is supplied; resp={resp}"
+    );
+    assert_eq!(
+        ws["current"].as_u64(),
+        Some(rev_after_edit),
+        "world_state.current must equal the live overlay revision; resp={resp}"
+    );
+    assert_eq!(
+        ws["plan"].as_u64(),
+        Some(rev_before_edit),
+        "world_state.plan must echo the caller's plan_revision; resp={resp}"
+    );
+    let symbols = ws["changed_symbols"].as_array().unwrap();
+    assert_eq!(
+        symbols.len(),
+        1,
+        "exactly one Edited entry expected for verify_token; got {symbols:?}"
+    );
+    assert_eq!(
+        symbols[0]["name"].as_str(),
+        Some("verify_token"),
+        "Edited entry name must correspond to agent-B's overlay diff; resp={resp}"
+    );
+    assert_eq!(
+        symbols[0]["change_kind"].as_str(),
+        Some("Edited"),
+        "Edited entry must carry change_kind=Edited; resp={resp}"
+    );
+    assert_eq!(
+        symbols[0]["at_revision"].as_u64(),
+        Some(rev_after_edit),
+        "Edited at_revision must match the post-edit overlay revision; resp={resp}"
+    );
+}
+
+/// PR 1 Task 1.8 cover: when the caller supplies a `plan_revision`
+/// newer than the overlay's current revision, the handler emits the
+/// third `LookupResult` arm — `BeyondCurrent` — with a `note` that
+/// tells the caller the world moved past them. The verbatim note text
+/// is `"plan_revision beyond current — server may have restarted"`
+/// (em-dash) and lives in
+/// `src/server/mcp/presence_tools.rs::compute_world_state`.
+#[tokio::test]
+async fn agent_a_plan_revision_beyond_current_gets_note() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (server, _backend) = build_pr1_federation_server(tmp.path());
+
+    // No overlay edits — `current_revision` stays at 0, so any
+    // `plan_revision >= 1` triggers `BeyondCurrent`. Use a value far
+    // past the floor so a future overlay mutation doesn't accidentally
+    // make the claim land inside the window.
+    let beyond_plan: u64 = 999_999;
+    assert!(
+        beyond_plan > server.overlay.current_revision(),
+        "test precondition: plan_revision must exceed current_revision ({}); got plan={beyond_plan}",
+        server.overlay.current_revision()
+    );
+
+    let (agent_id, token) = register(&server, "bob");
+    let args = serde_json::json!({
+        "agent_id": agent_id,
+        "session_token": token,
+        "files": [{
+            "path": "src/auth.rs",
+            "symbols": ["verify_token"],
+            "intent": "edit",
+            "plan_revision": beyond_plan,
+        }],
+    });
+    let resp = run_claim_files(&server, args).expect("claim_files should succeed");
+
+    assert_eq!(
+        resp["granted"].as_array().unwrap().len(),
+        1,
+        "claim itself still granted (BeyondCurrent is a note, not a refusal); resp={resp}"
+    );
+    let ws = &resp["world_state"];
+    assert!(
+        !ws.is_null(),
+        "world_state must be Some when plan_revision is supplied; resp={resp}"
+    );
+    // Verbatim from `compute_world_state` (presence_tools.rs). The em-dash
+    // (—, U+2014) is load-bearing: agents branch on the message text to
+    // decide between "server may have restarted, re-hydrate" vs other
+    // notes; do NOT silently replace it with an ASCII hyphen.
+    assert_eq!(
+        ws["note"].as_str(),
+        Some("plan_revision beyond current — server may have restarted"),
+        "BeyondCurrent must surface the verbatim note from compute_world_state; resp={resp}"
+    );
+    assert_eq!(
+        ws["changed_symbols"].as_array().unwrap().len(),
+        0,
+        "BeyondCurrent must not invent any changed_symbols entries; resp={resp}"
+    );
+    assert_eq!(
+        ws["plan"].as_u64(),
+        Some(beyond_plan),
+        "world_state.plan must echo the caller's plan_revision even on BeyondCurrent; resp={resp}"
+    );
+}
