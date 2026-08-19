@@ -13,7 +13,9 @@ use std::time::SystemTime;
 
 use crate::server::revision_log::RevisionId;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct AgentId(pub String);
 
@@ -182,7 +184,7 @@ pub struct Claim {
     pub plan_revision: Option<RevisionId>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConflictEntry {
     pub agent_id: AgentId,
     pub path: PathBuf,

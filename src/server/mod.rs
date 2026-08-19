@@ -35,6 +35,11 @@ pub mod presence;
 pub mod presence_lock;
 pub mod sse;
 
+// Audit log — append-only JSONL record of every edit that lands
+// on disk. See `crate::server::audit` for the storage model and
+// rotation semantics.
+pub mod audit;
+
 // Re-export the LainServer orchestrator + transport at `crate::server::*`
 // so existing callers (`lain::server::LainServer`, `lain::server::Transport`,
 // `crate::server::LainServer`, `crate::server::Transport`) keep working
