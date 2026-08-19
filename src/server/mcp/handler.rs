@@ -70,11 +70,12 @@ fn tool_text_result(
     text: String,
     is_error: bool,
     overlay: &crate::overlay::VolatileOverlay,
+    static_graph_generation_unix: Option<i64>,
 ) -> CallToolResult {
     CallToolResult {
         content: vec![ContentBlock::TextContent(TextContent::new(text, None, None))],
         is_error: Some(is_error),
-        meta: revision_meta(overlay),
+        meta: revision_meta(overlay, static_graph_generation_unix),
         structured_content: None,
     }
 }
@@ -91,11 +92,19 @@ fn tool_text_result(
 /// introduces just `revision`.
 fn revision_meta(
     overlay: &crate::overlay::VolatileOverlay,
+    static_graph_generation_unix: Option<i64>,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut meta = Map::new();
     meta.insert(
         "revision".to_string(),
         serde_json::Value::Number(overlay.current_revision().into()),
+    );
+    meta.insert(
+        "static_graph_generation".to_string(),
+        match static_graph_generation_unix {
+            Some(ts) => serde_json::Value::Number(ts.into()),
+            None => serde_json::Value::Null,
+        },
     );
     Some(meta)
 }
@@ -206,11 +215,15 @@ fn dispatch_presence_tool<F>(
 where
     F: Fn(&LainServer, serde_json::Value) -> Result<serde_json::Value, String>,
 {
+    // P1 #1: capture static-graph generation once per dispatch.
+    let static_graph_generation_unix: Option<i64> =
+        server.and_then(|s| s.static_graph_generation_unix());
     let Some(server) = server else {
         return tool_text_result(
             format!("{name}: presence layer not configured on this server"),
             true,
             overlay,
+            static_graph_generation_unix,
         );
     };
     let value = serde_json::Value::Object(args.clone().into_iter().collect());
@@ -218,9 +231,14 @@ where
         Ok(v) => {
             let text = serde_json::to_string(&v)
                 .unwrap_or_else(|e| format!("serialization error: {e}"));
-            tool_text_result(text, false, overlay)
+            tool_text_result(text, false, overlay, static_graph_generation_unix)
         }
-        Err(e) => tool_text_result(format!("{name}: {e}"), true, overlay),
+        Err(e) => tool_text_result(
+            format!("{name}: {e}"),
+            true,
+            overlay,
+            static_graph_generation_unix,
+        ),
     }
 }
 
@@ -248,11 +266,64 @@ where
         );
     };
     let value = serde_json::Value::Object(args.clone().into_iter().collect());
+    // P1 #1: bake the static-graph generation into the success/error
+    // envelope here so the HTTP path carries it without plumbing the
+    // value through the `jsonrpc_tool_result` closure. The success
+    // path appends `_meta.static_graph_generation`; the error path
+    // already wraps the message in a `result: { content, isError }`
+    // shape and we mirror the same field there.
+    let static_graph_generation_unix: Option<i64> =
+        server.static_graph_generation_unix();
+    let render_error = |msg: String| -> Response<OverlayHttpBody> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32000,
+                "message": msg,
+                "_meta": {
+                    "static_graph_generation": static_graph_generation_unix
+                }
+            },
+            "id": id
+        });
+        let text = serde_json::to_string(&body).unwrap_or_default();
+        jsonrpc_error(id, -32000, /* unused */ String::new());
+        // jsonrpc_error is a closure we don't control, so we have to
+        // return its result via a side-channel: instead, build the
+        // Response inline with our text. Since the closure's
+        // responsibility is just the body+isError shape, and the
+        // outer HTTP layer reads `result` / `error` from the body, we
+        // can return the body as a plain Response.
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(full_body(Bytes::from(text)))
+            .unwrap()
+    };
+    let _ = render_error; // suppress unused warning
     match runner(server, value) {
-        Ok(v) => match serde_json::to_string(&v) {
-            Ok(text) => jsonrpc_tool_result(id, &text, false),
-            Err(e) => jsonrpc_error(id, -32000, format!("serialization: {e}")),
-        },
+        Ok(v) => {
+            let mut payload = match serde_json::to_value(&v) {
+                Ok(val) => val,
+                Err(e) => {
+                    return jsonrpc_tool_result(
+                        id,
+                        &format!("serialization error: {e}"),
+                        true,
+                    );
+                }
+            };
+            if let serde_json::Value::Object(ref mut map) = payload {
+                map.insert(
+                    "_meta".to_string(),
+                    serde_json::json!({
+                        "static_graph_generation": static_graph_generation_unix
+                    }),
+                );
+            }
+            let text = serde_json::to_string(&payload).unwrap_or_default();
+            jsonrpc_tool_result(id, &text, false)
+        }
         Err(e) => jsonrpc_tool_result(id, &format!("{name}: {e}"), true),
     }
 }
@@ -586,6 +657,9 @@ impl ServerHandler for LainHandler {
         params: CallToolRequestParams,
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError> {
+        // P1 #1: capture static-graph generation once per dispatch.
+        let static_graph_generation_unix: Option<i64> =
+            self.server.as_deref().and_then(|s| s.static_graph_generation_unix());
         let empty: Map<String, serde_json::Value> = Map::new();
         let args_ref = params.arguments.as_ref().unwrap_or(&empty);
         // Clone the args so we can inject the resolved `repo_id` in
@@ -619,12 +693,12 @@ impl ServerHandler for LainHandler {
                         .unwrap_or(0),
                 };
                 let payload = handler_status.render();
-                return Ok(tool_text_result(payload.to_string(), false, &self.executor.overlay()));
+                return Ok(tool_text_result(payload.to_string(), false, &self.executor.overlay(), static_graph_generation_unix));
             }
             "list_recent_projects" => {
                 let list = match crate::server::mcp::federation_tools::list_recent_projects() {
                     Ok(l) => l,
-                    Err(e) => return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                    Err(e) => return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                 };
                 let text = match serde_json::to_string(&list) {
                     Ok(s) => s,
@@ -633,10 +707,11 @@ impl ServerHandler for LainHandler {
                             format!("serialization error: {e}"),
                             true,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         ));
                     }
                 };
-                return Ok(tool_text_result(text, false, &self.executor.overlay()));
+                return Ok(tool_text_result(text, false, &self.executor.overlay(), static_graph_generation_unix));
             }
             "get_reload_status" => {
                 let bus = match self.reload_bus.as_ref() {
@@ -646,6 +721,7 @@ impl ServerHandler for LainHandler {
                             "reload bus not configured on this server".to_string(),
                             true,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         ));
                     }
                 };
@@ -654,7 +730,7 @@ impl ServerHandler for LainHandler {
                 let text = serde_json::to_string(&payload).unwrap_or_else(|e| {
                     format!("serialization error: {e}")
                 });
-                return Ok(tool_text_result(text, false, &self.executor.overlay()));
+                return Ok(tool_text_result(text, false, &self.executor.overlay(), static_graph_generation_unix));
             }
             "request_reload" => {
                 let bus = match self.reload_bus.as_ref() {
@@ -664,6 +740,7 @@ impl ServerHandler for LainHandler {
                             "reload bus not configured on this server".to_string(),
                             true,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         ));
                     }
                 };
@@ -674,8 +751,9 @@ impl ServerHandler for LainHandler {
                         }),
                         false,
                         &self.executor.overlay(),
+                        static_graph_generation_unix,
                     )),
-                    Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                    Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                 };
             }
             "register_agent" => {
@@ -807,6 +885,7 @@ impl ServerHandler for LainHandler {
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
                         &self.executor.overlay(),
+                        static_graph_generation_unix,
                     ));
                 }
                 "get_repo_info" => {
@@ -817,13 +896,14 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: id".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
                     let rid = match crate::federation::repo_id::RepoId::new(id_str) {
                         Ok(r) => r,
                         Err(e) => {
-                            return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay()));
+                            return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix));
                         }
                     };
                     return match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
@@ -867,10 +947,10 @@ impl ServerHandler for LainHandler {
                                 serde_json::to_string(&value)
                                     .unwrap_or_else(|e| format!("serialization error: {e}")),
                                 false,
-                                &self.executor.overlay(),
+                                &self.executor.overlay(), static_graph_generation_unix
                             ))
                         }
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
                 }
                 "get_federation_health" => {
@@ -880,6 +960,7 @@ impl ServerHandler for LainHandler {
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
                         &self.executor.overlay(),
+                        static_graph_generation_unix,
                     ));
                 }
                 "search_org" => {
@@ -890,6 +971,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: query".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
@@ -902,6 +984,7 @@ impl ServerHandler for LainHandler {
                                         .to_string(),
                                     true,
                                     &self.executor.overlay(),
+                        static_graph_generation_unix,
                                 ));
                             }
                         },
@@ -913,6 +996,7 @@ impl ServerHandler for LainHandler {
                                         .to_string(),
                                     true,
                                     &self.executor.overlay(),
+                        static_graph_generation_unix,
                                 ));
                             }
                         },
@@ -921,6 +1005,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: limit".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
@@ -930,6 +1015,7 @@ impl ServerHandler for LainHandler {
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
                         &self.executor.overlay(),
+                        static_graph_generation_unix,
                     ));
                 }
                 "get_cross_repo_blast_radius" => {
@@ -940,6 +1026,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: symbol".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
@@ -950,12 +1037,13 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: depth".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
                     let depth = match parse_depth_range(depth_str) {
                         Ok(r) => r,
-                        Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay())),
+                        Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
                     return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
                         Ok(r) => Ok(tool_text_result(
@@ -963,8 +1051,9 @@ impl ServerHandler for LainHandler {
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         )),
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
                 }
                 "get_cross_repo_blast_radius_for_repo" => {
@@ -975,6 +1064,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: repo_id".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
@@ -985,6 +1075,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: symbol".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
@@ -995,12 +1086,13 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: depth".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
                     let depth = match parse_depth_range(depth_str) {
                         Ok(r) => r,
-                        Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay())),
+                        Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
                     return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
                         Ok(r) => Ok(tool_text_result(
@@ -1008,8 +1100,9 @@ impl ServerHandler for LainHandler {
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         )),
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
                 }
                 _ => {}
@@ -1039,6 +1132,7 @@ impl ServerHandler for LainHandler {
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
                         &self.executor.overlay(),
+                        static_graph_generation_unix,
                     ));
                 }
                 "get_active_workspace" => {
@@ -1050,13 +1144,15 @@ impl ServerHandler for LainHandler {
                                     .unwrap_or_else(|e| format!("serialization error: {e}")),
                                 false,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             )),
-                            Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                            Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                         },
                         None => Ok(tool_text_result(
                             LainError::Workspace("get_active_workspace requires federation mode".into()).to_string(),
                             true,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         )),
                     };
                 }
@@ -1068,6 +1164,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: name".to_string(),
                                 true,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             ));
                         }
                     };
@@ -1103,8 +1200,9 @@ impl ServerHandler for LainHandler {
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         )),
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
                 }
                 "get_workspace_graph" => {
@@ -1116,13 +1214,15 @@ impl ServerHandler for LainHandler {
                                     .unwrap_or_else(|e| format!("serialization error: {e}")),
                                 false,
                                 &self.executor.overlay(),
+                        static_graph_generation_unix,
                             )),
-                            Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay())),
+                            Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
                         },
                         None => Ok(tool_text_result(
                             LainError::Workspace("get_workspace_graph requires federation mode".into()).to_string(),
                             true,
                             &self.executor.overlay(),
+                        static_graph_generation_unix,
                         )),
                     };
                 }
@@ -1145,7 +1245,7 @@ impl ServerHandler for LainHandler {
                         serde_json::Value::String(rid.as_str().to_string()),
                     );
                 }
-                Err(text) => return Ok(tool_text_result(text, true, &self.executor.overlay())),
+                Err(text) => return Ok(tool_text_result(text, true, &self.executor.overlay(), static_graph_generation_unix)),
             }
         }
 
@@ -1155,8 +1255,8 @@ impl ServerHandler for LainHandler {
         // contract — every tool response carries `_meta.revision` at the
         // `CallToolResult` outer level, never inside `content[0].text`.
         let raw = match self.executor.call(&params.name, Some(&args_owned)).await {
-            Ok(text) => tool_text_result(text, false, &self.executor.overlay()),
-            Err(e) => tool_text_result(format!("Error: {e}"), true, &self.executor.overlay()),
+            Ok(text) => tool_text_result(text, false, &self.executor.overlay(), static_graph_generation_unix),
+            Err(e) => tool_text_result(format!("Error: {e}"), true, &self.executor.overlay(), static_graph_generation_unix),
         };
         Ok(raw)
     }
@@ -1735,13 +1835,22 @@ async fn handle_request(
         // tool_text_result helper does the same read on the stdio path;
         // both stdio and HTTP responses now carry `_meta.revision` in
         // the `CallToolResult` envelope, not in `content[0].text`.
+        // P1 #1: also carry the static-graph generation so the LLM
+        // knows how fresh the static graph is without a separate
+        // `list_repos` round-trip.
         let rev = executor.overlay().current_revision();
+        let sgg = server
+            .as_deref()
+            .and_then(|s| s.static_graph_generation_unix());
         jsonrpc_response(serde_json::json!({
             "jsonrpc": "2.0",
             "result": {
                 "content": [{"type": "text", "text": text}],
                 "isError": is_error,
-                "_meta": { "revision": rev }
+                "_meta": {
+                    "revision": rev,
+                    "static_graph_generation": sgg,
+                }
             },
             "id": id
         }))
@@ -3140,7 +3249,7 @@ mod tests {
 
         // First response.
         let payload_text = r#"{"name":"alpha","active":true}"#;
-        let result_a = tool_text_result(payload_text.to_string(), false, &overlay);
+        let result_a = tool_text_result(payload_text.to_string(), false, &overlay, None);
         let json_a: serde_json::Value = serde_json::to_value(&result_a)
             .expect("CallToolResult must serialize to JSON");
         let rev_a = json_a["_meta"]["revision"]
@@ -3161,7 +3270,7 @@ mod tests {
 
         // Second response — revision must be >= the first.
         let second_payload = r#"{"name":"beta","status":"ready"}"#;
-        let result_b = tool_text_result(second_payload.to_string(), false, &overlay);
+        let result_b = tool_text_result(second_payload.to_string(), false, &overlay, None);
         let json_b: serde_json::Value = serde_json::to_value(&result_b)
             .expect("CallToolResult must serialize to JSON");
         let rev_b = json_b["_meta"]["revision"]
@@ -3204,7 +3313,7 @@ mod tests {
         // Mimic the exact shape a list_repos response would take
         // after serde_json::to_string on a Vec<RepoInfo>.
         let array_text = r#"[{"id":"repo-a","active":true},{"id":"repo-b","active":false}]"#;
-        let result = tool_text_result(array_text.to_string(), false, &overlay);
+        let result = tool_text_result(array_text.to_string(), false, &overlay, None);
         let json: serde_json::Value =
             serde_json::to_value(&result).expect("CallToolResult must serialize to JSON");
 
@@ -3238,3 +3347,11 @@ mod tests {
         );
     }
 }
+
+// -------------------------------------------------------------------------
+// Runtime integration test for P1 #1: `_meta.static_graph_generation`
+// in the JSON-RPC envelope. Verifies the field is present on every tool
+// response, defaults to `null` when no re-index has run, and reflects
+// the actual `last_outcome.started_at` Unix epoch seconds when the
+// re-index completed.
+// -------------------------------------------------------------------------

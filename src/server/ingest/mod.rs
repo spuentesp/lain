@@ -1035,6 +1035,23 @@ impl LainServer {
             .unwrap_or_else(crate::config::state_dir)
     }
 
+    /// Static-graph generation as a Unix-epoch seconds value, or `None`
+    /// if no successful re-index has happened in this process. Used by
+    /// the JSON-RPC `_meta.static_graph_generation` envelope field (P1
+    /// #1) so the LLM knows how fresh the static graph is without
+    /// needing a separate `list_repos` round-trip.
+    pub fn static_graph_generation_unix(&self) -> Option<i64> {
+        use crate::server::refresh::RefreshResult;
+        use std::time::UNIX_EPOCH;
+        let outcome = self.last_outcome.lock();
+        if !matches!(outcome.result, RefreshResult::Ok) {
+            return None;
+        }
+        outcome.started_at.duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs() as i64)
+    }
+
     /// Persist the live `PresenceRegistry` + `OccupancyMap` to the
     /// server's state file. Called by the persist callback installed
     /// in the three constructors, so callers do not need to invoke
