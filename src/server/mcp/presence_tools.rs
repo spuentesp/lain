@@ -9,10 +9,12 @@
 
 use crate::server::ingest::LainServer;
 use crate::server::presence::{
-    AgentId, AgentKind, AgentMode, ClaimIntent, ClaimRequest, OccupancyEntry,
-    PresenceEvent,
+    AgentId, AgentKind, AgentMode, ChangedKind, ChangedSymbol, ClaimIntent, ClaimRequest,
+    OccupancyEntry, PresenceEvent, WorldState,
 };
+use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
+use crate::server::audit::{append_edit_event, AuditEvent};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -155,6 +157,11 @@ pub struct ClaimFilesEntry {
     pub path: String,
     pub symbols: Option<Vec<String>>,
     pub intent: Option<String>,
+    /// Last plan revision the calling agent saw (Task 1.4, PR 1).
+    /// `None` preserves the prior behavior for callers that don't
+    /// track revisions yet.
+    #[serde(default)]
+    pub plan_revision: Option<crate::server::revision_log::RevisionId>,
 }
 
 pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String> {
@@ -163,13 +170,37 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
+    // Capture `plan_revision` and the union of requested symbols up
+    // front so we can populate `world_state` after the claim is
+    // granted. Per Task 1.4, `plan_revision` travels per-file; we
+    // take the first non-None across the request set, matching the
+    // spec's "Some(_) when the request included a plan_revision"
+    // contract. If no file carried a revision, the response stays
+    // world_state-less for legacy callers.
+    let plan_revision: Option<RevisionId> = a.files.iter().find_map(|f| f.plan_revision);
+    let requested_symbols: Vec<String> = a.files.iter()
+        .flat_map(|f| f.symbols.clone().unwrap_or_default())
+        .collect();
     let requests: Vec<ClaimRequest> = a.files.into_iter().map(|f| ClaimRequest {
         path: std::path::PathBuf::from(f.path),
         symbols: f.symbols.unwrap_or_default(),
         intent: f.intent.as_deref().map(|s| if s == "read" { ClaimIntent::Read } else { ClaimIntent::Edit }).unwrap_or(ClaimIntent::Edit),
         ttl_seconds: None,
+        plan_revision: f.plan_revision,
     }).collect();
-    let result = server.occupancy.claim_with_session(&session, requests);
+    let mut result = server.occupancy.claim_with_session(&session, requests);
+    // Populate `world_state` only when the caller supplied a
+    // `plan_revision`. The brief's Step 3 pseudocode:
+    //   1. Check each requested symbol against the static graph and
+    //      record `Retracted` entries for symbols not present.
+    //   2. Ask the overlay for `diffs_since(plan)`. Three branches:
+    //      `Ok(diffs)` → fold into `Edited` entries via
+    //      `ChangedSymbol::from_diffs`; `BeyondCurrent` / `TooOld`
+    //      → empty `changed_symbols` plus a `note` for the agent.
+    //   3. Combine the two sources and emit `Some(WorldState)`.
+    if let Some(plan) = plan_revision {
+        result.world_state = Some(compute_world_state(server, plan, &requested_symbols));
+    }
     if !result.granted.is_empty() {
         for g in &result.granted {
             let _ = server.presence_event_tx.send(PresenceEvent::ClaimGranted {
@@ -177,26 +208,198 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
                 path: g.path.clone(),
             });
         }
+        // Audit append (Task 2.3, PR 2). The spec's invariant is
+        // "audit never blocks an edit": one event per granted path,
+        // `racers` populated from the post-resolution conflict list
+        // (empty when uncontested), `landed_revision` captured
+        // *after* `OccupancyMap::claim` so it reflects the
+        // post-claim overlay state the agent believes it is writing
+        // into. The append is best-effort: a filesystem failure
+        // emits `WARN` and the claim itself remains valid. The
+        // `claim_set` is the post-grant `Claim` snapshot pulled
+        // from the occupancy map — the spec records the claims the
+        // writer *believes itself to hold*, not the request payload.
+        // We snapshot the agent's full claim set once and partition
+        // it per granted path so a multi-file claim still produces
+        // one audit line per granted file.
+        let all_claims = server.occupancy.list_for_agent(&session.id);
+        let landed_revision = server.overlay.current_revision();
+        let audit_dir = server.state_dir_for_audit();
+        let ts_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        for g in &result.granted {
+            let claim_set: Vec<crate::server::presence::Claim> = all_claims
+                .iter()
+                .filter(|c| c.path == g.path)
+                .cloned()
+                .collect();
+            let audit = AuditEvent {
+                ts_unix,
+                agent_id: session.id.clone(),
+                path: g.path.clone(),
+                claim_set,
+                racers: result.conflicts.clone(),
+                plan_revision,
+                landed_revision,
+            };
+            if let Err(e) = append_edit_event(&audit_dir, &audit) {
+                tracing::warn!("audit append failed: {e}");
+            }
+            // SSE `edit_landed` (PR 2 / Task 2.4) — same best-effort
+            // contract as the audit append: a dropped subscriber or a
+            // closed broadcast channel must never block the claim. The
+            // wire payload is the same `AuditEvent` we just wrote to
+            // disk, so Command Center subscribers see the write the
+            // instant it lands rather than waiting for a future
+            // `get_audit_log` poll.
+            let _ = server
+                .presence_event_tx
+                .send(PresenceEvent::EditLanded { event: audit.clone() });
+        }
     }
     if !result.conflicts.is_empty() {
+        let severity = runtime_conflict_severity(server, &result.conflicts);
         let _ = server.presence_event_tx.send(PresenceEvent::ConflictDetected {
             agent_id: session.id.clone(),
             conflicts: result.conflicts.clone(),
+            severity,
         });
     }
-    Ok(json!({
-        "granted": result.granted.iter().map(|g| json!({
-            "path": g.path.to_string_lossy(),
-            "symbols": g.symbols,
-        })).collect::<Vec<_>>(),
-        "conflicts": result.conflicts.iter().map(|c| json!({
-            "agent_id": c.agent_id.as_str(),
-            "path": c.path.to_string_lossy(),
-            "symbols": c.symbols,
-            "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
-            "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
-        })).collect::<Vec<_>>(),
-    }))
+    let mut out = serde_json::Map::new();
+    out.insert("granted".into(), Value::Array(result.granted.iter().map(|g| json!({
+        "path": g.path.to_string_lossy(),
+        "symbols": g.symbols,
+    })).collect()));
+    out.insert("conflicts".into(), Value::Array(result.conflicts.iter().map(|c| json!({
+        "agent_id": c.agent_id.as_str(),
+        "path": c.path.to_string_lossy(),
+        "symbols": c.symbols,
+        "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+        "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
+    })).collect()));
+    // `world_state` is populated by the static-graph retract detector
+    // (Task 1.6, PR 1). When `None`, the field is omitted from the
+    // wire response (matching the `skip_serializing_if` on the struct
+    // field) so existing callers see no new shape.
+    if let Some(ws) = result.world_state.as_ref() {
+        if let Ok(v) = serde_json::to_value(ws) {
+            out.insert("world_state".into(), v);
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// Build the `WorldState` payload for a `claim_files` call that
+/// supplied a `plan_revision`. Three layers:
+///
+/// 1. **Retracted** — any requested symbol the static graph no longer
+///    resolves. Federation mode consults the `GraphBackend` name index
+///    (matches `project_repo`'s retract-aware contract); single-workspace
+///    servers consult the per-repo `GraphDatabase`.
+/// 2. **Edited** — symbols touched by overlay diffs since `plan`.
+///    `ChangedSymbol::from_diffs` dedups by name and keeps the latest
+///    `at_revision`. Filtered to the requested symbols so unrelated
+///    overlay churn doesn't pollute the response (spec: "filters to
+///    the claim's paths only").
+/// 3. **Note** — set on `BeyondCurrent` (the world moved past the
+///    caller's plan before claim landed) and `TooOld` (the plan is
+///    older than the ring buffer's floor). The agent uses the note to
+///    decide whether to re-query or to proceed under advisory.
+fn compute_world_state(
+    server: &LainServer,
+    plan: RevisionId,
+    requested_symbols: &[String],
+) -> WorldState {
+    let current = server.overlay.current_revision();
+
+    // ── (a) Static-graph retract detection ─────────────────────────────
+    // The brief's pseudocode names `FederatedIndex::symbol_to_repos`
+    // (the in-memory name index) and `GraphDatabase::find_nodes_by_name`
+    // (per-repo). The federation's `symbol_to_repos` is private, so we
+    // call the public `GraphBackend::find_nodes_by_name` instead — the
+    // same name it uses for the `resolve_symbol` fallback path. The
+    // per-repo `GraphDatabase` exposes `find_node_by_name` (singular),
+    // which is sufficient for the "does any node have this name?"
+    // question; we use the singular form accordingly.
+    let mut retracted: Vec<ChangedSymbol> = Vec::new();
+    for sym in requested_symbols {
+        if !symbol_exists_in_static_graph(server, sym) {
+            retracted.push(ChangedSymbol {
+                name: sym.clone(),
+                change_kind: ChangedKind::Retracted,
+                at_revision: current,
+            });
+        }
+    }
+
+    // ── (b) Overlay diffs since `plan` ─────────────────────────────────
+    let overlay_diffs = match server.overlay.diffs_since(plan) {
+        Ok(ds) => ds,
+        Err(err) => match err {
+            LookupResult::BeyondCurrent => {
+                return WorldState {
+                    current,
+                    plan,
+                    changed_symbols: Vec::new(),
+                    note: Some(
+                        "plan_revision beyond current — server may have restarted".into(),
+                    ),
+                };
+            }
+            LookupResult::TooOld => {
+                return WorldState {
+                    current,
+                    plan,
+                    changed_symbols: Vec::new(),
+                    note: Some("plan_revision too old for delta; resync required".into()),
+                };
+            }
+            // `LookupResult::Ok` is the (within-window) success arm of
+            // the enum, but here we're already in the `Err` branch of
+            // `diffs_since` — `Ok` is unreachable. Explicitly handle
+            // it so the match stays exhaustive against future enum
+            // growth (e.g. a `Transitional` variant that wouldn't be
+            // an error).
+            LookupResult::Ok => Vec::new(),
+        },
+    };
+
+    // ── (c) Combine overlay `Edited` entries with the retract set ──────
+    // Filter the overlay diffs to symbols the claim actually asked
+    // about; otherwise a single claim would surface every overlay
+    // mutation since `plan`, which is noise an agent has to ignore.
+    let mut changed_symbols = ChangedSymbol::from_diffs(&overlay_diffs, plan, current);
+    if !requested_symbols.is_empty() {
+        let requested: std::collections::HashSet<&str> =
+            requested_symbols.iter().map(|s| s.as_str()).collect();
+        changed_symbols.retain(|cs| requested.contains(cs.name.as_str()));
+    }
+    changed_symbols.extend(retracted);
+    WorldState {
+        current,
+        plan,
+        changed_symbols,
+        note: None,
+    }
+}
+
+/// Whether `sym` is currently a node in the static graph. Federation
+/// mode routes through the federation's `GraphBackend` (the same
+/// surface `project_repo` uses for retracts); single-workspace mode
+/// checks the per-repo `GraphDatabase`. Errors are treated as
+/// "symbol not present" — the retract detector is best-effort and
+/// must not block a claim.
+fn symbol_exists_in_static_graph(server: &LainServer, sym: &str) -> bool {
+    if let Some(fed) = server.federation() {
+        match fed.backend().find_nodes_by_name(sym) {
+            Ok(nodes) => !nodes.is_empty(),
+            Err(_) => false,
+        }
+    } else {
+        server.graph.find_node_by_name(sym).is_some()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -415,6 +618,48 @@ pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, Str
         "files": out_files,
         "total_overlaps": total_overlaps,
     }))
+}
+
+/// Classify a live occupancy conflict with the same weighted bands used by
+/// `detect_overlap`. Symbol claims are resolved through the current graph so
+/// their `NodeType` contributes the same weight. File-level claims have no
+/// symbols to resolve, so each distinct path contributes the minimum weight.
+fn runtime_conflict_severity(
+    server: &LainServer,
+    conflicts: &[crate::server::presence::ConflictEntry],
+) -> &'static str {
+    let mut seen_symbols = std::collections::HashSet::new();
+    let mut overlap = Vec::new();
+
+    for symbol in conflicts.iter().flat_map(|conflict| &conflict.symbols) {
+        if !seen_symbols.insert(symbol.as_str()) {
+            continue;
+        }
+        let kind = if let Some(fed) = server.federation() {
+            fed.backend()
+                .find_nodes_by_name(symbol)
+                .ok()
+                .and_then(|nodes| nodes.into_iter().next())
+                .map(|node| node.node_type)
+        } else {
+            server.graph.find_node_by_name(symbol).map(|node| node.node_type)
+        }
+        // A live claim may name a symbol not yet indexed. Treat it as a member
+        // rather than dropping it from the score: the conflict is still real.
+        .unwrap_or(NodeType::Variable);
+        overlap.push((symbol.clone(), kind));
+    }
+
+    if overlap.is_empty() {
+        let mut paths = std::collections::HashSet::new();
+        overlap.extend(conflicts.iter().filter_map(|conflict| {
+            paths
+                .insert(conflict.path.clone())
+                .then(|| (conflict.path.to_string_lossy().into_owned(), NodeType::File))
+        }));
+    }
+
+    overlap_severity(&overlap)
 }
 
 /// How much a single shared symbol contributes to a file's severity score.

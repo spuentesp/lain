@@ -32,6 +32,7 @@ async fn query_graph_includes_occupancy() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
 
     // Verify the claim is observable through the helper the
@@ -106,6 +107,7 @@ fn claim_grants_empty_path_when_unoccupied() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(result.granted.len(), 1);
     assert_eq!(result.conflicts.len(), 0);
@@ -121,12 +123,14 @@ fn claim_reports_conflict_on_overlap() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(result.granted.len(), 0);
     assert_eq!(result.conflicts.len(), 1);
@@ -143,12 +147,14 @@ fn claim_different_symbols_on_same_file_no_conflict() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["validate".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(result.granted.len(), 1);
     assert_eq!(result.conflicts.len(), 0);
@@ -164,12 +170,14 @@ fn claim_file_level_no_symbols_overlaps_with_anything_on_file() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["anything".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(result.granted.len(), 0);
     assert_eq!(result.conflicts.len(), 1);
@@ -180,8 +188,8 @@ fn release_returns_removed_paths() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
     occ.claim(&alice, vec![
-        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None },
-        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Read, ttl_seconds: None },
+        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None },
+        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Read, ttl_seconds: None, plan_revision: None },
     ]);
     let released = occ.release(&alice, &[std::path::PathBuf::from("auth.rs")]);
     assert_eq!(released, vec![std::path::PathBuf::from("auth.rs")]);
@@ -193,8 +201,8 @@ fn release_all_for_clears_agent() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
     occ.claim(&alice, vec![
-        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None },
-        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None },
+        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None },
+        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None },
     ]);
     let released = occ.release_all_for(&alice);
     assert_eq!(released.len(), 2);
@@ -204,8 +212,8 @@ fn release_all_for_clears_agent() {
 #[test]
 fn list_for_path_shows_all_agents() {
     let occ = lain::server::presence::OccupancyMap::new();
-    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None }]);
-    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["validate".into()], intent: ClaimIntent::Edit, ttl_seconds: None }]);
+    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
+    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["validate".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
     let entry = occ.list_for_path(&std::path::PathBuf::from("auth.rs")).unwrap();
     assert_eq!(entry.agents.len(), 2);
     assert_eq!(entry.symbols.len(), 2);
@@ -214,8 +222,8 @@ fn list_for_path_shows_all_agents() {
 #[test]
 fn list_all_returns_all_claimed_paths() {
     let occ = lain::server::presence::OccupancyMap::new();
-    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None }]);
-    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None }]);
+    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
+    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
 
     let entries = occ.list_all();
     let paths: std::collections::HashSet<_> = entries.iter().map(|e| e.path.clone()).collect();
@@ -288,7 +296,7 @@ fn register_agent_returns_id_and_token() {
 fn occupancy_round_trip() {
     let occ = OccupancyMap::new();
     let alice = AgentId("alice".into());
-    let req = ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None };
+    let req = ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None };
     let r = occ.claim(&alice, vec![req]);
     assert_eq!(r.granted.len(), 1);
     let claims = occ.list_for_agent(&alice);
@@ -352,6 +360,10 @@ async fn presence_tool_dispatchers_round_trip() {
     // Drain ClaimGranted.
     let ev = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::ClaimGranted { .. }));
+    // Drain EditLanded (PR 2 / Task 2.4 — emitted alongside the
+    // audit append for the granted claim).
+    let ev = events.recv().await.unwrap();
+    assert!(matches!(ev, PresenceEvent::EditLanded { .. }));
 
     // 3. Register a second agent to provoke a conflict.
     let v2 = run_register_agent(
@@ -361,7 +373,8 @@ async fn presence_tool_dispatchers_round_trip() {
     let bob_id = v2["agent_id"].as_str().unwrap().to_string();
     let bob_token = v2["session_token"].as_str().unwrap().to_string();
     // Drain bob's AgentJoined.
-    let _ = events.recv().await.unwrap();
+    let ev = events.recv().await.unwrap();
+    assert!(matches!(ev, PresenceEvent::AgentJoined { .. }));
 
     let v = run_claim_files(
         &server_arc,
@@ -503,6 +516,7 @@ fn persistence_round_trip() {
             symbols: vec![],
             intent: ClaimIntent::Edit,
             ttl_seconds: None,
+            plan_revision: None,
         }],
     );
     save_pair(&path, &reg1, &occ1).unwrap();
@@ -532,6 +546,7 @@ fn ttl_seconds_bounds_claim_even_with_heartbeat() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: Some(1), // 1 second
+        plan_revision: None,
     };
     occ.claim(&alice, vec![req]);
     let claims = occ.list_for_agent(&alice);
@@ -560,6 +575,7 @@ fn no_ttl_means_no_expiry() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     };
     occ.claim(&alice, vec![req]);
     let claims = occ.list_for_agent(&alice);
@@ -582,6 +598,7 @@ fn expire_by_ttl_releases_expired_claims() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: Some(1),
+        plan_revision: None,
     }]);
     // bob: no TTL on db.rs — survives. Different file keeps the test
     // from accidentally exercising the file-level vs symbol-level
@@ -591,6 +608,7 @@ fn expire_by_ttl_releases_expired_claims() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let released = occ.expire_by_ttl();
@@ -621,6 +639,7 @@ fn claim_recorded_last_touched_unix() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     };
     occ.claim(&agent, vec![req]);
     let claims = occ.list_for_agent(&agent);
@@ -641,12 +660,14 @@ fn read_claim_does_not_conflict_with_edit_claim() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
         intent: ClaimIntent::Read, // <-- read, not edit
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(result.granted.len(), 1, "read claim should NOT conflict with edit");
     assert_eq!(result.conflicts.len(), 0);
@@ -666,12 +687,14 @@ fn edit_claim_still_conflicts_with_existing_edit_claim() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     let result = occ.claim(&bob, vec![ClaimRequest {
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(result.granted.len(), 0, "edit-vs-edit conflict should still hold");
     assert_eq!(result.conflicts.len(), 1);
@@ -701,6 +724,7 @@ fn file_level_edit_does_not_conflict_with_symbol_level_read() {
         symbols: vec!["func_x".into()],
         intent: ClaimIntent::Read,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
 
     // yuri does a file-level Edit. xena's symbol-level Read is a
@@ -710,6 +734,7 @@ fn file_level_edit_does_not_conflict_with_symbol_level_read() {
         symbols: vec![], // file-level
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(
         result.granted.len(),
@@ -739,6 +764,7 @@ fn file_level_edit_conflicts_with_symbol_level_edit_and_reports_real_intent() {
         symbols: vec!["func_x".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
 
     let result = occ.claim(&yuri, vec![ClaimRequest {
@@ -746,6 +772,7 @@ fn file_level_edit_conflicts_with_symbol_level_edit_and_reports_real_intent() {
         symbols: vec![],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     assert_eq!(result.granted.len(), 0, "file-level Edit blocks on symbol-level Edit");
     assert_eq!(result.conflicts.len(), 1);
@@ -958,6 +985,7 @@ fn symbol_level_claim_records_nonzero_content_hash() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     };
     occ.claim(&agent, vec![req]);
     let claims = occ.list_for_agent(&agent);
@@ -987,6 +1015,7 @@ fn symbol_level_claim_hash_changes_when_body_changes() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     let hash1 = occ.list_for_agent(&agent)[0].content_hash.unwrap();
 
@@ -996,10 +1025,50 @@ fn symbol_level_claim_hash_changes_when_body_changes() {
         symbols: vec!["login".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     let claims = occ.list_for_agent(&agent);
     assert_eq!(claims.len(), 2, "agent should now hold two claim records");
     let hash2 = claims[1].content_hash.unwrap();
 
     assert_ne!(hash1, hash2);
+}
+
+// --- Task 1.4 brief: Claim.plan_revision field ---
+
+/// Round-tripping a `Claim` with `plan_revision = Some(42)` must preserve
+/// the field. The field is `Option<RevisionId>` (alias for `u64`) on the
+/// in-memory `Claim` and sits next to `expires_at` on the struct.
+#[test]
+fn claim_round_trips_plan_revision() {
+    let claim = Claim {
+        agent_id: AgentId("a1".into()),
+        path: std::path::PathBuf::from("/x.rs"),
+        symbols: vec!["login".into()],
+        content_hash: None,
+        intent: ClaimIntent::Edit,
+        claimed_at: SystemTime::UNIX_EPOCH,
+        last_touched_unix: SystemTime::UNIX_EPOCH,
+        expires_at: None,
+        plan_revision: Some(42),
+    };
+    let json = serde_json::to_string(&claim).unwrap();
+    let back: Claim = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.plan_revision, Some(42));
+}
+
+/// Older state files have no `plan_revision` key. With
+/// `#[serde(default)]`, deserialization must succeed and yield `None`
+/// rather than 400'ing the loader.
+#[test]
+fn claim_without_plan_revision_deserializes_to_none() {
+    let json = r#"{
+        "agent_id": "a1",
+        "path": "/x.rs",
+        "symbols": ["login"],
+        "content_hash": null,
+        "intent": "Edit"
+    }"#;
+    let claim: Claim = serde_json::from_str(json).unwrap();
+    assert_eq!(claim.plan_revision, None);
 }

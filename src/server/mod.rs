@@ -23,6 +23,7 @@ pub mod toolchains;
 pub mod sensors;
 pub mod watcher;
 pub mod overlay;
+pub mod revision_log;
 
 pub mod ingest;
 pub mod query;
@@ -33,6 +34,16 @@ pub mod attribution;
 pub mod presence;
 pub mod presence_lock;
 pub mod sse;
+
+// Audit log — append-only JSONL record of every edit that lands
+// on disk. See `crate::server::audit` for the storage model and
+// rotation semantics.
+pub mod audit;
+
+// Tiny glob matcher used by the `get_audit_log` MCP tool (Task 2.5)
+// to filter audit events by path. Thin shim over the `glob` crate
+// that is already a project dependency.
+pub mod glob_match;
 
 // Re-export the LainServer orchestrator + transport at `crate::server::*`
 // so existing callers (`lain::server::LainServer`, `lain::server::Transport`,

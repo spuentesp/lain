@@ -29,6 +29,7 @@ fn presence_and_occupancy_survive_lain_restart() {
         symbols: vec!["bar".into()],
         intent: ClaimIntent::Edit,
         ttl_seconds: None,
+        plan_revision: None,
     }]);
     save_pair(&state_path, &server1.presence, &server1.occupancy).expect("save");
 
