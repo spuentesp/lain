@@ -155,6 +155,11 @@ pub struct ClaimFilesEntry {
     pub path: String,
     pub symbols: Option<Vec<String>>,
     pub intent: Option<String>,
+    /// Last plan revision the calling agent saw (Task 1.4, PR 1).
+    /// `None` preserves the prior behavior for callers that don't
+    /// track revisions yet.
+    #[serde(default)]
+    pub plan_revision: Option<crate::server::revision_log::RevisionId>,
 }
 
 pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String> {
@@ -168,6 +173,7 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         symbols: f.symbols.unwrap_or_default(),
         intent: f.intent.as_deref().map(|s| if s == "read" { ClaimIntent::Read } else { ClaimIntent::Edit }).unwrap_or(ClaimIntent::Edit),
         ttl_seconds: None,
+        plan_revision: f.plan_revision,
     }).collect();
     let result = server.occupancy.claim_with_session(&session, requests);
     if !result.granted.is_empty() {

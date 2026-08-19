@@ -367,6 +367,7 @@ fn attribute_edit(
                 symbols: vec![],
                 intent: ClaimIntent::Edit,
                 ttl_seconds: None,
+                plan_revision: None,
             }],
         );
         if !result.granted.is_empty() {

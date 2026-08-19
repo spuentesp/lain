@@ -11,6 +11,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use crate::server::revision_log::RevisionId;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct AgentId(pub String);
@@ -170,6 +172,14 @@ pub struct Claim {
     /// Optional expiry timestamp (PR 10 Task 3 hook). `None` means
     /// "no expiry set"; the federation expiry loop will ignore it.
     pub expires_at: Option<SystemTime>,
+    /// Last plan revision the agent saw at the moment this claim was
+    /// granted (Task 1.4, PR 1). `None` for legacy claims or for
+    /// callers that don't track revisions yet. Tolerated on load via
+    /// `default` so older state files hydrate without migration, and
+    /// omitted from the wire JSON when absent (`skip_serializing_if`)
+    /// so unchanged claims don't bloat the persist payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_revision: Option<RevisionId>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -456,6 +466,12 @@ pub struct ClaimRequest {
     /// TTL of its own and is only released explicitly or when the
     /// owning agent's session expires.
     pub ttl_seconds: Option<u64>,
+    /// Last plan revision the caller saw when issuing this claim
+    /// (Task 1.4). Threads onto the resulting `Claim` so the value
+    /// survives persistence and reachability-checks against the
+    /// overlay can flag stale claims. `None` for callers that don't
+    /// supply a revision.
+    pub plan_revision: Option<RevisionId>,
 }
 
 #[derive(Debug, Clone)]
@@ -797,6 +813,7 @@ impl OccupancyMap {
                         claimed_at: now,
                         last_touched_unix: now,
                         expires_at,
+                        plan_revision: req.plan_revision,
                     });
                     granted.push(req);
                 } else {
