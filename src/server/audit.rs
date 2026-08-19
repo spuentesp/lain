@@ -198,6 +198,45 @@ pub fn read_audit_log(
     Ok(out)
 }
 
+/// Size in bytes of the live `audit.jsonl` under `state_dir`, i.e.
+/// the byte offset at which the next `append_edit_event` call will
+/// start writing. Returns `0` if the file is missing (fresh server)
+/// or unreadable (treat missing and unreadable the same: a brand-new
+/// append will create the file fresh). The rotated sibling is
+/// ignored — by the time the next append fires, rotation will have
+/// either already happened (sibling is fresh) or be about to (the
+/// next append decides based on the live file's size, which is what
+/// we report here).
+///
+/// This is the source of truth that `PersistedState::audit_offset_bytes`
+/// is persisted from at save time (Task 2.6). The OS's append-only
+/// positioning means the audit module never *needs* the persisted
+/// value to seek — `O_APPEND` already lands the write at the current
+/// end of file — but the field is still useful as a "last known good"
+/// marker for diagnostics and for `get_audit_log` consumers.
+pub fn current_offset_bytes(state_dir: &Path) -> u64 {
+    let path = state_dir.join(AUDIT_LOG_FILENAME);
+    match std::fs::metadata(&path) {
+        Ok(m) => m.len(),
+        // Missing or unreadable → "no audit data yet" → offset 0.
+        Err(_) => 0,
+    }
+}
+
+/// True when the live `audit.jsonl` exists and is openable under
+/// `state_dir`. The loader (Task 2.6) uses this to decide whether
+/// to stamp a fresh `audit_reset_at_unix` on the persisted state
+/// file: if the audit log is gone, the next save would otherwise
+/// silently re-emit a stale offset that doesn't correspond to any
+/// real audit data, so the loader marks the gap and resets the
+/// offset to 0. The rotated sibling is not consulted — rotation is
+/// the live file's problem, and a missing live file is already
+/// enough to flag a reset.
+pub fn audit_log_present_and_readable(state_dir: &Path) -> bool {
+    let path = state_dir.join(AUDIT_LOG_FILENAME);
+    std::fs::File::open(&path).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

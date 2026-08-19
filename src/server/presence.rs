@@ -1210,11 +1210,33 @@ struct PersistedState {
 /// file at `path`. The write is atomic: serialise to `path.tmp` first,
 /// then `rename` over `path`. Returns a string error on any IO / JSON
 /// failure; callers wrap as needed.
+///
+/// The `audit_offset_bytes` field is populated from the live
+/// `audit.jsonl` file (sibling of `path` under the same state
+/// directory) at save time — Task 2.6 wiring. The state file is
+/// always co-located with the audit log on disk (see
+/// `LainServer::state_dir_for_audit`), so `path.parent()` is the
+/// correct audit directory in every production code path. A bare
+/// filename with no parent (which `LainServer::state_path` never
+/// produces, but tests might) falls back to the current dir, which
+/// at worst yields a `0` offset for a missing audit log.
 pub fn save_pair(
     path: &Path,
     reg: &PresenceRegistry,
     occ: &OccupancyMap,
 ) -> Result<(), String> {
+    // Task 2.6 — read the live audit log size now so the value
+    // persisted on this save reflects "how much audit data was on
+    // disk at the moment of this write," not a placeholder. The
+    // sibling relationship between the state file and the audit log
+    // holds in production; the parent-unwrap_or("") fallback keeps
+    // this safe even for synthetic test paths with no parent.
+    let audit_dir: PathBuf = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(""));
+    let audit_offset_bytes = crate::server::audit::current_offset_bytes(&audit_dir);
+
     let state = {
         let s = reg.inner.lock();
         let o = occ.inner.lock();
@@ -1233,13 +1255,15 @@ pub fn save_pair(
             occupancy_by_agent: o.by_agent.iter()
                 .map(|(k, v)| (k.0.clone(), v.clone()))
                 .collect(),
-            // Placeholder defaults for Task 2.2 — the audit module
-            // isn't wired into save yet. Task 2.6 replaces these with
-            // the actual offset + reset timestamp read from the audit
-            // module at save time. Additive-compat: state files from
-            // before this commit load with `0` / `None` via
-            // `#[serde(default)]` on the struct fields.
-            audit_offset_bytes: 0,
+            // Task 2.6 — these fields are now driven by the audit
+            // module instead of placeholders. `audit_offset_bytes`
+            // is the live size of `audit.jsonl`; `audit_reset_at_unix`
+            // is set by `load_pair` when it detects a missing or
+            // unreadable audit log on the way in, and simply
+            // round-trips here on the way out. Additive-compat
+            // (state files from before Task 2.2 still load via
+            // `#[serde(default)]`).
+            audit_offset_bytes,
             audit_reset_at_unix: None,
         }
     };
@@ -1264,6 +1288,15 @@ pub fn save_pair(
 /// On a successful read, prior contents of `reg` / `occ` are **not**
 /// wiped before merge — callers should pass freshly-constructed
 /// registries. Same string-error convention as `save_pair`.
+///
+/// Task 2.6: after a successful parse, if the live `audit.jsonl` is
+/// missing or unreadable in the state directory (`path.parent()`),
+/// the loader rewrites the state file with `audit_offset_bytes = 0`
+/// and `audit_reset_at_unix = Some(now)`. The spec calls for a WARN
+/// here; we surface it through `tracing::warn!` so operators see it
+/// in the server log. The next `save_pair` then persists the reset
+/// timestamp out to the world; subsequent restarts see the marker
+/// and don't re-warn.
 pub fn load_pair(
     path: &Path,
     reg: &PresenceRegistry,
@@ -1274,8 +1307,51 @@ pub fn load_pair(
     }
     let json = std::fs::read_to_string(path)
         .map_err(|e| format!("read {}: {e}", path.display()))?;
-    let state: PersistedState = serde_json::from_str(&json)
+    let mut state: PersistedState = serde_json::from_str(&json)
         .map_err(|e| format!("parse {}: {e}", path.display()))?;
+
+    // Task 2.6 — audit log present-or-not check + reset rewrite,
+    // before we start consuming `state`'s `Vec` fields below. The
+    // same `path.parent()` rule from `save_pair` applies: the state
+    // file and audit log are siblings under the state directory,
+    // and a bare path with no parent falls back to the current dir
+    // for the check (which yields a fresh "missing" verdict,
+    // triggering the reset — correct, since no audit log is
+    // colocated there). Doing the rewrite here keeps `state` fully
+    // owned so we can `&state` for the on-disk rewrite; the on-disk
+    // marker is independent of the in-memory hydration that follows
+    // so the order doesn't matter for the data flow.
+    let audit_dir: PathBuf = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(""));
+    if !crate::server::audit::audit_log_present_and_readable(&audit_dir) {
+        tracing::warn!(
+            "audit log missing or unreadable at {}; resetting audit_offset_bytes and stamping audit_reset_at_unix",
+            audit_dir.join(crate::server::audit::AUDIT_LOG_FILENAME).display(),
+        );
+        state.audit_offset_bytes = 0;
+        state.audit_reset_at_unix = Some(system_time_now_unix());
+        // Persist the reset marker immediately so a crash between
+        // load and the first save doesn't lose it. The write goes
+        // through the same atomic-rename path as `save_pair` so a
+        // half-written state file can't be observed by a concurrent
+        // reader. A concurrent mutator racing the rewrite would
+        // still write its own (possibly newer) state on top of ours
+        // — that's the same race the regular save path already
+        // accepts, so it doesn't widen the surface here.
+        let json = serde_json::to_string_pretty(&state)
+            .map_err(|e| format!("serialize PersistedState (reset): {e}"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    }
 
     let mut s = reg.inner.lock();
     let mut o = occ.inner.lock();
@@ -1299,6 +1375,7 @@ pub fn load_pair(
     for (k, claims) in state.occupancy_by_agent {
         o.by_agent.insert(AgentId(k), claims);
     }
+
     Ok(())
 }
 
@@ -1537,4 +1614,138 @@ mod audit_persistence_tests {
         assert_eq!(parsed.audit_offset_bytes, 0);
         assert_eq!(parsed.audit_reset_at_unix, None);
     }
+
+    /// Task 2.6 / brief: `save_pair` must read the current size of
+    /// `audit.jsonl` (its sibling under the same state directory) and
+    /// emit that as `audit_offset_bytes`, not the placeholder `0`.
+    /// Pre-create the audit log with a known size, call `save_pair`,
+    /// re-parse the state file, and assert the offset matches.
+    #[test]
+    fn offset_round_trips_across_state_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+
+        // 12345 bytes of known sentinel content. The exact byte
+        // count is what the test pins — `save_pair` must surface
+        // this on disk, not a placeholder.
+        const EXPECTED: u64 = 12_345;
+        std::fs::write(&audit_path, vec![b'x'; EXPECTED as usize]).unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        save_pair(&state_path, &reg, &occ).expect("save_pair");
+
+        let written = fs::read_to_string(&state_path).unwrap();
+        let parsed: PersistedState = serde_json::from_str(&written)
+            .expect("state file must round-trip after save");
+        assert_eq!(
+            parsed.audit_offset_bytes, EXPECTED,
+            "save_pair must read audit.jsonl size and emit it as audit_offset_bytes; \
+             got {} expected {} (state file:\n{written})",
+            parsed.audit_offset_bytes, EXPECTED,
+        );
+    }
+
+    /// Task 2.6 / spec: if `audit.jsonl` is missing on load, the
+    /// loader must mark `audit_reset_at_unix` with a recent timestamp
+    /// so the next save persists the reset, and `get_audit_log`
+    /// consumers can report the gap. This test pre-writes a state
+    /// file with `audit_reset_at_unix: None`, runs `load_pair` with
+    /// no audit file present, and asserts the state file now carries
+    /// a reset timestamp.
+    #[test]
+    fn load_pair_marks_reset_when_audit_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        // No `audit.jsonl` is created — the missing-file case is
+        // the entire point of the test.
+        assert!(!dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME).exists());
+
+        // Seed a state file with a prior offset and no reset marker
+        // (the "pre-reset" state: we thought we had an audit log
+        // pointing at byte 9999, but it's gone).
+        let seeded = serde_json::json!({
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": [],
+            "audit_offset_bytes": 9_999_u64,
+            "audit_reset_at_unix": serde_json::Value::Null,
+        });
+        std::fs::write(&state_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        load_pair(&state_path, &reg, &occ).expect("load_pair");
+
+        // The state file on disk must now have `audit_reset_at_unix`
+        // set to a recent timestamp (not null). The loader rewrites
+        // the file when it detects the missing audit log.
+        let after = fs::read_to_string(&state_path).unwrap();
+        let parsed: PersistedState = serde_json::from_str(&after)
+            .expect("state file must round-trip after load-induced reset");
+        let reset = parsed
+            .audit_reset_at_unix
+            .expect("load_pair must set audit_reset_at_unix when audit.jsonl is missing");
+        let now = system_time_now_unix();
+        assert!(
+            (now - reset).abs() < 5.0,
+            "reset timestamp should be recent: reset={reset} now={now}",
+        );
+        // The offset is also reset to 0 (the spec says "reset offset
+        // to 0" when the audit log is missing).
+        assert_eq!(
+            parsed.audit_offset_bytes, 0,
+            "load_pair must reset audit_offset_bytes to 0 when audit.jsonl is missing",
+        );
+    }
+
+    /// Counterpart of the previous test: when `audit.jsonl` IS
+    /// present on load, `load_pair` must not clobber the persisted
+    /// offset or stamp a spurious reset. Existing offset survives.
+    #[test]
+    fn load_pair_preserves_offset_when_audit_file_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+        // Create a 100-byte audit log so the file exists and is
+        // readable; the loader must not flag a reset.
+        std::fs::write(&audit_path, vec![b'x'; 100]).unwrap();
+
+        let seeded = serde_json::json!({
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": [],
+            "audit_offset_bytes": 100_u64,
+            "audit_reset_at_unix": serde_json::Value::Null,
+        });
+        std::fs::write(&state_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        load_pair(&state_path, &reg, &occ).expect("load_pair");
+
+        let after = fs::read_to_string(&state_path).unwrap();
+        let parsed: PersistedState = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            parsed.audit_offset_bytes, 100,
+            "load_pair must preserve the persisted offset when audit.jsonl exists",
+        );
+        assert!(
+            parsed.audit_reset_at_unix.is_none(),
+            "load_pair must not stamp a reset when audit.jsonl is present",
+        );
+    }
+}
+
+/// `SystemTime::now()` as a fractional UNIX-epoch second, matching
+/// the `ts_unix: f64` field on `AuditEvent` and `audit_reset_at_unix`.
+/// Free function (not a method) so unit tests in this module can use
+/// it without standing up a `LainServer` or touching the real clock.
+fn system_time_now_unix() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    dur.as_secs() as f64 + dur.subsec_millis() as f64 / 1_000.0
 }
