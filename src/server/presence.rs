@@ -1089,11 +1089,14 @@ impl Default for OccupancyMap {
 /// - `ClaimGranted` / `ClaimReleased` — occupancy map changes.
 /// - `ConflictDetected` — an occupancy claim came back with conflicts.
 /// - `EditLanded` — a successful write path appended an `AuditEvent`
-///   (PR 2 / Task 2.4). The inner `AuditEvent`'s fields are flattened
-///   into the wire JSON so Command Center subscribers see the same
-///   shape on the `/events` stream that `get_audit_log` would return
-///   for the same write.
-#[derive(Debug, Clone)]
+///   (PR 2 / Task 2.4). The wire JSON for this variant carries the
+///   `EditLanded` tag wrapping the inner `AuditEvent`'s fields
+///   (serde's external-tag default). Downstream consumers read the
+///   audit data from `data["EditLanded"]`. The SSE frame's `event:`
+///   field is set to `"edit_landed"`, so the stream shape is symmetric
+///   with `get_audit_log`'s responses — both serialize the seven
+///   `AuditEvent` fields under the same JSON keys.
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum PresenceEvent {
     AgentJoined(AgentSession),
     AgentLeft(AgentId),
@@ -1105,62 +1108,9 @@ pub enum PresenceEvent {
         conflicts: Vec<ConflictEntry>,
         severity: &'static str,
     },
-    /// PR 2 / Task 2.4 — emitted by every write path that appends to
-    /// `audit.jsonl`, alongside the append. The custom `Serialize`
-    /// impl flattens the inner `AuditEvent`'s fields to the top
-    /// level of the wire JSON (matching the audit log's per-line
-    /// shape) so downstream consumers can treat the two payloads
-    /// identically.
     EditLanded {
         event: crate::server::audit::AuditEvent,
     },
-}
-
-// Manual `Serialize` impl (instead of `#[derive(serde::Serialize)]`)
-// so `EditLanded` can emit its inner `AuditEvent`'s fields at the
-// top level of the JSON object. Serde's `#[serde(tag = "...")]` only
-// works for unit variants (and would still wrap the inner object),
-// and `#[serde(flatten)]` on enum-variant fields can't strip the
-// outer variant tag, so the hand-rolled implementation is the
-// smallest mechanism that produces the wire shape the spec asks for.
-// All other variants serialize as their natural struct/tuple shape
-// (i.e. their previous `#[derive(Serialize)]` output).
-impl serde::Serialize for PresenceEvent {
-    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        match self {
-            // PR 2 / Task 2.4 — flatten the inner `AuditEvent`
-            // directly so its fields sit at the JSON top level,
-            // matching the audit log's per-line wire shape.
-            PresenceEvent::EditLanded { event } => event.serialize(ser),
-            PresenceEvent::AgentJoined(s) => s.serialize(ser),
-            PresenceEvent::AgentLeft(a) => a.serialize(ser),
-            PresenceEvent::HeartbeatExpired(a) => a.serialize(ser),
-            PresenceEvent::ClaimGranted { agent_id, path } => {
-                let mut s = ser.serialize_struct("ClaimGranted", 2)?;
-                s.serialize_field("agent_id", agent_id)?;
-                s.serialize_field("path", path)?;
-                s.end()
-            }
-            PresenceEvent::ClaimReleased { agent_id, path } => {
-                let mut s = ser.serialize_struct("ClaimReleased", 2)?;
-                s.serialize_field("agent_id", agent_id)?;
-                s.serialize_field("path", path)?;
-                s.end()
-            }
-            PresenceEvent::ConflictDetected {
-                agent_id,
-                conflicts,
-                severity,
-            } => {
-                let mut s = ser.serialize_struct("ConflictDetected", 3)?;
-                s.serialize_field("agent_id", agent_id)?;
-                s.serialize_field("conflicts", conflicts)?;
-                s.serialize_field("severity", severity)?;
-                s.end()
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

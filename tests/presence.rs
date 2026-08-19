@@ -360,6 +360,10 @@ async fn presence_tool_dispatchers_round_trip() {
     // Drain ClaimGranted.
     let ev = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::ClaimGranted { .. }));
+    // Drain EditLanded (PR 2 / Task 2.4 — emitted alongside the
+    // audit append for the granted claim).
+    let ev = events.recv().await.unwrap();
+    assert!(matches!(ev, PresenceEvent::EditLanded { .. }));
 
     // 3. Register a second agent to provoke a conflict.
     let v2 = run_register_agent(
@@ -369,7 +373,8 @@ async fn presence_tool_dispatchers_round_trip() {
     let bob_id = v2["agent_id"].as_str().unwrap().to_string();
     let bob_token = v2["session_token"].as_str().unwrap().to_string();
     // Drain bob's AgentJoined.
-    let _ = events.recv().await.unwrap();
+    let ev = events.recv().await.unwrap();
+    assert!(matches!(ev, PresenceEvent::AgentJoined { .. }));
 
     let v = run_claim_files(
         &server_arc,

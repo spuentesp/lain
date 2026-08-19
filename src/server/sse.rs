@@ -123,14 +123,20 @@ mod tests {
         let json =
             serde_json::to_value(&PresenceEvent::EditLanded { event }).unwrap();
 
-        // Wire-contract checks: every AuditEvent field at the top level.
-        assert_eq!(json["agent_id"], "a-edit");
-        assert_eq!(json["path"], "/src/lib.rs");
-        assert_eq!(json["plan_revision"], 7);
-        assert_eq!(json["landed_revision"], 42);
-        assert!((json["ts_unix"].as_f64().unwrap() - 1.7e9).abs() < 0.001);
-        assert!(json["claim_set"].is_array());
-        assert!(json["racers"].is_array());
+        // Wire-contract checks: every AuditEvent field lives under
+        // the `EditLanded` variant tag and inside the `event` field
+        // (serde's external-tag default wraps a struct variant's
+        // fields under their original names). Consumers read
+        // `data["EditLanded"]["event"]["<field>"]`. The SSE frame's
+        // `event:` field is `"edit_landed"`, so a header-only
+        // subscriber can recognize the type without parsing the body.
+        assert_eq!(json["EditLanded"]["event"]["agent_id"], "a-edit");
+        assert_eq!(json["EditLanded"]["event"]["path"], "/src/lib.rs");
+        assert_eq!(json["EditLanded"]["event"]["plan_revision"], 7);
+        assert_eq!(json["EditLanded"]["event"]["landed_revision"], 42);
+        assert!((json["EditLanded"]["event"]["ts_unix"].as_f64().unwrap() - 1.7e9).abs() < 0.001);
+        assert!(json["EditLanded"]["event"]["claim_set"].is_array());
+        assert!(json["EditLanded"]["event"]["racers"].is_array());
 
         // The SSE event-name mapping must be `edit_landed` — that's
         // what the Command Center subscribes to.
@@ -166,7 +172,7 @@ mod tests {
         let frame = build_frame_for(&event).await;
         let payload: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
         assert_eq!(frame.event, "conflict_detected");
-        assert_eq!(payload["severity"], "high");
+        assert_eq!(payload["ConflictDetected"]["severity"], "high");
     }
 
     /// Helper: build one `SseFrame` from a `PresenceEvent` without
