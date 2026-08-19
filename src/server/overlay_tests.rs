@@ -496,3 +496,38 @@ fn test_overlay_last_update_age_updates_on_edge() {
     let age = overlay.last_update_age_secs();
     assert!(age < 1.0, "After edge insert, overlay should have fresh timestamp, got {}", age);
 }
+
+// ─── RevisionLog wiring (Task 1.2) ─────────────────────────────────────────
+//
+// These exercise the `current_revision` / `diffs_since` surface promised by
+// Task 1.2. The log is embedded inside `VolatileOverlay` and fed by
+// `insert_node` / `insert_edge`; nothing outside `overlay.rs` reads it yet.
+
+#[test]
+fn overlay_reports_current_revision_after_inserts() {
+    let vo = VolatileOverlay::new();
+    assert_eq!(vo.current_revision(), 0);
+    let node = GraphNode::new(NodeType::Function, "f1".to_string(), "/p.rs".to_string());
+    vo.insert_node(node);
+    let rev = vo.current_revision();
+    assert!(rev >= 1, "expected current_revision >= 1 after one insert, got {rev}");
+}
+
+#[test]
+fn overlay_diffs_since_filters_correctly() {
+    let vo = VolatileOverlay::new();
+    vo.insert_node(GraphNode::new(NodeType::Function, "a".to_string(), "/a.rs".to_string()));
+    let mid = vo.current_revision();
+    vo.insert_node(GraphNode::new(NodeType::Function, "b".to_string(), "/b.rs".to_string()));
+    let diffs = vo.diffs_since(mid).unwrap();
+    assert_eq!(diffs.len(), 1);
+    assert!(diffs[0].added.iter().any(|n| n.name == "b"));
+}
+
+#[test]
+fn overlay_diffs_since_beyond_current_errors() {
+    use crate::server::revision_log::LookupResult;
+    let vo = VolatileOverlay::new();
+    vo.insert_node(GraphNode::new(NodeType::Function, "a".to_string(), "/a.rs".to_string()));
+    assert!(matches!(vo.diffs_since(999), Err(LookupResult::BeyondCurrent)));
+}
