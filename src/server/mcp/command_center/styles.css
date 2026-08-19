@@ -389,3 +389,30 @@ table.repo-table th {
   border: 1px solid var(--border);
   border-radius: 4px;
 }
+
+.conflict-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.4rem;
+  align-items: center;
+  margin-bottom: 0.25rem;
+  border: 1px solid var(--border);
+}
+
+.conflict-card code {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
+
+.severity {
+  border-radius: 999px;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.severity-none { background: #eaeef2; color: #57606a; }
+.severity-low { background: #ddf4ff; color: #0969da; }
+.severity-medium { background: #fff8c5; color: #7d4e00; }
+.severity-high { background: #ffebe9; color: #cf222e; }

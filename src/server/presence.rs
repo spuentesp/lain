@@ -1100,7 +1100,11 @@ pub enum PresenceEvent {
     HeartbeatExpired(AgentId),
     ClaimGranted { agent_id: AgentId, path: PathBuf },
     ClaimReleased { agent_id: AgentId, path: PathBuf },
-    ConflictDetected { agent_id: AgentId, conflicts: Vec<ConflictEntry> },
+    ConflictDetected {
+        agent_id: AgentId,
+        conflicts: Vec<ConflictEntry>,
+        severity: &'static str,
+    },
     /// PR 2 / Task 2.4 — emitted by every write path that appends to
     /// `audit.jsonl`, alongside the append. The custom `Serialize`
     /// impl flattens the inner `AuditEvent`'s fields to the top
@@ -1147,10 +1151,12 @@ impl serde::Serialize for PresenceEvent {
             PresenceEvent::ConflictDetected {
                 agent_id,
                 conflicts,
+                severity,
             } => {
-                let mut s = ser.serialize_struct("ConflictDetected", 2)?;
+                let mut s = ser.serialize_struct("ConflictDetected", 3)?;
                 s.serialize_field("agent_id", agent_id)?;
                 s.serialize_field("conflicts", conflicts)?;
+                s.serialize_field("severity", severity)?;
                 s.end()
             }
         }

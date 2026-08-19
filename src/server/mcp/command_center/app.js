@@ -217,7 +217,25 @@ function subscribePresenceEvents() {
     ev.addEventListener('heartbeat_expired', () => rerender('agents'));
     ev.addEventListener('claim_granted', () => rerender('both'));
     ev.addEventListener('claim_released', () => rerender('both'));
-    ev.addEventListener('conflict_detected', () => rerender('rooms'));
+    ev.addEventListener('conflict_detected', (event) => {
+      rerender('rooms');
+      let conflict;
+      try { conflict = JSON.parse(event.data); } catch (_) { return; }
+      const list = document.getElementById('conflicts-list');
+      if (!list) return;
+      const allowed = new Set(['none', 'low', 'medium', 'high']);
+      const severity = allowed.has(conflict.severity) ? conflict.severity : 'none';
+      const first = Array.isArray(conflict.conflicts) ? conflict.conflicts[0] : null;
+      const li = document.createElement('li');
+      li.className = 'conflict-card';
+      li.innerHTML = `
+        <span class="severity severity-${severity}">${escapeHtml(severity)}</span>
+        <strong>${escapeHtml(conflict.agent_id || 'unknown agent')}</strong>
+        <code>${escapeHtml(first && first.path ? first.path : 'unknown path')}</code>
+      `;
+      if (list.querySelector('.muted')) list.innerHTML = '';
+      list.prepend(li);
+    });
     ev.addEventListener('ready', () => rerender('both'));
     ev.addEventListener('error', () => {
       // EventSource auto-reconnects on transient errors; log once so the

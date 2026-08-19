@@ -99,8 +99,9 @@ mod tests {
 
     use super::*;
     use crate::server::audit::AuditEvent;
-    use crate::server::presence::AgentId;
+    use crate::server::presence::{AgentId, ClaimIntent, ConflictEntry};
     use std::path::PathBuf;
+    use std::time::SystemTime;
 
     /// `EditLanded` must serialize the `AuditEvent`'s fields at the
     /// top level of the JSON object (matching the wire spec
@@ -146,6 +147,26 @@ mod tests {
         })
         .await;
         assert_eq!(frame.event, "edit_landed");
+    }
+
+    #[tokio::test]
+    async fn sse_severity_conflict_detected_includes_severity_field() {
+        let event = PresenceEvent::ConflictDetected {
+            agent_id: AgentId("a-conflict".into()),
+            conflicts: vec![ConflictEntry {
+                agent_id: AgentId("holder".into()),
+                path: PathBuf::from("src/lib.rs"),
+                symbols: vec!["login".into(), "logout".into()],
+                intent: ClaimIntent::Edit,
+                last_seen_unix: SystemTime::UNIX_EPOCH,
+            }],
+            severity: "high",
+        };
+
+        let frame = build_frame_for(&event).await;
+        let payload: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
+        assert_eq!(frame.event, "conflict_detected");
+        assert_eq!(payload["severity"], "high");
     }
 
     /// Helper: build one `SseFrame` from a `PresenceEvent` without

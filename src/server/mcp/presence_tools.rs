@@ -260,9 +260,11 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         }
     }
     if !result.conflicts.is_empty() {
+        let severity = runtime_conflict_severity(server, &result.conflicts);
         let _ = server.presence_event_tx.send(PresenceEvent::ConflictDetected {
             agent_id: session.id.clone(),
             conflicts: result.conflicts.clone(),
+            severity,
         });
     }
     let mut out = serde_json::Map::new();
@@ -616,6 +618,48 @@ pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, Str
         "files": out_files,
         "total_overlaps": total_overlaps,
     }))
+}
+
+/// Classify a live occupancy conflict with the same weighted bands used by
+/// `detect_overlap`. Symbol claims are resolved through the current graph so
+/// their `NodeType` contributes the same weight. File-level claims have no
+/// symbols to resolve, so each distinct path contributes the minimum weight.
+fn runtime_conflict_severity(
+    server: &LainServer,
+    conflicts: &[crate::server::presence::ConflictEntry],
+) -> &'static str {
+    let mut seen_symbols = std::collections::HashSet::new();
+    let mut overlap = Vec::new();
+
+    for symbol in conflicts.iter().flat_map(|conflict| &conflict.symbols) {
+        if !seen_symbols.insert(symbol.as_str()) {
+            continue;
+        }
+        let kind = if let Some(fed) = server.federation() {
+            fed.backend()
+                .find_nodes_by_name(symbol)
+                .ok()
+                .and_then(|nodes| nodes.into_iter().next())
+                .map(|node| node.node_type)
+        } else {
+            server.graph.find_node_by_name(symbol).map(|node| node.node_type)
+        }
+        // A live claim may name a symbol not yet indexed. Treat it as a member
+        // rather than dropping it from the score: the conflict is still real.
+        .unwrap_or(NodeType::Variable);
+        overlap.push((symbol.clone(), kind));
+    }
+
+    if overlap.is_empty() {
+        let mut paths = std::collections::HashSet::new();
+        overlap.extend(conflicts.iter().filter_map(|conflict| {
+            paths
+                .insert(conflict.path.clone())
+                .then(|| (conflict.path.to_string_lossy().into_owned(), NodeType::File))
+        }));
+    }
+
+    overlap_severity(&overlap)
 }
 
 /// How much a single shared symbol contributes to a file's severity score.
