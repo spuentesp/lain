@@ -254,10 +254,232 @@ function wireOnlyMySessionToggle() {
   idInput.value = prefs.myAgentId;
   const onChange = () => {
     saveMySessionPrefs({ onlyMySession: toggle.checked, myAgentId: idInput.value });
-    applyMySessionFilterToList();
+    // PR 3 / Task 3.3 — the session filter is now applied at render time
+    // against the in-memory conflict buffer, so just re-render.
+    renderConflictsList();
   };
   toggle.addEventListener('change', onChange);
   idInput.addEventListener('input', onChange);
+}
+
+// ── PR 3 / Task 3.3 — burst collapsing ────────────────────────────────────
+//
+// Pure helper: groups `events` (objects with `{ts, path, ...}`) by `path` in
+// chronological order. Two adjacent same-path events whose `ts` differ by at
+// most `window_ms` are joined into one card. Runs of fewer than 3 items are
+// expanded back into single-item cards so 1- or 2-event groups stay
+// separate (per the brief).
+//
+// Output card shape: { path, count, first_ts, last_ts, items: [...] }
+//
+// --- Snapshot tests (brief) ---
+// The repo has no JS test harness (verified — only npm-shim has *.test.js).
+// These tests are documented inline; a future harness can pick them up as-is.
+//
+//   test('burst of 3 events same path within 5s collapses to one card', () => {
+//     const base = Date.now();
+//     const events = [
+//       { ts: base,        path: '/x.rs' },
+//       { ts: base + 1000, path: '/x.rs' },
+//       { ts: base + 2000, path: '/x.rs' },
+//     ];
+//     const cards = collapseBursts(events, { window_ms: 5000 });
+//     expect(cards).toHaveLength(1);
+//     expect(cards[0].count).toBe(3);
+//   });
+//
+//   test('events outside the window stay separate', () => {
+//     const base = Date.now();
+//     const events = [
+//       { ts: base,        path: '/x.rs' },
+//       { ts: base + 6000, path: '/x.rs' },
+//     ];
+//     const cards = collapseBursts(events, { window_ms: 5000 });
+//     expect(cards).toHaveLength(2);
+//   });
+function collapseBursts(events, opts) {
+  const window_ms = (opts && Number(opts.window_ms)) || 5000;
+  const list = Array.isArray(events)
+    ? events.filter(e => e && typeof e.path === 'string')
+    : [];
+  const sorted = list.slice().sort(
+    (a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0)
+  );
+  const runs = [];
+  for (const ev of sorted) {
+    const ts = Number(ev.ts) || 0;
+    const last = runs[runs.length - 1];
+    if (
+      last &&
+      last.path === ev.path &&
+      (ts - last.last_ts) <= window_ms
+    ) {
+      last.count += 1;
+      last.last_ts = ts;
+      last.items.push(ev);
+    } else {
+      runs.push({
+        path: ev.path,
+        count: 1,
+        first_ts: ts,
+        last_ts: ts,
+        items: [ev],
+      });
+    }
+  }
+  // Collapse only runs of 3+; smaller runs stay as one-card-per-item so
+  // the renderer doesn't need a "tiny burst" branch.
+  const out = [];
+  for (const run of runs) {
+    if (run.count >= 3) {
+      out.push(run);
+    } else {
+      for (const it of run.items) {
+        out.push({
+          path: it.path,
+          count: 1,
+          first_ts: Number(it.ts) || 0,
+          last_ts: Number(it.ts) || 0,
+          items: [it],
+        });
+      }
+    }
+  }
+  return out;
+}
+
+// Buffer of recent conflict items + burst expansion state. Module-level so
+// the SSE handler and the toggle both share the same view.
+const CONFLICT_BUFFER_TTL_MS = 60000; // keep items 60s — comfortably longer
+                                      // than the 5s collapse window even on
+                                      // a slow event stream.
+let conflictBuffer = []; // [{ ts, path, event: <raw conflict_detected payload> }]
+const expandedBursts = new Set(); // keys: "<path>:<first_ts>"
+
+function flattenConflictEvent(event, ts) {
+  if (!event || !Array.isArray(event.conflicts)) return [];
+  const t = Number(ts) || Date.now();
+  const out = [];
+  for (const c of event.conflicts) {
+    if (!c || typeof c.path !== 'string') continue;
+    out.push({ ts: t, path: c.path, event });
+  }
+  return out;
+}
+
+function pruneConflictBuffer() {
+  const cutoff = Date.now() - CONFLICT_BUFFER_TTL_MS;
+  while (conflictBuffer.length > 0 &&
+         (Number(conflictBuffer[0].ts) || 0) < cutoff) {
+    conflictBuffer.shift();
+  }
+}
+
+function burstKey(card) {
+  return `${card.path}:${card.first_ts}`;
+}
+
+function formatTs(ts) {
+  const t = Number(ts) || 0;
+  if (!t) return '?';
+  try {
+    return new Date(t).toLocaleTimeString();
+  } catch (_) {
+    return '?';
+  }
+}
+
+function pickBurstSeverity(items) {
+  const allowed = new Set(['none', 'low', 'medium', 'high']);
+  const rank = { none: 0, low: 1, medium: 2, high: 3 };
+  let best = 'none';
+  for (const it of items) {
+    const e = it.event || {};
+    const s = allowed.has(e.severity) ? e.severity : 'none';
+    if ((rank[s] || 0) > (rank[best] || 0)) best = s;
+  }
+  return best;
+}
+
+function renderConflictsList() {
+  const list = document.getElementById('conflicts-list');
+  if (!list) return;
+  // PR 3 / Task 3.2 — re-apply session filter against the buffer at render
+  // time so toggling the filter doesn't lose buffered events.
+  const prefs = loadMySessionPrefs();
+  const items = (!prefs.onlyMySession || !prefs.myAgentId)
+    ? conflictBuffer.slice()
+    : conflictBuffer.filter(
+        i => i.event && i.event.agent_id === prefs.myAgentId
+      );
+  const cards = collapseBursts(items, { window_ms: 5000 });
+  // Drop expansion keys that no longer correspond to a card in the buffer.
+  const activeKeys = new Set(cards.map(burstKey));
+  for (const k of Array.from(expandedBursts)) {
+    if (!activeKeys.has(k)) expandedBursts.delete(k);
+  }
+  list.innerHTML = '';
+  if (cards.length === 0) {
+    list.innerHTML = '<li class="muted">no conflicts</li>';
+    return;
+  }
+  for (const card of cards) {
+    const li = document.createElement('li');
+    li.className = 'conflict-card';
+    const severity = pickBurstSeverity(card.items);
+    const firstEvent = card.items[0].event || {};
+    li.dataset.agentId = firstEvent.agent_id || '';
+    if (card.count >= 3) {
+      const key = burstKey(card);
+      const expanded = expandedBursts.has(key);
+      li.classList.add('burst');
+      if (expanded) li.classList.add('expanded');
+      const header = `
+        <span class="severity severity-${severity}">${escapeHtml(severity)}</span>
+        <strong>${escapeHtml(firstEvent.agent_id || 'unknown agent')}</strong>
+        <code>${escapeHtml(card.path || 'unknown path')}</code>
+        <span class="burst-count" title="events in this burst">×${card.count}</span>
+        <span class="burst-window">${escapeHtml(formatTs(card.first_ts))} → ${escapeHtml(formatTs(card.last_ts))}</span>
+        <button class="burst-toggle" data-key="${escapeHtml(key)}">${expanded ? 'hide' : 'show all'}</button>
+      `;
+      if (expanded) {
+        const inner = card.items.map(it => {
+          const e = it.event || {};
+          const sev = (new Set(['none', 'low', 'medium', 'high']).has(e.severity))
+            ? e.severity : 'none';
+          return `<li class="burst-item">
+            <span class="severity severity-${sev}">${escapeHtml(sev)}</span>
+            <strong>${escapeHtml(e.agent_id || 'unknown')}</strong>
+            <code>${escapeHtml(it.path)}</code>
+            <span class="burst-item-ts">${escapeHtml(formatTs(it.ts))}</span>
+          </li>`;
+        }).join('');
+        li.innerHTML = `${header}<ul class="burst-items">${inner}</ul>`;
+      } else {
+        li.innerHTML = header;
+      }
+    } else {
+      // Single item — legacy card shape (matches pre-Task 3.3 layout).
+      const item = card.items[0];
+      const e = item.event || {};
+      li.innerHTML = `
+        <span class="severity severity-${severity}">${escapeHtml(severity)}</span>
+        <strong>${escapeHtml(e.agent_id || 'unknown agent')}</strong>
+        <code>${escapeHtml(item.path || 'unknown path')}</code>
+      `;
+    }
+    list.appendChild(li);
+  }
+  // Wire show-all / hide buttons.
+  list.querySelectorAll('.burst-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.key;
+      if (!key) return;
+      if (expandedBursts.has(key)) expandedBursts.delete(key);
+      else expandedBursts.add(key);
+      renderConflictsList();
+    });
+  });
 }
 
 function subscribePresenceEvents() {
@@ -276,31 +498,15 @@ function subscribePresenceEvents() {
       rerender('rooms');
       let conflict;
       try { conflict = JSON.parse(event.data); } catch (_) { return; }
-      const list = document.getElementById('conflicts-list');
-      if (!list) return;
-      const prefs = loadMySessionPrefs();
-      // PR 3 / Task 3.2 — drop events not from the bound session when
-      // the toggle is on. Rooms still re-render (other agents' claims
-      // remain visible up top).
-      const filtered = filterConflictEvents([conflict], {
-        onlyMySession: prefs.onlyMySession,
-        myAgentId: prefs.myAgentId,
-      });
-      if (filtered.length === 0) return;
-      const visible = filtered[0];
-      const allowed = new Set(['none', 'low', 'medium', 'high']);
-      const severity = allowed.has(visible.severity) ? visible.severity : 'none';
-      const first = Array.isArray(visible.conflicts) ? visible.conflicts[0] : null;
-      const li = document.createElement('li');
-      li.className = 'conflict-card';
-      li.dataset.agentId = visible.agent_id || '';
-      li.innerHTML = `
-        <span class="severity severity-${severity}">${escapeHtml(severity)}</span>
-        <strong>${escapeHtml(visible.agent_id || 'unknown agent')}</strong>
-        <code>${escapeHtml(first && first.path ? first.path : 'unknown path')}</code>
-      `;
-      if (list.querySelector('.muted')) list.innerHTML = '';
-      list.prepend(li);
+      // PR 3 / Task 3.3 — flatten the conflict_detected payload into
+      // per-path items, append to the rolling buffer, and re-render with
+      // burst collapsing. Session filtering happens at render time against
+      // the buffer so toggling the filter later still re-filters correctly.
+      const items = flattenConflictEvent(conflict, Date.now());
+      if (items.length === 0) return;
+      conflictBuffer.push(...items);
+      pruneConflictBuffer();
+      renderConflictsList();
     });
     ev.addEventListener('ready', () => rerender('both'));
     ev.addEventListener('error', () => {

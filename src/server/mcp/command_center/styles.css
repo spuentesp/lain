@@ -451,3 +451,72 @@ table.repo-table th {
 .severity-low { background: #ddf4ff; color: #0969da; }
 .severity-medium { background: #fff8c5; color: #7d4e00; }
 .severity-high { background: #ffebe9; color: #cf222e; }
+
+/* PR 3 / Task 3.3 — burst-collapsed cards. The header row uses a denser
+   grid to fit severity + agent + path + count + window + toggle. The
+   inner expanded list nests one row per event. */
+.conflict-card.burst {
+  grid-template-columns: auto auto 1fr auto;
+  background: #f6f8fa;
+}
+
+.conflict-card.burst.expanded {
+  background: #fff;
+}
+
+.burst-count {
+  background: #ddf4ff;
+  color: #0969da;
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.burst-window {
+  font-size: 0.72rem;
+  color: #57606a;
+  white-space: nowrap;
+}
+
+.burst-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.45rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+  color: #0969da;
+}
+
+.burst-toggle:hover {
+  background: #ddf4ff;
+}
+
+.burst-items {
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0 0;
+  border-top: 1px dashed var(--border);
+}
+
+.burst-item {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 0.2rem 0.4rem;
+  align-items: center;
+  padding: 0.15rem 0;
+  font-size: 0.85rem;
+}
+
+.burst-item code {
+  overflow-wrap: anywhere;
+}
+
+.burst-item-ts {
+  font-size: 0.72rem;
+  color: #57606a;
+  white-space: nowrap;
+}
