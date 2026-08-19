@@ -1072,3 +1072,73 @@ fn claim_without_plan_revision_deserializes_to_none() {
     let claim: Claim = serde_json::from_str(json).unwrap();
     assert_eq!(claim.plan_revision, None);
 }
+
+// -------------------------------------------------------------------------
+// Runtime TooOld test: TooOld path through the full claim_files → world_state
+// pipeline. The smoke harness couldn't exercise this end-to-end (creating
+// 280+ files in the workspace broke the LSP bridge; see
+// docs/superpowers/sdd/2026-08-18-coordination-staleness-audit/).
+//
+// Drive the RevisionLog directly via the public overlay.insert_node API
+// instead — that has the same effect (increments current_revision; once
+// the ring buffer wraps, floor > 0). Then call run_claim_files with
+// plan_revision=0 and assert the verbatim spec note fires.
+// -------------------------------------------------------------------------
+#[tokio::test]
+async fn to_old_path_fires_via_run_claim_files() {
+    use lain::server::LainServer;
+    use lain::server::schema::{GraphNode, NodeType};
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server_arc = std::sync::Arc::new(server);
+
+    // Drive the overlay revision past the ring buffer's 256-entry
+    // capacity. Each insert_node bumps current_revision. The ring's
+    // capacity is 256 (set by RevisionLog::new()), so >256 inserts push
+    // floor > 0 and make plan=0 fall below it.
+    for i in 0..300 {
+        let node = GraphNode::new(
+            NodeType::Function,
+            format!("smoke_f{:04}", i),
+            format!("/tmp/synthetic/f{:04}.rs", i),
+        );
+        let _ = server_arc.overlay.insert_node(node);
+    }
+    let current = server_arc.overlay.current_revision();
+    assert!(
+        current > 256,
+        "current revision must exceed ring buffer capacity to trigger TooOld; got {}",
+        current,
+    );
+
+    // Register an agent and claim with plan_revision=0 — that should hit
+    // the TooOld branch in compute_world_state.
+    let session = server_arc.presence.register(
+        "tooold".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+    );
+    let args = serde_json::json!({
+        "agent_id": session.id.as_str(),
+        "session_token": session.session_token,
+        "files": [{
+            "path": tmp.path().join("a.rs").to_string_lossy(),
+            "symbols": ["a"],
+            "intent": "read",
+            "plan_revision": 0,
+        }],
+    });
+    let result = lain::server::mcp::presence_tools::run_claim_files(&server_arc, args)
+        .expect("claim_files");
+    // run_claim_files returns the ClaimResult directly (the dispatcher's
+    // tool_text_result wrapper is what adds the {content:[{text:...}]} shape).
+    let ws = result.get("world_state").expect("world_state must be present");
+    let note = ws.get("note").and_then(|v| v.as_str()).expect("note must be set");
+    let plan = ws.get("plan").and_then(|v| v.as_u64()).expect("plan must be set");
+
+    assert_eq!(note, "plan_revision too old for delta; resync required",
+               "TooOld note must match the spec verbatim (note={:?})", note);
+    assert_eq!(plan, 0, "plan must echo the requested plan_revision");
+}
