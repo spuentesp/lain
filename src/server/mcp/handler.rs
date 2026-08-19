@@ -753,6 +753,15 @@ impl ServerHandler for LainHandler {
                     crate::server::mcp::presence_tools::run_detect_overlap,
                 ));
             }
+            "get_audit_log" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &self.executor.overlay(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::audit_tools::run_get_audit_log,
+                ));
+            }
             _ => {}
         }
 

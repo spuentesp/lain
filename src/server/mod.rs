@@ -40,6 +40,11 @@ pub mod sse;
 // rotation semantics.
 pub mod audit;
 
+// Tiny glob matcher used by the `get_audit_log` MCP tool (Task 2.5)
+// to filter audit events by path. Thin shim over the `glob` crate
+// that is already a project dependency.
+pub mod glob_match;
+
 // Re-export the LainServer orchestrator + transport at `crate::server::*`
 // so existing callers (`lain::server::LainServer`, `lain::server::Transport`,
 // `crate::server::LainServer`, `crate::server::Transport`) keep working
