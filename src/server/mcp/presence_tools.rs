@@ -164,6 +164,36 @@ pub struct ClaimFilesEntry {
     pub plan_revision: Option<crate::server::revision_log::RevisionId>,
 }
 
+// ─── get_world_state (P0 gap fix) ─────────────────────────────────────
+// Read-only companion to claim_files. Surfaces the same `WorldState`
+// shape (retract detection, overlay-delta filtering) without requiring
+// the agent to take a claim. Lets an LLM ask "is this symbol still in
+// the graph?" or "what's the current world state for these symbols?"
+// before deciding whether to claim, edit, or skip.
+#[derive(Debug, Deserialize)]
+pub struct GetWorldStateArgs {
+    /// Symbols to inspect for retract detection. Empty list returns
+    /// a `WorldState` with empty `changed_symbols` and `note: None`
+    /// (no-op query).
+    #[serde(default)]
+    pub symbols: Vec<String>,
+    /// Last plan revision the calling agent saw. `None` uses the
+    /// current overlay revision (no-op query, no resync note).
+    #[serde(default)]
+    pub plan_revision: Option<crate::server::revision_log::RevisionId>,
+}
+
+pub fn run_get_world_state(
+    server: &LainServer,
+    args: Value,
+) -> Result<Value, String> {
+    let a: GetWorldStateArgs =
+        serde_json::from_value(args).map_err(|e| e.to_string())?;
+    let plan = a.plan_revision.unwrap_or_else(|| server.overlay.current_revision());
+    let ws = compute_world_state(server, plan, &a.symbols);
+    serde_json::to_value(ws).map_err(|e| e.to_string())
+}
+
 pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: ClaimFilesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;

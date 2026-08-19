@@ -337,6 +337,11 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset). Returns an array of AuditEvent objects (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
         &[],
     ),
+    (
+        "get_world_state",
+        "Read-only companion to claim_files: returns the same WorldState shape (retracted symbols, overlay-delta changed_symbols filtered to the requested set, and a resync note for BeyondCurrent/TooOld) without taking a claim. Lets an LLM ask 'is this symbol still in the graph?' or 'what's the world state for these symbols?' before deciding whether to claim. Args: symbols (list of symbol names to check for retract — empty list yields a no-op WorldState), plan_revision (the agent's last-seen overlay revision; omit for current). Returns { current, plan, changed_symbols: [{ name, change_kind, at_revision }], note } where change_kind is Edited | Retracted and note is set only on BeyondCurrent ('plan_revision beyond current — server may have restarted') or TooOld ('plan_revision too old for delta; resync required').",
+        &[],
+    ),
 ];
 
 /// Tool definitions exposed only when the MCP server was constructed with a
@@ -765,6 +770,15 @@ impl ServerHandler for LainHandler {
                     &params.name,
                     &args_owned,
                     crate::server::mcp::audit_tools::run_get_audit_log,
+                ));
+            }
+            "get_world_state" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &self.executor.overlay(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::presence_tools::run_get_world_state,
                 ));
             }
             _ => {}
@@ -2079,6 +2093,13 @@ async fn handle_request(
                                     &jsonrpc_tool_result, &jsonrpc_error,
                                     id, name, &args_map, server.as_deref(),
                                     crate::server::mcp::audit_tools::run_get_audit_log,
+                                ));
+                            }
+                            "get_world_state" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::presence_tools::run_get_world_state,
                                 ));
                             }
                             _ => {}
