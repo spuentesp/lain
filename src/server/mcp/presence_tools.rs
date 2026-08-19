@@ -9,9 +9,10 @@
 
 use crate::server::ingest::LainServer;
 use crate::server::presence::{
-    AgentId, AgentKind, AgentMode, ClaimIntent, ClaimRequest, OccupancyEntry,
-    PresenceEvent,
+    AgentId, AgentKind, AgentMode, ChangedKind, ChangedSymbol, ClaimIntent, ClaimRequest,
+    OccupancyEntry, PresenceEvent, WorldState,
 };
+use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -168,6 +169,17 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
+    // Capture `plan_revision` and the union of requested symbols up
+    // front so we can populate `world_state` after the claim is
+    // granted. Per Task 1.4, `plan_revision` travels per-file; we
+    // take the first non-None across the request set, matching the
+    // spec's "Some(_) when the request included a plan_revision"
+    // contract. If no file carried a revision, the response stays
+    // world_state-less for legacy callers.
+    let plan_revision: Option<RevisionId> = a.files.iter().find_map(|f| f.plan_revision);
+    let requested_symbols: Vec<String> = a.files.iter()
+        .flat_map(|f| f.symbols.clone().unwrap_or_default())
+        .collect();
     let requests: Vec<ClaimRequest> = a.files.into_iter().map(|f| ClaimRequest {
         path: std::path::PathBuf::from(f.path),
         symbols: f.symbols.unwrap_or_default(),
@@ -175,7 +187,19 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         ttl_seconds: None,
         plan_revision: f.plan_revision,
     }).collect();
-    let result = server.occupancy.claim_with_session(&session, requests);
+    let mut result = server.occupancy.claim_with_session(&session, requests);
+    // Populate `world_state` only when the caller supplied a
+    // `plan_revision`. The brief's Step 3 pseudocode:
+    //   1. Check each requested symbol against the static graph and
+    //      record `Retracted` entries for symbols not present.
+    //   2. Ask the overlay for `diffs_since(plan)`. Three branches:
+    //      `Ok(diffs)` → fold into `Edited` entries via
+    //      `ChangedSymbol::from_diffs`; `BeyondCurrent` / `TooOld`
+    //      → empty `changed_symbols` plus a `note` for the agent.
+    //   3. Combine the two sources and emit `Some(WorldState)`.
+    if let Some(plan) = plan_revision {
+        result.world_state = Some(compute_world_state(server, plan, &requested_symbols));
+    }
     if !result.granted.is_empty() {
         for g in &result.granted {
             let _ = server.presence_event_tx.send(PresenceEvent::ClaimGranted {
@@ -212,6 +236,117 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         }
     }
     Ok(Value::Object(out))
+}
+
+/// Build the `WorldState` payload for a `claim_files` call that
+/// supplied a `plan_revision`. Three layers:
+///
+/// 1. **Retracted** — any requested symbol the static graph no longer
+///    resolves. Federation mode consults the `GraphBackend` name index
+///    (matches `project_repo`'s retract-aware contract); single-workspace
+///    servers consult the per-repo `GraphDatabase`.
+/// 2. **Edited** — symbols touched by overlay diffs since `plan`.
+///    `ChangedSymbol::from_diffs` dedups by name and keeps the latest
+///    `at_revision`. Filtered to the requested symbols so unrelated
+///    overlay churn doesn't pollute the response (spec: "filters to
+///    the claim's paths only").
+/// 3. **Note** — set on `BeyondCurrent` (the world moved past the
+///    caller's plan before claim landed) and `TooOld` (the plan is
+///    older than the ring buffer's floor). The agent uses the note to
+///    decide whether to re-query or to proceed under advisory.
+fn compute_world_state(
+    server: &LainServer,
+    plan: RevisionId,
+    requested_symbols: &[String],
+) -> WorldState {
+    let current = server.overlay.current_revision();
+
+    // ── (a) Static-graph retract detection ─────────────────────────────
+    // The brief's pseudocode names `FederatedIndex::symbol_to_repos`
+    // (the in-memory name index) and `GraphDatabase::find_nodes_by_name`
+    // (per-repo). The federation's `symbol_to_repos` is private, so we
+    // call the public `GraphBackend::find_nodes_by_name` instead — the
+    // same name it uses for the `resolve_symbol` fallback path. The
+    // per-repo `GraphDatabase` exposes `find_node_by_name` (singular),
+    // which is sufficient for the "does any node have this name?"
+    // question; we use the singular form accordingly.
+    let mut retracted: Vec<ChangedSymbol> = Vec::new();
+    for sym in requested_symbols {
+        if !symbol_exists_in_static_graph(server, sym) {
+            retracted.push(ChangedSymbol {
+                name: sym.clone(),
+                change_kind: ChangedKind::Retracted,
+                at_revision: current,
+            });
+        }
+    }
+
+    // ── (b) Overlay diffs since `plan` ─────────────────────────────────
+    let overlay_diffs = match server.overlay.diffs_since(plan) {
+        Ok(ds) => ds,
+        Err(err) => match err {
+            LookupResult::BeyondCurrent => {
+                return WorldState {
+                    current,
+                    plan,
+                    changed_symbols: Vec::new(),
+                    note: Some(
+                        "plan_revision beyond current — server may have restarted".into(),
+                    ),
+                };
+            }
+            LookupResult::TooOld => {
+                return WorldState {
+                    current,
+                    plan,
+                    changed_symbols: Vec::new(),
+                    note: Some("plan_revision too old for delta; resync required".into()),
+                };
+            }
+            // `LookupResult::Ok` is the (within-window) success arm of
+            // the enum, but here we're already in the `Err` branch of
+            // `diffs_since` — `Ok` is unreachable. Explicitly handle
+            // it so the match stays exhaustive against future enum
+            // growth (e.g. a `Transitional` variant that wouldn't be
+            // an error).
+            LookupResult::Ok => Vec::new(),
+        },
+    };
+
+    // ── (c) Combine overlay `Edited` entries with the retract set ──────
+    // Filter the overlay diffs to symbols the claim actually asked
+    // about; otherwise a single claim would surface every overlay
+    // mutation since `plan`, which is noise an agent has to ignore.
+    let mut changed_symbols = ChangedSymbol::from_diffs(&overlay_diffs, plan, current);
+    if !requested_symbols.is_empty() {
+        let requested: std::collections::HashSet<&str> =
+            requested_symbols.iter().map(|s| s.as_str()).collect();
+        changed_symbols.retain(|cs| requested.contains(cs.name.as_str()));
+    }
+    changed_symbols.extend(retracted);
+    WorldState {
+        current,
+        plan,
+        changed_symbols,
+        note: None,
+    }
+}
+
+/// Whether `sym` is currently a node in the static graph. Federation
+/// mode routes through the federation's `GraphBackend` (the same
+/// surface `project_repo` uses for retracts); single-workspace mode
+/// checks the per-repo `GraphDatabase`. Errors are treated as
+/// "symbol not present" — the retract detector is best-effort and
+/// must not block a claim.
+fn symbol_exists_in_static_graph(server: &LainServer, sym: &str) -> bool {
+    if let Some(fed) = server.federation() {
+        match fed.backend().find_nodes_by_name(sym) {
+            Ok(nodes) => !nodes.is_empty(),
+            Err(_) => false,
+        }
+    } else {
+        server.graph.find_node_by_name(sym).is_some()
+    }
 }
 
 #[derive(Debug, Deserialize)]
