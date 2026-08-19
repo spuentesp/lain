@@ -454,7 +454,7 @@ impl Default for PresenceRegistry {
 use std::collections::HashSet;
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ClaimRequest {
     pub path: PathBuf,
     pub symbols: Vec<String>,
@@ -474,10 +474,19 @@ pub struct ClaimRequest {
     pub plan_revision: Option<RevisionId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ClaimResult {
     pub granted: Vec<ClaimRequest>,
     pub conflicts: Vec<ConflictEntry>,
+    /// Snapshot of (current_revision, plan_revision) at claim time, plus
+    /// the symbols that changed since the caller's `plan_revision` and a
+    /// free-form `note` for `BeyondCurrent` / `TooOld` error paths.
+    /// `None` when the caller didn't supply a `plan_revision` and no
+    /// staleness info applies (omitted from the wire JSON by
+    /// `skip_serializing_if`). Populated by the static-graph retract
+    /// detector (Task 1.6, PR 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_state: Option<WorldState>,
 }
 
 #[derive(Debug, Default)]
@@ -826,7 +835,7 @@ impl OccupancyMap {
         if !granted.is_empty() {
             if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
-        ClaimResult { granted, conflicts }
+        ClaimResult { granted, conflicts, world_state: None }
     }
 
     /// Refresh the `last_touched` timestamp on every claim this agent
@@ -1241,4 +1250,139 @@ fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
         return None;
     }
     Some(SymbolHash::from_bytes(&bytes[start..end]))
+}
+
+// ── WorldState / ChangedSymbol / ChangedKind (Task 1.5, PR 1) ────────────────
+//
+// The claim response carries a `world_state` snapshot so the caller can
+// tell whether its plan is stale without a second round-trip. The shapes
+// here are populated by the static-graph retract detector (Task 1.6)
+// and surfaced on `ClaimResult`. `LookupResult` lives in
+// `crate::server::revision_log` and is re-exported from `revision_log`
+// for callers that want to reason about `diffs_since` outcomes.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ChangedKind {
+    Edited,
+    Retracted,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ChangedSymbol {
+    pub name: String,
+    pub change_kind: ChangedKind,
+    pub at_revision: RevisionId,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WorldState {
+    pub current: RevisionId,
+    pub plan: RevisionId,
+    #[serde(default)]
+    pub changed_symbols: Vec<ChangedSymbol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl ChangedSymbol {
+    /// Collapse a stream of `OverlayDiff`s into one `ChangedSymbol` per
+    /// name, keeping the *latest* `at_revision` we saw for that name.
+    ///
+    /// The brief leaves `plan` unused in the helper — the caller in
+    /// `run_claim_files` filters by the claim's paths/symbols after
+    /// construction, so this just does the structural dedup. Returns
+    /// `ChangedKind::Edited` for every entry: distinguishing retracted
+    /// from edited is the static-graph retract detector's job
+    /// (Task 1.6), which compares the diff against the indexed graph.
+    pub fn from_diffs(
+        diffs: &[crate::server::overlay::stream::OverlayDiff],
+        _plan: RevisionId,
+        _current: RevisionId,
+    ) -> Vec<ChangedSymbol> {
+        use std::collections::BTreeMap;
+        let mut by_name: BTreeMap<String, RevisionId> = BTreeMap::new();
+        for d in diffs {
+            for n in &d.added {
+                // `BTreeMap::insert` keeps the *latest* `d.revision`
+                // because we iterate `diffs` in order; later diffs on
+                // the same symbol overwrite earlier ones.
+                by_name.insert(n.name.clone(), d.revision);
+            }
+            for n in &d.updated {
+                by_name.insert(n.name.clone(), d.revision);
+            }
+        }
+        by_name
+            .into_iter()
+            .map(|(name, at)| ChangedSymbol {
+                name,
+                change_kind: ChangedKind::Edited,
+                at_revision: at,
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod world_state_tests {
+    //! Unit tests for the `WorldState` / `ChangedSymbol` /
+    //! `ChangedSymbol::from_diffs` contract (Task 1.5, PR 1).
+    //!
+    //! These live alongside the types so the serialization shape
+    //! can't drift from the implementation without a test failure.
+    use super::*;
+    use crate::server::overlay::stream::OverlayDiff;
+    use crate::server::schema::{GraphNode, NodeType};
+
+    #[test]
+    fn world_state_serializes_note_only_when_some() {
+        let ws = WorldState {
+            current: 10,
+            plan: 5,
+            changed_symbols: vec![ChangedSymbol {
+                name: "verify_token".into(),
+                change_kind: ChangedKind::Retracted,
+                at_revision: 10,
+            }],
+            note: Some("plan_revision beyond current — server restarted".into()),
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(json.contains("\"note\""));
+        assert!(json.contains("\"Retracted\""));
+    }
+
+    #[test]
+    fn world_state_with_no_note_omits_field() {
+        let ws = WorldState {
+            current: 10,
+            plan: 5,
+            changed_symbols: vec![],
+            note: None,
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(!json.contains("\"note\""));
+    }
+
+    #[test]
+    fn changed_symbols_deduplicated_in_construction_helper() {
+        // Two diffs on the same symbol name should collapse into one
+        // entry with the latest `at_revision` (revision 7 wins).
+        let diffs = vec![
+            OverlayDiff {
+                revision: 6,
+                added: vec![GraphNode::new(NodeType::Function, "f".into(), "/x.rs".into())],
+                removed: vec![],
+                updated: vec![],
+            },
+            OverlayDiff {
+                revision: 7,
+                added: vec![GraphNode::new(NodeType::Function, "f".into(), "/x.rs".into())],
+                removed: vec![],
+                updated: vec![],
+            },
+        ];
+        let out = ChangedSymbol::from_diffs(&diffs, 5, 8);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].at_revision, 7);
+    }
 }

@@ -190,19 +190,28 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
             conflicts: result.conflicts.clone(),
         });
     }
-    Ok(json!({
-        "granted": result.granted.iter().map(|g| json!({
-            "path": g.path.to_string_lossy(),
-            "symbols": g.symbols,
-        })).collect::<Vec<_>>(),
-        "conflicts": result.conflicts.iter().map(|c| json!({
-            "agent_id": c.agent_id.as_str(),
-            "path": c.path.to_string_lossy(),
-            "symbols": c.symbols,
-            "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
-            "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
-        })).collect::<Vec<_>>(),
-    }))
+    let mut out = serde_json::Map::new();
+    out.insert("granted".into(), Value::Array(result.granted.iter().map(|g| json!({
+        "path": g.path.to_string_lossy(),
+        "symbols": g.symbols,
+    })).collect()));
+    out.insert("conflicts".into(), Value::Array(result.conflicts.iter().map(|c| json!({
+        "agent_id": c.agent_id.as_str(),
+        "path": c.path.to_string_lossy(),
+        "symbols": c.symbols,
+        "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+        "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
+    })).collect()));
+    // `world_state` is populated by the static-graph retract detector
+    // (Task 1.6, PR 1). When `None`, the field is omitted from the
+    // wire response (matching the `skip_serializing_if` on the struct
+    // field) so existing callers see no new shape.
+    if let Some(ws) = result.world_state.as_ref() {
+        if let Ok(v) = serde_json::to_value(ws) {
+            out.insert("world_state".into(), v);
+        }
+    }
+    Ok(Value::Object(out))
 }
 
 #[derive(Debug, Deserialize)]
