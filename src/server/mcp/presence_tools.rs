@@ -339,10 +339,16 @@ fn compute_world_state(
         Ok(ds) => ds,
         Err(err) => match err {
             LookupResult::BeyondCurrent => {
+                // `retracted` is independent of the overlay revision
+                // counter: the static graph can drop a symbol while
+                // the overlay hasn't moved. Keep the retract set even
+                // when the overlay window is unreachable — the agent
+                // still benefits from knowing the static graph no
+                // longer has the symbol they queried for.
                 return WorldState {
                     current,
                     plan,
-                    changed_symbols: Vec::new(),
+                    changed_symbols: retracted,
                     note: Some(
                         "plan_revision beyond current — server may have restarted".into(),
                     ),
@@ -352,7 +358,7 @@ fn compute_world_state(
                 return WorldState {
                     current,
                     plan,
-                    changed_symbols: Vec::new(),
+                    changed_symbols: retracted,
                     note: Some("plan_revision too old for delta; resync required".into()),
                 };
             }
