@@ -332,6 +332,11 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "Detect symbol-level overlap between two git refs in a workspace. Args: base (required), head (defaults to HEAD), workspace (required). Returns { base, head, total_overlaps, files: [{ repo, path, symbols_base, symbols_head, overlap, severity }] } — a non-empty overlap means both refs edited the same definition. `severity` is none | low | medium | high, graded by the kinds of the shared symbols (a shared function weighs more than a shared module).",
         &["base", "workspace"],
     ),
+    (
+        "get_audit_log",
+        "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset). Returns an array of AuditEvent objects (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
+        &[],
+    ),
 ];
 
 /// Tool definitions exposed only when the MCP server was constructed with a
@@ -2067,6 +2072,13 @@ async fn handle_request(
                                     &jsonrpc_tool_result, &jsonrpc_error,
                                     id, name, &args_map, server.as_deref(),
                                     crate::server::mcp::presence_tools::run_detect_overlap,
+                                ));
+                            }
+                            "get_audit_log" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::audit_tools::run_get_audit_log,
                                 ));
                             }
                             _ => {}
