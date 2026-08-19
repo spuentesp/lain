@@ -72,7 +72,7 @@ pub struct WriteContext {
 /// offset persistence, future forensic tools) all key off this
 /// exact shape. The struct serializes as a single JSON object per
 /// line, terminated by `\n`, in `audit.jsonl`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     /// Wall-clock time the event was recorded, as a UNIX-epoch
     /// fractional second count. `f64` for the same reason the rest

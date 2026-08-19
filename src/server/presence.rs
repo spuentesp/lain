@@ -13,9 +13,7 @@ use std::time::SystemTime;
 
 use crate::server::revision_log::RevisionId;
 
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct AgentId(pub String);
 
