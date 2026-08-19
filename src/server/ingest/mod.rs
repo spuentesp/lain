@@ -1008,6 +1008,27 @@ impl LainServer {
         }
     }
 
+    /// Directory that holds the per-server `audit.jsonl` log
+    /// (Task 2.3, PR 2). Sibling of the persisted-state JSON file
+    /// returned by `state_path()`: both live under `state_dir()` from
+    /// `crate::config`, so the audit log survives across restarts
+    /// alongside the occupancy snapshot.
+    ///
+    /// Falls back to `state_dir()` itself when the state path has no
+    /// parent (degenerate but possible if a future caller constructed
+    /// the server from a workspace path that resolves to a bare
+    /// filename). `append_edit_event` writes to this directory via
+    /// the audit module, which `mkdir`s nothing on its own — the
+    /// state dir is created lazily by the persist callback when the
+    /// first presence change happens, so the audit directory is
+    /// already present by the time any claim reaches us in practice.
+    pub fn state_dir_for_audit(&self) -> std::path::PathBuf {
+        self.state_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(crate::config::state_dir)
+    }
+
     /// Persist the live `PresenceRegistry` + `OccupancyMap` to the
     /// server's state file. Called by the persist callback installed
     /// in the three constructors, so callers do not need to invoke

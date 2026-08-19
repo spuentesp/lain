@@ -14,6 +14,7 @@ use crate::server::presence::{
 };
 use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
+use crate::server::audit::{append_edit_event, AuditEvent};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -206,6 +207,46 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
                 agent_id: session.id.clone(),
                 path: g.path.clone(),
             });
+        }
+        // Audit append (Task 2.3, PR 2). The spec's invariant is
+        // "audit never blocks an edit": one event per granted path,
+        // `racers` populated from the post-resolution conflict list
+        // (empty when uncontested), `landed_revision` captured
+        // *after* `OccupancyMap::claim` so it reflects the
+        // post-claim overlay state the agent believes it is writing
+        // into. The append is best-effort: a filesystem failure
+        // emits `WARN` and the claim itself remains valid. The
+        // `claim_set` is the post-grant `Claim` snapshot pulled
+        // from the occupancy map — the spec records the claims the
+        // writer *believes itself to hold*, not the request payload.
+        // We snapshot the agent's full claim set once and partition
+        // it per granted path so a multi-file claim still produces
+        // one audit line per granted file.
+        let all_claims = server.occupancy.list_for_agent(&session.id);
+        let landed_revision = server.overlay.current_revision();
+        let audit_dir = server.state_dir_for_audit();
+        let ts_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        for g in &result.granted {
+            let claim_set: Vec<crate::server::presence::Claim> = all_claims
+                .iter()
+                .filter(|c| c.path == g.path)
+                .cloned()
+                .collect();
+            let audit = AuditEvent {
+                ts_unix,
+                agent_id: session.id.clone(),
+                path: g.path.clone(),
+                claim_set,
+                racers: result.conflicts.clone(),
+                plan_revision,
+                landed_revision,
+            };
+            if let Err(e) = append_edit_event(&audit_dir, &audit) {
+                tracing::warn!("audit append failed: {e}");
+            }
         }
     }
     if !result.conflicts.is_empty() {
