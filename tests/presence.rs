@@ -1197,3 +1197,103 @@ async fn get_world_state_tool_returns_retracted_and_beyond_current() {
     assert_eq!(r["note"], "plan_revision beyond current — server may have restarted");
     assert_eq!(r["plan"], cur + 9999);
 }
+
+// -------------------------------------------------------------------------
+// Runtime integration test for get_recent_activity MCP tool (smoke5
+// verified the live HTTP behavior; this test locks the contract in
+// `cargo test`). Mirrors the smoke verification: registered in
+// tools/list, path_glob filter, group_by=path (default), per-group
+// count + sample_event shape.
+// -------------------------------------------------------------------------
+#[tokio::test]
+async fn get_recent_activity_tool_groups_by_path() {
+    use lain::server::LainServer;
+    use serde_json::json;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+
+    // Use a unique per-run path so the test is hermetic even if the
+    // underlying state dir already contains audit events from prior
+    // runs (the audit log persists across server restarts).
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let prefix = format!("/tmp/hermetic-{}/", run_id);
+    let p1 = format!("{}alpha.rs", prefix);
+    let p2 = format!("{}beta.rs", prefix);
+    let p3 = format!("{}gamma.rs", prefix);
+    let p_other = format!("{}delta.rs", prefix);
+
+    // Register 3 agents
+    let alice = server.presence.register(
+        format!("alice_{}", run_id), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+    );
+    let bob = server.presence.register(
+        format!("bob_{}", run_id), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+    );
+    let carol = server.presence.register(
+        format!("carol_{}", run_id), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+    );
+
+    // Helper: claim one file and return the granted count
+    fn claim_count(
+        server: &LainServer,
+        agent_id: &str,
+        token: &str,
+        path: &str,
+    ) -> usize {
+        let args = json!({
+            "agent_id": agent_id,
+            "session_token": token,
+            "files": [{"path": path, "symbols": ["x"]}],
+        });
+        lain::server::mcp::presence_tools::run_claim_files(server, args)
+            .expect("claim")["granted"]
+            .as_array().unwrap().len()
+    }
+    assert_eq!(claim_count(&server, alice.id.as_str(), &alice.session_token, &p1), 1);
+    assert_eq!(claim_count(&server, alice.id.as_str(), &alice.session_token, &p2), 1);
+    assert_eq!(claim_count(&server, alice.id.as_str(), &alice.session_token, &p3), 1);
+    assert_eq!(claim_count(&server, bob.id.as_str(), &bob.session_token, &p_other), 1);
+    let _ = carol;  // unused
+
+    // 1) Path-grouped digest scoped to this run's prefix
+    let args = json!({"path_glob": format!("{}*", prefix)});
+    let digest = lain::server::mcp::audit_tools::run_get_recent_activity(
+        &server, args,
+    ).expect("get_recent_activity");
+
+    assert_eq!(digest["total_events"].as_u64(), Some(4),
+               "total_events should be 4 (3 alice + 1 bob); digest={digest:?}");
+    assert_eq!(digest["total_groups"].as_u64(), Some(4),
+               "total_groups should be 4 (4 distinct paths); digest={digest:?}");
+    assert_eq!(digest["group_by"].as_str(), Some("path"));
+    assert_eq!(digest["truncated"].as_bool(), Some(false));
+    assert_eq!(digest["groups"].as_array().map(|a| a.len()), Some(4));
+
+    // Each group: count=1, sample_event has all 7 contract fields
+    for g in digest["groups"].as_array().unwrap() {
+        assert_eq!(g["count"].as_u64(), Some(1));
+        let ev = &g["sample_event"];
+        assert!(ev.get("ts_unix").is_some());
+        assert!(ev.get("agent_id").is_some());
+        assert!(ev.get("path").is_some());
+        assert!(ev.get("claim_set").is_some());
+        assert!(ev.get("racers").is_some());
+        assert!(ev.get("plan_revision").is_some());
+        assert!(ev.get("landed_revision").is_some());
+        assert_eq!(g["first_ts"].as_f64(), g["last_ts"].as_f64(),
+                   "first_ts == last_ts when count==1");
+    }
+
+    // 2) Limit truncates and reports truncated=true
+    let args2 = json!({"path_glob": format!("{}*", prefix), "limit": 2});
+    let digest2 = lain::server::mcp::audit_tools::run_get_recent_activity(
+        &server, args2,
+    ).expect("get_recent_activity");
+    assert_eq!(digest2["groups"].as_array().map(|a| a.len()), Some(2));
+    assert_eq!(digest2["truncated"].as_bool(), Some(true));
+    assert_eq!(digest2["total_groups"].as_u64(), Some(4));
+}

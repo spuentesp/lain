@@ -342,6 +342,11 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
         "Read-only companion to claim_files: returns the same WorldState shape (retracted symbols, overlay-delta changed_symbols filtered to the requested set, and a resync note for BeyondCurrent/TooOld) without taking a claim. Lets an LLM ask 'is this symbol still in the graph?' or 'what's the world state for these symbols?' before deciding whether to claim. Args: symbols (list of symbol names to check for retract — empty list yields a no-op WorldState), plan_revision (the agent's last-seen overlay revision; omit for current). Returns { current, plan, changed_symbols: [{ name, change_kind, at_revision }], note } where change_kind is Edited | Retracted and note is set only on BeyondCurrent ('plan_revision beyond current — server may have restarted') or TooOld ('plan_revision too old for delta; resync required').",
         &[],
     ),
+    (
+        "get_recent_activity",
+        "Compact digest of the audit log: groups recent edit_landed events by path (default), agent, or hour and returns a count + sample per group. Designed for LLM session compaction — instead of re-reading every audit.jsonl line, the agent gets a navigable summary and can call get_audit_log with a specific path_glob for full detail. Args: since_unix (filter by ts_unix), group_by ('path' (default) | 'agent' | 'hour'), path_glob (pre-filter by path before grouping), limit (max groups returned, default 20). Returns { groups: [{ key, count, first_ts, last_ts, sample_event }], total_events, total_groups, truncated, group_by }. truncated=true when total_groups > limit.",
+        &[],
+    ),
 ];
 
 /// Tool definitions exposed only when the MCP server was constructed with a
@@ -779,6 +784,15 @@ impl ServerHandler for LainHandler {
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_get_world_state,
+                ));
+            }
+            "get_recent_activity" => {
+                return Ok(dispatch_presence_tool(
+                    self.server.as_deref(),
+                    &self.executor.overlay(),
+                    &params.name,
+                    &args_owned,
+                    crate::server::mcp::audit_tools::run_get_recent_activity,
                 ));
             }
             _ => {}
@@ -2100,6 +2114,13 @@ async fn handle_request(
                                     &jsonrpc_tool_result, &jsonrpc_error,
                                     id, name, &args_map, server.as_deref(),
                                     crate::server::mcp::presence_tools::run_get_world_state,
+                                ));
+                            }
+                            "get_recent_activity" => {
+                                return Ok(jsonrpc_presence_tool(
+                                    &jsonrpc_tool_result, &jsonrpc_error,
+                                    id, name, &args_map, server.as_deref(),
+                                    crate::server::mcp::audit_tools::run_get_recent_activity,
                                 ));
                             }
                             _ => {}

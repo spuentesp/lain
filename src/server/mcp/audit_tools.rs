@@ -22,7 +22,7 @@ use crate::server::audit::{read_audit_log, AuditEvent};
 use crate::server::glob_match;
 use crate::server::ingest::LainServer;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +72,126 @@ pub(crate) fn read_filtered(
         events.retain(|e| glob_match::simple(pattern, &e.path));
     }
     events
+}
+
+// ─── get_recent_activity (P0 #3) ─────────────────────────────────────
+// Digest of the audit log: an LLM in a long session needs a compact
+// summary of recent work without re-reading every line. Groups events
+// by path/agent/hour and returns counts + a sample event per group.
+// Reuses read_audit_log from Task 2.1; no new persistence.
+
+#[derive(Debug, Deserialize, Default)]
+pub struct GetRecentActivityArgs {
+    /// Drop events whose `ts_unix` is strictly less than this. `None`
+    /// returns everything in the rotation window.
+    #[serde(default)]
+    pub since_unix: Option<f64>,
+    /// "path" (default) | "agent" | "hour".
+    #[serde(default)]
+    pub group_by: Option<String>,
+    /// Pre-filter the events by path glob before grouping. `None`
+    /// keeps everything.
+    #[serde(default)]
+    pub path_glob: Option<String>,
+    /// Max groups returned. Default 20.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+const RECENT_ACTIVITY_DEFAULT_LIMIT: usize = 20;
+
+pub fn run_get_recent_activity(
+    server: &LainServer,
+    args: Value,
+) -> Result<Value, String> {
+    let state_dir = server.state_dir_for_audit();
+    run_get_recent_activity_with_dir(&state_dir, args)
+}
+
+pub fn run_get_recent_activity_with_dir(
+    state_dir: &Path,
+    args: Value,
+) -> Result<Value, String> {
+    let a: GetRecentActivityArgs =
+        serde_json::from_value(args).map_err(|e| e.to_string())?;
+    let limit = a.limit.unwrap_or(RECENT_ACTIVITY_DEFAULT_LIMIT);
+    let group_by = a.group_by.as_deref().unwrap_or("path");
+
+    let mut events = read_audit_log(state_dir, a.since_unix).map_err(|e| e.to_string())?;
+    if let Some(pattern) = a.path_glob.as_deref() {
+        events.retain(|e| glob_match::simple(pattern, &e.path));
+    }
+
+    let total_events = events.len();
+    let mut groups: std::collections::BTreeMap<String, GroupAccum> = std::collections::BTreeMap::new();
+    for ev in &events {
+        let key = group_key(ev, group_by);
+        let entry = groups.entry(key).or_default();
+        entry.count += 1;
+        if entry.first_ts > ev.ts_unix || entry.first_ts == 0.0 {
+            entry.first_ts = ev.ts_unix;
+        }
+        if ev.ts_unix > entry.last_ts {
+            entry.last_ts = ev.ts_unix;
+        }
+        // sample_event: keep the latest in the group
+        if ev.ts_unix >= entry.last_sample_ts {
+            entry.last_sample_ts = ev.ts_unix;
+            entry.sample_event = Some(ev.clone());
+        }
+    }
+    // Convert to a sorted vector by last_ts desc (most recent group first)
+    let mut sorted: Vec<(String, GroupAccum)> = groups.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.last_ts.partial_cmp(&a.1.last_ts).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total_groups = sorted.len();
+    let truncated = total_groups > limit;
+    let groups_out: Vec<Value> = sorted
+        .into_iter()
+        .take(limit)
+        .map(|(key, g)| {
+            json!({
+                "key": key,
+                "count": g.count,
+                "first_ts": g.first_ts,
+                "last_ts": g.last_ts,
+                "sample_event": g.sample_event,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "groups": groups_out,
+        "total_events": total_events,
+        "total_groups": total_groups,
+        "truncated": truncated,
+        "group_by": group_by,
+    }))
+}
+
+#[derive(Default)]
+struct GroupAccum {
+    count: usize,
+    first_ts: f64,
+    last_ts: f64,
+    last_sample_ts: f64,
+    sample_event: Option<AuditEvent>,
+}
+
+fn group_key(ev: &AuditEvent, group_by: &str) -> String {
+    match group_by {
+        "agent" => format!("agent:{}", ev.agent_id.0),
+        "hour" => {
+            // Round ts_unix to the start of the hour.
+            let secs_per_hour = 3600.0_f64;
+            let hour_start = (ev.ts_unix / secs_per_hour).floor() * secs_per_hour;
+            format!("hour:{}", hour_start as i64)
+        }
+        // Default (incl. unknown values) is path. We treat unknown
+        // values as path rather than erroring so a future caller
+        // passing a typo still gets useful data.
+        _ => ev.path.to_string_lossy().to_string(),
+    }
 }
 
 #[cfg(test)]
