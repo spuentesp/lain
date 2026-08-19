@@ -9,6 +9,7 @@ pub mod refresh;
 pub mod tools;
 
 // Core
+pub mod auth;
 pub mod graph;
 pub mod schema;
 pub mod git;

@@ -1750,6 +1750,45 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
+    // Auth + rate limit (P0 #1). `/health` is unauthenticated by design
+    // (operational probe). All other endpoints — including `/mcp` and
+    // `/events` — require a valid `Authorization: Bearer <key>` and
+    // respect the per-key rate limit. Stdio callers bypass this entirely.
+    if !(method == Method::GET && path == "/health") {
+        let auth_header = req.headers().get("authorization")
+            .and_then(|v| v.to_str().ok());
+        // Pick the bucket key: validated bearer token when present,
+        // else the raw header (so an attacker can't share a bucket by
+        // spoofing an empty key).
+        let bucket_key = crate::server::auth::bearer_token(auth_header.unwrap_or(""))
+            .unwrap_or_else(|| auth_header.unwrap_or("anonymous").to_string());
+        if let Some(srv) = server.as_deref() {
+            if let Err(reason) = srv.auth.check_bearer(auth_header) {
+                let body_bytes = serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32001, "message": reason.message()},
+                    "id": null
+                })).unwrap_or_default();
+                return Ok(Response::builder()
+                    .status(StatusCode::from_u16(reason.http_status()).unwrap())
+                    .body(full_body(Bytes::from(body_bytes)))
+                    .unwrap());
+            }
+            if let Err(retry_after) = srv.auth.check_rate(&bucket_key) {
+                let body_bytes = serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32002, "message": "rate limit exceeded"},
+                    "id": null
+                })).unwrap_or_default();
+                return Ok(Response::builder()
+                    .status(StatusCode::from_u16(429).unwrap())
+                    .header("Retry-After", retry_after.to_string())
+                    .body(full_body(Bytes::from(body_bytes)))
+                    .unwrap());
+            }
+        }
+    }
+
     // GET / is now served by the Command Center SPA shell (PR 4, Task 4.3).
     // The pre-PR-1 /federation-dashboard.html asset was dropped in PR 1
     // (Task 1.3) and is not restored here; the SPA replaces it.

@@ -357,6 +357,7 @@ fn build_federation_server(
             crate::server::refresh::RefreshOutcome::skipped(),
         )),
         attribution: default_attribution_backend(),
+        auth: Arc::new(crate::server::auth::AuthState::from_env()),
     };
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
     // when the file exists, and install a persist callback so every
@@ -403,6 +404,10 @@ pub struct LainServer {
     /// via `with_federation`); `None` for single-workspace servers
     /// (constructed via `new`).
     federation: Option<Arc<FederatedIndex>>,
+    /// Per-key auth + rate limit (P0 #1). Populated from `LAIN_API_KEYS`
+    /// and `LAIN_RATE_LIMIT_RPM` env vars at server startup. Cloned into
+    /// the HTTP request handler so dev mode (no env) stays zero-cost.
+    pub auth: Arc<crate::server::auth::AuthState>,
     /// Workspaces file passed to `LainMcpServer` when `with_federation_and_workspaces`
     /// is used. `Some` when a workspace is active; `None` for the
     /// all-repos path (no workspaces.yaml).
@@ -562,6 +567,7 @@ impl LainServer {
                 crate::server::refresh::RefreshOutcome::skipped(),
             )),
             attribution: default_attribution_backend(),
+            auth: Arc::new(crate::server::auth::AuthState::from_env()),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists. Idempotent: missing file is a no-op.

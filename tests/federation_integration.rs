@@ -1196,10 +1196,19 @@ async fn agent_a_plan_revision_beyond_current_gets_note() {
         Some("plan_revision beyond current — server may have restarted"),
         "BeyondCurrent must surface the verbatim note from compute_world_state; resp={resp}"
     );
+    // Since commit 040cdd6, BeyondCurrent/TooOld branches preserve the
+    // retract set across error paths (static-graph state and overlay
+    // state are independent). `verify_token` is absent from the static
+    // graph in this fixture, so it surfaces here as a `Retracted` entry.
+    let cs: Vec<&serde_json::Value> = ws["changed_symbols"]
+        .as_array().unwrap()
+        .iter()
+        .filter(|c| c["change_kind"] == "Retracted"
+                  && c["name"] == "verify_token")
+        .collect();
     assert_eq!(
-        ws["changed_symbols"].as_array().unwrap().len(),
-        0,
-        "BeyondCurrent must not invent any changed_symbols entries; resp={resp}"
+        cs.len(), 1,
+        "BeyondCurrent must preserve the retract set; resp={resp}"
     );
     assert_eq!(
         ws["plan"].as_u64(),
