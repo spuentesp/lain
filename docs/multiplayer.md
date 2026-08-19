@@ -160,3 +160,28 @@ Returns:
 ```
 
 Pair with `hooks/claude-code/pre-commit.sh` (configured as Claude Code's `PreToolUse` on `Bash` for `git commit`) to refuse commits that would conflict with the previous ref. Catches the real damage — merge conflicts — at the right moment.
+
+## Revision surface
+
+Every tool response now carries a top-level `revision: u64` field. The
+counter is per-process and monotonic; it increments on every overlay diff
+the server emits. Tools that don't return JSON (streaming-only) are
+unchanged.
+
+Claim-aware tools (`claim_files` is the only one today) additionally
+accept `plan_revision: u64` on request and may return `world_state` on
+response. See `docs/superpowers/specs/2026-08-18-coordination-staleness-audit-design.md`
+for the full contract.
+
+## world_state.changed_symbols
+
+`world_state` is the agent's signal that the world may have moved since
+it queried. Each entry is `{ name, change_kind, at_revision }` where
+`change_kind` is `Edited` (changed via overlay diff) or `Retracted`
+(removed from the static graph).
+
+If `world_state.note` is set, the agent must resync:
+- `"plan_revision beyond current — server may have restarted"` →
+  the server reloaded and lost the revision counter; re-query.
+- `"plan_revision too old for delta; resync required"` →
+  the agent's plan is too far in the past; re-query.
