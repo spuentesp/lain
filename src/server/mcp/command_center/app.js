@@ -233,18 +233,6 @@ function saveMySessionPrefs(prefs) {
   } catch (_) { /* persist best-effort */ }
 }
 
-function applyMySessionFilterToList() {
-  const list = document.getElementById('conflicts-list');
-  if (!list) return;
-  const prefs = loadMySessionPrefs();
-  const cards = list.querySelectorAll('.conflict-card');
-  for (const card of cards) {
-    const cardAgent = card.dataset.agentId || '';
-    const visible = !prefs.onlyMySession || !prefs.myAgentId || cardAgent === prefs.myAgentId;
-    card.style.display = visible ? '' : 'none';
-  }
-}
-
 function wireOnlyMySessionToggle() {
   const toggle = document.getElementById('only-my-session-toggle');
   const idInput = document.getElementById('only-my-session-id');
