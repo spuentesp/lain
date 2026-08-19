@@ -1134,6 +1134,17 @@ struct PersistedState {
     occupancy_by_file: Vec<(PathBuf, Vec<String>, Vec<(String, Vec<String>)>)>,
     /// `(agent_id_string, [claim])`. Mirrored into `by_file` on load.
     occupancy_by_agent: Vec<(String, Vec<Claim>)>,
+    /// Offset (in bytes) into `audit.jsonl` at which the next audit
+    /// append should start on the next restart. Task 2.6 reads this
+    /// out of the audit module on save and writes it back on load so
+    /// crash-safe append continuation crosses process boundaries.
+    #[serde(default)]
+    audit_offset_bytes: u64,
+    /// Unix-epoch seconds at which `audit.jsonl` was last reset
+    /// because it was missing or corrupt on load. `None` until
+    /// Task 2.6 wires up the loader's reset detection.
+    #[serde(default)]
+    audit_reset_at_unix: Option<f64>,
 }
 
 /// Serialize the in-memory presence registry + occupancy map to a JSON
@@ -1163,6 +1174,14 @@ pub fn save_pair(
             occupancy_by_agent: o.by_agent.iter()
                 .map(|(k, v)| (k.0.clone(), v.clone()))
                 .collect(),
+            // Placeholder defaults for Task 2.2 — the audit module
+            // isn't wired into save yet. Task 2.6 replaces these with
+            // the actual offset + reset timestamp read from the audit
+            // module at save time. Additive-compat: state files from
+            // before this commit load with `0` / `None` via
+            // `#[serde(default)]` on the struct fields.
+            audit_offset_bytes: 0,
+            audit_reset_at_unix: None,
         }
     };
     if let Some(parent) = path.parent() {
@@ -1384,5 +1403,79 @@ mod world_state_tests {
         let out = ChangedSymbol::from_diffs(&diffs, 5, 8);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].at_revision, 7);
+    }
+}
+
+#[cfg(test)]
+mod audit_persistence_tests {
+    //! Round-trip tests for the new `audit_offset_bytes` /
+    //! `audit_reset_at_unix` fields on `PersistedState` (Task 2.2).
+    //!
+    //! These live alongside the type so the on-disk shape can't drift
+    //! from the implementation without a test failure. The struct
+    //! fields are private to the module, so we test from inside rather
+    //! than via the `tests/` integration tree — that way we can assert
+    //! on the field values directly.
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn audit_offset_and_reset_round_trip_through_persisted_state() {
+        // Task 2.2: `audit_offset_bytes` + `audit_reset_at_unix` are new
+        // additive fields on `PersistedState`. They must round-trip
+        // through serde so the audit module can resume append safely
+        // after a restart.
+        let json = r#"{
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": [],
+            "audit_offset_bytes": 12345,
+            "audit_reset_at_unix": 1700000000.5
+        }"#;
+        let state: PersistedState = serde_json::from_str(json)
+            .expect("PersistedState should accept audit fields");
+        assert_eq!(state.audit_offset_bytes, 12345);
+        assert_eq!(state.audit_reset_at_unix, Some(1700000000.5));
+    }
+
+    #[test]
+    fn pre_task_2_2_state_loads_with_defaults() {
+        // State files written before Task 2.2 don't have the audit
+        // fields. `#[serde(default)]` lets them load with `0` / `None`
+        // instead of failing the parser — no migration required.
+        let json = r#"{
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": []
+        }"#;
+        let state: PersistedState = serde_json::from_str(json)
+            .expect("Legacy state files without audit fields must still load");
+        assert_eq!(state.audit_offset_bytes, 0);
+        assert_eq!(state.audit_reset_at_unix, None);
+    }
+
+    #[test]
+    fn save_pair_writes_audit_fields_with_placeholder_defaults() {
+        // For Task 2.2 the audit module isn't wired up yet, so the
+        // values written to disk are placeholders (`0` / `None`). Task
+        // 2.6 swaps these for live audit-module values. We still want
+        // the round-trip through `save_pair` / a JSON re-parse to
+        // succeed and emit both fields — that way the on-disk shape is
+        // stable from this commit onward.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        save_pair(&path, &reg, &occ).expect("save_pair");
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("\"audit_offset_bytes\""), "save_pair must emit audit_offset_bytes; got:\n{written}");
+        assert!(written.contains("\"audit_reset_at_unix\""), "save_pair must emit audit_reset_at_unix; got:\n{written}");
+
+        // Round-trip back through `load_pair` -> PersistedState with no
+        // parse error, then double-check we read what we wrote.
+        load_pair(&path, &reg, &occ).expect("load_pair");
+        let parsed: PersistedState = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed.audit_offset_bytes, 0);
+        assert_eq!(parsed.audit_reset_at_unix, None);
     }
 }
