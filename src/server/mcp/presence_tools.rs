@@ -247,6 +247,16 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
             if let Err(e) = append_edit_event(&audit_dir, &audit) {
                 tracing::warn!("audit append failed: {e}");
             }
+            // SSE `edit_landed` (PR 2 / Task 2.4) — same best-effort
+            // contract as the audit append: a dropped subscriber or a
+            // closed broadcast channel must never block the claim. The
+            // wire payload is the same `AuditEvent` we just wrote to
+            // disk, so Command Center subscribers see the write the
+            // instant it lands rather than waiting for a future
+            // `get_audit_log` poll.
+            let _ = server
+                .presence_event_tx
+                .send(PresenceEvent::EditLanded { event: audit.clone() });
         }
     }
     if !result.conflicts.is_empty() {
