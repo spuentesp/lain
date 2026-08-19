@@ -205,6 +205,61 @@ async function renderRooms() {
 
 // ── Live SSE subscription (Task 9) ──────────────────────────────────────────
 
+// PR 3 / Task 3.2 — "Only my session" toggle. Pure filter helper so the
+// logic is independently testable without a DOM. An event passes when
+// either (a) the toggle is off, (b) `myAgentId` is blank, or (c) the
+// event's `agent_id` matches the bound session.
+function filterConflictEvents(events, opts) {
+  const onlyMySession = !!(opts && opts.onlyMySession);
+  const myAgentId = (opts && typeof opts.myAgentId === 'string') ? opts.myAgentId.trim() : '';
+  if (!onlyMySession || !myAgentId) return Array.isArray(events) ? events : [];
+  return (Array.isArray(events) ? events : []).filter(e => e && e.agent_id === myAgentId);
+}
+
+function loadMySessionPrefs() {
+  let onlyMySession = false;
+  let myAgentId = '';
+  try {
+    onlyMySession = localStorage.getItem('lain_only_my_session') === '1';
+    myAgentId = localStorage.getItem('lain_my_agent_id') || '';
+  } catch (_) { /* localStorage unavailable — fall back to defaults */ }
+  return { onlyMySession, myAgentId };
+}
+
+function saveMySessionPrefs(prefs) {
+  try {
+    localStorage.setItem('lain_only_my_session', prefs.onlyMySession ? '1' : '0');
+    localStorage.setItem('lain_my_agent_id', prefs.myAgentId || '');
+  } catch (_) { /* persist best-effort */ }
+}
+
+function applyMySessionFilterToList() {
+  const list = document.getElementById('conflicts-list');
+  if (!list) return;
+  const prefs = loadMySessionPrefs();
+  const cards = list.querySelectorAll('.conflict-card');
+  for (const card of cards) {
+    const cardAgent = card.dataset.agentId || '';
+    const visible = !prefs.onlyMySession || !prefs.myAgentId || cardAgent === prefs.myAgentId;
+    card.style.display = visible ? '' : 'none';
+  }
+}
+
+function wireOnlyMySessionToggle() {
+  const toggle = document.getElementById('only-my-session-toggle');
+  const idInput = document.getElementById('only-my-session-id');
+  if (!toggle || !idInput) return;
+  const prefs = loadMySessionPrefs();
+  toggle.checked = prefs.onlyMySession;
+  idInput.value = prefs.myAgentId;
+  const onChange = () => {
+    saveMySessionPrefs({ onlyMySession: toggle.checked, myAgentId: idInput.value });
+    applyMySessionFilterToList();
+  };
+  toggle.addEventListener('change', onChange);
+  idInput.addEventListener('input', onChange);
+}
+
 function subscribePresenceEvents() {
   try {
     const ev = new EventSource('/events');
@@ -223,14 +278,25 @@ function subscribePresenceEvents() {
       try { conflict = JSON.parse(event.data); } catch (_) { return; }
       const list = document.getElementById('conflicts-list');
       if (!list) return;
+      const prefs = loadMySessionPrefs();
+      // PR 3 / Task 3.2 — drop events not from the bound session when
+      // the toggle is on. Rooms still re-render (other agents' claims
+      // remain visible up top).
+      const filtered = filterConflictEvents([conflict], {
+        onlyMySession: prefs.onlyMySession,
+        myAgentId: prefs.myAgentId,
+      });
+      if (filtered.length === 0) return;
+      const visible = filtered[0];
       const allowed = new Set(['none', 'low', 'medium', 'high']);
-      const severity = allowed.has(conflict.severity) ? conflict.severity : 'none';
-      const first = Array.isArray(conflict.conflicts) ? conflict.conflicts[0] : null;
+      const severity = allowed.has(visible.severity) ? visible.severity : 'none';
+      const first = Array.isArray(visible.conflicts) ? visible.conflicts[0] : null;
       const li = document.createElement('li');
       li.className = 'conflict-card';
+      li.dataset.agentId = visible.agent_id || '';
       li.innerHTML = `
         <span class="severity severity-${severity}">${escapeHtml(severity)}</span>
-        <strong>${escapeHtml(conflict.agent_id || 'unknown agent')}</strong>
+        <strong>${escapeHtml(visible.agent_id || 'unknown agent')}</strong>
         <code>${escapeHtml(first && first.path ? first.path : 'unknown path')}</code>
       `;
       if (list.querySelector('.muted')) list.innerHTML = '';
@@ -567,6 +633,10 @@ async function init() {
   // Live presence: open the EventSource once the initial render has run so
   // the panels have data before the first event redraws them.
   subscribePresenceEvents();
+
+  // PR 3 / Task 3.2 — restore the "Only my session" toggle from
+  // localStorage and keep existing conflict cards in sync when it flips.
+  wireOnlyMySessionToggle();
 
   // Status bar poll.
   setInterval(renderStatusBar, 2000);
