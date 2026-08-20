@@ -8,8 +8,9 @@
 //! the ingest pipeline itself.
 
 pub mod ingestion;
-pub mod scan;
 pub mod jobs;
+pub mod resolve;
+pub mod scan;
 
 /// Per-process counter that disambiguates the staging dir used by
 /// `LainServer::with_federation`. The placeholder `LainServer` builds a

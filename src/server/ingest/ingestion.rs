@@ -2,10 +2,10 @@ use crate::error::LainError;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType, is_type_level_target};
+use crate::schema::{GraphEdge, GraphNode};
 use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -197,157 +197,26 @@ impl LainServer {
 
         // 3. Resolve Phase: Link external references to internal nodes (CALLS/USES)
         info!("Resolving topology: Linking {} external references...", all_external_refs.len());
-        let mut call_edges = Vec::new();
-        for (source_id, ref_loc) in all_external_refs {
-            let path_str = crate::graph::graph_path(&self.config.workspace, &ref_loc.path);
-            if let Some(target_node) = self.graph.get_node_at_location(&path_str, ref_loc.line) {
-                if target_node.id != source_id {
-                    call_edges.push(GraphEdge::new(EdgeType::Calls, source_id, target_node.id));
-                }
-            }
-        }
+        let call_edges =
+            super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs);
         info!("Ingesting {} call edges", call_edges.len());
         self.graph.insert_edges_batch(&call_edges)?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
         info!("Resolving {} tree-sitter static references...", all_static_refs.len());
-        {
-            // Build name → node IDs index for O(1) target resolution
-            let mut name_index: HashMap<String, Vec<(String, NodeType)>> = HashMap::new();
-            for node in self.graph.get_all_nodes() {
-                name_index
-                    .entry(node.name.clone())
-                    .or_default()
-                    .push((node.id.clone(), node.node_type.clone()));
-            }
-
-            let mut static_edges: Vec<GraphEdge> = Vec::new();
-            let mut seen: HashSet<(String, String)> = HashSet::new();
-
-            for sr in all_static_refs {
-                let Some(source_node) =
-                    self.graph.get_node_at_location(&sr.file_path, sr.source_line)
-                else {
-                    continue;
-                };
-
-                let Some(candidates) = name_index.get(&sr.target_name) else {
-                    continue;
-                };
-
-                for (target_id, target_type) in candidates {
-                    if *target_id == source_node.id {
-                        continue; // no self-edges
-                    }
-                    // Uses edges only towards type-level nodes
-                    if sr.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
-                        continue;
-                    }
-                    let key = (source_node.id.clone(), target_id.clone());
-                    if seen.insert(key) {
-                        static_edges.push(GraphEdge::new(
-                            sr.edge_type.clone(),
-                            source_node.id.clone(),
-                            target_id.clone(),
-                        ));
-                    }
-                }
-            }
-
-            info!("Ingesting {} static tree-sitter edges", static_edges.len());
-            self.graph.insert_edges_batch(&static_edges)?;
-        }
+        let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs);
+        info!("Ingesting {} static tree-sitter edges", static_edges.len());
+        self.graph.insert_edges_batch(&static_edges)?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
         info!("Resolving {} pattern references for cross-boundary detection...", all_pattern_refs.len());
-        {
-            use std::collections::HashMap as Map;
-            // Pre-compute file path → node ID for O(1) lookups
-            let file_nodes: Map<String, GraphNode> = self.graph.get_all_nodes()
-                .into_iter()
-                .filter(|n| matches!(n.node_type, NodeType::File))
-                .map(|n| (n.path.clone(), n))
-                .collect();
-
-            // Group by pattern value: pattern_value -> list of file paths that reference it
-            let mut value_to_files: Map<String, Vec<String>> = Map::new();
-            for pr in &all_pattern_refs {
-                // Deduplicate by file path - multiple refs from same file count as one
-                let entry = value_to_files.entry(pr.value.clone()).or_default();
-                if !entry.contains(&pr.file_path) {
-                    entry.push(pr.file_path.clone());
-                }
-            }
-
-            // Score patterns: count cross-directory pairs. Higher = more interesting.
-            // Only keep patterns with 2-20 references (too few = noise, too many = common libs)
-            let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
-            for (value, files) in value_to_files {
-                if files.len() < 2 || files.len() > 20 {
-                    continue;
-                }
-                // Count unique directories
-                let mut dirs: HashSet<String> = HashSet::new();
-                for f in &files {
-                    if let Some(parent) = std::path::Path::new(f).parent() {
-                        dirs.insert(parent.to_string_lossy().to_string());
-                    }
-                }
-                if dirs.len() < 2 {
-                    continue;
-                }
-                // Score = number of directory pairs (combinatorial size of coupling)
-                let pairs = dirs.len() * (dirs.len() - 1) / 2;
-                scored.push((pairs, value, files));
-            }
-
-            // Sort by score descending; take top patterns until edge budget exhausted
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
-            // Proportional cap: 10 edges per pattern, max 200. Prevents combinatorial blowup while scaling with pattern count.
-            let max_pattern_edges = (scored.len() * 10).min(200);
-            let mut pattern_edges: Vec<GraphEdge> = Vec::new();
-            let mut seen: HashSet<(String, String)> = HashSet::new();
-
-            for (_score, _value, files) in scored {
-                if pattern_edges.len() >= max_pattern_edges {
-                    break;
-                }
-                // Group by directory, pick one representative file per dir
-                let mut dirs: Map<String, String> = Map::new(); // dir -> representative file
-                for f in &files {
-                    if let Some(parent) = std::path::Path::new(f).parent() {
-                        let parent_str = parent.to_string_lossy().to_string();
-                        dirs.entry(parent_str).or_insert_with(|| f.clone());
-                    }
-                }
-                let all_dirs: Vec<_> = dirs.into_iter().collect();
-                // Connect representative files across directory pairs (1 edge per pair)
-                for i in 0..all_dirs.len() {
-                    if pattern_edges.len() >= max_pattern_edges {
-                        break;
-                    }
-                    for j in (i + 1)..all_dirs.len() {
-                        let (_dir_a, file_a) = &all_dirs[i];
-                        let (_dir_b, file_b) = &all_dirs[j];
-                        let key = (file_a.clone(), file_b.clone());
-                        if seen.insert(key) {
-                            if let (Some(node_a), Some(node_b)) = (
-                                file_nodes.get(file_a),
-                                file_nodes.get(file_b),
-                            ) {
-                                pattern_edges.push(GraphEdge::new(EdgeType::Pattern, node_a.id.clone(), node_b.id.clone()));
-                            }
-                        }
-                        if pattern_edges.len() >= max_pattern_edges {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
-            self.graph.insert_edges_batch(&pattern_edges)?;
-        }
+        let pattern_edges = super::resolve::resolve_pattern_edges(
+            &self.graph,
+            &all_pattern_refs,
+            super::resolve::PatternLimits::DEFAULT,
+        );
+        info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
+        self.graph.insert_edges_batch(&pattern_edges)?;
 
         // 4. Temporal Analysis Phase: Co-changes
         let co_change_pairs = {
@@ -581,10 +450,6 @@ pub async fn index_one_repo(
     const COCHANGE_COMMIT_WINDOW: usize = 100;
     const COCHANGE_MIN_PAIR_COUNT: usize = 2;
     const COCHANGE_MAX_COMMIT_FILES: usize = 50;
-    const PATTERN_MAX_REF_COUNT: usize = 20;
-    const PATTERN_MIN_DIRS: usize = 2;
-    const PATTERN_MAX_EDGES: usize = 200;
-    const PATTERN_EDGES_PER_VALUE: usize = 10;
 
     let files_to_scan: Vec<_> = files.into_iter().collect();
     let file_chunks: Vec<Vec<PathBuf>> = files_to_scan
@@ -690,140 +555,23 @@ pub async fn index_one_repo(
     );
 
     // Resolve phase: link external references to internal nodes (CALLS)
-    let mut call_edges: Vec<GraphEdge> = Vec::new();
-    for (source_id, ref_loc) in all_external_refs {
-        let path_str = crate::graph::graph_path(path, &ref_loc.path);
-        if let Some(target_node) = db.get_node_at_location(&path_str, ref_loc.line) {
-            if target_node.id != source_id {
-                call_edges.push(GraphEdge::new(EdgeType::Calls, source_id, target_node.id));
-            }
-        }
-    }
+    let call_edges = super::resolve::resolve_call_edges(db, path, &all_external_refs);
     info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
     db.insert_edges_batch(&call_edges)?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
-    {
-        let mut name_index: HashMap<String, Vec<(String, NodeType)>> = HashMap::new();
-        for node in db.get_all_nodes() {
-            name_index
-                .entry(node.name.clone())
-                .or_default()
-                .push((node.id.clone(), node.node_type.clone()));
-        }
-
-        let mut static_edges: Vec<GraphEdge> = Vec::new();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-
-        for sr in all_static_refs {
-            let Some(source_node) = db.get_node_at_location(&sr.file_path, sr.source_line) else {
-                continue;
-            };
-            let Some(candidates) = name_index.get(&sr.target_name) else {
-                continue;
-            };
-            for (target_id, target_type) in candidates {
-                if *target_id == source_node.id {
-                    continue;
-                }
-                if sr.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
-                    continue;
-                }
-                let key = (source_node.id.clone(), target_id.clone());
-                if seen.insert(key) {
-                    static_edges.push(GraphEdge::new(
-                        sr.edge_type.clone(),
-                        source_node.id.clone(),
-                        target_id.clone(),
-                    ));
-                }
-            }
-        }
-        info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
-        db.insert_edges_batch(&static_edges)?;
-    }
+    let static_edges = super::resolve::resolve_static_edges(db, &all_static_refs);
+    info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
+    db.insert_edges_batch(&static_edges)?;
 
     // Pattern resolve: cross-boundary detection
-    {
-        let file_nodes: HashMap<String, GraphNode> = db.get_all_nodes()
-            .into_iter()
-            .filter(|n| matches!(n.node_type, NodeType::File))
-            .map(|n| (n.path.clone(), n))
-            .collect();
-
-        let mut value_to_files: HashMap<String, Vec<String>> = HashMap::new();
-        for pr in &all_pattern_refs {
-            let entry = value_to_files.entry(pr.value.clone()).or_default();
-            if !entry.contains(&pr.file_path) {
-                entry.push(pr.file_path.clone());
-            }
-        }
-
-        let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
-        for (value, files) in value_to_files {
-            if files.len() < 2 || files.len() > PATTERN_MAX_REF_COUNT {
-                continue;
-            }
-            let mut dirs: HashSet<String> = HashSet::new();
-            for f in &files {
-                if let Some(parent) = std::path::Path::new(f).parent() {
-                    dirs.insert(parent.to_string_lossy().to_string());
-                }
-            }
-            if dirs.len() < PATTERN_MIN_DIRS {
-                continue;
-            }
-            let pairs = dirs.len() * (dirs.len() - 1) / 2;
-            scored.push((pairs, value, files));
-        }
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-
-        let max_pattern_edges = (scored.len() * PATTERN_EDGES_PER_VALUE).min(PATTERN_MAX_EDGES);
-        let mut pattern_edges: Vec<GraphEdge> = Vec::new();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-
-        for (_score, _value, files) in scored {
-            if pattern_edges.len() >= max_pattern_edges {
-                break;
-            }
-            let mut dirs: HashMap<String, String> = HashMap::new();
-            for f in &files {
-                if let Some(parent) = std::path::Path::new(f).parent() {
-                    let parent_str = parent.to_string_lossy().to_string();
-                    dirs.entry(parent_str).or_insert_with(|| f.clone());
-                }
-            }
-            let all_dirs: Vec<_> = dirs.into_iter().collect();
-            for i in 0..all_dirs.len() {
-                if pattern_edges.len() >= max_pattern_edges {
-                    break;
-                }
-                for j in (i + 1)..all_dirs.len() {
-                    let (_dir_a, file_a) = &all_dirs[i];
-                    let (_dir_b, file_b) = &all_dirs[j];
-                    let key = (file_a.clone(), file_b.clone());
-                    if seen.insert(key) {
-                        if let (Some(node_a), Some(node_b)) = (
-                            file_nodes.get(file_a),
-                            file_nodes.get(file_b),
-                        ) {
-                            pattern_edges.push(GraphEdge::new(
-                                EdgeType::Pattern,
-                                node_a.id.clone(),
-                                node_b.id.clone(),
-                            ));
-                        }
-                    }
-                    if pattern_edges.len() >= max_pattern_edges {
-                        break;
-                    }
-                }
-            }
-        }
-
-        info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
-        db.insert_edges_batch(&pattern_edges)?;
-    }
+    let pattern_edges = super::resolve::resolve_pattern_edges(
+        db,
+        &all_pattern_refs,
+        super::resolve::PatternLimits::FEDERATION,
+    );
+    info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
+    db.insert_edges_batch(&pattern_edges)?;
 
     // Co-change analysis
     let co_change_pairs = git
