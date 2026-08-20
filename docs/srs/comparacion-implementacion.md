@@ -41,7 +41,7 @@
 
 | RNF | Resumen | Estado | Observaciones |
 |---|---|---|---|
-| RNF-01 | Consulta < 2 s (p90, ~100 KLOC) | ✅ | Medido en `tests/coordination_benchmark.rs` (2026-08-20): handlers MCP p99 ≤ 13.5 ms (peor caso `get_audit_log`), `get_blast_radius` sobre cadena de 10 K funciones p99 = 101 µs, `claim_files` con 8 agentes concurrentes p99 = 1.92 ms. |
+| RNF-01 | Consulta < 2 s (p90, ~100 KLOC) | ✅ | Medido en `tests/coordination_benchmark.rs` (2026-08-20): `get_blast_radius` con traversal completo sobre cadena de 10 K funciones p50=47 ms / p99=68 ms; handlers MCP p99 ≤ 38 ms (peor caso `get_audit_log`, que relee el JSONL en cada llamada); `claim_files` con 8 agentes concurrentes p99 = 1.6 ms. |
 | RNF-02 | Frescura ≤ 60 s | 🟡 | Jobs periódicos: sliding window 30 s, background sync 60 s (`src/server/jobs.rs`); el peor caso puede exceder 60 s — medir. |
 | RNF-03 | Persistencia e IDs estables | ✅ | `.lain/graph.bin`; UUID v5 determinista por (tipo, ruta, nombre). |
 | RNF-04 | Procesamiento 100 % local | ✅ | Embeddings ONNX locales; sin llamadas a servicios externos en runtime (la descarga del modelo es en instalación). Verificar con inspección de red. |

@@ -193,16 +193,28 @@ async fn blast_radius_latency_benchmark() {
     let mut samples = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let t = Instant::now();
+        // Blast radius BFS-walks INCOMING edges, so query the *tail* of
+        // the chain: `function_9999` is called by `function_9998`, which
+        // is called by `function_9997`, ... — the traversal visits all
+        // 10k nodes. (Querying `function_0` here would measure the
+        // trivial no-callers case.)
         let out = lain::tools::handlers::impact::get_blast_radius(
             &graph,
             &overlay,
-            "function_0",
+            "function_9999",
             false,
             None,
         )
         .await
         .expect("blast radius");
-        assert!(!out.is_empty());
+        // Sanity: the whole chain must be traversed (the report caps
+        // displayed names at 20 but always prints the total). 10k
+        // functions + the containing file node, minus the start node.
+        assert!(
+            out.contains("Total transitively affected nodes: 10000"),
+            "expected the full 10k chain in the traversal count, got: {}",
+            &out[..out.len().min(400)]
+        );
         samples.push(t.elapsed());
     }
 
