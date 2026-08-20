@@ -136,7 +136,16 @@ impl RepoIndex {
     /// polling rather than wedging the federation.
     pub async fn index(self: &Arc<Self>) -> Result<(), LainError> {
         let path = self.source.local_path().to_path_buf();
-        let db = self.db.clone();
+        // Borrow `self.db` directly instead of cloning. `GraphDatabase`
+        // derives Clone but `DashMap` clones its shards independently —
+        // every `index_map` / `path_index` mutation lands on the clone,
+        // and the server's bound `&self.db` reads from an empty index
+        // map while the on-disk file (and the clone) hold the real
+        // graph. `get_edges_to` and friends return empty even though
+        // the edges exist in petgraph (which IS Arc-shared and survives
+        // the clone). `git_guard` already serializes writers, so a
+        // shared `&self.db` borrow across the pipeline is safe.
+        let db = &self.db;
         let lsp = self.lsp.clone();
         let git = Arc::clone(&self.git);
 

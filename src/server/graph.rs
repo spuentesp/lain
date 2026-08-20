@@ -297,7 +297,16 @@ impl GraphDatabase {
 
                 // Add this path's replacements in the same locked section.
                 let mut fresh = kept;
+                let mut seen_ids: HashSet<String> = HashSet::new();
                 for node in by_path.get(path.as_str()).into_iter().flatten() {
+                    // Two source files in the same directory emit the
+                    // same `Namespace` node (deterministic id) — without
+                    // a guard the second `add_node` creates an orphan
+                    // petgraph entry that holds incident edges but is
+                    // invisible to the id-keyed index. Keep the first.
+                    if !seen_ids.insert(node.id.clone()) {
+                        continue;
+                    }
                     let idx = graph.add_node((*node).clone());
                     self.index_map.insert(node.id.clone(), idx);
                     fresh.push(idx);

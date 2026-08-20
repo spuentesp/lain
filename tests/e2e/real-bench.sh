@@ -177,9 +177,40 @@ echo "full report: $WORK/report.md"
 # Machine-readable verdict for CI: PASS exits 0, CHECK exits 1 so the
 # nightly actually goes red when the budget is blown or no conflicts
 # were exercised (which would mean the scenario didn't test anything).
-if grep -q 'verdict: PASS' "$WORK/report.md"; then
-    exit 0
-else
+# A third gate checks that `get_blast_radius` returns real content —
+# latency alone isn't proof of correctness if the federation ingestion
+# silently produces empty graphs (the bug that lived behind commit
+# f3eb0b8's "(no dependents)" symptom for a single-repo server).
+if ! grep -q 'verdict: PASS' "$WORK/report.md"; then
     echo "verdict not PASS — see report above" >&2
     exit 1
 fi
+
+# Content check: blast_radius against a known symbol from the subject
+# repo must list at least one dependent. Picking `claim_files` because
+# it has callers across the MCP dispatch path in the lain source tree.
+content_file="$WORK/raw/content-check.json"
+if ! curl -s -m 15 -o "$content_file" -X POST "$URL/mcp" \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":999,"method":"tools/call","params":{"name":"get_blast_radius","arguments":{"symbol":"claim_files"}}}'; then
+    echo "content check: get_blast_radius request failed" >&2
+    exit 1
+fi
+content_text=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d["result"]["content"][0]["text"])
+except Exception:
+    print("")' "$content_file" 2>/dev/null || true)
+if ! grep -q 'Total transitively affected nodes: ' <<< "$content_text"; then
+    echo "content check: blast_radius returned no dependents for claim_files — federation ingestion is broken" >&2
+    echo "$content_text" >&2
+    exit 1
+fi
+total=$(grep -o 'Total transitively affected nodes: [0-9]*' <<< "$content_text" | tail -1 | grep -o '[0-9]*$')
+if [ "${total:-0}" -lt 1 ]; then
+    echo "content check: blast_radius listed 0 dependents for claim_files" >&2
+    exit 1
+fi
+echo "content check: blast_radius(claim_files) → ${total} dependents — OK"
