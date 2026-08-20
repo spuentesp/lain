@@ -259,13 +259,16 @@ async fn lain_server_exposes_presence_and_occupancy() {
 /// so callers don't need the trait.
 #[tokio::test]
 async fn sse_broadcasts_presence_events() {
+    use lain::server::events_log::EventsLog;
     use lain::server::presence::PresenceEvent;
     use lain::server::sse::serve_sse;
 
-    let (tx, _rx) = tokio::sync::broadcast::channel::<PresenceEvent>(16);
-    let mut stream = serve_sse(tx.subscribe(), None);
+    let tmp = tempfile::tempdir().unwrap();
+    let log = std::sync::Arc::new(EventsLog::open(tmp.path()).unwrap());
+    let (tx, _rx) = tokio::sync::broadcast::channel::<(u64, PresenceEvent)>(16);
+    let mut stream = serve_sse(tx.subscribe(), None, log);
 
-    tx.send(PresenceEvent::AgentLeft(AgentId("x".into()))).unwrap();
+    tx.send((7, PresenceEvent::AgentLeft(AgentId("x".into())))).unwrap();
 
     let event = tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
         .await
@@ -274,6 +277,44 @@ async fn sse_broadcasts_presence_events() {
         .expect("not an error");
     assert!(event.data.contains("AgentLeft"));
     assert!(event.data.contains("x"));
+    assert_eq!(event.id, 7, "live frames carry the durable event id");
+}
+
+/// `serve_sse` with a `Last-Event-ID` replays every durable event with
+/// id > last_id (in order) before yielding from the live bus.
+#[tokio::test]
+async fn sse_replays_after_last_event_id() {
+    use lain::server::events_log::EventsLog;
+    use lain::server::presence::PresenceEvent;
+    use lain::server::sse::serve_sse;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let log = std::sync::Arc::new(EventsLog::open(tmp.path()).unwrap());
+    let id1 = log.append(&PresenceEvent::AgentLeft(AgentId("old".into())));
+    let id2 = log.append(&PresenceEvent::AgentLeft(AgentId("new".into())));
+
+    let (tx, _rx) = tokio::sync::broadcast::channel::<(u64, PresenceEvent)>(16);
+    let mut stream = serve_sse(tx.subscribe(), Some(id1.to_string()), log);
+
+    // The replayed frame arrives without any live broadcast.
+    let frame = tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+        .await
+        .expect("replayed frame arrived")
+        .expect("some frame")
+        .expect("not an error");
+    assert_eq!(frame.id, id2);
+    assert!(frame.data.contains("new"));
+
+    // After the backlog drains, live events flow with their durable ids.
+    tx.send((id2 + 1, PresenceEvent::AgentLeft(AgentId("live".into()))))
+        .unwrap();
+    let live = tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+        .await
+        .expect("live frame arrived")
+        .expect("some frame")
+        .expect("not an error");
+    assert_eq!(live.id, id2 + 1);
+    assert!(live.data.contains("live"));
 }
 
 // --- Task 7 brief: MCP tool layer end-to-end round-trips ---
@@ -338,7 +379,7 @@ async fn presence_tool_dispatchers_round_trip() {
     assert_eq!(v["agent_id"].as_str().unwrap().len(), 36); // UUID string
 
     // AgentJoined fired.
-    let ev = events.recv().await.unwrap();
+    let (_, ev) = events.recv().await.unwrap();
     match ev {
         PresenceEvent::AgentJoined(s) => assert_eq!(s.id.as_str(), agent_id),
         other => panic!("expected AgentJoined, got {other:?}"),
@@ -358,11 +399,11 @@ async fn presence_tool_dispatchers_round_trip() {
     assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
 
     // Drain ClaimGranted.
-    let ev = events.recv().await.unwrap();
+    let (_, ev) = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::ClaimGranted { .. }));
     // Drain EditLanded (PR 2 / Task 2.4 — emitted alongside the
     // audit append for the granted claim).
-    let ev = events.recv().await.unwrap();
+    let (_, ev) = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::EditLanded { .. }));
 
     // 3. Register a second agent to provoke a conflict.
@@ -373,7 +414,7 @@ async fn presence_tool_dispatchers_round_trip() {
     let bob_id = v2["agent_id"].as_str().unwrap().to_string();
     let bob_token = v2["session_token"].as_str().unwrap().to_string();
     // Drain bob's AgentJoined.
-    let ev = events.recv().await.unwrap();
+    let (_, ev) = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::AgentJoined { .. }));
 
     let v = run_claim_files(
@@ -387,7 +428,7 @@ async fn presence_tool_dispatchers_round_trip() {
     assert_eq!(v["granted"].as_array().unwrap().len(), 0);
     assert_eq!(v["conflicts"].as_array().unwrap().len(), 1);
     // ConflictDetected fired.
-    let ev = events.recv().await.unwrap();
+    let (_, ev) = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::ConflictDetected { .. }));
 
     // 4. list_active_agents sees both.
@@ -433,7 +474,7 @@ async fn presence_tool_dispatchers_round_trip() {
         }),
     ).unwrap();
     assert_eq!(v["released"].as_array().unwrap().len(), 1);
-    let ev = events.recv().await.unwrap();
+    let (_, ev) = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::ClaimReleased { .. }));
 
     // 9. After release, alice's claim count is 0.

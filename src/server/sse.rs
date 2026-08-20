@@ -1,7 +1,7 @@
 //! Server-Sent Events stream for presence + occupancy events.
 //!
-//! `serve_sse` wraps a `tokio::sync::broadcast::Receiver<PresenceEvent>` so a
-//! client driving the returned `SseStream` with `.next()` receives one
+//! `serve_sse` wraps a `tokio::sync::broadcast::Receiver<(u64, PresenceEvent)>`
+//! so a client driving the returned `SseStream` with `.next()` receives one
 //! `SseFrame` per broadcast event. The stream terminates (returns `None`)
 //! when the broadcast sender is dropped.
 //!
@@ -11,18 +11,31 @@
 //! `Stream<Item = Result<SseFrame, Infallible>>` would produce, so swapping
 //! in a `futures::Stream` later is a no-op for callers.
 //!
+//! Resume: when the client passes a `Last-Event-ID`, `serve_sse` first
+//! drains every event with `event_id > last_id` from the durable
+//! [`EventsLog`] (in id order) and only then yields from the live bus.
+//! Live frames carry the same durable id, so a reconnecting client can
+//! always resume from the last id it saw. Events that arrive on the bus
+//! while the replay is being assembled may appear twice (once from the
+//! log, once live); clients must treat ids as dedup keys, which the SSE
+//! spec already requires them to track.
+//!
 //! The full streaming body for `GET /events` is wired in Task 11; the
 //! `sse_placeholder_body` helper exists so the HTTP handler can return a
 //! well-formed `text/event-stream` response with a single `ready` frame
 //! before the live stream is plugged in.
 
+use crate::server::events_log::EventsLog;
 use crate::server::presence::PresenceEvent;
+use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// One SSE frame. `event` is the SSE event name, `data` is the
-/// JSON-serialized `PresenceEvent`, and `id` is a monotonic counter so
-/// clients can use `Last-Event-ID` to resume after a disconnect.
+/// JSON-serialized `PresenceEvent`, and `id` is the durable event id
+/// assigned by the [`EventsLog`] so clients can use `Last-Event-ID` to
+/// resume after a disconnect.
 #[derive(Debug, Clone)]
 pub struct SseFrame {
     pub event: &'static str,
@@ -30,36 +43,53 @@ pub struct SseFrame {
     pub id: u64,
 }
 
-/// Owning stream of `SseFrame`s produced from a `broadcast::Receiver`.
+/// SSE event-name mapping for a `PresenceEvent`. Shared between the
+/// live path and the replay backlog so both emit identical frames.
+fn event_name(event: &PresenceEvent) -> &'static str {
+    match event {
+        PresenceEvent::AgentJoined(_) => "agent_joined",
+        PresenceEvent::AgentLeft(_) => "agent_left",
+        PresenceEvent::HeartbeatExpired(_) => "heartbeat_expired",
+        PresenceEvent::ClaimGranted { .. } => "claim_granted",
+        PresenceEvent::ClaimReleased { .. } => "claim_released",
+        PresenceEvent::ConflictDetected { .. } => "conflict_detected",
+        PresenceEvent::EditLanded { .. } => "edit_landed",
+    }
+}
+
+fn frame_for(id: u64, event: &PresenceEvent) -> SseFrame {
+    let data = serde_json::to_string(event).unwrap_or_else(|_| "{}".into());
+    SseFrame {
+        event: event_name(event),
+        data,
+        id,
+    }
+}
+
+/// Owning stream of `SseFrame`s produced from a `broadcast::Receiver`,
+/// preceded by any replayed frames from the durable log.
 pub struct SseStream {
-    rx: broadcast::Receiver<PresenceEvent>,
-    counter: u64,
+    rx: broadcast::Receiver<(u64, PresenceEvent)>,
+    /// Replayed frames (from `EventsLog::replay_after`) drained before
+    /// the first live frame.
+    backlog: VecDeque<SseFrame>,
 }
 
 impl SseStream {
-    /// Wait for the next broadcast event and convert it into a frame.
+    /// Wait for the next event and convert it into a frame, draining
+    /// the replay backlog first.
     ///
     /// Lagged events are dropped silently (the broadcast ring buffer
     /// overwrote them before we caught up); the loop continues with the
     /// next event. Returns `None` only when the broadcast sender has been
     /// dropped.
     pub async fn next(&mut self) -> Option<Result<SseFrame, Infallible>> {
+        if let Some(frame) = self.backlog.pop_front() {
+            return Some(Ok(frame));
+        }
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
-                    self.counter += 1;
-                    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
-                    let name: &'static str = match &event {
-                        PresenceEvent::AgentJoined(_) => "agent_joined",
-                        PresenceEvent::AgentLeft(_) => "agent_left",
-                        PresenceEvent::HeartbeatExpired(_) => "heartbeat_expired",
-                        PresenceEvent::ClaimGranted { .. } => "claim_granted",
-                        PresenceEvent::ClaimReleased { .. } => "claim_released",
-                        PresenceEvent::ConflictDetected { .. } => "conflict_detected",
-                        PresenceEvent::EditLanded { .. } => "edit_landed",
-                    };
-                    return Some(Ok(SseFrame { event: name, data, id: self.counter }));
-                }
+                Ok((id, event)) => return Some(Ok(frame_for(id, &event))),
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
@@ -69,17 +99,26 @@ impl SseStream {
 
 /// Build an `SseStream` from a freshly-cloned broadcast receiver.
 ///
-/// `_last_event_id` is accepted for API symmetry with the eventual HTTP
-/// handler (which will read it from the `Last-Event-ID` header); for the
-/// MVP broadcast-channel transport the seek-backward behavior isn't
-/// expressible, so the parameter is ignored. Once the broadcast buffer
-/// is replaced with a durable ring (see Task 11), this becomes a
-/// `skip_while(frame.id <= last_id)` before yielding.
+/// `last_event_id` is the raw value of the client's `Last-Event-ID`
+/// header. When it parses as a `u64`, every event with a durable id
+/// greater than it is replayed from `events_log` (in id order) before
+/// the first live frame; an absent or unparseable value means "live
+/// only".
 pub fn serve_sse(
-    rx: broadcast::Receiver<PresenceEvent>,
-    _last_event_id: Option<String>,
+    rx: broadcast::Receiver<(u64, PresenceEvent)>,
+    last_event_id: Option<String>,
+    events_log: Arc<EventsLog>,
 ) -> SseStream {
-    SseStream { rx, counter: 0 }
+    let backlog = last_event_id
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|last_id| {
+            events_log
+                .replay_after(last_id)
+                .map(|(id, ev)| frame_for(id, &ev))
+                .collect()
+        })
+        .unwrap_or_default();
+    SseStream { rx, backlog }
 }
 
 /// Static placeholder body for `GET /events` until Task 11 wires the
@@ -166,7 +205,7 @@ mod tests {
                 intent: ClaimIntent::Edit,
                 last_seen_unix: SystemTime::UNIX_EPOCH,
             }],
-            severity: "high",
+            severity: "high".to_string(),
         };
 
         let frame = build_frame_for(&event).await;
@@ -176,23 +215,8 @@ mod tests {
     }
 
     /// Helper: build one `SseFrame` from a `PresenceEvent` without
-    /// needing a live broadcast channel. Mirrors the inline mapping
-    /// in `SseStream::next`.
+    /// needing a live broadcast channel.
     async fn build_frame_for(event: &PresenceEvent) -> SseFrame {
-        let data = serde_json::to_string(event).unwrap_or_else(|_| "{}".into());
-        let name: &'static str = match event {
-            PresenceEvent::AgentJoined(_) => "agent_joined",
-            PresenceEvent::AgentLeft(_) => "agent_left",
-            PresenceEvent::HeartbeatExpired(_) => "heartbeat_expired",
-            PresenceEvent::ClaimGranted { .. } => "claim_granted",
-            PresenceEvent::ClaimReleased { .. } => "claim_released",
-            PresenceEvent::ConflictDetected { .. } => "conflict_detected",
-            PresenceEvent::EditLanded { .. } => "edit_landed",
-        };
-        SseFrame {
-            event: name,
-            data,
-            id: 1,
-        }
+        frame_for(1, event)
     }
 }

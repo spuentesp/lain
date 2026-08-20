@@ -33,7 +33,7 @@ pub fn run_register_agent(server: &LainServer, args: Value) -> Result<Value, Str
     let mode = a.mode.as_deref().map(AgentMode::parse).unwrap_or(AgentMode::Interactive);
     let parent = a.parent_session_id.map(AgentId);
     let session = server.presence.register(a.name, kind, mode, a.pid, parent);
-    let _ = server.presence_event_tx.send(PresenceEvent::AgentJoined(session.clone()));
+    server.emit_presence_event(PresenceEvent::AgentJoined(session.clone()));
     let expires_at_unix = system_time_to_unix_secs(session.started_at)
         + system_time_to_unix_secs_delta(server.presence_expires_after());
     Ok(json!({
@@ -233,7 +233,7 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
     }
     if !result.granted.is_empty() {
         for g in &result.granted {
-            let _ = server.presence_event_tx.send(PresenceEvent::ClaimGranted {
+            server.emit_presence_event(PresenceEvent::ClaimGranted {
                 agent_id: session.id.clone(),
                 path: g.path.clone(),
             });
@@ -284,17 +284,15 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
             // disk, so Command Center subscribers see the write the
             // instant it lands rather than waiting for a future
             // `get_audit_log` poll.
-            let _ = server
-                .presence_event_tx
-                .send(PresenceEvent::EditLanded { event: audit.clone() });
+            server.emit_presence_event(PresenceEvent::EditLanded { event: audit.clone() });
         }
     }
     if !result.conflicts.is_empty() {
         let severity = runtime_conflict_severity(server, &result.conflicts);
-        let _ = server.presence_event_tx.send(PresenceEvent::ConflictDetected {
+        server.emit_presence_event(PresenceEvent::ConflictDetected {
             agent_id: session.id.clone(),
             conflicts: result.conflicts.clone(),
-            severity,
+            severity: severity.to_string(),
         });
     }
     let mut out = serde_json::Map::new();
@@ -460,7 +458,7 @@ pub fn run_release_files(server: &LainServer, args: Value) -> Result<Value, Stri
     let paths: Vec<std::path::PathBuf> = a.files.into_iter().map(|f| std::path::PathBuf::from(f.path)).collect();
     let released = server.occupancy.release(&session.id, &paths);
     for path in &released {
-        let _ = server.presence_event_tx.send(PresenceEvent::ClaimReleased {
+        server.emit_presence_event(PresenceEvent::ClaimReleased {
             agent_id: session.id.clone(),
             path: path.clone(),
         });

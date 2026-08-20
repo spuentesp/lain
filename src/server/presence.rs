@@ -1096,7 +1096,7 @@ impl Default for OccupancyMap {
 ///   field is set to `"edit_landed"`, so the stream shape is symmetric
 ///   with `get_audit_log`'s responses — both serialize the seven
 ///   `AuditEvent` fields under the same JSON keys.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PresenceEvent {
     AgentJoined(AgentSession),
     AgentLeft(AgentId),
@@ -1106,7 +1106,7 @@ pub enum PresenceEvent {
     ConflictDetected {
         agent_id: AgentId,
         conflicts: Vec<ConflictEntry>,
-        severity: &'static str,
+        severity: String,
     },
     EditLanded {
         event: crate::server::audit::AuditEvent,

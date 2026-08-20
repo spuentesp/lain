@@ -26,7 +26,16 @@ fn e2e_attribution_via_real_child_pid() {
     let occupancy = Arc::new(OccupancyMap::new());
     let _ = presence.register("e2e-child".into(), AgentKind::Other("e2e".into()), AgentMode::Interactive, Some(pid), None);
     let (tx, _rx) = tokio::sync::broadcast::channel(8);
-    let watcher = AttributionWatcher::new(presence.clone(), occupancy.clone(), tx, tmp.path().to_path_buf());
+    let events_log = Arc::new(
+        lain::server::events_log::EventsLog::open(&tmp.path().join("events")).unwrap(),
+    );
+    let watcher = AttributionWatcher::new(
+        presence.clone(),
+        occupancy.clone(),
+        tx,
+        events_log,
+        tmp.path().to_path_buf(),
+    );
     let _h = watcher.start();
 
     // Wait for the child to write.

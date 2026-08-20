@@ -10,6 +10,7 @@ pub mod tools;
 
 // Core
 pub mod auth;
+pub mod events_log;
 pub mod graph;
 pub mod schema;
 pub mod git;

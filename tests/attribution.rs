@@ -24,10 +24,14 @@ fn attribution_auto_claims_via_pid_on_linux() {
     );
 
     let (tx, _rx) = tokio::sync::broadcast::channel(8);
+    let events_log = Arc::new(
+        lain::server::events_log::EventsLog::open(&tmp.path().join("events")).unwrap(),
+    );
     let watcher = AttributionWatcher::new(
         presence.clone(),
         occupancy.clone(),
         tx,
+        events_log,
         tmp.path().to_path_buf(),
     );
     let _h = watcher.start();

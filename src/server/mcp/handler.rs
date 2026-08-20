@@ -1943,10 +1943,11 @@ async fn handle_request(
             .get("last-event-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        let events_log = server.events_log.clone();
         let (tx, rx) = mpsc::unbounded_channel::<std::io::Result<Bytes>>();
         tokio::spawn(async move {
             use crate::server::sse::serve_sse;
-            let mut stream = serve_sse(bus_rx, last_event_id);
+            let mut stream = serve_sse(bus_rx, last_event_id, events_log);
             // Send one synthetic `ready` frame so clients know the stream
             // is live before the first real broadcast event arrives.
             if tx

@@ -231,7 +231,8 @@ impl AttributionBackend for NoopBackend {
 pub struct AttributionWatcher {
     presence: Arc<PresenceRegistry>,
     occupancy: Arc<OccupancyMap>,
-    event_tx: broadcast::Sender<PresenceEvent>,
+    event_tx: broadcast::Sender<(u64, PresenceEvent)>,
+    events_log: Arc<crate::server::events_log::EventsLog>,
     config_dir: PathBuf,
     backend: Arc<dyn AttributionBackend>,
 }
@@ -247,7 +248,8 @@ impl AttributionWatcher {
     pub fn new(
         presence: Arc<PresenceRegistry>,
         occupancy: Arc<OccupancyMap>,
-        event_tx: broadcast::Sender<PresenceEvent>,
+        event_tx: broadcast::Sender<(u64, PresenceEvent)>,
+        events_log: Arc<crate::server::events_log::EventsLog>,
         config_dir: PathBuf,
     ) -> Self {
         let backend: Arc<dyn AttributionBackend> = if cfg!(target_os = "linux") {
@@ -255,7 +257,7 @@ impl AttributionWatcher {
         } else {
             Arc::new(NoopBackend)
         };
-        Self::new_with_backend(backend, presence, occupancy, event_tx, config_dir)
+        Self::new_with_backend(backend, presence, occupancy, event_tx, events_log, config_dir)
     }
 
     /// Construct a watcher with an explicit [`AttributionBackend`]. This
@@ -265,13 +267,15 @@ impl AttributionWatcher {
         backend: Arc<dyn AttributionBackend>,
         presence: Arc<PresenceRegistry>,
         occupancy: Arc<OccupancyMap>,
-        event_tx: broadcast::Sender<PresenceEvent>,
+        event_tx: broadcast::Sender<(u64, PresenceEvent)>,
+        events_log: Arc<crate::server::events_log::EventsLog>,
         config_dir: PathBuf,
     ) -> Self {
         Self {
             presence,
             occupancy,
             event_tx,
+            events_log,
             config_dir,
             backend,
         }
@@ -284,6 +288,7 @@ impl AttributionWatcher {
         let presence = self.presence;
         let occupancy = self.occupancy;
         let event_tx = self.event_tx;
+        let events_log = self.events_log;
         let root = self.config_dir;
         let backend = self.backend;
 
@@ -315,6 +320,7 @@ impl AttributionWatcher {
                                     &presence,
                                     &occupancy,
                                     &event_tx,
+                                    &events_log,
                                     backend.as_ref(),
                                 );
                             }
@@ -334,7 +340,8 @@ fn attribute_edit(
     path: &Path,
     presence: &PresenceRegistry,
     occupancy: &OccupancyMap,
-    event_tx: &broadcast::Sender<PresenceEvent>,
+    event_tx: &broadcast::Sender<(u64, PresenceEvent)>,
+    events_log: &crate::server::events_log::EventsLog,
     backend: &dyn AttributionBackend,
 ) {
     // 1. Try PID attribution via the injected backend.
@@ -371,10 +378,12 @@ fn attribute_edit(
             }],
         );
         if !result.granted.is_empty() {
-            let _ = event_tx.send(PresenceEvent::ClaimGranted {
+            let ev = PresenceEvent::ClaimGranted {
                 agent_id: agent_id.clone(),
                 path: path.to_path_buf(),
-            });
+            };
+            let eid = events_log.append(&ev);
+            let _ = event_tx.send((eid, ev));
         }
     } else {
         // Unattributed edit — log to audit (Task 7 wires the sink).

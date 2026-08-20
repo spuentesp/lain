@@ -193,7 +193,8 @@ fn build_embedder_pair(
 fn spawn_presence_expiry_loop(
     presence: Arc<PresenceRegistry>,
     occupancy: Arc<OccupancyMap>,
-    tx: broadcast::Sender<PresenceEvent>,
+    tx: broadcast::Sender<(u64, PresenceEvent)>,
+    events_log: Arc<crate::server::events_log::EventsLog>,
 ) {
     let p = presence.clone();
     let o = occupancy.clone();
@@ -203,13 +204,14 @@ fn spawn_presence_expiry_loop(
         loop {
             tick.tick().await;
             for id in p.expire_stale() {
-                let _ = t.send(PresenceEvent::HeartbeatExpired(id));
+                let ev = PresenceEvent::HeartbeatExpired(id);
+                let eid = events_log.append(&ev);
+                let _ = t.send((eid, ev));
             }
             for (agent_id, path) in o.expire_by_ttl() {
-                let _ = t.send(PresenceEvent::ClaimReleased {
-                    agent_id,
-                    path,
-                });
+                let ev = PresenceEvent::ClaimReleased { agent_id, path };
+                let eid = events_log.append(&ev);
+                let _ = t.send((eid, ev));
             }
         }
     });
@@ -222,7 +224,8 @@ fn start_attribution_watcher(
     attribution: Arc<dyn AttributionBackend>,
     presence: Arc<PresenceRegistry>,
     occupancy: Arc<OccupancyMap>,
-    tx: broadcast::Sender<PresenceEvent>,
+    tx: broadcast::Sender<(u64, PresenceEvent)>,
+    events_log: Arc<crate::server::events_log::EventsLog>,
     repos_yaml: Option<&Path>,
 ) {
     let root = repos_yaml
@@ -234,6 +237,7 @@ fn start_attribution_watcher(
         presence,
         occupancy,
         tx,
+        events_log,
         root,
     )
     .start();
@@ -317,12 +321,28 @@ fn build_federation_server(
     let presence = Arc::new(PresenceRegistry::new());
     let occupancy = Arc::new(OccupancyMap::new());
     let (presence_event_tx, _) = broadcast::channel(PRESENCE_EVENT_CHANNEL_CAPACITY);
-    spawn_presence_expiry_loop(presence.clone(), occupancy.clone(), presence_event_tx.clone());
+    // P1 #2: open the events log before `mem_path` is moved into the
+    // LainServer struct — the expiry loop and attribution watcher tag
+    // every broadcast event with the durable id assigned here.
+    // `events_log_path_from_config` only borrows the path; we clone the
+    // Arc into the struct below.
+    let events_log_path = LainServer::events_log_path_from_config(&mem_path);
+    let events_log = Arc::new(
+        crate::server::events_log::EventsLog::open(&events_log_path)
+            .expect("open events.jsonl"),
+    );
+    spawn_presence_expiry_loop(
+        presence.clone(),
+        occupancy.clone(),
+        presence_event_tx.clone(),
+        events_log.clone(),
+    );
     start_attribution_watcher(
         attribution,
         presence.clone(),
         occupancy.clone(),
         presence_event_tx.clone(),
+        events_log.clone(),
         repos_yaml.as_deref(),
     );
 
@@ -330,7 +350,7 @@ fn build_federation_server(
     let server = LainServer {
         config: LainConfig {
             workspace: ws,
-            memory_path: mem_path,
+            memory_path: mem_path.clone(),
         },
         graph,
         overlay,
@@ -358,6 +378,7 @@ fn build_federation_server(
         )),
         attribution: default_attribution_backend(),
         auth: Arc::new(crate::server::auth::AuthState::from_env()),
+        events_log: events_log.clone(),
     };
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
     // when the file exists, and install a persist callback so every
@@ -408,6 +429,12 @@ pub struct LainServer {
     /// and `LAIN_RATE_LIMIT_RPM` env vars at server startup. Cloned into
     /// the HTTP request handler so dev mode (no env) stays zero-cost.
     pub auth: Arc<crate::server::auth::AuthState>,
+    /// Durable SSE event log (P1 #2). Captures every `PresenceEvent`
+    /// broadcast on the SSE channel with a monotonic `event_id: u64`,
+    /// supports replay-after-id via `events.jsonl` so SSE subscribers
+    /// that reconnect with `Last-Event-ID: N` see every event since N.
+    /// Lives in the same state dir as `audit.jsonl`.
+    pub events_log: Arc<crate::server::events_log::EventsLog>,
     /// Workspaces file passed to `LainMcpServer` when `with_federation_and_workspaces`
     /// is used. `Some` when a workspace is active; `None` for the
     /// all-repos path (no workspaces.yaml).
@@ -458,13 +485,16 @@ pub struct LainServer {
     /// Occupancy map: which files/symbols each agent has claimed. Wrapped
     /// in `Arc` for the same reason as `presence`.
     pub occupancy: Arc<OccupancyMap>,
-    /// Broadcast sender for `PresenceEvent`s. Subscribers (SSE handler in
-    /// Task 6, attribution watcher, etc.) clone the receiver and stream
-    /// events to clients. Capacity 256 is generous for an interactive
-    /// session; if a slow consumer falls behind, `send` returns Err and the
-    /// event is dropped (the registry/occupancy state itself remains
-    /// consistent on the server side).
-    pub presence_event_tx: broadcast::Sender<PresenceEvent>,
+    /// Broadcast sender for `PresenceEvent`s, tagged with the durable
+    /// `event_id` assigned by [`crate::server::events_log::EventsLog`]
+    /// at emit time. Subscribers (SSE handler, etc.) clone the receiver
+    /// and stream events to clients; the id lets a reconnecting client
+    /// resume via `Last-Event-ID` (see `serve_sse`). Capacity 256 is
+    /// generous for an interactive session; if a slow consumer falls
+    /// behind, `send` returns Err and the event is dropped (the
+    /// registry/occupancy state itself remains consistent on the
+    /// server side).
+    pub presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
     /// Strategy used by the background attribution watcher to map a
     /// workspace path to the PID that wrote it. The `lain server` CLI
     /// picks this at startup based on platform (`ProcFsBackend` on
@@ -540,6 +570,14 @@ impl LainServer {
         info!("Lain server initialized");
         let now = SystemTime::now();
         let (presence_event_tx, _) = broadcast::channel(PRESENCE_EVENT_CHANNEL_CAPACITY);
+        // P1 #2: open the events log before `memory_path` is moved into
+        // the LainServer struct. `events_log_path_from_config` only
+        // borrows the path; we clone the Arc into the struct below.
+        let events_log_path = LainServer::events_log_path_from_config(memory_path);
+        let events_log = Arc::new(
+            crate::server::events_log::EventsLog::open(&events_log_path)
+                .expect("open events.jsonl"),
+        );
         let server = Self {
             config,
             graph,
@@ -568,6 +606,7 @@ impl LainServer {
             )),
             attribution: default_attribution_backend(),
             auth: Arc::new(crate::server::auth::AuthState::from_env()),
+            events_log: events_log.clone(),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists. Idempotent: missing file is a no-op.
@@ -725,9 +764,21 @@ impl LainServer {
 
     /// Borrowed handle to the `PresenceEvent` broadcast sender. Subscribers
     /// clone the receiver side (`tx.subscribe()`) to stream events to
-    /// their own consumers.
-    pub fn presence_event_tx(&self) -> &broadcast::Sender<PresenceEvent> {
+    /// their own consumers. Events are tagged with their durable
+    /// `EventsLog` id (see [`Self::emit_presence_event`]).
+    pub fn presence_event_tx(&self) -> &broadcast::Sender<(u64, PresenceEvent)> {
         &self.presence_event_tx
+    }
+
+    /// Emit a presence event: append it to the durable events log
+    /// (assigning its monotonic `event_id`) and broadcast the
+    /// `(event_id, event)` pair to all subscribers. This is the only
+    /// path live events should take — sending on `presence_event_tx`
+    /// directly would skip durability and break SSE `Last-Event-ID`
+    /// resume.
+    pub fn emit_presence_event(&self, event: PresenceEvent) {
+        let id = self.events_log.append(&event);
+        let _ = self.presence_event_tx.send((id, event));
     }
 
     /// Borrowed handle to the [`AttributionBackend`] this server was
@@ -1030,6 +1081,16 @@ impl LainServer {
     /// already present by the time any claim reaches us in practice.
     pub fn state_dir_for_audit(&self) -> std::path::PathBuf {
         self.state_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(crate::config::state_dir)
+    }
+
+    /// Directory that holds the per-server `events.jsonl` log (P1 #2:
+    /// SSE replay). Same parent directory as `audit.jsonl` so both
+    /// live in the same state dir and survive restarts together.
+    pub fn events_log_path_from_config(mem_path: &std::path::Path) -> std::path::PathBuf {
+        mem_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(crate::config::state_dir)
