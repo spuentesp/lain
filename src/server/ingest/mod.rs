@@ -203,18 +203,39 @@ fn spawn_presence_expiry_loop(
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tick.tick().await;
-            for id in p.expire_stale() {
-                let ev = PresenceEvent::HeartbeatExpired(id);
-                let eid = events_log.append(&ev);
-                let _ = t.send((eid, ev));
-            }
-            for (agent_id, path) in o.expire_by_ttl() {
-                let ev = PresenceEvent::ClaimReleased { agent_id, path };
-                let eid = events_log.append(&ev);
-                let _ = t.send((eid, ev));
-            }
+            expiry_tick(&p, &o, &t, &events_log);
         }
     });
+}
+
+/// One tick of the expiry loop. Expiring a session must also release
+/// every claim it held: previously `expire_stale` removed only the
+/// session, so a dead agent's claims (default: no TTL) persisted
+/// forever — found live, where claims from days-old smoke tests kept
+/// conflicting with new claims. Emits `HeartbeatExpired` plus one
+/// `ClaimReleased` per released path, all with durable events-log ids.
+fn expiry_tick(
+    presence: &PresenceRegistry,
+    occupancy: &OccupancyMap,
+    tx: &broadcast::Sender<(u64, PresenceEvent)>,
+    events_log: &crate::server::events_log::EventsLog,
+) {
+    let emit = |ev: PresenceEvent| {
+        let eid = events_log.append(&ev);
+        let _ = tx.send((eid, ev));
+    };
+    for id in presence.expire_stale() {
+        emit(PresenceEvent::HeartbeatExpired(id.clone()));
+        for path in occupancy.release_all_for(&id) {
+            emit(PresenceEvent::ClaimReleased {
+                agent_id: id.clone(),
+                path,
+            });
+        }
+    }
+    for (agent_id, path) in occupancy.expire_by_ttl() {
+        emit(PresenceEvent::ClaimReleased { agent_id, path });
+    }
 }
 
 /// Start the attribution watcher (inotify on `repos.yaml`'s parent
@@ -1170,5 +1191,86 @@ impl LainServer {
         // Touch the first closure so the compiler does not warn about
         // an unused binding; both callbacks are installed above.
         let _ = cb;
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+    use crate::server::presence::{AgentKind, AgentMode, ClaimRequest, ClaimIntent};
+
+    /// A session expiring must release its claims: the pre-fix behavior
+    /// left dead agents' no-TTL claims in the occupancy map forever
+    /// (observed live: days-old smoke-test claims kept conflicting).
+    #[test]
+    fn expiry_tick_releases_claims_of_expired_sessions() {
+        let presence = PresenceRegistry::with_expiry(std::time::Duration::from_millis(20));
+        let occupancy = OccupancyMap::new();
+        let (tx, _rx) = broadcast::channel(16);
+        let tmp = tempfile::tempdir().unwrap();
+        let log = crate::server::events_log::EventsLog::open(tmp.path()).unwrap();
+
+        let sess = presence.register(
+            "ghost".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+        let granted = occupancy.claim(
+            &sess.id,
+            vec![ClaimRequest {
+                path: PathBuf::from("a.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None, // no TTL — the case that used to leak
+                plan_revision: None,
+            }],
+        );
+        assert_eq!(granted.granted.len(), 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        expiry_tick(&presence, &occupancy, &tx, &log);
+
+        assert!(presence.list_active(true).is_empty(), "session expired");
+        assert!(
+            occupancy.list_all().is_empty(),
+            "claims of an expired session must be released, got: {:?}",
+            occupancy.list_all()
+        );
+    }
+
+    /// Claims WITH a TTL still expire via their own path; sessions whose
+    /// claims expire keep living (heartbeat-independent).
+    #[test]
+    fn expiry_tick_keeps_ttl_claim_path() {
+        let presence = PresenceRegistry::new();
+        let occupancy = OccupancyMap::new();
+        let (tx, _rx) = broadcast::channel(16);
+        let tmp = tempfile::tempdir().unwrap();
+        let log = crate::server::events_log::EventsLog::open(tmp.path()).unwrap();
+
+        let sess = presence.register(
+            "ttl-agent".into(),
+            AgentKind::Kimi,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+        occupancy.claim(
+            &sess.id,
+            vec![ClaimRequest {
+                path: PathBuf::from("b.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: Some(0), // expires immediately
+                plan_revision: None,
+            }],
+        );
+
+        expiry_tick(&presence, &occupancy, &tx, &log);
+
+        assert!(occupancy.list_all().is_empty(), "TTL claim expired");
+        assert_eq!(presence.list_active(true).len(), 1, "session alive");
     }
 }

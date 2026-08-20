@@ -13,19 +13,19 @@ const fs = require('fs');
 
 function getPlatform(platform = process.platform, arch = process.arch) {
   if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
-  if (platform === 'darwin' && arch === 'x64')   return 'x86_64-apple-darwin';
   if (platform === 'linux'  && arch === 'x64')   return 'x86_64-unknown-linux-gnu';
-  if (platform === 'win32'  && arch === 'x64')   return 'x86_64-pc-windows-msvc.exe';
+  if (platform === 'linux'  && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
+  if (platform === 'win32'  && arch === 'x64')   return 'x86_64-pc-windows-msvc';
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
 function getAssetName(platform, version) {
   const versionSlug = version.replace(/^v/, '');
   const map = {
-    'aarch64-apple-darwin':     `lain-${versionSlug}-aarch64-apple-darwin`,
-    'x86_64-apple-darwin':      `lain-${versionSlug}-x86_64-apple-darwin`,
-    'x86_64-unknown-linux-gnu': `lain-${versionSlug}-x86_64-unknown-linux-gnu`,
-    'x86_64-pc-windows-msvc.exe': `lain-${versionSlug}-x86_64-pc-windows-msvc.exe`,
+    'aarch64-apple-darwin':       `lain-${versionSlug}-aarch64-apple-darwin.tar.gz`,
+    'x86_64-unknown-linux-gnu':   `lain-${versionSlug}-x86_64-unknown-linux-gnu.tar.gz`,
+    'aarch64-unknown-linux-gnu':  `lain-${versionSlug}-aarch64-unknown-linux-gnu.tar.gz`,
+    'x86_64-pc-windows-msvc':     `lain-${versionSlug}-x86_64-pc-windows-msvc.tar.gz`,
   };
   const asset = map[platform];
   if (!asset) throw new Error(`Unsupported platform for binary download: ${platform}`);
@@ -68,16 +68,22 @@ test('darwin arm64 → aarch64-apple-darwin', () => {
   assert.strictEqual(getPlatform('darwin', 'arm64'), 'aarch64-apple-darwin');
 });
 
-test('darwin x64 → x86_64-apple-darwin', () => {
-  assert.strictEqual(getPlatform('darwin', 'x64'), 'x86_64-apple-darwin');
+test('darwin x64 throws (no published asset)', () => {
+  let threw = false;
+  try { getPlatform('darwin', 'x64'); } catch (e) { threw = true; }
+  assert(threw, 'should throw on darwin x64');
 });
 
 test('linux x64 → x86_64-unknown-linux-gnu', () => {
   assert.strictEqual(getPlatform('linux', 'x64'), 'x86_64-unknown-linux-gnu');
 });
 
-test('win32 x64 → x86_64-pc-windows-msvc.exe', () => {
-  assert.strictEqual(getPlatform('win32', 'x64'), 'x86_64-pc-windows-msvc.exe');
+test('linux arm64 → aarch64-unknown-linux-gnu', () => {
+  assert.strictEqual(getPlatform('linux', 'arm64'), 'aarch64-unknown-linux-gnu');
+});
+
+test('win32 x64 → x86_64-pc-windows-msvc', () => {
+  assert.strictEqual(getPlatform('win32', 'x64'), 'x86_64-pc-windows-msvc');
 });
 
 test('unknown platform throws', () => {
@@ -92,22 +98,22 @@ console.log('\n[ getAssetName ]');
 
 test('v0.1.0 → "0.1.0" slug (no leading v in asset name)', () => {
   const name = getAssetName('x86_64-unknown-linux-gnu', 'v0.1.0');
-  assert.strictEqual(name, 'lain-0.1.0-x86_64-unknown-linux-gnu');
+  assert.strictEqual(name, 'lain-0.1.0-x86_64-unknown-linux-gnu.tar.gz');
 });
 
 test('0.1.0 (no v) also works', () => {
-  const name = getAssetName('x86_64-apple-darwin', '0.1.0');
-  assert.strictEqual(name, 'lain-0.1.0-x86_64-apple-darwin');
+  const name = getAssetName('aarch64-unknown-linux-gnu', '0.1.0');
+  assert.strictEqual(name, 'lain-0.1.0-aarch64-unknown-linux-gnu.tar.gz');
 });
 
 test('macOS ARM asset name is correct', () => {
   const name = getAssetName('aarch64-apple-darwin', 'v0.1.0');
-  assert.strictEqual(name, 'lain-0.1.0-aarch64-apple-darwin');
+  assert.strictEqual(name, 'lain-0.1.0-aarch64-apple-darwin.tar.gz');
 });
 
-test('Windows asset name ends in .exe', () => {
-  const name = getAssetName('x86_64-pc-windows-msvc.exe', 'v0.1.0');
-  assert.strictEqual(name, 'lain-0.1.0-x86_64-pc-windows-msvc.exe');
+test('Windows asset name ends in .tar.gz', () => {
+  const name = getAssetName('x86_64-pc-windows-msvc', 'v0.1.0');
+  assert.strictEqual(name, 'lain-0.1.0-x86_64-pc-windows-msvc.tar.gz');
 });
 
 test('unknown platform in getAssetName throws', () => {
@@ -124,22 +130,22 @@ test('GitHub release URL is correctly formed', () => {
   const url = buildUrl('x86_64-unknown-linux-gnu', 'v0.1.0');
   assert.strictEqual(
     url,
-    'https://github.com/spuentesp/lain/releases/download/v0.1.0/lain-0.1.0-x86_64-unknown-linux-gnu'
+    'https://github.com/spuentesp/lain/releases/download/v0.1.0/lain-0.1.0-x86_64-unknown-linux-gnu.tar.gz'
   );
 });
 
 test('custom repo works', () => {
-  const url = buildUrl('x86_64-apple-darwin', 'v0.1.0', 'myorg/mylain');
+  const url = buildUrl('aarch64-apple-darwin', 'v0.1.0', 'myorg/mylain');
   assert.strictEqual(
     url,
-    'https://github.com/myorg/mylain/releases/download/v0.1.0/lain-0.1.0-x86_64-apple-darwin'
+    'https://github.com/myorg/mylain/releases/download/v0.1.0/lain-0.1.0-aarch64-apple-darwin.tar.gz'
   );
 });
 
 test('different version in URL', () => {
-  const url = buildUrl('x86_64-apple-darwin', 'v1.2.3');
+  const url = buildUrl('aarch64-apple-darwin', 'v1.2.3');
   assert.ok(url.includes('/v1.2.3/'));
-  assert.ok(url.includes('lain-1.2.3-x86_64-apple-darwin'));
+  assert.ok(url.includes('lain-1.2.3-aarch64-apple-darwin'));
 });
 
 // ── Binary name ─────────────────────────────
@@ -255,9 +261,9 @@ console.log('\n[ Full URL round-trip for all platforms ]');
 
 const platforms = [
   { p: 'darwin', a: 'arm64',  expected: 'aarch64-apple-darwin' },
-  { p: 'darwin', a: 'x64',    expected: 'x86_64-apple-darwin' },
   { p: 'linux',  a: 'x64',    expected: 'x86_64-unknown-linux-gnu' },
-  { p: 'win32',  a: 'x64',    expected: 'x86_64-pc-windows-msvc.exe' },
+  { p: 'linux',  a: 'arm64',  expected: 'aarch64-unknown-linux-gnu' },
+  { p: 'win32',  a: 'x64',    expected: 'x86_64-pc-windows-msvc' },
 ];
 
 for (const { p, a, expected } of platforms) {
@@ -266,7 +272,7 @@ for (const { p, a, expected } of platforms) {
     assert.strictEqual(plat, expected);
     const asset = getAssetName(plat, 'v0.1.0');
     assert.ok(asset.startsWith('lain-'));
-    assert.ok(asset.endsWith(plat));
+    assert.ok(asset.endsWith(`${plat}.tar.gz`));
     const url = buildUrl(plat, 'v0.1.0');
     assert.ok(url.startsWith('https://github.com/spuentesp/lain/releases/download/v0.1.0/lain-'));
   });

@@ -152,9 +152,14 @@ get_latest_version() {
 download_onnx_model() {
   local model_dir="$HOME/.local/lain/models"
   local model_file="$model_dir/all-MiniLM-L6-v2.onnx"
-  local model_url="https://github.com/sentence-transformers/sentence-transformers/releases/download/v2.2.0/all-MiniLM-L6-v2.onnx"
+  local tokenizer_file="$model_dir/tokenizer.json"
+  # Hugging Face is the live source; the old sentence-transformers
+  # GitHub-release URL is dead (404). The embedder refuses to load
+  # without BOTH model + tokenizer.
+  local model_url="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
+  local tokenizer_url="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
 
-  if [ -f "$model_file" ]; then
+  if [ -f "$model_file" ] && [ -f "$tokenizer_file" ]; then
     if [ -n "$OPT_YES" ]; then
       info "Model already exists at $model_file" >&2
       echo "$model_file"
@@ -169,30 +174,33 @@ download_onnx_model() {
       echo "$model_file"
       return 0
     fi
-    rm -f "$model_file"
+    rm -f "$model_file" "$tokenizer_file"
   fi
 
   mkdir -p "$model_dir"
 
-  info "Downloading ONNX embedding model..." >&2
-  info "Source: $model_url" >&2
-  info "Destination: $model_file" >&2
+  info "Downloading ONNX embedding model + tokenizer..." >&2
+  info "Sources: $model_url" >&2
+  info "         $tokenizer_url" >&2
+  info "Destination: $model_dir" >&2
 
+  local dl_ok=0
   if command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL -o "$model_file" "$model_url"; then
-      error "Failed to download model. You can download it manually:" >&2
-      echo "  $model_url" >&2
-      return 1
-    fi
+    curl -fsSL -o "$model_file" "$model_url" && \
+    curl -fsSL -o "$tokenizer_file" "$tokenizer_url" && dl_ok=1
   elif command -v wget >/dev/null 2>&1; then
-    if ! wget -q -O "$model_file" "$model_url"; then
-      error "Failed to download model. You can download it manually:" >&2
-      echo "  $model_url" >&2
-      return 1
-    fi
+    wget -q -O "$model_file" "$model_url" && \
+    wget -q -O "$tokenizer_file" "$tokenizer_url" && dl_ok=1
   else
     error "curl or wget is required to download the model." >&2
-    echo "Please download manually: $model_url" >&2
+  fi
+
+  if [ "$dl_ok" != "1" ]; then
+    # Don't leave a half-downloaded model behind.
+    rm -f "$model_file" "$tokenizer_file"
+    error "Failed to download. You can download both files manually:" >&2
+    echo "  $model_url" >&2
+    echo "  $tokenizer_url" >&2
     return 1
   fi
 
