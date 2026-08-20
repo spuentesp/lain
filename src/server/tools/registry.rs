@@ -37,7 +37,11 @@ pub struct ToolContext {
     pub ui_sessions: Arc<AsyncMutex<std::collections::HashMap<String, UiSession>>>,
     pub jobs: Arc<AsyncMutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
-    pub diagnostics_port: u16,
+    /// Port the HTTP transport is listening on, shared as an atomic so
+    /// `run_http` can publish it after construction. 0 = no UI server
+    /// (stdio mode); tool handlers then omit the interactive `/ui/...`
+    /// link instead of emitting a dead URL.
+    pub diagnostics_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     /// Workspace root path. Used as the default `cwd` for execution tools
     /// (`run_build`, `run_tests`, `run_clippy`) so they don't fail just
     /// because the binary was launched from a different directory.
@@ -92,7 +96,7 @@ impl ToolContext {
             ui_sessions,
             jobs,
             job_webhooks,
-            diagnostics_port: crate::server::tools::DIAGNOSTICS_PORT,
+            diagnostics_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             workspace: std::path::PathBuf::from("."),
             // Default to empty registries so standalone / sidecar
             // executors (which don't carry a `LainServer`) still

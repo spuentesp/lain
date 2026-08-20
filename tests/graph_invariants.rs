@@ -94,6 +94,32 @@ async fn test_blast_radius_unknown_node() {
     assert!(result.is_err());
 }
 
+/// Regression: `main` reaches `b` via two paths (main→a→b and
+/// main→x→b). The pre-fix BFS enqueued `main` once per edge, listing
+/// it twice while `visited` counted it once — the headline total then
+/// disagreed with the number of listed dependents.
+#[tokio::test]
+async fn test_blast_radius_dedups_callers_and_count_matches_listing() {
+    let graph = make_test_graph();
+    let overlay = VolatileOverlay::new();
+
+    let text = get_blast_radius(&graph, &overlay, "b", false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        text.matches("- main (Function)").count(),
+        1,
+        "main must be listed exactly once:\n{text}"
+    );
+    let listed = text.lines().filter(|l| l.starts_with("  - ")).count();
+    let total: usize = text
+        .lines()
+        .find_map(|l| l.strip_prefix("- Total transitively affected nodes: "))
+        .and_then(|n| n.parse().ok())
+        .expect("total line present when dependents exist");
+    assert_eq!(listed, total, "listed dependents must equal the headline count:\n{text}");
+}
+
 #[test]
 fn test_graph_node_lookup_by_name() {
     let graph = make_test_graph();

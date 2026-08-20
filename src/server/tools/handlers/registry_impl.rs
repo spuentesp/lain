@@ -15,6 +15,30 @@ use async_trait::async_trait;
 use inventory;
 use serde_json::{Map, Value};
 
+/// Build the `(sessions, port)` pair the UI-session handlers need to
+/// emit an interactive `/ui/...` link. Returns `None` when no HTTP
+/// transport is serving (stdio mode, `diagnostics_port == 0`) —
+/// emitting a link there produces a dead URL.
+fn ui_link(
+    ctx: &ToolContext,
+) -> Option<(
+    &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, crate::server::tools::UiSession>,
+        >,
+    >,
+    u16,
+)> {
+    let port = ctx
+        .diagnostics_port
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if port == 0 {
+        None
+    } else {
+        Some((&ctx.ui_sessions, port))
+    }
+}
+
 // ─── Handler macros ────────────────────────────────────────────────────────────
 
 // Arg-extraction helpers (`str_arg`, `required_str_arg`, `usize_arg`,
@@ -190,7 +214,7 @@ impl ToolHandler for GetCallChainHandler {
             &ctx.overlay,
             &from,
             &to,
-            Some(&ctx.ui_sessions),
+            ui_link(ctx),
         )
         .await
     }
@@ -348,7 +372,7 @@ impl ToolHandler for GetBlastRadiusHandler {
             &ctx.overlay,
             &symbol,
             include_coupling,
-            Some(&ctx.ui_sessions),
+            ui_link(ctx),
         )
         .await
     }
@@ -380,7 +404,7 @@ impl ToolHandler for GetCouplingRadarHandler {
             &ctx.graph,
             &ctx.overlay,
             &symbol,
-            Some(&ctx.ui_sessions),
+            ui_link(ctx),
         )
         .await
     }

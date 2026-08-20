@@ -1651,6 +1651,9 @@ impl LainMcpServer {
             });
         }
 
+        // Publish the real listener port so tool output can link to
+        // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
+        self.executor.set_diagnostics_port(port);
         let executor = Arc::new(self.executor);
         let federation = self.federation;
         let workspaces = self.workspaces;

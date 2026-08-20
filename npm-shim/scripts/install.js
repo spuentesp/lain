@@ -232,15 +232,16 @@ async function install() {
   createSymlink();
 
   // Post-install: nothing more to do. The user configures their
-  // project + agent MCP wiring themselves by editing their agent's
-  // MCP config to point at `lain server --config ./repos.yaml`.
+  // agent's MCP wiring themselves, pointing it at the zero-config
+  // `lain mcp` entry (walks up for .git, no repos.yaml needed).
 
   console.log('\n=== Installation complete ===\n');
-  console.log('  To run the MCP server for a project:');
-  console.log(`    ${binaryPath} server --config /path/to/repos.yaml`);
-  console.log('\n  Add the same command to your agent\'s MCP config and');
-  console.log('  see `lain --help` for the full subcommand surface');
-  console.log('  (server, workspaces, repos, query, ask).');
+  console.log('  The zero-config MCP entry point (run from any git repo):');
+  console.log(`    ${binaryPath} mcp`);
+  console.log('\n  Add it to your agent\'s MCP config as:');
+  console.log('    { "mcpServers": { "lain": { "command": "lain", "args": ["mcp"] } } }');
+  console.log('\n  See `lain --help` for the full subcommand surface');
+  console.log('  (server, mcp, workspaces, repos, query, hooks, doctor).');
   console.log('\n  Or add lain to your PATH:');
   console.log(`    export PATH="$HOME/.lain/bin:$PATH"\n`);
 }

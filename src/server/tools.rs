@@ -100,9 +100,16 @@ impl ToolExecutor {
     pub fn overlay(&self) -> &VolatileOverlay { &self.ctx.overlay }
     pub fn embedder(&self) -> &NlpEmbedder { &self.ctx.embedder }
     pub fn ui_sessions(&self) -> &AsyncMutex<HashMap<String, UiSession>> { &self.ctx.ui_sessions }
+    /// Record the port the HTTP transport is actually listening on, so
+    /// tool output can link to `/ui/...` sessions. 0 (the default) means
+    /// "no UI server" (stdio mode) — handlers then skip the link instead
+    /// of emitting a dead URL.
+    pub fn set_diagnostics_port(&self, port: u16) {
+        self.ctx
+            .diagnostics_port
+            .store(port, std::sync::atomic::Ordering::Relaxed);
+    }
 }
-
-pub const DIAGNOSTICS_PORT: u16 = 9999;
 
 impl ToolExecutor {
     pub fn new(

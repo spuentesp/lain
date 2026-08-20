@@ -278,8 +278,17 @@ impl GraphDatabase {
                             kept.push(idx);
                         }
                         Some(n) => {
-                            removed_ids.push(n.id.clone());
+                            let id = n.id.clone();
                             graph.remove_node(idx); // incident edges go with it
+                            // Remove the stale id → index entry NOW, not
+                            // after the replacements are inserted: node ids
+                            // are deterministic (same path+name → same id),
+                            // so a deferred removal wipes the *fresh* entry
+                            // inserted below and every id-keyed lookup
+                            // (get_edges_to, blast radius) silently returns
+                            // empty while name-keyed lookups still work.
+                            self.index_map.remove(&id);
+                            removed_ids.push(id);
                         }
                         // index pointed at a vacated slot; nothing to remove
                         None => {}
@@ -305,9 +314,9 @@ impl GraphDatabase {
             // whether a file was in the graph. Readers that consult
             // `path_index` under the graph read lock now see the old pair or
             // the new pair, never a mix.
-            for id in &removed_ids {
-                self.index_map.remove(id);
-            }
+            // (`index_map` entries for removed ids were already dropped
+            // inline above — see the removal loop for why deferring that
+            // wipes freshly re-inserted entries for deterministic ids.)
             for (path, indices) in new_entries {
                 if indices.is_empty() {
                     self.path_index.remove(&path);

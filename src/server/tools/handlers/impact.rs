@@ -4,7 +4,7 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::server::tools::utils::resolve_node;
-use crate::server::tools::{UiSession, UiSessionData, BlastRadiusNode, DIAGNOSTICS_PORT};
+use crate::server::tools::{UiSession, UiSessionData, BlastRadiusNode};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -13,8 +13,11 @@ use uuid::Uuid;
 /// Store a UI session and append its interactive link to the output string.
 /// Must be `async` so we can `.lock().await` synchronously — spawning the
 /// insert races the agent's immediate fetch of the URL we return.
+/// `port` is the actual HTTP listener port (stdio mode passes none and
+/// the link is never emitted).
 async fn store_ui_session_and_append_link(
     sessions: &Arc<AsyncMutex<HashMap<String, UiSession>>>,
+    port: u16,
     session_type: &str,
     data: UiSessionData,
     url_path: &str,
@@ -38,7 +41,7 @@ async fn store_ui_session_and_append_link(
 
     output.push_str(&format!(
         "\n\n[Interactive {}: http://localhost:{}/ui/{}/{}]",
-        url_path, DIAGNOSTICS_PORT, url_path, session_id
+        url_path, port, url_path, session_id
     ));
 }
 
@@ -47,7 +50,7 @@ pub async fn get_blast_radius(
     overlay: &VolatileOverlay,
     symbol: &str,
     include_coupling: bool,
-    ui_sessions: Option<&Arc<AsyncMutex<HashMap<String, UiSession>>>>,
+    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16)>,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
 
@@ -68,8 +71,15 @@ pub async fn get_blast_radius(
 
     // Blast radius = BFS over INCOMING edges (who depends on this symbol)
     let mut visited: HashSet<String> = HashSet::new();
+    // Nodes already pushed into the queue. Without this, a caller with
+    // two edges to already-visited nodes gets enqueued twice: the
+    // display list shows it duplicated while `visited` counts it once
+    // (observed live: "Total: 5" under a 6-line list with a repeated
+    // `src (Namespace)` row).
+    let mut queued: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(String, u32)> = VecDeque::new();
     queue.push_back((node.id.clone(), 0));
+    queued.insert(node.id.clone());
 
     let mut affected_names: Vec<String> = Vec::new();
     let mut session_nodes: Vec<BlastRadiusNode> = Vec::new();
@@ -86,33 +96,34 @@ pub async fn get_blast_radius(
         if let Ok(incoming) = graph.get_edges_to(&id) {
             for e in incoming {
                 let source_id = e.source_id.clone();
-                if !visited.contains(&source_id) {
-                    if let Ok(Some(caller)) = graph.get_node(&source_id) {
-                        let is_direct = depth == 0;
-                        affected_names.push(format!(
-                            "  - {} ({:?}) in {}",
-                            caller.name, caller.node_type, caller.path
-                        ));
-                        session_nodes.push(BlastRadiusNode {
-                            id: caller.id.clone(),
-                            name: caller.name.clone(),
-                            node_type: format!("{:?}", caller.node_type),
-                            path: caller.path.clone(),
-                            depth,
-                            is_direct,
-                        });
-
-                        // Confidence: LSP sync = high confidence, tree-sitter only = fallback
-                        // Count each unique caller node once (first visit)
-                        let node_sync_time = caller.last_lsp_sync.unwrap_or(0);
-                        if node_sync_time > 0 {
-                            lsp_resolved += 1;
-                        } else {
-                            tree_sitter_fallback += 1;
-                        }
-                    }
-                    queue.push_back((source_id, depth + 1));
+                if visited.contains(&source_id) || !queued.insert(source_id.clone()) {
+                    continue;
                 }
+                if let Ok(Some(caller)) = graph.get_node(&source_id) {
+                    let is_direct = depth == 0;
+                    affected_names.push(format!(
+                        "  - {} ({:?}) in {}",
+                        caller.name, caller.node_type, caller.path
+                    ));
+                    session_nodes.push(BlastRadiusNode {
+                        id: caller.id.clone(),
+                        name: caller.name.clone(),
+                        node_type: format!("{:?}", caller.node_type),
+                        path: caller.path.clone(),
+                        depth,
+                        is_direct,
+                    });
+
+                    // Confidence: LSP sync = high confidence, tree-sitter only = fallback
+                    // Count each unique caller node once (first visit)
+                    let node_sync_time = caller.last_lsp_sync.unwrap_or(0);
+                    if node_sync_time > 0 {
+                        lsp_resolved += 1;
+                    } else {
+                        tree_sitter_fallback += 1;
+                    }
+                }
+                queue.push_back((source_id, depth + 1));
             }
         }
     }
@@ -133,7 +144,11 @@ pub async fn get_blast_radius(
         ));
     }
 
-    let total_affected = visited.len().saturating_sub(1); // exclude start node
+    // The headline count must equal the number of listed names
+    // (affected_names/session_nodes grow in lockstep, one per unique
+    // resolvable caller); deriving it from `visited` instead drifted
+    // whenever an edge pointed at an unresolvable node.
+    let total_affected = affected_names.len();
     if affected_names.is_empty() {
         output.push_str("\n  (no dependents found — symbol may be a leaf or not yet indexed)");
         // Don't show total count when there are no names to show
@@ -159,12 +174,12 @@ pub async fn get_blast_radius(
     }
 
     // Store UI session if rich format requested
-    if let Some(sessions) = ui_sessions {
+    if let Some((sessions, port)) = ui_sessions {
         let data = UiSessionData::BlastRadius {
             symbol: symbol.to_string(),
             nodes: session_nodes,
         };
-        store_ui_session_and_append_link(sessions, "blast-radius", data, "blast-radius", &mut output).await;
+        store_ui_session_and_append_link(sessions, port, "blast-radius", data, "blast-radius", &mut output).await;
         output.push_str("\nClick nodes to mark approved, then describe your selection to the agent.");
     }
 
@@ -175,7 +190,7 @@ pub async fn get_coupling_radar(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
-    ui_sessions: Option<&Arc<AsyncMutex<HashMap<String, UiSession>>>>,
+    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16)>,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
 
@@ -199,13 +214,13 @@ pub async fn get_coupling_radar(
     );
 
     // Store UI session if rich format requested
-    if let Some(sessions) = ui_sessions {
+    if let Some((sessions, port)) = ui_sessions {
         let data = UiSessionData::Coupling {
             symbol: symbol.to_string(),
             matrix: vec![],
             files: partners.iter().map(|(p, _)| p.clone()).take(20).collect(),
         };
-        store_ui_session_and_append_link(sessions, "coupling", data, "coupling", &mut output).await;
+        store_ui_session_and_append_link(sessions, port, "coupling", data, "coupling", &mut output).await;
         output.push_str("\nClick cells to see co-change details, then describe your selection to the agent.");
     }
 

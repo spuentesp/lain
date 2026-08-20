@@ -197,26 +197,12 @@ download_onnx_model() {
 }
 
 check_in_path() {
-  if command -v "$BIN_NAME" >/dev/null 2>&1; then
-    local existing_path
-    existing_path=$(which "$BIN_NAME" 2>/dev/null || true)
-    if [ -n "$existing_path" ]; then
-      return 0
-    fi
-  fi
-  return 1
-}
-
-check_existing_installation() {
-  if command -v "$BIN_NAME" >/dev/null 2>&1; then
-    local existing_path
-    existing_path=$(which "$BIN_NAME" 2>/dev/null || true)
-    if [ -n "$existing_path" ]; then
-      warn "Found existing $BIN_NAME at $existing_path"
-      return 0
-    fi
-  fi
-  return 1
+  # True when the directory we installed into is on PATH — checking
+  # `command -v lain` instead would credit someone else's install.
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 check_writeable() {
@@ -336,12 +322,20 @@ main() {
   local version
   version=$(get_latest_version)
 
-  # Check if already installed
-  if check_existing_installation; then
+  # Check if already installed — in OUR install dir, not anywhere on
+  # PATH (a package-manager lain elsewhere shouldn't block us). With
+  # --yes we reinstall without prompting; otherwise ask, defaulting to
+  # "keep" when stdin isn't a TTY (curl | bash).
+  if [ -f "${INSTALL_DIR}/${BIN_NAME}" ] || [ -f "${INSTALL_DIR}/${BIN_NAME}.exe" ]; then
     echo ""
-    echo -e "${YELLOW}Warning:${NC} $BIN_NAME is already in your PATH."
-    read -p "Reinstall anyway? [y/N] " -n 1 -r reply || reply="n"
-    echo ""
+    echo -e "${YELLOW}Warning:${NC} $BIN_NAME is already installed at ${INSTALL_DIR}."
+    local reply="n"
+    if [ -n "$OPT_YES" ]; then
+      reply="y"
+    else
+      read -p "Reinstall anyway? [y/N] " -n 1 -r reply || reply="n"
+      echo ""
+    fi
     if [[ ! $reply =~ ^[Yy]$ ]]; then
       info "Keeping existing installation."
       exit 0
@@ -435,7 +429,7 @@ main() {
       shell_rc="$HOME/.bashrc"
     fi
 
-    local export_line='export PATH="$HOME/.local/lain:$PATH"'
+    local export_line="export PATH=\"$INSTALL_DIR:\$PATH\""
     local do_add=""
 
     if [ -n "$OPT_YES" ]; then
@@ -451,7 +445,7 @@ main() {
     fi
 
     if [ -n "$do_add" ] && [ -n "$shell_rc" ]; then
-      if grep -qF '.local/lain' "$shell_rc" 2>/dev/null; then
+      if grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
         info "PATH entry already in $shell_rc"
       else
         printf '\n# Added by LAIN installer\n%s\n' "$export_line" >> "$shell_rc"
@@ -460,7 +454,7 @@ main() {
       info "Run: source $shell_rc  (or open a new terminal)"
       # Also export for the current session so the agent registration
       # step below can invoke the freshly installed binary
-      export PATH="$HOME/.local/lain:$PATH"
+      export PATH="$INSTALL_DIR:$PATH"
     else
       echo -e "${YELLOW}[ADD TO PATH]${NC} Add to your shell profile:"
       echo "    $export_line"
