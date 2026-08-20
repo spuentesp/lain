@@ -328,6 +328,50 @@ where
     }
 }
 
+/// JSON-schema property for a tool arg, typed by name. The `*_TOOL_DEFS`
+/// tables only carry arg names, so the type lives here. Getting this
+/// wrong had real consequences: every arg used to be `type: string`,
+/// which made `claim_files.files` (an array) unusable for
+/// schema-respecting clients — Claude Code serialized the array into a
+/// JSON *string* and the handler rejected it with "invalid type:
+/// string, expected a sequence" (found in the live end-to-end review).
+fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut p = serde_json::Map::new();
+    match name {
+        "files" => {
+            p.insert("type".into(), "array".into());
+            p.insert(
+                "items".into(),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "symbols": { "type": "array", "items": { "type": "string" } },
+                        "intent": { "type": "string", "enum": ["read", "edit"] },
+                        "ttl_seconds": { "type": "integer" }
+                    },
+                    "required": ["path"]
+                }),
+            );
+            p.insert("description".into(), "files to claim or release".into());
+        }
+        "symbols" => {
+            p.insert("type".into(), "array".into());
+            p.insert("items".into(), serde_json::json!({ "type": "string" }));
+            p.insert("description".into(), "symbol names".into());
+        }
+        "limit" => {
+            p.insert("type".into(), "integer".into());
+            p.insert("description".into(), "max results".into());
+        }
+        _ => {
+            p.insert("type".into(), "string".into());
+            p.insert("description".into(), name.into());
+        }
+    }
+    p
+}
+
 /// Tool definitions exposed unconditionally (server-status and
 /// recent-projects reporting). Centralized here so the stdio and HTTP
 /// `tools/list` responses and `tools/call` dispatchers agree on names
@@ -381,12 +425,12 @@ const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
     (
         "claim_files",
         "Announce intent to edit (or read) files/symbols. Returns conflicts: other agents already holding claims.",
-        &["files"],
+        &["agent_id", "session_token", "files"],
     ),
     (
         "release_files",
         "Release claims. Other agents get a notification.",
-        &["files"],
+        &["agent_id", "session_token", "files"],
     ),
     (
         "list_occupancy",
@@ -572,10 +616,7 @@ impl ServerHandler for LainHandler {
             for (name, description, required) in FEDERATION_TOOL_DEFS {
                 let mut props = std::collections::BTreeMap::new();
                 for req in *required {
-                    let mut p = serde_json::Map::new();
-                    p.insert("type".into(), serde_json::Value::String("string".into()));
-                    p.insert("description".into(), serde_json::Value::String(format!("{req} of the repo to look up")));
-                    props.insert((*req).to_string(), p);
+                    props.insert((*req).to_string(), arg_property_schema(req));
                 }
                 let input_schema = ToolInputSchema::new(
                     required.iter().map(|s| s.to_string()).collect(),
@@ -599,10 +640,7 @@ impl ServerHandler for LainHandler {
             for (name, description, required) in WORKSPACE_TOOL_DEFS {
                 let mut props = std::collections::BTreeMap::new();
                 for req in *required {
-                    let mut p = serde_json::Map::new();
-                    p.insert("type".into(), serde_json::Value::String("string".into()));
-                    p.insert("description".into(), serde_json::Value::String(format!("{req} of the workspace to look up")));
-                    props.insert((*req).to_string(), p);
+                    props.insert((*req).to_string(), arg_property_schema(req));
                 }
                 let input_schema = ToolInputSchema::new(
                     required.iter().map(|s| s.to_string()).collect(),
@@ -626,10 +664,7 @@ impl ServerHandler for LainHandler {
         for (name, description, required) in SERVER_TOOL_DEFS {
             let mut props = std::collections::BTreeMap::new();
             for req in *required {
-                let mut p = serde_json::Map::new();
-                p.insert("type".into(), serde_json::Value::String("string".into()));
-                p.insert("description".into(), serde_json::Value::String(format!("{req}")));
-                props.insert((*req).to_string(), p);
+                props.insert((*req).to_string(), arg_property_schema(req));
             }
             let input_schema = ToolInputSchema::new(
                 required.iter().map(|s| s.to_string()).collect(),
@@ -2067,10 +2102,10 @@ async fn handle_request(
                             for (name, description, required) in FEDERATION_TOOL_DEFS {
                                 let mut props = serde_json::Map::new();
                                 for req in *required {
-                                    let mut p = serde_json::Map::new();
-                                    p.insert("type".into(), serde_json::Value::String("string".into()));
-                                    p.insert("description".into(), serde_json::Value::String(format!("{req} of the repo to look up")));
-                                    props.insert((*req).to_string(), serde_json::Value::Object(p));
+                                    props.insert(
+                                        (*req).to_string(),
+                                        serde_json::Value::Object(arg_property_schema(req)),
+                                    );
                                 }
                                 let input_schema = serde_json::json!({
                                     "type": "object",
@@ -2087,10 +2122,10 @@ async fn handle_request(
                         for (name, description, required) in SERVER_TOOL_DEFS {
                             let mut props = serde_json::Map::new();
                             for req in *required {
-                                let mut p = serde_json::Map::new();
-                                p.insert("type".into(), serde_json::Value::String("string".into()));
-                                p.insert("description".into(), serde_json::Value::String(format!("{req}")));
-                                props.insert((*req).to_string(), serde_json::Value::Object(p));
+                                props.insert(
+                                    (*req).to_string(),
+                                    serde_json::Value::Object(arg_property_schema(req)),
+                                );
                             }
                             let input_schema = serde_json::json!({
                                 "type": "object",
@@ -2915,6 +2950,40 @@ mod tests {
     use crate::federation::graph_backend::PetgraphBackend;
     use crate::error::LainError;
     use std::sync::Arc;
+
+    /// Pins the fix for the live e2e finding: the advertised schema for
+    /// `claim_files` / `release_files` must include `agent_id` +
+    /// `session_token` (the handlers require them) and `files` must be
+    /// typed as an array — when every arg was `type: string`,
+    /// schema-respecting clients (Claude Code) serialized the files
+    /// array into a JSON string and the call was unusable.
+    #[test]
+    fn claim_files_schema_has_auth_args_and_typed_files() {
+        let defs: std::collections::HashMap<_, _> = SERVER_TOOL_DEFS
+            .iter()
+            .map(|(name, _, required)| (*name, *required))
+            .collect();
+        for tool in ["claim_files", "release_files"] {
+            let required = defs.get(tool).unwrap_or_else(|| panic!("{tool} not in SERVER_TOOL_DEFS"));
+            for arg in ["agent_id", "session_token", "files"] {
+                assert!(
+                    required.contains(&arg),
+                    "{tool} must advertise required arg {arg}, has: {required:?}"
+                );
+            }
+            let files = arg_property_schema("files");
+            assert_eq!(
+                files.get("type").and_then(|v| v.as_str()),
+                Some("array"),
+                "files must be typed array, not string"
+            );
+        }
+        // The generic fallback stays a string for scalar args.
+        assert_eq!(
+            arg_property_schema("agent_id").get("type").and_then(|v| v.as_str()),
+            Some("string")
+        );
+    }
 
     #[test]
     fn explicit_repo_wins() {
