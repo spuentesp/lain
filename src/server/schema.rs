@@ -58,6 +58,23 @@ impl std::fmt::Display for EdgeType {
     }
 }
 
+/// True for "type-level" node kinds: structs, enums, traits, classes,
+/// interfaces. A `Uses` edge is only emitted toward these kinds —
+/// pointing a `Uses` edge at a function or method would be misleading
+/// (the reference isn't to the function object, it's to its type). The
+/// scanner's tree-sitter resolve phase enforces this so cross-file
+/// symbol references resolve to declarations rather than implementations.
+pub fn is_type_level_target(t: &NodeType) -> bool {
+    matches!(
+        t,
+        NodeType::Struct
+            | NodeType::Enum
+            | NodeType::Trait
+            | NodeType::Class
+            | NodeType::Interface
+    )
+}
+
 /// A node in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphNode {

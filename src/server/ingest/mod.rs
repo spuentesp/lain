@@ -388,8 +388,7 @@ fn build_federation_server(
         federation_transport: Some(transport),
         federation_port: Some(port),
         started_at: now,
-        last_sync_at: Arc::new(Mutex::new(now)),
-        last_error: Arc::new(Mutex::new(None)),
+        sync_status: crate::server::sync_status::SyncStatus::new(now),
         repos_yaml,
         reload_bus: Arc::new(ReloadBus::new()),
         presence,
@@ -478,16 +477,10 @@ pub struct LainServer {
     /// Process start time, captured at construction. Immutable for the
     /// life of the server; surfaced via `get_server_status`.
     started_at: SystemTime,
-    /// Last successful sync time, updated by ingest/sync paths. The
-    /// `get_server_status` tool surfaces this so operators can see how
-    /// fresh the federation is. Wrapped in `Arc<Mutex<_>>` so `LainServer`
-    /// stays `Clone` (the executor sidecar clones the server).
-    last_sync_at: Arc<Mutex<SystemTime>>,
-    /// Most recent sync/ingest error message, if any. Cleared by
-    /// `record_sync()` and set by `record_last_error()`. Surfaced via
-    /// `get_server_status`. Wrapped in `Arc<Mutex<_>>` for the same
-    /// `Clone` reason as `last_sync_at`.
-    last_error: Arc<Mutex<Option<String>>>,
+    /// Sync attempt bookkeeping shared across the ingest/sync paths.
+    /// Lives in its own module so new fields don't grow the LainServer
+    /// impl block. See [`crate::server::sync_status::SyncStatus`].
+    sync_status: crate::server::sync_status::SyncStatus,
     /// Path to the `repos.yaml` this server was launched with, if any.
     /// `None` for single-workspace servers (no federation config). Used
     /// to record the project in `~/.config/lain/recent_projects` and to
@@ -616,8 +609,7 @@ impl LainServer {
             federation_transport: None,
             federation_port: None,
             started_at: now,
-            last_sync_at: Arc::new(Mutex::new(now)),
-            last_error: Arc::new(Mutex::new(None)),
+            sync_status: crate::server::sync_status::SyncStatus::new(now),
             repos_yaml: None,
             reload_bus: Arc::new(ReloadBus::new()),
             presence: Arc::new(PresenceRegistry::new()),
@@ -824,31 +816,30 @@ impl LainServer {
         self.started_at
     }
 
-    /// Last successful sync time. Updated via `record_sync`; consumed by
-    /// `get_server_status`.
+    /// Last successful sync time. Updated via [`Self::record_sync`];
+    /// consumed by `get_server_status`.
     pub fn last_sync_at(&self) -> SystemTime {
-        *self.last_sync_at.lock()
+        self.sync_status.last_sync_at()
     }
 
     /// Most recent ingest/sync error message, if any.
     pub fn last_error(&self) -> Option<String> {
-        self.last_error.lock().clone()
+        self.sync_status.last_error()
     }
 
     /// Mark a sync attempt as successful: clear `last_error` and bump
     /// `last_sync_at` to now. Called by ingest/sync paths that finish
-    /// without an error; errors should call `record_last_error` instead.
+    /// without an error; errors should call [`Self::record_last_error`]
+    /// instead.
     pub fn record_sync(&self) {
-        *self.last_sync_at.lock() = SystemTime::now();
-        *self.last_error.lock() = None;
+        self.sync_status.record_ok();
     }
 
     /// Record an error message from the ingest/sync paths and refresh
     /// `last_sync_at` to the current time so the operator can see when
     /// the last attempt was.
     pub fn record_last_error(&self, msg: impl Into<String>) {
-        *self.last_sync_at.lock() = SystemTime::now();
-        *self.last_error.lock() = Some(msg.into());
+        self.sync_status.record_error(msg);
     }
 
     /// Transport for the active MCP server. `None` for single-workspace
@@ -866,13 +857,6 @@ impl LainServer {
     /// Path to the `repos.yaml` this server was launched with, if any.
     /// `None` for single-workspace servers.
     pub fn repos_yaml(&self) -> Option<&Path> {
-        self.repos_yaml.as_deref()
-    }
-
-    /// Borrowed accessor for `repos_yaml_path`. Alias of `repos_yaml`
-    /// kept distinct so callers that read the docs of one don't have
-    /// to scan the other.
-    pub fn repos_yaml_path(&self) -> Option<&Path> {
         self.repos_yaml.as_deref()
     }
 
@@ -925,8 +909,8 @@ impl LainServer {
             Some(transport),
             Some(port),
             self.started_at,
-            Arc::clone(&self.last_sync_at),
-            Arc::clone(&self.last_error),
+            self.sync_status.last_sync_at_handle(),
+            self.sync_status.last_error_handle(),
         )
         .with_reload_bus(Arc::clone(&self.reload_bus))
         .with_server(server_arc);

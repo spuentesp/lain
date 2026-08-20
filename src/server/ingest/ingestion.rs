@@ -2,7 +2,7 @@ use crate::error::LainError;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType, is_type_level_target};
 use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
 use std::collections::{HashMap, HashSet};
@@ -240,16 +240,7 @@ impl LainServer {
                         continue; // no self-edges
                     }
                     // Uses edges only towards type-level nodes
-                    if matches!(sr.edge_type, EdgeType::Uses)
-                        && !matches!(
-                            target_type,
-                            NodeType::Struct
-                                | NodeType::Enum
-                                | NodeType::Trait
-                                | NodeType::Class
-                                | NodeType::Interface
-                        )
-                    {
+                    if sr.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
                         continue;
                     }
                     let key = (source_node.id.clone(), target_id.clone());
@@ -735,16 +726,7 @@ pub async fn index_one_repo(
                 if *target_id == source_node.id {
                     continue;
                 }
-                if matches!(sr.edge_type, EdgeType::Uses)
-                    && !matches!(
-                        target_type,
-                        NodeType::Struct
-                            | NodeType::Enum
-                            | NodeType::Trait
-                            | NodeType::Class
-                            | NodeType::Interface
-                    )
-                {
+                if sr.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
                     continue;
                 }
                 let key = (source_node.id.clone(), target_id.clone());

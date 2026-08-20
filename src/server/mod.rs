@@ -26,6 +26,7 @@ pub mod sensors;
 pub mod watcher;
 pub mod overlay;
 pub mod revision_log;
+pub mod sync_status;
 
 pub mod ingest;
 pub mod query;

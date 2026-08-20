@@ -1,4 +1,4 @@
-use crate::schema::{GraphEdge, NodeType, EdgeType};
+use crate::schema::{is_type_level_target, GraphEdge, NodeType, EdgeType};
 use super::LainServer;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
@@ -143,11 +143,7 @@ impl LainServer {
                             if let Some(candidates) = name_index.get(&r.target_name) {
                                 for (target_id, target_type) in candidates {
                                     if *target_id == source.id { continue; }
-                                    if matches!(r.edge_type, EdgeType::Uses)
-                                        && !matches!(target_type,
-                                            NodeType::Struct | NodeType::Enum | NodeType::Trait
-                                            | NodeType::Class | NodeType::Interface)
-                                    {
+                                    if r.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
                                         continue;
                                     }
                                     let key = (source.id.clone(), target_id.clone());

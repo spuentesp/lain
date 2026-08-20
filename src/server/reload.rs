@@ -156,7 +156,7 @@ pub async fn run_rebuild(
 ) -> Result<(), LainError> {
     bus.set_state(ReloadState::Rebuilding).await;
 
-    let repos_yaml = match server.repos_yaml_path() {
+    let repos_yaml = match server.repos_yaml() {
         Some(p) => p.to_path_buf(),
         None => {
             // Single-workspace server — nothing to reload. Treat as a
