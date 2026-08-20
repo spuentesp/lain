@@ -18,8 +18,9 @@
 
 set -uo pipefail
 
-LAIN="${LAIN:-/home/sebastian/lain/target/release/lain}"
-SUBJECT="${SUBJECT:-/home/sebastian/lain}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+LAIN="${LAIN:-$REPO_ROOT/target/release/lain}"
+SUBJECT="${SUBJECT:-$REPO_ROOT}"
 WORK="${WORK:-/tmp/lain-real-bench}"
 PORT="${PORT:-9998}"
 URL="http://127.0.0.1:$PORT"
@@ -35,7 +36,7 @@ FILES=(src/server/presence.rs src/server/sse.rs src/server/ingest/mod.rs
 
 if [ ! -x "$LAIN" ]; then
     echo "release binary missing, building (cargo build --release)..."
-    (cd /home/sebastian/lain && cargo build --release) || exit 1
+    (cd "$REPO_ROOT" && cargo build --release) || exit 1
 fi
 
 mkdir -p "$WORK/raw"
@@ -172,3 +173,13 @@ PYEOF
 cat "$WORK/report.md"
 echo
 echo "full report: $WORK/report.md"
+
+# Machine-readable verdict for CI: PASS exits 0, CHECK exits 1 so the
+# nightly actually goes red when the budget is blown or no conflicts
+# were exercised (which would mean the scenario didn't test anything).
+if grep -q 'verdict: PASS' "$WORK/report.md"; then
+    exit 0
+else
+    echo "verdict not PASS — see report above" >&2
+    exit 1
+fi
