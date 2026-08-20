@@ -50,64 +50,7 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
 // as the Command Center SPA in PR 4 (Task 4.3). Until then, GET / and
 // GET /federation-dashboard.html simply fall through to the next branch.
 
-/// Wrap a string payload in a `CallToolResult` with a single text block.
-///
-/// Every response carries the overlay's current `revision` in the
-/// outer `_meta` envelope (not in `content[0].text`). This is the
-/// single chokepoint for adding the field — both stdio and HTTP
-/// dispatch sites route every `is_error: true` / `is_error: false`
-/// response through here (or through the `jsonrpc_tool_result`
-/// closure in the HTTP path that adds the same `_meta`), so the
-/// wire contract is uniform across the entire tool surface.
-///
-/// The inner `content[0].text` is passed through verbatim — bare
-/// arrays, strings, Markdown, and JSON objects all retain their
-/// existing shape. Revisions live in `_meta.revision`, which is
-/// additive at the `CallToolResult` envelope level and is supported
-/// by every `CallToolResult` constructor in
-/// `rust-mcp-schema` 0.10 (the version pinned in `Cargo.toml`).
-fn tool_text_result(
-    text: String,
-    is_error: bool,
-    overlay: &crate::overlay::VolatileOverlay,
-    static_graph_generation_unix: Option<i64>,
-) -> CallToolResult {
-    CallToolResult {
-        content: vec![ContentBlock::TextContent(TextContent::new(text, None, None))],
-        is_error: Some(is_error),
-        meta: revision_meta(overlay, static_graph_generation_unix),
-        structured_content: None,
-    }
-}
-
-/// Build a `_meta` map for the `CallToolResult` envelope that
-/// records the overlay's current `revision`. Read once at construction
-/// time so the value is stable for the lifetime of the response —
-/// re-reading on the receiving end could see a different revision
-/// if the overlay advances while the client is parsing.
-///
-/// The map is intentionally minimal (single key): the protocol
-/// reserves `_meta` for arbitrary keys, but adding more would
-/// require a coordinated client-side bump. Round 2 of Task 1.3
-/// introduces just `revision`.
-fn revision_meta(
-    overlay: &crate::overlay::VolatileOverlay,
-    static_graph_generation_unix: Option<i64>,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let mut meta = Map::new();
-    meta.insert(
-        "revision".to_string(),
-        serde_json::Value::Number(overlay.current_revision().into()),
-    );
-    meta.insert(
-        "static_graph_generation".to_string(),
-        match static_graph_generation_unix {
-            Some(ts) => serde_json::Value::Number(ts.into()),
-            None => serde_json::Value::Null,
-        },
-    );
-    Some(meta)
-}
+use crate::server::mcp::envelope::{arg_property_schema, revision_meta, tool_text_result};
 
 /// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
 /// error on malformed input. Used by both stdio and HTTP dispatch arms for
@@ -332,50 +275,6 @@ where
 /// tables only carry arg names, so the type lives here. Getting this
 /// wrong had real consequences: every arg used to be `type: string`,
 /// which made `claim_files.files` (an array) unusable for
-/// schema-respecting clients — Claude Code serialized the array into a
-/// JSON *string* and the handler rejected it with "invalid type:
-/// string, expected a sequence" (found in the live end-to-end review).
-fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
-    let mut p = serde_json::Map::new();
-    match name {
-        "files" => {
-            p.insert("type".into(), "array".into());
-            p.insert(
-                "items".into(),
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "symbols": { "type": "array", "items": { "type": "string" } },
-                        "intent": { "type": "string", "enum": ["read", "edit"] },
-                        "ttl_seconds": { "type": "integer" }
-                    },
-                    "required": ["path"]
-                }),
-            );
-            p.insert("description".into(), "files to claim or release".into());
-        }
-        "symbols" => {
-            p.insert("type".into(), "array".into());
-            p.insert("items".into(), serde_json::json!({ "type": "string" }));
-            p.insert("description".into(), "symbol names".into());
-        }
-        "limit" => {
-            p.insert("type".into(), "integer".into());
-            p.insert("description".into(), "max results".into());
-        }
-        _ => {
-            p.insert("type".into(), "string".into());
-            p.insert("description".into(), name.into());
-        }
-    }
-    p
-}
-
-/// Tool definitions exposed unconditionally (server-status and
-/// recent-projects reporting). Centralized here so the stdio and HTTP
-/// `tools/list` responses and `tools/call` dispatchers agree on names
-/// and gating.
 const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
     (
         "get_server_status",
