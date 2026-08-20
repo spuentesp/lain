@@ -153,6 +153,45 @@ mod tests {
         assert!(other.exists(), "non-session files must be untouched");
     }
 
+    /// Two workspaces whose paths share a filename stem (e.g. two
+    /// different `repos.yaml`) must resolve to *different* state
+    /// files — the pre-hash behavior collapsed both onto
+    /// `<stem>.json` and silently shared presence state across
+    /// unrelated servers.
+    #[test]
+    fn state_path_disambiguates_same_stem_workspaces() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let cfg_a = a.path().join("repos.yaml");
+        let cfg_b = b.path().join("repos.yaml");
+        std::fs::write(&cfg_a, "repos: []\n").unwrap();
+        std::fs::write(&cfg_b, "repos: []\n").unwrap();
+        let pa = super::state_path_for_workspace(&cfg_a);
+        let pb = super::state_path_for_workspace(&cfg_b);
+        assert_ne!(pa, pb, "same-stem configs must not share a state file");
+        // Stable across calls for the same config.
+        assert_eq!(pa, super::state_path_for_workspace(&cfg_a));
+        // Both names keep the readable stem prefix.
+        let name_a = pa.file_name().unwrap().to_string_lossy();
+        assert!(name_a.starts_with("repos-"), "got {name_a}");
+        assert!(name_a.ends_with(".json"), "got {name_a}");
+    }
+
+    /// The hash suffix must be the first 8 hex chars of BLAKE3 over
+    /// the canonicalized absolute path — pinned so a future change to
+    /// the derivation is a deliberate break, not a silent one.
+    #[test]
+    fn state_path_hash_matches_blake3_of_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("repos.yaml");
+        std::fs::write(&cfg, "repos: []\n").unwrap();
+        let abs = std::fs::canonicalize(&cfg).unwrap();
+        let digest = blake3::hash(abs.to_string_lossy().as_bytes()).to_hex();
+        let expected = format!("repos-{}.json", &digest[..8]);
+        let got = super::state_path_for_workspace(&cfg);
+        assert_eq!(got.file_name().unwrap().to_string_lossy(), expected);
+    }
+
     /// Backdate a file's mtime without depending on the `filetime`
     /// crate. Uses `std::fs::File::set_modified`, stable since 1.75.
     fn filetime_set(p: &std::path::Path, t: std::time::SystemTime) {
@@ -167,7 +206,7 @@ mod tests {
 /// Return the path to the lain state dir (`~/.local/lain/state`).
 /// `LainServer::save_state` / `load_state` write and read the
 /// `PresenceRegistry` + `OccupancyMap` JSON snapshot here, one file
-/// per workspace (`<workspace-stem>.json`). `$XDG_STATE_HOME/lain`
+/// per workspace (`<stem>-<hash>.json`, see `state_path_for_workspace`). `$XDG_STATE_HOME/lain`
 /// takes precedence when present (per the XDG spec).
 pub fn state_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
@@ -180,11 +219,19 @@ pub fn state_dir() -> PathBuf {
 }
 
 /// Resolve the persisted-state file for a given workspace. The
-/// filename is `<config-stem>.json` where `config_stem` is the last
+/// filename is `<stem>-<hash>.json` where `stem` is the last
 /// path component of the workspace, sanitized to only alphanumerics
-/// + `-_` (punctuation becomes `-`). This keeps the state filename
-/// stable across relaunches with the same workspace, without needing
-/// to embed absolute paths.
+/// + `-_` (punctuation becomes `-`), and `hash` is the first 8 hex
+/// chars of the BLAKE3 of the absolute (canonicalized) workspace
+/// path. The hash disambiguates two configs that share a filename
+/// stem — previously two different `repos.yaml` files in different
+/// directories both mapped to `repos.json` and silently shared
+/// presence state.
+///
+/// One-shot migration: if the legacy `<stem>.json` exists and the
+/// hashed name doesn't, the legacy file is renamed over. If two
+/// colliding configs both have legacy state, the first launch wins
+/// the rename; the other starts empty (same as a fresh config).
 pub fn state_path_for_workspace(workspace: &std::path::Path) -> PathBuf {
     let stem = workspace
         .file_stem()
@@ -200,5 +247,12 @@ pub fn state_path_for_workspace(workspace: &std::path::Path) -> PathBuf {
             }
         })
         .collect();
-    state_dir().join(format!("{}.json", cleaned))
+    let abs = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let digest = blake3::hash(abs.to_string_lossy().as_bytes()).to_hex();
+    let path = state_dir().join(format!("{}-{}.json", cleaned, &digest[..8]));
+    let legacy = state_dir().join(format!("{}.json", cleaned));
+    if legacy.exists() && !path.exists() {
+        let _ = std::fs::rename(&legacy, &path);
+    }
+    path
 }

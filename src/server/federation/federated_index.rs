@@ -79,6 +79,19 @@ impl FederatedIndex {
         out
     }
 
+    /// Local checkout paths of every registered repo. The attribution
+    /// watcher monitors exactly these roots — watching `repos.yaml`'s
+    /// parent dir instead swept in unrelated files (server logs,
+    /// scratch files) and auto-claimed them under the single-agent
+    /// heuristic.
+    pub fn repo_paths(&self) -> Vec<std::path::PathBuf> {
+        self.repos
+            .read()
+            .values()
+            .map(|idx| idx.source().local_path().to_path_buf())
+            .collect()
+    }
+
     pub fn global_id(&self, repo: &RepoId, kind: NodeType, path: &str, name: &str) -> GlobalId {
         GlobalId::new(repo, kind, path, name)
     }

@@ -102,7 +102,7 @@ If an agent forgets to call `claim_files`, lain still knows:
 
 ## Stability & persistence
 
-Symbol IDs include a BLAKE3 content hash. Claims carry an optional `ttl_seconds` that bounds them even with active heartbeats. State (`PresenceRegistry` + `OccupancyMap`) is persisted to `~/.local/lain/state/<config-stem>.json` on every mutation and restored on `lain server` startup, so claims survive restarts.
+Symbol IDs include a BLAKE3 content hash. Claims carry an optional `ttl_seconds` that bounds them even with active heartbeats. State (`PresenceRegistry` + `OccupancyMap`) is persisted to `~/.local/lain/state/<config-stem>-<hash>.json` (hash of the absolute config path, so two configs that share a filename stem don't collide) on every mutation and restored on `lain server` startup, so claims survive restarts.
 
 For attribution portability, lain selects the backend at startup:
 

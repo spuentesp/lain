@@ -11,21 +11,33 @@ use crate::query::spec::{
     QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp, TypeSelector,
 };
 
-pub fn run_query(expression: &str, workspace: &std::path::Path) -> Result<()> {
-    let memory_path = workspace.join(".lain/graph.bin");
+pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Result<()> {
+    // Resolve the workspace root: explicit `--workspace`, else walk up
+    // for `.git` like `lain mcp` does. The graph lives at
+    // `<workspace>/.lain/graph.bin` (written by `lain mcp` / `lain
+    // server` indexing).
+    let root = match workspace {
+        Some(p) => p.to_path_buf(),
+        None => walk_up_for_git().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no `.git` found in any parent directory — pass `--workspace PATH` to override"
+            )
+        })?,
+    };
+    let memory_path = root.join(".lain/graph.bin");
 
     let graph = match GraphDatabase::new(&memory_path) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error: Failed to load graph at {:?}: {}", memory_path, e);
-            eprintln!("\nHint: Run 'lain' first to build the code graph.");
+            eprintln!("\nHint: Run 'lain mcp' (or 'lain server') first to build the code graph.");
             std::process::exit(1);
         }
     };
 
     let embedder = NlpEmbedder::new()?;
     let cache = Arc::new(Mutex::new(HashMap::new()));
-    let mut executor = Executor::new(&graph, &embedder, &cache, workspace);
+    let mut executor = Executor::new(&graph, &embedder, &cache, &root);
     let spec = parse_query_string(expression);
 
     match executor.execute(&spec) {
@@ -198,6 +210,21 @@ fn parse_query_string(expr: &str) -> QuerySpec {
 
     ops.push(GraphOp::Limit(LimitOp { count: limit_count, offset: 0 }));
     QuerySpec::new(ops)
+}
+
+/// Walk up from the current directory until a `.git` marker is found
+/// and return that ancestor. Mirrors `cli::mcp::find_git_workspace_root`
+/// (kept private there); duplicated here so `lain query` has the same
+/// zero-config behavior without exporting cross-module helpers.
+fn walk_up_for_git() -> Option<std::path::PathBuf> {
+    let mut current = std::env::current_dir().ok()?.canonicalize().ok()?;
+    for _ in 0..16 {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        current = current.parent()?.to_path_buf();
+    }
+    None
 }
 
 /// Map a CLI name pattern to a NameSelector:

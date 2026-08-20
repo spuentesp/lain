@@ -34,7 +34,7 @@ fn e2e_attribution_via_real_child_pid() {
         occupancy.clone(),
         tx,
         events_log,
-        tmp.path().to_path_buf(),
+        vec![tmp.path().to_path_buf()],
     );
     let _h = watcher.start();
 

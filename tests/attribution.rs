@@ -32,7 +32,7 @@ fn attribution_auto_claims_via_pid_on_linux() {
         occupancy.clone(),
         tx,
         events_log,
-        tmp.path().to_path_buf(),
+        vec![tmp.path().to_path_buf()],
     );
     let _h = watcher.start();
 

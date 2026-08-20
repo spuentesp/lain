@@ -159,8 +159,8 @@ fn build_embedder_pair(
     tuning: &TuningConfig,
 ) -> Result<(NlpEmbedder, CrossEncoder), LainError> {
     let embedder = if let Some(p) = model_path {
-        let tokenizer = p.join("tokenizer.json");
-        NlpEmbedder::with_max_threads(p, &tokenizer, tuning.ingestion.nlp_max_threads)?
+        let (model, tokenizer) = NlpEmbedder::resolve_model_paths(p);
+        NlpEmbedder::with_max_threads(&model, &tokenizer, tuning.ingestion.nlp_max_threads)?
     } else {
         NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
     };
@@ -238,28 +238,29 @@ fn expiry_tick(
     }
 }
 
-/// Start the attribution watcher (inotify on `repos.yaml`'s parent
-/// dir for live edit attribution). The handle is dropped — the
-/// thread lives until the channel closes.
+/// Start the attribution watcher (inotify on each registered repo's
+/// checkout for live edit attribution). The handle is dropped — the
+/// thread lives until the channel closes. Previously this watched
+/// `repos.yaml`'s parent dir, which auto-claimed unrelated files
+/// (server logs, scratch files) under the single-agent heuristic;
+/// now it watches exactly `FederatedIndex::repo_paths()`. Repos
+/// added by a hot-reload after startup are not watched until the
+/// next server restart.
 fn start_attribution_watcher(
     attribution: Arc<dyn AttributionBackend>,
     presence: Arc<PresenceRegistry>,
     occupancy: Arc<OccupancyMap>,
     tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<crate::server::events_log::EventsLog>,
-    repos_yaml: Option<&Path>,
+    repo_roots: Vec<PathBuf>,
 ) {
-    let root = repos_yaml
-        .and_then(Path::parent)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
     let _ = AttributionWatcher::new_with_backend(
         attribution,
         presence,
         occupancy,
         tx,
         events_log,
-        root,
+        repo_roots,
     )
     .start();
 }
@@ -364,7 +365,7 @@ fn build_federation_server(
         occupancy.clone(),
         presence_event_tx.clone(),
         events_log.clone(),
-        repos_yaml.as_deref(),
+        federation.repo_paths(),
     );
 
     let now = SystemTime::now();
@@ -538,10 +539,10 @@ impl LainServer {
         let overlay = VolatileOverlay::new();
 
         let embedder = if let Some(model_path) = embedding_model {
-            let tokenizer_path = model_path.parent().map(|p| p.join("tokenizer.json"))
-                .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
+            let (model, tokenizer_path) =
+                crate::server::nlp::NlpEmbedder::resolve_model_paths(model_path);
             crate::server::nlp::NlpEmbedder::with_max_threads(
-                model_path,
+                &model,
                 &tokenizer_path,
                 tuning.ingestion.nlp_max_threads,
             )?

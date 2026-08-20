@@ -86,10 +86,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::cli::repos::ReposAction,
     },
-    /// Run a query against the project's persisted graph.
+    /// Run a query against the project's persisted graph
+    /// (`<workspace>/.lain/graph.bin`). Without `--workspace`, walks
+    /// up from the current directory for `.git` like `lain mcp`.
     Query {
-        #[arg(long, default_value = "./repos.yaml")]
-        config: PathBuf,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
         expression: String,
     },
     /// Single-user LLM-assisted query.

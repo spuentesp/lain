@@ -233,7 +233,11 @@ pub struct AttributionWatcher {
     occupancy: Arc<OccupancyMap>,
     event_tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<crate::server::events_log::EventsLog>,
-    config_dir: PathBuf,
+    /// Roots to watch — the registered repos' local checkouts, not
+    /// `repos.yaml`'s parent dir (which swept in unrelated files like
+    /// server logs and auto-claimed them under the single-agent
+    /// heuristic).
+    roots: Vec<PathBuf>,
     backend: Arc<dyn AttributionBackend>,
 }
 
@@ -250,14 +254,14 @@ impl AttributionWatcher {
         occupancy: Arc<OccupancyMap>,
         event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         events_log: Arc<crate::server::events_log::EventsLog>,
-        config_dir: PathBuf,
+        roots: Vec<PathBuf>,
     ) -> Self {
         let backend: Arc<dyn AttributionBackend> = if cfg!(target_os = "linux") {
             Arc::new(ProcFsBackend)
         } else {
             Arc::new(NoopBackend)
         };
-        Self::new_with_backend(backend, presence, occupancy, event_tx, events_log, config_dir)
+        Self::new_with_backend(backend, presence, occupancy, event_tx, events_log, roots)
     }
 
     /// Construct a watcher with an explicit [`AttributionBackend`]. This
@@ -269,30 +273,36 @@ impl AttributionWatcher {
         occupancy: Arc<OccupancyMap>,
         event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         events_log: Arc<crate::server::events_log::EventsLog>,
-        config_dir: PathBuf,
+        roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             presence,
             occupancy,
             event_tx,
             events_log,
-            config_dir,
+            roots,
             backend,
         }
     }
 
-    /// Watch the config directory's parent (the project root) for file
-    /// changes. Spawn a watcher thread; auto-attribute each change to the
-    /// agent whose PID has the file open for write.
+    /// Watch every root for file changes. Spawns a watcher thread;
+    /// auto-attributes each change to the agent whose PID has the file
+    /// open for write. An empty `roots` list means "nothing to watch":
+    /// the thread exits immediately (federation mode passes the
+    /// registered repos' checkouts; if there are none, watching
+    /// `repos.yaml`'s parent would only pick up noise).
     pub fn start(self) -> std::thread::JoinHandle<()> {
         let presence = self.presence;
         let occupancy = self.occupancy;
         let event_tx = self.event_tx;
         let events_log = self.events_log;
-        let root = self.config_dir;
+        let roots = self.roots;
         let backend = self.backend;
 
         std::thread::spawn(move || {
+            if roots.is_empty() {
+                return;
+            }
             let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
             let mut watcher = match RecommendedWatcher::new(
                 move |res| {
@@ -303,7 +313,15 @@ impl AttributionWatcher {
                 Ok(w) => w,
                 Err(_) => return,
             };
-            if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+            // Watch each repo root; a root that fails to register
+            // (deleted checkout, permissions) is skipped, not fatal.
+            let mut watched = 0usize;
+            for root in &roots {
+                if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
+                    watched += 1;
+                }
+            }
+            if watched == 0 {
                 return;
             }
 

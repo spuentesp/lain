@@ -60,15 +60,11 @@ fn main() -> Result<()> {
             rt.block_on(lain::cli::workspaces::run(action, &config))
         }
         Some(Commands::Repos { config, action }) => lain::cli::repos::run(action, &config),
-        Some(Commands::Query { config, expression }) => {
-            // NOTE: Task 1.9 keeps the pre-consolidation semantics
-            // for `query` — `cli::query::run_query` reads the second
-            // arg as the workspace directory (it joins
-            // `.lain/graph.bin` onto it). The `--config` flag here
-            // defaults to `./repos.yaml` for shape parity with the
-            // other subcommands; PR 2 will rewire it to a real
-            // workspace path. For now, the value is forwarded as-is.
-            lain::cli::query::run_query(&expression, &config)
+        Some(Commands::Query { workspace, expression }) => {
+            // `query` reads `<workspace>/.lain/graph.bin`; without
+            // `--workspace` it walks up for `.git` exactly like
+            // `lain mcp` (see cli::query::run_query).
+            lain::cli::query::run_query(&expression, workspace.as_deref())
         }
         Some(Commands::Ask { config: _, question: _ }) => {
             // NOTE: `cli::ask::run_ask` is the PreToolUse hook handler

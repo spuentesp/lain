@@ -27,6 +27,24 @@ pub struct NlpEmbedder {
 }
 
 impl NlpEmbedder {
+    /// Resolve a user-supplied `--embedding-model` / `LAIN_EMBEDDING_MODEL`
+    /// path to `(model.onnx, tokenizer.json)`. Accepts either a directory
+    /// containing both files (the documented form) or a direct path to the
+    /// `.onnx` file, in which case the tokenizer is read from the same
+    /// directory. Previously `lain server` documented a directory while
+    /// `lain mcp` treated the value as a file — both go through here now.
+    pub fn resolve_model_paths(p: &Path) -> (PathBuf, PathBuf) {
+        if p.is_dir() {
+            (p.join("model.onnx"), p.join("tokenizer.json"))
+        } else {
+            let tokenizer = p
+                .parent()
+                .map(|d| d.join("tokenizer.json"))
+                .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
+            (p.to_path_buf(), tokenizer)
+        }
+    }
+
     /// Initialize with default paths (models/all-MiniLM-L6-v2.onnx).
     /// Reads `LAIN_EMBEDDING_MODEL` env var if set, else relative path.
     /// `max_threads` follows the same 0 = auto convention as with_max_threads.
@@ -38,11 +56,7 @@ impl NlpEmbedder {
     pub fn new_with_threads(max_threads: usize) -> Result<Self, LainError> {
         // Check env var first, then fall back to relative path
         let (model_path, tokenizer_path) = if let Some(model_env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
-            let model_path = Path::new(&model_env).to_path_buf();
-            let tokenizer_path = model_path.parent()
-                .map(|p| p.join("tokenizer.json"))
-                .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
-            (model_path, tokenizer_path)
+            Self::resolve_model_paths(Path::new(&model_env))
         } else {
             (Path::new("models/all-MiniLM-L6-v2.onnx").to_path_buf(),
              Path::new("models/tokenizer.json").to_path_buf())
@@ -449,5 +463,30 @@ pub fn resolve_intra_threads(max_threads: usize) -> usize {
         cores.min(4).max(1)
     } else {
         max_threads.max(1)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    /// `resolve_model_paths` accepts the documented directory form
+    /// (joins `model.onnx` + `tokenizer.json`) and the legacy file
+    /// form (sibling tokenizer). This is the drift fix: `lain server`
+    /// documented a directory while `lain mcp` treated it as a file.
+    #[test]
+    fn resolve_model_paths_accepts_dir_and_file_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("model-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (m, t) = super::NlpEmbedder::resolve_model_paths(&dir);
+        assert_eq!(m, dir.join("model.onnx"));
+        assert_eq!(t, dir.join("tokenizer.json"));
+
+        let file = dir.join("custom.onnx");
+        std::fs::write(&file, b"").unwrap();
+        let (m, t) = super::NlpEmbedder::resolve_model_paths(&file);
+        assert_eq!(m, file);
+        assert_eq!(t, dir.join("tokenizer.json"));
     }
 }
