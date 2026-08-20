@@ -50,10 +50,15 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
 // as the Command Center SPA in PR 4 (Task 4.3). Until then, GET / and
 // GET /federation-dashboard.html simply fall through to the next branch.
 
+use crate::server::mcp::command_center_assets::{
+    APP_JS, BLAST_RADIUS_HTML, CALL_CHAIN_HTML, COUPLING_HTML, INDEX_HTML, SPA_ASSETS,
+    STYLES_CSS,
+};
 use crate::server::mcp::definitions::{
     defs_to_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
 };
 use crate::server::mcp::envelope::{arg_property_schema, revision_meta, tool_text_result};
+use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
 /// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
 /// error on malformed input. Used by both stdio and HTTP dispatch arms for
@@ -1702,7 +1707,7 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "text/event-stream")
             .header("Cache-Control", "no-cache")
-            .body(UnsyncBoxBody::new(OverlaySubscribeBody { rx }))
+            .body(UnsyncBoxBody::new(OverlaySubscribeBody::new(rx)))
             .unwrap());
     }
 
@@ -2330,7 +2335,7 @@ async fn handle_request(
                 crate::tools::UiSessionData::BlastRadius { symbol, nodes } => (symbol, nodes),
                 _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
-            let mut html = include_str!("../../ui/blast-radius.html").to_string();
+            let mut html = BLAST_RADIUS_HTML.to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", &symbol);
             html = html.replace("NODES_PLACEHOLDER", &serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()));
             return Ok(Response::builder()
@@ -2359,7 +2364,7 @@ async fn handle_request(
                 crate::tools::UiSessionData::Coupling { symbol, files, .. } => (symbol, files, &()),
                 _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
-            let mut html = include_str!("../../ui/coupling.html").to_string();
+            let mut html = COUPLING_HTML.to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", symbol);
             html = html.replace("FILES_PLACEHOLDER", &serde_json::to_string(files).unwrap_or_else(|_| "[]".to_string()));
             return Ok(Response::builder()
@@ -2389,7 +2394,7 @@ async fn handle_request(
                 crate::tools::UiSessionData::CallChain { from, to, path } => (from, to, path),
                 _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
             };
-            let mut html = include_str!("../../ui/call-chain.html").to_string();
+            let mut html = CALL_CHAIN_HTML.to_string();
             html = html.replace("FROM_PLACEHOLDER", from);
             html = html.replace("TO_PLACEHOLDER", to);
             html = html.replace("PATH_PLACEHOLDER", &serde_json::to_string(path).unwrap_or_else(|_| "[]".to_string()));
@@ -2452,7 +2457,7 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "application/x-ndjson")
             .header("Cache-Control", "no-cache")
-            .body(UnsyncBoxBody::new(OverlaySubscribeBody { rx }))
+            .body(UnsyncBoxBody::new(OverlaySubscribeBody::new(rx)))
             .unwrap());
     }
 
@@ -2496,7 +2501,7 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "text/html; charset=utf-8")
             .body(full_body(Bytes::from_static(
-                include_str!("command_center/index.html").as_bytes(),
+                include_bytes!("command_center/index.html"),
             )))
             .unwrap());
     }
@@ -2505,7 +2510,7 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "text/javascript; charset=utf-8")
             .body(full_body(Bytes::from_static(
-                include_str!("command_center/app.js").as_bytes(),
+                include_bytes!("command_center/app.js"),
             )))
             .unwrap());
     }
@@ -2514,19 +2519,14 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "text/css; charset=utf-8")
             .body(full_body(Bytes::from_static(
-                include_str!("command_center/styles.css").as_bytes(),
+                include_bytes!("command_center/styles.css"),
             )))
             .unwrap());
     }
     if method == Method::GET && path.starts_with("/assets/") {
         // Whitelist the known SPA assets so an unvetted path under /assets/
-        // can't be used to exfiltrate other include_str!() targets.
-        const SPA_ASSETS: &[(&str, &str)] = &[
-            (
-                "/assets/d3.v7.min.js",
-                include_str!("command_center/assets/d3.v7.min.js"),
-            ),
-        ];
+        // can't be used to exfiltrate other include_str!() targets. The
+        // SPA_ASSETS table lives in `mcp::command_center_assets`.
         for (route, body) in SPA_ASSETS {
             if path == *route {
                 return Ok(Response::builder()
@@ -2553,32 +2553,6 @@ async fn handle_request(
 /// channel that is fed by a tokio task that pumps broadcast events into
 /// JSON bytes. When the client disconnects (the channel is closed), the
 /// body returns `None` and hyper finishes the response.
-struct OverlaySubscribeBody {
-    rx: mpsc::UnboundedReceiver<std::io::Result<Bytes>>,
-}
-
-impl http_body::Body for OverlaySubscribeBody {
-    type Data = Bytes;
-    type Error = std::io::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<std::io::Result<Frame<Self::Data>>>> {
-        match Pin::new(&mut self.rx).poll_recv(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                Poll::Ready(Some(Ok(Frame::data(bytes))))
-            }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-/// Definitions for the 6 special-case tools that are dispatched directly in
-/// `ToolExecutor::call_inner` (not via the inventory registry). Including them
-/// in `tools/list` makes them visible to MCP clients.
 fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> {
     use crate::tools::definitions::ToolDefinition;
     vec![
