@@ -26,11 +26,11 @@ class Lain < Formula
 
   def caveats
     <<~EOS
-      Lain is installed. To run the MCP server for a project, point it at
-      the project's repos.yaml:
-            lain server --config ./repos.yaml
+      Lain is installed. The zero-config MCP entry point is:
+            lain mcp
+      (run from anywhere inside a git repo — no repos.yaml needed).
 
-      For the full subcommand list (server, workspaces, repos, query, ask):
+      For the full subcommand list (server, mcp, workspaces, repos, query, hooks, doctor):
             lain --help
     EOS
   end

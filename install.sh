@@ -11,15 +11,9 @@ INSTALL_DIR="${LAIN_INSTALL_DIR:-$HOME/.local/lain}"
 BIN_NAME="lain"
 
 # Default configuration
-DEFAULT_WORKSPACE="."
-DEFAULT_TRANSPORT="stdio"
-DEFAULT_PORT="9999"
 DEFAULT_AGENT="auto"
 
 # Parsed options
-OPT_WORKSPACE=""
-OPT_TRANSPORT=""
-OPT_PORT=""
 OPT_AGENT=""
 OPT_EMBEDDING_MODEL=""
 OPT_DOWNLOAD_MODEL=""
@@ -40,16 +34,8 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case $1 in
-      --workspace)
-        OPT_WORKSPACE="$2"
-        shift 2
-        ;;
-      --transport)
-        OPT_TRANSPORT="$2"
-        shift 2
-        ;;
-      --port)
-        OPT_PORT="$2"
+      --workspace|--transport|--port)
+        warn "$1 is deprecated and ignored — the shipped MCP entry is 'lain mcp' (zero-config stdio, walks up for .git)"
         shift 2
         ;;
       --agent)
@@ -72,14 +58,14 @@ parse_args() {
         echo "Usage: $0 [OPTIONS]"
         echo ""
         echo "Options:"
-        echo "  --workspace PATH         Workspace path for LAIN [default: .]"
-        echo "  --transport MODE        MCP transport: stdio, http, both [default: stdio]"
-        echo "  --port PORT             HTTP port for MCP server [default: 9999]"
         echo "  --agent AGENT           Target agent: auto, claude, gemini, cursor, windsurf, cline, kimi [default: auto]"
-        echo "  --embedding-model PATH  Path to ONNX embedding model"
+        echo "  --embedding-model PATH  Path to ONNX embedding model (dir with model.onnx + tokenizer.json)"
         echo "  --download-model        Download default ONNX model (all-MiniLM-L6-v2.onnx)"
         echo "  -y, --yes               Skip all confirmation prompts"
         echo "  -h, --help              Show this help message"
+        echo ""
+        echo "The MCP entry point is 'lain mcp' (zero-config: walks up for .git,"
+        echo "stdio transport, no repos.yaml needed)."
         echo ""
         echo "Environment Variables:"
         echo "  LAIN_INSTALL_DIR        Installation directory [default: ~/.local/lain]"
@@ -384,38 +370,6 @@ main() {
     echo "========================================"
     echo ""
 
-    # Ask for workspace
-    if [ -z "$OPT_WORKSPACE" ]; then
-      read -p "Workspace path [default: .]: " workspace_input || workspace_input=""
-      OPT_WORKSPACE="${workspace_input:-.}"
-    fi
-
-    # Ask for transport mode
-    if [ -z "$OPT_TRANSPORT" ]; then
-      echo ""
-      echo "MCP Transport Mode:"
-      echo "  1) stdio   - Standard MCP (recommended for Claude Code)"
-      echo "  2) http    - HTTP only (for debugging)"
-      echo "  3) both    - Both stdio + HTTP (recommended for development)"
-      read -p "Choose transport mode [default: stdio]: " transport_input || transport_input=""
-      
-      case "$transport_input" in
-        1|"") OPT_TRANSPORT="stdio" ;;
-        2)   OPT_TRANSPORT="http" ;;
-        3)   OPT_TRANSPORT="both" ;;
-        stdio|http|both) OPT_TRANSPORT="$transport_input" ;;
-        *)   warn "Invalid choice, using stdio"; OPT_TRANSPORT="stdio" ;;
-      esac
-    fi
-
-    # Ask for port if http/both
-    if [ "$OPT_TRANSPORT" = "http" ] || [ "$OPT_TRANSPORT" = "both" ]; then
-      if [ -z "$OPT_PORT" ]; then
-        read -p "HTTP port [default: 9999]: " port_input || port_input=""
-        OPT_PORT="${port_input:-9999}"
-      fi
-    fi
-
     # Ask for agent
     if [ -z "$OPT_AGENT" ]; then
       echo ""
@@ -445,14 +399,9 @@ main() {
     echo ""
     echo "========================================"
     echo "Configuration Summary:"
-    echo "  Workspace:     ${OPT_WORKSPACE:-.}"
-    echo "  Transport:     ${OPT_TRANSPORT:-stdio}"
-    if [ "$OPT_TRANSPORT" = "http" ] || [ "$OPT_TRANSPORT" = "both" ]; then
-      echo "  Port:          ${OPT_PORT:-9999}"
-    else
-      echo "  Port:          N/A (stdio only)"
-    fi
     echo "  Agent:         ${OPT_AGENT:-auto}"
+    echo "  MCP entry:     lain mcp  (zero-config: walks up for .git; no"
+    echo "                 repos.yaml, transport, or port needed)"
     echo "========================================"
     echo ""
     read -p "Continue with installation? [Y/n] " -n 1 -r confirm_reply || confirm_reply="y"
@@ -509,7 +458,8 @@ main() {
         info "Added to $shell_rc"
       fi
       info "Run: source $shell_rc  (or open a new terminal)"
-      # Also export for the current session so lain init can run
+      # Also export for the current session so the agent registration
+      # step below can invoke the freshly installed binary
       export PATH="$HOME/.local/lain:$PATH"
     else
       echo -e "${YELLOW}[ADD TO PATH]${NC} Add to your shell profile:"
@@ -537,36 +487,56 @@ main() {
     fi
   fi
 
-  # Build init command
-  local init_cmd="${INSTALL_DIR}/${BIN_NAME} init --agent ${OPT_AGENT:-$DEFAULT_AGENT}"
-  if [ -n "$OPT_WORKSPACE" ]; then
-    init_cmd="$init_cmd --workspace $OPT_WORKSPACE"
-  fi
-  if [ -n "$OPT_TRANSPORT" ]; then
-    init_cmd="$init_cmd --transport $OPT_TRANSPORT"
-  fi
-  if [ -n "$OPT_PORT" ]; then
-    init_cmd="$init_cmd --port $OPT_PORT"
-  fi
+  # Register the MCP server with the chosen agent. The shipped entry
+  # point is `lain mcp` — zero-config: it walks up for `.git`, needs
+  # no repos.yaml, and runs on stdio. (`lain init` was removed in the
+  # CLI consolidation; registration is done here directly.)
+  local lain_bin="${INSTALL_DIR}/${BIN_NAME}"
+  local lain_args="mcp"
   if [ -n "$model_path" ]; then
-    init_cmd="$init_cmd --embedding-model $model_path"
+    lain_args="mcp --embedding-model $model_path"
   fi
-  if [ -n "$OPT_YES" ]; then
-    init_cmd="$init_cmd --yes"
+  local mcp_json
+  if [ -n "$model_path" ]; then
+    mcp_json=$(printf '{"mcpServers":{"lain":{"command":"%s","args":["mcp","--embedding-model","%s"]}}}' "$lain_bin" "$model_path")
+  else
+    mcp_json=$(printf '{"mcpServers":{"lain":{"command":"%s","args":["mcp"]}}}' "$lain_bin")
   fi
 
   echo ""
   echo "Configuring LAIN for agent..."
-  echo -e "${BLUE}Running:${NC} $init_cmd"
   echo ""
 
-  # Run init command
-  if $init_cmd; then
-    info "LAIN initialized successfully!"
-  else
-    warn "LAIN initialization failed. You can run manually:"
-    echo "  $init_cmd"
+  local agent="${OPT_AGENT:-$DEFAULT_AGENT}"
+  # Auto-detect: prefer a Claude Code CLI when present.
+  if [ "$agent" = "auto" ]; then
+    if command -v claude >/dev/null 2>&1; then
+      agent="claude"
+    fi
   fi
+
+  case "$agent" in
+    claude)
+      if command -v claude >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        if claude mcp add --scope user lain -- "$lain_bin" $lain_args; then
+          info "Registered 'lain' MCP server with Claude Code (user scope)"
+        else
+          warn "claude mcp add failed; add this manually to your MCP config:"
+          echo "  $mcp_json"
+        fi
+      else
+        warn "claude CLI not found; add this to your agent's MCP config:"
+        echo "  $mcp_json"
+      fi
+      ;;
+    *)
+      echo "Add lain to your agent's MCP config:"
+      echo "  $mcp_json"
+      echo ""
+      echo "Per-agent setup guides: https://github.com/spuentesp/lain/tree/main/hooks"
+      ;;
+  esac
 
   # Quick verify
   echo ""
