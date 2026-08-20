@@ -1,41 +1,18 @@
 //! Graph correctness tests — algorithm verification for blast radius, resolution priority, and query executor
 
-use lain::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
+mod common;
+
 use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
+use lain::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
 use lain::tools::handlers::impact::get_blast_radius;
 
+/// Local thin shim over [`common::call_graph_fixture`]: every test in
+/// this file uses only the graph (the fixture's overlay is empty),
+/// and keeping the call sites `make_test_graph()` keeps each test's
+/// body identical to the pre-refactor form.
 fn make_test_graph() -> GraphDatabase {
-    let tmp = std::env::temp_dir().join("test_graph_db");
-    let _ = std::fs::remove_dir_all(&tmp);
-    let graph = GraphDatabase::new(&tmp).unwrap();
-
-    // Build a call graph:
-    // main -> a -> b -> c (leaf)
-    // main -> x -> b (b has two callers)
-    // main -> y (y is dead — no outgoing edges)
-
-    let main = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
-    let a = GraphNode::new(NodeType::Function, "a".to_string(), "/src/a.rs".to_string());
-    let b = GraphNode::new(NodeType::Function, "b".to_string(), "/src/b.rs".to_string());
-    let c = GraphNode::new(NodeType::Function, "c".to_string(), "/src/c.rs".to_string());
-    let x = GraphNode::new(NodeType::Function, "x".to_string(), "/src/x.rs".to_string());
-    let y = GraphNode::new(NodeType::Function, "y".to_string(), "/src/y.rs".to_string());
-
-    graph.upsert_node(main.clone()).unwrap();
-    graph.upsert_node(a.clone()).unwrap();
-    graph.upsert_node(b.clone()).unwrap();
-    graph.upsert_node(c.clone()).unwrap();
-    graph.upsert_node(x.clone()).unwrap();
-    graph.upsert_node(y.clone()).unwrap();
-
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, main.id.clone(), a.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, b.id.clone(), c.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, main.id.clone(), x.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, x.id.clone(), b.id.clone())).unwrap();
-
-    graph
+    common::call_graph_fixture().0
 }
 
 fn make_overlay_with_node(name: &str, path: &str) -> VolatileOverlay {
