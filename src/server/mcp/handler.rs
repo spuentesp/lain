@@ -50,6 +50,9 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
 // as the Command Center SPA in PR 4 (Task 4.3). Until then, GET / and
 // GET /federation-dashboard.html simply fall through to the next branch.
 
+use crate::server::mcp::definitions::{
+    defs_to_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
+};
 use crate::server::mcp::envelope::{arg_property_schema, revision_meta, tool_text_result};
 
 /// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
@@ -271,161 +274,6 @@ where
     }
 }
 
-/// JSON-schema property for a tool arg, typed by name. The `*_TOOL_DEFS`
-/// tables only carry arg names, so the type lives here. Getting this
-/// wrong had real consequences: every arg used to be `type: string`,
-/// which made `claim_files.files` (an array) unusable for
-const SERVER_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
-    (
-        "get_server_status",
-        "Returns the server's run-time status: pid, transport, port, started_at, last_sync_at, last_error, repo_count, workspace_count.",
-        &[],
-    ),
-    (
-        "list_recent_projects",
-        "List projects the operator has used recently, with per-project workspace_count and repo_count pulled from each project's repos.yaml/workspaces.yaml.",
-        &[],
-    ),
-    (
-        "get_reload_status",
-        "Returns the current reload subsystem state: state (idle | rebuilding | failed), started_at, last_reload_at, last_error, pending_changes.",
-        &[],
-    ),
-    (
-        "request_reload",
-        "Schedule a hot-reload of repos.yaml and workspaces.yaml. The actual rebuild runs on a background task; the call returns immediately after queueing the signal.",
-        &[],
-    ),
-    (
-        "register_agent",
-        "Register this agent with lain. Returns an agent_id and session_token to use on every subsequent call.",
-        &["name"],
-    ),
-    (
-        "heartbeat",
-        "Refresh the session. lain expires sessions 60 seconds after the last heartbeat.",
-        &["agent_id", "session_token"],
-    ),
-    (
-        "list_active_agents",
-        "List agents currently connected. Set include_background=true to also see cron/CI agents.",
-        &[],
-    ),
-    (
-        "who_am_i",
-        "Resolve a session_token to the agent it belongs to, plus their current claims.",
-        &["session_token"],
-    ),
-    (
-        "list_subagents",
-        "List active subagents whose parent_session_id matches the caller's session. Args: session_token. Returns: { parent, subagents: [{ agent_id, name, kind, mode, started_at_unix, last_heartbeat_unix }] }",
-        &["session_token"],
-    ),
-    (
-        "claim_files",
-        "Announce intent to edit (or read) files/symbols. Returns conflicts: other agents already holding claims.",
-        &["agent_id", "session_token", "files"],
-    ),
-    (
-        "release_files",
-        "Release claims. Other agents get a notification.",
-        &["agent_id", "session_token", "files"],
-    ),
-    (
-        "list_occupancy",
-        "Show which agents are in a file or the whole workspace.",
-        &[],
-    ),
-    (
-        "my_claims",
-        "List files this agent has claimed.",
-        &["agent_id", "session_token"],
-    ),
-    (
-        "detect_overlap",
-        "Detect symbol-level overlap between two git refs in a workspace. Args: base (required), head (defaults to HEAD), workspace (required). Returns { base, head, total_overlaps, files: [{ repo, path, symbols_base, symbols_head, overlap, severity }] } — a non-empty overlap means both refs edited the same definition. `severity` is none | low | medium | high, graded by the kinds of the shared symbols (a shared function weighs more than a shared module).",
-        &["base", "workspace"],
-    ),
-    (
-        "get_audit_log",
-        "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset). Returns an array of AuditEvent objects (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
-        &[],
-    ),
-    (
-        "get_world_state",
-        "Read-only companion to claim_files: returns the same WorldState shape (retracted symbols, overlay-delta changed_symbols filtered to the requested set, and a resync note for BeyondCurrent/TooOld) without taking a claim. Lets an LLM ask 'is this symbol still in the graph?' or 'what's the world state for these symbols?' before deciding whether to claim. Args: symbols (list of symbol names to check for retract — empty list yields a no-op WorldState), plan_revision (the agent's last-seen overlay revision; omit for current). Returns { current, plan, changed_symbols: [{ name, change_kind, at_revision }], note } where change_kind is Edited | Retracted and note is set only on BeyondCurrent ('plan_revision beyond current — server may have restarted') or TooOld ('plan_revision too old for delta; resync required').",
-        &[],
-    ),
-    (
-        "get_recent_activity",
-        "Compact digest of the audit log: groups recent edit_landed events by path (default), agent, or hour and returns a count + sample per group. Designed for LLM session compaction — instead of re-reading every audit.jsonl line, the agent gets a navigable summary and can call get_audit_log with a specific path_glob for full detail. Args: since_unix (filter by ts_unix), group_by ('path' (default) | 'agent' | 'hour'), path_glob (pre-filter by path before grouping), limit (max groups returned, default 20). Returns { groups: [{ key, count, first_ts, last_ts, sample_event }], total_events, total_groups, truncated, group_by }. truncated=true when total_groups > limit.",
-        &[],
-    ),
-];
-
-/// Tool definitions exposed only when the MCP server was constructed with a
-/// `FederatedIndex`. Centralized here so the stdio `tools/list` response, the
-/// stdio `tools/call` dispatch, and the HTTP JSON-RPC `tools/list` / `tools/call`
-/// paths agree on names, schemas, and gating.
-const FEDERATION_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
-    (
-        "list_repos",
-        "List every repository currently registered in the federation, with id, path, health, and graph stats.",
-        &[],
-    ),
-    (
-        "get_repo_info",
-        "Get info about a single repository in the federation by id.",
-        &["id"],
-    ),
-    (
-        "get_federation_health",
-        "Aggregate health counts and total node/edge counts across the federation, plus a rough memory estimate.",
-        &[],
-    ),
-    (
-        "search_org",
-        "Case-insensitive substring search across every repo's symbols (matched on name or path). Args: query (substring), limit (max results, parsed as usize). Returns matches sorted by (repo_id, name).",
-        &["query", "limit"],
-    ),
-    (
-        "get_cross_repo_blast_radius",
-        "Resolve a symbol across the federation, traverse outgoing Calls edges in [min_depth, max_depth) (depth is a u32 range like \"1..3\"), and group visited nodes by repo. Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}. Caps at 1000 nodes; truncated=true when the cap is hit.",
-        &["symbol", "depth"],
-    ),
-    (
-        "get_cross_repo_blast_radius_for_repo",
-        "Same as get_cross_repo_blast_radius but the caller disambiguates the repo explicitly via repo_id, bypassing symbol resolution. Args: repo_id, symbol, depth (u32 range like \"1..3\"). Returns {by_repo: {repo_id: [global_ids...]}, total_count, truncated}.",
-        &["repo_id", "symbol", "depth"],
-    ),
-];
-
-/// Workspace-aware MCP tools, registered when the server was constructed
-/// with a `WorkspacesFile` (i.e., when a workspace may be active). These
-/// are additive to the 6 federation tools — they don't replace anything.
-const WORKSPACE_TOOL_DEFS: &[(&str, &str, &[&str])] = &[
-    (
-        "list_workspaces",
-        "List all known workspaces from workspaces.yaml. Returns [{name, description?, source?, member_count, is_active}].",
-        &[],
-    ),
-    (
-        "get_active_workspace",
-        "Return the workspace the server is currently holding (the one whose repos were loaded). Errors with NoActiveWorkspace if the server was started without --workspace or no workspace matches the loaded repos.",
-        &[],
-    ),
-    (
-        "get_workspace",
-        "Full detail on one workspace by name: description?, source?, members: [{repo_id, path, health}]. Errors with NotFound if name is unknown.",
-        &["name"],
-    ),
-    (
-        "get_workspace_graph",
-        "Per-workspace graph for the dashboard. Returns {nodes: [...], edges: [...], truncated: bool}. Filters to Function/Method/Class + Calls/Imports. Optional filter: substring match against node name + path. Cross-repo Calls edges are marked cross_repo: true.",
-        &["filter?"],
-    ),
-];
-
 struct LainHandler {
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
@@ -512,76 +360,13 @@ impl ServerHandler for LainHandler {
             });
         }
         if self.federation.is_some() {
-            for (name, description, required) in FEDERATION_TOOL_DEFS {
-                let mut props = std::collections::BTreeMap::new();
-                for req in *required {
-                    props.insert((*req).to_string(), arg_property_schema(req));
-                }
-                let input_schema = ToolInputSchema::new(
-                    required.iter().map(|s| s.to_string()).collect(),
-                    if props.is_empty() { None } else { Some(props) },
-                    None,
-                );
-                tools.push(Tool {
-                    name: (*name).to_string(),
-                    description: Some((*description).to_string()),
-                    input_schema,
-                    annotations: None,
-                    execution: None,
-                    icons: vec![],
-                    meta: None,
-                    output_schema: None,
-                    title: None,
-                });
-            }
+            tools.extend(defs_to_tools(FEDERATION_TOOL_DEFS));
         }
         if self.workspaces.is_some() {
-            for (name, description, required) in WORKSPACE_TOOL_DEFS {
-                let mut props = std::collections::BTreeMap::new();
-                for req in *required {
-                    props.insert((*req).to_string(), arg_property_schema(req));
-                }
-                let input_schema = ToolInputSchema::new(
-                    required.iter().map(|s| s.to_string()).collect(),
-                    if props.is_empty() { None } else { Some(props) },
-                    None,
-                );
-                tools.push(Tool {
-                    name: (*name).to_string(),
-                    description: Some((*description).to_string()),
-                    input_schema,
-                    annotations: None,
-                    execution: None,
-                    icons: vec![],
-                    meta: None,
-                    output_schema: None,
-                    title: None,
-                });
-            }
+            tools.extend(defs_to_tools(WORKSPACE_TOOL_DEFS));
         }
         // Server-status and recent-projects tools are always available.
-        for (name, description, required) in SERVER_TOOL_DEFS {
-            let mut props = std::collections::BTreeMap::new();
-            for req in *required {
-                props.insert((*req).to_string(), arg_property_schema(req));
-            }
-            let input_schema = ToolInputSchema::new(
-                required.iter().map(|s| s.to_string()).collect(),
-                if props.is_empty() { None } else { Some(props) },
-                None,
-            );
-            tools.push(Tool {
-                name: (*name).to_string(),
-                description: Some((*description).to_string()),
-                input_schema,
-                annotations: None,
-                execution: None,
-                icons: vec![],
-                meta: None,
-                output_schema: None,
-                title: None,
-            });
-        }
+        tools.extend(defs_to_tools(SERVER_TOOL_DEFS));
 
         Ok(ListToolsResult { tools, meta: None, next_cursor: None })
     }
@@ -2001,9 +1786,9 @@ async fn handle_request(
                             })
                             .collect();
                         if federation.is_some() {
-                            for (name, description, required) in FEDERATION_TOOL_DEFS {
+                            for t in FEDERATION_TOOL_DEFS {
                                 let mut props = serde_json::Map::new();
-                                for req in *required {
+                                for req in t.required_args {
                                     props.insert(
                                         (*req).to_string(),
                                         serde_json::Value::Object(arg_property_schema(req)),
@@ -2012,18 +1797,18 @@ async fn handle_request(
                                 let input_schema = serde_json::json!({
                                     "type": "object",
                                     "properties": props,
-                                    "required": required,
+                                    "required": t.required_args,
                                 });
                                 tools.push(serde_json::json!({
-                                    "name": name,
-                                    "description": description,
+                                    "name": t.name,
+                                    "description": t.description,
                                     "inputSchema": input_schema
                                 }));
                             }
                         }
-                        for (name, description, required) in SERVER_TOOL_DEFS {
+                        for t in SERVER_TOOL_DEFS {
                             let mut props = serde_json::Map::new();
-                            for req in *required {
+                            for req in t.required_args {
                                 props.insert(
                                     (*req).to_string(),
                                     serde_json::Value::Object(arg_property_schema(req)),
@@ -2032,11 +1817,11 @@ async fn handle_request(
                             let input_schema = serde_json::json!({
                                 "type": "object",
                                 "properties": props,
-                                "required": required,
+                                "required": t.required_args,
                             });
                             tools.push(serde_json::json!({
-                                "name": name,
-                                "description": description,
+                                "name": t.name,
+                                "description": t.description,
                                 "inputSchema": input_schema
                             }));
                         }
@@ -2863,7 +2648,7 @@ mod tests {
     fn claim_files_schema_has_auth_args_and_typed_files() {
         let defs: std::collections::HashMap<_, _> = SERVER_TOOL_DEFS
             .iter()
-            .map(|(name, _, required)| (*name, *required))
+            .map(|t| (t.name, t.required_args))
             .collect();
         for tool in ["claim_files", "release_files"] {
             let required = defs.get(tool).unwrap_or_else(|| panic!("{tool} not in SERVER_TOOL_DEFS"));

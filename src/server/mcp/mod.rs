@@ -1,6 +1,7 @@
 //! MCP handler and federation tools.
 
 pub mod audit_tools;
+pub mod definitions;
 pub mod envelope;
 pub mod federation_tools;
 pub mod handler;
