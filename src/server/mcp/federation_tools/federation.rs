@@ -97,20 +97,25 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
 /// or not they have been projected. A backend fallback then scans
 /// `fed.backend().list_nodes()` to catch nodes inserted directly into the
 /// federated backend (bypassing `add_repo` / `project_repo` — the same
-/// fallback pattern used by `FederatedIndex::resolve_symbol`). Results are
-/// deduplicated by `global_id` so a node visible through both paths is
-/// returned once.
+/// fallback pattern used by `FederatedIndex::resolve_symbol`).
+///
+/// Results are deduplicated by `(repo_id, name, path)` so a node visible
+/// through both the per-repo db (which uses content-hash ids) and the
+/// federation backend (which uses deterministic global ids) is returned
+/// once — the canonical triple is what callers actually care about.
 pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<SymbolMatch> {
     let q = query.to_lowercase();
     let mut hits: Vec<SymbolMatch> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    let key = |repo: &str, name: &str, path: &str| (repo.to_string(), name.to_string(), path.to_string());
 
     // Primary path: per-repo nodes.
     for (repo_id, _) in fed.list_repos() {
         if let Some(repo) = fed.get_repo(&repo_id) {
             for n in repo.nodes() {
                 if n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q) {
-                    if seen.insert(n.id.clone()) {
+                    if seen.insert(key(repo_id.as_str(), &n.name, &n.path)) {
                         hits.push(SymbolMatch {
                             global_id: n.id.clone(),
                             repo_id: repo_id.to_string(),
@@ -129,15 +134,15 @@ pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<Symbol
     // has no `list_repos()` iteration to draw from.
     if let Ok(backend_nodes) = fed.backend().list_nodes() {
         for n in backend_nodes {
-            if seen.contains(&n.id) {
+            let repo_id = GlobalId::parse(&n.id)
+                .ok()
+                .map(|g| g.repo_id().to_string())
+                .unwrap_or_default();
+            if seen.contains(&key(&repo_id, &n.name, &n.path)) {
                 continue;
             }
             if n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q) {
-                let repo_id = GlobalId::parse(&n.id)
-                    .ok()
-                    .map(|g| g.repo_id().to_string())
-                    .unwrap_or_default();
-                seen.insert(n.id.clone());
+                seen.insert(key(repo_id.as_str(), &n.name, &n.path));
                 hits.push(SymbolMatch {
                     global_id: n.id.clone(),
                     repo_id,

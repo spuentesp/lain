@@ -2,7 +2,8 @@ use crate::error::LainError;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::schema::{GraphEdge, GraphNode};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::overlay::VolatileOverlay;
 use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
 use std::collections::HashSet;
@@ -345,6 +346,13 @@ impl LainServer {
         }
         self.graph.save_to_disk().await?;
 
+        // Bump the overlay freshness so the indexer doesn't read as
+        // "stale" the moment the server comes up. The index path
+        // doesn't insert through the overlay (it writes the static
+        // graph), so without this touch every freshly-indexed server
+        // would start with `Overlay freshness: stale`.
+        self.overlay.touch();
+
         let duration = scan_start.elapsed();
         info!("Lain fully restored and ready in {:?}", duration);
 
@@ -408,6 +416,7 @@ pub async fn index_one_repo(
     db: &GraphDatabase,
     lsp: &LspPool,
     git: &GitSensor,
+    overlay: &VolatileOverlay,
 ) -> Result<(), LainError> {
     let scan_start = std::time::Instant::now();
     let (latest_commit, latest_time) = git.get_latest_commit_info()?;
@@ -626,5 +635,6 @@ pub async fn index_one_repo(
         path,
         scan_start.elapsed()
     );
+    overlay.touch();
     Ok(())
 }

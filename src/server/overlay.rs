@@ -36,6 +36,12 @@ pub struct VolatileOverlay {
     log: Arc<Mutex<RevisionLog>>,
 }
 
+/// Cheap clone (already provided by the `#[derive(Clone)]` on the
+/// struct — every field is an `Arc`, so duplicating the overlay just
+/// bumps the reference counts). Used for sharing one overlay between
+/// `FederatedIndex` (so index() can touch it) and `LainServer`
+/// (which the tool executor dispatches against).
+
 impl VolatileOverlay {
     /// Create a new volatile overlay
     pub fn new() -> Self {
@@ -52,6 +58,17 @@ impl VolatileOverlay {
     pub fn last_update_age_secs(&self) -> f64 {
         let last = *self.last_updated.read();
         last.elapsed().as_secs_f64()
+    }
+
+    /// Bump the overlay's last-updated timestamp without changing
+    /// nodes. Used after a successful indexing pass so the freshness
+    /// indicator reflects "we just indexed" rather than "no edits
+    /// ever". The index path doesn't insert nodes through the
+    /// overlay (it writes the static graph), so without this the
+    /// freshness banner stays "stale" forever on a freshly-indexed
+    /// server.
+    pub fn touch(&self) {
+        *self.last_updated.write() = Instant::now();
     }
 
     /// Highest revision id assigned by this overlay's internal `RevisionLog`.

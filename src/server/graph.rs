@@ -873,6 +873,12 @@ impl GraphDatabase {
         Ok(())
     }
 
+    /// Top symbols by `anchor_score`. Many real codebases contain
+    /// dozens of identically-named trivial helpers (e.g. `as_str()` calls
+    /// everywhere); without dedup `find_anchors` would return the same
+    /// name 20 times in a row. We dedup by `(name, kind)` and keep the
+    /// best-scoring instance of each, so the top-N output reads as a
+    /// meaningful list of distinct anchors.
     pub fn find_anchors(&self, limit: usize) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let mut sorted: Vec<_> = graph.node_weights().cloned().collect();
@@ -881,7 +887,23 @@ impl GraphDatabase {
                 .unwrap_or(0.0)
                 .total_cmp(&a.anchor_score.unwrap_or(0.0))
         });
-        Ok(sorted.into_iter().take(limit).collect())
+        let mut by_name_kind: std::collections::HashMap<(String, String), GraphNode> =
+            std::collections::HashMap::new();
+        for n in sorted {
+            let key = (n.name.clone(), format!("{:?}", n.node_type));
+            // Insert only the first (best-scoring) instance per
+            // (name, kind). `sorted` is already descending by score.
+            by_name_kind.entry(key).or_insert(n);
+        }
+        // Re-sort the deduped set by score (the HashMap insert order
+        // is not guaranteed to be sorted).
+        let mut out: Vec<GraphNode> = by_name_kind.into_values().collect();
+        out.sort_by(|a, b| {
+            b.anchor_score
+                .unwrap_or(0.0)
+                .total_cmp(&a.anchor_score.unwrap_or(0.0))
+        });
+        Ok(out.into_iter().take(limit).collect())
     }
 
     pub fn calculate_depths(&self) -> Result<(), LainError> {

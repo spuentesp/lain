@@ -19,6 +19,7 @@ use crate::federation::repo_id::{GlobalId, RepoId};
 use crate::federation::repo_index::RepoIndex;
 use crate::federation::repo_source::RepoSource;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::overlay::VolatileOverlay;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -29,6 +30,14 @@ pub struct FederatedIndex {
     repos: RwLock<HashMap<RepoId, Arc<RepoIndex>>>,
     backend: Arc<dyn GraphBackend>,
     symbol_to_repos: DashMap<String, Vec<RepoId>>,
+    /// Shared `VolatileOverlay` installed into each `RepoIndex` on
+    /// construction via [`Self::install_overlay`]. The federation's
+    /// `VolatileOverlay` is what the server returns as the "overlay
+    /// freshness" — without this wiring every freshly-indexed server
+    /// would show "stale" forever because the indexer doesn't insert
+    /// through the overlay. `None` until [`Self::install_overlay`]
+    /// is called (the test harness never calls it).
+    federation_overlay: RwLock<Option<Arc<VolatileOverlay>>>,
 }
 
 impl FederatedIndex {
@@ -37,6 +46,19 @@ impl FederatedIndex {
             repos: RwLock::new(HashMap::new()),
             backend,
             symbol_to_repos: DashMap::new(),
+            federation_overlay: RwLock::new(None),
+        }
+    }
+
+    /// Wire the federation's shared `VolatileOverlay` into every
+    /// existing and future `RepoIndex`. Idempotent — calling twice with
+    /// different overlays swaps the active one and updates all live
+    /// repos. Called once by `build_federation_server` after the
+    /// `VolatileOverlay` is constructed.
+    pub fn install_overlay(&self, overlay: Arc<VolatileOverlay>) {
+        *self.federation_overlay.write() = Some(overlay.clone());
+        for repo in self.repos.read().values() {
+            repo.set_overlay(overlay.clone());
         }
     }
 
@@ -53,6 +75,13 @@ impl FederatedIndex {
         let per_repo_dir = data_dir.join("repos").join(id.as_str());
         std::fs::create_dir_all(&per_repo_dir).map_err(|e| LainError::Io(e.to_string()))?;
         let index = Arc::new(RepoIndex::new(source, &per_repo_dir)?);
+        // If the federation already has an overlay wired in (the
+        // production constructor installs it before the first `add_repo`),
+        // share the same Arc so a successful index() updates the
+        // server-wide freshness banner.
+        if let Some(overlay) = self.federation_overlay.read().clone() {
+            index.set_overlay(overlay);
+        }
         self.repos.write().insert(id, index);
         self.rebuild_symbol_index();
         Ok(())
@@ -109,13 +138,46 @@ impl FederatedIndex {
         // Re-key every node to its global id and upsert into the backend.
         let mut live: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(nodes.len());
+        let mut local_to_global: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(nodes.len());
         for n in &nodes {
             let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name);
             let mut rewritten = n.clone();
             rewritten.id = gid.as_str().to_string();
             live.insert(gid.as_str().to_string());
             self.backend.upsert_node(rewritten)?;
+            local_to_global.insert(n.id.clone(), gid.as_str().to_string());
         }
+
+        // Project intra-repo edges (Calls / Contains / Uses / ...) with
+        // their endpoint ids rewritten to global ids. The backend
+        // upserts are idempotent on edge identity (source+target+
+        // edge_type), so re-running `project_repo` is safe. Edges with
+        // either endpoint missing from the local-to-global map (e.g.
+        // scanner-introduced virtual edges) are skipped — they'll show
+        // up next time the scanner emits them with stable ids.
+        let db = repo.db();
+        let mut projected_edges = 0usize;
+        for edge in &db.all_edges() {
+            let Some(src) = local_to_global.get(&edge.source_id) else {
+                continue;
+            };
+            let Some(tgt) = local_to_global.get(&edge.target_id) else {
+                continue;
+            };
+            self.backend.upsert_edge(GraphEdge {
+                edge_type: edge.edge_type.clone(),
+                source_id: src.clone(),
+                target_id: tgt.clone(),
+                weight: edge.weight,
+            })?;
+            projected_edges += 1;
+        }
+        tracing::info!(
+            "[federation] {:?}: projected {} intra-repo edges",
+            id.as_str(),
+            projected_edges
+        );
 
         // Retract what this repo no longer has. Projection was upsert-only, so
         // the federated view accumulated every symbol a repo ever contained: a

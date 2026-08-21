@@ -195,6 +195,11 @@ fn build_federation_server(
         )
         .with_reindex_timeout(reindex_timeout),
     };
+    // Wire the federation's shared `VolatileOverlay` into every
+    // `RepoIndex` so a successful index pass touches the overlay and
+    // the freshness banner doesn't read as "stale" forever. See
+    // `FederatedIndex::install_overlay` for the swap semantics.
+    federation.install_overlay(Arc::new(overlay.clone()));
     let _mcp = mcp;
     if workspaces_lock.is_some() {
         info!("Lain federation server initialized with workspaces");
