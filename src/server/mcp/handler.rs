@@ -24,15 +24,13 @@ use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper::body::{Bytes, Frame};
+use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
 use parking_lot::RwLock;
 use serde_json::Map;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::net::TcpListener;
 use tracing::{debug, info};
 
 /// Response body used by the HTTP handler. Most responses are a single
@@ -55,9 +53,10 @@ use crate::server::mcp::command_center_assets::{
     STYLES_CSS,
 };
 use crate::server::mcp::definitions::{
-    defs_to_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
+    defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
+    WORKSPACE_TOOL_DEFS,
 };
-use crate::server::mcp::envelope::{arg_property_schema, revision_meta, tool_text_result};
+use crate::server::mcp::envelope::{arg_property_schema, tool_text_result};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
 /// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
@@ -1791,44 +1790,13 @@ async fn handle_request(
                             })
                             .collect();
                         if federation.is_some() {
-                            for t in FEDERATION_TOOL_DEFS {
-                                let mut props = serde_json::Map::new();
-                                for req in t.required_args {
-                                    props.insert(
-                                        (*req).to_string(),
-                                        serde_json::Value::Object(arg_property_schema(req)),
-                                    );
-                                }
-                                let input_schema = serde_json::json!({
-                                    "type": "object",
-                                    "properties": props,
-                                    "required": t.required_args,
-                                });
-                                tools.push(serde_json::json!({
-                                    "name": t.name,
-                                    "description": t.description,
-                                    "inputSchema": input_schema
-                                }));
-                            }
+                            tools.extend(defs_to_value_tools(FEDERATION_TOOL_DEFS));
                         }
-                        for t in SERVER_TOOL_DEFS {
-                            let mut props = serde_json::Map::new();
-                            for req in t.required_args {
-                                props.insert(
-                                    (*req).to_string(),
-                                    serde_json::Value::Object(arg_property_schema(req)),
-                                );
-                            }
-                            let input_schema = serde_json::json!({
-                                "type": "object",
-                                "properties": props,
-                                "required": t.required_args,
-                            });
-                            tools.push(serde_json::json!({
-                                "name": t.name,
-                                "description": t.description,
-                                "inputSchema": input_schema
-                            }));
+                        if workspaces.is_some() {
+                            tools.extend(defs_to_value_tools(WORKSPACE_TOOL_DEFS));
+                        }
+                        for t in defs_to_value_tools(SERVER_TOOL_DEFS) {
+                            tools.push(t);
                         }
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
                     }
@@ -2500,27 +2468,21 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/html; charset=utf-8")
-            .body(full_body(Bytes::from_static(
-                include_bytes!("command_center/index.html"),
-            )))
+            .body(full_body(Bytes::from_static(INDEX_HTML)))
             .unwrap());
     }
     if method == Method::GET && path == "/app.js" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/javascript; charset=utf-8")
-            .body(full_body(Bytes::from_static(
-                include_bytes!("command_center/app.js"),
-            )))
+            .body(full_body(Bytes::from_static(APP_JS)))
             .unwrap());
     }
     if method == Method::GET && path == "/styles.css" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/css; charset=utf-8")
-            .body(full_body(Bytes::from_static(
-                include_bytes!("command_center/styles.css"),
-            )))
+            .body(full_body(Bytes::from_static(STYLES_CSS)))
             .unwrap());
     }
     if method == Method::GET && path.starts_with("/assets/") {

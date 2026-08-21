@@ -212,8 +212,9 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
 ];
 
 /// Map a `&[ToolDef]` to the Vec<Tool> shape the MCP `tools/list`
-/// response expects. Both the stdio and the HTTP paths call this
-/// with their respective slice; the function itself is shared.
+/// response expects. The stdio path calls this; the HTTP path uses
+/// [`defs_to_value_tools`] because its response is a `serde_json::Value`
+/// (not a `rust_mcp_schema::Tool`).
 pub fn defs_to_tools(defs: &[ToolDef]) -> Vec<Tool> {
     defs.iter()
         .map(|d| Tool {
@@ -226,6 +227,34 @@ pub fn defs_to_tools(defs: &[ToolDef]) -> Vec<Tool> {
             meta: None,
             output_schema: None,
             title: None,
+        })
+        .collect()
+}
+
+/// Map a `&[ToolDef]` to the `serde_json::Value` shape the HTTP
+/// JSON-RPC `tools/list` arm of `handle_request` uses. Mirrors
+/// [`defs_to_tools`] so the two transports don't diverge on tool
+/// shape, descriptions, or argument schemas.
+pub fn defs_to_value_tools(defs: &[ToolDef]) -> Vec<serde_json::Value> {
+    defs.iter()
+        .map(|d| {
+            let mut props = serde_json::Map::new();
+            for req in d.required_args {
+                props.insert(
+                    (*req).to_string(),
+                    serde_json::Value::Object(arg_property_schema(req)),
+                );
+            }
+            let input_schema = serde_json::json!({
+                "type": "object",
+                "properties": props,
+                "required": d.required_args,
+            });
+            serde_json::json!({
+                "name": d.name,
+                "description": d.description,
+                "inputSchema": input_schema,
+            })
         })
         .collect()
 }

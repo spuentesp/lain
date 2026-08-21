@@ -15,7 +15,7 @@
 use crate::graph::{graph_path, GraphDatabase};
 use crate::schema::{is_type_level_target, EdgeType, GraphEdge};
 use crate::lsp::ReferenceLocation;
-use crate::server::ingest::scan::{PatternRef, StaticFileRef};
+use super::scan::{PatternRef, StaticFileRef};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 

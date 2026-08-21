@@ -4,7 +4,7 @@
 //! persistent graph, the volatile overlay, the embedder + cross-encoder,
 //! the git sensor, the LSP pool, and the tool executor. It owns the
 //! federation handle (set by `with_federation*`) and the background-sync
-//! job. The four sibling modules carry the actual work:
+//! job. The sibling modules carry the actual work:
 //!
 //! - [`config`] — `LainConfig`, `Transport`, `PRESENCE_EVENT_CHANNEL_CAPACITY`.
 //! - [`constructors`] — `LainServer::new`, the four `with_federation*`
