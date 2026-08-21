@@ -934,9 +934,11 @@ impl GraphDatabase {
     /// Top symbols by `anchor_score`. Many real codebases contain
     /// dozens of identically-named trivial helpers (e.g. `as_str()` calls
     /// everywhere); without dedup `find_anchors` would return the same
-    /// name 20 times in a row. We dedup by `(name, kind)` and keep the
+    /// name 20 times in a row. We dedup by NAME and keep the
     /// best-scoring instance of each, so the top-N output reads as a
-    /// meaningful list of distinct anchors.
+    /// meaningful list of distinct anchors. The key is the name alone,
+    /// not (name, kind): a `parse` function and a `parse` method are
+    /// the same anchor for a reader skimming the list.
     pub fn find_anchors(&self, limit: usize) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let mut sorted: Vec<_> = graph.node_weights().cloned().collect();
@@ -945,17 +947,16 @@ impl GraphDatabase {
                 .unwrap_or(0.0)
                 .total_cmp(&a.anchor_score.unwrap_or(0.0))
         });
-        let mut by_name_kind: std::collections::HashMap<(String, String), GraphNode> =
+        let mut by_name: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
         for n in sorted {
-            let key = (n.name.clone(), format!("{:?}", n.node_type));
-            // Insert only the first (best-scoring) instance per
-            // (name, kind). `sorted` is already descending by score.
-            by_name_kind.entry(key).or_insert(n);
+            // Insert only the first (best-scoring) instance per name.
+            // `sorted` is already descending by score.
+            by_name.entry(n.name.clone()).or_insert(n);
         }
         // Re-sort the deduped set by score (the HashMap insert order
         // is not guaranteed to be sorted).
-        let mut out: Vec<GraphNode> = by_name_kind.into_values().collect();
+        let mut out: Vec<GraphNode> = by_name.into_values().collect();
         out.sort_by(|a, b| {
             b.anchor_score
                 .unwrap_or(0.0)
@@ -1574,5 +1575,34 @@ mod anchor_hub_tests {
 
         let score = g.get_node(&prod.id).unwrap().unwrap().anchor_score.unwrap();
         assert_eq!(score, 0.0, "called only from tests must score 0");
+    }
+
+    /// A Function and a Method sharing a name are the same anchor for
+    /// a reader — `parse` the fn and `parse` the method showed up as
+    /// two entries on the lain repo. Dedup is by name, not (name, kind).
+    #[test]
+    fn same_name_function_and_method_dedup_to_one() {
+        let g = db("lain_test_anchor_namededup");
+        let f = func("parse", "src/a.rs", (1, 30));
+        let mut m = GraphNode::new(NodeType::Method, "parse".into(), "src/b.rs".into());
+        m.line_start = Some(1);
+        m.line_end = Some(30);
+        let hub_caller = func("caller", "src/c.rs", (1, 20));
+        let callee = func("helper", "src/util.rs", (1, 8));
+        // Give both `parse` nodes the same score-relevant shape.
+        let e1 = GraphEdge::new(EdgeType::Calls, hub_caller.id.clone(), f.id.clone());
+        let e2 = GraphEdge::new(EdgeType::Calls, hub_caller.id.clone(), m.id.clone());
+        let e3 = GraphEdge::new(EdgeType::Calls, f.id.clone(), callee.id.clone());
+        let e4 = GraphEdge::new(EdgeType::Calls, m.id.clone(), callee.id.clone());
+        g.insert_nodes_batch(&[f, m, hub_caller, callee]).unwrap();
+        for e in [e1, e2, e3, e4] {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let anchors = g.find_anchors(10).unwrap();
+        let parses = anchors.iter().filter(|n| n.name == "parse").count();
+        assert_eq!(parses, 1, "function+method `parse` must dedup to one entry");
     }
 }
