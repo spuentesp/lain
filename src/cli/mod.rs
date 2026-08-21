@@ -2,6 +2,7 @@ pub mod ask;
 pub mod dispatch;
 pub mod doctor;
 pub mod hooks;
+pub mod init;
 pub mod mcp;
 pub mod oneshot;
 pub mod query;
@@ -13,6 +14,56 @@ pub mod workspaces;
 pub use query::run_query;
 pub use ask::run_ask;
 pub use server::run_server;
+
+/// Resolve a `repos.yaml` path passed to a subcommand.
+///
+/// When the caller passes `--config PATH`, use that path verbatim.
+/// When the default `./repos.yaml` is used and the file exists,
+/// use it. When the default doesn't exist, fall back to the
+/// discoverable candidates in this order:
+///
+/// 1. `./.lain/repos.yaml` — local override (gitignored in teams
+///    that prefer per-developer federation configs).
+/// 2. `$XDG_CONFIG_HOME/lain/repos.yaml` (or
+///    `~/.config/lain/repos.yaml`) — the per-user default.
+///
+/// If none of these exist, return the original path (which the
+/// server will fail on with a clear "not found" error). This keeps
+/// the current failure mode unchanged for typos while removing the
+/// `--config ./repos.yaml` boilerplate for the common case where the
+/// operator already has a federation file at one of these locations.
+pub fn resolve_repos_config(path: &std::path::Path) -> std::path::PathBuf {
+    // If the user passed an explicit --config (not the default),
+    // respect it. We can't tell "default" from "explicit" here — the
+    // helper is only invoked when the caller wants discovery, which
+    // is exactly the default path. Callers who want to force a path
+    // pass it through unchanged.
+    if path != std::path::Path::new("./repos.yaml") {
+        return path.to_path_buf();
+    }
+    if path.exists() {
+        return path.to_path_buf();
+    }
+    let candidates = [
+        std::path::PathBuf::from("./.lain/repos.yaml"),
+        user_config_dir().join("lain/repos.yaml"),
+    ];
+    for c in candidates {
+        if c.exists() {
+            return c;
+        }
+    }
+    path.to_path_buf()
+}
+
+fn user_config_dir() -> std::path::PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return std::path::PathBuf::from(xdg);
+        }
+    }
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
+}
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -154,6 +205,24 @@ pub enum Commands {
         /// guessing."
         #[arg(long)]
         reindex_timeout: Option<u64>,
+    },
+    /// Scaffold a `repos.yaml` for the current directory. Walks up for
+    /// `.git` (same as `lain mcp`), then writes a minimal
+    /// `repos.yaml` pointing the only repo at the discovered workspace
+    /// and a per-repo `data_dir` at `./.lain/data`. The ergonomic
+    /// onboarding: `cd` into any clone, run `lain init`, run
+    /// `lain server` — no hand-written YAML.
+    ///
+    /// Fails if `./repos.yaml` already exists (refuse to clobber).
+    /// Add `--force` to overwrite. With `--print` print the would-be
+    /// file and exit (useful for piping into `tee` or for CI).
+    Init {
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        print: bool,
     },
     /// Agent pre-edit hook entry point (claim/release files).
     Hooks {

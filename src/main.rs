@@ -42,7 +42,7 @@ fn main() -> Result<()> {
                 .build()
                 .context("build tokio runtime for server subcommand")?;
             rt.block_on(lain::cli::server::run_server(
-                &config,
+                &lain::cli::resolve_repos_config(&config),
                 &transport,
                 port,
                 &log_level,
@@ -57,9 +57,9 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()
                 .context("build tokio runtime for workspaces subcommand")?;
-            rt.block_on(lain::cli::workspaces::run(action, &config))
+            rt.block_on(lain::cli::workspaces::run(action, &lain::cli::resolve_repos_config(&config)))
         }
-        Some(Commands::Repos { config, action }) => lain::cli::repos::run(action, &config),
+        Some(Commands::Repos { config, action }) => lain::cli::repos::run(action, &lain::cli::resolve_repos_config(&config)),
         Some(Commands::Query { workspace, expression }) => {
             // `query` reads `<workspace>/.lain/graph.bin`; without
             // `--workspace` it walks up for `.git` exactly like
@@ -97,6 +97,11 @@ fn main() -> Result<()> {
                 reindex_timeout.map(std::time::Duration::from_secs),
             ))
         }
+        Some(Commands::Init {
+            workspace,
+            force,
+            print,
+        }) => lain::cli::init::run_init(workspace.as_deref(), force, print),
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
         Some(Commands::Oneshot {
             workspace,
