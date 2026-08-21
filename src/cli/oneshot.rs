@@ -15,12 +15,28 @@
 //! The server process is killed after a configurable timeout
 //! (default 60s, override with `LAIN_ONESHOT_TIMEOUT=<seconds>`)
 //! because `lain mcp`'s stdio loop doesn't exit on its own.
+//!
+//! Two protocol details matter here, both learned from live hangs:
+//!
+//! 1. stdin must stay OPEN until the `tools/call` response arrives.
+//!    Closing it early makes the MCP SDK's stdio reader hit EOF and
+//!    tear down the transport; when the single-threaded `lain mcp`
+//!    runtime is busy with a startup re-index (cold or stale graph —
+//!    i.e. exactly the first-run case), the in-flight `tools/call`
+//!    loses the race against the shutdown and never responds.
+//! 2. The deadline must be enforced with `recv_timeout` on a reader
+//!    thread, not by checking a deadline after a blocking `read()` —
+//!    a silent server blocks `read()` forever and the deadline never
+//!    fires.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+/// JSON-RPC id of the `tools/call` request (initialize is id 1).
+const ID_CALL: i64 = 2;
 
 /// Run `lain mcp` as a subprocess, send one `tools/call`, print the
 /// result, and exit. Returns an error if the tool name is unknown
@@ -85,7 +101,7 @@ pub fn run_oneshot(
         .context("spawn `lain mcp`")?;
 
     {
-        let mut stdin = child.stdin.take().context("take stdin")?;
+        let stdin = child.stdin.as_mut().context("take stdin")?;
         // Minimal MCP initialize + tools/call. The MCP spec requires
         // `notifications/initialized` after initialize; we skip it (the
         // server tolerates the omission for short-lived clients).
@@ -99,62 +115,88 @@ pub fn run_oneshot(
                 "clientInfo": {"name": "lain-oneshot", "version": "0.6.0"}
             }
         });
-        let id_call: i64 = 2;
         let call = json!({
             "jsonrpc": "2.0",
-            "id": id_call,
+            "id": ID_CALL,
             "method": "tools/call",
             "params": {"name": tool, "arguments": args_obj}
         });
         writeln!(stdin, "{}", init)?;
         writeln!(stdin, "{}", call)?;
-        // Drop stdin so the server's stdio reader hits EOF after the
-        // two writes (otherwise `run_stdio` blocks on more input).
+        // stdin stays OPEN (see module docs): closing it now would let
+        // the server's transport shut down before our tools/call is
+        // answered whenever a startup re-index keeps the runtime busy.
     }
 
-    // Read stdout concurrently with a timeout. `wait_with_output`
-    // would block until the process exits; we use `try_wait` in a
-    // small loop so we can kill the child after the deadline even if
-    // it's still alive (which `run_stdio` always is — its stdio loop
-    // doesn't exit on EOF).
+    // Reader thread: stream stdout lines until the tools/call response
+    // shows up, then forward it. Reading line-by-line (not a fixed
+    // byte cap) so large responses survive intact.
     let stdout = child.stdout.take().context("take stdout")?;
-    let mut reader = std::io::Read::take(stdout, 4096);
-    let mut buf = String::new();
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(timeout_secs);
-    loop {
-        // Best-effort read with a short timeout via poll. If the
-        // server is still streaming, we get whatever is buffered; if
-        // EOF (unlikely; the server loops), we break.
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break, // EOF or IO error: server gone
+                Ok(_) => {
+                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                        if v.get("id").and_then(|i| i.as_i64()) == Some(ID_CALL) {
+                            let _ = tx.send(v);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Drain stderr on its own thread so a chatty child (RUST_LOG=debug)
+    // can't block on a full pipe buffer; the captured text is attached
+    // to error messages for diagnosis.
+    let stderr = child.stderr.take().context("take stderr")?;
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
         use std::io::Read;
-        let mut tmp = [0u8; 4096];
-        match std::io::Read::read(&mut reader, &mut tmp) {
-            Ok(0) => break, // EOF
-            Ok(n) => buf.push_str(&String::from_utf8_lossy(&tmp[..n])),
-            Err(_) => break,
+        let mut s = String::new();
+        let _ = stderr.take(256 * 1024).read_to_string(&mut s);
+        let _ = err_tx.send(s);
+    });
+
+    let deadline = std::time::Duration::from_secs(timeout_secs);
+    let tool_response = match rx.recv_timeout(deadline) {
+        Ok(v) => v,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stderr_text = err_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .unwrap_or_default();
+            return Err(anyhow!(
+                "no tools/call response from `lain mcp` within {timeout_secs}s \
+                 (server stderr: {})",
+                if stderr_text.trim().is_empty() { "<empty>".into() } else { stderr_text }
+            ));
         }
-        if std::time::Instant::now() >= deadline {
-            break;
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stderr_text = err_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .unwrap_or_default();
+            return Err(anyhow!(
+                "`lain mcp` exited without answering tools/call \
+                 (server stderr: {})",
+                if stderr_text.trim().is_empty() { "<empty>".into() } else { stderr_text }
+            ));
         }
-        // Brief sleep so we don't spin-busy-read.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    // Kill the server regardless of whether we got a response.
+    };
+
+    // Response in hand: now the server is disposable.
     let _ = child.kill();
     let _ = child.wait();
-
-    // Find the tools/call response (skip the initialize response).
-    let id_call: i64 = 2;
-    let tool_response = buf
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find(|v| v.get("id").and_then(|i| i.as_i64()) == Some(id_call))
-        .ok_or_else(|| {
-            anyhow!(
-                "no tools/call response from mcp within {timeout_secs}s; raw output:\n{buf}"
-            )
-        })?;
 
     if let Some(err) = tool_response.get("error") {
         return Err(anyhow!("tool error: {err}"));
