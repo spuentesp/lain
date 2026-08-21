@@ -834,13 +834,13 @@ impl GraphDatabase {
         self.check_writable()?;
         let mut graph = self.graph.write();
 
-        // Two-pass: compute raw anchor ratios, find the corpus-wide max,
+        // Two-pass: compute raw hub scores, find the corpus-wide max,
         // then normalize every node so the top symbol scores 100 and
         // everything else scales accordingly.
         //
-        // Without this normalization, anchor_score = fan_in / (fan_out+1)
-        // grows unbounded as the corpus grows (we've observed values up
-        // to 1063 in production). That makes the search ranking
+        // Without this normalization the raw score grows unbounded as
+        // the corpus grows (we've observed values up to 1063 in
+        // production). That makes the search ranking
         // `sim + anchor_weight * anchor` anchor-dominated, hiding
         // semantically better matches and producing different rankings
         // across reindexes of the same code.
@@ -854,13 +854,56 @@ impl GraphDatabase {
         //     normalization in search.rs
         let indices: Vec<_> = graph.node_indices().collect();
 
-        // Pass 1: compute raw ratios, find max
+        // Pass 1: compute raw hub scores, find max.
+        //
+        // Hub semantics (spec 2026-08-21-anchor-hub-scoring-design):
+        // an anchor is an ORCHESTRATION hub — called by many
+        // (calls_in), coordinating many (calls_out), with a real
+        // body (size_factor). Only Calls edges count: the old
+        // fan_in/(fan_out+1) counted every edge type (including
+        // Contains from the parent file) and actively punished
+        // fan_out, which is backwards for hubs — it put 1-line
+        // helpers like `as_str` at the top of find_anchors.
         let mut max_raw: f32 = 0.0;
         let mut raws: Vec<(petgraph::graph::NodeIndex, f32)> = Vec::with_capacity(indices.len());
         for idx in &indices {
-            let fan_in = graph.neighbors_directed(*idx, Direction::Incoming).count() as f32;
-            let fan_out = graph.neighbors_directed(*idx, Direction::Outgoing).count() as f32;
-            let raw = fan_in / (fan_out + 1.0);
+            let node = &graph[*idx];
+            // Test code is hub-shaped (fixtures call everything and are
+            // called by every test) but anchors are entry points into
+            // the PRODUCT. Test-path symbols score 0, and Calls edges
+            // with a test-path endpoint don't count toward fan-in/out
+            // either (fifty `test_*` callers don't make `default` an
+            // orchestration hub). Inline `#[cfg(test)]` modules inside
+            // regular src files are only detectable via the
+            // `*_tests.rs` / `tests.rs` file-stem conventions.
+            if is_test_path(&node.path) {
+                raws.push((*idx, 0.0));
+                continue;
+            }
+            let raw = match node.node_type {
+                NodeType::Function | NodeType::Method => {
+                    let calls_in = graph
+                        .edges_directed(*idx, Direction::Incoming)
+                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                        .filter(|e| !is_test_path(&graph[e.source()].path))
+                        .count() as f32;
+                    let calls_out = graph
+                        .edges_directed(*idx, Direction::Outgoing)
+                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                        .filter(|e| !is_test_path(&graph[e.target()].path))
+                        .count() as f32;
+                    let body_lines = match (node.line_start, node.line_end) {
+                        (Some(s), Some(e)) => e.saturating_sub(s) as f32 + 1.0,
+                        _ => 1.0,
+                    };
+                    let size_factor = (body_lines / 8.0).min(1.0);
+                    // log2(1 + calls_out): a leaf that calls nothing is
+                    // not an orchestration hub and scores 0 — no matter
+                    // how many callers it has (the `as_str` problem).
+                    calls_in * (1.0 + calls_out).log2() * size_factor
+                }
+                _ => 0.0,
+            };
             if raw > max_raw {
                 max_raw = raw;
             }
@@ -1175,6 +1218,21 @@ impl GraphDatabase {
     }
 }
 
+/// Test code is hub-shaped (fixtures call everything, every test calls
+/// fixtures) but anchors are entry points into the PRODUCT. Detect by
+/// path conventions: a `tests/` directory component, or the Rust
+/// `*_tests.rs` / `*_test.rs` / `tests.rs` file-stem conventions used
+/// for `#[cfg(test)]` modules under `src/`. Inline cfg(test) modules
+/// in regular src files are not detectable by path.
+fn is_test_path(path: &str) -> bool {
+    if path.split('/').any(|c| c == "tests") {
+        return true;
+    }
+    let stem = path.rsplit('/').next().unwrap_or(path);
+    let stem = stem.strip_suffix(".rs").unwrap_or(stem);
+    stem == "tests" || stem.ends_with("_tests") || stem.ends_with("_test")
+}
+
 #[cfg(test)]
 mod replace_tests {
     use super::*;
@@ -1353,5 +1411,168 @@ mod freshness_tests {
         // A current file must produce no banner — a note on every answer is
         // noise, and noise gets ignored.
         assert!(g.freshness(&ws, "src/b.rs").note("src/b.rs").is_none());
+    }
+}
+
+#[cfg(test)]
+mod anchor_hub_tests {
+    use super::*;
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    fn func(name: &str, path: &str, lines: (u32, u32)) -> GraphNode {
+        let mut n = GraphNode::new(NodeType::Function, name.into(), path.into());
+        n.line_start = Some(lines.0);
+        n.line_end = Some(lines.1);
+        n
+    }
+
+    /// A trivial 1-line helper with 20 callers must rank BELOW a
+    /// 30-line hub with 5 callers and 10 callees. This is the
+    /// `as_str` problem: the old fan_in/(fan_out+1) formula put
+    /// the helper on top; hub scoring must not.
+    #[test]
+    fn hub_outranks_trivial_helper() {
+        let g = db("lain_test_anchor_hub");
+        let helper = func("as_str", "src/util.rs", (10, 10));
+        let hub = func("orchestrate", "src/core.rs", (1, 30));
+        let mut nodes = vec![helper.clone(), hub.clone()];
+        let mut edges = Vec::new();
+        for i in 0..20 {
+            let caller = func(&format!("caller{i}"), "src/a.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), helper.id.clone()));
+            nodes.push(caller);
+        }
+        for i in 0..5 {
+            let caller = func(&format!("hubcaller{i}"), "src/b.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), hub.id.clone()));
+            nodes.push(caller);
+        }
+        for i in 0..10 {
+            let callee = func(&format!("callee{i}"), "src/c.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, hub.id.clone(), callee.id.clone()));
+            nodes.push(callee);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        for e in edges {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let helper_score = g.get_node(&helper.id).unwrap().unwrap().anchor_score.unwrap();
+        let hub_score = g.get_node(&hub.id).unwrap().unwrap().anchor_score.unwrap();
+        assert!(
+            hub_score > helper_score,
+            "hub ({hub_score}) should outrank trivial helper ({helper_score})"
+        );
+        assert_eq!(hub_score, 100.0, "hub is the corpus max, normalizes to 100");
+    }
+
+    /// Types/structs/namespaces never rank as anchors — the handler
+    /// filters them out anyway, so the scorer aligns with display.
+    #[test]
+    fn non_functions_score_zero() {
+        let g = db("lain_test_anchor_nonfn");
+        let s = GraphNode::new(NodeType::Struct, "Config".into(), "src/cfg.rs".into());
+        let caller = func("use_cfg", "src/a.rs", (1, 10));
+        let edge = GraphEdge::new(EdgeType::Calls, caller.id.clone(), s.id.clone());
+        let sid = s.id.clone();
+        g.insert_nodes_batch(&[s, caller]).unwrap();
+        g.upsert_edge(edge).unwrap();
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&sid).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "struct must score 0");
+    }
+
+    /// A leaf utility called by everyone but calling nothing is NOT an
+    /// orchestration hub: calls_out=0 must zero the score. Live check
+    /// on the lain repo showed `as_str` (91 callers, 0 callees) still
+    /// ranking top-3 when the log used `2 +` (factor 1 for leaves).
+    #[test]
+    fn leaf_utility_scores_zero() {
+        let g = db("lain_test_anchor_leaf");
+        let leaf = func("as_str", "src/util.rs", (1, 10));
+        let mut nodes = vec![leaf.clone()];
+        let mut edges = Vec::new();
+        for i in 0..50 {
+            let caller = func(&format!("caller{i}"), "src/a.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), leaf.id.clone()));
+            nodes.push(caller);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        for e in edges {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&leaf.id).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "leaf with calls_out=0 must score 0");
+    }
+
+    /// Test helpers are hubs of the test suite, not of the product.
+    /// Live check: `make_test_graph` (tests/common) ranked #1 on the
+    /// lain repo. Symbols under a `tests/` path never rank as anchors,
+    /// and neither do the `*_tests.rs` / `tests.rs` file-stem
+    /// conventions used for `#[cfg(test)]` modules under src/.
+    #[test]
+    fn test_code_scores_zero() {
+        let g = db("lain_test_anchor_testcode");
+        let test_hub = func("make_test_graph", "tests/common/mod.rs", (1, 60));
+        let cfg_test_hub = func("make_test_graph", "src/server/graph_tests.rs", (1, 60));
+        let caller = func("a_test", "tests/foo.rs", (1, 20));
+        let callee = func("helper", "src/util.rs", (1, 8));
+        let e1 = GraphEdge::new(EdgeType::Calls, caller.id.clone(), test_hub.id.clone());
+        let e2 = GraphEdge::new(EdgeType::Calls, test_hub.id.clone(), callee.id.clone());
+        let e3 = GraphEdge::new(EdgeType::Calls, caller.id.clone(), cfg_test_hub.id.clone());
+        let e4 = GraphEdge::new(EdgeType::Calls, cfg_test_hub.id.clone(), callee.id.clone());
+        let tid = test_hub.id.clone();
+        let cid = cfg_test_hub.id.clone();
+        g.insert_nodes_batch(&[test_hub, cfg_test_hub, caller, callee]).unwrap();
+        for e in [e1, e2, e3, e4] {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&tid).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "tests/ dir symbol must score 0");
+        let score = g.get_node(&cid).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "*_tests.rs (cfg(test) module) must score 0");
+    }
+
+    /// Calls FROM test code don't make a production function an
+    /// orchestration hub. Live check: `Default::default` impls ranked
+    /// top-3 because fifty `test_*` functions call them.
+    #[test]
+    fn calls_from_test_code_do_not_count() {
+        let g = db("lain_test_anchor_testcallers");
+        let prod = func("default", "src/config.rs", (1, 15));
+        let callee = func("helper", "src/util.rs", (1, 8));
+        let mut nodes = vec![prod.clone(), callee.clone()];
+        // calls_out = 1 so the leaf rule alone can't zero the score;
+        // only the test-caller filter can.
+        let mut edges = vec![GraphEdge::new(EdgeType::Calls, prod.id.clone(), callee.id.clone())];
+        for i in 0..30 {
+            let tcaller = func(&format!("test_caller{i}"), "tests/it.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, tcaller.id.clone(), prod.id.clone()));
+            nodes.push(tcaller);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        for e in edges {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&prod.id).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "called only from tests must score 0");
     }
 }

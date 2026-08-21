@@ -32,17 +32,29 @@ compute-then-normalize structure:
 - Only `NodeType::Function` / `NodeType::Method` get a nonzero score
   (aligns scoring with the handler-side filter in
   `tools/handlers/metrics.rs`).
+- Symbols under test paths score 0 — test fixtures are hub-shaped but
+  anchors are entry points into the product. Detection by path
+  convention: a `tests/` directory component, or the `*_tests.rs` /
+  `*_test.rs` / `tests.rs` file stems used for `#[cfg(test)]` modules
+  under `src/` (live check: `make_test_graph` lives in
+  `src/server/graph_tests.rs`). Calls edges with a test-path endpoint
+  don't count toward fan-in/out either — fifty `test_*` callers don't
+  make `Default::default` an orchestration hub. Inline `#[cfg(test)]`
+  modules in regular src files are not detectable by path.
 - `calls_in` / `calls_out`: incoming/outgoing edges restricted to
   `EdgeType::Calls`.
 - `body_lines = line_end - line_start + 1`; missing line info → 1.
 - `size_factor = min(1.0, body_lines / 8.0)`.
-- `raw = calls_in * log2(2 + calls_out) * size_factor`
-  - `2 +` inside the log so `calls_out = 0` yields factor 1 (not 0).
+- `raw = calls_in * log2(1 + calls_out) * size_factor`
+  - `log2(1 + calls_out)`: a leaf that calls nothing scores 0 — live
+    verification showed `2 +` left pure utilities (`as_str`, 91
+    callers, 0 callees) in the top 3.
 - Percentile normalization to 100 over the corpus max, unchanged.
 
 Worked example: `as_str` (calls_in 40, calls_out 1, 1 line) →
-40 × 1.58 × 0.125 ≈ 7.9. A hub (calls_in 8, calls_out 12, 40 lines) →
-8 × 3.81 × 1.0 ≈ 30.5. The hub wins.
+40 × 1.0 × 0.125 = 5. A pure leaf (calls_in 91, calls_out 0) → 0.
+A hub (calls_in 8, calls_out 12, 40 lines) → 8 × 3.70 × 1.0 ≈ 29.6.
+The hub wins.
 
 ## Explicitly unchanged
 
