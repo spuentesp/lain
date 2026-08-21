@@ -98,6 +98,15 @@ fn main() -> Result<()> {
             ))
         }
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
+        Some(Commands::Oneshot {
+            workspace,
+            tool,
+            args,
+        }) => lain::cli::oneshot::run_oneshot(
+            workspace.as_deref(),
+            &tool,
+            &args,
+        ),
         Some(Commands::Doctor) => {
             // `doctor` returns its own exit code (0 clean, 1 hard
             // failure). Anything else (e.g. a network error from

@@ -1,13 +1,14 @@
-pub mod query;
 pub mod ask;
-pub mod server;
-pub mod workspaces;
-pub mod repos;
 pub mod dispatch;
-pub mod signal;
-pub mod hooks;
 pub mod doctor;
+pub mod hooks;
 pub mod mcp;
+pub mod oneshot;
+pub mod query;
+pub mod repos;
+pub mod server;
+pub mod signal;
+pub mod workspaces;
 
 pub use query::run_query;
 pub use ask::run_ask;
@@ -93,6 +94,33 @@ pub enum Commands {
         #[arg(long)]
         workspace: Option<PathBuf>,
         expression: String,
+    },
+    /// One-shot MCP query: boots a transient `lain mcp` server
+    /// (stdin/stdout), sends a single `tools/call` for the named
+    /// tool, prints the result as a pretty table, and exits. The
+    /// ergonomic shortcut for "I just want to grep the symbols
+    /// without keeping a server alive".
+    ///
+    /// Built-in shortcuts:
+    /// - `find_anchors` — top symbols by anchor score (deduped)
+    /// - `get_blast_radius <symbol>` — incoming callers of `<symbol>`
+    /// - `find_dead_code` — symbols with no incoming call edges
+    /// - `get_call_chain <from> <to>` — call path between two symbols
+    ///
+    /// Any tool name registered in the stdio MCP server works.
+    /// Arguments after the tool name are passed as the tool's
+    /// `arguments` object (positional, in the order the tool
+    /// declares them).
+    Oneshot {
+        /// Workspace root (default: walk up from cwd for `.git`).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Tool name, e.g. `find_anchors` or `get_blast_radius`.
+        tool: String,
+        /// Positional arguments forwarded as the tool's `arguments`.
+        /// Numbers are parsed as integers; everything else as strings.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Single-user LLM-assisted query.
     Ask {
