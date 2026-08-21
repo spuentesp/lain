@@ -510,7 +510,22 @@ impl GraphDatabase {
         Ok(())
     }
 
+    /// Insert an edge idempotently: same `(source, target, edge_type)`
+    /// triple is added at most once. `project_repo` runs on every
+    /// add_repo / reload / watcher-triggered index, so without dedup
+    /// the federation backend accumulates N copies of each edge over
+    /// the lifetime of the server (observed: `total_edges` = 127k
+    /// instead of the per-repo 15k on the lain repo itself).
     pub fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
+        let graph = self.graph.read();
+        let source_idx = self.index_map.get(&edge.source_id).map(|r| *r.value());
+        let target_idx = self.index_map.get(&edge.target_id).map(|r| *r.value());
+        if let (Some(s), Some(t)) = (source_idx, target_idx) {
+            if graph.edges_connecting(s, t).any(|e| e.weight().edge_type == edge.edge_type) {
+                return Ok(());
+            }
+        }
+        drop(graph);
         self.insert_edge(&edge)
     }
 

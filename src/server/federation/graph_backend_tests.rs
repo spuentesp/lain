@@ -53,6 +53,18 @@ impl GraphBackend for HashMapBackend {
         self.edges.write().unwrap().push(edge);
         Ok(())
     }
+    fn upsert_edges_batch(&self, edges: &[GraphEdge]) -> Result<(), LainError> {
+        let mut g = self.edges.write().unwrap();
+        g.extend_from_slice(edges);
+        Ok(())
+    }
+    fn upsert_nodes_batch(&self, nodes: &[GraphNode]) -> Result<(), LainError> {
+        let mut g = self.nodes.write().unwrap();
+        for node in nodes {
+            g.insert(node.id.clone(), node.clone());
+        }
+        Ok(())
+    }
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError> {
         Ok(self.nodes.read().unwrap().get(global_id).cloned())
     }

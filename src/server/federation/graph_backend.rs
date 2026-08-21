@@ -16,6 +16,20 @@ pub trait GraphBackend: Send + Sync {
         name: &str,
     ) -> Result<(), LainError>;
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError>;
+    /// Bulk-upsert nodes with a single disk save at the end. The
+    /// federation's `project_repo` path inserts one node per repo
+    /// symbol (~3k+ for the lain repo); calling `upsert_node` per
+    /// node would do ~3k disk syncs. This batches the inserts and
+    /// saves once. Idempotency is the same as `upsert_node` — the
+    /// backend deduplicates on global id.
+    fn upsert_nodes_batch(&self, nodes: &[GraphNode]) -> Result<(), LainError>;
+    /// Bulk-upsert edges with a single disk save at the end. The
+    /// federation's `project_repo` path inserts one edge per intra-repo
+    /// edge (~10k+ for the lain repo); calling `upsert_edge` per-edge
+    /// would do ~10k disk syncs. This batches the inserts and saves
+    /// once. Idempotency is the same as `upsert_edge` — backend
+    /// deduplicates on source+target+type.
+    fn upsert_edges_batch(&self, edges: &[GraphEdge]) -> Result<(), LainError>;
     /// Remove nodes by global id, with their incident edges.
     ///
     /// `project_repo` upserts a repo's nodes but had no way to retract one, so
@@ -121,6 +135,28 @@ impl GraphBackend for PetgraphBackend {
 
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.db.upsert_edge(edge)?;
+        self.db.save_to_disk_sync()
+    }
+
+    fn upsert_edges_batch(&self, edges: &[GraphEdge]) -> Result<(), LainError> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        for edge in edges {
+            self.db.upsert_edge(edge.clone())?;
+        }
+        self.db.save_to_disk_sync()
+    }
+
+    fn upsert_nodes_batch(&self, nodes: &[GraphNode]) -> Result<(), LainError> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        for node in nodes {
+            let global_id = GlobalId::parse(&node.id)?;
+            self.db.upsert_node(node.clone())?;
+            self.index.insert(node.id.clone(), global_id);
+        }
         self.db.save_to_disk_sync()
     }
 

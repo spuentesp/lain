@@ -140,14 +140,24 @@ impl FederatedIndex {
             std::collections::HashSet::with_capacity(nodes.len());
         let mut local_to_global: std::collections::HashMap<String, String> =
             std::collections::HashMap::with_capacity(nodes.len());
+        let mut batch_nodes: Vec<crate::schema::GraphNode> = Vec::with_capacity(nodes.len());
         for n in &nodes {
             let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name);
             let mut rewritten = n.clone();
             rewritten.id = gid.as_str().to_string();
             live.insert(gid.as_str().to_string());
-            self.backend.upsert_node(rewritten)?;
+            batch_nodes.push(rewritten);
             local_to_global.insert(n.id.clone(), gid.as_str().to_string());
         }
+        // Batch upsert: one disk save at the end instead of ~N syncs.
+        // The per-node path saved on every upsert and wedged the
+        // loader for seconds-to-minutes on large repos (3k+ nodes).
+        self.backend.upsert_nodes_batch(&batch_nodes)?;
+        tracing::info!(
+            "[federation] {:?}: projected {} nodes",
+            id.as_str(),
+            batch_nodes.len()
+        );
 
         // Project intra-repo edges (Calls / Contains / Uses / ...) with
         // their endpoint ids rewritten to global ids. The backend
@@ -156,8 +166,12 @@ impl FederatedIndex {
         // either endpoint missing from the local-to-global map (e.g.
         // scanner-introduced virtual edges) are skipped — they'll show
         // up next time the scanner emits them with stable ids.
+        //
+        // BATCH: ~10k edges is normal for a large repo. The per-edge
+        // upsert saves the backend graph on every call, which would
+        // take minutes. Batch all the writes and save once.
         let db = repo.db();
-        let mut projected_edges = 0usize;
+        let mut batch: Vec<crate::schema::GraphEdge> = Vec::new();
         for edge in &db.all_edges() {
             let Some(src) = local_to_global.get(&edge.source_id) else {
                 continue;
@@ -165,18 +179,18 @@ impl FederatedIndex {
             let Some(tgt) = local_to_global.get(&edge.target_id) else {
                 continue;
             };
-            self.backend.upsert_edge(GraphEdge {
+            batch.push(crate::schema::GraphEdge {
                 edge_type: edge.edge_type.clone(),
                 source_id: src.clone(),
                 target_id: tgt.clone(),
                 weight: edge.weight,
-            })?;
-            projected_edges += 1;
+            });
         }
+        self.backend.upsert_edges_batch(&batch)?;
         tracing::info!(
             "[federation] {:?}: projected {} intra-repo edges",
             id.as_str(),
-            projected_edges
+            batch.len()
         );
 
         // Retract what this repo no longer has. Projection was upsert-only, so
