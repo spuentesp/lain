@@ -570,23 +570,22 @@ fn run_resolver_command(argv: &[String], program: &str) -> Option<std::path::Pat
 
 /// Resolve `program` for `profile`, falling back to the bare name.
 ///
-/// Cached per process: `PATH` and the installed toolchains don't change
-/// under a running server, and the resolver steps spawn processes.
+/// Deliberately not cached. A cache keyed on the program name was tried
+/// and removed: it pinned *failures* as well as successes, so a server
+/// that had been up since before the user installed their toolchain
+/// would keep reporting it missing until restart — and these servers
+/// are known to run for days. It also ignored `PATH`, so a process
+/// whose environment changed kept answering from the old one.
+///
+/// The cost it saved is negligible. One program is resolved per
+/// `run_build` / `run_tests` invocation, and the common case — the
+/// program is on `PATH` — spawns nothing at all. Only a genuine miss
+/// reaches the resolver commands, and that is a few milliseconds
+/// against a build measured in seconds.
 pub fn resolve_program(program: &str, profile: Option<&ToolchainProfile>) -> String {
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = format!("{}::{program}", profile.map(|p| p.name.as_str()).unwrap_or(""));
-    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
-        return hit;
-    }
-    let resolved = resolve_in(&lookup_for(program, profile), program, &run_resolver_command)
+    resolve_in(&lookup_for(program, profile), program, &run_resolver_command)
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| program.to_string());
-    if let Ok(mut c) = cache.lock() {
-        c.insert(key, resolved.clone());
-    }
-    resolved
+        .unwrap_or_else(|| program.to_string())
 }
 
 #[cfg(test)]

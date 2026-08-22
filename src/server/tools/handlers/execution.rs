@@ -57,7 +57,37 @@ fn parse_command(cmd_str: &str, profile: Option<&ToolchainProfile>) -> (Command,
     for arg in parts {
         cmd.arg(arg);
     }
+    put_toolchain_on_child_path(&mut cmd, &resolved);
     (cmd, program.to_string())
+}
+
+/// Prepend the resolved binary's own directory to the child's `PATH`.
+///
+/// Resolving the program we spawn is necessary but not sufficient:
+/// toolchains shell out to their siblings. Found end to end — with a
+/// toolchain-free `PATH`, `cargo` resolved and ran, then died with
+/// `could not execute process `rustc -vV` (never executed)`, because
+/// the child inherited the server's `PATH` and `rustc` was not on it.
+/// The same shape applies to `npm` → `node` and `pytest` → `python`.
+///
+/// Prepending, not replacing: the rest of the environment stays intact,
+/// and a toolchain the operator deliberately put on `PATH` still wins
+/// for anything this directory does not provide.
+pub(crate) fn put_toolchain_on_child_path(cmd: &mut Command, resolved: &str) {
+    let Some(dir) = Path::new(resolved).parent() else {
+        return;
+    };
+    // A bare name means resolution found nothing; there is no directory
+    // worth adding, and the spawn error will say so.
+    if dir.as_os_str().is_empty() {
+        return;
+    }
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs = vec![dir.to_path_buf()];
+    dirs.extend(std::env::split_paths(&existing));
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        cmd.env("PATH", joined);
+    }
 }
 
 pub async fn run_build(
@@ -315,6 +345,46 @@ mod spawn_tests {
         let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         let msg = spawn_error("cargo", Path::new("/ws"), e).to_string();
         assert!(msg.contains("cargo") && msg.contains("/ws"), "{msg}");
+    }
+
+    /// Resolving the program is not enough: toolchains shell out to
+    /// their siblings. Found end to end — `cargo` resolved and ran with
+    /// a toolchain-free PATH, then died with
+    /// `could not execute process `rustc -vV``, because the child
+    /// inherited the server's PATH.
+    #[test]
+    fn the_resolved_toolchain_directory_is_on_the_child_path() {
+        let mut cmd = Command::new("true");
+        put_toolchain_on_child_path(&mut cmd, "/opt/toolchain/bin/cargo");
+        let path = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string())
+            .expect("PATH must be set on the child");
+        assert!(
+            path.starts_with("/opt/toolchain/bin:"),
+            "the toolchain's own directory must come first so siblings resolve: {path}"
+        );
+        assert!(
+            path.len() > "/opt/toolchain/bin:".len(),
+            "the existing PATH must be preserved, not replaced: {path}"
+        );
+    }
+
+    /// An unresolved program is a bare name with no directory, so there
+    /// is nothing worth prepending and the spawn error should speak.
+    #[test]
+    fn an_unresolved_program_leaves_the_child_path_alone() {
+        let mut cmd = Command::new("true");
+        put_toolchain_on_child_path(&mut cmd, "go");
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .all(|(k, _)| k != std::ffi::OsStr::new("PATH")),
+            "no directory means no PATH override"
+        );
     }
 
     #[test]

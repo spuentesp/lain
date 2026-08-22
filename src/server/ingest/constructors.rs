@@ -349,6 +349,7 @@ fn build_federation_server(
 
     let now = SystemTime::now();
     let server = LainServer {
+        presence_state_seen: Arc::new(Mutex::new(None)),
         config: LainConfig {
             workspace: ws,
             memory_path: mem_path.clone(),
@@ -479,6 +480,7 @@ impl LainServer {
             EventsLog::open(&events_log_path).expect("open events.jsonl"),
         );
         let server = Self {
+            presence_state_seen: Arc::new(Mutex::new(None)),
             config,
             graph,
             overlay,

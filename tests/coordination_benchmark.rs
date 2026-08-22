@@ -246,6 +246,10 @@ fn concurrent_agents_contention_benchmark() {
             )
         })
         .collect();
+    // Same agents drive the deterministic hold phase after the loop,
+    // and hand the file back afterwards.
+    let creds_for_hold = creds.clone();
+    let creds_for_release = creds.clone();
 
     let mut handles = Vec::new();
     for (agent_id, token) in creds {
@@ -296,12 +300,64 @@ fn concurrent_agents_contention_benchmark() {
     }
 
     println!("\n=== Concurrent coordination ({AGENTS} agents x {CYCLES} cycles, {FILES} shared files) ===");
-    println!("total conflicts detected: {total_conflicts}");
+    println!("claim/release cycles, incidental conflicts: {total_conflicts}");
     report("claim_files (contended)", &mut all);
-    assert!(
-        total_conflicts > 0,
-        "expected real advisory conflicts under this contention pattern"
+
+    // The loop above claims and releases immediately, so whether any two
+    // agents overlap is a race — and presence calls are now serialized
+    // behind the state-file lock, which closes that window most of the
+    // time. Asserting on it tested the scheduler, not the product: it
+    // passed when threads happened to interleave and failed when they
+    // did not.
+    //
+    // Conflict detection is a correctness property, so test it as one:
+    // every agent claims the same file and nobody releases. Exactly one
+    // may hold it; everyone else must be told who does.
+    let mut handles = Vec::new();
+    for (agent_id, token) in creds_for_hold {
+        let server = server.clone();
+        handles.push(std::thread::spawn(move || {
+            let v = run_claim_files(
+                &server,
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "session_token": token,
+                    "files": [{"path": "held.rs", "intent": "edit"}],
+                }),
+            )
+            .expect("claim_files must not error under contention");
+            (
+                v["granted"].as_array().unwrap().len(),
+                v["conflicts"].as_array().unwrap().len(),
+            )
+        }));
+    }
+    let (mut held, mut refused) = (0usize, 0usize);
+    for h in handles {
+        let (g, c) = h.join().expect("agent thread panicked");
+        held += g;
+        refused += c;
+    }
+    println!("contended hold: {held} granted, {refused} conflicted");
+    assert_eq!(held, 1, "exactly one agent may hold a contended file");
+    assert_eq!(
+        refused,
+        AGENTS - 1,
+        "every other agent must be told who holds it"
     );
+
+    // Hand `held.rs` back, so the drain assertion below still measures
+    // what it was written to measure: no claim leaked from contention.
+    for (agent_id, token) in &creds_for_release {
+        let _ = run_release_files(
+            &server,
+            serde_json::json!({
+                "agent_id": agent_id,
+                "session_token": token,
+                "files": [{"path": "held.rs"}],
+            }),
+        );
+    }
 
     // Everyone released at the end of their last cycle: the occupancy map
     // must drain back to empty — no leaked claims from the contention.

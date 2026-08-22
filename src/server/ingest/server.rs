@@ -41,6 +41,11 @@ use tracing::info;
 
 #[derive(Clone)]
 pub struct LainServer {
+    /// Modification time of the presence state file as of our last
+    /// load. Lets `with_shared_presence` skip re-reading a file no peer
+    /// has touched — the reload exists to see other processes' writes,
+    /// and re-parsing our own is pure cost on a hot path.
+    pub(crate) presence_state_seen: Arc<Mutex<Option<std::time::SystemTime>>>,
     pub config: LainConfig,
     pub graph: GraphDatabase,
     pub overlay: VolatileOverlay,
@@ -548,14 +553,14 @@ impl LainServer {
     pub fn with_shared_presence<T>(&self, f: impl FnOnce() -> T) -> T {
         let path = self.state_path();
         let _lock = crate::server::state_lock::acquire(&path);
-        if let Err(e) = self.load_state() {
-            tracing::debug!("presence refresh skipped: {e}");
-        }
-        let out = f();
-        if let Err(e) = self.save_state() {
-            tracing::warn!("presence save failed: {e}");
-        }
-        out
+        self.refresh_shared_presence();
+        // No explicit save here: `install_persist_callback` already
+        // writes on every mutation, and only on an actual mutation.
+        // Saving again wrote the whole state file a second time on
+        // every presence call — including read-only ones that changed
+        // nothing — which showed up as a ~300ms p99 on contended
+        // claims.
+        f()
     }
 
     /// Read-only half of [`Self::with_shared_presence`]: refresh from
@@ -564,9 +569,23 @@ impl LainServer {
     /// friends, where a stale read is the whole bug and a write would
     /// be pure contention.
     pub fn refresh_shared_presence(&self) {
+        let path = self.state_path();
+        // The reload exists to observe *other processes'* writes. If the
+        // file has not changed since we last read it, there is nothing
+        // to observe and parsing it again is wasted work on a path
+        // every presence call goes through.
+        let current = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        {
+            let seen = self.presence_state_seen.lock();
+            if current.is_some() && *seen == current {
+                return;
+            }
+        }
         if let Err(e) = self.load_state() {
             tracing::debug!("presence refresh skipped: {e}");
+            return;
         }
+        *self.presence_state_seen.lock() = current;
     }
 
     /// Install a persist callback on `presence` and `occupancy` that
