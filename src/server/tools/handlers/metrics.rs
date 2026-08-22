@@ -344,7 +344,9 @@ pub fn find_dead_code(
 
     let shown: Vec<_> = match like {
         Some(query) => {
-            let query_emb = embedder.embed(query)?;
+            // A user query, so it takes the prefix — this call site
+            // used to embed it raw against a corpus embedded plain.
+            let query_emb = embedder.embed_query(query)?;
             const SEMANTIC_THRESHOLD: f32 = 0.3;
             report
                 .unreferenced

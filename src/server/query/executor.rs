@@ -270,8 +270,10 @@ impl<'a> Executor<'a> {
             return Ok(());
         }
 
-        // Embed the query once
-        let query_emb = self.embedder.embed(&sem.like)
+        // Embed the query once. `embed_query`, not `embed`: this is a
+        // user query and must carry the configured prefix, which this
+        // call site silently omitted.
+        let query_emb = self.embedder.embed_query(&sem.like)
             .map_err(|e| LainError::Nlp(format!("Failed to embed query: {}", e)))?;
 
         // Get full graph nodes to access their embeddings

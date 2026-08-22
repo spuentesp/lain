@@ -213,12 +213,18 @@ fn build_embedder_pair(
     model_path: Option<&Path>,
     tuning: &TuningConfig,
 ) -> Result<(NlpEmbedder, CrossEncoder), LainError> {
-    let embedder = if let Some(p) = model_path {
+    let mut embedder = if let Some(p) = model_path {
         let (model, tokenizer) = NlpEmbedder::resolve_model_paths(p);
         NlpEmbedder::with_max_threads(&model, &tokenizer, tuning.ingestion.nlp_max_threads)?
     } else {
         NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
     };
+    // The query/document asymmetry belongs to the model, so the
+    // embedder carries it rather than each caller remembering.
+    embedder.set_query_prefix(tuning.query_prefix.clone());
+    if !tuning.query_prefix.is_empty() {
+        info!("NLP query prefix active: {:?}", tuning.query_prefix);
+    }
     if embedder.is_stub() {
         info!("NLP embedder running in stub mode (no --embedding-model set)");
     } else if let Some(p) = model_path {

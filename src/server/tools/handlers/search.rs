@@ -68,16 +68,10 @@ pub fn semantic_search(
         return Ok("No nodes found for semantic search in Merged Brain. Run 'run_enrichment' first.".to_string());
     }
 
-    // 2. Compute query embedding once
-    // Apply query_prefix if configured (BGE-style asymmetric retrieval).
-    // Documents embedded during ingestion are NOT prefixed — only the
-    // user's query string gets the instruction.
-    let query_for_embedding = if tuning.query_prefix.is_empty() {
-        query.to_string()
-    } else {
-        format!("{}{}", tuning.query_prefix, query)
-    };
-    let query_emb = embedder.embed(&query_for_embedding)?;
+    // 2. Compute query embedding once. `embed_query` applies the
+    //    configured prefix; documents go through `embed` and stay
+    //    plain, which is what makes the retrieval asymmetric.
+    let query_emb = embedder.embed_query(query)?;
 
     // 3. Batch Scoring with Shadow Masking
     let mut scored: Vec<(&GraphNode, f32)> = Vec::new();

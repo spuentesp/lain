@@ -129,7 +129,9 @@ Local ONNX-based semantic search using [ORT (ONNX Runtime)](https://onnxruntime.
 - **Model-agnostic** — any ONNX model producing fixed-dimension embeddings works
 - **Recommended model:** `bge-small-en-v1.5` (BAAI, 384 dimensions, ~120MB) — better MTEB scores than MiniLM
 - **Default model:** `all-MiniLM-L6-v2` (384 dimensions, ~80MB)
-- **BGE asymmetric retrieval:** set `query_prefix = "Represent this sentence for searching relevant passages: "` in `.lain/tuning.toml` — prepended to queries at embed time, leaving documents unchanged. Required for optimal BGE performance on short queries.
+- **BGE asymmetric retrieval:** set `query_prefix = "Represent this sentence for searching relevant passages: "` in `.lain/tuning.toml`. Required for optimal BGE performance on short queries; leave empty (the default) for MiniLM, which expects no instruction.
+
+  The asymmetry is the point: **queries** carry the instruction, the **corpus** does not. The embedder enforces it — `embed_query()` applies the prefix, `embed()` never does — so every query path gets it and no document path can. It was previously a convention at the call sites, and two of the three query paths (`query_graph`'s `semantic_filter` op and `find_dead_code --like`) had silently omitted it, embedding queries in document space while `semantic_search` alone did the right thing. Prefixing documents too would collapse the two spaces into one and make the setting worse than useless.
 - **Tokenization:** Hugging Face `tokenizers` crate
 - **Threading:** `nlp_max_threads` in `.lain/tuning.toml` (0 = auto-detect `min(cores, 4)`). BGE-small inference doesn't benefit from more than 4 threads per call.
 

@@ -101,7 +101,7 @@ Files that co-change with this one.
 ### semantic_search
 Find code by meaning, not just names. Uses local ONNX embeddings with hybrid scoring (cosine similarity + stemmed token-overlap) and shows body excerpts in the response.
 
-Best results with the **BGE** model family (`bge-small-en-v1.5` recommended); set `query_prefix` in `.lain/tuning.toml` for asymmetric retrieval.
+Best results with the **BGE** model family (`bge-small-en-v1.5` recommended); set `query_prefix` in `.lain/tuning.toml` for asymmetric retrieval — it is applied to queries only, never to the indexed corpus, and covers every tool that embeds a query (`semantic_search`, `find_dead_code --like`, and `semantic_filter` in `query_graph`).
 
 ```json
 { "name": "semantic_search", "arguments": { "query": "error handling", "limit": 5 } }
