@@ -124,7 +124,7 @@ fn zero_daemon_claim_and_release_work_without_a_server() {
     // First agent claims — should succeed via the filesystem fallback.
     claim(
         dead_url,
-        file_path.to_str().unwrap(),
+        &[file_path.to_string_lossy().to_string()],
         "",
         "edit",
         "agent-a",
@@ -136,7 +136,7 @@ fn zero_daemon_claim_and_release_work_without_a_server() {
     // Second agent claims the same path — must observe a conflict.
     let conflict = claim(
         dead_url,
-        file_path.to_str().unwrap(),
+        &[file_path.to_string_lossy().to_string()],
         "",
         "edit",
         "agent-b",
@@ -173,7 +173,7 @@ fn zero_daemon_claim_and_release_work_without_a_server() {
     // After release, the second agent can claim cleanly.
     claim(
         dead_url,
-        file_path.to_str().unwrap(),
+        &[file_path.to_string_lossy().to_string()],
         "",
         "edit",
         "agent-b",

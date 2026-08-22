@@ -47,7 +47,12 @@ impl LainServer {
         };
 
         if files.is_empty() {
-            info!("No files to process.");
+            // Same trap as the federation pipeline: a deletion-only
+            // commit produces an empty scan list, and returning here
+            // without sweeping strands the deleted file's nodes while
+            // advancing the marker past the commit that removed them.
+            info!("No files to scan; sweeping orphans.");
+            sweep_orphans(&self.config.workspace, &self.graph, &self.git.lock());
             self.graph.set_last_commit(latest_commit)?;
             return Ok(());
         }
@@ -153,8 +158,18 @@ impl LainServer {
                         if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                             warn!("Batch node write error: {}", e);
                         }
-                        if let Err(e) = self.graph.insert_edges_batch(&batch_edges) {
-                            warn!("Batch edge write error: {}", e);
+                        match self.graph.insert_edges_batch(&batch_edges) {
+                            Ok(0) => {}
+                            // A dropped edge means the graph no longer
+                            // describes the code: its endpoint was not
+                            // in the index when the edge landed. Silence
+                            // here hid 37 files whose symbols had no
+                            // `Contains` edge from their own file node.
+                            Ok(dropped) => warn!(
+                                "Batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
+                                batch_edges.len()
+                            ),
+                            Err(e) => warn!("Batch edge write error: {}", e),
                         }
                         // Durably persist the flush. The in-memory inserts above
                         // are lost if the outer re-index timeout drops this task,
@@ -188,8 +203,13 @@ impl LainServer {
             if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                 warn!("Final batch node write error: {}", e);
             }
-            if let Err(e) = self.graph.insert_edges_batch(&batch_edges) {
-                warn!("Final batch edge write error: {}", e);
+            match self.graph.insert_edges_batch(&batch_edges) {
+                Ok(0) => {}
+                Ok(dropped) => warn!(
+                    "Final batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
+                    batch_edges.len()
+                ),
+                Err(e) => warn!("Final batch edge write error: {}", e),
             }
         }
 
@@ -201,13 +221,19 @@ impl LainServer {
         let call_edges =
             super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs);
         info!("Ingesting {} call edges", call_edges.len());
-        self.graph.insert_edges_batch(&call_edges)?;
+        let dropped = self.graph.insert_edges_batch(&call_edges)?;
+        if dropped > 0 {
+            warn!("{dropped} of {} call edges dropped (endpoint not in index)", call_edges.len());
+        }
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
         info!("Resolving {} tree-sitter static references...", all_static_refs.len());
         let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs);
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
-        self.graph.insert_edges_batch(&static_edges)?;
+        let dropped = self.graph.insert_edges_batch(&static_edges)?;
+        if dropped > 0 {
+            warn!("{dropped} of {} static edges dropped (endpoint not in index)", static_edges.len());
+        }
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
         info!("Resolving {} pattern references for cross-boundary detection...", all_pattern_refs.len());
@@ -217,7 +243,10 @@ impl LainServer {
             super::resolve::PatternLimits::DEFAULT,
         );
         info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
-        self.graph.insert_edges_batch(&pattern_edges)?;
+        let dropped = self.graph.insert_edges_batch(&pattern_edges)?;
+        if dropped > 0 {
+            warn!("{dropped} of {} pattern edges dropped (endpoint not in index)", pattern_edges.len());
+        }
 
         // 4. Temporal Analysis Phase: Co-changes
         let co_change_pairs = {
@@ -411,6 +440,41 @@ impl LainServer {
 /// block the per-repo write on it. The signature takes `&GitSensor` (not
 /// `Arc<Mutex<GitSensor>>`) so the caller decides the locking strategy;
 /// `RepoIndex::index` wraps the lock in a single `let _g = ...` scope.
+/// Prune nodes whose file is no longer tracked by git.
+///
+/// Split out so both exits from `index_one_repo` run it. The
+/// `files.is_empty()` early return did not, and that was a permanent
+/// leak: `get_changed_files_since` deliberately skips paths that are no
+/// longer on disk, so a commit that *only* deletes files yields an
+/// empty scan list. The early return then advanced the last-commit
+/// marker past that deletion, so no later pass ever revisited it and
+/// the deleted file's symbols stayed in the graph forever. That is the
+/// most likely reason a long-lived index carried more nodes than a
+/// fresh index of the same commit (observed: 3769 vs 3340).
+fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
+    match git.get_all_tracked_files() {
+        Ok(tracked_paths) => {
+            // Reduced with the same helper the scanner mints node paths with:
+            // git returns absolute paths, and comparing those to relative node
+            // keys marks every node an orphan rather than raising an error.
+            let tracked: HashSet<String> = tracked_paths
+                .iter()
+                .map(|p| crate::graph::graph_path(path, p))
+                .collect();
+            if tracked.is_empty() {
+                warn!("[federation] Skipping orphan sweep for {:?}: no tracked files", path);
+            } else {
+                match db.prune_orphans(&tracked) {
+                    Ok(0) => info!("[federation] {:?}: orphan sweep found nothing", path),
+                    Ok(n) => info!("[federation] {:?}: orphan sweep pruned {n} nodes", path),
+                    Err(e) => warn!("[federation] {:?}: orphan sweep failed: {e}", path),
+                }
+            }
+        }
+        Err(e) => warn!("[federation] Skipping orphan sweep for {:?}: {e}", path),
+    }
+}
+
 pub async fn index_one_repo(
     path: &Path,
     db: &GraphDatabase,
@@ -440,7 +504,12 @@ pub async fn index_one_repo(
     };
 
     if files.is_empty() {
-        info!("[federation] No files to process for {:?}.", path);
+        // "No files to scan" is not "nothing changed": a deletion-only
+        // commit lands here, because `get_changed_files_since` skips
+        // paths that are gone from disk. Sweep before advancing the
+        // marker, or those nodes are stranded permanently.
+        info!("[federation] No files to scan for {:?}; sweeping orphans.", path);
+        sweep_orphans(path, db, git);
         db.set_last_commit(latest_commit)?;
         db.save_to_disk_sync()?;
         return Ok(());
@@ -524,8 +593,13 @@ pub async fn index_one_repo(
                     if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
                         warn!("[federation] Batch node write error: {}", e);
                     }
-                    if let Err(e) = db.insert_edges_batch(&batch_edges) {
-                        warn!("[federation] Batch edge write error: {}", e);
+                    match db.insert_edges_batch(&batch_edges) {
+                        Ok(0) => {}
+                        Ok(dropped) => warn!(
+                            "[federation] Batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
+                            batch_edges.len()
+                        ),
+                        Err(e) => warn!("[federation] Batch edge write error: {}", e),
                     }
                     batch_nodes.clear();
                     batch_edges.clear();
@@ -548,8 +622,13 @@ pub async fn index_one_repo(
         if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
             warn!("[federation] Final batch node write error: {}", e);
         }
-        if let Err(e) = db.insert_edges_batch(&batch_edges) {
-            warn!("[federation] Final batch edge write error: {}", e);
+        match db.insert_edges_batch(&batch_edges) {
+            Ok(0) => {}
+            Ok(dropped) => warn!(
+                "[federation] Final batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
+                batch_edges.len()
+            ),
+            Err(e) => warn!("[federation] Final batch edge write error: {}", e),
         }
     }
 
@@ -566,12 +645,18 @@ pub async fn index_one_repo(
     // Resolve phase: link external references to internal nodes (CALLS)
     let call_edges = super::resolve::resolve_call_edges(db, path, &all_external_refs);
     info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
-    db.insert_edges_batch(&call_edges)?;
+    let dropped = db.insert_edges_batch(&call_edges)?;
+    if dropped > 0 {
+        warn!("[federation] {dropped} of {} call edges dropped (endpoint not in index)", call_edges.len());
+    }
 
     // Static resolve: tree-sitter derived Calls/Uses edges
     let static_edges = super::resolve::resolve_static_edges(db, &all_static_refs);
     info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
-    db.insert_edges_batch(&static_edges)?;
+    let dropped = db.insert_edges_batch(&static_edges)?;
+    if dropped > 0 {
+        warn!("[federation] {dropped} of {} static edges dropped (endpoint not in index)", static_edges.len());
+    }
 
     // Pattern resolve: cross-boundary detection
     let pattern_edges = super::resolve::resolve_pattern_edges(
@@ -605,27 +690,7 @@ pub async fn index_one_repo(
     // reaching this point means the pass covered every changed file —
     // there is no partial case to gate on here, unlike the
     // single-workspace pipeline.
-    match git.get_all_tracked_files() {
-        Ok(tracked_paths) => {
-            // Reduced with the same helper the scanner mints node paths with:
-            // git returns absolute paths, and comparing those to relative node
-            // keys marks every node an orphan rather than raising an error.
-            let tracked: HashSet<String> = tracked_paths
-                .iter()
-                .map(|p| crate::graph::graph_path(path, p))
-                .collect();
-            if tracked.is_empty() {
-                warn!("[federation] Skipping orphan sweep for {:?}: no tracked files", path);
-            } else {
-                match db.prune_orphans(&tracked) {
-                    Ok(0) => info!("[federation] {:?}: orphan sweep found nothing", path),
-                    Ok(n) => info!("[federation] {:?}: orphan sweep pruned {n} nodes", path),
-                    Err(e) => warn!("[federation] {:?}: orphan sweep failed: {e}", path),
-                }
-            }
-        }
-        Err(e) => warn!("[federation] Skipping orphan sweep for {:?}: {e}", path),
-    }
+    sweep_orphans(path, db, git);
 
     db.set_last_commit(latest_commit)?;
     db.save_to_disk_sync()?;

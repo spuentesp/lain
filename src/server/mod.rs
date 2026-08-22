@@ -10,6 +10,7 @@ pub mod tools;
 
 // Core
 pub mod auth;
+pub mod build_info;
 pub mod events_log;
 pub mod graph;
 pub mod schema;
@@ -36,6 +37,7 @@ pub mod reload;
 pub mod attribution;
 pub mod presence;
 pub mod presence_lock;
+pub mod state_lock;
 pub mod sse;
 
 // Audit log — append-only JSONL record of every edit that lands

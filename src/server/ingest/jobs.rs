@@ -160,7 +160,7 @@ impl LainServer {
 
             // Persist edges immediately (edge insert is cheap, non-blocking)
             if !new_edges.is_empty() {
-                if let Err(e) = self.graph.insert_edges_batch(&new_edges) {
+                if let Err(e) = self.graph.insert_edges_batch(&new_edges).map(|_| ()) {
                     warn!("Sliding window: edge insert failed: {}", e);
                 } else {
                     debug!("Sliding window: {} new edges from {} files", new_edges.len(), dirty_paths.len());

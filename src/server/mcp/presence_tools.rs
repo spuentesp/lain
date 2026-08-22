@@ -9,14 +9,35 @@
 
 use crate::server::ingest::LainServer;
 use crate::server::presence::{
-    AgentId, AgentKind, AgentMode, ChangedKind, ChangedSymbol, ClaimIntent, ClaimRequest,
-    OccupancyEntry, PresenceEvent, WorldState,
+    AgentId, AgentKind, AgentMode, AgentSession, ChangedKind, ChangedSymbol, ClaimIntent,
+    ClaimRequest, OccupancyEntry, PresenceEvent, WorldState,
 };
 use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
 use crate::server::audit::{append_edit_event, AuditEvent};
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// Resolve a session token to its session, refreshing the heartbeat as
+/// a side effect.
+///
+/// Sessions used to expire on wall clock alone: only an explicit
+/// `heartbeat` reset the timer, so an agent that claimed a file,
+/// thought for a minute and came back found its session gone — and with
+/// it every claim it held, silently, leaving the file free for the next
+/// agent to take mid-edit. An LLM agent has no timer between turns, so
+/// "call heartbeat every N seconds" is not something it can honor.
+///
+/// Any authenticated call is proof of life. Every dispatcher that
+/// resolves a token goes through here.
+fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
+    let session = server.presence.by_token(token).ok_or("unknown session token")?;
+    // Best-effort: the session was just resolved, so this only fails on
+    // a race with expiry, in which case the caller's own work still
+    // proceeds on the session it already holds.
+    let _ = server.presence.heartbeat(&session.id, token);
+    Ok(session)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterAgentArgs {
@@ -29,13 +50,21 @@ pub struct RegisterAgentArgs {
 
 pub fn run_register_agent(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: RegisterAgentArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    server.with_shared_presence(|| run_register_agent_inner(server, a))
+}
+
+fn run_register_agent_inner(server: &LainServer, a: RegisterAgentArgs) -> Result<Value, String> {
     let kind = a.kind.as_deref().map(AgentKind::parse).unwrap_or(AgentKind::Other("unknown".into()));
     let mode = a.mode.as_deref().map(AgentMode::parse).unwrap_or(AgentMode::Interactive);
     let parent = a.parent_session_id.map(AgentId);
     let session = server.presence.register(a.name, kind, mode, a.pid, parent);
     server.emit_presence_event(PresenceEvent::AgentJoined(session.clone()));
+    // Report the TTL this session actually gets, not the registry
+    // default — background agents are reaped faster than interactive
+    // ones, and an agent that plans around the wrong number loses its
+    // claims without warning.
     let expires_at_unix = system_time_to_unix_secs(session.started_at)
-        + system_time_to_unix_secs_delta(server.presence_expires_after());
+        + system_time_to_unix_secs_delta(server.presence.expires_after_for(&session.mode));
     Ok(json!({
         "agent_id": session.id.as_str(),
         "session_token": session.session_token,
@@ -51,6 +80,10 @@ pub struct HeartbeatArgs {
 
 pub fn run_heartbeat(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: HeartbeatArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    server.with_shared_presence(|| run_heartbeat_inner(server, a))
+}
+
+fn run_heartbeat_inner(server: &LainServer, a: HeartbeatArgs) -> Result<Value, String> {
     let agent_id = AgentId(a.agent_id);
     server.presence.heartbeat(&agent_id, &a.session_token)
         .map_err(|e| e.to_string())?;
@@ -70,6 +103,9 @@ pub struct ListActiveAgentsArgs {
 }
 
 pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value, String> {
+    // A listing that only sees this process's own memory is the
+    // symptom that made the split invisible.
+    server.refresh_shared_presence();
     let a: ListActiveAgentsArgs = serde_json::from_value(args).unwrap_or(ListActiveAgentsArgs { include_background: None });
     let sessions = server.presence.list_active(a.include_background.unwrap_or(false));
     let out: Vec<Value> = sessions.into_iter().map(|s| {
@@ -93,8 +129,9 @@ pub struct WhoAmIArgs {
 }
 
 pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
+    server.refresh_shared_presence();
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;
+    let session = authenticate(server, &a.session_token)?;
     let claims = server.occupancy.list_for_agent(&session.id);
     let parent_session_id = session.parent_session_id.as_ref().map(|p| p.as_str().to_string());
     Ok(json!({
@@ -107,6 +144,7 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
             "path": c.path.to_string_lossy(),
             "symbols": c.symbols,
             "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+        "inferred": c.inferred,
             "claimed_at": system_time_to_unix_secs(c.claimed_at),
         })).collect::<Vec<_>>(),
     }))
@@ -126,8 +164,9 @@ pub struct ListSubagentsArgs {
 /// subagent sees on its own `who_am_i` minus `claims`, making it usable
 /// as a lightweight rendering input from the parent's side.
 pub fn run_list_subagents(server: &LainServer, args: Value) -> Result<Value, String> {
+    server.refresh_shared_presence();
     let a: ListSubagentsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;
+    let session = authenticate(server, &a.session_token)?;
     let parent_id = session.id.clone();
     let mut children: Vec<Value> = Vec::new();
     for child in server.presence.list_active(true) {
@@ -190,13 +229,21 @@ pub fn run_get_world_state(
     let a: GetWorldStateArgs =
         serde_json::from_value(args).map_err(|e| e.to_string())?;
     let plan = a.plan_revision.unwrap_or_else(|| server.overlay.current_revision());
-    let ws = compute_world_state(server, plan, &a.symbols);
+    let ws = compute_world_state(server, plan, &a.symbols, &std::collections::HashSet::new());
     serde_json::to_value(ws).map_err(|e| e.to_string())
 }
 
 pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: ClaimFilesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;
+    // Conflict detection is the whole point of this tool, and it can
+    // only see peers if the registry is refreshed from the shared state
+    // file first — and only stay correct if the grant is written back
+    // under the same lock.
+    server.with_shared_presence(|| run_claim_files_inner(server, a))
+}
+
+fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value, String> {
+    let session = authenticate(server, &a.session_token)?;
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
@@ -218,6 +265,17 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         ttl_seconds: None,
         plan_revision: f.plan_revision,
     }).collect();
+    // Snapshot the agent's held symbols *before* the claim lands.
+    // Retract detection asks "was this symbol here when you last
+    // looked?", and after the claim is applied every symbol in the
+    // request is trivially held — which would make every unknown name
+    // look like a retraction.
+    let held_before: std::collections::HashSet<String> = server
+        .occupancy
+        .list_for_agent(&session.id)
+        .into_iter()
+        .flat_map(|c| c.symbols)
+        .collect();
     let mut result = server.occupancy.claim_with_session(&session, requests);
     // Populate `world_state` only when the caller supplied a
     // `plan_revision`. The brief's Step 3 pseudocode:
@@ -229,7 +287,7 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
     //      → empty `changed_symbols` plus a `note` for the agent.
     //   3. Combine the two sources and emit `Some(WorldState)`.
     if let Some(plan) = plan_revision {
-        result.world_state = Some(compute_world_state(server, plan, &requested_symbols));
+        result.world_state = Some(compute_world_state(server, plan, &requested_symbols, &held_before));
     }
     if !result.granted.is_empty() {
         for g in &result.granted {
@@ -305,8 +363,22 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
         "path": c.path.to_string_lossy(),
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+        "inferred": c.inferred,
         "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
     })).collect()));
+    // Advisories: granted, but somebody else is editing this file.
+    // Omitted when empty so unchanged responses keep their shape.
+    if !result.advisories.is_empty() {
+        out.insert("advisories".into(), Value::Array(result.advisories.iter().map(|c| json!({
+            "agent_id": c.agent_id.as_str(),
+            "path": c.path.to_string_lossy(),
+            "symbols": c.symbols,
+            "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+            "inferred": c.inferred,
+            "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
+            "note": "granted — another agent holds an edit claim here; re-read before you patch",
+        })).collect()));
+    }
     // `world_state` is populated by the static-graph retract detector
     // (Task 1.6, PR 1). When `None`, the field is omitted from the
     // wire response (matching the `skip_serializing_if` on the struct
@@ -339,6 +411,11 @@ fn compute_world_state(
     server: &LainServer,
     plan: RevisionId,
     requested_symbols: &[String],
+    // `held_before`: symbols the caller already held *before* this
+    // call. A symbol in there was in the graph when its claim was
+    // granted, so its absence now is a genuine retraction; anything
+    // else was simply never indexed.
+    held_before: &std::collections::HashSet<String>,
 ) -> WorldState {
     let current = server.overlay.current_revision();
 
@@ -351,12 +428,22 @@ fn compute_world_state(
     // per-repo `GraphDatabase` exposes `find_node_by_name` (singular),
     // which is sufficient for the "does any node have this name?"
     // question; we use the singular form accordingly.
+    // "Absent" alone cannot distinguish *removed* from *never present*.
+    // The caller's own claim history can: a symbol this agent already
+    // holds a claim on was in the graph when the claim was granted, so
+    // its disappearance is a genuine retraction. Anything else is
+    // simply not indexed — which is what an agent asking about a match
+    // arm, or a function added since the last index, should be told.
     let mut retracted: Vec<ChangedSymbol> = Vec::new();
     for sym in requested_symbols {
         if !symbol_exists_in_static_graph(server, sym) {
             retracted.push(ChangedSymbol {
                 name: sym.clone(),
-                change_kind: ChangedKind::Retracted,
+                change_kind: if held_before.contains(sym) {
+                    ChangedKind::Retracted
+                } else {
+                    ChangedKind::NotIndexed
+                },
                 at_revision: current,
             });
         }
@@ -451,7 +538,11 @@ pub struct ReleaseFilesEntry {
 
 pub fn run_release_files(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: ReleaseFilesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;
+    server.with_shared_presence(|| run_release_files_inner(server, a))
+}
+
+fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<Value, String> {
+    let session = authenticate(server, &a.session_token)?;
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
@@ -472,6 +563,7 @@ pub struct ListOccupancyArgs {
 }
 
 pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, String> {
+    server.refresh_shared_presence();
     let a: ListOccupancyArgs = serde_json::from_value(args).unwrap_or(ListOccupancyArgs { path: None });
     let entries: Vec<OccupancyEntry> = if let Some(p) = a.path.as_deref() {
         server.occupancy.list_for_path(std::path::Path::new(p)).into_iter().collect()
@@ -509,8 +601,9 @@ pub struct MyClaimsArgs {
 }
 
 pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> {
+    server.refresh_shared_presence();
     let a: MyClaimsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let session = server.presence.by_token(&a.session_token).ok_or("unknown session token")?;
+    let session = authenticate(server, &a.session_token)?;
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
@@ -519,6 +612,7 @@ pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> 
         "path": c.path.to_string_lossy(),
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+        "inferred": c.inferred,
         "claimed_at": system_time_to_unix_secs(c.claimed_at),
     })).collect::<Vec<_>>()))
 }
@@ -566,10 +660,18 @@ pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, Str
 
     let fed = server
         .federation()
-        .ok_or("federation not configured on this server")?;
+        .ok_or(
+            "detect_overlap needs federation mode: start the server with \
+             `lain server --config repos.yaml`. This process was started \
+             without a federation config, so it has no repos to scan.",
+        )?;
     let workspaces = server
         .workspaces_snapshot()
-        .ok_or("no workspaces file loaded on this server")?;
+        .ok_or(
+            "detect_overlap needs a workspaces file, and this server has none \
+             loaded. Create one with `lain workspaces create <name> --members \
+             <repo-ids>`, then restart the server or call `request_reload`.",
+        )?;
     let spec = workspaces
         .workspaces
         .iter()

@@ -28,6 +28,96 @@ pub enum NodeType {
     Schema,     // Data schema (OpenAPI, Protobuf, JSON Schema)
 }
 
+impl NodeType {
+    /// Every variant, in declaration order.
+    ///
+    /// `describe_schema` builds its node-type list from this so the
+    /// documented schema cannot drift from the graph again. It had:
+    /// the tool advertised five types while the indexer emitted
+    /// eighteen, so an agent following the documentation queried
+    /// `type: "Function"` for a method and got zero results while
+    /// `find_anchors` was ranking that same method first.
+    pub fn all() -> &'static [NodeType] {
+        &[
+            NodeType::File,
+            NodeType::Namespace,
+            NodeType::Module,
+            NodeType::Package,
+            NodeType::Class,
+            NodeType::Interface,
+            NodeType::Struct,
+            NodeType::Enum,
+            NodeType::Trait,
+            NodeType::Function,
+            NodeType::Method,
+            NodeType::Property,
+            NodeType::Variable,
+            NodeType::Constant,
+            NodeType::HttpRoute,
+            NodeType::Topic,
+            NodeType::Resource,
+            NodeType::Schema,
+        ]
+    }
+
+    /// One-line description for `describe_schema`.
+    pub fn description(&self) -> &'static str {
+        match self {
+            NodeType::File => "A source file",
+            NodeType::Namespace => "A namespace",
+            NodeType::Module => "A module",
+            NodeType::Package => "A package",
+            NodeType::Class => "A class definition",
+            NodeType::Interface => "An interface definition",
+            NodeType::Struct => "A struct definition",
+            NodeType::Enum => "An enum definition",
+            NodeType::Trait => "A trait definition",
+            NodeType::Function => "A free function definition",
+            NodeType::Method => {
+                "A method defined in an impl block, class, or trait. Distinct \
+                 from Function — in Rust and other impl-heavy languages most \
+                 code lives here, so a query filtered to Function alone will \
+                 miss it"
+            }
+            NodeType::Property => "A property or field",
+            NodeType::Variable => "A variable binding",
+            NodeType::Constant => "A constant",
+            NodeType::HttpRoute => "An HTTP endpoint (e.g. GET /api/users)",
+            NodeType::Topic => "A message queue topic (Kafka, RabbitMQ)",
+            NodeType::Resource => "An IaC resource (Terraform, k8s)",
+            NodeType::Schema => "A data schema (OpenAPI, Protobuf, JSON Schema)",
+        }
+    }
+
+    /// Node properties a query may filter on.
+    pub fn properties(&self) -> &'static [&'static str] {
+        match self {
+            NodeType::File => &["path", "language"],
+            NodeType::Function | NodeType::Method => &["name", "path", "signature"],
+            _ => &["name", "path"],
+        }
+    }
+
+    /// Labels that may be attached to this node type.
+    pub fn labels(&self) -> &'static [&'static str] {
+        match self {
+            NodeType::File => &["generated", "test"],
+            NodeType::Function | NodeType::Method => &["test", "deprecated", "async"],
+            NodeType::Class | NodeType::Struct | NodeType::Enum | NodeType::Trait => {
+                &["test", "deprecated"]
+            }
+            _ => &[],
+        }
+    }
+
+    /// Types that hold executable code — the set every "which symbols"
+    /// analysis should span. Excluding `Method` here is what made
+    /// `suggest_refactor_targets` blind to impl blocks.
+    pub fn callable() -> &'static [NodeType] {
+        &[NodeType::Function, NodeType::Method]
+    }
+}
+
 impl std::fmt::Display for NodeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
@@ -50,6 +140,100 @@ pub enum EdgeType {
     Consumes,      // Consumer -> Topic (Kafka consumer, queue listener)
     DeployedTo,    // IaC resource -> cloud resource (k8s, AWS, etc.)
     CrossRepoSameSymbol, // Federation-only: same symbol across different repos (added Task 10)
+}
+
+impl EdgeType {
+    /// Every variant, in declaration order. `describe_schema` builds
+    /// its edge-type list from this.
+    ///
+    /// The hand-written list had drifted badly: it advertised `Defines`,
+    /// `Inherits`, `TestedBy` and `Import` — none of which exist — while
+    /// omitting `Imports`, `CoChangedWith` (the co-change coupling lain
+    /// advertises as a headline feature), `Pattern`, and every
+    /// cross-runtime and federation edge. An agent building a query
+    /// from the documented schema was choosing from a menu that was
+    /// half fiction.
+    pub fn all() -> &'static [EdgeType] {
+        &[
+            EdgeType::Contains,
+            EdgeType::Calls,
+            EdgeType::Uses,
+            EdgeType::Implements,
+            EdgeType::Imports,
+            EdgeType::CoChangedWith,
+            EdgeType::Pattern,
+            EdgeType::CallsHttp,
+            EdgeType::Produces,
+            EdgeType::Consumes,
+            EdgeType::DeployedTo,
+            EdgeType::CrossRepoSameSymbol,
+        ]
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            EdgeType::Contains => "A file or module contains a symbol",
+            EdgeType::Calls => "A function calls another function",
+            EdgeType::Uses => "Code uses a variable or type",
+            EdgeType::Implements => "A class implements an interface",
+            EdgeType::Imports => "A file imports another file or module",
+            EdgeType::CoChangedWith => {
+                "Two files change together in git history — temporal coupling, \
+                 not a static dependency"
+            }
+            EdgeType::Pattern => "A semantic boundary indicator (path prefix, topic name)",
+            EdgeType::CallsHttp => "An HTTP route points at its handler",
+            EdgeType::Produces => "A producer writes to a topic",
+            EdgeType::Consumes => "A consumer reads from a topic",
+            EdgeType::DeployedTo => "An IaC resource maps to a cloud resource",
+            EdgeType::CrossRepoSameSymbol => {
+                "Federation-only: the same symbol found in two different repos"
+            }
+        }
+    }
+
+    /// Node types an edge of this kind can start from.
+    pub fn source_types(&self) -> &'static [NodeType] {
+        match self {
+            EdgeType::Contains => &[NodeType::File, NodeType::Module, NodeType::Namespace],
+            EdgeType::Calls | EdgeType::Uses => &[NodeType::Function, NodeType::Method],
+            EdgeType::Implements => &[NodeType::Class, NodeType::Struct],
+            EdgeType::Imports | EdgeType::Pattern => &[NodeType::File],
+            EdgeType::CoChangedWith => &[NodeType::File],
+            EdgeType::CallsHttp => &[NodeType::HttpRoute],
+            EdgeType::Produces | EdgeType::Consumes => &[NodeType::Function, NodeType::Method],
+            EdgeType::DeployedTo => &[NodeType::Resource],
+            EdgeType::CrossRepoSameSymbol => &[NodeType::Function, NodeType::Method],
+        }
+    }
+
+    /// Node types an edge of this kind can point at.
+    pub fn target_types(&self) -> &'static [NodeType] {
+        match self {
+            EdgeType::Contains => &[
+                NodeType::Function,
+                NodeType::Method,
+                NodeType::Class,
+                NodeType::Struct,
+                NodeType::Enum,
+                NodeType::Trait,
+            ],
+            EdgeType::Calls => &[NodeType::Function, NodeType::Method],
+            EdgeType::Uses => &[
+                NodeType::Class,
+                NodeType::Struct,
+                NodeType::Enum,
+                NodeType::Variable,
+                NodeType::Constant,
+            ],
+            EdgeType::Implements => &[NodeType::Interface, NodeType::Trait],
+            EdgeType::Imports | EdgeType::CoChangedWith | EdgeType::Pattern => &[NodeType::File],
+            EdgeType::CallsHttp => &[NodeType::Function, NodeType::Method],
+            EdgeType::Produces | EdgeType::Consumes => &[NodeType::Topic],
+            EdgeType::DeployedTo => &[NodeType::Resource],
+            EdgeType::CrossRepoSameSymbol => &[NodeType::Function, NodeType::Method],
+        }
+    }
 }
 
 impl std::fmt::Display for EdgeType {

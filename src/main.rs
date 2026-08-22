@@ -23,6 +23,11 @@ use clap::{CommandFactory, Parser};
 use lain::cli::{Args, Commands};
 
 fn main() -> Result<()> {
+    // Stamp the executable's mtime before anything can rebuild
+    // underneath a long-running server, so `get_health` /
+    // `get_server_status` can tell an agent when the binary answering
+    // its calls has been superseded on disk.
+    lain::server::build_info::record_startup_exe_mtime();
     let args = Args::parse();
     match args.command {
         Some(Commands::Server {

@@ -929,6 +929,7 @@ fn conflict_entry_carries_agent_id_and_last_seen_unix() {
     let bob = AgentId("bob".into());
     let now = SystemTime::now();
     let entry = ConflictEntry {
+        inferred: false,
         agent_id: bob.clone(),
         path: std::path::PathBuf::from("auth.rs"),
         symbols: vec!["login".into()],
@@ -1068,9 +1069,15 @@ fn symbol_level_claim_hash_changes_when_body_changes() {
         ttl_seconds: None,
         plan_revision: None,
     }]);
+    // Re-claiming the same scope replaces the record rather than
+    // appending beside it: an agent that re-claims a file in a loop
+    // used to accumulate a row per call in `my_claims`, inflating
+    // `claims_count` and leaving stale hashes behind the fresh one.
+    // One record, carrying the current body's hash, is what a caller
+    // asking "what do I hold?" needs.
     let claims = occ.list_for_agent(&agent);
-    assert_eq!(claims.len(), 2, "agent should now hold two claim records");
-    let hash2 = claims[1].content_hash.unwrap();
+    assert_eq!(claims.len(), 1, "re-claiming a scope must replace, not duplicate");
+    let hash2 = claims[0].content_hash.unwrap();
 
     assert_ne!(hash1, hash2);
 }
@@ -1083,6 +1090,7 @@ fn symbol_level_claim_hash_changes_when_body_changes() {
 #[test]
 fn claim_round_trips_plan_revision() {
     let claim = Claim {
+        inferred: false,
         agent_id: AgentId("a1".into()),
         path: std::path::PathBuf::from("/x.rs"),
         symbols: vec!["login".into()],
@@ -1219,16 +1227,21 @@ async fn get_world_state_tool_returns_retracted_and_beyond_current() {
     //    path that matters for safety.
     // ------------------------------------------------------------------------
 
-    // 3) Non-existent symbol — IS in Retracted
+    // 3) Non-existent symbol — reported as NotIndexed, not Retracted.
+    //    `get_world_state` is read-only and carries no agent identity,
+    //    so it has no record of the caller ever having seen this
+    //    symbol. "The graph has no such symbol" is all it can honestly
+    //    say; claiming the symbol was *deleted* told agents their
+    //    target had been removed when it had simply never been indexed.
     let r = lain::server::mcp::presence_tools::run_get_world_state(
         &server, json!({"symbols": ["nonexistent_xyz"]}),
     ).expect("get_world_state");
     let cs = r["changed_symbols"].as_array().unwrap();
-    let retracted: Vec<_> = cs.iter()
-        .filter(|c| c["name"] == "nonexistent_xyz" && c["change_kind"] == "Retracted")
+    let absent: Vec<_> = cs.iter()
+        .filter(|c| c["name"] == "nonexistent_xyz" && c["change_kind"] == "NotIndexed")
         .collect();
-    assert_eq!(retracted.len(), 1,
-               "nonexistent_xyz must be Retracted; cs={cs:?}");
+    assert_eq!(absent.len(), 1,
+               "nonexistent_xyz must be NotIndexed; cs={cs:?}");
 
     // 4) BeyondCurrent path with verbatim spec note
     let cur = server.overlay.current_revision();
@@ -1337,4 +1350,339 @@ async fn get_recent_activity_tool_groups_by_path() {
     assert_eq!(digest2["groups"].as_array().map(|a| a.len()), Some(2));
     assert_eq!(digest2["truncated"].as_bool(), Some(true));
     assert_eq!(digest2["total_groups"].as_u64(), Some(4));
+}
+
+// --- Claim path canonicalization (F-01) ---
+//
+// Claims used to be keyed on the caller's raw spelling, so the same
+// file claimed as `/ws/src/a.rs` and as `src/a.rs` produced two
+// independent claims that never conflicted. That split ran between the
+// CLI (absolute paths) and MCP callers (repo-relative), so the two
+// halves of the product could not collide by construction.
+
+fn claim_req(path: &str) -> ClaimRequest {
+    ClaimRequest {
+        path: std::path::PathBuf::from(path),
+        symbols: vec![],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+        plan_revision: None,
+    }
+}
+
+#[test]
+fn claims_collide_across_path_spellings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "pub fn a() {}").unwrap();
+
+    let abs = root.join("src/a.rs");
+    let abs_str = abs.to_string_lossy().to_string();
+
+    // Every spelling an agent could plausibly send for one file.
+    let spellings = [
+        abs_str.as_str(),
+        "src/a.rs",
+        "./src/a.rs",
+        "src/../src/a.rs",
+    ];
+
+    for spelling in spellings {
+        let occ = lain::server::presence::OccupancyMap::new();
+        occ.set_workspace_root(root);
+        let alice = AgentId("alice".into());
+        let bob = AgentId("bob".into());
+
+        // Alice always claims the absolute form — this is what
+        // `lain hooks claim` writes.
+        let first = occ.claim(&alice, vec![claim_req(&abs_str)]);
+        assert_eq!(first.granted.len(), 1, "alice should hold {abs_str}");
+
+        let result = occ.claim(&bob, vec![claim_req(spelling)]);
+        assert_eq!(
+            result.conflicts.len(),
+            1,
+            "spelling {spelling:?} must conflict with the absolute claim"
+        );
+        assert_eq!(result.granted.len(), 0, "spelling {spelling:?} must not be granted");
+        assert_eq!(result.conflicts[0].agent_id, alice);
+    }
+}
+
+#[test]
+fn granted_paths_are_canonical() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "pub fn a() {}").unwrap();
+
+    let occ = lain::server::presence::OccupancyMap::new();
+    occ.set_workspace_root(root);
+    let alice = AgentId("alice".into());
+
+    // The echoed path is the key that was actually taken, not the
+    // caller's spelling — otherwise `my_claims` would not match what
+    // the agent sent to `release_files`.
+    let result = occ.claim(&alice, vec![claim_req("./src/../src/a.rs")]);
+    assert_eq!(result.granted.len(), 1);
+    assert_eq!(result.granted[0].path, std::path::PathBuf::from("src/a.rs"));
+}
+
+#[test]
+fn release_matches_a_differently_spelled_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "pub fn a() {}").unwrap();
+
+    let occ = lain::server::presence::OccupancyMap::new();
+    occ.set_workspace_root(root);
+    let alice = AgentId("alice".into());
+
+    occ.claim(&alice, vec![claim_req(&root.join("src/a.rs").to_string_lossy())]);
+    let released = occ.release(&alice, &[std::path::PathBuf::from("src/a.rs")]);
+    assert_eq!(released.len(), 1, "relative release must find an absolute claim");
+
+    // And the file is now free for another agent.
+    let bob = AgentId("bob".into());
+    let result = occ.claim(&bob, vec![claim_req("src/a.rs")]);
+    assert_eq!(result.conflicts.len(), 0);
+    assert_eq!(result.granted.len(), 1);
+}
+
+#[test]
+fn claim_for_a_file_that_does_not_exist_yet_still_collides() {
+    // An agent claiming a file it is about to create has nothing on
+    // disk to anchor against; it must still land on one key.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let occ = lain::server::presence::OccupancyMap::new();
+    occ.set_workspace_root(root);
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+
+    occ.claim(&alice, vec![claim_req(&root.join("src/new.rs").to_string_lossy())]);
+    let result = occ.claim(&bob, vec![claim_req("src/new.rs")]);
+    assert_eq!(result.conflicts.len(), 1, "unborn file must still collide");
+}
+
+#[test]
+fn same_relative_path_in_two_repos_stays_distinct() {
+    // Federation: `src/main.rs` in repo A and repo B are different
+    // files and must not be forced into one claim by canonicalization.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_a = tmp.path().join("a");
+    let repo_b = tmp.path().join("b");
+    std::fs::create_dir_all(repo_a.join("src")).unwrap();
+    std::fs::create_dir_all(repo_b.join("src")).unwrap();
+    std::fs::write(repo_a.join("src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(repo_b.join("src/main.rs"), "fn main() {}").unwrap();
+
+    let occ = lain::server::presence::OccupancyMap::new();
+    occ.add_claim_roots(&[repo_a.clone(), repo_b.clone()]);
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+
+    occ.claim(&alice, vec![claim_req(&repo_a.join("src/main.rs").to_string_lossy())]);
+    let result = occ.claim(&bob, vec![claim_req(&repo_b.join("src/main.rs").to_string_lossy())]);
+    assert_eq!(result.conflicts.len(), 0, "different repos must not collide");
+    assert_eq!(result.granted.len(), 1);
+}
+
+// --- Session lifetime (F-05) ---
+//
+// The TTL used to be 60 seconds of wall clock refreshed only by an
+// explicit `heartbeat`. A single LLM turn — thinking plus a couple of
+// tool round-trips — routinely runs past that, so an agent would claim
+// a file, reason about it, and come back to `unknown session token`
+// with its claims silently released and the file free for someone else
+// to take mid-edit.
+
+#[test]
+fn interactive_ttl_is_sized_for_model_latency() {
+    use lain::server::presence::{BACKGROUND_SESSION_TTL, INTERACTIVE_SESSION_TTL};
+    assert!(
+        INTERACTIVE_SESSION_TTL >= std::time::Duration::from_secs(300),
+        "an interactive TTL under 5 minutes cannot survive a normal agent turn"
+    );
+    assert_eq!(BACKGROUND_SESSION_TTL, std::time::Duration::from_secs(60));
+
+    let reg = PresenceRegistry::new();
+    assert_eq!(reg.expires_after_for(&AgentMode::Interactive), INTERACTIVE_SESSION_TTL);
+    assert_eq!(reg.expires_after_for(&AgentMode::Background), BACKGROUND_SESSION_TTL);
+}
+
+#[tokio::test]
+async fn any_authenticated_tool_call_extends_the_session() {
+    use lain::server::mcp::presence_tools::{run_my_claims, run_register_agent};
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+
+    let v = run_register_agent(&server, serde_json::json!({"name": "alice"})).unwrap();
+    let agent_id = v["agent_id"].as_str().unwrap().to_string();
+    let token = v["session_token"].as_str().unwrap().to_string();
+
+    let before = server.presence.by_token(&token).unwrap().last_heartbeat;
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // `my_claims` is not the heartbeat tool — it is ordinary work.
+    run_my_claims(
+        &server,
+        serde_json::json!({"agent_id": agent_id, "session_token": token}),
+    )
+    .unwrap();
+
+    let after = server.presence.by_token(&token).unwrap().last_heartbeat;
+    assert!(
+        after > before,
+        "an authenticated tool call must count as proof of life"
+    );
+}
+
+#[tokio::test]
+async fn expired_session_revokes_claims_with_a_reason() {
+    use lain::server::ingest::background::expiry_tick;
+
+    let reg = PresenceRegistry::with_expiry(std::time::Duration::from_millis(20));
+    let occ = lain::server::presence::OccupancyMap::new();
+    let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+    let tmp = tempfile::tempdir().unwrap();
+    let events_log = lain::server::events_log::EventsLog::open(tmp.path()).unwrap();
+
+    let session = reg.register("alice".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    occ.claim(&session.id, vec![claim_req("auth.rs")]);
+
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    expiry_tick(&reg, &occ, &tx, &events_log);
+
+    // A revoked claim is not a released one: the holder never asked to
+    // give it up and may still believe it owns the file.
+    let mut saw_revoked = false;
+    while let Ok((_, ev)) = rx.try_recv() {
+        if let PresenceEvent::ClaimRevoked { agent_id, path, reason } = ev {
+            assert_eq!(agent_id, session.id);
+            assert_eq!(path, std::path::PathBuf::from("auth.rs"));
+            assert_eq!(reason, "session_expired");
+            saw_revoked = true;
+        }
+    }
+    assert!(saw_revoked, "session expiry must announce the revocation");
+}
+
+// --- Inferred claims (F-04) ---
+
+#[test]
+fn inferred_claims_are_flagged_and_declaration_upgrades_them() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+
+    // The watcher guessed alice wrote this file.
+    let r = occ.claim_inferred(&alice, vec![claim_req("auth.rs")]);
+    assert_eq!(r.granted.len(), 1);
+    let claims = occ.list_for_agent(&alice);
+    assert!(claims[0].inferred, "a guessed claim must say so");
+
+    // Alice then declares it herself — a declaration outranks a guess.
+    occ.claim(&alice, vec![claim_req("auth.rs")]);
+    let claims = occ.list_for_agent(&alice);
+    assert!(
+        claims.iter().all(|c| !c.inferred),
+        "an explicit claim must clear the inferred marker"
+    );
+}
+
+#[test]
+fn inference_never_downgrades_a_declared_claim() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+
+    occ.claim(&alice, vec![claim_req("auth.rs")]);
+    // The watcher sees a write to a file alice already declared; that
+    // must refresh, not reclassify.
+    occ.claim_inferred(&alice, vec![claim_req("auth.rs")]);
+
+    let claims = occ.list_for_agent(&alice);
+    assert!(
+        claims.iter().all(|c| !c.inferred),
+        "a declared claim stays declared when the watcher re-observes it"
+    );
+}
+
+#[test]
+fn conflicts_report_whether_the_holder_was_guessed() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+
+    occ.claim_inferred(&alice, vec![claim_req("auth.rs")]);
+    let result = occ.claim(&bob, vec![claim_req("auth.rs")]);
+
+    assert_eq!(result.conflicts.len(), 1);
+    assert!(
+        result.conflicts[0].inferred,
+        "bob must be able to tell a guess from a declaration before backing off"
+    );
+}
+
+// --- Read-over-edit advisories (F-06) ---
+
+#[test]
+fn read_over_edit_grants_with_an_advisory() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+
+    occ.claim(&alice, vec![claim_req("handler.rs")]); // edit
+    let result = occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("handler.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Read,
+        ttl_seconds: None,
+        plan_revision: None,
+    }]);
+
+    // Readers are never blocked...
+    assert_eq!(result.granted.len(), 1, "a read must still be granted");
+    assert_eq!(result.conflicts.len(), 0, "a read must not conflict");
+    // ...but they must be told the file is being rewritten under them.
+    assert_eq!(result.advisories.len(), 1, "read over a live edit needs an advisory");
+    assert_eq!(result.advisories[0].agent_id, alice);
+    assert_eq!(result.advisories[0].intent, ClaimIntent::Edit);
+}
+
+#[test]
+fn read_on_a_quiet_file_carries_no_advisory() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let bob = AgentId("bob".into());
+    let result = occ.claim(&bob, vec![ClaimRequest {
+        path: std::path::PathBuf::from("quiet.rs"),
+        symbols: vec![],
+        intent: ClaimIntent::Read,
+        ttl_seconds: None,
+        plan_revision: None,
+    }]);
+    assert!(result.advisories.is_empty(), "no editor, no advisory");
+}
+
+#[test]
+fn read_over_another_read_carries_no_advisory() {
+    let occ = lain::server::presence::OccupancyMap::new();
+    let alice = AgentId("alice".into());
+    let bob = AgentId("bob".into());
+    let read = |p: &str| ClaimRequest {
+        path: std::path::PathBuf::from(p),
+        symbols: vec![],
+        intent: ClaimIntent::Read,
+        ttl_seconds: None,
+        plan_revision: None,
+    };
+    occ.claim(&alice, vec![read("shared.rs")]);
+    let result = occ.claim(&bob, vec![read("shared.rs")]);
+    assert!(result.advisories.is_empty(), "two readers are not a hazard");
 }

@@ -34,20 +34,101 @@ use std::time::SystemTime;
 use tokio::sync::broadcast;
 use tracing::info;
 
+/// Remove staging dirs left behind by processes that are gone.
+///
+/// Each dir is named `lain-federation-{pid}-{counter}`, so the pid in
+/// the name is the liveness signal. A dir belonging to a live process
+/// (including this one) is never touched; anything else is a leftover
+/// from a server that exited without cleaning up.
+///
+/// Best-effort throughout: an unreadable directory, an unparseable
+/// name, or a failed delete is skipped. Sweeping is a courtesy, not a
+/// correctness requirement, and must never block startup.
+fn sweep_abandoned_staging_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix("lain-federation-") else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == std::process::id() || process_is_alive(pid) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
+/// Is a pid still running? Linux reads `/proc`; elsewhere we assume
+/// alive, which keeps the sweep conservative — never deleting a live
+/// server's workspace matters far more than reclaiming a stale dir.
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// Allocate a unique staging dir for federation-mode servers. The
 /// placeholder `LainServer` builds a throwaway git repo at
-/// `/tmp/lain-federation-{pid}-{counter}` so parallel tests in the
-/// same process don't race on a shared path.
+/// `<state_dir>/federation/lain-federation-{pid}-{counter}` so parallel
+/// tests in the same process don't race on a shared path.
+///
+/// Not `/tmp`: this directory is the server's `config.workspace` for
+/// its whole lifetime, and `/tmp` reapers delete it underneath a
+/// long-running process. When that happened the server kept reporting
+/// `Operational ✅` for a workspace path that no longer existed, with a
+/// permanent `reference 'refs/heads/master' not found` warning — the
+/// unborn HEAD of this very placeholder repo — while serving a graph
+/// days behind HEAD. The state dir is where lain's other durable state
+/// already lives.
 fn allocate_staging_dir() -> Result<PathBuf, LainError> {
     let counter = super::STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
+    // `/tmp` reaped abandoned staging dirs for us; the state dir does
+    // not, so sweep them here instead of trading a disappearing
+    // workspace for an unbounded pile of them.
+    sweep_abandoned_staging_dirs(&crate::config::state_dir().join("federation"));
+    let dir = crate::config::state_dir().join("federation").join(format!(
         "lain-federation-{}-{}",
         std::process::id(),
         counter
     ));
     std::fs::create_dir_all(&dir)?;
     if !dir.join(".git").exists() {
-        git2::Repository::init(&dir)?;
+        let repo = git2::Repository::init(&dir)?;
+        // Give the placeholder a born HEAD.
+        //
+        // `Repository::init` leaves HEAD pointing at an *unborn*
+        // branch, so the startup re-index — which runs against
+        // `config.workspace`, and in federation mode that is this
+        // placeholder — failed with `reference 'refs/heads/master' not
+        // found` on every boot. That warning was permanent, alarming,
+        // and about a directory holding no code: it said "serving a
+        // stale graph" while the real repo had indexed cleanly. An
+        // empty initial commit makes the re-index a trivial no-op, so
+        // a degraded status once again means something is actually
+        // wrong.
+        let sig = git2::Signature::now("lain", "lain@localhost")
+            .map_err(|e| LainError::Other(format!("staging signature: {e}")))?;
+        let tree_oid = {
+            let mut idx = repo.index()
+                .map_err(|e| LainError::Other(format!("staging index: {e}")))?;
+            idx.write_tree()
+                .map_err(|e| LainError::Other(format!("staging tree: {e}")))?
+        };
+        let tree = repo.find_tree(tree_oid)
+            .map_err(|e| LainError::Other(format!("staging find_tree: {e}")))?;
+        repo.commit(Some("HEAD"), &sig, &sig, "staging placeholder for federation mode — holds no code", &tree, &[])
+            .map_err(|e| LainError::Other(format!("staging commit: {e}")))?;
     }
     Ok(dir)
 }

@@ -15,13 +15,25 @@
 //!    out), and a no-op fallback (Windows / `--no-process-attribution`)
 //!    share a single interface.
 //! 2. **Single-agent heuristic.** If no PID match and exactly one
-//!    *interactive* agent is currently connected, attribute the edit to
-//!    that agent. (Two-or-more agents with no PID match is treated as
-//!    unattributed; the audit log gets a "unattributed edit" entry.)
+//!    *interactive* agent is connected, attribute the edit to that
+//!    agent. (Two-or-more agents with no PID match is unattributed.)
+//!    This carries most real attributions: a write closes its fd long
+//!    before the inotify event is handled, so the PID lookup usually
+//!    finds nothing.
 //!
-//! Successful attribution auto-claims the file for the agent (intent:
+//! Events are filtered by [`is_attributable`] before either strategy
+//! runs, so VCS internals, build output and editor scratch never reach
+//! attribution at all. That filter is what makes the heuristic safe:
+//! unfiltered, it attributed *any* write under the workspace to
+//! whichever agent happened to be connected, and a `curl`-driven agent
+//! that never ran git was found holding `<repo>/.git/index.lock` for
+//! its entire lifetime.
+//!
+//! Successful attribution claims the file for the agent (intent:
 //! `Edit`) on the shared `OccupancyMap` and broadcasts a `ClaimGranted`
-//! event so SSE subscribers see the update.
+//! event so SSE subscribers see the update. Such claims are marked
+//! `inferred` and carry a short TTL: they are a guess, they say so, and
+//! a wrong one expires on its own.
 
 use crate::server::presence::{
     ClaimIntent, ClaimRequest, OccupancyMap, PresenceEvent, PresenceRegistry,
@@ -332,7 +344,7 @@ impl AttributionWatcher {
                         EventKind::Modify(_) | EventKind::Create(_)
                     ) {
                         for path in event.paths {
-                            if path.is_file() {
+                            if path.is_file() && is_attributable(&path) {
                                 attribute_edit(
                                     &path,
                                     &presence,
@@ -349,6 +361,60 @@ impl AttributionWatcher {
         })
     }
 }
+
+/// Directory names whose contents are never an agent's edit. The
+/// watcher registers repo roots recursively, so without this filter
+/// every write anywhere under the checkout became a claim: a `curl`
+/// driven agent that never ran git was found holding
+/// `<repo>/.git/index.lock`, written by an unrelated shell command,
+/// for its entire lifetime. A single `cargo build` would have flooded
+/// the registry with thousands of `target/` artifacts.
+const NEVER_ATTRIBUTED_DIRS: &[&str] = &[
+    ".git",
+    ".lain",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+];
+
+/// True when a filesystem event on `path` could plausibly be an agent
+/// editing source. Filters build output, VCS internals, and editor
+/// scratch files — none of which anyone claims on purpose.
+fn is_attributable(path: &Path) -> bool {
+    if path
+        .components()
+        .any(|c| NEVER_ATTRIBUTED_DIRS.contains(&c.as_os_str().to_string_lossy().as_ref()))
+    {
+        return false;
+    }
+    let name = match path.file_name() {
+        Some(n) => n.to_string_lossy().to_string(),
+        None => return false,
+    };
+    // Editor and tool scratch: vim swap/backup, Emacs lock files,
+    // generic temporaries, and the `.#` / `~` conventions.
+    let scratch = name.ends_with('~')
+        || name.ends_with(".swp")
+        || name.ends_with(".swx")
+        || name.ends_with(".tmp")
+        || name.ends_with(".lock")
+        || name.starts_with(".#")
+        || name.starts_with('#');
+    !scratch
+}
+
+/// How long an inferred claim survives without being re-observed.
+///
+/// Inferred claims used to be created with no TTL at all, so a single
+/// wrong guess stuck to the agent until its session died. Two minutes
+/// is long enough to cover a real edit-then-pause and short enough that
+/// a misfire heals itself.
+const INFERRED_CLAIM_TTL_SECS: u64 = 120;
 
 /// Best-effort attribution of a single file edit. See the module-level
 /// docs for the strategy order: PID lookup, then single-agent fallback,
@@ -375,6 +441,19 @@ fn attribute_edit(
     };
 
     // 2. Fallback: single interactive agent heuristic.
+    //
+    // Kept, deliberately. PID lookup loses most real edits — a write
+    // closes its fd long before the inotify event is processed, so
+    // `/proc/<pid>/fd` no longer shows the file — and without this
+    // fallback attribution would discover almost nothing.
+    //
+    // What made it harmful was never the heuristic itself but what it
+    // was allowed to claim: with no path filter, *any* filesystem event
+    // under the workspace became a claim, so a `curl`-driven agent that
+    // never ran git ended up holding `<repo>/.git/index.lock` for its
+    // whole lifetime. `is_attributable` removes that class outright, and
+    // what remains is marked `inferred` with a short TTL — visible as a
+    // guess, and self-healing when the guess is wrong.
     let agent_id = agent_id.or_else(|| {
         let active: Vec<_> = presence.list_active(false);
         if active.len() == 1 {
@@ -385,13 +464,14 @@ fn attribute_edit(
     });
 
     if let Some(agent_id) = agent_id {
-        let result = occupancy.claim(
+        let result = occupancy.claim_inferred(
             &agent_id,
             vec![ClaimRequest {
                 path: path.to_path_buf(),
                 symbols: vec![],
                 intent: ClaimIntent::Edit,
-                ttl_seconds: None,
+                // A guess must be able to expire on its own.
+                ttl_seconds: Some(INFERRED_CLAIM_TTL_SECS),
                 plan_revision: None,
             }],
         );
@@ -406,5 +486,51 @@ fn attribute_edit(
     } else {
         // Unattributed edit — log to audit (Task 7 wires the sink).
         eprintln!("[attribution] unattributed edit: {}", path.display());
+    }
+}
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn build_and_vcs_paths_are_never_attributed() {
+        // The live failure: a `curl`-driven agent that never ran git
+        // was found holding `<repo>/.git/index.lock`, written by an
+        // unrelated shell command.
+        for p in [
+            "/ws/.git/index.lock",
+            "/ws/.git/COMMIT_EDITMSG",
+            "/ws/target/debug/build/foo/output",
+            "/ws/node_modules/left-pad/index.js",
+            "/ws/.lain/graph.bin",
+            "/ws/dist/bundle.js",
+            "/ws/__pycache__/mod.cpython-312.pyc",
+        ] {
+            assert!(!is_attributable(Path::new(p)), "{p} must not be attributed");
+        }
+    }
+
+    #[test]
+    fn editor_scratch_files_are_never_attributed() {
+        for p in [
+            "/ws/src/main.rs~",
+            "/ws/src/.main.rs.swp",
+            "/ws/src/.#main.rs",
+            "/ws/src/main.rs.tmp",
+        ] {
+            assert!(!is_attributable(Path::new(p)), "{p} must not be attributed");
+        }
+    }
+
+    #[test]
+    fn ordinary_source_files_are_attributed() {
+        for p in [
+            "/ws/src/main.rs",
+            "/ws/src/server/presence.rs",
+            "/ws/tests/presence.rs",
+            "/ws/README.md",
+        ] {
+            assert!(is_attributable(Path::new(p)), "{p} must be attributed");
+        }
     }
 }

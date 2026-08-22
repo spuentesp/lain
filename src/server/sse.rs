@@ -52,6 +52,7 @@ fn event_name(event: &PresenceEvent) -> &'static str {
         PresenceEvent::HeartbeatExpired(_) => "heartbeat_expired",
         PresenceEvent::ClaimGranted { .. } => "claim_granted",
         PresenceEvent::ClaimReleased { .. } => "claim_released",
+        PresenceEvent::ClaimRevoked { .. } => "claim_revoked",
         PresenceEvent::ConflictDetected { .. } => "conflict_detected",
         PresenceEvent::EditLanded { .. } => "edit_landed",
     }
@@ -199,6 +200,7 @@ mod tests {
         let event = PresenceEvent::ConflictDetected {
             agent_id: AgentId("a-conflict".into()),
             conflicts: vec![ConflictEntry {
+                inferred: false,
                 agent_id: AgentId("holder".into()),
                 path: PathBuf::from("src/lib.rs"),
                 symbols: vec!["login".into(), "logout".into()],

@@ -72,14 +72,23 @@ pub fn expiry_tick(
     for id in presence.expire_stale() {
         emit(PresenceEvent::HeartbeatExpired(id.clone()));
         for path in occupancy.release_all_for(&id) {
-            emit(PresenceEvent::ClaimReleased {
+            // `ClaimRevoked`, not `ClaimReleased`: the agent did not ask
+            // to give this up and may still be mid-edit. Subscribers
+            // need to tell the two apart to know whether the file is
+            // genuinely free.
+            emit(PresenceEvent::ClaimRevoked {
                 agent_id: id.clone(),
                 path,
+                reason: "session_expired".to_string(),
             });
         }
     }
     for (agent_id, path) in occupancy.expire_by_ttl() {
-        emit(PresenceEvent::ClaimReleased { agent_id, path });
+        emit(PresenceEvent::ClaimRevoked {
+            agent_id,
+            path,
+            reason: "ttl_expired".to_string(),
+        });
     }
 }
 

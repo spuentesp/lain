@@ -154,3 +154,35 @@ async fn claim_without_plan_revision_omits_world_state() {
         "world_state must be None when plan_revision is None; resp={resp}"
     );
 }
+
+/// A symbol the graph never held is `NotIndexed`, not `Retracted`.
+///
+/// `get_world_state{symbols:["claim_files"]}` used to answer
+/// `change_kind: "Retracted"` for a name that is a match arm rather
+/// than a definition — telling an agent its target had been deleted
+/// when the graph had simply never seen it. The tool exists to answer
+/// "is this symbol still in the graph?" before claiming, so conflating
+/// *never present* with *removed* inverts the decision it informs.
+#[tokio::test]
+async fn symbol_never_in_the_graph_is_not_indexed_rather_than_retracted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (server, _backend) = build_federation_server(tmp.path());
+
+    let v = run_register_agent(&server, serde_json::json!({"name": "alice"})).unwrap();
+    let agent_id = v["agent_id"].as_str().unwrap().to_string();
+    let token = v["session_token"].as_str().unwrap().to_string();
+
+    // Never seeded, never claimed before — the agent has no history
+    // with this name and neither does the graph.
+    let resp = claim(&server, &agent_id, &token, 0, &["never_existed"]);
+    let ws = &resp["world_state"];
+    assert!(!ws.is_null(), "world_state must be Some when plan_revision is provided");
+
+    let symbols = ws["changed_symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 1, "expected one entry; got {symbols:?}");
+    assert_eq!(symbols[0]["name"], "never_existed");
+    assert_eq!(
+        symbols[0]["change_kind"], "NotIndexed",
+        "a symbol the graph never held must not be reported as deleted; got {symbols:?}"
+    );
+}

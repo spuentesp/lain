@@ -390,3 +390,39 @@ fn open_read_only_rejects_writes() {
     let n2 = ro.get_node(&id).expect("get on read-only").expect("node present");
     assert_eq!(n2.id, n.id);
 }
+/// Co-change output showed `src/server/presence_lock.rs (2 times)`
+/// three times inside a four-row list: the graph can hold more than one
+/// node for a path, and every edge into them was emitted verbatim.
+/// Partners must be folded by path before they reach a caller.
+#[test]
+fn co_change_partners_are_deduped_by_path() {
+    let tmp = std::env::temp_dir().join("test_co_change_dedup");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    let source = "/src/cli/hooks.rs";
+    let partner = "/src/server/presence_lock.rs";
+    let other = "/src/main.rs";
+
+    graph.upsert_node(GraphNode::new(NodeType::File, "hooks.rs".to_string(), source.to_string())).unwrap();
+    graph.upsert_node(GraphNode::new(NodeType::File, "presence_lock.rs".to_string(), partner.to_string())).unwrap();
+    graph.upsert_node(GraphNode::new(NodeType::File, "main.rs".to_string(), other.to_string())).unwrap();
+
+    // The same relationship recorded repeatedly — what the enrichment
+    // pass produces when a path resolves through more than one node.
+    graph.insert_co_change_edges(&[
+        (source.to_string(), partner.to_string(), 2),
+        (source.to_string(), partner.to_string(), 2),
+        (source.to_string(), partner.to_string(), 2),
+        (source.to_string(), other.to_string(), 2),
+    ]).unwrap();
+
+    let partners = graph.get_co_change_partners(source).unwrap();
+    let lock_rows = partners.iter().filter(|(p, _)| p == partner).count();
+    assert_eq!(lock_rows, 1, "one row per partner path, got {partners:?}");
+    assert_eq!(partners.len(), 2, "two distinct partners, got {partners:?}");
+
+    // Max, not sum: repeats are the same relationship seen twice.
+    let count = partners.iter().find(|(p, _)| p == partner).unwrap().1;
+    assert_eq!(count, 2, "repeated edges must not inflate the count");
+}

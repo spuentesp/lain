@@ -322,8 +322,17 @@ impl ToolHandler for SemanticSearchHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         if ctx.embedder.is_stub() {
+            // Never name a command that does not exist: `lain
+            // install-embeddings` returned `error: unrecognized
+            // subcommand`, so an agent that followed the instruction
+            // got an error and then had to decide whether to trust the
+            // next thing lain told it. These three paths are real.
             return Err(LainError::Unavailable(
-                "Semantic search unavailable: NLP model not loaded. Install embeddings with: lain install-embeddings".to_string(),
+                "Semantic search unavailable: NLP model not loaded. Get one with \
+                 `install.sh --download-model`, point the LAIN_EMBEDDING_MODEL env var \
+                 at a model directory containing model.onnx + tokenizer.json, or place \
+                 one in `.lain/models/`."
+                    .to_string(),
             ));
         }
         let query = required_str_arg(args, "query")?;
@@ -707,7 +716,7 @@ impl ToolHandler for SyncStateHandler {
         ctx: &ToolContext,
         _args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::enrichment::sync_state(&ctx.graph, &ctx.git, &ctx.tuning.ingestion)
+        handlers::enrichment::sync_state(&ctx.graph, &ctx.git, &ctx.tuning.ingestion, &ctx.jobs, &ctx.last_outcome)
     }
 }
 inventory::submit!(ToolHandlerEntry(&SyncStateHandler));

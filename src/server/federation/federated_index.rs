@@ -40,6 +40,26 @@ pub struct FederatedIndex {
     federation_overlay: RwLock<Option<Arc<VolatileOverlay>>>,
 }
 
+/// Collapse a per-definition repo list to the distinct repos in it,
+/// preserving order.
+///
+/// `resolve_symbol` answers "which repo owns this name?", so the same
+/// repo listed once per definition is one answer, not several. Without
+/// this, an ordinary name — `new`, `default`, a helper repeated across
+/// modules — made `resolve_symbol` fail with
+/// `AmbiguousSymbol(["lain", "lain"])`: a request to disambiguate
+/// between one repo and itself, naming a `repo_id` parameter the tool
+/// schema does not expose. Unactionable by construction.
+pub(crate) fn distinct_repos(entries: &[RepoId]) -> Vec<RepoId> {
+    let mut out: Vec<RepoId> = Vec::with_capacity(entries.len());
+    for e in entries {
+        if !out.contains(e) {
+            out.push(e.clone());
+        }
+    }
+    out
+}
+
 impl FederatedIndex {
     pub fn new(backend: Arc<dyn GraphBackend>) -> Self {
         Self {
@@ -244,10 +264,16 @@ impl FederatedIndex {
     pub fn resolve_symbol(&self, name: &str) -> Result<RepoId, LainError> {
         // Fast path: the in-memory name index built by `rebuild_symbol_index`.
         if let Some(entries) = self.symbol_to_repos.get(name) {
-            return match entries.len() {
-                1 => Ok(entries[0].clone()),
-                _ => Err(LainError::AmbiguousSymbol(entries.clone())),
-            };
+            // Ambiguity is about *repos*, not definitions. Both paths go
+            // through `distinct_repos` so a name defined several times
+            // in one repo can never be reported as a cross-repo clash.
+            let distinct = distinct_repos(entries.value());
+            if !distinct.is_empty() {
+                return match distinct.len() {
+                    1 => Ok(distinct.into_iter().next().unwrap()),
+                    _ => Err(LainError::AmbiguousSymbol(distinct)),
+                };
+            }
         }
         // Fallback: scan the backend. This keeps `resolve_symbol` correct even
         // when nodes were inserted directly into the backend (e.g. tests, or
@@ -264,11 +290,18 @@ impl FederatedIndex {
         hits.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         hits.dedup();
         match hits.len() {
+            // The graph indexes committed code. Saying only "not found"
+            // reads as "this symbol does not exist", which is how an
+            // agent concludes a function it can see in the working tree
+            // was deleted.
             0 => Err(LainError::NotFound(format!(
-                "symbol {name} not found in any repo"
+                "symbol {name} not found in any indexed repo — the federation graph \
+                 indexes committed code, so a symbol added since the last indexed \
+                 commit will not appear until it is committed and re-indexed \
+                 (check `get_health` for how far behind HEAD the graph is)"
             ))),
             1 => Ok(hits.into_iter().next().unwrap()),
-            _ => Err(LainError::AmbiguousSymbol(hits)),
+            _ => Err(LainError::AmbiguousSymbol(distinct_repos(&hits))),
         }
     }
 
@@ -282,7 +315,21 @@ impl FederatedIndex {
         for repo_id in &repo_ids {
             if let Some(idx) = self.get_repo(repo_id) {
                 for node in idx.nodes() {
-                    tmp.entry(node.name.clone()).or_default().push(repo_id.clone());
+                    let entry = tmp.entry(node.name.clone()).or_default();
+                    // One entry per *repo*, not per node. A name defined
+                    // more than once inside a single repo — which is
+                    // ordinary: `new`, `default`, a helper repeated across
+                    // modules — used to push that repo's id once per
+                    // definition. `resolve_symbol`'s fast path then saw
+                    // `len() != 1` and returned
+                    // `AmbiguousSymbol(["lain", "lain"])`: a request to
+                    // disambiguate between one repo and itself, with a
+                    // `repo_id` parameter the tool schema doesn't even
+                    // expose. Only the slow fallback deduped, so the bug
+                    // appeared exactly when the index was warm.
+                    if !entry.contains(repo_id) {
+                        entry.push(repo_id.clone());
+                    }
                 }
             }
         }

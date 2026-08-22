@@ -31,10 +31,20 @@ pub fn get_server_status(server: &LainServer) -> serde_json::Value {
         crate::server::ingest::config::Transport::Stdio => "stdio".to_string(),
         crate::server::ingest::config::Transport::Http => "http".to_string(),
     });
+    use crate::server::build_info;
     serde_json::json!({
         "pid": std::process::id(),
+        "version": build_info::VERSION,
+        "git_sha": build_info::GIT_SHA,
+        "binary_mtime_unix": build_info::binary_mtime_unix(),
+        "binary_is_stale": build_info::binary_is_stale(),
         "transport": transport,
-        "port": server.port(),
+        // Null under stdio: reporting 9999 when nothing is listening
+        // sends an agent to a dashboard that isn't there.
+        "port": match transport.as_deref() {
+            Some("http") => server.port().map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+            _ => serde_json::Value::Null,
+        },
         "started_at": system_time_to_unix(server.started_at()),
         "last_sync_at": system_time_to_unix(server.last_sync_at()),
         "last_error": server.last_error(),
@@ -116,6 +126,26 @@ mod tests {
         assert!(v.get("repo_count").is_some(), "missing repo_count");
         assert!(v.get("workspace_count").is_some(), "missing workspace_count");
 
+        // Build identity: an agent bound to a long-lived stdio server
+        // has no other way to learn that its server predates the fix
+        // it is reading about in the source tree.
+        assert_eq!(
+            v.get("version").and_then(|x| x.as_str()),
+            Some(crate::server::build_info::VERSION),
+            "missing or wrong version"
+        );
+        assert_eq!(
+            v.get("git_sha").and_then(|x| x.as_str()),
+            Some(crate::server::build_info::GIT_SHA),
+            "missing or wrong git_sha"
+        );
+        assert!(v.get("binary_mtime_unix").is_some(), "missing binary_mtime_unix");
+        assert_eq!(
+            v.get("binary_is_stale").and_then(|x| x.as_bool()),
+            Some(false),
+            "binary_is_stale must be false when no startup mtime was recorded"
+        );
+
         // `pid` is the current process.
         assert_eq!(v["pid"].as_u64().unwrap(), std::process::id() as u64);
         // Single-workspace mode: no federation, so transport/port null.
@@ -159,5 +189,59 @@ mod tests {
         server.record_sync();
         let v = get_server_status(&server);
         assert!(v["last_error"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    //! Two builders, one tool. `get_server_status` is rendered here and
+    //! again by `mcp::handler::HandlerStatus::render`, and the two must
+    //! agree on the payload's shape.
+    //!
+    //! This guard exists because the last undetected divergence of this
+    //! kind was expensive: stdio and HTTP built `tools/list` separately,
+    //! drifted on the `claim_files` schema, and `claim_files` became
+    //! uncallable on stdio — every encoding rejected with
+    //! `invalid type: string ..., expected a sequence`, with no way for
+    //! a client to tell why.
+
+    /// The key set both builders must produce. Adding a field to one
+    /// without the other should fail here rather than in an agent's
+    /// session six weeks later.
+    const EXPECTED_KEYS: &[&str] = &[
+        "pid",
+        "version",
+        "git_sha",
+        "binary_mtime_unix",
+        "binary_is_stale",
+        "transport",
+        "port",
+        "started_at",
+        "last_sync_at",
+        "last_error",
+        "repo_count",
+        "workspace_count",
+    ];
+
+    #[test]
+    fn server_status_payloads_do_not_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        git2::Repository::init(&ws).unwrap();
+        let mem = tmp.path().join("graph.bin");
+        let server = crate::server::LainServer::new(&ws, &mem, None).unwrap();
+
+        let v = super::get_server_status(&server);
+        let obj = v.as_object().expect("payload is an object");
+
+        let mut actual: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        actual.sort();
+        let mut expected: Vec<&str> = EXPECTED_KEYS.to_vec();
+        expected.sort();
+        assert_eq!(
+            actual, expected,
+            "get_server_status keys drifted; update BOTH builders and EXPECTED_KEYS"
+        );
     }
 }

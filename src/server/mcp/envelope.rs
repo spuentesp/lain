@@ -107,6 +107,24 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
             p.insert("type".into(), "integer".into());
             p.insert("description".into(), "max results".into());
         }
+        // Booleans must be typed: the generic fallback is `string`, and
+        // a schema-respecting client would send "true" as text, which
+        // `serde_json::from_value::<Option<bool>>` rejects — the same
+        // class of bug that made `claim_files`'s array arg unusable.
+        "include_background" => {
+            p.insert("type".into(), "boolean".into());
+            p.insert(
+                "description".into(),
+                "also list cron/CI (background) agents".into(),
+            );
+        }
+        "head" => {
+            p.insert("type".into(), "string".into());
+            p.insert(
+                "description".into(),
+                "git ref to compare against base; defaults to HEAD".into(),
+            );
+        }
         _ => {
             p.insert("type".into(), "string".into());
             p.insert("description".into(), name.into());

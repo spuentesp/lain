@@ -260,6 +260,28 @@ impl GraphDatabase {
 
         let mut removed_ids: Vec<String> = Vec::new();
         let mut new_entries: Vec<(String, Vec<NodeIndex>)> = Vec::new();
+        // Incoming edges that must survive the replacement.
+        //
+        // `remove_node` takes every incident edge with it. For the file
+        // being re-scanned that is correct — its own outgoing edges are
+        // rebuilt from the fresh scan. But *incoming* edges from files
+        // that are NOT in this pass are collateral: an incremental
+        // re-index only re-resolves refs from the files it scanned, so
+        // a caller in an untouched file is never restored and its edge
+        // is gone for good. Left unhandled this erodes the graph on
+        // every incremental pass — the observed end state was 37 of 335
+        // files whose symbols had no edges at all, and functions that
+        // were demonstrably called reporting zero callers.
+        //
+        // Node ids are deterministic (same path + name + kind), so a
+        // symbol that still exists after the re-scan comes back under
+        // the same id and the edge is still meaningful. A symbol that
+        // was genuinely deleted does not come back, and the edge stays
+        // dropped — which is also correct.
+        let replaced_paths: HashSet<&str> = paths.iter().map(|p| p.as_str()).collect();
+        let mut preserved_incoming: Vec<GraphEdge> = Vec::new();
+        let mut collateral_edges = 0usize;
+        let mut restored_edges = 0usize;
 
         {
             let mut graph = self.graph.write();
@@ -279,6 +301,22 @@ impl GraphDatabase {
                         }
                         Some(n) => {
                             let id = n.id.clone();
+                            collateral_edges += graph.edges(idx).count();
+                            // Capture inbound edges from files this pass
+                            // is not rebuilding, before they go with the
+                            // node. Sources inside `replaced_paths` are
+                            // skipped: those files are being re-scanned
+                            // and will re-resolve their own edges, so
+                            // restoring them here would duplicate.
+                            for e in graph.edges_directed(idx, Direction::Incoming) {
+                                let src_is_replaced = graph
+                                    .node_weight(e.source())
+                                    .map(|s| replaced_paths.contains(s.path.as_str()))
+                                    .unwrap_or(true);
+                                if !src_is_replaced {
+                                    preserved_incoming.push(e.weight().clone());
+                                }
+                            }
                             graph.remove_node(idx); // incident edges go with it
                             // Remove the stale id → index entry NOW, not
                             // after the replacements are inserted: node ids
@@ -326,6 +364,24 @@ impl GraphDatabase {
             // (`index_map` entries for removed ids were already dropped
             // inline above — see the removal loop for why deferring that
             // wipes freshly re-inserted entries for deterministic ids.)
+            // Restore the inbound edges whose endpoints both still
+            // exist. Done inside the same write lock so no reader ever
+            // observes the node back without its callers.
+            for edge in &preserved_incoming {
+                if let (Some(s), Some(t)) = (
+                    self.index_map.get(&edge.source_id).map(|r| *r.value()),
+                    self.index_map.get(&edge.target_id).map(|r| *r.value()),
+                ) {
+                    let already = graph
+                        .edges_connecting(s, t)
+                        .any(|e| e.weight().edge_type == edge.edge_type);
+                    if !already {
+                        graph.add_edge(s, t, edge.clone());
+                        restored_edges += 1;
+                    }
+                }
+            }
+
             for (path, indices) in new_entries {
                 if indices.is_empty() {
                     self.path_index.remove(&path);
@@ -333,6 +389,16 @@ impl GraphDatabase {
                     self.path_index.insert(path, indices);
                 }
             }
+        }
+
+        if collateral_edges > 0 {
+            tracing::debug!(
+                "replace_nodes_for_paths: {} path(s), {} node(s) removed, \
+                 {collateral_edges} incident edge(s) removed with them, \
+                 {restored_edges} inbound edge(s) restored from unchanged files",
+                paths.len(),
+                removed_ids.len()
+            );
         }
 
         Ok(removed_ids.len())
@@ -495,19 +561,35 @@ impl GraphDatabase {
         Ok(())
     }
 
-    pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<(), LainError> {
+    /// Insert a batch of edges, skipping any whose endpoints aren't in
+    /// the graph. Returns the number that were **dropped**.
+    ///
+    /// The skip itself is necessary — an edge to a node that no longer
+    /// exists can't be added — but it used to be silent, and that
+    /// silence hid a real defect: in one production graph, 37 of 335
+    /// files had symbols with no `Contains` edge from their own file
+    /// node, so their symbols were orphaned and every structural query
+    /// about them came back empty. Nothing logged it, no counter
+    /// recorded it, and the graph reported itself healthy.
+    ///
+    /// Callers should log a non-zero return. An indexing pass that
+    /// drops edges produced a graph that does not describe the code.
+    pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
 
+        let mut dropped = 0usize;
         for edge in new_edges {
             if let (Some(s), Some(t)) = (
                 self.index_map.get(&edge.source_id).map(|r| *r.value()),
                 self.index_map.get(&edge.target_id).map(|r| *r.value())
             ) {
                 graph.add_edge(s, t, edge.clone());
+            } else {
+                dropped += 1;
             }
         }
-        Ok(())
+        Ok(dropped)
     }
 
     /// Insert an edge idempotently: same `(source, target, edge_type)`
@@ -1031,7 +1113,7 @@ impl GraphDatabase {
             edges.push(edge);
         }
         // Use batch insertion which is inherently resilient to missing nodes
-        self.insert_edges_batch(&edges)
+        self.insert_edges_batch(&edges).map(|_| ())
     }
 
     pub fn get_co_change_partners(&self, file_path: &str) -> Result<Vec<(String, usize)>, LainError> {
@@ -1041,13 +1123,30 @@ impl GraphDatabase {
         let id = GraphNode::generate_id(&NodeType::File, file_path, &filename, None);
         let Some(idx) = self.index_map.get(&id).map(|r| *r.value()) else { return Ok(Vec::new()); };
 
-        Ok(graph.edges_directed(idx, Direction::Outgoing)
+        // Fold by target path before returning. The graph can hold more
+        // than one node for a path (and more than one edge into them),
+        // and the raw edge list was emitted verbatim — which is why
+        // co-change output showed `src/server/presence_lock.rs (2 times)`
+        // three separate times in a four-row list.
+        //
+        // Max, not sum: the weights are counts of the same underlying
+        // co-change relationship observed through different nodes, so
+        // adding them would inflate the number rather than merge it.
+        let mut by_path: HashMap<String, usize> = HashMap::new();
+        for e in graph
+            .edges_directed(idx, Direction::Outgoing)
             .filter(|e| e.weight().edge_type == EdgeType::CoChangedWith)
-            .map(|e| {
-                let target_node = &graph[e.target()];
-                (target_node.path.clone(), e.weight().weight.unwrap_or(0.0) as usize)
-            })
-            .collect())
+        {
+            let target_node = &graph[e.target()];
+            let count = e.weight().weight.unwrap_or(0.0) as usize;
+            let slot = by_path.entry(target_node.path.clone()).or_insert(0);
+            *slot = (*slot).max(count);
+        }
+        let mut out: Vec<(String, usize)> = by_path.into_iter().collect();
+        // Strongest partner first, then by path so equal counts are
+        // stable across runs instead of following HashMap order.
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
     }
 
     pub fn get_last_commit(&self) -> Result<Option<String>, LainError> {

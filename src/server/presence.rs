@@ -11,6 +11,21 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+/// Default time an interactive agent may go without proof of life.
+///
+/// Was 60 seconds, which is shorter than a single LLM turn: an agent
+/// that claimed a file, reasoned about it, and came back found its
+/// session expired and its claims silently released. Any authenticated
+/// tool call now counts as a heartbeat (see
+/// `mcp::presence_tools::authenticate`), so this is a backstop for a
+/// genuinely departed agent rather than a liveness treadmill.
+pub const INTERACTIVE_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Background (cron / CI) agents keep the original fast reap. They are
+/// scripted, so heartbeating on a schedule is something they can
+/// actually do, and a wedged one should give its claims back quickly.
+pub const BACKGROUND_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 use crate::server::revision_log::RevisionId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -180,6 +195,14 @@ pub struct Claim {
     /// so unchanged claims don't bloat the persist payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_revision: Option<RevisionId>,
+    /// `true` when the server *guessed* this claim from filesystem
+    /// activity rather than the agent declaring it (see
+    /// `server::attribution`). A consumer should weigh "this agent told
+    /// me" differently from "the server inferred it": inferred claims
+    /// come from a heuristic that can and does misfire, and they carry
+    /// a short TTL so a wrong guess heals itself.
+    #[serde(default)]
+    pub inferred: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -194,6 +217,12 @@ pub struct ConflictEntry {
     /// downstream renderers — they can branch on `intent` without
     /// re-deriving the semantics from `path`.
     pub intent: ClaimIntent,
+    /// `true` when the conflicting claim was inferred from filesystem
+    /// activity rather than declared by its holder. Lets a blocked
+    /// agent distinguish "alice said she is editing this" from "the
+    /// server saw a write and guessed it was alice".
+    #[serde(default)]
+    pub inferred: bool,
     /// When the conflicting claim was last touched (typically claim
     /// grant time). Serialized as a UNIX-epoch second count in the
     /// MCP conflict JSON so callers can show "alice has been holding
@@ -324,7 +353,7 @@ impl std::fmt::Debug for PresenceRegistry {
 
 impl PresenceRegistry {
     pub fn new() -> Self {
-        Self::with_expiry(Duration::from_secs(60))
+        Self::with_expiry(INTERACTIVE_SESSION_TTL)
     }
 
     pub fn with_expiry(expires_after: Duration) -> Self {
@@ -392,13 +421,35 @@ impl PresenceRegistry {
         Ok(())
     }
 
+    /// How long a given session may go without proof of life.
+    ///
+    /// Interactive agents get the registry default (10 minutes), which
+    /// is sized for model latency: a single LLM turn — thinking plus a
+    /// couple of tool round-trips — routinely runs past a minute, and
+    /// an agent has no timer between turns with which to heartbeat.
+    /// Background agents (cron, CI) keep the fast 60-second reap: they
+    /// are scripted, they can heartbeat on a schedule, and a wedged one
+    /// should release its claims promptly.
+    pub fn expires_after_for(&self, mode: &AgentMode) -> Duration {
+        match mode {
+            AgentMode::Background => BACKGROUND_SESSION_TTL,
+            AgentMode::Interactive => self.expires_after(),
+        }
+    }
+
     pub fn expire_stale(&self) -> Vec<AgentId> {
         let now = SystemTime::now();
         let expires_after = self.inner.lock().expires_after;
         let stale: Vec<AgentId> = {
             let mut s = self.inner.lock();
             let stale: Vec<AgentId> = s.sessions.iter()
-                .filter(|(_, sess)| now.duration_since(sess.last_heartbeat).unwrap_or_default() >= expires_after)
+                .filter(|(_, sess)| {
+                    let ttl = match sess.mode {
+                        AgentMode::Background => BACKGROUND_SESSION_TTL,
+                        AgentMode::Interactive => expires_after,
+                    };
+                    now.duration_since(sess.last_heartbeat).unwrap_or_default() >= ttl
+                })
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in &stale {
@@ -478,6 +529,17 @@ pub struct ClaimRequest {
 pub struct ClaimResult {
     pub granted: Vec<ClaimRequest>,
     pub conflicts: Vec<ConflictEntry>,
+    /// Non-blocking notices about claims that were *granted anyway*.
+    ///
+    /// A read claim never conflicts — readers shouldn't block on
+    /// writers. But returning `{"conflicts": [], "granted": [...]}` and
+    /// nothing else told a reader nothing about the agent rewriting the
+    /// file underneath it, which is the most common way agent teams
+    /// actually collide: B reads, reasons for two minutes, and patches
+    /// a version A already replaced. Same shape as `conflicts`, but
+    /// advisory: proceed, and re-read before you patch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<ConflictEntry>,
     /// Snapshot of (current_revision, plan_revision) at claim time, plus
     /// the symbols that changed since the caller's `plan_revision` and a
     /// free-form `note` for `BeyondCurrent` / `TooOld` error paths.
@@ -509,6 +571,10 @@ struct FileOccupancy {
     /// `ConflictEntry` so callers can tell when the conflicting
     /// claim was first (or most recently) recorded.
     last_touched: HashMap<String, HashMap<AgentId, SystemTime>>,
+    /// Agents whose presence on this file was inferred from filesystem
+    /// activity rather than declared. Mirrored onto `ConflictEntry` so
+    /// a conflicting agent can tell a guess from a declaration.
+    inferred: HashSet<AgentId>,
 }
 
 impl FileOccupancy {
@@ -580,6 +646,85 @@ struct OccupancyState {
     by_agent: HashMap<AgentId, Vec<Claim>>,
 }
 
+/// Lexically normalize a path: resolve `.` and `..` components without
+/// touching the filesystem. `/a/../b` becomes `/b`, `./a/b` becomes
+/// `a/b`, and `/..` stays `/`. A leading `..` on a relative path is
+/// kept — there is nothing to pop it against.
+///
+/// Lexical on purpose: a claim may name a file the agent is about to
+/// *create*, so `fs::canonicalize` would fail on exactly the paths that
+/// matter most.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // `/..` is `/`; a prefix behaves the same way.
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Canonical key for a claim path.
+///
+/// Claims used to be keyed on the caller's raw spelling, so
+/// `/ws/src/a.rs`, `src/a.rs`, `./src/a.rs` and `src/../src/a.rs` were
+/// four independent claims on one file and never conflicted with each
+/// other. That split ran straight down the middle of the product:
+/// `lain hooks claim` writes absolute paths while MCP callers write
+/// repo-relative ones, so the CLI and the MCP surface could never
+/// collide.
+///
+/// Resolution runs in two steps.
+///
+/// First the path is made absolute: an absolute path is normalized as
+/// given; a relative one is anchored to the first root under which the
+/// file actually exists, falling back to the primary root for a file
+/// the agent is about to create.
+///
+/// Then it is presented workspace-relative when it lives under the
+/// primary workspace root, and absolute when it does not. That keeps
+/// the common single-repo case on the short, readable key agents
+/// already send, while federation — where the primary root is a `/tmp`
+/// staging placeholder that no real file lives under — falls through to
+/// absolute keys, so `src/main.rs` in two federated repos stays two
+/// distinct claims instead of colliding.
+///
+/// With no roots configured at all the path is normalized and left as
+/// it came in; it still collides with itself, which is the best
+/// available answer.
+fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        lexical_normalize(path)
+    } else {
+        let anchored = roots
+            .iter()
+            .map(|root| lexical_normalize(&root.join(path)))
+            .find(|candidate| candidate.exists());
+        match anchored.or_else(|| roots.first().map(|root| lexical_normalize(&root.join(path)))) {
+            Some(p) => p,
+            None => return lexical_normalize(path),
+        }
+    };
+
+    match roots.first() {
+        Some(primary) => match absolute.strip_prefix(primary) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => absolute,
+        },
+        None => absolute,
+    }
+}
+
 #[derive(Clone)]
 pub struct OccupancyMap {
     inner: std::sync::Arc<Mutex<OccupancyState>>,
@@ -595,6 +740,12 @@ pub struct OccupancyMap {
     /// `claim` reads this under a small lock so the side-effect
     /// doesn't race with a `set_workspace_root` swap.
     workspace_root: std::sync::Arc<parking_lot::Mutex<Option<PathBuf>>>,
+    /// Roots a relative claim path may be anchored to, in priority
+    /// order. Seeded with the workspace root; federation servers extend
+    /// it with every registered repo path, because there the workspace
+    /// is a staging placeholder and the real files live under the repo
+    /// roots. Read by `canonical_claim_path`.
+    claim_roots: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
 }
 
 impl std::fmt::Debug for OccupancyMap {
@@ -614,6 +765,7 @@ impl OccupancyMap {
             inner: std::sync::Arc::new(Mutex::new(OccupancyState::default())),
             persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             workspace_root: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            claim_roots: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
@@ -637,6 +789,36 @@ impl OccupancyMap {
     pub fn set_workspace_root(&self, workspace_root: &Path) {
         let mut slot = self.workspace_root.lock();
         *slot = Some(workspace_root.to_path_buf());
+        drop(slot);
+        // The workspace is also the first anchor for relative claim
+        // paths. Kept at the front so it wins over repo roots added
+        // later by `add_claim_roots`.
+        let mut roots = self.claim_roots.lock();
+        let root = lexical_normalize(workspace_root);
+        roots.retain(|r| r != &root);
+        roots.insert(0, root);
+    }
+
+    /// Register additional roots that a relative claim path may be
+    /// anchored to. Federation servers call this with every registered
+    /// repo path: there `config.workspace` is a `/tmp` staging
+    /// placeholder, so the repo roots are the only anchors that can
+    /// turn `src/server/presence.rs` into the same key the CLI produces
+    /// from an absolute path.
+    pub fn add_claim_roots(&self, paths: &[PathBuf]) {
+        let mut roots = self.claim_roots.lock();
+        for p in paths {
+            let root = lexical_normalize(p);
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+
+    /// Snapshot the claim-path anchors. Taken before the occupancy lock
+    /// so normalization never runs under it.
+    fn claim_roots_snapshot(&self) -> Vec<PathBuf> {
+        self.claim_roots.lock().clone()
     }
 
     /// Snapshot the workspace root, if configured. Used by
@@ -654,7 +836,14 @@ impl OccupancyMap {
     }
 
     pub fn claim(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
-        self.claim_in_memory(agent_id, requests)
+        self.claim_in_memory(agent_id, requests, false)
+    }
+
+    /// Claim on behalf of an agent that never asked — the attribution
+    /// watcher saw a write and guessed who made it. Marked `inferred`
+    /// so every consumer can tell it apart from a declared claim.
+    pub fn claim_inferred(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
+        self.claim_in_memory(agent_id, requests, true)
     }
 
     /// Same as [`Self::claim`] but additionally writes the filesystem
@@ -670,7 +859,7 @@ impl OccupancyMap {
         session: &AgentSession,
         requests: Vec<ClaimRequest>,
     ) -> ClaimResult {
-        let result = self.claim_in_memory(&session.id, requests);
+        let result = self.claim_in_memory(&session.id, requests, false);
         if !result.granted.is_empty() {
             self.write_lock_files(session, &result.granted);
         }
@@ -681,11 +870,29 @@ impl OccupancyMap {
     /// `claim` (no FS side-effect, agent-id-only callers) and
     /// `claim_with_session` (FS side-effect + full session) share
     /// the same conflict / book-keeping logic.
-    fn claim_in_memory(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
-        let (granted, conflicts) = {
+    fn claim_in_memory(
+        &self,
+        agent_id: &AgentId,
+        requests: Vec<ClaimRequest>,
+        inferred: bool,
+    ) -> ClaimResult {
+        // Canonicalize before anything is keyed, so two agents naming
+        // one file in two spellings land on the same entry. Done
+        // outside the occupancy lock: the relative-path branch stats
+        // the filesystem.
+        let roots = self.claim_roots_snapshot();
+        let requests: Vec<ClaimRequest> = requests
+            .into_iter()
+            .map(|mut r| {
+                r.path = canonical_claim_path(&roots, &r.path);
+                r
+            })
+            .collect();
+        let (granted, conflicts, advisories) = {
             let mut s = self.inner.lock();
             let mut granted = Vec::new();
             let mut conflicts = Vec::new();
+            let mut advisories = Vec::new();
 
             for req in requests {
                 let entry = s.by_file.entry(req.path.clone()).or_default();
@@ -695,6 +902,34 @@ impl OccupancyMap {
                 // item #5. They still update the agent/symbol
                 // bookkeeping below so the granting agent becomes
                 // observable for occupancy listings.
+                if req.intent == ClaimIntent::Read {
+                    // A read is granted regardless, but the reader
+                    // deserves to know someone is rewriting the file
+                    // while it reads. Advisory, never blocking.
+                    for other in entry.agents.iter().filter(|a| *a != agent_id) {
+                        let holder_intent = entry
+                            .intent_for(other, "__file_level__")
+                            .or_else(|| entry.any_symbol_intent(other));
+                        if holder_intent == Some(ClaimIntent::Edit) {
+                            advisories.push(ConflictEntry {
+                                agent_id: other.clone(),
+                                inferred: entry.inferred.contains(other),
+                                path: req.path.clone(),
+                                symbols: entry
+                                    .symbols
+                                    .iter()
+                                    .filter(|(sym, agents)| {
+                                        sym.as_str() != "__file_level__" && agents.contains(other)
+                                    })
+                                    .map(|(sym, _)| sym.clone())
+                                    .collect(),
+                                intent: ClaimIntent::Edit,
+                                last_seen_unix: entry.last_touched_unix_for(other),
+                            });
+                        }
+                    }
+                }
+
                 if req.intent == ClaimIntent::Edit {
                     // File-level Edit collision: only conflicts with
                     // another agent's Edit-intent claim — at any scope
@@ -724,6 +959,7 @@ impl OccupancyMap {
                             }
                             req_conflicts.push(ConflictEntry {
                                 agent_id: other.clone(),
+                                inferred: entry.inferred.contains(&other),
                                 path: req.path.clone(),
                                 symbols: vec![],
                                 intent: other_intent,
@@ -742,6 +978,7 @@ impl OccupancyMap {
                                     if entry.intent_for(other, sym) == Some(ClaimIntent::Edit) {
                                         req_conflicts.push(ConflictEntry {
                                             agent_id: other.clone(),
+                                            inferred: entry.inferred.contains(&other),
                                             path: req.path.clone(),
                                             symbols: vec![sym.clone()],
                                             intent: ClaimIntent::Edit,
@@ -765,6 +1002,7 @@ impl OccupancyMap {
                                 if entry.intent_for(&other, "__file_level__") == Some(ClaimIntent::Edit) {
                                     req_conflicts.push(ConflictEntry {
                                         agent_id: other.clone(),
+                                        inferred: entry.inferred.contains(&other),
                                         path: req.path.clone(),
                                         symbols: vec![],
                                         intent: ClaimIntent::Edit,
@@ -781,7 +1019,23 @@ impl OccupancyMap {
                     // Apply: add agent to file; add to symbol sets; record
                     // intent and last-touched under each scope (real
                     // symbol name or the `__file_level__` sentinel).
+                    // A declaration always wins over a guess; a guess
+                    // never downgrades a declaration. So `inferred`
+                    // marks only claims the agent did not already hold,
+                    // while an explicit claim clears the marker outright
+                    // — the agent has now said out loud what the watcher
+                    // had only inferred.
+                    let already_held = entry.agents.contains(agent_id);
                     entry.agents.insert(agent_id.clone());
+                    if !inferred {
+                        entry.inferred.remove(agent_id);
+                    } else if !already_held {
+                        entry.inferred.insert(agent_id.clone());
+                    }
+                    // Read the resolved flag now: `entry` borrows
+                    // `s.by_file`, and the `Claim` below writes through
+                    // `s.by_agent`.
+                    let claim_is_inferred = entry.inferred.contains(agent_id);
                     if req.symbols.is_empty() {
                         entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
                         entry.intents.entry("__file_level__".into()).or_default().insert(agent_id.clone(), req.intent.clone());
@@ -813,7 +1067,17 @@ impl OccupancyMap {
                     // session expires.
                     let expires_at = req.ttl_seconds
                         .map(|s| now + std::time::Duration::from_secs(s));
-                    s.by_agent.entry(agent_id.clone()).or_default().push(Claim {
+                    // Re-claiming a scope replaces the previous entry
+                    // rather than appending beside it. Without this,
+                    // an agent that claimed the same file twice — or
+                    // whose declared claim was re-observed by the
+                    // attribution watcher — accumulated duplicate rows
+                    // in `my_claims`, inflating `claims_count` and
+                    // leaving a stale `inferred` flag behind the fresh
+                    // one.
+                    let agent_claims = s.by_agent.entry(agent_id.clone()).or_default();
+                    agent_claims.retain(|c| !(c.path == req.path && c.symbols == req.symbols));
+                    agent_claims.push(Claim {
                         agent_id: agent_id.clone(),
                         path: req.path.clone(),
                         symbols: req.symbols.clone(),
@@ -823,6 +1087,7 @@ impl OccupancyMap {
                         last_touched_unix: now,
                         expires_at,
                         plan_revision: req.plan_revision,
+                        inferred: claim_is_inferred,
                     });
                     granted.push(req);
                 } else {
@@ -830,12 +1095,12 @@ impl OccupancyMap {
                 }
             }
 
-            (granted, conflicts)
+            (granted, conflicts, advisories)
         };
         if !granted.is_empty() {
             if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
-        ClaimResult { granted, conflicts, world_state: None }
+        ClaimResult { granted, conflicts, advisories, world_state: None }
     }
 
     /// Refresh the `last_touched` timestamp on every claim this agent
@@ -860,12 +1125,20 @@ impl OccupancyMap {
     }
 
     pub fn release(&self, agent_id: &AgentId, paths: &[PathBuf]) -> Vec<PathBuf> {
+        // Same canonicalization as `claim_in_memory`, so a release
+        // spelled differently from the claim still finds it.
+        let roots = self.claim_roots_snapshot();
+        let paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| canonical_claim_path(&roots, p))
+            .collect();
         let released = {
             let mut s = self.inner.lock();
             let mut released = Vec::new();
-            for path in paths {
+            for path in &paths {
                 if let Some(entry) = s.by_file.get_mut(path) {
                     entry.agents.remove(agent_id);
+                    entry.inferred.remove(agent_id);
                     let syms_to_remove: Vec<String> = entry.symbols.iter()
                         .filter(|(_, agents)| agents.contains(agent_id))
                         .map(|(s, _)| s.clone())
@@ -953,6 +1226,7 @@ impl OccupancyMap {
             for (agent_id, path, symbols) in &to_drop {
                 if let Some(entry) = s.by_file.get_mut(path) {
                     entry.agents.remove(agent_id);
+                    entry.inferred.remove(agent_id);
                     // Remove the agent from any symbol set it claimed.
                     // For file-level claims (`symbols` empty) the
                     // bookkeeping lives under the `__file_level__`
@@ -1041,6 +1315,10 @@ impl OccupancyMap {
     }
 
     pub fn list_for_path(&self, path: &Path) -> Option<OccupancyEntry> {
+        // Readers canonicalize on the same rule as `claim`, so asking
+        // "who is in this file?" with an absolute path finds a claim
+        // taken with a relative one, and vice versa.
+        let path = &canonical_claim_path(&self.claim_roots_snapshot(), path);
         let s = self.inner.lock();
         s.by_file.get(path).map(|entry| {
             let mut symbols: Vec<SymbolOccupancy> = entry.symbols.iter()
@@ -1103,6 +1381,17 @@ pub enum PresenceEvent {
     HeartbeatExpired(AgentId),
     ClaimGranted { agent_id: AgentId, path: PathBuf },
     ClaimReleased { agent_id: AgentId, path: PathBuf },
+    /// A claim taken away from an agent that did not ask to give it up:
+    /// its session expired, or the claim's own TTL ran out. Distinct
+    /// from `ClaimReleased` (a voluntary `release_files`) because the
+    /// holder may still believe it owns the file — a subscriber seeing
+    /// this should treat the holder's in-flight edit as unprotected.
+    /// `reason` is `session_expired` or `ttl_expired`.
+    ClaimRevoked {
+        agent_id: AgentId,
+        path: PathBuf,
+        reason: String,
+    },
     ConflictDetected {
         agent_id: AgentId,
         conflicts: Vec<ConflictEntry>,
@@ -1375,7 +1664,16 @@ fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum ChangedKind {
     Edited,
+    /// The symbol was in the graph and is not any more — something the
+    /// caller was working on disappeared under it.
     Retracted,
+    /// The graph has no record of this symbol at all. Distinct from
+    /// `Retracted`, which used to cover both cases: asking about a name
+    /// that is a match arm rather than a definition, or one added since
+    /// the last index, returned `Retracted` and told the agent its
+    /// target had been deleted. "I have never seen this" and "this was
+    /// removed" call for opposite reactions.
+    NotIndexed,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

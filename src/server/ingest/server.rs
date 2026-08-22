@@ -525,6 +525,50 @@ impl LainServer {
             .map_err(|e| crate::server::error::LainError::Other(format!("load_state({}): {e}", path.display())))
     }
 
+    /// Run `f` inside the cross-process presence critical section:
+    /// take the state-file lock, refresh the in-memory registries from
+    /// disk, run `f`, then write the result back.
+    ///
+    /// This is what makes presence shared between processes on one
+    /// machine. The stdio transport spawns a server *per client*, so
+    /// two agents on the same repo previously ran two registries and
+    /// could not see each other — every claim was granted, no conflict
+    /// was ever reported, and nothing indicated the coordination layer
+    /// was inert. The state file was already the shared medium; it was
+    /// only ever written, never re-read.
+    ///
+    /// Reload-before-act matters as much as the lock: without it this
+    /// process would save a snapshot built from its own stale memory
+    /// and drop every peer's session.
+    ///
+    /// Advisory throughout — a lock timeout proceeds unlocked, and a
+    /// failed load or save is logged rather than surfaced. Presence is
+    /// a coordination hint; it must never be the thing that breaks a
+    /// tool call.
+    pub fn with_shared_presence<T>(&self, f: impl FnOnce() -> T) -> T {
+        let path = self.state_path();
+        let _lock = crate::server::state_lock::acquire(&path);
+        if let Err(e) = self.load_state() {
+            tracing::debug!("presence refresh skipped: {e}");
+        }
+        let out = f();
+        if let Err(e) = self.save_state() {
+            tracing::warn!("presence save failed: {e}");
+        }
+        out
+    }
+
+    /// Read-only half of [`Self::with_shared_presence`]: refresh from
+    /// disk so a listing reflects peers, without taking the write lock
+    /// or saving. Used by `list_active_agents`, `list_occupancy` and
+    /// friends, where a stale read is the whole bug and a write would
+    /// be pure contention.
+    pub fn refresh_shared_presence(&self) {
+        if let Err(e) = self.load_state() {
+            tracing::debug!("presence refresh skipped: {e}");
+        }
+    }
+
     /// Install a persist callback on `presence` and `occupancy` that
     /// drives `save_state` on every mutation. Called once from each
     /// constructor, immediately after the registries are built and
@@ -558,6 +602,14 @@ impl LainServer {
         // callback above; called from all three constructors via
         // `install_persist_callback`.
         self.occupancy.set_workspace_root(&self.config.workspace);
+        // In federation mode `config.workspace` is a staging
+        // placeholder, not a checkout — the real files live under the
+        // registered repo roots. Register those too so a relative claim
+        // path from an MCP caller canonicalizes to the same key the CLI
+        // produces from an absolute path.
+        if let Some(fed) = &self.federation {
+            self.occupancy.add_claim_roots(&fed.repo_paths());
+        }
         // Touch the first closure so the compiler does not warn about
         // an unused binding; both callbacks are installed above.
         let _ = cb;

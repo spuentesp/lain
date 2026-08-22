@@ -15,15 +15,78 @@ use std::path::Path;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-/// Parse a command string like "cargo build --message-format=json" into a Command
-fn parse_command(cmd_str: &str) -> Command {
+/// Resolve a toolchain binary that may not be on the server's `PATH`.
+///
+/// MCP servers inherit the environment of whatever spawned them, and an
+/// editor-launched process routinely has no toolchain shims: on the
+/// machine this was found, `cargo` lived only at
+/// `~/.rustup/toolchains/<triple>/bin/cargo`, so every `run_build` /
+/// `run_tests` / `run_clippy` call failed. Falls back to the bare name
+/// so a `PATH`-resolvable binary keeps working unchanged.
+fn resolve_program(program: &str) -> String {
+    if program != "cargo" && program != "rustc" {
+        return program.to_string();
+    }
+    // Explicit override wins.
+    if let Ok(p) = std::env::var(program.to_uppercase()) {
+        if !p.is_empty() && Path::new(&p).exists() {
+            return p;
+        }
+    }
+    // Ask rustup where the active toolchain's binary lives.
+    if let Ok(out) = std::process::Command::new("rustup").args(["which", program]).output() {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() && Path::new(&p).exists() {
+                return p;
+            }
+        }
+    }
+    // The conventional shim directory.
+    if let Ok(home) = std::env::var("HOME") {
+        let p = Path::new(&home).join(".cargo/bin").join(program);
+        if p.exists() {
+            return p.to_string_lossy().to_string();
+        }
+    }
+    program.to_string()
+}
+
+/// Turn a failed spawn into an error an agent can act on.
+///
+/// `cmd.output()` on a missing binary yields `No such file or directory
+/// (os error 2)` and nothing else — no program, no directory, no path.
+/// An agent reading that has no way to tell a missing toolchain from a
+/// bad `cwd`, and both are one-line fixes once named.
+fn spawn_error(program: &str, work_dir: &Path, e: std::io::Error) -> LainError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        let path = std::env::var("PATH").unwrap_or_else(|_| "<unset>".into());
+        return LainError::NotFound(format!(
+            "`{program}` was not found. Tried to run it in {} with PATH={path}. \
+             The lain server inherits the environment of whatever launched it, which \
+             often lacks toolchain shims — install {program}, add it to PATH, or set \
+             the {} environment variable to its absolute path.",
+            work_dir.display(),
+            program.to_uppercase()
+        ));
+    }
+    LainError::Io(format!(
+        "running `{program}` in {}: {e}",
+        work_dir.display()
+    ))
+}
+
+/// Parse a command string like "cargo build --message-format=json" into
+/// a Command, plus the program name for error reporting.
+fn parse_command(cmd_str: &str) -> (Command, String) {
     let mut parts = cmd_str.split_whitespace();
     let program = parts.next().unwrap_or("echo");
-    let mut cmd = Command::new(program);
+    let resolved = resolve_program(program);
+    let mut cmd = Command::new(&resolved);
     for arg in parts {
         cmd.arg(arg);
     }
-    cmd
+    (cmd, program.to_string())
 }
 
 pub async fn run_build(
@@ -50,7 +113,7 @@ pub async fn run_build(
         }
     };
 
-    let mut cmd = parse_command(&profile.build_cmd());
+    let (mut cmd, mut program) = parse_command(&profile.build_cmd());
     // Inject --release if requested (for rust)
     if release && (toolchain_name == "rust" || toolchain_name == "cargo") {
         // Inject --release into the build command for rust
@@ -60,11 +123,16 @@ pub async fn run_build(
         } else {
             base_cmd
         };
-        cmd = parse_command(&cmd_str);
+        let (c, p) = parse_command(&cmd_str);
+        cmd = c;
+        program = p;
     }
     cmd.current_dir(work_dir);
 
-    let output = cmd.output().await.map_err(|e| LainError::Io(e.to_string()))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| spawn_error(&program, work_dir, e))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.status.code().unwrap_or(-1);
@@ -127,7 +195,7 @@ pub async fn run_tests(
         }
     };
 
-    let mut cmd = parse_command(&profile.test_cmd());
+    let (mut cmd, program) = parse_command(&profile.test_cmd());
     // Inject filter for rust if provided
     if toolchain_name == "rust" || toolchain_name == "cargo" {
         if let Some(f) = filter {
@@ -141,7 +209,7 @@ pub async fn run_tests(
 
     let result = timeout(timeout_duration, cmd.output()).await
         .map_err(|_| LainError::Mcp("Tests timed out".to_string()))?
-        .map_err(|e| LainError::Io(e.to_string()))?;
+        .map_err(|e| spawn_error(&program, work_dir, e))?;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -188,7 +256,7 @@ pub async fn run_clippy(
         return Err(LainError::NotFound("Cargo.toml not found - not a Rust project".to_string()));
     }
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = Command::new(resolve_program("cargo"));
     cmd.arg("clippy");
     if fix {
         cmd.arg("--fix");
@@ -198,7 +266,10 @@ pub async fn run_clippy(
     cmd.arg("--message-format=json");
     cmd.current_dir(work_dir);
 
-    let output = cmd.output().await.map_err(|e| LainError::Io(e.to_string()))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| spawn_error("cargo", work_dir, e))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.status.code().unwrap_or(-1);
@@ -242,4 +313,46 @@ pub async fn run_clippy(
     }
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::*;
+
+    /// A missing binary used to surface as bare
+    /// `IO error: No such file or directory (os error 2)` — no program,
+    /// no directory, no PATH. An agent reading that cannot tell a
+    /// missing toolchain from a bad `cwd`.
+    #[test]
+    fn missing_program_error_names_the_program_and_where_it_looked() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let err = spawn_error("cargo", Path::new("/ws/project"), e);
+        let msg = err.to_string();
+        assert!(msg.contains("cargo"), "must name the program: {msg}");
+        assert!(msg.contains("/ws/project"), "must name the directory: {msg}");
+        assert!(msg.contains("PATH="), "must show the PATH it searched: {msg}");
+    }
+
+    #[test]
+    fn other_spawn_errors_keep_their_cause_and_context() {
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = spawn_error("cargo", Path::new("/ws"), e).to_string();
+        assert!(msg.contains("cargo") && msg.contains("/ws"), "{msg}");
+    }
+
+    #[test]
+    fn non_toolchain_programs_are_left_alone() {
+        // Only cargo/rustc get rustup resolution; everything else must
+        // resolve through PATH exactly as before.
+        assert_eq!(resolve_program("npm"), "npm");
+        assert_eq!(resolve_program("go"), "go");
+    }
+
+    #[test]
+    fn parse_command_reports_the_program_name_not_the_resolved_path() {
+        // The error message should say `cargo`, not a long absolute
+        // path the user never typed.
+        let (_cmd, program) = parse_command("cargo build --message-format=json");
+        assert_eq!(program, "cargo");
+    }
 }

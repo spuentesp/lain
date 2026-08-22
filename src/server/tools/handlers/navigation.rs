@@ -226,7 +226,16 @@ pub fn get_layered_map(
     granularity: &str
 ) -> Result<String, LainError> {
     let mut all_nodes = Vec::new();
-    for node_type in [NodeType::File, NodeType::Namespace, NodeType::Class, NodeType::Function] {
+    // Includes `Method` — a layered map that omits impl blocks is a
+    // map with most of the code missing.
+    for node_type in [
+        NodeType::File,
+        NodeType::Namespace,
+        NodeType::Module,
+        NodeType::Class,
+        NodeType::Function,
+        NodeType::Method,
+    ] {
         all_nodes.extend(graph.get_nodes_by_type(node_type)?);
     }
 

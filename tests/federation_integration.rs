@@ -1197,18 +1197,21 @@ async fn agent_a_plan_revision_beyond_current_gets_note() {
         "BeyondCurrent must surface the verbatim note from compute_world_state; resp={resp}"
     );
     // Since commit 040cdd6, BeyondCurrent/TooOld branches preserve the
-    // retract set across error paths (static-graph state and overlay
-    // state are independent). `verify_token` is absent from the static
-    // graph in this fixture, so it surfaces here as a `Retracted` entry.
+    // absent-symbol set across error paths (static-graph state and
+    // overlay state are independent). `verify_token` is absent from the
+    // static graph in this fixture and this agent never held it, so it
+    // surfaces as `NotIndexed` — the graph has no record of it, which
+    // is different from it having been deleted. The subject of this
+    // assertion is that the set survives the error path at all.
     let cs: Vec<&serde_json::Value> = ws["changed_symbols"]
         .as_array().unwrap()
         .iter()
-        .filter(|c| c["change_kind"] == "Retracted"
+        .filter(|c| c["change_kind"] == "NotIndexed"
                   && c["name"] == "verify_token")
         .collect();
     assert_eq!(
         cs.len(), 1,
-        "BeyondCurrent must preserve the retract set; resp={resp}"
+        "BeyondCurrent must preserve the absent-symbol set; resp={resp}"
     );
     assert_eq!(
         ws["plan"].as_u64(),

@@ -7,88 +7,34 @@ use crate::query::spec::QuerySpec;
 /// Describe the current graph schema
 pub fn describe_schema() -> SchemaDescription {
     SchemaDescription {
-        node_types: vec![
-            NodeTypeDesc {
-                name: "Function".into(),
-                description: "A function or method definition".into(),
-                properties: vec!["name".into(), "path".into(), "signature".into()],
-                labels: vec!["test".into(), "deprecated".into(), "async".into()],
-            },
-            NodeTypeDesc {
-                name: "File".into(),
-                description: "A source file".into(),
-                properties: vec!["path".into(), "language".into()],
-                labels: vec!["generated".into(), "test".into()],
-            },
-            NodeTypeDesc {
-                name: "Module".into(),
-                description: "A module or package".into(),
-                properties: vec!["name".into(), "path".into()],
-                labels: vec![],
-            },
-            NodeTypeDesc {
-                name: "Class".into(),
-                description: "A class or struct definition".into(),
-                properties: vec!["name".into(), "path".into()],
-                labels: vec!["test".into(), "deprecated".into()],
-            },
-            NodeTypeDesc {
-                name: "Interface".into(),
-                description: "An interface or trait definition".into(),
-                properties: vec!["name".into(), "path".into()],
-                labels: vec![],
-            },
-        ],
-        edge_types: vec![
-            EdgeTypeDesc {
-                name: "Calls".into(),
-                description: "Function calls another function".into(),
-                source_types: vec!["Function".into()],
-                target_types: vec!["Function".into()],
-            },
-            EdgeTypeDesc {
-                name: "Uses".into(),
-                description: "Code uses a value/entity".into(),
-                source_types: vec!["Function".into(), "Class".into()],
-                target_types: vec!["Function".into(), "Class".into(), "Interface".into()],
-            },
-            EdgeTypeDesc {
-                name: "Import".into(),
-                description: "File imports a module".into(),
-                source_types: vec!["File".into()],
-                target_types: vec!["Module".into()],
-            },
-            EdgeTypeDesc {
-                name: "Defines".into(),
-                description: "File/module defines a Function/Class".into(),
-                source_types: vec!["File".into(), "Module".into()],
-                target_types: vec!["Function".into(), "Class".into(), "Interface".into()],
-            },
-            EdgeTypeDesc {
-                name: "Contains".into(),
-                description: "Module contains other modules".into(),
-                source_types: vec!["Module".into()],
-                target_types: vec!["Module".into(), "Function".into()],
-            },
-            EdgeTypeDesc {
-                name: "Inherits".into(),
-                description: "Class inherits from another class".into(),
-                source_types: vec!["Class".into()],
-                target_types: vec!["Class".into(), "Interface".into()],
-            },
-            EdgeTypeDesc {
-                name: "Implements".into(),
-                description: "Class implements an interface".into(),
-                source_types: vec!["Class".into()],
-                target_types: vec!["Interface".into()],
-            },
-            EdgeTypeDesc {
-                name: "TestedBy".into(),
-                description: "Function is tested by a test function".into(),
-                source_types: vec!["Function".into()],
-                target_types: vec!["Function".into()],
-            },
-        ],
+        // Built from `NodeType::all()` so the documented schema
+        // cannot drift from what the indexer actually emits. It had:
+        // five types were listed by hand while eighteen existed, and
+        // `Method` — where most Rust code lives — was among the
+        // missing, so schema-following queries silently returned
+        // nothing.
+        node_types: crate::server::schema::NodeType::all()
+            .iter()
+            .map(|t| NodeTypeDesc {
+                name: t.to_string(),
+                description: t.description().into(),
+                properties: t.properties().iter().map(|p| (*p).to_string()).collect(),
+                labels: t.labels().iter().map(|l| (*l).to_string()).collect(),
+            })
+            .collect(),
+        // Built from `EdgeType::all()` for the same reason the node
+        // list is: the hand-written version advertised four edge kinds
+        // that do not exist and omitted eight that do, `CoChangedWith`
+        // among them.
+        edge_types: crate::server::schema::EdgeType::all()
+            .iter()
+            .map(|e| EdgeTypeDesc {
+                name: e.to_string(),
+                description: e.description().into(),
+                source_types: e.source_types().iter().map(|t| t.to_string()).collect(),
+                target_types: e.target_types().iter().map(|t| t.to_string()).collect(),
+            })
+            .collect(),
         examples: vec![
             ExampleQuery {
                 name: "blast_radius".into(),
@@ -204,5 +150,64 @@ mod tests {
         assert!(!schema.node_types.is_empty());
         assert!(!schema.edge_types.is_empty());
         assert!(!schema.examples.is_empty());
+    }
+
+    /// The documented schema must cover every type the indexer can
+    /// emit. It advertised five of eighteen, so an agent that followed
+    /// `describe_schema` and queried `type: "Function"` for a method
+    /// got `count: 0` while `find_anchors` ranked that same method
+    /// first — two tools, opposite answers, in one session.
+    #[test]
+    fn describe_schema_covers_every_node_type() {
+        use crate::server::schema::NodeType;
+        let schema = describe_schema();
+        let described: std::collections::HashSet<String> =
+            schema.node_types.iter().map(|n| n.name.clone()).collect();
+        for t in NodeType::all() {
+            assert!(
+                described.contains(&t.to_string()),
+                "describe_schema omits {t}, which the graph can contain"
+            );
+        }
+        assert!(
+            described.contains("Method"),
+            "Method is where most impl-language code lives; it must be documented"
+        );
+    }
+
+    /// The edge list drifted the same way the node list did: four
+    /// advertised kinds did not exist and eight real ones were missing,
+    /// `CoChangedWith` among them — the temporal coupling lain
+    /// advertises as a headline feature was absent from its own schema.
+    #[test]
+    fn describe_schema_covers_every_edge_type() {
+        use crate::server::schema::EdgeType;
+        let schema = describe_schema();
+        let described: std::collections::HashSet<String> =
+            schema.edge_types.iter().map(|e| e.name.clone()).collect();
+        for e in EdgeType::all() {
+            assert!(
+                described.contains(&e.to_string()),
+                "describe_schema omits {e}, which the graph can contain"
+            );
+        }
+        assert_eq!(
+            described.len(),
+            EdgeType::all().len(),
+            "describe_schema must not advertise edge types the graph has no variant for"
+        );
+    }
+
+    /// Descriptions are what an LLM reads to pick a type; an empty one
+    /// is worse than no entry.
+    #[test]
+    fn every_node_type_has_a_description() {
+        use crate::server::schema::NodeType;
+        for t in NodeType::all() {
+            assert!(!t.description().is_empty(), "{t} has no description");
+        }
+        for e in crate::server::schema::EdgeType::all() {
+            assert!(!e.description().is_empty(), "{e} has no description");
+        }
     }
 }

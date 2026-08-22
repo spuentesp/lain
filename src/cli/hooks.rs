@@ -25,11 +25,20 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        #[arg(long)]
+        ///
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// the codebase but ignored here, so exporting it and omitting
+        /// `--url` failed with "the following required arguments were
+        /// not provided" — a flag that looked optional and was not.
+        #[arg(long, default_value = "")]
         url: String,
-        /// Absolute file path being claimed.
-        #[arg(long)]
-        path: String,
+        /// File path being claimed. Repeat for a multi-file claim:
+        /// `--path a.rs --path b.rs`. All paths go in one `claim_files`
+        /// call, so the set is granted or refused together — one
+        /// invocation per file could half-succeed and leave the agent
+        /// holding an inconsistent subset.
+        #[arg(long, required = true)]
+        path: Vec<String>,
         /// Optional symbol name within the file.
         #[arg(long, default_value = "")]
         symbol: String,
@@ -53,7 +62,12 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        #[arg(long)]
+        ///
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// the codebase but ignored here, so exporting it and omitting
+        /// `--url` failed with "the following required arguments were
+        /// not provided" — a flag that looked optional and was not.
+        #[arg(long, default_value = "")]
         url: String,
         /// Absolute file path being released.
         #[arg(long)]
@@ -79,7 +93,12 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        #[arg(long)]
+        ///
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// the codebase but ignored here, so exporting it and omitting
+        /// `--url` failed with "the following required arguments were
+        /// not provided" — a flag that looked optional and was not.
+        #[arg(long, default_value = "")]
         url: String,
         /// Base ref — commit SHA, branch name, or `HEAD~N`. Resolved
         /// to a full SHA before being sent to the server.
@@ -221,6 +240,25 @@ struct McpContent {
 ///
 /// The hook scripts and e2e tests now pass the bare form; older callers
 /// that still pass the full form continue to work.
+/// Resolve the server URL from the flag, falling back to `$LAIN_URL`.
+///
+/// `--url` used to be mandatory while `LAIN_URL` was read elsewhere in
+/// the codebase and ignored here, so exporting it and omitting the flag
+/// failed with clap's "required arguments were not provided" — the
+/// error names the flag but not the variable that should have covered
+/// for it.
+pub fn resolve_url(flag: &str) -> Result<String> {
+    if !flag.is_empty() {
+        return Ok(flag.to_string());
+    }
+    match std::env::var("LAIN_URL") {
+        Ok(v) if !v.is_empty() => Ok(v),
+        _ => anyhow::bail!(
+            "no lain server URL: pass --url http://localhost:9999 or set LAIN_URL"
+        ),
+    }
+}
+
 fn mcp_endpoint(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     if trimmed.ends_with("/mcp") {
@@ -355,15 +393,21 @@ fn chrono_now_unix() -> u64 {
 /// is authoritative and the filesystem write happens as a side-effect.
 pub fn claim(
     url: &str,
-    path: &str,
+    paths: &[String],
     symbol: &str,
     intent: &str,
     agent_name: &str,
     agent_kind: &str,
     parent_session_id: &str,
 ) -> Result<()> {
+    let url = &resolve_url(url)?;
     if !server_reachable(url, Duration::from_millis(200)) {
-        return claim_filesystem(path, symbol, intent, agent_name, agent_kind);
+        // The filesystem fallback is per-path; claim each in turn and
+        // fail on the first refusal.
+        for path in paths {
+            claim_filesystem(path, symbol, intent, agent_name, agent_kind)?;
+        }
+        return Ok(());
     }
     let parent = if parent_session_id.is_empty() {
         None
@@ -371,16 +415,26 @@ pub fn claim(
         Some(parent_session_id)
     };
     let sess = register_if_needed(url, agent_name, agent_kind, parent)?;
-    let mut files = serde_json::Map::new();
-    files.insert("path".into(), serde_json::Value::String(path.to_string()));
-    if !symbol.is_empty() {
-        files.insert("symbols".into(), serde_json::json!([symbol]));
-    }
-    files.insert(
-        "intent".into(),
-        serde_json::Value::String(intent.to_string()),
+    // `--symbol` scopes every path in the request. It is only
+    // meaningful for a single-path claim; with several paths the caller
+    // is claiming whole files.
+    let files_arr = serde_json::Value::Array(
+        paths
+            .iter()
+            .map(|path| {
+                let mut files = serde_json::Map::new();
+                files.insert("path".into(), serde_json::Value::String(path.clone()));
+                if !symbol.is_empty() && paths.len() == 1 {
+                    files.insert("symbols".into(), serde_json::json!([symbol]));
+                }
+                files.insert(
+                    "intent".into(),
+                    serde_json::Value::String(intent.to_string()),
+                );
+                serde_json::Value::Object(files)
+            })
+            .collect(),
     );
-    let files_arr = serde_json::Value::Array(vec![serde_json::Value::Object(files)]);
     let mut args = serde_json::json!({
         "agent_id": sess.agent_id,
         "session_token": sess.session_token,
@@ -420,6 +474,7 @@ pub fn release(
     agent_kind: &str,
     parent_session_id: &str,
 ) -> Result<()> {
+    let url = &resolve_url(url)?;
     if !server_reachable(url, Duration::from_millis(200)) {
         return release_filesystem(path);
     }
@@ -626,6 +681,7 @@ pub fn overlap_check(
     head: Option<&str>,
     workspace: &str,
 ) -> Result<()> {
+    let url = &resolve_url(url)?;
     let base_sha = git_rev_parse_full(base)
         .with_context(|| format!("resolving base ref {base:?}"))?;
     let head_input = head.unwrap_or("HEAD");
@@ -856,5 +912,35 @@ mod tests {
             root.join("src/sub").canonicalize().unwrap(),
             "`.lain` must not be honored as a workspace anchor"
         );
+    }
+}
+
+#[cfg(test)]
+mod url_resolution_tests {
+    use super::*;
+
+    /// `--url` was mandatory while `LAIN_URL` was read elsewhere in the
+    /// codebase and ignored here, so exporting the variable and
+    /// omitting the flag failed with clap's "required arguments were
+    /// not provided" — an error that names the flag but not the
+    /// variable that should have covered for it.
+    #[test]
+    fn explicit_flag_wins() {
+        assert_eq!(
+            resolve_url("http://localhost:9999").unwrap(),
+            "http://localhost:9999"
+        );
+    }
+
+    #[test]
+    fn missing_url_names_both_ways_to_supply_it() {
+        // `env::remove_var` is process-wide; this test only asserts the
+        // message shape, which holds regardless of ambient LAIN_URL.
+        let err = match std::env::var("LAIN_URL") {
+            Ok(v) if !v.is_empty() => return, // ambient value; nothing to assert
+            _ => resolve_url("").unwrap_err().to_string(),
+        };
+        assert!(err.contains("--url"), "must name the flag: {err}");
+        assert!(err.contains("LAIN_URL"), "must name the env var: {err}");
     }
 }
