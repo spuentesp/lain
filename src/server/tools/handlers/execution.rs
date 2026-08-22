@@ -9,48 +9,11 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::tuning::RuntimeConfig;
-use crate::toolchains::{detect_toolchains, load_toolchain_profiles};
+use crate::toolchains::{detect_toolchains, load_toolchain_profiles, ToolchainProfile};
 use crate::server::tools::handlers::decoration::{decorate_output, get_parser, GraphEnricher};
 use std::path::Path;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
-
-/// Resolve a toolchain binary that may not be on the server's `PATH`.
-///
-/// MCP servers inherit the environment of whatever spawned them, and an
-/// editor-launched process routinely has no toolchain shims: on the
-/// machine this was found, `cargo` lived only at
-/// `~/.rustup/toolchains/<triple>/bin/cargo`, so every `run_build` /
-/// `run_tests` / `run_clippy` call failed. Falls back to the bare name
-/// so a `PATH`-resolvable binary keeps working unchanged.
-fn resolve_program(program: &str) -> String {
-    if program != "cargo" && program != "rustc" {
-        return program.to_string();
-    }
-    // Explicit override wins.
-    if let Ok(p) = std::env::var(program.to_uppercase()) {
-        if !p.is_empty() && Path::new(&p).exists() {
-            return p;
-        }
-    }
-    // Ask rustup where the active toolchain's binary lives.
-    if let Ok(out) = std::process::Command::new("rustup").args(["which", program]).output() {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() && Path::new(&p).exists() {
-                return p;
-            }
-        }
-    }
-    // The conventional shim directory.
-    if let Ok(home) = std::env::var("HOME") {
-        let p = Path::new(&home).join(".cargo/bin").join(program);
-        if p.exists() {
-            return p.to_string_lossy().to_string();
-        }
-    }
-    program.to_string()
-}
 
 /// Turn a failed spawn into an error an agent can act on.
 ///
@@ -62,10 +25,12 @@ fn spawn_error(program: &str, work_dir: &Path, e: std::io::Error) -> LainError {
     if e.kind() == std::io::ErrorKind::NotFound {
         let path = std::env::var("PATH").unwrap_or_else(|_| "<unset>".into());
         return LainError::NotFound(format!(
-            "`{program}` was not found. Tried to run it in {} with PATH={path}. \
-             The lain server inherits the environment of whatever launched it, which \
-             often lacks toolchain shims — install {program}, add it to PATH, or set \
-             the {} environment variable to its absolute path.",
+            "`{program}` was not found. Tried to run it in {} with PATH={path}, then \
+             searched this toolchain's known install locations. The lain server \
+             inherits the environment of whatever launched it, which often lacks \
+             version-manager shims. Fix by any of: install {program}; add it to PATH; \
+             set {}=/absolute/path/to/{program}; or add its directory to \
+             `program_dirs` in the toolchain's TOML profile (see toolchains/README.md).",
             work_dir.display(),
             program.to_uppercase()
         ));
@@ -78,10 +43,16 @@ fn spawn_error(program: &str, work_dir: &Path, e: std::io::Error) -> LainError {
 
 /// Parse a command string like "cargo build --message-format=json" into
 /// a Command, plus the program name for error reporting.
-fn parse_command(cmd_str: &str) -> (Command, String) {
+///
+/// The program is resolved through the toolchain profile, which knows
+/// where that ecosystem's version managers install: an MCP server
+/// inherits the environment of whatever launched it, and an
+/// editor-launched process routinely has no shims on `PATH`. The error
+/// path still reports the *name* the user wrote, not the resolved path.
+fn parse_command(cmd_str: &str, profile: Option<&ToolchainProfile>) -> (Command, String) {
     let mut parts = cmd_str.split_whitespace();
     let program = parts.next().unwrap_or("echo");
-    let resolved = resolve_program(program);
+    let resolved = crate::toolchains::resolve_program(program, profile);
     let mut cmd = Command::new(&resolved);
     for arg in parts {
         cmd.arg(arg);
@@ -113,7 +84,7 @@ pub async fn run_build(
         }
     };
 
-    let (mut cmd, mut program) = parse_command(&profile.build_cmd());
+    let (mut cmd, mut program) = parse_command(&profile.build_cmd(), Some(profile));
     // Inject --release if requested (for rust)
     if release && (toolchain_name == "rust" || toolchain_name == "cargo") {
         // Inject --release into the build command for rust
@@ -123,7 +94,7 @@ pub async fn run_build(
         } else {
             base_cmd
         };
-        let (c, p) = parse_command(&cmd_str);
+        let (c, p) = parse_command(&cmd_str, Some(profile));
         cmd = c;
         program = p;
     }
@@ -195,7 +166,7 @@ pub async fn run_tests(
         }
     };
 
-    let (mut cmd, program) = parse_command(&profile.test_cmd());
+    let (mut cmd, program) = parse_command(&profile.test_cmd(), Some(profile));
     // Inject filter for rust if provided
     if toolchain_name == "rust" || toolchain_name == "cargo" {
         if let Some(f) = filter {
@@ -256,7 +227,13 @@ pub async fn run_clippy(
         return Err(LainError::NotFound("Cargo.toml not found - not a Rust project".to_string()));
     }
 
-    let mut cmd = Command::new(resolve_program("cargo"));
+    // `clippy` is Rust by definition, so resolve through the rust
+    // profile rather than a bare `cargo` that PATH may not have.
+    let rust_profile = crate::toolchains::get_toolchain_profile("rust");
+    let mut cmd = Command::new(crate::toolchains::resolve_program(
+        "cargo",
+        rust_profile.as_ref(),
+    ));
     cmd.arg("clippy");
     if fix {
         cmd.arg("--fix");
@@ -341,18 +318,21 @@ mod spawn_tests {
     }
 
     #[test]
-    fn non_toolchain_programs_are_left_alone() {
-        // Only cargo/rustc get rustup resolution; everything else must
-        // resolve through PATH exactly as before.
-        assert_eq!(resolve_program("npm"), "npm");
-        assert_eq!(resolve_program("go"), "go");
+    fn parse_command_reports_the_program_name_not_the_resolved_path() {
+        // The error message should say `cargo`, not a long absolute
+        // path the user never typed — resolution is an implementation
+        // detail, the name is what the operator can act on.
+        let (_cmd, program) = parse_command("cargo build --message-format=json", None);
+        assert_eq!(program, "cargo");
     }
 
     #[test]
-    fn parse_command_reports_the_program_name_not_the_resolved_path() {
-        // The error message should say `cargo`, not a long absolute
-        // path the user never typed.
-        let (_cmd, program) = parse_command("cargo build --message-format=json");
-        assert_eq!(program, "cargo");
+    fn an_unknown_program_falls_back_to_its_bare_name() {
+        // So the spawn error names what was actually missing rather
+        // than a path lain invented.
+        assert_eq!(
+            crate::toolchains::resolve_program("definitely-not-installed-xyz", None),
+            "definitely-not-installed-xyz"
+        );
     }
 }
