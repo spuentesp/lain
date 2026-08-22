@@ -9,6 +9,12 @@ use std::path::Path;
 /// Tuning parameters for graph construction and query ranking.
 /// Loaded from .lain/tuning.toml in the workspace root.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Every field defaults, so a `tuning.toml` may set only the keys it
+/// cares about. Without container-level `serde(default)` a partial file
+/// failed to parse outright, `load_tuning_config` logged a warning most
+/// operators never see, and *every* setting silently reverted — so a
+/// file setting one key was worse than no file at all.
+#[serde(default)]
 pub struct TuningConfig {
     /// Semantic search: minimum cosine similarity to include a result.
     /// Range: [0.0, 1.0]. Higher = more precise, lower = more recall.
@@ -68,6 +74,7 @@ impl Default for TuningConfig {
 
 /// Ingestion pipeline tuning — affects scanning, embedding, and graph construction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IngestionConfig {
     /// Number of concurrent LSP language servers for parallel file analysis.
     /// Higher = more parallel scanning, more memory/CPU.
@@ -136,6 +143,7 @@ impl Default for IngestionConfig {
 /// or filesystem behaved differently had no way to adjust them. Every
 /// other timeout in lain is tunable; these are now too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PresenceConfig {
     /// How long an interactive agent may go without proof of life.
     ///
@@ -179,6 +187,7 @@ impl Default for PresenceConfig {
 
 /// Runtime tuning — timeouts and limits for command execution and LSP operations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeConfig {
     /// Default timeout for arbitrary command execution (seconds).
     pub default_command_timeout_secs: u64,
@@ -226,4 +235,44 @@ pub fn save_tuning_config(workspace: &Path, config: &TuningConfig) -> std::io::R
     std::fs::write(dir.join("tuning.toml"), contents)?;
     tracing::info!("Saved tuning config to {:?}", dir.join("tuning.toml"));
     Ok(())
+}
+
+#[cfg(test)]
+mod partial_config_tests {
+    //! A `tuning.toml` must be able to set one key.
+    //!
+    //! Without container-level `serde(default)` a partial file failed to
+    //! parse, `load_tuning_config` logged a warning to a stream most
+    //! operators never read, and every setting silently reverted to its
+    //! default — so the documented workflow ("set `query_prefix` in
+    //! `.lain/tuning.toml`") quietly did nothing.
+    use super::*;
+
+    #[test]
+    fn a_single_key_file_keeps_every_other_default() {
+        let cfg: TuningConfig = toml::from_str(r#"query_prefix = "Represent: ""#).unwrap();
+        assert_eq!(cfg.query_prefix, "Represent: ");
+        assert_eq!(cfg.semantic_similarity_threshold, 0.3);
+        assert_eq!(cfg.presence.interactive_session_ttl_secs, 600);
+    }
+
+    #[test]
+    fn a_partial_nested_table_keeps_its_siblings() {
+        let cfg: TuningConfig =
+            toml::from_str("[presence]\ninteractive_session_ttl_secs = 900\n").unwrap();
+        assert_eq!(cfg.presence.interactive_session_ttl_secs, 900);
+        assert_eq!(cfg.presence.background_session_ttl_secs, 60);
+        assert_eq!(cfg.presence.inferred_claim_ttl_secs, 120);
+    }
+
+    #[test]
+    fn an_empty_file_is_the_default_config() {
+        let cfg: TuningConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.presence.interactive_session_ttl_secs, 600);
+        assert_eq!(cfg.ingestion.lsp_pool_size, IngestionConfig::default().lsp_pool_size);
+        assert_eq!(
+            cfg.runtime.default_test_timeout_secs,
+            RuntimeConfig::default().default_test_timeout_secs
+        );
+    }
 }

@@ -530,9 +530,7 @@ Workspaces are named groups of repos that the federation engine indexes
 together as a coherent unit. A workspace = a subset of `repos.yaml`'s
 repos, picked at server start via `--workspace <name>` (or `auto` to
 read the operator's `~/.config/lain/active_workspace` pointer). The
-workspace config lives in `workspaces.yaml` next to `repos.yaml`; see
-the [Workspaces spec](../superpowers/specs/2026-08-12-lain-workspaces-design.md)
-for the full design. This section is a quick reference.
+workspace config lives in `workspaces.yaml` next to `repos.yaml`.
 
 ### When to use workspaces
 

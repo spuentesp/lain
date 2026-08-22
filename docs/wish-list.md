@@ -55,7 +55,7 @@ seconds and shouldn't have to go through `register_agent` → `heartbeat` →
 
 ## 5. Advisory conflicts should say *what*, not just *that*
 
-Per `docs/multiplayer-e2e-report.md`, Scenario D's second agent edits "despite
+In the end-to-end run this list came from, a second agent edited "despite
 the conflict warning" — conflicts are advisory, which I think is the right
 default (a hard lock would just cause agents to sit blocked or retry-storm).
 But the warning payload should tell me enough to make a real decision:
@@ -76,9 +76,8 @@ lockout into a one-line diagnostic.
 
 ## 7. Reconcile the two roadmaps
 
-`docs/superpowers/plans/2026-08-14-lain-consolidation.md` (sitting uncommitted
-on `main`) explicitly deletes `hook.rs`, `projects.rs`, and the
-owner/sidecar/lock machinery as "multi-user coordination" out of scope — dated
+The 2026-08-14 consolidation plan explicitly deleted `hook.rs`, `projects.rs`,
+and the owner/sidecar/lock machinery as "multi-user coordination" out of scope — dated
 before the multiplayer work (2026-08-15 through 2026-08-18) that built exactly
 that surface back out, more thoroughly, in this worktree. As a customer I
 don't need both to survive intact, but I do need to know which one is the

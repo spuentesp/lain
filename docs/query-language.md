@@ -47,7 +47,7 @@ Locate nodes in the graph.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string \| `["Type1", "Type2"]` | Node type: `File`, `Module`, `Function`, `Method`, `Class`, `Interface`, `Trait`, `Variable`, `Constant` |
+| `type` | string \| `["Type1", "Type2"]` | Node type — see [Node Types](#node-types). Omit to match every kind |
 | `name` | string | Exact name (or object with glob/startsWith/endsWith) |
 | `id` | string | Node UUID |
 | `label` | string \| `["L1"]` \| `{ "not": ["L1"] }` | Node label |
@@ -75,7 +75,7 @@ Traverse edges from found nodes.
 
 | Field | Description |
 |-------|-------------|
-| `edge` | `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`, `TestedBy`, `AnchoredAt` |
+| `edge` | `Calls`, `Contains`, `Uses`, `Implements`, `Imports`, `CoChangedWith`, `Pattern`, `CallsHttp`, `Produces`, `Consumes`, `DeployedTo`, `CrossRepoSameSymbol` |
 | `direction` | `outgoing` \| `incoming` \| `both` |
 | `depth` | Integer or `{ "min": N, "max": M }` |
 | `target` | Optional nested `FindOp` — only follow edges to matching nodes |
@@ -194,7 +194,7 @@ With args via `ops` equivalent:
 {
   "ops": [
     { "op": "find", "type": "File", "name": "auth.rs" },
-    { "op": "connect", "edge": "CO_CHANGED_WITH", "direction": "both", "depth": 1 }
+    { "op": "connect", "edge": "CoChangedWith", "direction": "both", "depth": 1 }
   ]
 }
 ```
@@ -205,7 +205,7 @@ With args via `ops` equivalent:
 {
   "ops": [
     { "op": "find", "type": "Function", "path": "src/handlers/" },
-    { "op": "connect", "edge": "TestedBy", "direction": "incoming", "depth": 0 },
+    { "op": "connect", "edge": "Calls", "direction": "incoming", "depth": 0 },
     { "op": "filter", "type": "Function" }
   ]
 }
@@ -262,17 +262,30 @@ With explicit ops:
 
 ## Edge Types
 
+These are generated from the `EdgeType` enum, so `describe_schema` and
+this table cannot drift from what the indexer actually emits.
+
 | Edge | Meaning |
 |------|---------|
 | `Calls` | Function invocation |
-| `Contains` | File/Module contains child |
-| `Defines` | Module/scope defines symbol |
-| `Inherits` | Class inheritance |
+| `Contains` | File/module contains a symbol |
+| `Uses` | Code uses a variable or type |
+| `Implements` | Class implements an interface |
 | `Imports` | Import/use statement |
-| `CO_CHANGED_WITH` | Historical co-change |
-| `TestedBy` | Test coverage |
-| `AnchoredAt` | Anchor relationship |
+| `CoChangedWith` | Historical co-change (temporal coupling, not a static dependency) |
+| `Pattern` | Semantic boundary indicator (path prefix, topic name) |
+| `CallsHttp` | HTTP route → handler |
+| `Produces` / `Consumes` | Producer/consumer ↔ message topic |
+| `DeployedTo` | IaC resource → cloud resource |
+| `CrossRepoSameSymbol` | Federation-only: same symbol in two repos |
 
 ## Node Types
 
-`File`, `Module`, `Function`, `Method`, `Class`, `Interface`, `Trait`, `Variable`, `Constant`
+`File`, `Namespace`, `Module`, `Package`, `Class`, `Interface`, `Struct`,
+`Enum`, `Trait`, `Function`, `Method`, `Property`, `Variable`, `Constant`,
+`HttpRoute`, `Topic`, `Resource`, `Schema`
+
+`Function` and `Method` are distinct. In Rust and other impl-heavy
+languages most code is a `Method`, so a query filtered to `Function`
+alone silently misses it — call `describe_schema` if in doubt, and note
+that `find` without a `type` matches every kind.
