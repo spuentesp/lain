@@ -9,10 +9,6 @@
 use super::config::LainConfig;
 use crate::config::state_path_for_workspace;
 use crate::server::attribution::AttributionBackend;
-use crate::server::auth::AuthState;
-use crate::server::error::LainError;
-use crate::server::events_log::EventsLog;
-use crate::server::federation::config::FederationConfig;
 use crate::server::federation::config::RepoConfig;
 use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::repo_id::RepoId;
@@ -26,7 +22,7 @@ use crate::server::presence::{
     load_pair as load_presence_pair, save_pair as save_presence_pair, OccupancyMap,
     PresenceEvent, PresenceRegistry,
 };
-use crate::server::refresh::{RefreshOutcome, RefreshResult};
+use crate::server::refresh::RefreshResult;
 use crate::server::reload::ReloadBus;
 use crate::server::sync_status::SyncStatus;
 use crate::server::tools::ToolExecutor;

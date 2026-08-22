@@ -136,14 +136,6 @@ impl<'de> serde::Deserialize<'de> for SymbolHash {
     }
 }
 
-/// `SystemTime::default()` is not in `std`; provide a fixed UNIX_EPOCH
-/// default for the timestamps that we deliberately leave out of the
-/// persisted JSON (started_at, last_heartbeat, claimed_at). Hydrating
-/// the registries from disk leaves these at UNIX_EPOCH; downstream code
-/// that cares about real timestamps (the federation expiry loop) reloads
-/// them via the live `heartbeat` flow, not via persistence.
-fn epoch() -> SystemTime { SystemTime::UNIX_EPOCH }
-
 /// Serialize a `SystemTime` as UNIX seconds.
 ///
 /// These fields used to be `skip_serializing`, on the reasoning that

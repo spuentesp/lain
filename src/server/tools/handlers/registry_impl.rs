@@ -9,7 +9,7 @@ use crate::error::LainError;
 use crate::server::tools::handlers;
 use crate::server::tools::registry::{ToolCapability, ToolContext, ToolHandler, ToolHandlerEntry};
 use crate::server::tools::utils::{
-    bool_arg, opt_str_arg, required_str_arg, str_arg, u32_arg, usize_arg,
+    bool_arg, opt_str_arg, required_str_arg, u32_arg, usize_arg,
 };
 use async_trait::async_trait;
 use inventory;

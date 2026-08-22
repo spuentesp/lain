@@ -112,31 +112,30 @@ fn test_anchor_scores_normalized_to_100() {
         );
     }
 
-    // b has fan_in=2, fan_out=1 (calls c) → raw = 2/2 = 1.0; if it's
-    // the top, it gets 100. Otherwise it scales.
+    // b is the only node with two callers *and* a callee, so it is the
+    // corpus top and normalizes to 100.
+    //
+    // This assertion used to recompute the expectation with the
+    // superseded `fan_in / (fan_out + 1)` ratio. It passed anyway,
+    // because on this fixture both the old ratio and the hub formula
+    // rank `b` first and the top always normalizes to 100 — so the
+    // check could not have failed if the formula regressed. The
+    // discriminating case lives in
+    // `graph::anchor_hub_tests::hub_outranks_trivial_helper`, which builds
+    // a fixture where the two formulas disagree.
     let b = graph.find_node_by_name("b").unwrap();
-    let b_raw = (b.fan_in.unwrap() as f32) / (b.fan_out.unwrap() as f32 + 1.0);
-    // verify the stored anchor matches the formula raw / max * 100
-    let max_raw: f32 = graph
-        .find_anchors(100)
-        .unwrap()
-        .iter()
-        .map(|n| {
-            let fi = n.fan_in.unwrap_or(0) as f32;
-            let fo = n.fan_out.unwrap_or(0) as f32;
-            fi / (fo + 1.0)
-        })
-        .fold(0.0, f32::max);
-    let expected = if max_raw > 0.0 {
-        b_raw / max_raw * 100.0
-    } else {
-        0.0
-    };
     assert!(
-        (b.anchor_score.unwrap() - expected).abs() < 1e-4,
-        "b's anchor should be {}, got {}",
-        expected,
+        (b.anchor_score.unwrap() - 100.0).abs() < 1e-4,
+        "b is the corpus top and must normalize to 100, got {}",
         b.anchor_score.unwrap()
+    );
+    // c is called once but calls nothing: a leaf is not an
+    // orchestration hub, whatever its caller count.
+    let c = graph.find_node_by_name("c").unwrap();
+    assert_eq!(
+        c.anchor_score.unwrap(),
+        0.0,
+        "a leaf that calls nothing must not score as a hub"
     );
 }
 

@@ -203,8 +203,8 @@ mod tests {
         let id1 = log.append(&PresenceEvent::AgentJoined(sess.clone()));
         let id2 = log.append(&PresenceEvent::AgentLeft(AgentId("a".into())));
         let id3 = log.append(&PresenceEvent::AgentJoined(sess));
-        let replayed: Vec<u64> = log.replay_after(1).map(|(id, _)| id).collect();
-        assert_eq!(replayed, vec![id2, id3], "replay_after(1) returns events with id > 1, in order");
+        let replayed: Vec<u64> = log.replay_after(id1).map(|(id, _)| id).collect();
+        assert_eq!(replayed, vec![id2, id3], "replay_after(id1) returns events with id > id1, in order");
     }
 
     #[test]

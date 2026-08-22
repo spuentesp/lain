@@ -22,7 +22,7 @@ impl LainServer {
                 if let Ok(Some(last)) = self.graph.get_last_commit() {
                     if last != commit {
                         info!("Background sync: new commits detected, triggering sync");
-                        let mut s = self.clone();
+                        let s = self.clone();
                         if let Err(e) = s.build_core_memory().await {
                             warn!("Background sync failed: {}", e);
                         }

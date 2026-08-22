@@ -5,7 +5,7 @@
 
 use super::dto::RecentProjectEntry;
 use crate::error::LainError;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Compute the workspace + repo counts for a recent project entry
 /// based on its `repos.yaml` / `workspaces.yaml` paths. Failures

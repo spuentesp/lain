@@ -5,7 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::server::tools::utils::resolve_node;
 use crate::server::tools::{UiSession, UiSessionData, BlastRadiusNode};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -45,6 +45,9 @@ async fn store_ui_session_and_append_link(
     ));
 }
 
+/// How many dependents to name per section before summarizing.
+const LIST_CAP: usize = 20;
+
 pub async fn get_blast_radius(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
@@ -81,7 +84,9 @@ pub async fn get_blast_radius(
     queue.push_back((node.id.clone(), 0));
     queued.insert(node.id.clone());
 
-    let mut affected_names: Vec<String> = Vec::new();
+    // (depth-of-caller, formatted row). Depth is kept so the report can
+    // separate real callers from nodes that merely reach this one.
+    let mut affected_names: Vec<(u32, String)> = Vec::new();
     let mut session_nodes: Vec<BlastRadiusNode> = Vec::new();
 
     // Confidence tracking: nodes resolved via LSP vs tree-sitter fallback
@@ -112,16 +117,21 @@ pub async fn get_blast_radius(
                 }
                 if let Ok(Some(caller)) = graph.get_node(&source_id) {
                     let is_direct = depth == 0;
-                    affected_names.push(format!(
+                    affected_names.push((depth + 1, format!(
                         "  - {} ({:?}) in {}",
                         caller.name, caller.node_type, caller.path
-                    ));
+                    )));
                     session_nodes.push(BlastRadiusNode {
                         id: caller.id.clone(),
                         name: caller.name.clone(),
                         node_type: format!("{:?}", caller.node_type),
                         path: caller.path.clone(),
-                        depth,
+                        // The caller sits one hop past the node we
+                        // popped, so its depth is `depth + 1`. Emitting
+                        // the parent's depth put every direct caller at
+                        // 0, the seed's own level, and disagreed with
+                        // the `[depth N]` tags in the text report.
+                        depth: depth + 1,
                         is_direct,
                     });
 
@@ -164,12 +174,57 @@ pub async fn get_blast_radius(
         output.push_str("\n  (no dependents found — symbol may be a leaf or not yet indexed)");
         // Don't show total count when there are no names to show
     } else {
-        let show = affected_names.len().min(20);
-        for name in &affected_names[..show] {
+        // Direct callers and transitive reach answer different questions and
+        // must not collapse into one number. Reverse closure through a
+        // central dispatcher is huge and still correct: this helper has
+        // three callers, and 434 nodes can reach it. Emitting all 434 in
+        // discovery order buried the three that actually call it.
+        let direct: Vec<&String> = affected_names
+            .iter()
+            .filter(|(d, _)| *d == 1)
+            .map(|(_, n)| n)
+            .collect();
+        let mut by_depth: BTreeMap<u32, usize> = BTreeMap::new();
+        for (d, _) in &affected_names {
+            *by_depth.entry(*d).or_insert(0) += 1;
+        }
+
+        output.push_str(&format!("\n- Direct dependents ({}):", direct.len()));
+        for name in direct.iter().take(LIST_CAP) {
             output.push_str(&format!("\n{}", name));
         }
-        if affected_names.len() > 20 {
-            output.push_str(&format!("\n  ... and {} more", affected_names.len() - 20));
+        if direct.len() > LIST_CAP {
+            output.push_str(&format!(
+                "\n  ... and {} more direct",
+                direct.len() - LIST_CAP
+            ));
+        }
+
+        let indirect: Vec<&(u32, String)> =
+            affected_names.iter().filter(|(d, _)| *d > 1).collect();
+        if !indirect.is_empty() {
+            let deepest = by_depth.keys().next_back().copied().unwrap_or(1);
+            output.push_str(&format!(
+                "\n- Indirect dependents ({}), reaching it only through the callers above; deepest chain {} levels:",
+                indirect.len(),
+                deepest
+            ));
+            // Still listed by name — the point of the split is that the
+            // three real callers stop being buried, not that the rest
+            // becomes invisible. Depth is tagged so a reader can tell a
+            // direct break from a transitive one.
+            for (d, name) in indirect.iter().take(LIST_CAP) {
+                output.push_str(&format!("\n{} [depth {}]", name, d));
+            }
+            if indirect.len() > LIST_CAP {
+                output.push_str(&format!(
+                    "\n  ... and {} more indirect, by depth:",
+                    indirect.len() - LIST_CAP
+                ));
+                for (d, count) in by_depth.iter().filter(|(d, _)| **d > 1) {
+                    output.push_str(&format!("\n  - depth {}: {}", d, count));
+                }
+            }
         }
         output.push_str(&format!("\n- Total transitively affected nodes: {}", total_affected));
     }

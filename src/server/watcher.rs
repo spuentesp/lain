@@ -135,7 +135,7 @@ const DEBOUNCE_MS: u64 = 100;
 /// `AddDirectory` (from the notify callback); `Shutdown` is the
 /// clean-stop hook used by tests that own the channel and want to
 /// drain the thread without leaking it.
-enum WatchCommand {
+pub(crate) enum WatchCommand {
     /// Register a directory-create path the notify callback just saw.
     AddDirectory(PathBuf),
     /// Stop the watcher thread's command-receive loop.
@@ -377,6 +377,7 @@ impl WatcherThreadArgs {
     }
 
     /// Test wiring: caller provides whichever hooks they need.
+    #[cfg(test)]
     pub fn for_test(
         workspace: PathBuf,
         file_sender: mpsc::Sender<PathBuf>,

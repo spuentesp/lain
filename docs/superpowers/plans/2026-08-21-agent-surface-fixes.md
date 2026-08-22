@@ -404,7 +404,7 @@ Tasks 6–11 are low-risk and can be batched into a single cleanup PR.
 ---
 
 ## Out of scope
-- `Method` node semantics beyond registering the type (Task 7). Whether a method should be an anchor candidate is a scoring question, adjacent to `2026-08-21-anchor-hub-scoring.md`.
+- `Method` node semantics beyond registering the type (Task 7). Whether a method should be an anchor candidate is a scoring question, adjacent to the hub-scoring formula documented in `GraphDatabase::calculate_anchor_scores`.
 - Semantic search quality. The model wasn't loaded in this evaluation, so `semantic_search` was never exercised — only its error message (Task 9).
 
 ---

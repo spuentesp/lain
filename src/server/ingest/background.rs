@@ -12,7 +12,6 @@ use crate::server::presence::{OccupancyMap, PresenceEvent, PresenceRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
 
 /// Pick the platform-appropriate default [`AttributionBackend`] for
 /// constructors that don't take an explicit backend (i.e. the

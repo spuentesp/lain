@@ -230,8 +230,11 @@ on `name` or `path`. Results are deduplicated by `global_id`, sorted by
 ### `get_cross_repo_blast_radius`
 
 The headline federation tool. Resolves a symbol across the federation,
-then traverses outgoing `Calls` edges in the federated graph and groups
-the visited nodes by repo.
+then traverses **incoming** `Calls` edges in the federated graph — the
+symbol's callers, answering "if I change this, what breaks?" — and
+groups the visited nodes by repo. (The prose here previously said
+"outgoing" while the example below listed `caller_*` nodes; the example
+was the accurate half.)
 
 - **Arguments:**
   - `symbol` (string, required) — the function/symbol name

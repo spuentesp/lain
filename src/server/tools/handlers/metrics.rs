@@ -58,11 +58,19 @@ pub fn find_anchors(
         return Ok("No anchors found in Merged Brain.".to_string());
     }
 
+    // Report the path, not just the name. `graph.find_anchors` dedups by
+    // name and keeps the best-scoring node, so the name alone is
+    // ambiguous whenever a name is defined more than once — and the
+    // follow-up call the strategy guide recommends resolves the name
+    // independently, landing on a different node. Live, `find_anchors`
+    // listed `as_str (score: 100.000)` while `get_anchor_score as_str`
+    // answered `0.000`: two tools, same name, different nodes, flatly
+    // contradictory answers with nothing on screen to explain it.
     Ok(format!("Top {} anchors (Merged Brain):\n{}",
-        anchors.len(),
+        anchors.len().min(limit),
         anchors.iter().enumerate().take(limit).map(|(i, n)| {
             let score = n.anchor_score.map(|s| format!("{:.3}", s)).unwrap_or_else(|| "N/A".to_string());
-            format!("{}. {} (score: {})", i + 1, n.name, score)
+            format!("{}. {} ({:?}) in {} (score: {})", i + 1, n.name, n.node_type, n.path, score)
         }).collect::<Vec<_>>().join("\n")
     ))
 }
@@ -73,9 +81,20 @@ pub fn get_anchor_score(
     symbol: &str
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
+    // Name which node was scored. A name defined several times resolves
+    // to one arbitrary instance here while `find_anchors` reports the
+    // best-scoring one, so the bare name made the two tools look like
+    // they disagreed (`as_str`: 100.000 there, 0.000 here) when they
+    // were describing different symbols.
     match node.anchor_score {
-        Some(s) => Ok(format!("Anchor score for '{}': {:.3}", symbol, s)),
-        None => Ok(format!("Symbol '{}' has no anchor score in Merged Brain.", symbol)),
+        Some(s) => Ok(format!(
+            "Anchor score for '{}' ({:?} in {}): {:.3}",
+            symbol, node.node_type, node.path, s
+        )),
+        None => Ok(format!(
+            "Symbol '{}' ({:?} in {}) has no anchor score in Merged Brain.",
+            symbol, node.node_type, node.path
+        )),
     }
 }
 

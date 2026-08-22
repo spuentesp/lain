@@ -1,5 +1,12 @@
 # Lain Multiplayer — Customer Wish List
 
+> **Read this as a historical complaint, not as current behavior.**
+> Sections 1–12 are the original agent-seat report, kept verbatim because
+> the framing is the useful part. Most of what they describe is fixed.
+> The verified current state is at the bottom, under
+> [Status — verified 2026-08-22](#status--verified-2026-08-22); where a
+> section below contradicts it, the bottom section is right.
+
 Written from the seat of a coding agent (Claude Code) that shares a repo with
 other agent consoles. Based on hands-on use of the `consolidation` worktree's
 multiplayer layer (`docs/multiplayer.md`, `docs/hooks.md`) plus one direct
@@ -125,14 +132,14 @@ opt-in-by-registration, so an agent that doesn't participate costs nothing.
 ### Status (2026-08-20, after Round 2)
 
 - **#8 per-repo tools must answer** → **partially addressed in `577a444`**. When the federation has exactly one repo, the executor's `ToolContext::graph` is now that repo's indexed `GraphDatabase`, not the empty staging dir. `find_anchors` / `explain_symbol` / `get_blast_radius` / etc. now answer against the real graph for the single-repo case (the typical `lain` user setup). **Multi-repo federation still binds to the placeholder** — per-repo tools with no explicit `repo_id` will return the wrong repo's data or empty. Round-2 follow-up: pass `&FederatedIndex` to per-repo handlers and have them pick the right `RepoIndex::db()` based on `repo_id` (already in args from the round-1 fix).
-- **#9 tools/list filter for inert tools** → open. Quick win on top of #8 round-2.
-- **#10 `doctor` should verify the integration surface** → partially addressed. The on-disk hook check now also tries the install layout (`$bindir/../share/lain/hooks/`) so release binaries report OK, not FAIL (commit `f643f68`). **Open**: `doctor` still doesn't call `tools/list` on a live MCP endpoint. The "all checks passed" on a broken MCP registration remains the most embarrassing single failure — the check covers the wrong surface.
-- **#11 single-workspace mode was removed** → **design decision still owed**. Two reasonable answers: (a) restore a no-args `lain mcp` for the single-repo case (walk up for `.git`, index, serve stdio), or (b) keep federation-only and rewrite the strategy guide / `SKILL.md` / tool list to match what federation can actually do. Current state is the worst of both. The single-repo binding fix in #8 unblocks option (a) only if we also add a `lain mcp` entrypoint; right now there's no MCP-friendly single-repo mode.
-- **#12a `semantic_search` unreachable (NLP model not loaded)** → open. `lain server` has no `--embedding-model` flag, so the model never loads. The ONNX model is on disk and unused.
-- **#12b `query_graph` schema mismatch** → open. Documented `{"ops":[{"find":"Function"},{"limit":3}]}` errors with `missing field 'op'`. Either the docs or the handler is wrong.
-- **#12c `get_cross_repo_blast_radius` traverses outgoing, not incoming** → open. "Blast radius" to an agent means *incoming* callers ("if I change X, what breaks?"). Outgoing edges answer "what does X depend on", which is `trace_dependency`. Either flip it or rename.
+- **#9 tools/list filter for inert tools** → still open (see the verified status at the bottom; it is the same architectural item as multi-repo #8). Quick win on top of #8 round-2.
+- **#10 `doctor` should verify the integration surface** → partially addressed. The on-disk hook check now also tries the install layout (`$bindir/../share/lain/hooks/`) so release binaries report OK, not FAIL (commit `f643f68`). **CLOSED 2026-08-22**: `doctor` now calls `tools/list` on the live MCP endpoint and fails on an empty surface. Previously open: The "all checks passed" on a broken MCP registration remains the most embarrassing single failure — the check covers the wrong surface.
+- **#11 single-workspace mode was removed** → **CLOSED**: option (a) was taken — `lain mcp` exists. Original note: Two reasonable answers: (a) restore a no-args `lain mcp` for the single-repo case (walk up for `.git`, index, serve stdio), or (b) keep federation-only and rewrite the strategy guide / `SKILL.md` / tool list to match what federation can actually do. Current state is the worst of both. The single-repo binding fix in #8 unblocks option (a) only if we also add a `lain mcp` entrypoint; right now there's no MCP-friendly single-repo mode.
+- **#12a `semantic_search` unreachable (NLP model not loaded)** → CLOSED (see bottom).~~open.~~ `lain server` has no `--embedding-model` flag, so the model never loads. The ONNX model is on disk and unused.
+- **#12b `query_graph` schema mismatch** → NOT A DEFECT (see bottom).~~open.~~ Documented `{"ops":[{"find":"Function"},{"limit":3}]}` errors with `missing field 'op'`. Either the docs or the handler is wrong.
+- **#12c `get_cross_repo_blast_radius` traverses outgoing, not incoming** → CLOSED; the traversal was already incoming, the *descriptions* were wrong (see bottom).~~open.~~ "Blast radius" to an agent means *incoming* callers ("if I change X, what breaks?"). Outgoing edges answer "what does X depend on", which is `trace_dependency`. Either flip it or rename.
 - **#12d running the tool can break its own test suite** → **addressed in `6d71a75`**. `find_workspace_root` no longer honors `.lain/` as a workspace anchor; only `.git`. The `/tmp/.lain` CI-red problem is gone.
-- **#12e session files accumulate one per PPID** → open. `~/.config/lain/hooks/` grows unbounded. `doctor` counts them; nothing reaps them. Worth a TTL-based cleanup or at least an "old sessions" warning.
+- **#12e session files accumulate one per PPID** → CLOSED, `doctor` reaps >30d (see bottom).~~open.~~ `~/.config/lain/hooks/` grows unbounded. `doctor` counts them; nothing reaps them. Worth a TTL-based cleanup or at least an "old sessions" warning.
 
 ---
 
@@ -257,13 +264,73 @@ is the worst of both.
 
 ## What a customer actually uses today
 
-Working and genuinely useful: `search_org` (better than grep — it
-distinguishes a `Function` from a similarly-named test), `list_repos`,
-and the entire multiplayer surface (`claim_files`, `list_occupancy`,
-`who_am_i`, `list_subagents`). That layer is solid.
+*(Historical — this paragraph described the state on 2026-08-19 and is
+no longer true. Superseded by the status section below.)*
 
-Not usable: everything structural — blast radius, anchors, dependency
-traces, semantic search. Which is the frustrating part, because that is
-precisely the work lain exists to replace, and the graph is right there:
-3007 nodes, 12641 edges, `health: ready`. It simply isn't wired to the
-tools that would read it.
+The original text read: "Not usable: everything structural — blast
+radius, anchors, dependency traces, semantic search." Every one of those
+answers today; see below.
+
+## Status — verified 2026-08-22
+
+Each line re-probed against a live server (`lain server`, HTTP transport,
+real ONNX model loaded, this repo indexed) rather than read off the code.
+
+**Closed:**
+
+- **#1–#7** — closed earlier (PR 12 / PR 18); see the 2026-08-20 section.
+- **#8 per-repo tools must answer** → closed *for the single-repo case*,
+  which is the setup `lain init` scaffolds and the one users run.
+  `find_dead_code`, `get_blast_radius`, `find_anchors`, `explain_symbol`,
+  `semantic_search`, `find_call_sites` and `query_graph` all answer
+  against the real graph. **Multi-repo federation still binds per-repo
+  tools to the empty staging placeholder** — see Open below.
+- **#10 `doctor` should verify the integration surface** → closed.
+  `doctor` now calls `tools/list` on the live MCP endpoint when
+  `LAIN_URL`/`LAIN_SERVER_URL` is set and reports the advertised tool
+  count, failing hard on an error envelope or an empty surface.
+  Verified against a stub that answers `/health` 200 with zero tools:
+  `[FAIL] MCP surface empty: tools/list advertises 0 tools`, exit 1.
+  The "all checks passed on a broken registration" failure is caught.
+- **#11 single-workspace mode was removed** → closed. `lain mcp` walks
+  up for `.git` and serves the per-repo surface on stdio, so the MCP
+  config is `{"command":"lain","args":["mcp"]}`. `lain init` scaffolds
+  `repos.yaml` for the server path.
+- **#12a `semantic_search` unreachable** → closed. `lain server
+  --embedding-model PATH` loads the ONNX bi-encoder; the tool returns
+  ranked results. Unset, it says `NLP Model: Not loaded` rather than
+  failing silently.
+- **#12b `query_graph` schema mismatch** → **not a defect.** The report
+  quoted `{"ops":[{"find":"Function"}]}`, a shorthand the docs never
+  specified. Every example in `docs/query-language.md` and
+  `docs/quickstart-query.md` uses the tagged form
+  (`{"op":"find","type":"Function","name":"handle"}`) and all five were
+  re-run successfully. No code or doc change was needed.
+- **#12c `get_cross_repo_blast_radius` direction** → closed, and the
+  reverse of what was reported: the *traversal* was already fixed to
+  incoming `Calls` (callers). What was still wrong was the **tool
+  description and `docs/FEDERATION.md`, which both still said
+  "outgoing"** — while FEDERATION.md's own example listed `caller_*`
+  nodes. Both now say incoming.
+- **#12d test suite self-break** → closed (`6d71a75`).
+- **#12e session files accumulate** → closed. `doctor` reaps session
+  JSON older than 30 days via `prune_old_sessions` and reports the count.
+
+**Open:**
+
+- **#8 (multi-repo) / #9 `tools/list` filter for inert tools.** These are
+  one architectural item. With two or more repos in the federation,
+  `bind_to_single_repo_graph` keeps the empty staging placeholder, so
+  per-repo structural tools answer against an empty graph. Fixing it
+  properly means threading repo selection (`repo_id`) through every
+  per-repo handler so each resolves the right `RepoIndex::db()` —
+  a real refactor, not a patch, and untouched here.
+
+  **What changed instead:** the failure is no longer silent. An empty
+  graph used to produce a confident false negative ("Node not found …
+  a symbol added since the last commit will not appear"), which is the
+  worst shape — a caller acts on it. `resolve_node` now detects the
+  0-node case and says so, naming both real causes (not indexed yet, or
+  multi-repo federation) and pointing at the federation tools or
+  `lain mcp`. A wrong answer became an actionable one; the underlying
+  binding limitation remains.

@@ -60,7 +60,7 @@ After install, `lain` exposes exactly five subcommands:
 | `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
 | `lain ask` | Single-user LLM-assisted query (uses `semantic_search` + `explain_symbol` heuristics). |
 | `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
-| `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs, presence registry, and (if `LAIN_URL` set) server reachability. |
+| `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs (reaping session files older than 30 days), presence registry, and — when `LAIN_URL`/`LAIN_SERVER_URL` is set — both server reachability **and the live MCP surface**, calling `tools/list` and failing if it errors or advertises zero tools. Exits 0 clean, 1 on a hard failure. |
 
 The cut surface (`init`, `agents`, `hook`, `projects`, top-level
 `use`) is gone — those concerns are reached through the five commands

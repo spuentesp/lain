@@ -12,10 +12,9 @@ use async_trait::async_trait;
 use rust_mcp_sdk::{
     mcp_server::{server_runtime, McpServerOptions, ServerHandler, ToMcpServerHandler},
     schema::{
-        CallToolRequestParams, CallToolResult, ContentBlock,
+        CallToolRequestParams, CallToolResult,
         InitializeResult, ListToolsResult, PaginatedRequestParams,
-        ProtocolVersion, RpcError, ServerCapabilities, ServerCapabilitiesTools,
-        TextContent, Tool, ToolInputSchema, Implementation,
+        ProtocolVersion, RpcError, ServerCapabilities, ServerCapabilitiesTools, Tool, ToolInputSchema, Implementation,
     },
     error::SdkResult,
     McpServer, StdioTransport, TransportOptions,
@@ -56,7 +55,7 @@ use crate::server::mcp::definitions::{
     defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
     WORKSPACE_TOOL_DEFS,
 };
-use crate::server::mcp::envelope::{arg_property_schema, tool_text_result};
+use crate::server::mcp::envelope::tool_text_result;
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
 /// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
@@ -99,7 +98,26 @@ pub fn resolve_repo_for_tool(
         return RepoId::new(r);
     }
     match symbol_hint {
-        Some(s) => fed.resolve_symbol(s),
+        Some(s) => match fed.resolve_symbol(s) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                // The hint exists to *choose a repo*. With exactly one
+                // repo there is nothing to choose, and failing the call
+                // because the hint did not resolve throws away the
+                // richer resolution the per-repo tool would have done:
+                // `resolve_node` accepts node ids and paths, while
+                // `resolve_symbol` only indexes names. `query_graph`
+                // hands back node ids, so every id it returned was
+                // rejected by every other tool — with an error blaming
+                // uncommitted code, which was never the cause.
+                let listed = fed.list_repos();
+                if listed.len() == 1 {
+                    Ok(listed[0].0.clone())
+                } else {
+                    Err(e)
+                }
+            }
+        },
         None => {
             let listed = fed.list_repos();
             if listed.is_empty() {
@@ -753,18 +771,25 @@ impl ServerHandler for LainHandler {
                             ));
                         }
                     };
-                    let depth_str = match args_owned.get("depth").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
+                    // Not `.and_then(as_str)`: that collapses "absent" and
+                    // "present but a number" into one message, and `depth: 2`
+                    // is the mistake callers actually make (it is a string
+                    // range like "1..3").
+                    let depth_owned = match crate::server::tools::utils::required_str_arg(
+                        &args_owned,
+                        "depth",
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
                             return Ok(tool_text_result(
-                                "Missing required argument: depth".to_string(),
+                                e.to_string(),
                                 true,
                                 &self.executor.overlay(),
                         static_graph_generation_unix,
                             ));
                         }
                     };
-                    let depth = match parse_depth_range(depth_str) {
+                    let depth = match parse_depth_range(&depth_owned) {
                         Ok(r) => r,
                         Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
@@ -802,18 +827,21 @@ impl ServerHandler for LainHandler {
                             ));
                         }
                     };
-                    let depth_str = match args_owned.get("depth").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
+                    let depth_owned = match crate::server::tools::utils::required_str_arg(
+                        &args_owned,
+                        "depth",
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
                             return Ok(tool_text_result(
-                                "Missing required argument: depth".to_string(),
+                                e.to_string(),
                                 true,
                                 &self.executor.overlay(),
                         static_graph_generation_unix,
                             ));
                         }
                     };
-                    let depth = match parse_depth_range(depth_str) {
+                    let depth = match parse_depth_range(&depth_owned) {
                         Ok(r) => r,
                         Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay(), static_graph_generation_unix)),
                     };
@@ -2060,11 +2088,15 @@ async fn handle_request(
                                         Some(s) => s,
                                         None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
                                     };
-                                    let depth_str = match args_map.get("depth").and_then(|v| v.as_str()) {
-                                        Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: depth", true)),
+                                    // Same reasoning as the stdio path: `depth: 2`
+                                    // must not be reported as a missing argument.
+                                    let depth_owned = match crate::server::tools::utils::required_str_arg(
+                                        &args_map, "depth",
+                                    ) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e.to_string(), true)),
                                     };
-                                    let depth = match parse_depth_range(depth_str) {
+                                    let depth = match parse_depth_range(&depth_owned) {
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
                                     };
@@ -2088,11 +2120,15 @@ async fn handle_request(
                                         Some(s) => s,
                                         None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
                                     };
-                                    let depth_str = match args_map.get("depth").and_then(|v| v.as_str()) {
-                                        Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: depth", true)),
+                                    // Same reasoning as the stdio path: `depth: 2`
+                                    // must not be reported as a missing argument.
+                                    let depth_owned = match crate::server::tools::utils::required_str_arg(
+                                        &args_map, "depth",
+                                    ) {
+                                        Ok(s) => s,
+                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e.to_string(), true)),
                                     };
-                                    let depth = match parse_depth_range(depth_str) {
+                                    let depth = match parse_depth_range(&depth_owned) {
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
                                     };
@@ -2568,6 +2604,7 @@ fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::mcp::envelope::arg_property_schema;
     use crate::federation::federated_index::FederatedIndex;
     use crate::federation::graph_backend::PetgraphBackend;
     use crate::error::LainError;
@@ -2613,6 +2650,39 @@ mod tests {
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
         let rid = resolve_repo_for_tool(&fed, None, Some("repo-a")).unwrap();
         assert_eq!(rid.as_str(), "repo-a");
+    }
+
+    /// An unresolvable symbol hint must not fail a single-repo call.
+    /// The hint's job is choosing a repo; with one repo there is nothing
+    /// to choose. `query_graph` returns node ids, `resolve_symbol` only
+    /// indexes names, so every id `query_graph` handed back was rejected
+    /// by `get_blast_radius` / `explain_symbol` / `get_code_snippet` —
+    /// with an error blaming uncommitted code, which was never the cause.
+    #[tokio::test]
+    async fn unresolvable_hint_still_dispatches_when_there_is_one_repo() {
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(
+                RepoId::new("only-repo").unwrap(),
+                src_dir.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
+        fed.add_repo(src, tmp.path()).await.unwrap();
+
+        // A node id, not a name — nothing the symbol index can match.
+        let rid = resolve_repo_for_tool(
+            &fed,
+            Some("3d139b4e-688d-51a9-af69-0c164e9aea92"),
+            None,
+        )
+        .expect("a single-repo federation must dispatch regardless of the hint");
+        assert_eq!(rid.as_str(), "only-repo");
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //!
 //! The pre-existing test files duplicated the same four lines of
 //! boilerplate — `tempfile::tempdir` + `GraphDatabase::new` +
-//! `VolatileOverlay::new` + (sometimes) `NlpEmbedder::new_with_threads`
+//! `VolatileOverlay::new`
 //! — in every fixture function. This module gives one place to
 //! change the construction and one place to test it.
 //!
@@ -23,9 +23,7 @@
 //! picked up — `mod common;` in each test file references it).
 
 use lain::graph::GraphDatabase;
-use lain::nlp::NlpEmbedder;
 use lain::overlay::VolatileOverlay;
-use std::sync::{Arc, Mutex};
 
 /// Empty `GraphDatabase` backed by a fresh tempdir + `graph.bin` file
 /// inside it. Caller owns the tempdir through the returned
@@ -85,19 +83,6 @@ pub fn call_graph_fixture() -> (GraphDatabase, VolatileOverlay) {
         g.insert_edge(e).unwrap();
     }
     (g, o)
-}
-
-/// Stub NLP embedder + matching cache. Used by tests that need a
-/// `ToolContext` without pulling in a real ONNX model.
-pub fn stub_embedder_and_cache() -> (
-    NlpEmbedder,
-    Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
-) {
-    use lain::nlp::CrossEncoder;
-    let _ = CrossEncoder::from_dir(std::path::Path::new("/nonexistent"));
-    let embedder = NlpEmbedder::new_with_threads(0).expect("stub embedder");
-    let cache = Arc::new(Mutex::new(std::collections::HashMap::new()));
-    (embedder, cache)
 }
 
 /// Smoke test: every helper returns a usable value and the fixture

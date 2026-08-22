@@ -16,6 +16,14 @@
 //!    reachable — this is a soft `[WARN]` rather than a hard `[FAIL]`
 //!    because `lain doctor` is also useful in environments where no
 //!    server is running locally.
+//! 7. If that server answered, whether its **MCP surface** is live:
+//!    `tools/list` is called and the advertised tool count reported.
+//!    This one is a hard `[FAIL]` (wishlist #10). A reachable `/health`
+//!    only proves the process is up; the surface agents actually call
+//!    can be empty behind it, and "all checks passed" printed over a
+//!    broken MCP registration is the single most misleading thing this
+//!    page could do. Once the server is known reachable, an empty or
+//!    erroring tool list is a real failure, not an environment quirk.
 //!
 //! Returns `Ok(0)` if every check passed, `Ok(1)` if any hard check
 //! failed. Hard failures do not abort early — the operator should see
@@ -46,6 +54,63 @@ impl Severity {
 fn emit(sev: Severity, msg: impl AsRef<str>) -> bool {
     println!("{} {}", sev.tag(), msg.as_ref());
     sev != Severity::Fail
+}
+
+/// Ask a live MCP endpoint for its tool list and report what came back.
+/// Returns false on a hard failure (unreachable, error envelope, or an
+/// empty surface) — an operator whose agent "sees no tools" needs this
+/// line to say so, not a green page derived from `/health`.
+fn emit_tools_list_check(base: &str) -> bool {
+    let endpoint = format!("{base}/mcp");
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+    });
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return emit(Severity::Fail, format!("could not build HTTP client: {e}")),
+    };
+    let resp = match client.post(&endpoint).json(&body).send() {
+        Ok(r) => r,
+        Err(e) => {
+            return emit(
+                Severity::Fail,
+                format!("MCP endpoint {endpoint} did not answer tools/list: {e}"),
+            )
+        }
+    };
+    let value: serde_json::Value = match resp.json() {
+        Ok(v) => v,
+        Err(e) => {
+            return emit(
+                Severity::Fail,
+                format!("tools/list returned a non-JSON body: {e}"),
+            )
+        }
+    };
+    if let Some(err) = value.get("error") {
+        return emit(Severity::Fail, format!("tools/list returned an error: {err}"));
+    }
+    let tools = value
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(|t| t.as_array());
+    match tools {
+        Some(list) if !list.is_empty() => emit(
+            Severity::Ok,
+            format!("MCP surface live: tools/list advertises {} tools", list.len()),
+        ),
+        Some(_) => emit(
+            Severity::Fail,
+            "MCP surface empty: tools/list advertises 0 tools (agents will see no tools)",
+        ),
+        None => emit(
+            Severity::Fail,
+            "tools/list response had no result.tools array",
+        ),
+    }
 }
 
 /// Run the diagnostic. Returns the exit code (0 = all hard checks OK,
@@ -177,10 +242,20 @@ pub fn run_doctor() -> Result<i32> {
     // `/mcp` so the same `LAIN_URL` that hooks use works here without
     // requiring a separate "diagnostic" URL.
     if let Ok(url) = std::env::var("LAIN_URL").or_else(|_| std::env::var("LAIN_SERVER_URL")) {
-        let health_url = format!("{}/health", url.trim_end_matches("/mcp").trim_end_matches('/'));
+        let base = url.trim_end_matches("/mcp").trim_end_matches('/').to_string();
+        let health_url = format!("{base}/health");
         match reqwest::blocking::get(&health_url) {
             Ok(r) if r.status().is_success() => {
                 emit(Severity::Ok, format!("server reachable at {url}"));
+                // Check 6b (wishlist #10): a reachable /health says the
+                // process is up, not that the surface agents actually
+                // call is wired. A server answering health while
+                // `tools/list` returns nothing is precisely the
+                // "all checks passed" on a broken MCP registration this
+                // page exists to catch, so ask the MCP endpoint itself.
+                if !emit_tools_list_check(&base) {
+                    failures += 1;
+                }
             }
             Ok(r) => {
                 emit(Severity::Fail, format!("server at {url} returned {}", r.status()));

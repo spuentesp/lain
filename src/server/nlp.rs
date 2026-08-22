@@ -554,7 +554,7 @@ mod query_prefix_tests {
     use super::*;
 
     #[test]
-    fn default_is_no_prefix_so_miniLM_behaviour_is_unchanged() {
+    fn default_is_no_prefix_so_mini_lm_behaviour_is_unchanged() {
         let e = NlpEmbedder::new_stub();
         assert_eq!(e.query_prefix(), "");
     }

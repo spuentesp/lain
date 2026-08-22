@@ -39,6 +39,25 @@ pub fn resolve_node(
     if let Some(n) = graph.find_node_by_path(handle) { return Ok(n); }
     if let Some(n) = graph.find_node_by_path(&canonical_handle) { return Ok(n); }
 
+    // An empty graph means this "not found" is not about the symbol at
+    // all — nothing would resolve. The per-repo tools bind to a real
+    // repo only when the federation holds exactly one; with several,
+    // they keep the empty staging placeholder and every structural
+    // query answers "not found" for symbols that plainly exist. That
+    // confident false negative is worse than an error, because a caller
+    // acts on it. Name the real cause instead.
+    if graph.node_count() == 0 && overlay.stats().node_count == 0 {
+        return Err(LainError::NotFound(format!(
+            "Node not found for handle: {handle} — but the per-repo graph is \
+             empty (0 nodes), so nothing would resolve. Either this workspace \
+             has not been indexed yet, or the server is running a multi-repo \
+             federation, where the per-repo tools are not bound to any one \
+             repo: use the federation tools (`search_org`, \
+             `get_cross_repo_blast_radius_for_repo`) or run a single-repo \
+             server (`lain mcp`)"
+        )));
+    }
+
     // The graph indexes committed state, so a symbol written but not yet
     // committed is genuinely absent rather than misplaced. Saying so turns a
     // dead end into a next step; the bare message reads as "does not exist".
@@ -107,13 +126,40 @@ pub fn str_arg(args: &Map<String, Value>, key: &str) -> String {
         .to_string()
 }
 
+/// Name a JSON value's type for error messages.
+pub fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// Extract a required string argument. Returns `LainError::NotFound`
-/// when the key is missing or the value isn't a string.
+/// when the key is missing, and a distinct type error when it is
+/// present but not a string.
+///
+/// The two cases must not report the same message. `depth: 2` on
+/// `get_cross_repo_blast_radius` answered "Missing required argument:
+/// depth" while depth was sitting right there in the call — sending the
+/// caller to hunt for an omission instead of showing them that the
+/// argument is a string range (`"1..3"`), not a number.
 pub fn required_str_arg(args: &Map<String, Value>, key: &str) -> Result<String, LainError> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| LainError::NotFound(format!("Missing required argument: {}", key)))
+    match args.get(key) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(other) => Err(LainError::NotFound(format!(
+            "Argument '{}' must be a string, got {}",
+            key,
+            json_type_name(other)
+        ))),
+        None => Err(LainError::NotFound(format!(
+            "Missing required argument: {}",
+            key
+        ))),
+    }
 }
 
 /// Extract an optional usize argument.
@@ -374,4 +420,72 @@ pub fn token_recall(query: &str, candidate: &str) -> f32 {
     let c: std::collections::HashSet<String> = lex_tokens(candidate);
     let hits = q.intersection(&c).count();
     hits as f32 / q.len() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A present-but-wrong-typed argument must not report as missing.
+    /// Live probe of `get_cross_repo_blast_radius` with `depth: 2`
+    /// answered "Missing required argument: depth" with depth right
+    /// there in the call, which sends the caller hunting for the wrong
+    /// bug instead of showing them it wants the range string "1..3".
+    #[test]
+    fn required_str_arg_separates_missing_from_wrong_type() {
+        let mut args = Map::new();
+        args.insert("depth".to_string(), json!(2));
+
+        let err = required_str_arg(&args, "depth").unwrap_err().to_string();
+        assert!(
+            err.contains("must be a string") && err.contains("a number"),
+            "wrong-typed arg should name the type it got, got: {err}"
+        );
+        assert!(
+            !err.contains("Missing"),
+            "a present argument must never report as missing, got: {err}"
+        );
+
+        let missing = required_str_arg(&args, "symbol").unwrap_err().to_string();
+        assert!(
+            missing.contains("Missing required argument: symbol"),
+            "an absent argument should still report as missing, got: {missing}"
+        );
+    }
+
+    /// An empty graph must not answer "this symbol does not exist".
+    /// In a multi-repo federation the per-repo tools keep the empty
+    /// staging placeholder, so every structural query returned a
+    /// confident false negative for symbols that plainly exist.
+    #[test]
+    fn resolve_node_on_an_empty_graph_names_the_real_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        assert_eq!(graph.node_count(), 0, "fixture must start empty");
+
+        let err = resolve_node(&graph, &overlay, "some_symbol")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("empty (0 nodes)"),
+            "an empty graph should say so, got: {err}"
+        );
+        assert!(
+            err.contains("federation") || err.contains("indexed"),
+            "the message should point at the actual cause, got: {err}"
+        );
+        assert!(
+            !err.contains("until it is committed"),
+            "the committed-code explanation is the wrong cause here: {err}"
+        );
+    }
+
+    #[test]
+    fn required_str_arg_returns_the_string() {
+        let mut args = Map::new();
+        args.insert("depth".to_string(), json!("1..3"));
+        assert_eq!(required_str_arg(&args, "depth").unwrap(), "1..3");
+    }
 }

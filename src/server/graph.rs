@@ -938,14 +938,33 @@ impl GraphDatabase {
 
         // Pass 1: compute raw hub scores, find max.
         //
-        // Hub semantics (spec 2026-08-21-anchor-hub-scoring-design):
-        // an anchor is an ORCHESTRATION hub — called by many
-        // (calls_in), coordinating many (calls_out), with a real
-        // body (size_factor). Only Calls edges count: the old
-        // fan_in/(fan_out+1) counted every edge type (including
-        // Contains from the parent file) and actively punished
-        // fan_out, which is backwards for hubs — it put 1-line
-        // helpers like `as_str` at the top of find_anchors.
+        // Hub semantics. An anchor is an ORCHESTRATION hub — called
+        // by many (calls_in), coordinating many (calls_out), with a
+        // real body (size_factor):
+        //
+        //     raw = calls_in * log2(1 + calls_out) * size_factor
+        //     size_factor = min(1, body_lines / 8)
+        //
+        // Only Calls edges count. The superseded fan_in/(fan_out+1)
+        // counted every edge type (including Contains from the parent
+        // file) and actively punished fan_out, which is backwards for
+        // hubs — it put 1-line helpers like `as_str` at the top of
+        // find_anchors.
+        //
+        // The approved design wrote `log2(2 + calls_out)`, so that
+        // calls_out = 0 yielded a factor of 1. This uses `1 +`
+        // deliberately: a function that calls nothing coordinates
+        // nothing, so it scores 0 however many callers it has — the
+        // stronger form of the same intent. Pinned by
+        // `anchor_hub_tests::{leaf_utility_scores_zero,
+        // hub_outranks_trivial_helper}`.
+        //
+        // Known limit: Calls edges are name-resolved when LSP type
+        // info is unavailable, so every `.as_str()` in the repo
+        // collapses onto one node and inflates its calls_in. A
+        // ubiquitous method name can still surface at the top;
+        // `find_anchors` reports the path so you can see which
+        // definition was scored.
         let mut max_raw: f32 = 0.0;
         let mut raws: Vec<(petgraph::graph::NodeIndex, f32)> = Vec::with_capacity(indices.len());
         for idx in &indices {
@@ -1190,7 +1209,7 @@ impl GraphDatabase {
     /// is "every impact query returns nothing," which is the exact
     /// failure the user reported as Bug 2.
     pub fn edge_counts_by_type(&self) -> std::collections::BTreeMap<String, usize> {
-        use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+        use petgraph::visit::IntoEdgeReferences;
         use std::collections::BTreeMap;
         let graph = self.graph.read();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();

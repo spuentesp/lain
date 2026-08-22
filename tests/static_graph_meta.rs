@@ -39,7 +39,7 @@ fn static_graph_generation_timestamp_when_ok() {
 
 #[test]
 fn static_graph_generation_none_when_failed() {
-    let mut server = make_test_server(None);
+    let server = make_test_server(None);
     *server.last_outcome.lock() =
         lain::server::refresh::RefreshOutcome::failed(SystemTime::now(), "synthetic".to_string());
     assert_eq!(server.static_graph_generation_unix(), None,
@@ -49,7 +49,7 @@ fn static_graph_generation_none_when_failed() {
 
 #[test]
 fn static_graph_generation_none_when_timeout() {
-    let mut server = make_test_server(None);
+    let server = make_test_server(None);
     *server.last_outcome.lock() =
         lain::server::refresh::RefreshOutcome::timeout(SystemTime::now());
     assert_eq!(server.static_graph_generation_unix(), None,

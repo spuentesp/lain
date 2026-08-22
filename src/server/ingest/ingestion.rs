@@ -2,7 +2,7 @@ use crate::error::LainError;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::schema::{GraphEdge, GraphNode};
 use crate::server::overlay::VolatileOverlay;
 use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
