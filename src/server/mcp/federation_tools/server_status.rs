@@ -26,11 +26,28 @@ fn system_time_to_unix(t: SystemTime) -> i64 {
 /// - `started_at`, `last_sync_at`: seconds since UNIX epoch
 /// - `last_error`: most recent sync error message, or null
 /// - `repo_count`, `workspace_count`: live counts from the federation
-pub fn get_server_status(server: &LainServer) -> serde_json::Value {
-    let transport = server.transport().map(|t| match t {
-        crate::server::ingest::config::Transport::Stdio => "stdio".to_string(),
-        crate::server::ingest::config::Transport::Http => "http".to_string(),
-    });
+/// Everything `get_server_status` reports that is not derived from the
+/// build or the process itself.
+///
+/// Exists so the payload has exactly one builder. It had two — this
+/// module for the single-workspace path and `mcp::handler::HandlerStatus`
+/// for HTTP — which drifted: the build-identity fields were added here
+/// and the HTTP transport kept serving a payload without them. That is
+/// the same failure mode that once left stdio and HTTP advertising
+/// different `claim_files` schemas.
+pub struct ServerStatusFields {
+    pub transport: Option<String>,
+    pub port: Option<u16>,
+    pub started_at: SystemTime,
+    pub last_sync_at: SystemTime,
+    pub last_error: Option<String>,
+    pub repo_count: usize,
+    pub workspace_count: usize,
+}
+
+/// Render the `get_server_status` payload. The single source of the
+/// wire shape; both transports call this.
+pub fn render_server_status(f: ServerStatusFields) -> serde_json::Value {
     use crate::server::build_info;
     serde_json::json!({
         "pid": std::process::id(),
@@ -38,18 +55,33 @@ pub fn get_server_status(server: &LainServer) -> serde_json::Value {
         "git_sha": build_info::GIT_SHA,
         "binary_mtime_unix": build_info::binary_mtime_unix(),
         "binary_is_stale": build_info::binary_is_stale(),
-        "transport": transport,
-        // Null under stdio: reporting 9999 when nothing is listening
+        "transport": f.transport,
+        // Null under stdio: reporting a port when nothing is listening
         // sends an agent to a dashboard that isn't there.
-        "port": match transport.as_deref() {
-            Some("http") => server.port().map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+        "port": match (f.transport.as_deref(), f.port) {
+            (Some("http"), Some(p)) => serde_json::Value::from(p),
             _ => serde_json::Value::Null,
         },
-        "started_at": system_time_to_unix(server.started_at()),
-        "last_sync_at": system_time_to_unix(server.last_sync_at()),
-        "last_error": server.last_error(),
-        "repo_count": server.repo_count(),
-        "workspace_count": server.workspace_count(),
+        "started_at": system_time_to_unix(f.started_at),
+        "last_sync_at": system_time_to_unix(f.last_sync_at),
+        "last_error": f.last_error,
+        "repo_count": f.repo_count,
+        "workspace_count": f.workspace_count,
+    })
+}
+
+pub fn get_server_status(server: &LainServer) -> serde_json::Value {
+    render_server_status(ServerStatusFields {
+        transport: server.transport().map(|t| match t {
+            crate::server::ingest::config::Transport::Stdio => "stdio".to_string(),
+            crate::server::ingest::config::Transport::Http => "http".to_string(),
+        }),
+        port: server.port(),
+        started_at: server.started_at(),
+        last_sync_at: server.last_sync_at(),
+        last_error: server.last_error(),
+        repo_count: server.repo_count(),
+        workspace_count: server.workspace_count(),
     })
 }
 
@@ -194,20 +226,18 @@ mod tests {
 
 #[cfg(test)]
 mod drift_tests {
-    //! Two builders, one tool. `get_server_status` is rendered here and
-    //! again by `mcp::handler::HandlerStatus::render`, and the two must
-    //! agree on the payload's shape.
+    //! One builder, two transports. `render_server_status` is now the
+    //! only place the payload's shape is declared; both the
+    //! single-workspace path and `mcp::handler::HandlerStatus` call it.
     //!
-    //! This guard exists because the last undetected divergence of this
-    //! kind was expensive: stdio and HTTP built `tools/list` separately,
-    //! drifted on the `claim_files` schema, and `claim_files` became
-    //! uncallable on stdio — every encoding rejected with
-    //! `invalid type: string ..., expected a sequence`, with no way for
-    //! a client to tell why.
+    //! This pins the wire shape. It began life as a drift guard between
+    //! two hand-written builders that had already diverged — the HTTP
+    //! one was serving a payload without the build-identity fields —
+    //! which is the same failure mode that once left stdio and HTTP
+    //! advertising different `claim_files` schemas.
 
-    /// The key set both builders must produce. Adding a field to one
-    /// without the other should fail here rather than in an agent's
-    /// session six weeks later.
+    /// The keys the payload must carry. A field added without updating
+    /// this fails here rather than in an agent's session weeks later.
     const EXPECTED_KEYS: &[&str] = &[
         "pid",
         "version",
@@ -241,7 +271,7 @@ mod drift_tests {
         expected.sort();
         assert_eq!(
             actual, expected,
-            "get_server_status keys drifted; update BOTH builders and EXPECTED_KEYS"
+            "get_server_status wire shape changed; update EXPECTED_KEYS deliberately"
         );
     }
 }

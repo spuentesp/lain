@@ -369,22 +369,52 @@ fn test_symbols_are_excluded_from_dead_code() {
 }
 
 #[test]
-fn test_detection_covers_label_path_and_name() {
-    use crate::server::tools::handlers::metrics::is_test_symbol_for_test;
+fn test_detection_prefers_the_label_over_conventions() {
+    use crate::server::tools::handlers::metrics::is_test_symbol;
     let mk = |name: &str, path: &str| GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
 
-    // Path conventions across languages.
-    assert!(is_test_symbol_for_test(&mk("anything", "/src/server/git_tests.rs")));
-    assert!(is_test_symbol_for_test(&mk("anything", "tests/presence.rs")));
-    assert!(is_test_symbol_for_test(&mk("anything", "npm-shim/bin/lain.test.js")));
-    // Name conventions.
-    assert!(is_test_symbol_for_test(&mk("test_thing", "/src/lib.rs")));
-    assert!(is_test_symbol_for_test(&mk("thing_test", "/src/lib.rs")));
-    // The `#[test]` label, which the tree-sitter extractor sets.
+    // The authoritative signal: the `test` label, now set by both the
+    // tree-sitter extractor (`#[test]`) and the LSP path (enclosing
+    // `mod tests`). A test in an ordinary source file is caught by it.
     let mut labelled = mk("checks_a_thing", "/src/lib.rs");
     labelled.label = Some("test".to_string());
-    assert!(is_test_symbol_for_test(&labelled));
-    // Ordinary production code is untouched.
-    assert!(!is_test_symbol_for_test(&mk("run_query", "/src/cli/query.rs")));
-    assert!(!is_test_symbol_for_test(&mk("latest", "/src/server/graph.rs")));
+    assert!(is_test_symbol(&labelled));
+
+    // Path conventions, kept only for languages with no attribute to
+    // read.
+    assert!(is_test_symbol(&mk("anything", "/src/server/git_tests.rs")));
+    assert!(is_test_symbol(&mk("anything", "tests/presence.rs")));
+    assert!(is_test_symbol(&mk("anything", "npm-shim/bin/lain.test.js")));
+
+    // Function-name guessing is gone: an unlabelled function in a
+    // production file is production code, whatever it is called. The
+    // guessing only existed to paper over LSP nodes arriving without
+    // the label.
+    assert!(!is_test_symbol(&mk("test_thing", "/src/lib.rs")));
+    assert!(!is_test_symbol(&mk("run_query", "/src/cli/query.rs")));
+    assert!(!is_test_symbol(&mk("latest", "/src/server/graph.rs")));
+}
+
+
+/// The analysis is now reachable as data, so a consumer never has to
+/// parse the prose to learn what was found.
+#[test]
+fn dead_code_analysis_is_available_without_parsing_prose() {
+    use crate::server::tools::handlers::metrics::analyze_dead_code;
+    let (graph, _overlay) = graph_with_an_unindexed_file();
+
+    let report = analyze_dead_code(&graph).unwrap();
+
+    assert_eq!(
+        report.unreferenced.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+        vec!["orphan"],
+        "the genuine orphan is the only strong signal"
+    );
+    assert_eq!(
+        report.unindexed_files,
+        vec!["/src/watcher.rs".to_string()],
+        "the file we could not call-index is named"
+    );
+    assert_eq!(report.unindexed_symbols, 4);
+    assert!(report.calls_out.is_empty());
 }

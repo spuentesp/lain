@@ -37,6 +37,7 @@ pub mod reload;
 pub mod attribution;
 pub mod presence;
 pub mod presence_lock;
+pub mod sentinel;
 pub mod state_lock;
 pub mod sse;
 

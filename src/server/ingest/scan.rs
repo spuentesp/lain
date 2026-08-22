@@ -209,8 +209,20 @@ pub async fn scan_file_batch(
     results
 }
 
-#[allow(clippy::too_many_arguments)]
-#[async_recursion::async_recursion]
+/// Does this symbol name a unit-test container?
+///
+/// The LSP hands back names, kinds and ranges — never attributes — so a
+/// `#[test]` function indexed through the LSP path arrives unlabelled,
+/// while the same function indexed through the tree-sitter fallback
+/// carries `label = "test"`. That asymmetry is why dead-code reporting
+/// had to guess from file and function names. Rust's `mod tests`
+/// convention is recoverable from the symbol hierarchy, so propagate it
+/// and let consumers read one honest label.
+fn is_test_container(node: &GraphNode) -> bool {
+    matches!(node.node_type, NodeType::Module | NodeType::Namespace)
+        && (node.name == "tests" || node.name == "test")
+}
+
 pub async fn process_symbol_recursive_enriched(
     nodes: &mut Vec<GraphNode>,
     edges: &mut Vec<GraphEdge>,
@@ -220,10 +232,32 @@ pub async fn process_symbol_recursive_enriched(
     git_sync: i64,
     commit_hash: String,
 ) {
+    process_symbol_recursive_inner(
+        nodes, edges, parent_id, symbol, lsp_sync, git_sync, commit_hash, false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[async_recursion::async_recursion]
+async fn process_symbol_recursive_inner(
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
+    parent_id: &str,
+    symbol: HierarchicalSymbol,
+    lsp_sync: i64,
+    git_sync: i64,
+    commit_hash: String,
+    inside_test_container: bool,
+) {
     let mut node = symbol.node;
     node.last_lsp_sync = Some(lsp_sync);
     node.last_git_sync = Some(git_sync);
     node.commit_hash = Some(commit_hash.clone());
+    let in_tests = inside_test_container || is_test_container(&node);
+    if in_tests && node.label.is_none() {
+        node.label = Some("test".to_string());
+    }
 
     let node_id = node.id.clone();
 
@@ -234,15 +268,17 @@ pub async fn process_symbol_recursive_enriched(
     edges.push(GraphEdge::new(EdgeType::Contains, parent_id.to_string(), node_id.clone()));
 
     for child in symbol.children {
-        process_symbol_recursive_enriched(
+        process_symbol_recursive_inner(
             nodes,
             edges,
             &node_id,
             child,
             lsp_sync,
             git_sync,
-            commit_hash.clone()
-        ).await;
+            commit_hash.clone(),
+            in_tests,
+        )
+        .await;
     }
 }
 

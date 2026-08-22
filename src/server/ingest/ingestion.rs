@@ -158,19 +158,7 @@ impl LainServer {
                         if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                             warn!("Batch node write error: {}", e);
                         }
-                        match self.graph.insert_edges_batch(&batch_edges) {
-                            Ok(0) => {}
-                            // A dropped edge means the graph no longer
-                            // describes the code: its endpoint was not
-                            // in the index when the edge landed. Silence
-                            // here hid 37 files whose symbols had no
-                            // `Contains` edge from their own file node.
-                            Ok(dropped) => warn!(
-                                "Batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
-                                batch_edges.len()
-                            ),
-                            Err(e) => warn!("Batch edge write error: {}", e),
-                        }
+                        insert_edges_best_effort(&self.graph, &batch_edges, "batch");
                         // Durably persist the flush. The in-memory inserts above
                         // are lost if the outer re-index timeout drops this task,
                         // which is why a 90s budget could never converge: every
@@ -203,14 +191,7 @@ impl LainServer {
             if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                 warn!("Final batch node write error: {}", e);
             }
-            match self.graph.insert_edges_batch(&batch_edges) {
-                Ok(0) => {}
-                Ok(dropped) => warn!(
-                    "Final batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
-                    batch_edges.len()
-                ),
-                Err(e) => warn!("Final batch edge write error: {}", e),
-            }
+            insert_edges_best_effort(&self.graph, &batch_edges, "final batch");
         }
 
         info!("Scanned {} files, {} failed, collected {} external refs, {} static refs, {} pattern refs",
@@ -221,19 +202,13 @@ impl LainServer {
         let call_edges =
             super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs);
         info!("Ingesting {} call edges", call_edges.len());
-        let dropped = self.graph.insert_edges_batch(&call_edges)?;
-        if dropped > 0 {
-            warn!("{dropped} of {} call edges dropped (endpoint not in index)", call_edges.len());
-        }
+        insert_edges_reporting(&self.graph, &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
         info!("Resolving {} tree-sitter static references...", all_static_refs.len());
         let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs);
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
-        let dropped = self.graph.insert_edges_batch(&static_edges)?;
-        if dropped > 0 {
-            warn!("{dropped} of {} static edges dropped (endpoint not in index)", static_edges.len());
-        }
+        insert_edges_reporting(&self.graph, &static_edges, "static")?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
         info!("Resolving {} pattern references for cross-boundary detection...", all_pattern_refs.len());
@@ -243,10 +218,7 @@ impl LainServer {
             super::resolve::PatternLimits::DEFAULT,
         );
         info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
-        let dropped = self.graph.insert_edges_batch(&pattern_edges)?;
-        if dropped > 0 {
-            warn!("{dropped} of {} pattern edges dropped (endpoint not in index)", pattern_edges.len());
-        }
+        insert_edges_reporting(&self.graph, &pattern_edges, "pattern")?;
 
         // 4. Temporal Analysis Phase: Co-changes
         let co_change_pairs = {
@@ -451,6 +423,42 @@ impl LainServer {
 /// the deleted file's symbols stayed in the graph forever. That is the
 /// most likely reason a long-lived index carried more nodes than a
 /// fresh index of the same commit (observed: 3769 vs 3340).
+/// Insert edges and report any the graph refused.
+///
+/// `insert_edges_batch` skips edges whose endpoints are missing from the
+/// index — necessary, since an edge to a node that isn't there can't be
+/// added, but it must never be silent: that silence is what hid 37 of
+/// 335 files whose symbols had no `Contains` edge from their own file
+/// node, in a graph that reported itself healthy.
+///
+/// `label` names the phase ("call", "static", "batch") so a warning
+/// says which part of the pipeline lost them.
+fn insert_edges_reporting(
+    db: &GraphDatabase,
+    edges: &[GraphEdge],
+    label: &str,
+) -> Result<(), LainError> {
+    match db.insert_edges_batch(edges) {
+        Ok(0) => Ok(()),
+        Ok(dropped) => {
+            warn!(
+                "{dropped} of {} {label} edges dropped (endpoint not in index)",
+                edges.len()
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Same as [`insert_edges_reporting`] but for the flush path, where a
+/// write error is logged and the pass continues rather than aborting.
+fn insert_edges_best_effort(db: &GraphDatabase, edges: &[GraphEdge], label: &str) {
+    if let Err(e) = insert_edges_reporting(db, edges, label) {
+        warn!("{label} edge write error: {e}");
+    }
+}
+
 fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
     match git.get_all_tracked_files() {
         Ok(tracked_paths) => {
@@ -593,14 +601,7 @@ pub async fn index_one_repo(
                     if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
                         warn!("[federation] Batch node write error: {}", e);
                     }
-                    match db.insert_edges_batch(&batch_edges) {
-                        Ok(0) => {}
-                        Ok(dropped) => warn!(
-                            "[federation] Batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
-                            batch_edges.len()
-                        ),
-                        Err(e) => warn!("[federation] Batch edge write error: {}", e),
-                    }
+                    insert_edges_best_effort(db, &batch_edges, "batch");
                     batch_nodes.clear();
                     batch_edges.clear();
                 }
@@ -622,14 +623,7 @@ pub async fn index_one_repo(
         if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
             warn!("[federation] Final batch node write error: {}", e);
         }
-        match db.insert_edges_batch(&batch_edges) {
-            Ok(0) => {}
-            Ok(dropped) => warn!(
-                "[federation] Final batch edge write: {dropped} of {} edges dropped (endpoint not in index)",
-                batch_edges.len()
-            ),
-            Err(e) => warn!("[federation] Final batch edge write error: {}", e),
-        }
+        insert_edges_best_effort(db, &batch_edges, "final batch");
     }
 
     info!(
@@ -645,18 +639,12 @@ pub async fn index_one_repo(
     // Resolve phase: link external references to internal nodes (CALLS)
     let call_edges = super::resolve::resolve_call_edges(db, path, &all_external_refs);
     info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
-    let dropped = db.insert_edges_batch(&call_edges)?;
-    if dropped > 0 {
-        warn!("[federation] {dropped} of {} call edges dropped (endpoint not in index)", call_edges.len());
-    }
+    insert_edges_reporting(db, &call_edges, "call")?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
     let static_edges = super::resolve::resolve_static_edges(db, &all_static_refs);
     info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
-    let dropped = db.insert_edges_batch(&static_edges)?;
-    if dropped > 0 {
-        warn!("[federation] {dropped} of {} static edges dropped (endpoint not in index)", static_edges.len());
-    }
+    insert_edges_reporting(db, &static_edges, "static")?;
 
     // Pattern resolve: cross-boundary detection
     let pattern_edges = super::resolve::resolve_pattern_edges(

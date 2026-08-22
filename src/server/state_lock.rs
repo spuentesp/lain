@@ -14,9 +14,12 @@
 //! before acting, so a process sees its peers, and (b) a lock, so a
 //! read-modify-write cycle doesn't clobber a peer's concurrent write.
 //!
-//! The lock is an `O_EXCL` sentinel next to the state file — no new
-//! dependency, and the same primitive `presence_lock` already uses for
-//! the zero-daemon fallback.
+//! The lock is an `O_EXCL` sentinel next to the state file, built on
+//! [`crate::server::sentinel`] — the same primitive `presence_lock`
+//! uses for the zero-daemon fallback. Only the policy differs: this is
+//! a critical section that retries to a deadline and then proceeds
+//! unlocked, where a claim lock reports its holder and expires in
+//! seconds.
 //!
 //! **Advisory, never blocking.** If the lock can't be taken within
 //! [`ACQUIRE_TIMEOUT`], the caller proceeds without it. A presence
@@ -24,17 +27,15 @@
 //! presence registry that can wedge an agent's session is a much worse
 //! failure, and the whole subsystem is advisory to begin with.
 
+use crate::server::sentinel::{self, Acquire};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// How long to keep retrying before giving up and proceeding unlocked.
-const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(2000);
 /// Gap between attempts.
-const RETRY_INTERVAL: Duration = Duration::from_millis(20);
 /// A sentinel older than this is assumed to belong to a process that
 /// died before releasing, and is taken over.
-const STALE_AFTER: Duration = Duration::from_secs(10);
 
 /// Sentinel path for a given state file.
 pub fn lock_path_for(state_path: &Path) -> PathBuf {
@@ -67,7 +68,7 @@ impl StateLock {
 impl Drop for StateLock {
     fn drop(&mut self) {
         if self.held {
-            let _ = std::fs::remove_file(&self.path);
+            let _ = sentinel::release(&self.path);
         }
     }
 }
@@ -77,56 +78,39 @@ impl Drop for StateLock {
 /// Always returns a `StateLock` — on timeout it returns one with
 /// `held == false` so the caller proceeds unlocked rather than failing.
 pub fn acquire(state_path: &Path) -> StateLock {
+    // Read from `PresenceConfig` rather than local constants, so every
+    // presence-related timing is declared in one place with the rest of
+    // lain's tunables.
+    let cfg = crate::server::tuning::PresenceConfig::default();
+    let acquire_timeout = Duration::from_millis(cfg.state_lock_acquire_timeout_ms);
+    let retry_interval = Duration::from_millis(cfg.state_lock_retry_interval_ms);
+    let stale_after = Duration::from_secs(cfg.state_lock_stale_after_secs);
     let path = lock_path_for(state_path);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let deadline = SystemTime::now() + ACQUIRE_TIMEOUT;
+    let deadline = SystemTime::now() + acquire_timeout;
     loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
+        match sentinel::try_acquire(&path, stale_after) {
+            Acquire::Acquired(mut f) => {
                 // Record the owner so a human debugging a stuck lock can
                 // see which process to look at.
                 let _ = writeln!(f, "{}", std::process::id());
                 return StateLock { path, held: true };
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if is_stale_at(&path, SystemTime::now()) {
-                    // The holder died. Remove and retry; if two peers
-                    // race here, one wins the `create_new` below.
-                    let _ = std::fs::remove_file(&path);
-                    continue;
-                }
+            Acquire::Stale => {
+                // The holder died. Remove and retry; if two peers race
+                // here, one wins the next create.
+                let _ = sentinel::release(&path);
+            }
+            Acquire::Held => {
                 if SystemTime::now() >= deadline {
                     return StateLock { path, held: false };
                 }
-                std::thread::sleep(RETRY_INTERVAL);
+                std::thread::sleep(retry_interval);
             }
-            Err(_) => {
-                // Unwritable state dir, permissions, read-only mount:
-                // proceed unlocked rather than breaking presence.
-                return StateLock { path, held: false };
-            }
+            // Unwritable state dir, permissions, read-only mount:
+            // proceed unlocked rather than breaking presence.
+            Acquire::Unavailable(_) => return StateLock { path, held: false },
         }
     }
-}
-
-/// `now` is injected so staleness is testable without backdating a
-/// file's mtime, which would need a dependency this crate doesn't carry.
-fn is_stale_at(path: &Path, now: SystemTime) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Ok(mtime) = meta.modified() else {
-        return false;
-    };
-    now.duration_since(mtime)
-        .map(|age| age > STALE_AFTER)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -169,30 +153,4 @@ mod tests {
         assert!(lock_path_for(&state).exists(), "non-holder must not release");
     }
 
-    #[test]
-    fn a_sentinel_older_than_the_window_is_stale() {
-        // A process that died holding the lock must not block its peers
-        // forever. Rather than backdating the file (which would need a
-        // dependency), look at it from a point far enough in the future.
-        let tmp = tempfile::tempdir().unwrap();
-        let state = tmp.path().join("s.json");
-        let sentinel = lock_path_for(&state);
-        std::fs::write(&sentinel, "99999").unwrap();
-
-        let now = SystemTime::now();
-        assert!(
-            !is_stale_at(&sentinel, now),
-            "a freshly written sentinel is a live holder"
-        );
-        assert!(
-            is_stale_at(&sentinel, now + STALE_AFTER + Duration::from_secs(5)),
-            "a sentinel past the window must be taken over"
-        );
-    }
-
-    #[test]
-    fn a_missing_sentinel_is_not_stale() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(!is_stale_at(&tmp.path().join("nope.lock"), SystemTime::now()));
-    }
 }

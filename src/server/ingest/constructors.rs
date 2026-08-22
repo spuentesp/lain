@@ -56,17 +56,33 @@ fn sweep_abandoned_staging_dirs(root: &Path) {
         let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
             continue;
         };
-        if pid == std::process::id() || process_is_alive(pid) {
+        if pid == std::process::id() {
             continue;
         }
-        let _ = std::fs::remove_dir_all(entry.path());
+        // Two independent reasons to reclaim: the owning process is
+        // demonstrably gone, or the directory is old enough that no
+        // live server could still be using it.
+        let owner_gone = !process_may_be_alive(pid);
+        let too_old = is_abandoned_by_age(&entry.path(), std::time::SystemTime::now());
+        if owner_gone || too_old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
-/// Is a pid still running? Linux reads `/proc`; elsewhere we assume
-/// alive, which keeps the sweep conservative — never deleting a live
-/// server's workspace matters far more than reclaiming a stale dir.
-fn process_is_alive(pid: u32) -> bool {
+/// A staging dir untouched for this long is abandoned regardless of
+/// what its pid says. Covers the platforms where liveness can't be
+/// checked, and pid reuse, which would otherwise pin a dir forever.
+const STAGING_ABANDONED_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Might this pid still be running?
+///
+/// Linux reads `/proc`. Elsewhere there is no dependency-free check, so
+/// the answer is "can't tell" — and the caller falls back to age rather
+/// than skipping cleanup entirely, which is what a bare `true` did: on
+/// macOS the sweep reclaimed nothing, ever, and said nothing about it.
+fn process_may_be_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
         std::path::Path::new(&format!("/proc/{pid}")).exists()
@@ -76,6 +92,19 @@ fn process_is_alive(pid: u32) -> bool {
         let _ = pid;
         true
     }
+}
+
+/// Has this directory gone untouched past [`STAGING_ABANDONED_AFTER`]?
+fn is_abandoned_by_age(path: &Path, now: std::time::SystemTime) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    now.duration_since(mtime)
+        .map(|age| age > STAGING_ABANDONED_AFTER)
+        .unwrap_or(false)
 }
 
 /// Allocate a unique staging dir for federation-mode servers. The

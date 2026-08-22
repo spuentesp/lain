@@ -45,6 +45,9 @@ pub struct TuningConfig {
     pub ingestion: IngestionConfig,
     /// Execution: timeouts for command/tool execution.
     pub runtime: RuntimeConfig,
+    /// Multiplayer: session lifetimes and presence-state locking.
+    #[serde(default)]
+    pub presence: PresenceConfig,
 }
 
 impl Default for TuningConfig {
@@ -58,6 +61,7 @@ impl Default for TuningConfig {
             max_pattern_edges: 200,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),
+            presence: PresenceConfig::default(),
         }
     }
 }
@@ -119,6 +123,56 @@ impl Default for IngestionConfig {
             nlp_max_threads: 0, // 0 = auto-detect (min(cores, 4))
             ui_session_ttl_secs: 600,
             default_query_limit: 100,
+        }
+    }
+}
+
+
+/// Multiplayer tuning — session lifetimes and the locks around shared
+/// presence state.
+///
+/// These were compile-time constants scattered across `presence`,
+/// `attribution` and `state_lock`, which meant an operator whose agents
+/// or filesystem behaved differently had no way to adjust them. Every
+/// other timeout in lain is tunable; these are now too.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresenceConfig {
+    /// How long an interactive agent may go without proof of life.
+    ///
+    /// Was 60s, which is shorter than a single LLM turn: an agent that
+    /// claimed a file, reasoned about it, and came back found its
+    /// session expired and its claims silently released. Any
+    /// authenticated tool call now counts as a heartbeat, so this is a
+    /// backstop for a departed agent rather than a liveness treadmill.
+    pub interactive_session_ttl_secs: u64,
+    /// Same, for background (cron / CI) agents. Kept short: they are
+    /// scripted, so heartbeating on a schedule is something they can
+    /// actually do, and a wedged one should give its claims back fast.
+    pub background_session_ttl_secs: u64,
+    /// How long a claim inferred by the attribution watcher survives
+    /// without being re-observed. Inferred claims are a guess; a wrong
+    /// one must heal itself rather than stick until the session dies.
+    pub inferred_claim_ttl_secs: u64,
+    /// How long to retry the presence state-file lock before proceeding
+    /// without it. The layer is advisory: losing a concurrent write is
+    /// a nuisance, wedging an agent's tool call is not.
+    pub state_lock_acquire_timeout_ms: u64,
+    /// Gap between attempts while waiting for that lock.
+    pub state_lock_retry_interval_ms: u64,
+    /// A state lock older than this is presumed abandoned by a dead
+    /// holder and may be taken over.
+    pub state_lock_stale_after_secs: u64,
+}
+
+impl Default for PresenceConfig {
+    fn default() -> Self {
+        Self {
+            interactive_session_ttl_secs: 600,
+            background_session_ttl_secs: 60,
+            inferred_claim_ttl_secs: 120,
+            state_lock_acquire_timeout_ms: 2000,
+            state_lock_retry_interval_ms: 20,
+            state_lock_stale_after_secs: 10,
         }
     }
 }

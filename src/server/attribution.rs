@@ -325,6 +325,26 @@ impl AttributionWatcher {
                 Ok(w) => w,
                 Err(_) => return,
             };
+            // One git sensor per root, opened on this thread because
+            // that is the only place they are read. Lets the repo's own
+            // `.gitignore` decide what is build output instead of a
+            // hardcoded list that drifts per project. A root that is
+            // not a git repo simply gets no opinion.
+            let ignore_sensors: Vec<(PathBuf, crate::server::git::GitSensor)> = roots
+                .iter()
+                .filter_map(|r| {
+                    crate::server::git::GitSensor::new(r).ok().map(|g| (r.clone(), g))
+                })
+                .collect();
+            let is_ignored = |p: &Path| -> Option<bool> {
+                let (_, sensor) = ignore_sensors
+                    .iter()
+                    .filter(|(root, _)| p.starts_with(root))
+                    // Deepest matching root wins, for nested checkouts.
+                    .max_by_key(|(root, _)| root.as_os_str().len())?;
+                sensor.is_ignored(p).ok()
+            };
+
             // Watch each repo root; a root that fails to register
             // (deleted checkout, permissions) is skipped, not fatal.
             let mut watched = 0usize;
@@ -344,7 +364,7 @@ impl AttributionWatcher {
                         EventKind::Modify(_) | EventKind::Create(_)
                     ) {
                         for path in event.paths {
-                            if path.is_file() && is_attributable(&path) {
+                            if path.is_file() && is_attributable(&path, is_ignored(&path)) {
                                 attribute_edit(
                                     &path,
                                     &presence,
@@ -362,30 +382,32 @@ impl AttributionWatcher {
     }
 }
 
-/// Directory names whose contents are never an agent's edit. The
-/// watcher registers repo roots recursively, so without this filter
-/// every write anywhere under the checkout became a claim: a `curl`
-/// driven agent that never ran git was found holding
-/// `<repo>/.git/index.lock`, written by an unrelated shell command,
-/// for its entire lifetime. A single `cargo build` would have flooded
-/// the registry with thousands of `target/` artifacts.
-const NEVER_ATTRIBUTED_DIRS: &[&str] = &[
-    ".git",
-    ".lain",
-    "target",
-    "node_modules",
-    "dist",
-    "build",
-    ".venv",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-];
+/// Directories git itself will not report as ignored, so gitignore
+/// cannot cover them.
+///
+/// Build output, `node_modules`, virtualenvs and caches are all
+/// deliberately absent: the repo's own `.gitignore` already declares
+/// those, and consulting it beats maintaining a parallel list that
+/// drifts per project. What is left is what git structurally cannot
+/// tell us — its own directory, and lain's.
+const NEVER_ATTRIBUTED_DIRS: &[&str] = &[".git", ".lain"];
 
 /// True when a filesystem event on `path` could plausibly be an agent
-/// editing source. Filters build output, VCS internals, and editor
-/// scratch files — none of which anyone claims on purpose.
-fn is_attributable(path: &Path) -> bool {
+/// editing source.
+///
+/// Without this filter every write anywhere under a watched checkout
+/// became a claim: a `curl`-driven agent that never ran git was found
+/// holding `<repo>/.git/index.lock`, written by an unrelated shell
+/// command, for its entire lifetime, and a single `cargo build` would
+/// have flooded the registry with `target/` artifacts.
+///
+/// `ignored` is the repo's own gitignore verdict for this path, when a
+/// `GitSensor` could be opened for its root. `None` means "no opinion"
+/// — an unopenable repo must not make everything unattributable.
+fn is_attributable(path: &Path, ignored: Option<bool>) -> bool {
+    if ignored == Some(true) {
+        return false;
+    }
     if path
         .components()
         .any(|c| NEVER_ATTRIBUTED_DIRS.contains(&c.as_os_str().to_string_lossy().as_ref()))
@@ -408,13 +430,6 @@ fn is_attributable(path: &Path) -> bool {
     !scratch
 }
 
-/// How long an inferred claim survives without being re-observed.
-///
-/// Inferred claims used to be created with no TTL at all, so a single
-/// wrong guess stuck to the agent until its session died. Two minutes
-/// is long enough to cover a real edit-then-pause and short enough that
-/// a misfire heals itself.
-const INFERRED_CLAIM_TTL_SECS: u64 = 120;
 
 /// Best-effort attribution of a single file edit. See the module-level
 /// docs for the strategy order: PID lookup, then single-agent fallback,
@@ -471,7 +486,9 @@ fn attribute_edit(
                 symbols: vec![],
                 intent: ClaimIntent::Edit,
                 // A guess must be able to expire on its own.
-                ttl_seconds: Some(INFERRED_CLAIM_TTL_SECS),
+                ttl_seconds: Some(
+                    crate::server::tuning::PresenceConfig::default().inferred_claim_ttl_secs,
+                ),
                 plan_revision: None,
             }],
         );
@@ -492,21 +509,28 @@ fn attribute_edit(
 mod filter_tests {
     use super::*;
 
+    /// git structurally cannot report its own directory as ignored, so
+    /// these stay hardcoded. The live failure: a `curl`-driven agent
+    /// that never ran git was found holding `<repo>/.git/index.lock`,
+    /// written by an unrelated shell command.
     #[test]
-    fn build_and_vcs_paths_are_never_attributed() {
-        // The live failure: a `curl`-driven agent that never ran git
-        // was found holding `<repo>/.git/index.lock`, written by an
-        // unrelated shell command.
+    fn vcs_internals_are_never_attributed_without_git_help() {
+        for p in ["/ws/.git/index.lock", "/ws/.git/COMMIT_EDITMSG", "/ws/.lain/graph.bin"] {
+            assert!(!is_attributable(Path::new(p), None), "{p} must not be attributed");
+        }
+    }
+
+    /// Build output is the repo's own declaration, not ours: whatever
+    /// `.gitignore` says is not source, we do not attribute. Keeping a
+    /// parallel list here would drift per project.
+    #[test]
+    fn gitignored_paths_are_never_attributed() {
         for p in [
-            "/ws/.git/index.lock",
-            "/ws/.git/COMMIT_EDITMSG",
             "/ws/target/debug/build/foo/output",
             "/ws/node_modules/left-pad/index.js",
-            "/ws/.lain/graph.bin",
             "/ws/dist/bundle.js",
-            "/ws/__pycache__/mod.cpython-312.pyc",
         ] {
-            assert!(!is_attributable(Path::new(p)), "{p} must not be attributed");
+            assert!(!is_attributable(Path::new(p), Some(true)), "{p} must not be attributed");
         }
     }
 
@@ -518,7 +542,7 @@ mod filter_tests {
             "/ws/src/.#main.rs",
             "/ws/src/main.rs.tmp",
         ] {
-            assert!(!is_attributable(Path::new(p)), "{p} must not be attributed");
+            assert!(!is_attributable(Path::new(p), None), "{p} must not be attributed");
         }
     }
 
@@ -530,7 +554,14 @@ mod filter_tests {
             "/ws/tests/presence.rs",
             "/ws/README.md",
         ] {
-            assert!(is_attributable(Path::new(p)), "{p} must be attributed");
+            assert!(is_attributable(Path::new(p), Some(false)), "{p} must be attributed");
         }
+    }
+
+    /// An unopenable repo must not make everything unattributable —
+    /// "no opinion" is not "ignored".
+    #[test]
+    fn no_git_opinion_still_attributes_source() {
+        assert!(is_attributable(Path::new("/ws/src/main.rs"), None));
     }
 }

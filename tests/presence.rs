@@ -1502,16 +1502,24 @@ fn same_relative_path_in_two_repos_stays_distinct() {
 
 #[test]
 fn interactive_ttl_is_sized_for_model_latency() {
-    use lain::server::presence::{BACKGROUND_SESSION_TTL, INTERACTIVE_SESSION_TTL};
+    // Asserts the *shipped configuration*, which is what agents get,
+    // rather than a constant that could drift from it.
+    let cfg = lain::server::tuning::PresenceConfig::default();
     assert!(
-        INTERACTIVE_SESSION_TTL >= std::time::Duration::from_secs(300),
+        cfg.interactive_session_ttl_secs >= 300,
         "an interactive TTL under 5 minutes cannot survive a normal agent turn"
     );
-    assert_eq!(BACKGROUND_SESSION_TTL, std::time::Duration::from_secs(60));
+    assert_eq!(cfg.background_session_ttl_secs, 60);
 
     let reg = PresenceRegistry::new();
-    assert_eq!(reg.expires_after_for(&AgentMode::Interactive), INTERACTIVE_SESSION_TTL);
-    assert_eq!(reg.expires_after_for(&AgentMode::Background), BACKGROUND_SESSION_TTL);
+    assert_eq!(
+        reg.expires_after_for(&AgentMode::Interactive),
+        std::time::Duration::from_secs(cfg.interactive_session_ttl_secs)
+    );
+    assert_eq!(
+        reg.expires_after_for(&AgentMode::Background),
+        std::time::Duration::from_secs(cfg.background_session_ttl_secs)
+    );
 }
 
 #[tokio::test]

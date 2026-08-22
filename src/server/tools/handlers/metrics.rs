@@ -108,45 +108,45 @@ fn is_trait_context(path: &str) -> bool {
     path.contains("trait") || path.contains("_trait")
 }
 
-/// Is this symbol a test, or defined in a test file?
+/// Path conventions that mark a whole file as tests, across the
+/// languages lain indexes. Used only where a per-symbol label cannot
+/// exist: a JS or Go test file has no attribute for the extractor to
+/// read, so the path is the only signal available.
+const TEST_FILE_CONVENTIONS: &[&str] = &[
+    "_tests.rs",
+    "_test.rs",
+    "_test.go",
+    ".test.js",
+    ".test.ts",
+    ".spec.js",
+    ".spec.ts",
+    "_test.py",
+];
+
+/// Is this symbol a test?
 ///
-/// A test function is invoked by the test harness, never by production
-/// code, so "no callers" is its normal state — reporting it as dead is
-/// pure noise, and acting on the report deletes the test suite. On this
-/// repo 18 of the 20 listed dead symbols were `#[test]` functions in a
-/// single `*_tests.rs` file.
+/// A test function is invoked by the harness, never by production code,
+/// so "no callers" is its normal state — reporting it as dead is noise,
+/// and acting on the report deletes the test suite.
 ///
-/// Three signals, because no single one covers every language or every
-/// indexing path: the `test` label (set from `#[test]` and friends by
-/// the tree-sitter extractor, absent on LSP-derived nodes), the file
-/// path convention, and the name convention.
-fn is_test_symbol(node: &crate::schema::GraphNode) -> bool {
+/// The authoritative signal is the `test` label, now set on both
+/// indexing paths: the tree-sitter extractor reads `#[test]` directly,
+/// and the LSP path propagates it down from an enclosing `mod tests`
+/// (see `ingest::scan::is_test_container`). Before that, LSP-derived
+/// nodes arrived unlabelled and this function had to guess from
+/// function names — which is exactly the kind of guessing that makes a
+/// tool untrustworthy. Path conventions remain only for languages where
+/// no attribute exists to read.
+pub(crate) fn is_test_symbol(node: &crate::schema::GraphNode) -> bool {
     if node.label.as_deref() == Some("test") {
         return true;
     }
     let path = node.path.as_str();
-    let in_test_file = path.contains("/tests/")
+    path.contains("/tests/")
         || path.starts_with("tests/")
-        || path.ends_with("_tests.rs")
-        || path.ends_with("_test.rs")
-        || path.ends_with("_test.go")
-        || path.ends_with(".test.js")
-        || path.ends_with(".test.ts")
-        || path.ends_with("_test.py")
-        || path.contains("/test_");
-    if in_test_file {
-        return true;
-    }
-    let name = node.name.as_str();
-    name.starts_with("test_") || name.ends_with("_test")
+        || TEST_FILE_CONVENTIONS.iter().any(|c| path.ends_with(c))
 }
 
-/// Test-only re-export so the detection rules can be asserted directly
-/// rather than inferred from `find_dead_code` output.
-#[cfg(test)]
-pub fn is_test_symbol_for_test(node: &crate::schema::GraphNode) -> bool {
-    is_test_symbol(node)
-}
 
 /// Minimum function count before a file with zero outgoing call edges
 /// is treated as unindexed rather than dead.
@@ -200,6 +200,123 @@ fn unindexed_files(functions: &[crate::schema::GraphNode]) -> HashSet<String> {
         .collect()
 }
 
+/// What a dead-code analysis found, before any of it is turned into
+/// prose.
+///
+/// Separated from rendering because the analysis is the reusable part:
+/// `find_dead_code` used to do stub-checking, unindexed detection, test
+/// filtering, tiering, semantic filtering *and* formatting in one
+/// function that returned a `String`, so any second consumer would have
+/// had to parse English to reach the data.
+pub struct DeadCodeReport {
+    /// Unreferenced and calling nothing — the strong signal.
+    pub unreferenced: Vec<crate::schema::GraphNode>,
+    /// Unreferenced but still calling out: entry points, callbacks and
+    /// trait impls look like this, so it is weaker evidence.
+    pub calls_out: Vec<crate::schema::GraphNode>,
+    /// Files with definitions but no call edges at all. Their symbols
+    /// are excluded rather than reported: we cannot see their callers
+    /// because we cannot see anyone's callers there.
+    pub unindexed_files: Vec<String>,
+    /// How many symbols those files accounted for.
+    pub unindexed_symbols: usize,
+    /// Tests dropped from consideration — a test has no production
+    /// caller by design.
+    pub tests_excluded: usize,
+}
+
+/// Classify every function in the graph. Pure with respect to the
+/// graph; the optional semantic filter is applied by the caller.
+pub fn analyze_dead_code(graph: &GraphDatabase) -> Result<DeadCodeReport, LainError> {
+    let functions = graph.get_nodes_by_type(NodeType::Function)?;
+    let unindexed = unindexed_files(&functions);
+
+    // Primary filter: fan_in == 0 (no incoming calls).
+    let candidates: Vec<_> = functions
+        .into_iter()
+        .filter(|f| f.fan_in.unwrap_or(0) == 0)
+        .collect();
+
+    // Drop names, trait contexts, and tests — all dead-looking by
+    // convention rather than by fact.
+    let before_tests = candidates.len();
+    let named: Vec<_> = candidates
+        .into_iter()
+        .filter(|f| !is_false_positive_name(&f.name) && !is_trait_context(&f.path))
+        .filter(|f| !is_test_symbol(f))
+        .collect();
+    let tests_excluded = before_tests.saturating_sub(named.len());
+
+    let (unindexed_hits, indexed): (Vec<_>, Vec<_>) =
+        named.into_iter().partition(|f| unindexed.contains(&f.path));
+
+    let (unreferenced, calls_out): (Vec<_>, Vec<_>) = indexed
+        .into_iter()
+        .partition(|f| f.fan_out.unwrap_or(0) == 0);
+
+    let mut unindexed_files: Vec<String> = unindexed.into_iter().collect();
+    unindexed_files.sort();
+
+    Ok(DeadCodeReport {
+        unreferenced,
+        calls_out,
+        unindexed_files,
+        unindexed_symbols: unindexed_hits.len(),
+        tests_excluded,
+    })
+}
+
+/// Render a [`DeadCodeReport`] as the tool's text response.
+fn render_dead_code(report: &DeadCodeReport, shown: &[crate::schema::GraphNode]) -> String {
+    let mut out = format!(
+        "Found {} unreferenced symbols (no callers, no callees) in Static Backbone:\n{}",
+        shown.len(),
+        shown
+            .iter()
+            .take(20)
+            .map(|n| format!("- {} ({}) [no callers, no callees]", n.name, n.path))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    if report.tests_excluded > 0 {
+        out.push_str(&format!(
+            "\n\n{} test symbol(s) were excluded: a test is run by the harness, never \
+             called by production code, so \"no callers\" is its normal state.",
+            report.tests_excluded
+        ));
+    }
+
+    if !report.calls_out.is_empty() {
+        out.push_str(&format!(
+            "\n\n{} more symbols have no callers but do call out (entry points, \
+             callbacks, and trait impls look like this) — weaker evidence, not listed.",
+            report.calls_out.len()
+        ));
+    }
+
+    // Naming the excluded files is the point, not a footnote: it is the
+    // most actionable bug report the call extractor will ever get.
+    if !report.unindexed_files.is_empty() {
+        out.push_str(&format!(
+            "\n\n⚠ {} file(s) have definitions but no call edges at all — their call \
+             graph could not be extracted, so {} symbol(s) in them were excluded rather \
+             than reported as dead. This is an indexing gap, not dead code:\n{}",
+            report.unindexed_files.len(),
+            report.unindexed_symbols,
+            report
+                .unindexed_files
+                .iter()
+                .take(20)
+                .map(|p| format!("- {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    out
+}
+
 pub fn find_dead_code(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
@@ -223,114 +340,27 @@ pub fn find_dead_code(
         ));
     }
 
-    let functions = graph.get_nodes_by_type(NodeType::Function)?;
-    let unindexed = unindexed_files(&functions);
+    let report = analyze_dead_code(graph)?;
 
-    // Primary filter: fan_in == 0 (no incoming calls).
-    let candidates: Vec<_> = functions
-        .into_iter()
-        .filter(|f| f.fan_in.unwrap_or(0) == 0)
-        .collect();
-
-    // Drop names, trait contexts, and tests — all dead-looking by
-    // convention rather than by fact.
-    let before_tests = candidates.len();
-    let named: Vec<_> = candidates
-        .iter()
-        .filter(|f| !is_false_positive_name(&f.name) && !is_trait_context(&f.path))
-        .filter(|f| !is_test_symbol(f))
-        .cloned()
-        .collect();
-    let tests_excluded = before_tests.saturating_sub(named.len());
-
-    // A symbol in an unindexed file tells us nothing: we can't see its
-    // callers because we can't see anyone's callers in that file.
-    let (unindexed_hits, indexed): (Vec<_>, Vec<_>) = named
-        .into_iter()
-        .partition(|f| unindexed.contains(&f.path));
-
-    // Within files we *can* see, two real tiers remain. A leaf with no
-    // callers is the strong signal; something that still calls out is
-    // weaker — it may be an entry point or a callback.
-    let (leaf_dead, calling_dead): (Vec<_>, Vec<_>) = indexed
-        .into_iter()
-        .partition(|f| f.fan_out.unwrap_or(0) == 0);
-
-    let results = if let Some(query) = like {
-        let query_emb = embedder.embed(query)?;
-        let threshold = 0.3; // semantic similarity threshold
-        leaf_dead
-            .into_iter()
-            .filter(|n| {
-                get_embedding(n, embedder, embedding_cache, workspace)
-                    .map(|emb| cosine_similarity(&query_emb, &emb) > threshold)
-                    .unwrap_or(false)
-            })
-            .collect()
-    } else {
-        leaf_dead
+    let shown: Vec<_> = match like {
+        Some(query) => {
+            let query_emb = embedder.embed(query)?;
+            const SEMANTIC_THRESHOLD: f32 = 0.3;
+            report
+                .unreferenced
+                .iter()
+                .filter(|n| {
+                    get_embedding(n, embedder, embedding_cache, workspace)
+                        .map(|emb| cosine_similarity(&query_emb, &emb) > SEMANTIC_THRESHOLD)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        }
+        None => report.unreferenced.clone(),
     };
 
-    let mut out = format!(
-        "Found {} unreferenced symbols (no callers, no callees) in Static Backbone:\n{}",
-        results.len(),
-        results
-            .iter()
-            .take(20)
-            .map(|n| {
-                let signals = {
-                    let mut s = Vec::new();
-                    if n.fan_in.unwrap_or(0) == 0 {
-                        s.push("no callers");
-                    }
-                    if n.fan_out.unwrap_or(0) == 0 {
-                        s.push("no callees");
-                    }
-                    s.join(", ")
-                };
-                format!("- {} ({}) [{}]", n.name, n.path, signals)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-
-    if tests_excluded > 0 {
-        out.push_str(&format!(
-            "\n\n{tests_excluded} test symbol(s) were excluded: a test is run by the \
-             harness, never called by production code, so \"no callers\" is its normal \
-             state."
-        ));
-    }
-
-    if !calling_dead.is_empty() {
-        out.push_str(&format!(
-            "\n\n{} more symbols have no callers but do call out (entry points, \
-             callbacks, and trait impls look like this) — weaker evidence, not listed.",
-            calling_dead.len()
-        ));
-    }
-
-    // Naming the excluded files is the point, not a footnote: it is the
-    // most actionable bug report the call extractor will ever get.
-    if !unindexed.is_empty() {
-        let mut names: Vec<_> = unindexed.iter().cloned().collect();
-        names.sort();
-        out.push_str(&format!(
-            "\n\n⚠ {} file(s) have definitions but no call edges at all — their call \
-             graph could not be extracted, so {} symbol(s) in them were excluded rather \
-             than reported as dead. This is an indexing gap, not dead code:\n{}",
-            names.len(),
-            unindexed_hits.len(),
-            names
-                .iter()
-                .take(20)
-                .map(|p| format!("- {p}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-
-    Ok(out)
+    Ok(render_dead_code(&report, &shown))
 }
 
 // Helper to get embedding for a node (cache-first, then on-demand)

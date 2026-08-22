@@ -1500,45 +1500,26 @@ struct HandlerStatus {
 impl HandlerStatus {
     /// Render the `get_server_status` payload.
     ///
-    /// This is a second implementation of the same payload as
-    /// `federation_tools::server_status::get_server_status`, and the two
-    /// have to stay in lockstep — the last time two builders for one
-    /// tool drifted, stdio and HTTP advertised different `claim_files`
-    /// schemas and the tool became uncallable on one of them.
-    /// `server_status_payloads_do_not_drift` pins the key sets together.
+    /// Delegates to the one builder in
+    /// `federation_tools::server_status` — this used to be a second
+    /// implementation of the same JSON, and it drifted: build-identity
+    /// fields were added there and this transport kept serving a
+    /// payload without them.
     fn render(&self) -> serde_json::Value {
-        let transport = self.transport.map(|t| match t {
-            crate::server::Transport::Stdio => "stdio".to_string(),
-            crate::server::Transport::Http => "http".to_string(),
-        });
-        use crate::server::build_info;
-        serde_json::json!({
-            "pid": std::process::id(),
-            "version": build_info::VERSION,
-            "git_sha": build_info::GIT_SHA,
-            "binary_mtime_unix": build_info::binary_mtime_unix(),
-            "binary_is_stale": build_info::binary_is_stale(),
-            "transport": transport,
-            // Null under stdio: reporting a port nobody listens on
-            // sends an agent to a dashboard that isn't there.
-            "port": match transport.as_deref() {
-                Some("http") => self.port.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
-                _ => serde_json::Value::Null,
-            },
-            "started_at": self
-                .started_at
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-            "last_sync_at": self
-                .last_sync_at
-                .lock()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-            "last_error": self.last_error.lock().clone(),
-            "repo_count": self.repo_count,
-            "workspace_count": self.workspaces_count,
+        use crate::server::mcp::federation_tools::server_status::{
+            render_server_status, ServerStatusFields,
+        };
+        render_server_status(ServerStatusFields {
+            transport: self.transport.map(|t| match t {
+                crate::server::Transport::Stdio => "stdio".to_string(),
+                crate::server::Transport::Http => "http".to_string(),
+            }),
+            port: self.port,
+            started_at: self.started_at,
+            last_sync_at: *self.last_sync_at.lock(),
+            last_error: self.last_error.lock().clone(),
+            repo_count: self.repo_count,
+            workspace_count: self.workspaces_count,
         })
     }
 }

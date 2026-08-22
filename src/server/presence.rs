@@ -11,20 +11,6 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// Default time an interactive agent may go without proof of life.
-///
-/// Was 60 seconds, which is shorter than a single LLM turn: an agent
-/// that claimed a file, reasoned about it, and came back found its
-/// session expired and its claims silently released. Any authenticated
-/// tool call now counts as a heartbeat (see
-/// `mcp::presence_tools::authenticate`), so this is a backstop for a
-/// genuinely departed agent rather than a liveness treadmill.
-pub const INTERACTIVE_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Background (cron / CI) agents keep the original fast reap. They are
-/// scripted, so heartbeating on a schedule is something they can
-/// actually do, and a wedged one should give its claims back quickly.
-pub const BACKGROUND_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 use crate::server::revision_log::RevisionId;
 
@@ -352,8 +338,16 @@ impl std::fmt::Debug for PresenceRegistry {
 }
 
 impl PresenceRegistry {
+    /// Registry with the shipped defaults from
+    /// [`crate::server::tuning::PresenceConfig`].
+    ///
+    /// The lifetimes used to be compile-time constants here. Every other
+    /// timeout in lain is tunable, so these are declared alongside them
+    /// and read from there — one place to change the number, and an
+    /// operator whose agents behave differently can actually change it.
     pub fn new() -> Self {
-        Self::with_expiry(INTERACTIVE_SESSION_TTL)
+        let cfg = crate::server::tuning::PresenceConfig::default();
+        Self::with_expiry(Duration::from_secs(cfg.interactive_session_ttl_secs))
     }
 
     pub fn with_expiry(expires_after: Duration) -> Self {
@@ -432,7 +426,9 @@ impl PresenceRegistry {
     /// should release its claims promptly.
     pub fn expires_after_for(&self, mode: &AgentMode) -> Duration {
         match mode {
-            AgentMode::Background => BACKGROUND_SESSION_TTL,
+            AgentMode::Background => Duration::from_secs(
+                crate::server::tuning::PresenceConfig::default().background_session_ttl_secs,
+            ),
             AgentMode::Interactive => self.expires_after(),
         }
     }
@@ -445,7 +441,10 @@ impl PresenceRegistry {
             let stale: Vec<AgentId> = s.sessions.iter()
                 .filter(|(_, sess)| {
                     let ttl = match sess.mode {
-                        AgentMode::Background => BACKGROUND_SESSION_TTL,
+                        AgentMode::Background => Duration::from_secs(
+                            crate::server::tuning::PresenceConfig::default()
+                                .background_session_ttl_secs,
+                        ),
                         AgentMode::Interactive => expires_after,
                     };
                     now.duration_since(sess.last_heartbeat).unwrap_or_default() >= ttl

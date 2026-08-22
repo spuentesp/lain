@@ -406,3 +406,46 @@ Tasks 6–11 are low-risk and can be batched into a single cleanup PR.
 ## Out of scope
 - `Method` node semantics beyond registering the type (Task 7). Whether a method should be an anchor candidate is a scoring question, adjacent to `2026-08-21-anchor-hub-scoring.md`.
 - Semantic search quality. The model wasn't loaded in this evaluation, so `semantic_search` was never exercised — only its error message (Task 9).
+
+---
+
+## Review 2026-08-22 (post-implementation, independent)
+
+Everything through Task 13 landed in `29d5ebc` (42 files, +4034/−317);
+full test suite green (`cargo test` exit 0) on that tree. Verified each
+task against the committed diff — all implemented, with these findings:
+
+**Gaps to close:**
+- Task 1: the plan's `claim_outside_workspace_still_collides_with_itself`
+  test was never written (the other three path-spelling tests exist in
+  `tests/presence.rs`).
+- Task 6 step 2: `get_context_for_prompt` still returns node lists
+  unfolded by path (the other aggregation sites were handled via Tasks
+  11.9/11.10, not path folding).
+- Task 11 step 4: staleness note on not-found answers only exists in the
+  federation resolver; `get_call_sites`, `explain_symbol`,
+  `explore_architecture` and the single-repo not-found paths still
+  answer flat "not found".
+
+**Deviations (acceptable, noted for the record):**
+- Task 4: own ignore-set in `attribution.rs` instead of reusing
+  `watcher::is_git_ignored`.
+- Task 8: `resolve_program` lives in `execution.rs`, not
+  `toolchains.rs`.
+- Task 12: the two-process test is two `LainServer` instances in one
+  test process sharing the state file — same file semantics, not OS
+  processes.
+
+**Landed but not in the plan (documented here so the plan stays the
+record):** re-claim replaces rather than accumulates
+(`presence.rs:1070`), `overlap_check` CLI accepts `LAIN_URL`,
+`reload.rs` test teardown for the staging-dir change.
+
+**In flight at review time (uncommitted, NOT part of this plan):**
+`src/server/sentinel.rs` (new module, 137 lines) replacing much of
+`state_lock.rs` (−84 lines there) plus `ingestion.rs` changes. Needs
+its own plan entry or a follow-up commit before any merge to main.
+
+**Still open:** Task 13's `fan_in`/`fan_out` semantics note (counts all
+edge kinds; `find_dead_code` reads them as call counts). Latent, not
+live.
