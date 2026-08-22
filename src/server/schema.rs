@@ -110,12 +110,6 @@ impl NodeType {
         }
     }
 
-    /// Types that hold executable code — the set every "which symbols"
-    /// analysis should span. Excluding `Method` here is what made
-    /// `suggest_refactor_targets` blind to impl blocks.
-    pub fn callable() -> &'static [NodeType] {
-        &[NodeType::Function, NodeType::Method]
-    }
 }
 
 impl std::fmt::Display for NodeType {
@@ -276,10 +270,25 @@ pub struct GraphNode {
     pub docstring: Option<String>,
     #[serde(default)]
     pub embedding: Option<String>,
+    /// Incoming edges of **every** kind, including the `Contains` edge
+    /// from the symbol's own file. Useful as a coupling signal; useless
+    /// as a "who calls this?" answer — see [`Self::calls_in`].
     #[serde(default)]
     pub fan_in: Option<u32>,
+    /// Outgoing edges of every kind. See [`Self::calls_out`].
     #[serde(default)]
     pub fan_out: Option<u32>,
+    /// Incoming `Calls` edges only — the number of callers.
+    ///
+    /// Separate from `fan_in` because conflating them is a live trap:
+    /// every symbol has an incoming `Contains` edge from its file, so
+    /// `fan_in == 0` is essentially never true and any dead-code check
+    /// written against it silently reports nothing.
+    #[serde(default)]
+    pub calls_in: Option<u32>,
+    /// Outgoing `Calls` edges only — the number of callees.
+    #[serde(default)]
+    pub calls_out: Option<u32>,
     #[serde(default)]
     pub anchor_score: Option<f32>,
     #[serde(default)]
@@ -338,6 +347,8 @@ impl GraphNode {
             docstring: None,
             embedding: None,
             fan_in: None,
+            calls_in: None,
+            calls_out: None,
             fan_out: None,
             anchor_score: None,
             depth_from_main: None,

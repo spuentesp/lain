@@ -213,9 +213,9 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "list_occupancy",
-        description: "Show which agents are in a file or the whole workspace.",
+        description: "Show which agents are in a file or the whole workspace. Pass `path` to scope to one file, or omit it for everything. Each entry carries `holders`: [{agent_id, name, intent, inferred}] — `edit` blocks other edits, `read` never blocks.",
         required_args: &[],
-        optional_args: &[],
+        optional_args: &["path"],
     },
     ToolDef {
         name: "my_claims",

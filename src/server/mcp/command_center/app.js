@@ -63,7 +63,17 @@ async function renderWorkspaces() {
     return;
   }
   if (result && result.isError) {
-    ul.innerHTML = `<li class="error">${escapeHtml(unwrapText(result) || 'error')}</li>`;
+    // `list_workspaces` is only registered when a workspaces file is
+    // loaded, so a federation with no `workspaces.yaml` — the ordinary
+    // setup — gets "Unknown tool" here. That is a configuration state,
+    // not a failure, and painting it red made a healthy dashboard look
+    // broken.
+    const msg = unwrapText(result) || 'error';
+    if (/unknown tool|no workspaces file/i.test(msg)) {
+      ul.innerHTML = '<li class="muted">no workspaces configured</li>';
+      return;
+    }
+    ul.innerHTML = `<li class="error">${escapeHtml(msg)}</li>`;
     return;
   }
   const list = parseJson(result) || [];

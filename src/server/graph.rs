@@ -996,6 +996,21 @@ impl GraphDatabase {
         for (idx, raw) in raws {
             let fan_in = graph.neighbors_directed(idx, Direction::Incoming).count() as u32;
             let fan_out = graph.neighbors_directed(idx, Direction::Outgoing).count() as u32;
+            // Calls-only counts, stored alongside the all-edge ones.
+            // "How many callers?" is a different question from "how
+            // coupled is this?", and answering the first with the
+            // second is why a dead-code check could never fire: the
+            // `Contains` edge from a symbol's own file guarantees
+            // `fan_in >= 1`. No test-path filter here — that is an
+            // anchor-scoring policy, not a fact about the graph.
+            let calls_in = graph
+                .edges_directed(idx, Direction::Incoming)
+                .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                .count() as u32;
+            let calls_out = graph
+                .edges_directed(idx, Direction::Outgoing)
+                .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                .count() as u32;
             // 100.0 scale so display "anchor 12.34" is human-readable;
             // top-of-corpus symbol always scores 100 regardless of how
             // big the codebase grows.
@@ -1007,6 +1022,8 @@ impl GraphDatabase {
             if let Some(node) = graph.node_weight_mut(idx) {
                 node.fan_in = Some(fan_in);
                 node.fan_out = Some(fan_out);
+                node.calls_in = Some(calls_in);
+                node.calls_out = Some(calls_out);
                 node.anchor_score = Some(normalized);
             }
         }

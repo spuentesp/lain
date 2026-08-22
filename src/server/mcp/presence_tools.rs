@@ -30,6 +30,17 @@ use serde_json::{json, Value};
 ///
 /// Any authenticated call is proof of life. Every dispatcher that
 /// resolves a token goes through here.
+/// Resolve an agent id to its registered name.
+///
+/// Conflicts and occupancy reported raw UUIDs, so an agent that was told
+/// "someone else holds this" had to make a second `list_active_agents`
+/// round-trip to learn who — and a human reading the dashboard saw a
+/// hex string. `None` when the session has since expired, which is
+/// itself useful: the holder is gone.
+fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
+    server.presence.get(id).map(|s| s.name)
+}
+
 fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
     let session = server.presence.by_token(token).ok_or("unknown session token")?;
     // Best-effort: the session was just resolved, so this only fails on
@@ -360,6 +371,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     })).collect()));
     out.insert("conflicts".into(), Value::Array(result.conflicts.iter().map(|c| json!({
         "agent_id": c.agent_id.as_str(),
+        "name": agent_name(server, &c.agent_id),
         "path": c.path.to_string_lossy(),
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
@@ -371,6 +383,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     if !result.advisories.is_empty() {
         out.insert("advisories".into(), Value::Array(result.advisories.iter().map(|c| json!({
             "agent_id": c.agent_id.as_str(),
+            "name": agent_name(server, &c.agent_id),
             "path": c.path.to_string_lossy(),
             "symbols": c.symbols,
             "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
@@ -584,6 +597,15 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         json!({
             "path": e.path.to_string_lossy(),
             "agents": e.agents.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
+            // `holders` says *how* each agent holds the path. Without
+            // it a surveying agent cannot tell a blocking `edit` from a
+            // harmless `read` and has to attempt a claim to find out.
+            "holders": e.holders.iter().map(|h| json!({
+                "agent_id": h.agent_id.as_str(),
+                "name": agent_name(server, &h.agent_id),
+                "intent": match h.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+                "inferred": h.inferred,
+            })).collect::<Vec<_>>(),
             "last_seen_unix": last_seen_unix,
             "symbols": e.symbols.iter().map(|s| json!({
                 "symbol": s.symbol,

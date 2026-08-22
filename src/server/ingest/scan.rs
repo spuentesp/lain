@@ -159,6 +159,16 @@ pub async fn scan_file_structure(
     // Tree-sitter static analysis: extract call, type-usage refs, and string literals from source
     // Read file once — reuse content for both extractors
     let (static_refs, pattern_refs) = if let Ok(content) = tokio::fs::read_to_string(&path).await {
+        // Attribute labels, merged onto whatever produced the nodes.
+        //
+        // The LSP reports names, kinds and ranges but never attributes,
+        // so an LSP-indexed `#[test]` function arrives unlabelled and
+        // dead-code detection cannot tell it from production code —
+        // observed live, ten `#[test]` functions in a top-20 "dead"
+        // list. Tree-sitter reads the attribute reliably and we are
+        // already parsing this file for refs, so take the labels from
+        // there regardless of which path built the nodes.
+        apply_attribute_labels(&path, &content, &mut nodes);
         let path_str = relative_path.clone();
         let static_refs: Vec<StaticFileRef> = crate::treesitter::extract_refs(&path, &content)
             .into_iter()
@@ -207,6 +217,49 @@ pub async fn scan_file_batch(
         results.push(result);
     }
     results
+}
+
+/// Merge tree-sitter attribute labels onto already-built nodes.
+///
+/// Matched on name plus start line where both are known, falling back
+/// to name alone — the LSP's range starts at the doc comment or
+/// attribute while tree-sitter's starts at the definition, so the two
+/// rarely agree exactly. A node that already carries a label keeps it.
+fn apply_attribute_labels(path: &Path, content: &str, nodes: &mut [GraphNode]) {
+    let defs = crate::treesitter::extract_definitions(path, content);
+    if defs.is_empty() {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        if node.label.is_some() {
+            continue;
+        }
+        // Prefer a definition whose span contains the node's start.
+        let hit = defs
+            .iter()
+            .filter(|d| d.name == node.name)
+            .min_by_key(|d| match node.line_start {
+                Some(l) => (d.line_start as i64 - l as i64).abs(),
+                None => 0,
+            });
+        if let Some(def) = hit {
+            if def.is_deprecated {
+                node.is_deprecated = true;
+                node.label = Some("deprecated".to_string());
+            } else if let Some(chosen) = def
+                .labels
+                .iter()
+                // `test` wins over whatever else is on the definition:
+                // `#[tokio::test]` yields ["tokio", "test"], and taking
+                // the first label would file it under "tokio" and lose
+                // the only fact any consumer cares about.
+                .find(|l| l.as_str() == "test")
+                .or_else(|| def.labels.first())
+            {
+                node.label = Some(chosen.clone());
+            }
+        }
+    }
 }
 
 /// Does this symbol name a unit-test container?
@@ -450,5 +503,60 @@ mod tests {
                 .map(|e| (&e.edge_type, &e.source_id, &e.target_id))
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod attribute_label_tests {
+    use super::*;
+
+    /// The LSP never reports attributes, so an LSP-indexed `#[test]`
+    /// function arrives unlabelled and dead-code detection cannot tell
+    /// it from production code. Ten such functions showed up in a
+    /// top-20 "dead code" list on this very repo.
+    #[test]
+    fn test_attribute_is_merged_onto_an_unlabelled_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("thing.rs");
+        let src = "pub fn prod() -> u32 { 1 }\n\
+                   #[cfg(test)]\n\
+                   mod tests {\n\
+                   #[test]\n\
+                   fn checks_a_thing() {}\n\
+                   #[tokio::test]\n\
+                   async fn checks_async() {}\n\
+                   }\n";
+        std::fs::write(&f, src).unwrap();
+
+        // Nodes as the LSP would hand them over: no labels at all.
+        let mut nodes = vec![
+            GraphNode::new(NodeType::Function, "prod".into(), "thing.rs".into()),
+            GraphNode::new(NodeType::Function, "checks_a_thing".into(), "thing.rs".into()),
+            GraphNode::new(NodeType::Function, "checks_async".into(), "thing.rs".into()),
+        ];
+        apply_attribute_labels(&f, src, &mut nodes);
+
+        let label = |n: &str| {
+            nodes.iter().find(|x| x.name == n).unwrap().label.clone()
+        };
+        assert_eq!(label("checks_a_thing").as_deref(), Some("test"));
+        assert_eq!(
+            label("checks_async").as_deref(),
+            Some("test"),
+            "#[tokio::test] must file as `test`, not `tokio`"
+        );
+        assert_eq!(label("prod"), None, "production code stays unlabelled");
+    }
+
+    #[test]
+    fn an_existing_label_is_not_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("thing.rs");
+        let src = "#[test]\nfn t() {}\n";
+        std::fs::write(&f, src).unwrap();
+        let mut nodes = vec![GraphNode::new(NodeType::Function, "t".into(), "thing.rs".into())];
+        nodes[0].label = Some("preset".into());
+        apply_attribute_labels(&f, src, &mut nodes);
+        assert_eq!(nodes[0].label.as_deref(), Some("preset"));
     }
 }

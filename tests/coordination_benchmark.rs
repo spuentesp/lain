@@ -209,9 +209,16 @@ async fn blast_radius_latency_benchmark() {
         .expect("blast radius");
         // Sanity: the whole chain must be traversed (the report caps
         // displayed names at 20 but always prints the total). 10k
-        // functions + the containing file node, minus the start node.
+        // functions minus the start node = 9999 callers.
+        //
+        // This expected 10000 while the traversal followed *every*
+        // incoming edge, which counted the containing File node as a
+        // dependent of its own symbol. A file does not break when a
+        // function inside it changes, and following that edge is what
+        // let a 3-caller helper report 564 affected nodes on the real
+        // graph. Impact now follows `Calls`/`Uses` only.
         assert!(
-            out.contains("Total transitively affected nodes: 10000"),
+            out.contains("Total transitively affected nodes: 9999"),
             "expected the full 10k chain in the traversal count, got: {}",
             &out[..out.len().min(400)]
         );

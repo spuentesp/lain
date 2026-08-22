@@ -88,6 +88,13 @@ The graph is a **petgraph** directed acyclic graph stored at `.lain/graph.bin`.
 | `CoChangedWith` | Historical co-change | Git history analysis |
 | `Pattern` | Cross-boundary pattern | Tree-sitter pattern detection |
 
+**Call counts vs fan:** `fan_in` / `fan_out` count edges of *every*
+kind, including the `Contains` edge each symbol has from its own file —
+so `fan_in == 0` is essentially never true and is useless as "has no
+callers". `calls_in` / `calls_out` count `Calls` edges only. Anything
+asking "who calls this?" must read the latter; a dead-code check
+written against `fan_in` silently reports nothing at all.
+
 **Node Identity:** UUID v5 derived from `(NodeType, FilePath, SymbolName)` for deterministic, stable IDs across runs. The `(NodeType, FilePath, SymbolName, line_start?)` quadruple is used when line_start is known (tree-sitter path) so two same-named symbols at different lines get distinct IDs.
 
 **Anchor scores:** percentile-normalized to `[0, 100]` per-corpus via two-pass `calculate_anchor_scores` in `src/graph.rs`. Top symbol always scores 100; everything else scales. Prevents unbounded growth across reindexes. The search formula `sim + anchor_weight × normalized_anchor` is then consistent regardless of corpus size.

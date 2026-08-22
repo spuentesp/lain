@@ -178,6 +178,9 @@ const UNINDEXED_FILE_MIN_FUNCTIONS: usize = 3;
 /// and saying so is the honest answer.
 fn unindexed_files(functions: &[crate::schema::GraphNode]) -> HashSet<String> {
     let mut per_file: HashMap<String, (usize, u32)> = HashMap::new();
+    // Counts `calls_out`, not `fan_out`: a file whose symbols have
+    // structural edges but no call edges is exactly the case this
+    // detects, and `fan_out` would hide it.
     for f in functions {
         // Count only non-test definitions toward the threshold. A file
         // that is mostly `#[test]` functions legitimately makes few
@@ -189,7 +192,7 @@ fn unindexed_files(functions: &[crate::schema::GraphNode]) -> HashSet<String> {
         }
         let e = per_file.entry(f.path.clone()).or_insert((0, 0));
         e.0 += 1;
-        e.1 += f.fan_out.unwrap_or(0);
+        e.1 += f.calls_out.unwrap_or(0);
     }
     per_file
         .into_iter()
@@ -223,18 +226,75 @@ pub struct DeadCodeReport {
     /// Tests dropped from consideration — a test has no production
     /// caller by design.
     pub tests_excluded: usize,
+    /// Dropped because the name appears again in its own file: a serde
+    /// attribute string, a function pointer, or similar reference the
+    /// call graph does not model.
+    pub name_referenced: usize,
 }
 
 /// Classify every function in the graph. Pure with respect to the
 /// graph; the optional semantic filter is applied by the caller.
-pub fn analyze_dead_code(graph: &GraphDatabase) -> Result<DeadCodeReport, LainError> {
+/// Is this symbol's name mentioned anywhere in its own file besides its
+/// definition?
+///
+/// The call graph only records *calls*. A symbol can be referenced in
+/// ways that are not calls and that no `Calls` edge will ever capture:
+///
+/// - `#[serde(default = "default_ref")]` — the reference is a string
+///   literal read by a derive macro.
+/// - `resolve_in(..., &run_resolver_command)` — a function pointer
+///   passed as a value, never invoked at that site.
+///
+/// Both were reported as dead on this repo while being load-bearing.
+/// A second mention in the same file is weak evidence, but it is the
+/// right *direction* of weak: a false "referenced" costs nothing, and a
+/// false "dead" invites someone to delete working code.
+fn referenced_by_name_in_its_file(node: &crate::schema::GraphNode, workspace: &std::path::Path) -> bool {
+    let path = workspace.join(&node.path);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        // Unreadable: this filter simply does not apply, so fall back to
+        // the call-graph verdict rather than excluding the symbol.
+        // Excluding on failure would make the whole tool silently
+        // vacuous the moment paths stopped resolving — which is the
+        // exact failure `fan_in` already caused once.
+        return false;
+    };
+    let name = node.name.as_str();
+    if name.is_empty() {
+        return true;
+    }
+    // Count whole-word occurrences; the definition itself is one.
+    let mut hits = 0usize;
+    for (i, _) in text.match_indices(name) {
+        let before = text[..i].chars().next_back();
+        let after = text[i + name.len()..].chars().next();
+        let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if boundary(before) && boundary(after) {
+            hits += 1;
+            if hits > 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn analyze_dead_code(
+    graph: &GraphDatabase,
+    workspace: &std::path::Path,
+) -> Result<DeadCodeReport, LainError> {
     let functions = graph.get_nodes_by_type(NodeType::Function)?;
     let unindexed = unindexed_files(&functions);
 
-    // Primary filter: fan_in == 0 (no incoming calls).
+    // Primary filter: no incoming *calls*.
+    //
+    // This read `fan_in` once, which counts every incoming edge — and
+    // every symbol has an incoming `Contains` edge from its own file.
+    // So `fan_in == 0` was essentially never true and the tool reported
+    // nothing at all, silently, while looking healthy.
     let candidates: Vec<_> = functions
         .into_iter()
-        .filter(|f| f.fan_in.unwrap_or(0) == 0)
+        .filter(|f| f.calls_in.unwrap_or(0) == 0)
         .collect();
 
     // Drop names, trait contexts, and tests — all dead-looking by
@@ -250,9 +310,19 @@ pub fn analyze_dead_code(graph: &GraphDatabase) -> Result<DeadCodeReport, LainEr
     let (unindexed_hits, indexed): (Vec<_>, Vec<_>) =
         named.into_iter().partition(|f| unindexed.contains(&f.path));
 
+    // Drop anything whose name is mentioned again in its own file:
+    // serde attribute strings and function pointers are references the
+    // call graph cannot see.
+    let before_mentions = indexed.len();
+    let indexed: Vec<_> = indexed
+        .into_iter()
+        .filter(|f| !referenced_by_name_in_its_file(f, workspace))
+        .collect();
+    let name_referenced = before_mentions.saturating_sub(indexed.len());
+
     let (unreferenced, calls_out): (Vec<_>, Vec<_>) = indexed
         .into_iter()
-        .partition(|f| f.fan_out.unwrap_or(0) == 0);
+        .partition(|f| f.calls_out.unwrap_or(0) == 0);
 
     let mut unindexed_files: Vec<String> = unindexed.into_iter().collect();
     unindexed_files.sort();
@@ -263,6 +333,7 @@ pub fn analyze_dead_code(graph: &GraphDatabase) -> Result<DeadCodeReport, LainEr
         unindexed_files,
         unindexed_symbols: unindexed_hits.len(),
         tests_excluded,
+        name_referenced,
     })
 }
 
@@ -284,6 +355,15 @@ fn render_dead_code(report: &DeadCodeReport, shown: &[crate::schema::GraphNode])
             "\n\n{} test symbol(s) were excluded: a test is run by the harness, never \
              called by production code, so \"no callers\" is its normal state.",
             report.tests_excluded
+        ));
+    }
+
+    if report.name_referenced > 0 {
+        out.push_str(&format!(
+            "\n\n{} symbol(s) were excluded because their name appears again in \
+             their own file — a serde attribute string, a function pointer, or \
+             another reference the call graph does not model.",
+            report.name_referenced
         ));
     }
 
@@ -340,7 +420,7 @@ pub fn find_dead_code(
         ));
     }
 
-    let report = analyze_dead_code(graph)?;
+    let report = analyze_dead_code(graph, workspace)?;
 
     let shown: Vec<_> = match like {
         Some(query) => {

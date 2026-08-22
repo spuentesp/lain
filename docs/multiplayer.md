@@ -78,14 +78,32 @@ The four calls in plain English:
      editing that file. A read never blocks on a writer; this is how
      you find out anyway. Re-read before you patch.
 
+   Conflicts and advisories carry the holder's `name` alongside its
+   `agent_id`, so you do not need a second call to learn who. `name` is
+   `null` when that session has since ended — never a fabricated
+   placeholder.
+
    Paths are canonicalized, so `/abs/auth.rs`, `auth.rs` and
    `./auth.rs` are the same claim. They used to be three.
 4. **`release_files`** — after editing. Frees the claim so the next
    agent can pick it up.
 
 You can also poll without claiming — `list_occupancy` (optionally
-scoped to a path) reports who currently holds claims on a file, and
+scoped with `path`) reports who currently holds claims on a file, and
 `list_active_agents` enumerates every connected session.
+
+Each occupancy entry carries `holders`:
+
+```json
+{ "path": "/repo/src/auth.rs",
+  "holders": [ { "agent_id": "…", "name": "alice", "intent": "edit", "inferred": false },
+               { "agent_id": "…", "name": "bob",   "intent": "read", "inferred": false } ] }
+```
+
+Read `intent` before concluding anything: `edit` blocks other edits,
+`read` never blocks. Without it a surveying agent cannot tell a
+blocking hold from a harmless one — two agents on a live server drew
+exactly the wrong conclusion from a bare list of ids.
 
 ### Listening for events (push)
 

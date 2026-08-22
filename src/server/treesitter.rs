@@ -404,13 +404,33 @@ fn collect_rust_metadata(node: &tree_sitter::Node, src_bytes: &[u8]) -> (bool, V
             } else if child.kind() == "attribute" {
                 let mut path = child.walk();
                 for p in child.children(&mut path) {
-                    if p.kind() == "identifier" {
-                        if let Ok(s) = p.utf8_text(src_bytes) {
-                            labels.push(s.to_string());
-                            if s == "deprecated" {
-                                is_deprecated = true;
+                    match p.kind() {
+                        "identifier" => {
+                            if let Ok(s) = p.utf8_text(src_bytes) {
+                                labels.push(s.to_string());
+                                if s == "deprecated" {
+                                    is_deprecated = true;
+                                }
                             }
                         }
+                        // `#[tokio::test]`, `#[serial_test::serial]`:
+                        // the attribute is a *scoped* identifier, which
+                        // the identifier arm never saw — so the single
+                        // most common async-test attribute in Rust
+                        // produced no labels at all and its functions
+                        // were indistinguishable from production code.
+                        // The last segment is the meaningful one.
+                        "scoped_identifier" => {
+                            if let Ok(s) = p.utf8_text(src_bytes) {
+                                if let Some(last) = s.rsplit("::").next() {
+                                    labels.push(last.to_string());
+                                    if last == "deprecated" {
+                                        is_deprecated = true;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

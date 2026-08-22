@@ -95,6 +95,17 @@ pub async fn get_blast_radius(
 
         if let Ok(incoming) = graph.get_edges_to(&id) {
             for e in incoming {
+                // Only dependency edges. "What breaks if I change this?"
+                // is about callers and users, not containment: following
+                // the `Contains` edge from a symbol's own file hopped up
+                // to the File node and then out through everything that
+                // file touches. Observed live — a private helper with
+                // exactly three callers reported 564 affected nodes,
+                // 16% of the graph, including symbols in files with no
+                // reference to it at all.
+                if !matches!(e.edge_type, crate::schema::EdgeType::Calls | crate::schema::EdgeType::Uses) {
+                    continue;
+                }
                 let source_id = e.source_id.clone();
                 if visited.contains(&source_id) || !queued.insert(source_id.clone()) {
                     continue;

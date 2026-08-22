@@ -179,6 +179,25 @@ fn init_workspace_state(ws: &Path) -> Result<PathBuf, LainError> {
 /// / `query_graph` / `get_function_callers` / `get_function_callees`
 /// without waiting for the round-2 federation-aware handler refactor
 /// (which is the open follow-up for multi-repo).
+/// The single registered repo's checkout, when there is exactly one.
+///
+/// `config.workspace` is a staging placeholder in federation mode, so
+/// any handler that resolves a repo-relative path against it reads
+/// nothing. `get_code_snippet` happened to work because it never
+/// consults the workspace; `find_dead_code` does, and its file checks
+/// silently found no files at all. Same reasoning as
+/// [`bind_to_single_repo_graph`], applied to the filesystem.
+fn single_repo_root(federation: &FederatedIndex) -> Option<PathBuf> {
+    let repos = federation.list_repos();
+    if repos.len() != 1 {
+        return None;
+    }
+    let (id, _) = repos.into_iter().next()?;
+    federation
+        .get_repo(&id)
+        .map(|r| r.source().local_path().to_path_buf())
+}
+
 fn bind_to_single_repo_graph(
     federation: &FederatedIndex,
     placeholder: GraphDatabase,
@@ -288,7 +307,10 @@ fn build_federation_server(
         Arc::clone(&git),
         Arc::clone(&lsp_pool),
         Arc::clone(&tuning),
-        ws.to_path_buf(),
+        // Tools resolve repo-relative paths against this, so hand them
+        // the real checkout when there is one rather than the staging
+        // placeholder.
+        single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf()),
     );
 
     // Build the LainMcpServer eagerly so any wiring problems surface

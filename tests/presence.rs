@@ -984,8 +984,22 @@ fn run_claim_files_conflict_json_has_no_unknown_name_field() {
     let conflicts = v["conflicts"].as_array().unwrap();
     assert_eq!(conflicts.len(), 1);
     let c = &conflicts[0];
-    // The new conflict JSON shape: agent_id, no name, last_seen_unix.
-    assert!(c.get("name").is_none(), "fragile `name` field must be dropped");
+    // Conflict JSON carries the holder's *name*, resolved live.
+    //
+    // `name` was dropped once because it emitted the literal string
+    // "unknown" whenever the session could not be resolved — a lie that
+    // read like a real agent called "unknown". It is back because two
+    // agents driving a live server both called its absence the single
+    // biggest usability defect: being told "someone holds this" as a
+    // bare UUID forces a second round-trip to learn who. The fix for
+    // the original fragility is the type: `null` when the holder is
+    // gone, never a fabricated name.
+    assert_eq!(
+        c["name"].as_str(),
+        Some("alice"),
+        "a conflict must name its holder, not just its uuid"
+    );
+    assert_ne!(c["name"].as_str(), Some("unknown"), "never fabricate a name");
     assert!(c["agent_id"].is_string());
     assert!(c["last_seen_unix"].as_u64().unwrap() > 0);
     assert!(c["intent"].as_str().unwrap() == "edit");
@@ -1693,4 +1707,39 @@ fn read_over_another_read_carries_no_advisory() {
     occ.claim(&alice, vec![read("shared.rs")]);
     let result = occ.claim(&bob, vec![read("shared.rs")]);
     assert!(result.advisories.is_empty(), "two readers are not a hazard");
+}
+
+
+/// The holder's name is resolved live, so a departed holder reports
+/// `null` rather than the fabricated "unknown" that got the field
+/// removed in the first place.
+#[tokio::test]
+async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
+    use lain::server::mcp::presence_tools::run_claim_files;
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+
+    let alice = run_register_agent_for_test(&server, "alice");
+    let bob = run_register_agent_for_test(&server, "bob");
+    run_claim_files(&server, serde_json::json!({
+        "agent_id": alice.0, "session_token": alice.1,
+        "files": [{"path": "auth.rs", "intent": "edit"}],
+    })).unwrap();
+
+    // Alice's session goes away while her claim is still on the file.
+    server.presence.remove(&AgentId(alice.0.clone()));
+
+    let v = run_claim_files(&server, serde_json::json!({
+        "agent_id": bob.0, "session_token": bob.1,
+        "files": [{"path": "auth.rs", "intent": "edit"}],
+    })).unwrap();
+    let c = &v["conflicts"].as_array().unwrap()[0];
+    assert!(
+        c["name"].is_null(),
+        "an unresolvable holder must be null, not a fabricated name: {c}"
+    );
 }

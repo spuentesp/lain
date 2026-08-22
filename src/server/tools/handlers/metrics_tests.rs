@@ -183,20 +183,22 @@ fn graph_with_an_unindexed_file() -> (GraphDatabase, VolatileOverlay) {
         let mut n = GraphNode::new(NodeType::Function, name.to_string(), "/src/watcher.rs".to_string());
         n.fan_in = Some(0);
         n.fan_out = Some(0);
+        n.calls_in = Some(0);
+        n.calls_out = Some(0);
         graph.upsert_node(n).unwrap();
     }
 
     // lib.rs: indexed — its functions have call edges, and one genuine
     // orphan sits among them.
     let mut caller = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    caller.fan_in = Some(1);
-    caller.fan_out = Some(1);
+    caller.calls_in = Some(1);
+    caller.calls_out = Some(1);
     let mut callee = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
-    callee.fan_in = Some(1);
-    callee.fan_out = Some(0);
+    callee.calls_in = Some(1);
+    callee.calls_out = Some(0);
     let mut orphan = GraphNode::new(NodeType::Function, "orphan".to_string(), "/src/lib.rs".to_string());
-    orphan.fan_in = Some(0);
-    orphan.fan_out = Some(0);
+    orphan.calls_in = Some(0);
+    orphan.calls_out = Some(0);
     graph.upsert_node(caller).unwrap();
     graph.upsert_node(callee).unwrap();
     graph.upsert_node(orphan).unwrap();
@@ -330,20 +332,20 @@ fn test_symbols_are_excluded_from_dead_code() {
     // A test file's functions: no production caller, by design.
     for name in ["test_git_sensor_in_temp_repo", "test_repo_identity_invalid", "sample_event"] {
         let mut n = GraphNode::new(NodeType::Function, name.to_string(), "/src/server/git_tests.rs".to_string());
-        n.fan_in = Some(0);
-        n.fan_out = Some(1); // indexed: the file has call edges
+        n.calls_in = Some(0);
+        n.calls_out = Some(1); // indexed: the file has call edges
         graph.upsert_node(n).unwrap();
     }
     // A genuinely unreferenced production function in an indexed file.
     let mut orphan = GraphNode::new(NodeType::Function, "orphan".to_string(), "/src/lib.rs".to_string());
-    orphan.fan_in = Some(0);
-    orphan.fan_out = Some(0);
+    orphan.calls_in = Some(0);
+    orphan.calls_out = Some(0);
     let mut live = GraphNode::new(NodeType::Function, "live".to_string(), "/src/lib.rs".to_string());
-    live.fan_in = Some(2);
-    live.fan_out = Some(3);
+    live.calls_in = Some(2);
+    live.calls_out = Some(3);
     let mut helper = GraphNode::new(NodeType::Function, "helper".to_string(), "/src/lib.rs".to_string());
-    helper.fan_in = Some(1);
-    helper.fan_out = Some(1);
+    helper.calls_in = Some(1);
+    helper.calls_out = Some(1);
     graph.upsert_node(orphan).unwrap();
     graph.upsert_node(live).unwrap();
     graph.upsert_node(helper).unwrap();
@@ -403,7 +405,7 @@ fn dead_code_analysis_is_available_without_parsing_prose() {
     use crate::server::tools::handlers::metrics::analyze_dead_code;
     let (graph, _overlay) = graph_with_an_unindexed_file();
 
-    let report = analyze_dead_code(&graph).unwrap();
+    let report = analyze_dead_code(&graph, std::path::Path::new("")).unwrap();
 
     assert_eq!(
         report.unreferenced.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
@@ -417,4 +419,105 @@ fn dead_code_analysis_is_available_without_parsing_prose() {
     );
     assert_eq!(report.unindexed_symbols, 4);
     assert!(report.calls_out.is_empty());
+}
+
+/// A dead function in a properly-indexed file must be found.
+///
+/// `find_dead_code` filtered on `fan_in == 0`, but `fan_in` counts every
+/// incoming edge — including the `Contains` edge every symbol has from
+/// its own file. Once the missing `Contains` edges were repaired,
+/// `fan_in == 0` stopped being true for anything and the tool silently
+/// reported nothing at all. Callers must be counted with `calls_in`.
+#[test]
+fn a_dead_function_is_found_even_though_its_file_contains_it() {
+    let tmp = std::env::temp_dir().join("test_metrics_contains_masking");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    let file = GraphNode::new(NodeType::File, "lib.rs".to_string(), "/src/lib.rs".to_string());
+    graph.upsert_node(file.clone()).unwrap();
+
+    // Three functions so the file is not mistaken for unindexed.
+    let mut caller = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
+    caller.calls_in = Some(0);
+    caller.calls_out = Some(1);
+    let mut callee = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    callee.calls_in = Some(1);
+    callee.calls_out = Some(0);
+    // The genuinely dead one — no callers, no callees — but its file
+    // `Contains` it, so `fan_in` is 1 and the old filter skipped it.
+    let mut orphan = GraphNode::new(NodeType::Function, "orphan".to_string(), "/src/lib.rs".to_string());
+    orphan.calls_in = Some(0);
+    orphan.calls_out = Some(0);
+
+    for n in [&caller, &callee, &orphan] {
+        let mut n = n.clone();
+        n.fan_in = Some(1); // the Contains edge from lib.rs
+        n.fan_out = Some(1);
+        graph.upsert_node(n).unwrap();
+    }
+    for n in [&caller, &callee, &orphan] {
+        graph
+            .upsert_edge(GraphEdge::new(EdgeType::Contains, file.id.clone(), n.id.clone()))
+            .unwrap();
+    }
+    graph
+        .upsert_edge(GraphEdge::new(EdgeType::Calls, caller.id.clone(), callee.id.clone()))
+        .unwrap();
+
+    let embedder = NlpEmbedder::new_stub();
+    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let text = find_dead_code(std::path::Path::new(""), &graph, &VolatileOverlay::new(), None, &embedder, &cache).unwrap();
+
+    assert!(
+        text.contains("- orphan ("),
+        "a function with no callers must be found even though its file contains it:\n{text}"
+    );
+    assert!(
+        !text.contains("- callee ("),
+        "a function with a real caller is not dead:\n{text}"
+    );
+}
+
+
+/// A symbol referenced only by a serde attribute string or a function
+/// pointer is not dead. Both shipped as "dead" on this repo while being
+/// load-bearing: deleting them is a compile error.
+#[test]
+fn a_name_referenced_only_by_attribute_or_pointer_is_not_dead() {
+    use crate::server::tools::handlers::metrics::analyze_dead_code;
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("cfg.rs"),
+        "fn default_ref() -> String { \"main\".into() }\n\
+         fn run_resolver() {}\n\
+         fn truly_dead() {}\n\
+         struct S { #[serde(default = \"default_ref\")] r: String }\n\
+         fn use_it() { let f = &run_resolver; let _ = f; }\n",
+    )
+    .unwrap();
+
+    let db = GraphDatabase::new(&tmp.path().join("g")).unwrap();
+    for name in ["default_ref", "run_resolver", "truly_dead"] {
+        let mut n = GraphNode::new(NodeType::Function, name.to_string(), "src/cfg.rs".to_string());
+        n.calls_in = Some(0);
+        n.calls_out = Some(0);
+        db.upsert_node(n).unwrap();
+    }
+    // One symbol with a call edge, so the file does not trip the
+    // "no call edges at all → unindexed" guard and get excluded whole.
+    let mut live = GraphNode::new(NodeType::Function, "use_it".to_string(), "src/cfg.rs".to_string());
+    live.calls_in = Some(1);
+    live.calls_out = Some(1);
+    db.upsert_node(live).unwrap();
+
+    let report = analyze_dead_code(&db, tmp.path()).unwrap();
+    let dead: Vec<&str> = report.unreferenced.iter().map(|n| n.name.as_str()).collect();
+
+    assert!(!dead.contains(&"default_ref"), "serde attribute reference missed: {dead:?}");
+    assert!(!dead.contains(&"run_resolver"), "function-pointer reference missed: {dead:?}");
+    assert!(dead.contains(&"truly_dead"), "a genuinely dead symbol must survive the filter: {dead:?}");
+    assert_eq!(report.name_referenced, 2);
 }

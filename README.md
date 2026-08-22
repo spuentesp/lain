@@ -434,6 +434,35 @@ curl -s -X POST http://localhost:9999/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_agent_strategy","arguments":{}},"id":1}'
 ```
 
+**`run_build` / `run_tests` fail with "not found"?**
+
+The server inherits the environment of whatever launched it, and an
+editor-launched MCP server usually has no version-manager shims on
+`PATH`. lain searches the toolchain's known install locations (rustup,
+nvm, pyenv, volta, mise, asdf and friends) before giving up, and the
+error names every way to fix it. To teach it a manager it doesn't know,
+add `program_dirs` / `program_resolver` to that toolchain's profile —
+see [`toolchains/README.md`](toolchains/README.md).
+
+**Answers look stale, or a symbol "doesn't exist" that clearly does?**
+
+Check `get_health`:
+
+- **`Build:`** tells you the version and git SHA of the process
+  answering, and warns when a newer binary is on disk. An MCP stdio
+  server is spawned once by its client and outlives every rebuild, so
+  it can be older than your source tree — restart the client to pick up
+  a new build.
+- **`Status:`** reads `Degraded ⚠` when the last re-index failed, which
+  means "not in this graph", not "does not exist".
+
+**Two agents not seeing each other?**
+
+They must share one workspace. Presence is exchanged through the state
+file under `~/.local/lain/state/`, so agents on the same repo see each
+other's claims even when each console spawned its own stdio server.
+`list_active_agents` and `list_occupancy` are the quickest check.
+
 ---
 
 ## License

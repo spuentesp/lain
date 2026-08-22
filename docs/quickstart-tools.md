@@ -272,3 +272,53 @@ Run cargo clippy.
 ```json
 { "name": "run_clippy", "arguments": { "cwd": "/path/to/project", "fix": false } }
 ```
+
+---
+
+## Multiplayer
+
+Coordination tools, for when more than one agent shares the repo. Full
+contract in [`multiplayer.md`](multiplayer.md).
+
+### register_agent
+Once at startup. Returns `agent_id`, `session_token`, `expires_at_unix`.
+```json
+{ "name": "register_agent", "arguments": { "name": "claude", "kind": "claude-code" } }
+```
+No heartbeat loop is needed — any authenticated call refreshes the
+session.
+
+### claim_files
+Before editing. Returns `granted`, `conflicts` (refused — someone else
+holds it) and `advisories` (granted, but someone is editing it anyway).
+```json
+{ "name": "claim_files", "arguments": {
+    "agent_id": "…", "session_token": "…",
+    "files": [{ "path": "src/auth.rs", "symbols": ["login"], "intent": "edit" }] } }
+```
+Paths are canonicalized, so `src/auth.rs`, `./src/auth.rs` and the
+absolute form are one claim.
+
+### release_files / my_claims / list_occupancy / who_am_i
+```json
+{ "name": "list_occupancy", "arguments": {} }
+```
+
+---
+
+## Reading the answers
+
+A few tools are easy to over-trust. What they actually mean:
+
+| Tool | Reports | Does **not** mean |
+|------|---------|-------------------|
+| `find_dead_code` | No incoming `Calls` edges, in a file whose call graph was extracted | "Safe to delete." It excludes tests, unindexed files, and symbols whose name appears again in their own file (serde attribute strings, function pointers) — and reports each exclusion count. Dynamic dispatch and cross-file string references are still invisible to it. |
+| `get_blast_radius` | Transitive `Calls`/`Uses` dependents | "Everything in these files." It deliberately does not follow `Contains`; a file is not a dependent of its own symbols. |
+| `get_call_sites` | Callers lain resolved | "All callers." A call inside a macro argument may not be indexed. |
+| `find_anchors` | Orchestration hubs — called by many, calling many, with a real body | "Most important." A widely-used leaf helper scores low by design. |
+| `get_coupling_radar` | Files that change together in git history | A static dependency. It is temporal correlation. |
+| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` or `get_call_sites` for those. |
+
+When the graph is behind HEAD, `get_health` says so and "not found"
+answers point at it. Treat a `Degraded ⚠` server's silence as "not in
+this graph", never as "does not exist".

@@ -142,21 +142,23 @@ pub fn semantic_search(
         }
     }
 
-    // 4. Sort by hybrid score: combine similarity with anchor score (Importance Sorting).
-    // anchor_score is normalized to [0, 1] within this candidate set via min-max
-    // so the formula behaves consistently regardless of corpus size or
-    // how many times the indexer has re-run. Without this, anchor scores
-    // can grow to 1000+ across reindexes and the formula
-    //   sim + anchor_weight * anchor
-    // becomes anchor-dominated even with anchor_weight=0.05, burying
-    // semantically better matches.
-    let max_anchor = scored.iter()
-        .map(|(n, _)| n.anchor_score.unwrap_or(0.0))
-        .fold(0.0f32, f32::max);
-    let norm = if max_anchor > 0.0 { max_anchor } else { 1.0 };
+    // 4. Sort by hybrid score: similarity plus a bounded importance bonus.
+    //
+    // `anchor_score` is already normalized against the whole corpus by
+    // `calculate_anchor_scores` — the top symbol scores 100. Divide by
+    // that known scale, not by the maximum within the result set.
+    //
+    // Min-max within the set was the previous approach, and it inflated
+    // noise: whichever candidate had the highest anchor got the *full*
+    // bonus even when nothing in the set was an anchor at all. Observed
+    // live — a result with anchor 0.59 out of 100 received the maximum
+    // +0.3 and outranked a candidate with 0.56 similarity against its
+    // 0.36. Against the global scale that bonus is 0.3 × 0.0059 ≈ 0.002,
+    // which is the honest weight for a symbol nothing depends on.
+    const ANCHOR_SCALE: f32 = 100.0;
     scored.sort_by(|a, b| {
-        let anchor_a = a.0.anchor_score.unwrap_or(0.0) / norm;
-        let anchor_b = b.0.anchor_score.unwrap_or(0.0) / norm;
+        let anchor_a = (a.0.anchor_score.unwrap_or(0.0) / ANCHOR_SCALE).clamp(0.0, 1.0);
+        let anchor_b = (b.0.anchor_score.unwrap_or(0.0) / ANCHOR_SCALE).clamp(0.0, 1.0);
         // Hybrid: similarity + anchor_weight * normalized_anchor_score
         let hybrid_a = a.1 + tuning.anchor_weight * anchor_a;
         let hybrid_b = b.1 + tuning.anchor_weight * anchor_b;

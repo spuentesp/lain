@@ -144,6 +144,38 @@ impl<'de> serde::Deserialize<'de> for SymbolHash {
 /// them via the live `heartbeat` flow, not via persistence.
 fn epoch() -> SystemTime { SystemTime::UNIX_EPOCH }
 
+/// Serialize a `SystemTime` as UNIX seconds.
+///
+/// These fields used to be `skip_serializing`, on the reasoning that
+/// live in-memory state always wins over the persisted snapshot. That
+/// stopped being true when presence became shared through the state
+/// file: every call now reloads it, so a dropped timestamp came back as
+/// the epoch almost immediately. Two agents driving a live server both
+/// reported `claimed_at: 0` on every claim they held, and a conflict's
+/// `last_seen_unix` froze — leaving no way to tell a fresh claim from a
+/// stale one, which is exactly what those fields are for.
+mod unix_secs {
+    use super::SystemTime;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
+        let secs = t
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        s.serialize_u64(secs)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SystemTime, D::Error> {
+        let secs = u64::deserialize(d)?;
+        Ok(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    }
+}
+
+/// `serde(default)` companion for [`unix_secs`], for snapshots written
+/// before the timestamps were persisted.
+fn epoch_secs() -> SystemTime { SystemTime::UNIX_EPOCH }
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
     pub agent_id: AgentId,
@@ -160,7 +192,7 @@ pub struct Claim {
     /// define the symbol.
     pub content_hash: Option<SymbolHash>,
     pub intent: ClaimIntent,
-    #[serde(skip_serializing, default = "epoch")]
+    #[serde(with = "unix_secs", default = "epoch_secs")]
     pub claimed_at: SystemTime,
     /// Wall-clock time of the most recent touch (claim grant or
     /// heartbeat refresh) on this claim. Surfaced in conflict reports
@@ -168,7 +200,7 @@ pub struct Claim {
     /// not just *who* is holding it. Defaults to `claimed_at` on
     /// construction and is serialized as epoch on persistence reload
     /// (same durability story as `claimed_at`: live state wins).
-    #[serde(skip_serializing, default = "epoch")]
+    #[serde(with = "unix_secs", default = "epoch_secs")]
     pub last_touched_unix: SystemTime,
     /// Optional expiry timestamp (PR 10 Task 3 hook). `None` means
     /// "no expiry set"; the federation expiry loop will ignore it.
@@ -224,10 +256,31 @@ pub struct SymbolOccupancy {
     pub agents: Vec<AgentId>,
 }
 
+/// One agent's hold on a file, with the detail needed to decide whether
+/// it is in your way.
+///
+/// `agents` alone was not enough. Two agents driving a live server both
+/// stumbled here: one saw a peer listed on a file it held for `edit`,
+/// could not see that the peer's hold was a non-blocking `read`, and
+/// reported that mutual exclusion was broken. It was not — the listing
+/// simply could not express the difference.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Holder {
+    pub agent_id: AgentId,
+    /// `edit` blocks other edits; `read` never blocks anything.
+    pub intent: ClaimIntent,
+    /// True when the attribution watcher guessed this hold rather than
+    /// the agent declaring it.
+    pub inferred: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OccupancyEntry {
     pub path: PathBuf,
+    /// Agent ids holding this path. Kept for compatibility; prefer
+    /// [`Self::holders`], which says *how* each one holds it.
     pub agents: Vec<AgentId>,
+    pub holders: Vec<Holder>,
     pub symbols: Vec<SymbolOccupancy>,
 }
 
@@ -1325,9 +1378,25 @@ impl OccupancyMap {
                 .map(|(sym, agents)| SymbolOccupancy { symbol: sym.clone(), agents: agents.iter().cloned().collect() })
                 .collect();
             symbols.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+            let mut holders: Vec<Holder> = entry
+                .agents
+                .iter()
+                .map(|a| Holder {
+                    agent_id: a.clone(),
+                    // Strongest intent at any scope: file-level first,
+                    // then any symbol-level. Read everywhere means read.
+                    intent: entry
+                        .intent_for(a, "__file_level__")
+                        .or_else(|| entry.any_symbol_intent(a))
+                        .unwrap_or(ClaimIntent::Read),
+                    inferred: entry.inferred.contains(a),
+                })
+                .collect();
+            holders.sort_by(|x, y| x.agent_id.as_str().cmp(y.agent_id.as_str()));
             OccupancyEntry {
                 path: path.to_path_buf(),
                 agents: entry.agents.iter().cloned().collect(),
+                holders,
                 symbols,
             }
         })
