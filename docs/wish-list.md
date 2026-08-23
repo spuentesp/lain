@@ -132,7 +132,7 @@ opt-in-by-registration, so an agent that doesn't participate costs nothing.
 ### Status (2026-08-20, after Round 2)
 
 - **#8 per-repo tools must answer** → **partially addressed in `577a444`**. When the federation has exactly one repo, the executor's `ToolContext::graph` is now that repo's indexed `GraphDatabase`, not the empty staging dir. `find_anchors` / `explain_symbol` / `get_blast_radius` / etc. now answer against the real graph for the single-repo case (the typical `lain` user setup). **Multi-repo federation still binds to the placeholder** — per-repo tools with no explicit `repo_id` will return the wrong repo's data or empty. Round-2 follow-up: pass `&FederatedIndex` to per-repo handlers and have them pick the right `RepoIndex::db()` based on `repo_id` (already in args from the round-1 fix).
-- **#9 tools/list filter for inert tools** → still open (see the bottom). No longer coupled to multi-repo #8, which is now fixed. Quick win on top of #8 round-2.
+- **#9 tools/list filter for inert tools** → CLOSED 2026-08-23. `semantic_search` is not advertised when no NLP model is loaded (63 tools instead of 64); it returns as soon as one is. Only fully-inert tools are filtered — see the section at the end.
 - **#10 `doctor` should verify the integration surface** → partially addressed. The on-disk hook check now also tries the install layout (`$bindir/../share/lain/hooks/`) so release binaries report OK, not FAIL (commit `f643f68`). **CLOSED 2026-08-22**: `doctor` now calls `tools/list` on the live MCP endpoint and fails on an empty surface. Previously open: The "all checks passed" on a broken MCP registration remains the most embarrassing single failure — the check covers the wrong surface.
 - **#11 single-workspace mode was removed** → **CLOSED**: option (a) was taken — `lain mcp` exists. Original note: Two reasonable answers: (a) restore a no-args `lain mcp` for the single-repo case (walk up for `.git`, index, serve stdio), or (b) keep federation-only and rewrite the strategy guide / `SKILL.md` / tool list to match what federation can actually do. Current state is the worst of both. The single-repo binding fix in #8 unblocks option (a) only if we also add a `lain mcp` entrypoint; right now there's no MCP-friendly single-repo mode.
 - **#12a `semantic_search` unreachable (NLP model not loaded)** → CLOSED (see bottom).~~open.~~ `lain server` has no `--embedding-model` flag, so the model never loads. The ONNX model is on disk and unused.
@@ -316,13 +316,23 @@ real ONNX model loaded, this repo indexed) rather than read off the code.
 - **#12e session files accumulate** → closed. `doctor` reaps session
   JSON older than 30 days via `prune_old_sessions` and reports the count.
 
-**Open:**
+**Closed 2026-08-23 — #9, `tools/list` filter for inert tools:**
 
-- **#9 `tools/list` filter for inert tools.** `tools/list` advertises the
-  full surface regardless of mode, so a caller still learns by trial
-  which tools answer in the mode the server is running. This is a
-  presentation filter, not a correctness bug — every advertised tool
-  that *can* answer now does.
+`tools/list` advertised the full surface regardless of mode, so a caller
+learned by trial which tools answer. A tool guaranteed to fail is worse
+than one not offered: the agent spends a round trip and then has to
+decide whether to trust the next thing lain says.
+
+`semantic_search` returns `Unavailable` on every call without an NLP
+model, so it is dropped from `tools/list` when the model is absent — 63
+tools rather than 64 — and returns the moment one is loaded. Only
+*fully* inert tools are filtered. `find_dead_code` stays advertised:
+without the model it refuses the `like` argument and answers normally
+otherwise, so hiding it would remove a working tool. A test pins both
+directions, because a filter that hides working tools is worse than the
+problem it solves.
+
+**Open: nothing.**
 
 **Closed 2026-08-23 — multi-repo binding (#8, second half):**
 
