@@ -64,6 +64,65 @@ pub fn resolve_node(
     )))
 }
 
+/// Resolve `handle`, and report the other definitions that share the
+/// name.
+///
+/// A bare name is the ergonomic way to call these tools and will stay
+/// that way — but with eleven `fn parse` definitions in this repo, "the
+/// node named parse" is not a question with one answer. The tools used
+/// to pick one and say nothing, so two of them could describe two
+/// different functions while appearing to disagree about one.
+///
+/// The second element is the *other* candidates, empty when the name is
+/// unique. Callers surface it; nobody is refused an answer over it,
+/// because erroring on ambiguity would break every call that is
+/// perfectly clear today.
+pub fn resolve_node_ambiguous(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    handle: &str,
+) -> Result<(GraphNode, Vec<GraphNode>), LainError> {
+    let node = resolve_node(graph, overlay, handle)?;
+    // Only a bare-name lookup can be ambiguous: an id or a path already
+    // names one node.
+    let others: Vec<GraphNode> = if node.name == handle {
+        graph
+            .find_all_nodes_by_name(handle)
+            .into_iter()
+            .filter(|n| n.id != node.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok((node, others))
+}
+
+/// A one-line warning naming the other definitions that share this
+/// name, or empty when there is nothing to warn about.
+pub fn ambiguity_note(chosen: &GraphNode, others: &[GraphNode]) -> String {
+    if others.is_empty() {
+        return String::new();
+    }
+    let mut note = format!(
+        "⚠ '{}' is defined {} times; this answer is about the one in {}. \
+         Others: ",
+        chosen.name,
+        others.len() + 1,
+        chosen.path
+    );
+    let shown: Vec<String> = others
+        .iter()
+        .take(5)
+        .map(|n| format!("{} ({})", n.path, n.id))
+        .collect();
+    note.push_str(&shown.join(", "));
+    if others.len() > 5 {
+        note.push_str(&format!(", and {} more", others.len() - 5));
+    }
+    note.push_str(". Pass a node id to choose one.\n\n");
+    note
+}
+
 /// Resolves a node at a specific location using the "Overlay Mask" pattern
 pub fn resolve_node_at_location(
     graph: &GraphDatabase,

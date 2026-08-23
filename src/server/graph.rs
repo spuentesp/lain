@@ -781,8 +781,33 @@ impl GraphDatabase {
         graph.edge_weights().cloned().collect()
     }
 
+    /// One node with this name, chosen deterministically.
+    ///
+    /// This used to be `node_weights().find(...)` — petgraph iteration
+    /// order, which is neither meaningful nor stable across reindexes.
+    /// With eleven `fn parse` definitions in this repo, two calls could
+    /// legitimately answer about two different functions, which is how
+    /// `find_anchors` and `get_anchor_score` ended up reporting
+    /// different scores "for `parse`". Sorting by (path, id) at least
+    /// makes the choice repeatable; [`Self::find_all_nodes_by_name`]
+    /// is what callers should use when they need to know a name was
+    /// ambiguous at all.
     pub fn find_node_by_name(&self, name: &str) -> Option<GraphNode> {
-        self.graph.read().node_weights().find(|n| n.name == name).cloned()
+        self.find_all_nodes_by_name(name).into_iter().next()
+    }
+
+    /// Every node with this name, sorted by (path, id) so the order is
+    /// stable across reindexes.
+    pub fn find_all_nodes_by_name(&self, name: &str) -> Vec<GraphNode> {
+        let mut hits: Vec<GraphNode> = self
+            .graph
+            .read()
+            .node_weights()
+            .filter(|n| n.name == name)
+            .cloned()
+            .collect();
+        hits.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+        hits
     }
 
     pub fn find_node_by_path(&self, path: &str) -> Option<GraphNode> {

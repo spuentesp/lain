@@ -80,7 +80,9 @@ pub fn get_anchor_score(
     overlay: &VolatileOverlay,
     symbol: &str
 ) -> Result<String, LainError> {
-    let node = resolve_node(graph, overlay, symbol)?;
+    let (node, other_defs) =
+        crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
+    let amb = crate::server::tools::utils::ambiguity_note(&node, &other_defs);
     // Name which node was scored. A name defined several times resolves
     // to one arbitrary instance here while `find_anchors` reports the
     // best-scoring one, so the bare name made the two tools look like
@@ -88,11 +90,11 @@ pub fn get_anchor_score(
     // were describing different symbols.
     match node.anchor_score {
         Some(s) => Ok(format!(
-            "Anchor score for '{}' ({:?} in {}): {:.3}",
+            "{amb}Anchor score for '{}' ({:?} in {}): {:.3}",
             symbol, node.node_type, node.path, s
         )),
         None => Ok(format!(
-            "Symbol '{}' ({:?} in {}) has no anchor score in Merged Brain.",
+            "{amb}Symbol '{}' ({:?} in {}) has no anchor score in Merged Brain.",
             symbol, node.node_type, node.path
         )),
     }
@@ -543,9 +545,14 @@ pub fn explain_symbol(
     occupancy: &OccupancyMap,
     symbol: &str
 ) -> Result<String, LainError> {
-    let node = resolve_node(graph, overlay, symbol)?;
+    let (node, other_defs) =
+        crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
 
     let mut lines = Vec::new();
+    let amb = crate::server::tools::utils::ambiguity_note(&node, &other_defs);
+    if !amb.is_empty() {
+        lines.push(amb.trim_end().to_string());
+    }
     lines.push(format!("## Explanation for '{}' ({:?})", symbol, node.node_type));
     // Scoped to the file this answer is about. The index is commit-driven, so
     // a file edited and not yet committed is invisible to it — the reader needs

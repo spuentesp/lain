@@ -163,7 +163,9 @@ pub fn get_call_sites(
     overlay: &VolatileOverlay,
     symbol: &str,
 ) -> Result<String, LainError> {
-    let node = resolve_node(graph, overlay, symbol)?;
+    let (node, other_defs) =
+        crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
+    let amb = crate::server::tools::utils::ambiguity_note(&node, &other_defs);
     let freshness = graph.freshness(workspace, &node.path);
     let target_id = &node.id;
 
@@ -178,14 +180,14 @@ pub fn get_call_sites(
         // read identically to a caller acting on the answer, so distinguish them.
         return Ok(match freshness.note(&node.path) {
             Some(note) => format!(
-                "{note}\nNo call sites found for '{symbol}' in the graph — \
+                "{amb}{note}\nNo call sites found for '{symbol}' in the graph — \
                  callers added since the last index would not appear."
             ),
-            None => format!("No call sites found for '{symbol}' ({symbol} is a leaf)"),
+            None => format!("{amb}No call sites found for '{symbol}' ({symbol} is a leaf)"),
         });
     }
 
-    let mut result = String::new();
+    let mut result = amb.clone();
     if let Some(note) = freshness.note(&node.path) {
         result.push_str(&note);
         result.push('\n');

@@ -55,7 +55,8 @@ pub async fn get_blast_radius(
     include_coupling: bool,
     ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16)>,
 ) -> Result<String, LainError> {
-    let node = resolve_node(graph, overlay, symbol)?;
+    let (node, other_defs) =
+        crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
 
     // Overlay freshness indicator
     let overlay_age = overlay.last_update_age_secs();
@@ -67,10 +68,11 @@ pub async fn get_blast_radius(
         "stale".to_string()
     };
 
-    let mut output = format!(
+    let mut output = crate::server::tools::utils::ambiguity_note(&node, &other_defs);
+    output.push_str(&format!(
         "Blast radius for '{}':\n- {} ({:?})\n- Overlay freshness: {}",
         symbol, node.name, node.node_type, freshness
-    );
+    ));
 
     // Blast radius = BFS over INCOMING edges (who depends on this symbol)
     let mut visited: HashSet<String> = HashSet::new();

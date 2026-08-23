@@ -84,12 +84,15 @@ pub fn resolve_call_edges(
 /// `refs` already carries the source file path + line for each entry;
 /// no workspace path is needed here.
 pub fn resolve_static_edges(db: &GraphDatabase, refs: &[StaticFileRef]) -> Vec<GraphEdge> {
-    let mut name_index: HashMap<String, Vec<(String, crate::schema::NodeType)>> = HashMap::new();
+    // (id, type, path). The path is what lets an ambiguous name be
+    // resolved to the definition in the calling file.
+    let mut name_index: HashMap<String, Vec<(String, crate::schema::NodeType, String)>> =
+        HashMap::new();
     for node in db.get_all_nodes() {
         name_index
             .entry(node.name.clone())
             .or_default()
-            .push((node.id.clone(), node.node_type.clone()));
+            .push((node.id.clone(), node.node_type.clone(), node.path.clone()));
     }
 
     let mut edges: Vec<GraphEdge> = Vec::new();
@@ -101,7 +104,27 @@ pub fn resolve_static_edges(db: &GraphDatabase, refs: &[StaticFileRef]) -> Vec<G
         let Some(candidates) = name_index.get(sr.target_name.as_str()) else {
             continue;
         };
-        for (target_id, target_type) in candidates {
+        // A name that several definitions share cannot be resolved by
+        // name alone. Emitting an edge to *every* candidate — which is
+        // what this did — manufactures callers wholesale: with eleven
+        // `fn parse` definitions, `Args::parse()` in main.rs (clap's
+        // derive) and `n.parse()` on a `&str` (stdlib) each produced
+        // eleven edges, and `get_call_sites parse` answered with 61
+        // callers, the same list for every one of the eleven nodes.
+        //
+        // Prefer a definition in the calling file, which is the case
+        // that is actually decidable. Otherwise emit nothing: a missing
+        // edge is a gap, N wrong edges are a lie, and the lie also
+        // inflates `find_anchors` and `get_blast_radius`.
+        let resolved: Vec<&(String, crate::schema::NodeType, String)> = if candidates.len() == 1 {
+            candidates.iter().collect()
+        } else {
+            candidates
+                .iter()
+                .filter(|(_, _, path)| path == &sr.file_path)
+                .collect()
+        };
+        for (target_id, target_type, _) in resolved {
             if *target_id == source_node.id {
                 continue;
             }
@@ -218,4 +241,107 @@ pub fn resolve_pattern_edges(
         }
     }
     edges
+}
+
+#[cfg(test)]
+mod ambiguous_name_tests {
+    use super::*;
+    use crate::graph::GraphDatabase;
+    use crate::schema::{GraphNode, NodeType};
+
+    fn fn_node(name: &str, path: &str, lines: (u32, u32)) -> GraphNode {
+        let mut n = GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
+        n.line_start = Some(lines.0);
+        n.line_end = Some(lines.1);
+        n
+    }
+
+    /// A reference to a name that several definitions share must not
+    /// produce an edge to every one of them.
+    ///
+    /// Live finding: with eleven `fn parse` definitions, every
+    /// `.parse()` in the repo — including clap's `Args::parse()` and
+    /// stdlib `str::parse` — fanned out to all eleven, so
+    /// `get_call_sites parse` reported 61 callers and returned the
+    /// identical list for each of the eleven nodes.
+    #[test]
+    fn an_ambiguous_name_does_not_link_to_every_candidate() {
+        let tmp = std::env::temp_dir().join("lain_resolve_ambiguous");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        // Three definitions of `parse`, in three files.
+        for path in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+            db.upsert_node(fn_node("parse", path, (1, 5))).unwrap();
+        }
+        // A caller in a fourth file, which defines no `parse`.
+        db.upsert_node(fn_node("caller", "src/d.rs", (1, 20)))
+            .unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "src/d.rs".to_string(),
+            source_line: 10,
+            target_name: "parse".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs);
+        assert!(
+            edges.is_empty(),
+            "a name with three candidates and none in the calling file is \
+             unresolvable; emitting {} edge(s) invents callers",
+            edges.len()
+        );
+    }
+
+    /// The decidable case still resolves: a definition in the calling
+    /// file wins over same-named definitions elsewhere.
+    #[test]
+    fn an_ambiguous_name_resolves_to_the_definition_in_the_calling_file() {
+        let tmp = std::env::temp_dir().join("lain_resolve_ambiguous_samefile");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        db.upsert_node(fn_node("parse", "src/other.rs", (1, 5)))
+            .unwrap();
+        let local = fn_node("parse", "src/d.rs", (1, 5));
+        let local_id = local.id.clone();
+        db.upsert_node(local).unwrap();
+        db.upsert_node(fn_node("caller", "src/d.rs", (10, 20)))
+            .unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "src/d.rs".to_string(),
+            source_line: 15,
+            target_name: "parse".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs);
+        assert_eq!(edges.len(), 1, "exactly one edge, to the local definition");
+        assert_eq!(edges[0].target_id, local_id);
+    }
+
+    /// An unambiguous name is unaffected — this is the common case and
+    /// must keep working.
+    #[test]
+    fn a_unique_name_still_links() {
+        let tmp = std::env::temp_dir().join("lain_resolve_unique");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let target = fn_node("sweep_orphans", "src/a.rs", (1, 5));
+        let target_id = target.id.clone();
+        db.upsert_node(target).unwrap();
+        db.upsert_node(fn_node("caller", "src/d.rs", (10, 20)))
+            .unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "src/d.rs".to_string(),
+            source_line: 15,
+            target_name: "sweep_orphans".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs);
+        assert_eq!(edges.len(), 1, "a unique name must still resolve");
+        assert_eq!(edges[0].target_id, target_id);
+    }
 }

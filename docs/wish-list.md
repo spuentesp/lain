@@ -398,8 +398,35 @@ Found and fixed:
   `docs/multiplayer.md` additionally placed it at the top level rather
   than under `_meta`. Both corrected there.
 
-Known and documented, not fixed: `Calls` edges are name-resolved when
-LSP type info is unavailable, so a common method name (`parse`,
-`as_str`) collects unrelated callers and no tool warns that a bare name
-was ambiguous. Pass a node id from `query_graph` to disambiguate. See
-the table in `docs/quickstart-tools.md`.
+### Name collisions — closed 2026-08-23
+
+Reported above as a documented limitation; fixed rather than left
+documented. Two separate defects were hiding behind one symptom.
+
+**Edges were manufactured.** `resolve_static_edges` looked a reference
+name up in an index and emitted an edge to *every* definition sharing
+it. With eleven `fn parse` in this repo, each `.parse()` in the tree —
+clap's `Args::parse()`, stdlib `str::parse` — produced eleven edges.
+`get_call_sites parse` answered with 61 callers and returned the *same*
+list for all eleven nodes. A name several definitions share is not
+resolvable by name alone, so resolution now prefers a definition in the
+calling file and otherwise emits nothing: a missing edge is a gap, N
+wrong edges are a lie, and the lie also inflated `find_anchors` and
+`get_blast_radius`. `parse` now reports 1 caller; `sweep_orphans`, whose
+name is unique, still reports its 3 real call sites.
+
+The knock-on effect is visible in `find_anchors`, which used to rank
+`as_str`, `parse`, `default`, `next`, `drop` — one-line accessors riding
+fabricated in-edges. It now ranks `required_str_arg`, `resolve_node`,
+`calculate_anchor_scores`, `insert_nodes_batch`: actual hubs, which is
+what the scoring was designed to surface all along.
+
+**Ambiguity was silent.** `find_node_by_name` returned
+`node_weights().find(...)` — petgraph iteration order, so the choice was
+both arbitrary and unstable across reindexes. It is now sorted by (path,
+id), and `explain_symbol`, `get_anchor_score`, `get_call_sites` and
+`get_blast_radius` open with a `⚠` line naming how many definitions
+share the name, which one they answered about, and the ids of the rest.
+Nobody is refused an answer over it — erroring would break every call
+that is perfectly clear — but nobody is silently handed the wrong node
+either.
