@@ -521,3 +521,62 @@ fn a_name_referenced_only_by_attribute_or_pointer_is_not_dead() {
     assert!(dead.contains(&"truly_dead"), "a genuinely dead symbol must survive the filter: {dead:?}");
     assert_eq!(report.name_referenced, 2);
 }
+
+/// A symbol called from *another* file must not be reported dead.
+///
+/// The reference check used to look only inside the symbol's own file,
+/// so it caught self-references and nothing else. A three-agent sweep
+/// on this repo reported nine dead symbols and seven were called from
+/// elsewhere — including `edge_counts_by_type`, which generates a
+/// section of `get_health`'s own output. An agent acting on that list
+/// would have deleted working code.
+#[test]
+fn find_dead_code_does_not_report_a_symbol_called_from_another_file() {
+    let ws = std::env::temp_dir().join("lain_deadcode_crossfile_ws");
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    // Defined in one file...
+    std::fs::write(
+        ws.join("src/lib.rs"),
+        "pub fn edge_counts_by_type() -> usize { 0 }\npub fn truly_unused() -> usize { 1 }\n",
+    )
+    .unwrap();
+    // ...called from another. No Calls edge models this, which is
+    // exactly the situation the graph gets into on a partial index.
+    std::fs::write(
+        ws.join("src/caller.rs"),
+        "fn report() { let _ = edge_counts_by_type(); }\n",
+    )
+    .unwrap();
+
+    let tmp = std::env::temp_dir().join("lain_deadcode_crossfile_graph");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+    for name in ["edge_counts_by_type", "truly_unused"] {
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/lib.rs".to_string(),
+        );
+        // No callers and no callees, per the call graph.
+        n.calls_in = Some(0);
+        n.calls_out = Some(0);
+        graph.upsert_node(n).unwrap();
+    }
+
+    let overlay = VolatileOverlay::new();
+    let embedder = NlpEmbedder::new_with_threads(0).unwrap();
+    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let report = find_dead_code(&ws, &graph, &overlay, None, &embedder, &cache).unwrap();
+
+    assert!(
+        !report.contains("edge_counts_by_type"),
+        "a symbol called from another file must not be reported dead:\n{report}"
+    );
+    assert!(
+        report.contains("truly_unused"),
+        "a genuinely unreferenced symbol must still be reported:\n{report}"
+    );
+
+    std::fs::remove_dir_all(&ws).ok();
+}

@@ -352,3 +352,44 @@ against the *process* working directory. `src/lib.rs` exists in every
 repo, so it returned a same-named file from wherever the server was
 launched — lain's own checkout — with no error. Paths now resolve
 against the bound repo's workspace.
+
+## Live three-agent sweep — 2026-08-23
+
+Three agents (alpha, beta, gamma) driven against one server, verifying
+the server's claims against the repo with `grep` rather than trusting
+them. Confirmed working: path canonicalization across spellings,
+`conflicts` vs `advisories` as separate arrays, holder `name`/`intent`
+on both, node ids round-tripping between `query_graph`,
+`explain_symbol` and `get_blast_radius`, and the blast-radius
+direct/indirect split (checked caller by caller — complete, nothing
+invented).
+
+Found and fixed:
+
+- **`find_dead_code` reported 9 symbols, 7 of them false.** All seven
+  were called from *another file*; the reference check only looked
+  inside the symbol's own file. One of them, `edge_counts_by_type`,
+  generates a section of `get_health`'s own output — the server used
+  the function to answer the agent and then said nothing calls it. The
+  check is now workspace-wide, and the list is back to the 2 the agent
+  independently confirmed as genuinely unreferenced.
+- **`get_call_sites` reported enclosing functions as call sites.**
+  `build_core_memory at ...:19-360` is a 341-line definition range, and
+  a function calling the target twice counted once. It now reports the
+  real lines (`sweep_orphans` → 3 calls at 55, 520, 681, matching grep).
+- **`release_files` rejected `["src/a.rs"]`** with `expected struct
+  ReleaseFilesEntry` — an internal Rust type name, for input that was
+  never ambiguous. Both spellings are accepted now.
+- **`register_agent` never declared `kind` or `mode`**, which it accepts
+  and reports to peers via `list_active_agents`. A schema-following
+  agent silently lost its own identity metadata.
+- **`_meta.revision` read 0 across eight state-changing presence calls.**
+  Correct — it counts overlay diffs, not claims — but undocumented, and
+  `docs/multiplayer.md` additionally placed it at the top level rather
+  than under `_meta`. Both corrected there.
+
+Known and documented, not fixed: `Calls` edges are name-resolved when
+LSP type info is unavailable, so a common method name (`parse`,
+`as_str`) collects unrelated callers and no tool warns that a bare name
+was ambiguous. Pass a node id from `query_graph` to disambiguate. See
+the table in `docs/quickstart-tools.md`.

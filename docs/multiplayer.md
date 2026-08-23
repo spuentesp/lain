@@ -252,10 +252,20 @@ Pair with `hooks/claude-code/pre-commit.sh` (configured as Claude Code's `PreToo
 
 ## Revision surface
 
-Every tool response now carries a top-level `revision: u64` field. The
-counter is per-process and monotonic; it increments on every overlay diff
-the server emits. Tools that don't return JSON (streaming-only) are
-unchanged.
+Every tool response carries a `revision: u64` under **`_meta`** — not at
+the top level. The counter is per-process and monotonic, and it counts
+**overlay diffs**: changes to files the watcher has picked up.
+
+It is not a global state counter, and in particular **claims do not move
+it**. A session that registers agents and takes and releases claims,
+without touching a file, will see `"revision": 0` on every response.
+That is the counter working, not a broken field — an agent watching for
+*presence* changes wants `list_occupancy` / `list_active_agents`, which
+are poll-only. (Observed live: an agent read `_meta.revision: 0` across
+eight state-changing presence calls and reasonably concluded the field
+was dead.)
+
+Tools that don't return JSON (streaming-only) are unchanged.
 
 Claim-aware tools (`claim_files` is the only one today) additionally
 accept `plan_revision: u64` on request and may return `world_state` on

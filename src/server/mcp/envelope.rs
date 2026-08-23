@@ -98,6 +98,20 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
             );
             p.insert("description".into(), "files to claim or release".into());
         }
+        // Declared so a schema-following agent keeps its identity
+        // metadata; both are stored and surfaced by `list_active_agents`.
+        "kind" => {
+            p.insert("type".into(), "string".into());
+            p.insert(
+                "description".into(),
+                "agent kind, e.g. claude-code | codex | kimi | agy (any string is accepted)".into(),
+            );
+        }
+        "mode" => {
+            p.insert("type".into(), "string".into());
+            p.insert("enum".into(), serde_json::json!(["interactive", "background"]));
+            p.insert("description".into(), "interactive or background".into());
+        }
         "symbols" => {
             p.insert("type".into(), "array".into());
             p.insert("items".into(), serde_json::json!({ "type": "string" }));

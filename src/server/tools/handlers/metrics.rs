@@ -264,25 +264,76 @@ pub struct DeadCodeReport {
 /// - `resolve_in(..., &run_resolver_command)` — a function pointer
 ///   passed as a value, never invoked at that site.
 ///
-/// Both were reported as dead on this repo while being load-bearing.
-/// A second mention in the same file is weak evidence, but it is the
-/// right *direction* of weak: a false "referenced" costs nothing, and a
-/// false "dead" invites someone to delete working code.
-fn referenced_by_name_in_its_file(node: &crate::schema::GraphNode, workspace: &std::path::Path) -> bool {
-    let path = workspace.join(&node.path);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        // Unreadable: this filter simply does not apply, so fall back to
-        // the call-graph verdict rather than excluding the symbol.
-        // Excluding on failure would make the whole tool silently
-        // vacuous the moment paths stopped resolving — which is the
-        // exact failure `fan_in` already caused once.
-        return false;
-    };
-    let name = node.name.as_str();
-    if name.is_empty() {
-        return true;
+/// Names among `candidates` that appear somewhere in the workspace
+/// beyond their own definition.
+///
+/// The same-file check above only ever caught references a symbol makes
+/// to itself. Every miss found in live testing was *cross-file*: a
+/// three-agent sweep reported nine dead symbols and seven were called
+/// from another file — `edge_counts_by_type` from `tools.rs`,
+/// `cosine_similarity` from two query paths, `clone_for_background`
+/// from `cli/server.rs`. One of them, `edge_counts_by_type`, produces a
+/// section of `get_health`'s own output: the server used the function
+/// to answer the agent and then reported that nothing calls it.
+///
+/// The cause is missing `Calls` edges, not bad logic here — those edges
+/// depend on how far LSP indexing got, so the same repo yields
+/// different answers warm and cold. That makes the call graph the wrong
+/// sole authority for a claim as destructive as "delete this". A
+/// textual sweep is weak evidence, but it is weak in the safe
+/// direction: a false "referenced" costs a missed cleanup, a false
+/// "dead" invites deleting working code.
+///
+/// One pass over the files, all candidates at once — candidate lists
+/// are small (single digits) and re-reading per candidate would be
+/// quadratic.
+fn names_referenced_anywhere(
+    candidates: &[crate::schema::GraphNode],
+    workspace: &std::path::Path,
+) -> HashSet<String> {
+    let mut referenced = HashSet::new();
+    if candidates.is_empty() {
+        return referenced;
     }
-    // Count whole-word occurrences; the definition itself is one.
+    // Where each name is defined, so the definition itself does not
+    // count as a reference to itself.
+    let mut own_file: HashMap<&str, &str> = HashMap::new();
+    for c in candidates {
+        own_file.insert(c.name.as_str(), c.path.as_str());
+    }
+
+    let walker = ignore::WalkBuilder::new(workspace).hidden(false).build();
+    for entry in walker.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let rel = path
+            .strip_prefix(workspace)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        for c in candidates {
+            let name = c.name.as_str();
+            if name.is_empty() || referenced.contains(name) {
+                continue;
+            }
+            // In the defining file the definition is one legitimate
+            // occurrence, so a second is needed; elsewhere one is enough.
+            let threshold = if own_file.get(name) == Some(&rel.as_str()) { 1 } else { 0 };
+            if whole_word_hits(&text, name) > threshold {
+                referenced.insert(name.to_string());
+            }
+        }
+    }
+    referenced
+}
+
+/// Count whole-word occurrences of `name` in `text`.
+fn whole_word_hits(text: &str, name: &str) -> usize {
     let mut hits = 0usize;
     for (i, _) in text.match_indices(name) {
         let before = text[..i].chars().next_back();
@@ -290,12 +341,9 @@ fn referenced_by_name_in_its_file(node: &crate::schema::GraphNode, workspace: &s
         let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
         if boundary(before) && boundary(after) {
             hits += 1;
-            if hits > 1 {
-                return true;
-            }
         }
     }
-    false
+    hits
 }
 
 pub fn analyze_dead_code(
@@ -333,9 +381,10 @@ pub fn analyze_dead_code(
     // serde attribute strings and function pointers are references the
     // call graph cannot see.
     let before_mentions = indexed.len();
+    let referenced = names_referenced_anywhere(&indexed, workspace);
     let indexed: Vec<_> = indexed
         .into_iter()
-        .filter(|f| !referenced_by_name_in_its_file(f, workspace))
+        .filter(|f| !referenced.contains(&f.name))
         .collect();
     let name_referenced = before_mentions.saturating_sub(indexed.len());
 

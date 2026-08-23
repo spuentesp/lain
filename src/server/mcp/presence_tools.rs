@@ -543,14 +543,59 @@ pub struct ReleaseFilesArgs {
     pub files: Vec<ReleaseFilesEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct ReleaseFilesEntry {
     pub path: String,
     pub symbols: Option<Vec<String>>,
 }
 
+/// Accept both `"src/a.rs"` and `{"path": "src/a.rs"}`.
+///
+/// `claim_files` needs objects because a claim carries `intent` and
+/// `ttl_seconds`; a release carries neither, so the bare path is the
+/// obvious spelling and an agent writes it without thinking. It used to
+/// be rejected with `invalid type: string "src/a.rs", expected struct
+/// ReleaseFilesEntry` — a Rust type name the caller cannot act on, for
+/// input that was never ambiguous.
+impl<'de> serde::Deserialize<'de> for ReleaseFilesEntry {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct AsObject {
+            path: String,
+            symbols: Option<Vec<String>>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Path(String),
+            Object(AsObject),
+        }
+        Ok(match Either::deserialize(d)? {
+            Either::Path(path) => ReleaseFilesEntry {
+                path,
+                symbols: None,
+            },
+            Either::Object(o) => ReleaseFilesEntry {
+                path: o.path,
+                symbols: o.symbols,
+            },
+        })
+    }
+}
+
 pub fn run_release_files(server: &LainServer, args: Value) -> Result<Value, String> {
-    let a: ReleaseFilesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    // Say what the tool accepts. The bare serde message names internal
+    // Rust types, which tells an agent nothing it can fix.
+    let a: ReleaseFilesArgs = serde_json::from_value(args).map_err(|e| {
+        format!(
+            "release_files: {e}. `files` is a list of paths — either \
+             [\"src/a.rs\"] or [{{\"path\": \"src/a.rs\"}}] — plus \
+             `agent_id` and `session_token`."
+        )
+    })?;
     server.with_shared_presence(|| run_release_files_inner(server, a))
 }
 

@@ -171,9 +171,14 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "register_agent",
-        description: "Register this agent with lain. Returns an agent_id and session_token to use on every subsequent call.",
+        description: "Register this agent with lain. Returns an agent_id and session_token to use on every subsequent call. `kind` and `mode` are optional but are stored and reported to other agents by `list_active_agents`, so passing them makes this agent legible to its peers.",
         required_args: &["name"],
-        optional_args: &[],
+        // These were accepted and stored but never declared, so an agent
+        // that followed the schema silently lost its own type and mode
+        // metadata — with nothing in any response to indicate a field
+        // had been dropped. Same class as the undeclared `path` on
+        // `list_occupancy`.
+        optional_args: &["kind", "mode"],
     },
     ToolDef {
         name: "heartbeat",

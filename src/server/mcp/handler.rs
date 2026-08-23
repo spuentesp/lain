@@ -338,6 +338,29 @@ struct LainHandler {
     server: Option<Arc<LainServer>>,
 }
 
+/// Tools that cannot answer in the current mode, and must therefore not
+/// be advertised.
+///
+/// Wishlist #9: `tools/list` used to offer the whole surface regardless
+/// of what the server could actually do, so a caller learned by trial
+/// which tools lie. Advertising a tool that is guaranteed to fail is
+/// worse than not offering it — the agent spends a round trip and then
+/// has to decide whether to trust the next thing lain says.
+///
+/// Only *fully* inert tools belong here. `find_dead_code` is not inert
+/// without the NLP model: it refuses the `like` argument and answers
+/// normally otherwise, so it stays advertised and rejects that one
+/// argument with a message naming the cause.
+fn inert_tool_names(embedder: &crate::server::nlp::NlpEmbedder) -> &'static [&'static str] {
+    if embedder.is_stub() {
+        // `semantic_search` is the whole tool, not one argument: with a
+        // stub embedder every call returns `Unavailable`.
+        &["semantic_search"]
+    } else {
+        &[]
+    }
+}
+
 #[async_trait]
 impl ServerHandler for LainHandler {
     async fn handle_list_tools_request(
@@ -363,6 +386,10 @@ impl ServerHandler for LainHandler {
                 }
             })
             .collect();
+
+        // Drop tools that cannot answer in this mode (wishlist #9).
+        let inert = inert_tool_names(self.executor.embedder());
+        tools.retain(|t| !inert.contains(&t.name.as_str()));
 
         // Append the 6 special-case tools handled in ToolExecutor::call_inner
         // so MCP clients can see the full surface in tools/list.
@@ -1806,6 +1833,13 @@ async fn handle_request(
                         // Append the 6 special-case tools (kept in sync with
                         // the stdio transport's handle_list_tools_request).
                         tools_vec.extend(special_tool_definitions());
+                        // Same mode filter as the stdio path (wishlist #9):
+                        // do not advertise a tool that is guaranteed to
+                        // fail in this mode. This is the transport agents
+                        // actually use, so a filter only on the stdio side
+                        // would not be the fix.
+                        let inert = inert_tool_names(executor.embedder());
+                        tools_vec.retain(|def| !inert.contains(&def.name));
                         let mut tools: Vec<serde_json::Value> = tools_vec
                             .iter()
                             .map(|def| {
@@ -2642,6 +2676,48 @@ mod tests {
             arg_property_schema("agent_id").get("type").and_then(|v| v.as_str()),
             Some("string")
         );
+    }
+
+    /// Wishlist #9. A tool that cannot answer must not be advertised —
+    /// and, just as importantly, a tool that *can* must not be hidden.
+    /// `find_dead_code` is the case that makes the distinction: without
+    /// the NLP model it refuses only the `like` argument and answers
+    /// normally otherwise, so hiding it would remove a working tool.
+    #[test]
+    fn only_fully_inert_tools_are_filtered_from_tools_list() {
+        let stub = crate::server::nlp::NlpEmbedder::new_with_threads(0).expect("stub embedder");
+        assert!(stub.is_stub(), "fixture must be a stub embedder");
+
+        let inert = inert_tool_names(&stub);
+        assert!(
+            inert.contains(&"semantic_search"),
+            "semantic_search returns Unavailable for every call without the \
+             model, so advertising it just costs the caller a round trip"
+        );
+        assert!(
+            !inert.contains(&"find_dead_code"),
+            "find_dead_code works without the model (it only refuses `like`); \
+             hiding it would drop a working tool"
+        );
+        assert!(
+            !inert.contains(&"query_graph"),
+            "query_graph takes the embedder but does not require it"
+        );
+
+        // Every name we filter must be a real tool, or the filter is
+        // silently doing nothing.
+        let known: std::collections::HashSet<&str> =
+            crate::tools::registry::ToolRegistry::definitions()
+                .iter()
+                .map(|d| d.name)
+                .collect();
+        for name in inert {
+            assert!(
+                known.contains(name),
+                "{name} is filtered but is not a registered tool — the filter \
+                 is a no-op and the stale name hides the fact"
+            );
+        }
     }
 
     #[test]

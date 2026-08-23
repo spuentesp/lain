@@ -190,16 +190,111 @@ pub fn get_call_sites(
         result.push_str(&note);
         result.push('\n');
     }
-    result.push_str(&format!("Call sites for '{}' ({} found):\n\n", symbol, callers.len()));
+    // Locate the actual call lines. `Calls` edges connect caller to
+    // callee and carry no position, so this listed each calling
+    // function's own definition range under the heading "Call sites" —
+    // `build_core_memory at ...:19-360` is a 341-line span, not a call
+    // site, and a function calling the target three times still counted
+    // as one. Scanning the caller's body for the name gives the real
+    // positions and the real count.
+    let mut lines_by_caller: Vec<(&crate::schema::GraphNode, Vec<usize>)> = Vec::new();
+    let mut total_sites = 0usize;
+    for caller in &callers {
+        let sites = call_lines_in(workspace, caller, &node.name);
+        total_sites += sites.len();
+        lines_by_caller.push((caller, sites));
+    }
 
-    for caller in callers {
-        let loc = if let (Some(ls), Some(le)) = (caller.line_start, caller.line_end) {
-            format!("{}:{}-{}", caller.path, ls, le)
+    let heading = if total_sites > 0 && total_sites != callers.len() {
+        format!(
+            "Call sites for '{}' ({} call(s) across {} function(s)):\n\n",
+            symbol,
+            total_sites,
+            callers.len()
+        )
+    } else {
+        format!(
+            "Call sites for '{}' ({} found):\n\n",
+            symbol,
+            total_sites.max(callers.len())
+        )
+    };
+    result.push_str(&heading);
+
+    for (caller, sites) in lines_by_caller {
+        if sites.is_empty() {
+            // Nothing matched textually — the file may have moved on
+            // since indexing. Fall back to the enclosing function and
+            // say that is what this is, rather than passing a
+            // definition range off as a call position.
+            let loc = if let (Some(ls), Some(le)) = (caller.line_start, caller.line_end) {
+                format!("{}:{}-{}", caller.path, ls, le)
+            } else {
+                caller.path.clone()
+            };
+            result.push_str(&format!(
+                "- **{}** — enclosing function at {} (exact call line not found in the file on disk)\n",
+                caller.name, loc
+            ));
         } else {
-            caller.path.clone()
-        };
-        result.push_str(&format!("- **{}** at {}\n", caller.name, loc));
+            let joined = sites
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let label = if sites.len() == 1 { "line" } else { "lines" };
+            result.push_str(&format!(
+                "- **{}** ({}) calls it at {} {}\n",
+                caller.name, caller.path, label, joined
+            ));
+        }
     }
 
     Ok(result)
+}
+
+/// 1-based line numbers inside `caller`'s body where `callee` appears as
+/// a whole word.
+///
+/// `line_start` is used only to bound the scan and is treated as
+/// advisory: it has been observed one off from the definition line, so
+/// the range is widened by one rather than trusted exactly.
+fn call_lines_in(
+    workspace: &std::path::Path,
+    caller: &crate::schema::GraphNode,
+    callee: &str,
+) -> Vec<usize> {
+    if callee.is_empty() {
+        return Vec::new();
+    }
+    let path = workspace.join(&caller.path);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let (lo, hi) = match (caller.line_start, caller.line_end) {
+        (Some(ls), Some(le)) => (ls.saturating_sub(1) as usize, le as usize + 1),
+        _ => (0usize, usize::MAX),
+    };
+    let mut out = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        let lineno = idx + 1;
+        if lineno < lo || lineno > hi {
+            continue;
+        }
+        let mut found = false;
+        for (i, _) in line.match_indices(callee) {
+            let before = line[..i].chars().next_back();
+            let after = line[i + callee.len()..].chars().next();
+            let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if boundary(before) && boundary(after) {
+                found = true;
+                break;
+            }
+        }
+        // Skip the definition itself.
+        if found && !line.trim_start().starts_with("fn ") && !line.contains(&format!("fn {callee}")) {
+            out.push(lineno);
+        }
+    }
+    out
 }
