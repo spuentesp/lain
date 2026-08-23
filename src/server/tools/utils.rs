@@ -40,21 +40,17 @@ pub fn resolve_node(
     if let Some(n) = graph.find_node_by_path(&canonical_handle) { return Ok(n); }
 
     // An empty graph means this "not found" is not about the symbol at
-    // all — nothing would resolve. The per-repo tools bind to a real
-    // repo only when the federation holds exactly one; with several,
-    // they keep the empty staging placeholder and every structural
-    // query answers "not found" for symbols that plainly exist. That
-    // confident false negative is worse than an error, because a caller
-    // acts on it. Name the real cause instead.
+    // all — nothing would resolve, so the committed-code explanation
+    // below would be a confident, specific, wrong answer. Say what is
+    // actually true instead.
     if graph.node_count() == 0 && overlay.stats().node_count == 0 {
         return Err(LainError::NotFound(format!(
-            "Node not found for handle: {handle} — but the per-repo graph is \
-             empty (0 nodes), so nothing would resolve. Either this workspace \
-             has not been indexed yet, or the server is running a multi-repo \
-             federation, where the per-repo tools are not bound to any one \
-             repo: use the federation tools (`search_org`, \
-             `get_cross_repo_blast_radius_for_repo`) or run a single-repo \
-             server (`lain mcp`)"
+            "Node not found for handle: {handle} — but the graph being \
+             searched is empty (0 nodes), so nothing would resolve. The \
+             workspace has probably not finished indexing; check \
+             `get_health`. In federation mode, pass `repo_id` (or a symbol \
+             that resolves to one repo) so the call binds to that repo's \
+             graph rather than the staging placeholder."
         )));
     }
 

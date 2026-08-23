@@ -132,7 +132,7 @@ opt-in-by-registration, so an agent that doesn't participate costs nothing.
 ### Status (2026-08-20, after Round 2)
 
 - **#8 per-repo tools must answer** → **partially addressed in `577a444`**. When the federation has exactly one repo, the executor's `ToolContext::graph` is now that repo's indexed `GraphDatabase`, not the empty staging dir. `find_anchors` / `explain_symbol` / `get_blast_radius` / etc. now answer against the real graph for the single-repo case (the typical `lain` user setup). **Multi-repo federation still binds to the placeholder** — per-repo tools with no explicit `repo_id` will return the wrong repo's data or empty. Round-2 follow-up: pass `&FederatedIndex` to per-repo handlers and have them pick the right `RepoIndex::db()` based on `repo_id` (already in args from the round-1 fix).
-- **#9 tools/list filter for inert tools** → still open (see the verified status at the bottom; it is the same architectural item as multi-repo #8). Quick win on top of #8 round-2.
+- **#9 tools/list filter for inert tools** → still open (see the bottom). No longer coupled to multi-repo #8, which is now fixed. Quick win on top of #8 round-2.
 - **#10 `doctor` should verify the integration surface** → partially addressed. The on-disk hook check now also tries the install layout (`$bindir/../share/lain/hooks/`) so release binaries report OK, not FAIL (commit `f643f68`). **CLOSED 2026-08-22**: `doctor` now calls `tools/list` on the live MCP endpoint and fails on an empty surface. Previously open: The "all checks passed" on a broken MCP registration remains the most embarrassing single failure — the check covers the wrong surface.
 - **#11 single-workspace mode was removed** → **CLOSED**: option (a) was taken — `lain mcp` exists. Original note: Two reasonable answers: (a) restore a no-args `lain mcp` for the single-repo case (walk up for `.git`, index, serve stdio), or (b) keep federation-only and rewrite the strategy guide / `SKILL.md` / tool list to match what federation can actually do. Current state is the worst of both. The single-repo binding fix in #8 unblocks option (a) only if we also add a `lain mcp` entrypoint; right now there's no MCP-friendly single-repo mode.
 - **#12a `semantic_search` unreachable (NLP model not loaded)** → CLOSED (see bottom).~~open.~~ `lain server` has no `--embedding-model` flag, so the model never loads. The ONNX model is on disk and unused.
@@ -279,12 +279,12 @@ real ONNX model loaded, this repo indexed) rather than read off the code.
 **Closed:**
 
 - **#1–#7** — closed earlier (PR 12 / PR 18); see the 2026-08-20 section.
-- **#8 per-repo tools must answer** → closed *for the single-repo case*,
-  which is the setup `lain init` scaffolds and the one users run.
+- **#8 per-repo tools must answer** → closed, both halves. Single-repo
+  (the setup `lain init` scaffolds) was bound first; multi-repo is bound
+  per call as of 2026-08-23 — see the section at the end.
   `find_dead_code`, `get_blast_radius`, `find_anchors`, `explain_symbol`,
-  `semantic_search`, `find_call_sites` and `query_graph` all answer
-  against the real graph. **Multi-repo federation still binds per-repo
-  tools to the empty staging placeholder** — see Open below.
+  `semantic_search`, `get_call_sites` and `query_graph` all answer
+  against the right repo's graph.
 - **#10 `doctor` should verify the integration surface** → closed.
   `doctor` now calls `tools/list` on the live MCP endpoint when
   `LAIN_URL`/`LAIN_SERVER_URL` is set and reports the advertised tool
@@ -318,19 +318,37 @@ real ONNX model loaded, this repo indexed) rather than read off the code.
 
 **Open:**
 
-- **#8 (multi-repo) / #9 `tools/list` filter for inert tools.** These are
-  one architectural item. With two or more repos in the federation,
-  `bind_to_single_repo_graph` keeps the empty staging placeholder, so
-  per-repo structural tools answer against an empty graph. Fixing it
-  properly means threading repo selection (`repo_id`) through every
-  per-repo handler so each resolves the right `RepoIndex::db()` —
-  a real refactor, not a patch, and untouched here.
+- **#9 `tools/list` filter for inert tools.** `tools/list` advertises the
+  full surface regardless of mode, so a caller still learns by trial
+  which tools answer in the mode the server is running. This is a
+  presentation filter, not a correctness bug — every advertised tool
+  that *can* answer now does.
 
-  **What changed instead:** the failure is no longer silent. An empty
-  graph used to produce a confident false negative ("Node not found …
-  a symbol added since the last commit will not appear"), which is the
-  worst shape — a caller acts on it. `resolve_node` now detects the
-  0-node case and says so, naming both real causes (not indexed yet, or
-  multi-repo federation) and pointing at the federation tools or
-  `lain mcp`. A wrong answer became an actionable one; the underlying
-  binding limitation remains.
+**Closed 2026-08-23 — multi-repo binding (#8, second half):**
+
+Per-repo tools now bind to whichever repo the call resolves to.
+`ToolContext` carries the federation and grows a `for_repo(repo_id)`
+that returns a context with `graph` and `workspace` swapped for that
+repo's; `ToolRegistry::dispatch` applies it using the `repo_id` the MCP
+dispatcher already resolved and injected. That id had been injected and
+then ignored — the code comment said so out loud — which is why every
+per-repo tool in a multi-repo federation read the empty staging
+placeholder.
+
+Verified on a real two-repo federation (`alpha`, `beta`, both `ready`):
+
+- `explain_symbol alpha_only_helper` and `explain_symbol
+  beta_only_helper` each resolve in their own repo.
+- `get_blast_radius beta_inner` reports `beta_only_helper` as its
+  direct dependent.
+- `find_anchors {"repo_id":"alpha"}` lists only alpha's symbols, and
+  the same for beta — no cross-repo leakage.
+- `get_code_snippet` reads `/tmp/multirepo/alpha/src/lib.rs` vs
+  `/tmp/multirepo/beta/src/lib.rs` for the same relative path.
+
+That last one was a second bug the first fix exposed: `get_code_snippet`
+passed its path straight to `std::fs`, which resolves a relative path
+against the *process* working directory. `src/lib.rs` exists in every
+repo, so it returned a same-named file from wherever the server was
+launched — lain's own checkout — with no error. Paths now resolve
+against the bound repo's workspace.

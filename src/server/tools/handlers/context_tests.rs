@@ -76,7 +76,8 @@ fn test_get_code_snippet_existing() {
     let tmp = std::env::temp_dir().join("test_snippet.txt");
     std::fs::write(&tmp, "line1\nline2\nline3\nline4\nline5\n").unwrap();
 
-    let result = get_code_snippet(&graph, &overlay, tmp.to_str().unwrap(), Some(2), None);
+    let ws = std::env::temp_dir();
+    let result = get_code_snippet(&graph, &overlay, &ws, tmp.to_str().unwrap(), Some(2), None);
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("line2") || text.contains("Showing lines"));
@@ -88,7 +89,8 @@ fn test_get_code_snippet_existing() {
 fn test_get_code_snippet_nonexistent_file() {
     let (graph, overlay) = make_test_graph();
 
-    let result = get_code_snippet(&graph, &overlay, "/nonexistent/file.txt", None, None);
+    let ws = std::env::temp_dir();
+    let result = get_code_snippet(&graph, &overlay, &ws, "/nonexistent/file.txt", None, None);
     assert!(result.is_err());
 }
 
@@ -121,4 +123,27 @@ fn test_get_call_sites_no_callers() {
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("No call sites") || text.contains("caller"));
+}
+/// A workspace-relative path must be read from the repo it belongs to,
+/// not from wherever the server process happens to be running. In a
+/// multi-repo federation `src/lib.rs` exists in every repo, and
+/// resolving it against the process cwd returned a same-named file from
+/// an unrelated checkout — the wrong contents, with no error.
+#[test]
+fn test_get_code_snippet_resolves_relative_path_against_workspace() {
+    let (graph, overlay) = make_test_graph();
+
+    let ws = std::env::temp_dir().join("lain_snippet_ws");
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/lib.rs"), "IN_THE_WORKSPACE\nsecond\n").unwrap();
+
+    let result = get_code_snippet(&graph, &overlay, &ws, "src/lib.rs", Some(1), None);
+    let text = result.expect("relative path should resolve inside the workspace");
+    assert!(
+        text.contains("IN_THE_WORKSPACE"),
+        "expected the workspace copy, got: {text}"
+    );
+
+    std::fs::remove_dir_all(&ws).ok();
 }

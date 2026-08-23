@@ -81,32 +81,58 @@ pub fn get_context_for_prompt(
     Ok(context)
 }
 
+/// Resolve a graph-relative path against the repo it belongs to.
+///
+/// Graph paths are workspace-relative, and `std::fs` resolves a relative
+/// path against the *process* working directory. In single-workspace
+/// mode those coincide often enough that nothing showed; in a multi-repo
+/// federation they never do, and `get_code_snippet` on a symbol in one
+/// repo happily returned the same-named file from wherever the server
+/// happened to be launched — `src/lib.rs` from lain's own checkout
+/// instead of the repo that was asked about. Wrong file, no error.
+fn resolve_against_workspace(workspace: &std::path::Path, path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        return path.to_string();
+    }
+    let joined = workspace.join(p);
+    if joined.exists() {
+        return joined.to_string_lossy().into_owned();
+    }
+    // Fall back to the caller's spelling: it may be relative to the
+    // process cwd (single-workspace mode) or simply not exist, and the
+    // read error should name what they actually asked for.
+    path.to_string()
+}
+
 pub fn get_code_snippet(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    workspace: &std::path::Path,
     path: &str,
     line: Option<u32>,
     context_lines: Option<usize>,
 ) -> Result<String, LainError> {
     let ctx = context_lines.unwrap_or(10);
     let line_num = line.unwrap_or(1) as usize;
+    let disk_path = resolve_against_workspace(workspace, path);
 
     // Try overlay first
     if let Some(node) = overlay.get_node(path) {
         if let (Some(ls), Some(le)) = (node.line_start, node.line_end) {
-            return read_file_range(path, ls as usize, le as usize, ctx);
+            return read_file_range(&disk_path, ls as usize, le as usize, ctx);
         }
     }
 
     // Fall back to graph
     if let Some(node) = graph.get_node_at_location(path, line.unwrap_or(1)) {
         if let (Some(ls), Some(le)) = (node.line_start, node.line_end) {
-            return read_file_range(path, ls as usize, le as usize, ctx);
+            return read_file_range(&disk_path, ls as usize, le as usize, ctx);
         }
     }
 
     // Just read the file with context around the line
-    read_file_range(path, line_num.saturating_sub(ctx), line_num + ctx, ctx)
+    read_file_range(&disk_path, line_num.saturating_sub(ctx), line_num + ctx, ctx)
 }
 
 fn read_file_range(path: &str, start: usize, end: usize, _ctx: usize) -> Result<String, LainError> {

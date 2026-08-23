@@ -883,7 +883,14 @@ impl ToolHandler for GetCodeSnippetHandler {
         let path = required_str_arg(args, "path")?;
         let line = u32_arg(args, "line");
         let context_lines = usize_arg(args, "context_lines");
-        handlers::context::get_code_snippet(&ctx.graph, &ctx.overlay, &path, line, context_lines)
+        handlers::context::get_code_snippet(
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.workspace,
+            &path,
+            line,
+            context_lines,
+        )
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCodeSnippetHandler));

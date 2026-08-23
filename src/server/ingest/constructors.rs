@@ -310,6 +310,13 @@ fn build_federation_server(
         // placeholder.
         single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf()),
     );
+    // Hand the executor the federation so `ToolRegistry::dispatch` can
+    // rebind `graph` / `workspace` to whichever repo the caller
+    // resolved. The bindings above stay as the default for calls that
+    // name no repo, which is the whole story in single-repo mode.
+    let mut tool_executor = tool_executor;
+    tool_executor.ctx = tool_executor.ctx.with_federation(Arc::clone(&federation));
+    let tool_executor = tool_executor;
 
     // Build the LainMcpServer eagerly so any wiring problems surface
     // at construction. The 8 multiplayer tools (presence, occupancy,

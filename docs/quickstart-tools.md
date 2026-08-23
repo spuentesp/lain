@@ -349,9 +349,12 @@ When the graph is behind HEAD, `get_health` says so and "not found"
 answers point at it. Treat a `Degraded ⚠` server's silence as "not in
 this graph", never as "does not exist".
 
-A "not found" against a graph with **0 nodes** says so explicitly and
-names the cause — the workspace is unindexed, or the server is running a
-multi-repo federation, where per-repo tools are not bound to any one
-repo. In that mode use the federation tools (`search_org`,
-`get_cross_repo_blast_radius_for_repo`) or run `lain mcp` against a
-single repo.
+A "not found" against a graph with **0 nodes** says so explicitly rather
+than blaming uncommitted code — usually the workspace has not finished
+indexing; check `get_health`.
+
+In federation mode, per-repo tools bind to the repo the call resolves
+to: pass `repo_id`, or a `symbol` that resolves to exactly one repo.
+With a single repo there is nothing to choose and it binds there
+automatically. Relative paths resolve against that repo's checkout, so
+`src/lib.rs` means *that* repo's `src/lib.rs`.
