@@ -153,7 +153,16 @@ impl ToolContext {
         let repo = fed.get_repo(&rid)?;
         let mut bound = self.clone();
         bound.graph = repo.db().clone();
-        bound.workspace = repo.source().local_path().to_path_buf();
+        let root = repo.source().local_path().to_path_buf();
+        // Git-backed tools (history, diff, branch status) read through
+        // `git`, so it has to follow the repo too — otherwise they keep
+        // answering from whichever checkout the server was built
+        // against. A repo whose checkout is not a git work tree keeps
+        // the existing sensor rather than failing the call.
+        if let Ok(sensor) = GitSensor::new(&root) {
+            bound.git = Arc::new(Mutex::new(sensor));
+        }
+        bound.workspace = root;
         Some(bound)
     }
 

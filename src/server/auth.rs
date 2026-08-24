@@ -6,8 +6,10 @@
 //!   requests to `/mcp` and `/events` must carry
 //!   `Authorization: Bearer <key>`. `/health` is exempt.
 //! - `LAIN_RATE_LIMIT_RPM=N` — per-key requests-per-minute budget.
-//!   Default 60. The token bucket refills smoothly. `LAIN_RATE_LIMIT=off`
-//!   disables rate limit even when keys are configured.
+//!   Honoured in every mode. When unset the limit defaults to 60 rpm
+//!   **only if API keys are configured**; with auth off there is no key
+//!   to bucket by, so the limit would throttle the local user and guard
+//!   nothing. `LAIN_RATE_LIMIT=off` disables it even when keys are set.
 //!
 //! Stdio transport is exempt from both checks (local process).
 //!
@@ -51,14 +53,32 @@ impl AuthState {
         let rate_limit_disabled = std::env::var("LAIN_RATE_LIMIT")
             .map(|v| v.to_ascii_lowercase() == "off")
             .unwrap_or(false);
+        let explicit_rpm = std::env::var("LAIN_RATE_LIMIT_RPM")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
         let rate_limit = if rate_limit_disabled {
             None
         } else {
-            let rpm = std::env::var("LAIN_RATE_LIMIT_RPM")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(60);
-            if rpm == 0 { None } else { Some(RateLimit::new(rpm)) }
+            // The bucket key is the bearer token, so with keys
+            // configured each key gets its own budget and the limit
+            // does what it is for. With no keys, auth is off and every
+            // caller shares one `anonymous` bucket — the limit then
+            // throttles the legitimate local user and protects nobody,
+            // because there is no key to abuse. Several agents on one
+            // local server share 60 rpm between them, which a single
+            // agent exploring a codebase exceeds on its own: observed
+            // as `429 rate limit exceeded` partway through a routine
+            // demo run, including on the `/ui/...` pages.
+            //
+            // So: default the limit on only when auth is on. An
+            // explicit `LAIN_RATE_LIMIT_RPM` is always honoured, in
+            // either mode, for anyone who wants a local cap.
+            match (explicit_rpm, api_keys.is_some()) {
+                (Some(0), _) => None,
+                (Some(rpm), _) => Some(RateLimit::new(rpm)),
+                (None, true) => Some(RateLimit::new(60)),
+                (None, false) => None,
+            }
         };
 
         AuthState { api_keys, rate_limit }
@@ -182,6 +202,49 @@ impl RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guards against re-introducing a shared bucket in dev mode.
+    ///
+    /// With no API keys, auth is off and every caller lands in one
+    /// `anonymous` bucket, so a 60 rpm default throttles the local user
+    /// and protects nothing — there is no key that could be abused.
+    /// Several agents on one local server share that budget, and a
+    /// single agent exploring a codebase exceeds it alone: a routine
+    /// demo run hit `429 rate limit exceeded` partway through, on the
+    /// `/ui/...` pages among others.
+    ///
+    /// `LAIN_RATE_LIMIT_RPM` is still honoured in both modes.
+    #[test]
+    fn rate_limit_defaults_off_without_keys_and_on_with_them() {
+        // Constructed directly rather than through `from_env`, which
+        // reads process-global state and would race other tests.
+        let dev = AuthState { api_keys: None, rate_limit: None };
+        for _ in 0..500 {
+            assert!(
+                dev.check_rate("anonymous").is_ok(),
+                "dev mode must not throttle the local user"
+            );
+        }
+
+        let keyed = AuthState {
+            api_keys: Some(vec!["k1".into()]),
+            rate_limit: Some(RateLimit::new(60)),
+        };
+        let mut denied = false;
+        for _ in 0..500 {
+            if keyed.check_rate("k1").is_err() {
+                denied = true;
+                break;
+            }
+        }
+        assert!(denied, "with a key configured the budget must still bite");
+
+        // Separate keys must not share a budget.
+        assert!(
+            keyed.check_rate("k2").is_ok(),
+            "a second key gets its own bucket"
+        );
+    }
 
     #[test]
     fn bearer_token_parses() {

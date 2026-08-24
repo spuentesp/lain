@@ -294,7 +294,14 @@ fn build_federation_server(
     let overlay = VolatileOverlay::new();
     let tuning = Arc::new(load_tuning_config(&ws));
     let (embedder, cross_encoder) = build_embedder_pair(embedding_model, &tuning)?;
-    let git = Arc::new(Mutex::new(GitSensor::new(&ws)?));
+    // Bind git to the real checkout, for the same reason the graph and
+    // the workspace are bound to it: in federation mode `ws` is the
+    // staging placeholder, which is its own git repo holding no code.
+    // `get_commit_history` answered from it — "staging placeholder for
+    // federation mode — holds no code" — while claiming to be the
+    // subject repo's history.
+    let git_root = single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf());
+    let git = Arc::new(Mutex::new(GitSensor::new(&git_root)?));
     let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
 
     let tool_executor = ToolExecutor::new(
