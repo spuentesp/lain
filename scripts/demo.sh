@@ -571,11 +571,97 @@ if [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ]; then
 else
   skip "federation" "second server never became healthy"
 fi
+# Left running on purpose: section 13 exercises the federation-scoped
+# tools against it. Killed at the end of that section.
+
+# ══ 13. Remaining surface, and coverage self-check ════════════════════
+section "13. Remaining tools and coverage"
+
+# Federation-scoped tools, against the two-repo server from section 12.
+if [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ]; then
+  check_contains "search_org finds symbols across repos" "beta_only_helper" \
+    "$(fcall search_org '{"query":"only_helper","limit":20}')"
+  check_contains "get_repo_info describes a repo" "alpha" \
+    "$(fcall get_repo_info '{"id":"alpha"}')"
+  # Aggregate health, not a roster: both fixture repos must be `ready`.
+  FH=$(fcall get_federation_health)
+  check_contains "federation health counts both repos" '"total_repos":2' "$FH"
+  check_contains "federation health reports both ready" '"ready":2'      "$FH"
+  check_contains "cross-repo blast radius, repo pinned explicitly" "beta" \
+    "$(fcall get_cross_repo_blast_radius_for_repo '{"repo_id":"beta","symbol":"beta_inner","depth":"1..3"}')"
+else
+  skip "federation-scoped tools" "federation server not running"
+fi
 kill "$FED_PID" 2>/dev/null
 
-# ══ 13. Benchmark ═════════════════════════════════════════════════════
+# Execution and control-plane tools on the subject server.
+RC_OUT=$(call run_clippy)
+check_absent "run_clippy answers" "__RPC_ERROR__" "$RC_OUT"
+
+check_absent "request_reload answers" "__RPC_ERROR__" "$(call request_reload)"
+check_absent "register_job_webhook answers" "__RPC_ERROR__" \
+  "$(call register_job_webhook '{"url":"http://127.0.0.1:1/none"}')"
+# No such job: the interesting property is that it says so rather than
+# inventing a status.
+check_contains "get_job_status reports an unknown job as not found" "not found" \
+  "$(printf '%s' "$(call get_job_status '{"job_id":"no-such-job"}')" | tr 'A-Z' 'a-z')"
+check_absent "debug_sleep answers" "__RPC_ERROR__" "$(call debug_sleep '{"secs":0}')"
+
+# `install_language_server` downloads and installs a toolchain. Running
+# it inside a demo would mutate the machine, so this checks the contract
+# it advertises instead of invoking it — and says so, rather than
+# quietly leaving a gap in the coverage count below.
+ILS_SCHEMA=$(curl -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  | python3 -c "
+import json,sys
+for t in json.load(sys.stdin)['result']['tools']:
+    if t['name']=='install_language_server':
+        print(json.dumps(t['inputSchema'])); break
+")
+check_contains "install_language_server advertises its schema (not invoked: it mutates the machine)" \
+  "language" "${ILS_SCHEMA:-}"
+
+# Coverage: every advertised tool must be exercised here, or named below
+# as deliberately not invoked. A tool added to the surface without a
+# check fails this — the only thing that keeps a demo honest as the
+# surface grows.
+#
+# This counts checks that *exist* in the script, not checks that ran:
+# a phase that SKIPped still counts here. The skip is reported on its
+# own line and in the summary, so read both.
+curl -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  > "$WORK/tools.json"
+
+COVERAGE=$(SCRIPT="$REPO_ROOT/scripts/demo.sh" \
+           TOOLS="$WORK/tools.json" \
+           EXEMPT="install_language_server" \
+           python3 <<'PYCOV'
+import json, os, re
+advertised = {t["name"] for t in json.load(open(os.environ["TOOLS"]))["result"]["tools"]}
+src = open(os.environ["SCRIPT"]).read()
+called = set()
+for m in re.finditer(r"\b(?:call|fcall|bench|sbench)\s+(?:\"[^\"]*\"\s+)?([a-z_][a-z0-9_]*)", src):
+    called.add(m.group(1))
+loop = re.search(r"for t in ([\s\S]*?)\ndo\n", src)
+if loop:
+    called.update(w for w in loop.group(1).split() if re.fullmatch(r"[a-z_][a-z0-9_]*", w))
+exempt = set(os.environ["EXEMPT"].split())
+missing = sorted(advertised - called - exempt)
+covered = len(advertised) - len(missing) - len(exempt)
+print("%d/%d %s" % (covered, len(advertised),
+                    "MISSING: " + ",".join(missing) if missing else "complete"))
+PYCOV
+)
+case "$COVERAGE" in
+  *complete*) check "every advertised tool is exercised (${COVERAGE%% *} + 1 exempt)" "complete" "complete" ;;
+  *)          check "every advertised tool is exercised" "complete" "$COVERAGE" ;;
+esac
+
+# ══ 14. Benchmark ═════════════════════════════════════════════════════
 if [ "$QUICK" = 0 ]; then
-  section "13. Benchmark"
+  section "14. Benchmark"
 
   bench() { # bench <label> <tool> <args> <reps>
     local label="$1" tool="$2" args="$3" reps="${4:-10}" i t0 t1 body
