@@ -383,18 +383,3 @@ fn comparison_table_output() {
     println!("║ Key Advantage: LAIN-mcp uses indexed graph, O(1) lookup vs O(n) scan         ║");
     println!("╚═══════════════════════════════════════════════════════════════════════════════╝");
 }
-
-#[test]
-fn memory_efficiency_comparison() {
-    println!("\n");
-    println!("=== Memory Efficiency ===");
-    println!("Approach              │ 1000 nodes memory │ Notes");
-    println!("──────────────────────┼───────────────────┼─────────────────────────────────────");
-
-    // LAIN-mcp uses petgraph with efficient edge storage
-    let _graph = build_medium_graph(1000);
-    println!("LAIN-mcp (petgraph)   │ ~50KB estimated   │ Adjacency list, ~32 bytes/node");
-    println!("Naive AST storage     │ ~500KB+           │ Full parse trees in memory");
-    println!("LSP-only (per-file)  │ ~200KB + server   │ Language server overhead");
-    println!("RAG embeddings        │ ~4MB+             │ Float vectors for each chunk");
-}

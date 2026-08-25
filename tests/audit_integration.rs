@@ -102,14 +102,11 @@ async fn granted_claim_appends_audit_event() {
     assert_eq!(ev.agent_id.as_str(), agent_id);
     assert_eq!(ev.path.to_string_lossy(), "auth.rs");
     assert!(ev.plan_revision.is_none(), "legacy caller must not set plan_revision");
-    // landed_revision is whatever the overlay reports at audit
-    // time. For a fresh server with no overlay events yet, that's
-    // the floor value 0; once any overlay mutation lands the
-    // counter advances (see the second test in this file for a
-    // post-bump case). The audit module serializes whatever the
-    // caller hands it — pinning an exact value here would
-    // over-specify the contract.
-    assert!(ev.landed_revision <= u64::MAX, "landed_revision must be a u64");
+    // landed_revision is deliberately left unasserted: it is whatever the
+    // overlay reports at audit time — the floor value 0 for a fresh server,
+    // higher once any overlay mutation lands (see the post-bump case in the
+    // second test). The audit module serializes whatever the caller hands it,
+    // so pinning a value here would over-specify the contract.
     // One Claim in the granted set: the just-recorded claim for
     // auth.rs on behalf of `agent_id`.
     assert_eq!(ev.claim_set.len(), 1, "claim_set should mirror the grant");
