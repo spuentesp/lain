@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use crate::cli::workspace::find_git_workspace_root;
 
 /// JSON-RPC id of the `tools/call` request (initialize is id 1).
 const ID_CALL: i64 = 2;
@@ -51,7 +52,7 @@ pub fn run_oneshot(
     // re-implement it inline to keep this module dependency-free.
     let workspace = match workspace {
         Some(p) => p.to_path_buf(),
-        None => find_git_workspace()?
+        None => find_git_workspace_root(None)?
             .ok_or_else(|| anyhow!(
                 "no `.git` found in any parent directory and no --workspace given; \
                  pass --workspace PATH or run from inside a clone"
@@ -212,22 +213,4 @@ pub fn run_oneshot(
         Err(_) => println!("{}", raw_text),
     }
     Ok(())
-}
-
-/// Walk up from the current directory until a `.git` directory is
-/// found, mirroring `cli::mcp::find_git_workspace_root`. Returns
-/// `None` if no `.git` is found within 16 levels.
-fn find_git_workspace() -> Result<Option<std::path::PathBuf>> {
-    let mut current =
-        std::env::current_dir().context("get current dir")?;
-    for _ in 0..16 {
-        if current.join(".git").exists() {
-            return Ok(Some(current));
-        }
-        match current.parent() {
-            Some(p) => current = p.to_path_buf(),
-            None => return Ok(None),
-        }
-    }
-    Ok(None)
 }
