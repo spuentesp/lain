@@ -61,41 +61,16 @@ fn emit(sev: Severity, msg: impl AsRef<str>) -> bool {
 /// empty surface) — an operator whose agent "sees no tools" needs this
 /// line to say so, not a green page derived from `/health`.
 fn emit_tools_list_check(base: &str) -> bool {
-    let endpoint = format!("{base}/mcp");
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
-    });
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return emit(Severity::Fail, format!("could not build HTTP client: {e}")),
-    };
-    let resp = match client.post(&endpoint).json(&body).send() {
-        Ok(r) => r,
-        Err(e) => {
-            return emit(
-                Severity::Fail,
-                format!("MCP endpoint {endpoint} did not answer tools/list: {e}"),
-            )
-        }
-    };
-    let value: serde_json::Value = match resp.json() {
+    let url = format!("{base}/mcp");
+    let value = match crate::cli::mcp_client::post_tool_call(&url, "tools/list", serde_json::json!({})) {
         Ok(v) => v,
-        Err(e) => {
-            return emit(
-                Severity::Fail,
-                format!("tools/list returned a non-JSON body: {e}"),
-            )
-        }
+        Err(e) => return emit(
+            Severity::Fail,
+            format!("MCP endpoint {url} did not answer tools/list: {e}"),
+        ),
     };
-    if let Some(err) = value.get("error") {
-        return emit(Severity::Fail, format!("tools/list returned an error: {err}"));
-    }
     let tools = value
-        .get("result")
-        .and_then(|r| r.get("tools"))
+        .get("tools")
         .and_then(|t| t.as_array());
     match tools {
         Some(list) if !list.is_empty() => emit(
