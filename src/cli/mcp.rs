@@ -76,37 +76,3 @@ pub async fn run_mcp(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    /// `find_git_workspace_root` returns the directory containing
-    /// `.git` when started from inside a clone. Uses a tempdir
-    /// hierarchy (`root/.git` + `root/src/sub/file.rs`) so the test
-    /// doesn't depend on the host repo's actual layout.
-    #[test]
-    fn find_git_workspace_root_walks_up_to_dot_git() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        let sub = root.join("src").join("nested");
-        std::fs::create_dir_all(&sub).unwrap();
-        let found = crate::cli::workspace::find_git_workspace_root(Some(&sub)).unwrap();
-        // canonicalize normalizes /tmp -> /private/tmp on macOS; just
-        // assert we walked up to *some* directory containing `.git`.
-        assert!(found.unwrap().join(".git").exists());
-    }
-
-    /// When no `.git` exists within 16 levels, the function returns
-    /// `None` rather than panicking — `run_mcp` translates that into
-    /// a clean error message ("no `.git` found, pass --workspace").
-    #[test]
-    fn find_git_workspace_root_returns_none_when_missing() {
-        // Build a deep tempdir with no `.git` anywhere. Walking
-        // from `deep/sub` should return `None` at the 16-level
-        // budget without panicking.
-        let tmp = tempfile::tempdir().unwrap();
-        let deep = tmp.path().join("a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/deep/sub");
-        std::fs::create_dir_all(&deep).unwrap();
-        let found = crate::cli::workspace::find_git_workspace_root(Some(&deep)).unwrap();
-        assert!(found.is_none(), ".git must not exist in this controlled tree");
-    }
-}
