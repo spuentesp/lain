@@ -4,7 +4,7 @@
 //! zero hand-written YAML.
 
 use anyhow::{anyhow, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const REPOS_TEMPLATE: &str = "\
 data_dir: ./.lain/data
@@ -27,7 +27,7 @@ pub fn run_init(
 ) -> Result<()> {
     let workspace = match workspace {
         Some(p) => p.to_path_buf(),
-        None => find_git_workspace()?
+        None => find_git_workspace(None)?
             .ok_or_else(|| anyhow!(
                 "no `.git` found in any parent directory and no --workspace given; \
                  pass --workspace PATH or run from inside a clone"
@@ -68,17 +68,4 @@ pub fn run_init(
     Ok(())
 }
 
-fn find_git_workspace() -> Result<Option<PathBuf>> {
-    let mut current =
-        std::env::current_dir().context("get current dir")?;
-    for _ in 0..16 {
-        if current.join(".git").exists() {
-            return Ok(Some(current));
-        }
-        match current.parent() {
-            Some(p) => current = p.to_path_buf(),
-            None => return Ok(None),
-        }
-    }
-    Ok(None)
-}
+pub(crate) use crate::cli::workspace::find_git_workspace_root as find_git_workspace;
