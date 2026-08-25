@@ -7,6 +7,7 @@
 //! - GET `/`              → index.html (text/html)
 //! - GET `/index.html`    → index.html
 //! - GET `/app.js`        → app.js (text/javascript)
+//! - GET `/theme.css`     → theme.css (text/css) — shared palette
 //! - GET `/styles.css`    → styles.css (text/css)
 //! - GET `/assets/*`      → vendored static assets under
 //!                           command_center/assets/
@@ -29,6 +30,11 @@ pub const SPA_ASSETS: &[(&str, &str)] = &[
 pub const INDEX_HTML: &[u8] = include_bytes!("command_center/index.html");
 pub const APP_JS: &[u8] = include_bytes!("command_center/app.js");
 pub const STYLES_CSS: &[u8] = include_bytes!("command_center/styles.css");
+
+/// The shared 80s-console palette (light + dark). Loaded by the SPA shell
+/// and by every standalone `/ui/*` detail view, so one token set themes
+/// the whole surface.
+pub const THEME_CSS: &[u8] = include_bytes!("command_center/theme.css");
 
 /// The blast-radius detail view (separate from the SPA shell;
 /// served at `/ui/blast-radius/{id}` for the interactive picker).

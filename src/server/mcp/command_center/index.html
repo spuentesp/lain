@@ -3,13 +3,26 @@
 <head>
   <meta charset="utf-8">
   <title>LAIN — Command Center</title>
+  <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/styles.css">
+  <script>
+    // Apply the saved theme before first paint so the page never flashes the
+    // wrong palette. No stored choice => fall through to prefers-color-scheme,
+    // which theme.css handles on its own.
+    try {
+      var t = localStorage.getItem('lain-theme');
+      if (t === 'light' || t === 'dark') {
+        document.documentElement.setAttribute('data-theme', t);
+      }
+    } catch (e) { /* storage blocked — system preference still applies */ }
+  </script>
 </head>
-<body>
+<body class="crt-scanlines">
   <header class="topbar">
     <h1>LAIN</h1>
     <span id="active-project">project: ...</span>
     <span id="active-workspace">workspace: ...</span>
+    <button type="button" id="theme-toggle" class="theme-toggle"></button>
   </header>
   <div class="layout">
     <aside class="sidebar">

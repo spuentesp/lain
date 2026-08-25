@@ -802,6 +802,47 @@ function renderToolForm(tool) {
   });
 }
 
+// ── Theme ──────────────────────────────────────────────────────────────────
+
+// The effective theme, mirroring the cascade in theme.css: an explicit
+// [data-theme] wins; otherwise light applies only when the system asks for it
+// and everything else falls through to the phosphor default.
+function currentTheme() {
+  const explicit = document.documentElement.getAttribute('data-theme');
+  if (explicit === 'light' || explicit === 'dark') return explicit;
+  return window.matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light'
+    : 'dark';
+}
+
+function wireThemeToggle() {
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+
+  const paint = () => {
+    const t = currentTheme();
+    btn.textContent = t === 'dark' ? 'phosphor' : 'paper';
+    const next = t === 'dark' ? 'paper (light)' : 'phosphor (dark)';
+    btn.title = 'Switch to ' + next;
+    btn.setAttribute('aria-label', btn.title);
+  };
+
+  btn.addEventListener('click', () => {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('lain-theme', next); } catch (e) { /* ignore */ }
+    paint();
+  });
+
+  // Keep following the system until the user makes an explicit choice.
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener(
+    'change',
+    () => { if (!document.documentElement.hasAttribute('data-theme')) paint(); }
+  );
+
+  paint();
+}
+
 // ── Boot ───────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -813,6 +854,10 @@ async function init() {
       document.querySelectorAll('.tab').forEach(t => { t.style.display = 'none'; });
       const target = document.getElementById('tab-' + name);
       if (target) target.style.display = 'block';
+      // Light up the selected tab in the tab bar.
+      document.querySelectorAll('[data-tab]').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
       const fn = window['render' + name.charAt(0).toUpperCase() + name.slice(1) + 'Tab'];
       if (typeof fn === 'function') fn();
     });
@@ -821,6 +866,10 @@ async function init() {
   // Show the first tab by default.
   const first = document.querySelector('.tab');
   if (first) first.style.display = 'block';
+  const firstBtn = document.querySelector('[data-tab]');
+  if (firstBtn) firstBtn.classList.add('active');
+
+  wireThemeToggle();
 
   // Sidebar / topbar (best-effort; one failure shouldn't block the rest).
   await Promise.allSettled([

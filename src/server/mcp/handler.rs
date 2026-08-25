@@ -49,6 +49,7 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
 
 use crate::server::mcp::command_center_assets::{
     APP_JS, BLAST_RADIUS_HTML, CALL_CHAIN_HTML, COUPLING_HTML, INDEX_HTML, SPA_ASSETS,
+    THEME_CSS,
     STYLES_CSS,
 };
 use crate::server::mcp::definitions::{
@@ -2531,6 +2532,7 @@ async fn handle_request(
     //   GET /              -> index.html (text/html)
     //   GET /index.html    -> index.html
     //   GET /app.js        -> app.js (text/javascript)
+    //   GET /theme.css     -> theme.css (text/css), the shared palette
     //   GET /styles.css    -> styles.css (text/css)
     //   GET /assets/*      -> vendored static assets under command_center/assets/
     if method == Method::GET && (path == "/" || path == "/index.html") {
@@ -2545,6 +2547,13 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "text/javascript; charset=utf-8")
             .body(full_body(Bytes::from_static(APP_JS)))
+            .unwrap());
+    }
+    if method == Method::GET && path == "/theme.css" {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/css; charset=utf-8")
+            .body(full_body(Bytes::from_static(THEME_CSS)))
             .unwrap());
     }
     if method == Method::GET && path == "/styles.css" {
