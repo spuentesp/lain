@@ -62,7 +62,15 @@ fn emit(sev: Severity, msg: impl AsRef<str>) -> bool {
 /// line to say so, not a green page derived from `/health`.
 fn emit_tools_list_check(base: &str) -> bool {
     let url = format!("{base}/mcp");
-    let value = match crate::cli::mcp_client::post_tool_call(&url, "tools/list", serde_json::json!({})) {
+    // `tools/list` is a top-level JSON-RPC method, not a tool — so
+    // route through `post_json_rpc` rather than `post_tool_call`,
+    // which would send `tools/call` with `params.name = "tools/list"`
+    // (a request no server-side handler can dispatch). The pre-dedup
+    // code sent the correct envelope; the migration regressed it,
+    // and the regression went uncaught by `doctor_smoke` because that
+    // test does not set `LAIN_URL`. See final-review-report.md
+    // Critical #1.
+    let value = match crate::cli::mcp_client::post_json_rpc(&url, "tools/list", serde_json::json!({})) {
         Ok(v) => v,
         Err(e) => return emit(
             Severity::Fail,
