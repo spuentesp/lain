@@ -24,7 +24,7 @@
 //! by `LainServer::new`).
 
 use anyhow::{anyhow, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Run a single-repo MCP server on stdio. If `workspace_arg` is
 /// `None`, walks up from the current directory until it finds a
@@ -40,8 +40,10 @@ pub async fn run_mcp(
 ) -> Result<()> {
     let workspace = match workspace_arg {
         Some(p) => p.to_path_buf(),
-        None => find_git_workspace_root()
-            .context("walk up for .git: no `.git` found in any parent directory")?,
+        None => crate::cli::workspace::find_git_workspace_root(None)
+            .and_then(|o| o.ok_or_else(|| anyhow!(
+                "walk up for .git: no `.git` found in any parent directory"
+            )))?,
     };
     if !workspace.join(".git").exists() {
         return Err(anyhow!(
@@ -74,29 +76,6 @@ pub async fn run_mcp(
     Ok(())
 }
 
-/// Walk up from the current directory until we find a `.git`
-/// directory, then return that ancestor. Mirrors the helper in
-/// `src/cli/hooks.rs::find_workspace_root` (intentionally not
-/// re-exported — that one only honors `.git`, but it lives in a
-/// submodule and exposing it would change the public surface).
-/// Returns `None` if no `.git` is found within 16 levels.
-fn find_git_workspace_root() -> Option<PathBuf> {
-    let mut current = std::env::current_dir()
-        .ok()?
-        .canonicalize()
-        .ok()?;
-    for _ in 0..16 {
-        if current.join(".git").exists() {
-            return Some(current);
-        }
-        match current.parent() {
-            Some(p) => current = p.to_path_buf(),
-            None => break,
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     /// `find_git_workspace_root` returns the directory containing
@@ -108,22 +87,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::create_dir_all(root.join("src/sub")).unwrap();
-        std::fs::write(root.join("src/sub/file.rs"), "fn x() {}").unwrap();
-        // `current_dir` is the test process's cwd, not the tempdir.
-        // We can't `chdir` in a multi-threaded test, so call the
-        // inner walk directly with `current = root.join("src/sub")`.
-        let mut current = root.join("src/sub");
-        for _ in 0..16 {
-            if current.join(".git").exists() {
-                return;
-            }
-            match current.parent() {
-                Some(p) => current = p.to_path_buf(),
-                None => panic!("walk did not find .git"),
-            }
-        }
-        panic!("walk exhausted 16 levels without finding .git");
+        let sub = root.join("src").join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = crate::cli::workspace::find_git_workspace_root(Some(&sub)).unwrap();
+        // canonicalize normalizes /tmp -> /private/tmp on macOS; just
+        // assert we walked up to *some* directory containing `.git`.
+        assert!(found.unwrap().join(".git").exists());
     }
 
     /// When no `.git` exists within 16 levels, the function returns
@@ -137,18 +106,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let deep = tmp.path().join("a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/deep/sub");
         std::fs::create_dir_all(&deep).unwrap();
-        let mut current = deep;
-        let mut found = false;
-        for _ in 0..16 {
-            if current.join(".git").exists() {
-                found = true;
-                break;
-            }
-            match current.parent() {
-                Some(p) => current = p.to_path_buf(),
-                None => break,
-            }
-        }
-        assert!(!found, ".git must not exist in this controlled tree");
+        let found = crate::cli::workspace::find_git_workspace_root(Some(&deep)).unwrap();
+        assert!(found.is_none(), ".git must not exist in this controlled tree");
     }
 }
