@@ -3,6 +3,7 @@ pub mod dispatch;
 pub mod doctor;
 pub mod hooks;
 pub mod init;
+pub mod io;
 pub mod mcp;
 pub mod oneshot;
 pub mod query;

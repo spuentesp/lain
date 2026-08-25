@@ -48,7 +48,9 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
             r#ref: ref_.to_string(),
         },
     });
-    write_atomic(config_path, &file)?;
+    let yaml = serde_yaml::to_string(&file).context("serialize yaml")?;
+    crate::cli::io::write_file_atomic(config_path, yaml.as_bytes())
+        .with_context(|| format!("write {}", config_path.display()))?;
     crate::cli::signal::signal_reload(config_path)
         .with_context(|| format!("signal reload after adding '{name}'"))?;
     Ok(())
@@ -76,25 +78,11 @@ fn remove(config_path: &Path, name: &str) -> Result<()> {
     if file.repos.len() == before {
         anyhow::bail!("repo '{name}' not found in {}", config_path.display());
     }
-    write_atomic(config_path, &file)?;
+    let yaml = serde_yaml::to_string(&file).context("serialize yaml")?;
+    crate::cli::io::write_file_atomic(config_path, yaml.as_bytes())
+        .with_context(|| format!("write {}", config_path.display()))?;
     crate::cli::signal::signal_reload(config_path)
         .with_context(|| format!("signal reload after removing '{name}'"))?;
-    Ok(())
-}
-
-/// Write YAML atomically: write to a sibling temp file, then rename.
-fn write_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
-    let tmp = dir.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "repos.yaml".to_string())
-    ));
-    let yaml = serde_yaml::to_string(value).context("serialize yaml")?;
-    std::fs::write(&tmp, yaml).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
