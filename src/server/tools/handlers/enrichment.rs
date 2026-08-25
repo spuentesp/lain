@@ -79,10 +79,21 @@ pub fn run_enrichment(
     Ok("Enrichment job started in background. Check 'get_health' later for status.".to_string())
 }
 
+/// Kick off a background re-sync of the graph with git HEAD.
+///
+/// Returns a `job_id`. It used to return only "State sync started in
+/// background. Check 'get_health' later for status." — and then every
+/// failure inside the spawned task went to `tracing::error!`, which no
+/// MCP client surfaces. An agent watching `get_health` saw the enriched
+/// commit never move, with nothing anywhere saying why. The job record
+/// is the answer to "did my sync work?", and a failure also degrades
+/// the health banner.
 pub fn sync_state(
     graph: &GraphDatabase,
     git: &Arc<Mutex<GitSensor>>,
     ingestion: &IngestionConfig,
+    jobs: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
+    last_outcome: &Arc<Mutex<crate::server::refresh::RefreshOutcome>>,
 ) -> Result<String, LainError> {
     let last_commit = graph.get_last_commit()?;
     let latest_commit = git.lock().get_latest_commit().unwrap_or_default();
@@ -96,32 +107,82 @@ pub fn sync_state(
     // Copy fields so they can be moved into async block
     let cochange_max_commit_files = ingestion.cochange_max_commit_files;
 
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let jobs_registry = Arc::clone(jobs);
+    let outcome_slot = Arc::clone(last_outcome);
+    {
+        let mut guard = jobs_registry.blocking_lock();
+        guard.insert(
+            job_id.clone(),
+            crate::server::tools::JobInfo {
+                id: job_id.clone(),
+                created_at: std::time::SystemTime::now(),
+                state: crate::server::tools::JobState::Running,
+            },
+        );
+    }
+    let job_id_for_task = job_id.clone();
+
     tokio::spawn(async move {
         tracing::info!("Starting background sync job");
+        // Every early return below must land in the job record, so the
+        // caller's `get_job_status` can distinguish "still running"
+        // from "failed two minutes ago".
+        let finish = |registry: Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
+                      id: String,
+                      result: Result<String, String>| async move {
+            let mut guard = registry.lock().await;
+            if let Some(j) = guard.get_mut(&id) {
+                j.state = match result {
+                    Ok(out) => crate::server::tools::JobState::Completed {
+                        success: true,
+                        output: Some(out),
+                        error: None,
+                    },
+                    Err(e) => crate::server::tools::JobState::Completed {
+                        success: false,
+                        output: None,
+                        error: Some(e),
+                    },
+                };
+            }
+        };
         let start_time = std::time::Instant::now();
 
         let last_commit = match graph_clone.get_last_commit() {
             Ok(lc) => lc,
             Err(e) => {
                 tracing::error!("Sync failed to get last commit: {}", e);
+                {
+                    let mut slot = outcome_slot.lock();
+                    *slot = crate::server::refresh::RefreshOutcome::failed(
+                        std::time::SystemTime::now(),
+                        format!("sync_state: {e}"),
+                    );
+                }
+                finish(jobs_registry, job_id_for_task, Err(format!("failed to get last commit: {e}"))).await;
                 return;
             }
         };
 
-        let git_guard = git_clone.lock();
-        let new_commits: Vec<CommitInfo> = if let Some(ref last) = last_commit {
-            match git_guard.get_new_commits_since(last) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("Failed to get new commits: {}, doing full refresh", e);
-                    Vec::new()
+        // Scoped: a `parking_lot` guard live across an `.await` makes
+        // the spawned future non-`Send`.
+        let (new_commits, latest_commit): (Vec<CommitInfo>, String) = {
+            let git_guard = git_clone.lock();
+            let new_commits = if let Some(ref last) = last_commit {
+                match git_guard.get_new_commits_since(last) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Failed to get new commits: {}, doing full refresh", e);
+                        Vec::new()
+                    }
                 }
-            }
-        } else {
-            Vec::new()
+            } else {
+                Vec::new()
+            };
+            let latest = git_guard.get_latest_commit().unwrap_or_default();
+            (new_commits, latest)
         };
-        let latest_commit = git_guard.get_latest_commit().unwrap_or_default();
-        drop(git_guard);
 
         // Analyze co-changes from new commits only
         let mut new_pairs: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
@@ -165,8 +226,17 @@ pub fn sync_state(
             }
         }
 
-        tracing::info!("Background sync job completed in {:?}. Synced {} commits.", start_time.elapsed(), new_commits.len());
+        let summary = format!(
+            "synced {} commits in {:?}",
+            new_commits.len(),
+            start_time.elapsed()
+        );
+        tracing::info!("Background sync job completed: {summary}");
+        finish(jobs_registry, job_id_for_task, Ok(summary)).await;
     });
 
-    Ok("State sync started in background. Check 'get_health' later for status.".to_string())
+    Ok(format!(
+        "State sync started in background as job {job_id}. Poll `get_job_status` with that \
+         job_id for the outcome; failures also show up in `get_health`."
+    ))
 }

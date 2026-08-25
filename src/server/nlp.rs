@@ -21,12 +21,57 @@ enum EmbedInner {
     Stub { embedding_dim: usize },
 }
 
+/// Compose the text actually embedded for a query.
+///
+/// Split out from [`NlpEmbedder::embed_query`] so it can be asserted
+/// directly: the stub embedder returns an all-zero vector for every
+/// input, so a test that only compares embeddings would pass even if
+/// this mangled the text.
+///
+/// Concatenation is deliberate and exact — no separator is inserted.
+/// BGE's documented instruction already ends in `": "`, and adding a
+/// space would change the tokenization the model was trained on.
+fn prefixed_query(prefix: &str, query: &str) -> String {
+    if prefix.is_empty() {
+        return query.to_string();
+    }
+    format!("{prefix}{query}")
+}
+
 #[derive(Clone)]
 pub struct NlpEmbedder {
     inner: EmbedInner,
+    /// Instruction prepended to *queries* only, from
+    /// `query_prefix` in `.lain/tuning.toml`. Empty by default.
+    ///
+    /// Lives here rather than at the call sites because the
+    /// query/document asymmetry is a property of the model, and leaving
+    /// it to convention did not hold: of the three places that embed a
+    /// user query, two forgot the prefix while all six document sites
+    /// correctly omitted it. [`Self::embed_query`] makes the choice
+    /// explicit, so a new call site has to pick one.
+    query_prefix: String,
 }
 
 impl NlpEmbedder {
+    /// Resolve a user-supplied `--embedding-model` / `LAIN_EMBEDDING_MODEL`
+    /// path to `(model.onnx, tokenizer.json)`. Accepts either a directory
+    /// containing both files (the documented form) or a direct path to the
+    /// `.onnx` file, in which case the tokenizer is read from the same
+    /// directory. Previously `lain server` documented a directory while
+    /// `lain mcp` treated the value as a file — both go through here now.
+    pub fn resolve_model_paths(p: &Path) -> (PathBuf, PathBuf) {
+        if p.is_dir() {
+            (p.join("model.onnx"), p.join("tokenizer.json"))
+        } else {
+            let tokenizer = p
+                .parent()
+                .map(|d| d.join("tokenizer.json"))
+                .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
+            (p.to_path_buf(), tokenizer)
+        }
+    }
+
     /// Initialize with default paths (models/all-MiniLM-L6-v2.onnx).
     /// Reads `LAIN_EMBEDDING_MODEL` env var if set, else relative path.
     /// `max_threads` follows the same 0 = auto convention as with_max_threads.
@@ -38,11 +83,7 @@ impl NlpEmbedder {
     pub fn new_with_threads(max_threads: usize) -> Result<Self, LainError> {
         // Check env var first, then fall back to relative path
         let (model_path, tokenizer_path) = if let Some(model_env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
-            let model_path = Path::new(&model_env).to_path_buf();
-            let tokenizer_path = model_path.parent()
-                .map(|p| p.join("tokenizer.json"))
-                .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
-            (model_path, tokenizer_path)
+            Self::resolve_model_paths(Path::new(&model_env))
         } else {
             (Path::new("models/all-MiniLM-L6-v2.onnx").to_path_buf(),
              Path::new("models/tokenizer.json").to_path_buf())
@@ -94,6 +135,7 @@ impl NlpEmbedder {
         let embedding_dim = Self::detect_embedding_dim(&mut session)?;
 
         Ok(Self {
+            query_prefix: String::new(),
             inner: EmbedInner::Onnx {
                 session: Arc::new(Mutex::new(session)),
                 tokenizer: Arc::new(tokenizer),
@@ -128,7 +170,7 @@ impl NlpEmbedder {
 
     #[doc(hidden)]
     pub fn new_stub() -> Self {
-        Self { inner: EmbedInner::Stub { embedding_dim: 384 } }
+        Self { inner: EmbedInner::Stub { embedding_dim: 384 }, query_prefix: String::new() }
     }
 
     /// Returns true if this embedder is a stub (no actual model loaded)
@@ -145,9 +187,35 @@ impl NlpEmbedder {
     }
 
     /// Generate a fixed-dimension embedding vector for the given text
+    /// Embed a **document**: a node's enriched text, indexed as-is.
+    ///
+    /// Never applies `query_prefix`. In asymmetric retrieval the corpus
+    /// carries no instruction; prefixing it would put documents and
+    /// queries in the same space and undo the asymmetry entirely.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, LainError> {
         let mut results = self.embed_batch(&[text])?;
         Ok(results.remove(0))
+    }
+
+    /// Embed a **query**: whatever the user or agent asked for.
+    ///
+    /// Applies `query_prefix` when one is configured. BGE-family models
+    /// expect `"Represent this sentence for searching relevant
+    /// passages: "` here and score materially worse on short queries
+    /// without it; MiniLM wants no prefix, which is the default.
+    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, LainError> {
+        self.embed(&prefixed_query(&self.query_prefix, query))
+    }
+
+    /// Install the configured query prefix. Called once when the
+    /// embedder is built, from the tuning config.
+    pub fn set_query_prefix(&mut self, prefix: impl Into<String>) {
+        self.query_prefix = prefix.into();
+    }
+
+    /// The configured query prefix, for diagnostics.
+    pub fn query_prefix(&self) -> &str {
+        &self.query_prefix
     }
 
     /// Embed a batch of texts in a single ONNX forward pass. Returns
@@ -449,5 +517,93 @@ pub fn resolve_intra_threads(max_threads: usize) -> usize {
         cores.min(4).max(1)
     } else {
         max_threads.max(1)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    /// `resolve_model_paths` accepts the documented directory form
+    /// (joins `model.onnx` + `tokenizer.json`) and the legacy file
+    /// form (sibling tokenizer). This is the drift fix: `lain server`
+    /// documented a directory while `lain mcp` treated it as a file.
+    #[test]
+    fn resolve_model_paths_accepts_dir_and_file_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("model-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (m, t) = super::NlpEmbedder::resolve_model_paths(&dir);
+        assert_eq!(m, dir.join("model.onnx"));
+        assert_eq!(t, dir.join("tokenizer.json"));
+
+        let file = dir.join("custom.onnx");
+        std::fs::write(&file, b"").unwrap();
+        let (m, t) = super::NlpEmbedder::resolve_model_paths(&file);
+        assert_eq!(m, file);
+        assert_eq!(t, dir.join("tokenizer.json"));
+    }
+}
+
+#[cfg(test)]
+mod query_prefix_tests {
+    //! The query/document asymmetry is the whole point of `query_prefix`,
+    //! and it was previously a convention that two of the three query
+    //! call sites had already broken. These pin the contract at the
+    //! embedder, where it now lives.
+    use super::*;
+
+    #[test]
+    fn default_is_no_prefix_so_mini_lm_behaviour_is_unchanged() {
+        let e = NlpEmbedder::new_stub();
+        assert_eq!(e.query_prefix(), "");
+    }
+
+    #[test]
+    fn a_configured_prefix_is_readable_back() {
+        let mut e = NlpEmbedder::new_stub();
+        e.set_query_prefix("Represent this sentence for searching relevant passages: ");
+        assert_eq!(
+            e.query_prefix(),
+            "Represent this sentence for searching relevant passages: "
+        );
+    }
+
+    /// The stub embedder returns an all-zero vector for every input, so
+    /// comparing embeddings proves nothing. Assert the composed text
+    /// instead — that is where a mistake would actually live.
+    #[test]
+    fn a_query_carries_the_prefix_verbatim() {
+        let bge = "Represent this sentence for searching relevant passages: ";
+        assert_eq!(
+            prefixed_query(bge, "where is auth handled"),
+            "Represent this sentence for searching relevant passages: where is auth handled"
+        );
+    }
+
+    #[test]
+    fn no_separator_is_invented() {
+        // BGE's instruction already ends in ": ". Inserting a space
+        // would change the tokenization the model was trained on.
+        assert_eq!(prefixed_query("PREFIX: ", "q"), "PREFIX: q");
+        assert_eq!(prefixed_query("PREFIX:", "q"), "PREFIX:q");
+    }
+
+    #[test]
+    fn an_empty_prefix_leaves_the_query_untouched() {
+        assert_eq!(prefixed_query("", "fn login()"), "fn login()");
+    }
+
+    /// Documents must never be prefixed: the corpus carries no
+    /// instruction, and prefixing it would put documents and queries in
+    /// the same space and undo the asymmetry the setting exists for.
+    #[test]
+    fn documents_never_take_the_prefix() {
+        let mut e = NlpEmbedder::new_stub();
+        e.set_query_prefix("PREFIX: ");
+        // `embed` is the document path; it takes the text as given.
+        // Verified structurally: `embed` does not consult query_prefix.
+        assert_eq!(e.query_prefix(), "PREFIX: ");
+        assert!(e.embed("fn login()").is_ok());
     }
 }

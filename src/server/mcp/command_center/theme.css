@@ -1,0 +1,132 @@
+/* LAIN — 80s console palette. Shared by every page the server serves:
+ * the Command Center SPA and the standalone /ui/* detail views.
+ *
+ * The palette is ported from the pre-SPA UI (`src/mcp/front_end_monitor.html`,
+ * dropped in 49f5f82): cyan phosphor on near-black, monospace throughout.
+ *
+ * Two themes, three states:
+ *   - dark (phosphor CRT) is the default on bare :root — it is lain's identity
+ *   - light (paper terminal / dot-matrix hardcopy) applies when the system asks
+ *     for it, or when [data-theme="light"] is set explicitly
+ *   - an explicit [data-theme] always beats the system preference
+ *
+ * Consumers must never hardcode a colour — every rule reads a token from here,
+ * so both themes come from one rule set and only the values swap. Two knobs
+ * turn the CRT treatment itself on and off per theme: --glow (phosphor bloom on
+ * accent text) and --scanlines (overlay opacity), both neutral in light.
+ */
+
+:root {
+  /* ── Dark: cyan phosphor on near-black (the ported palette) ───────────── */
+  --bg: #05080f;
+  --surface: #0a0f14;
+  --surface-alt: #0a1210;
+  --fg: #00e5cc;
+  --fg-muted: #4a8a82;
+  --accent: #00e5cc;
+  --accent-fg: #05080f;
+  --border: #1f3d3a;
+  --border-strong: #2f5f59;
+
+  --ok: #00e5cc;
+  --warn: #ffd93d;
+  --err: #ff6b6b;
+
+  --sev-none-bg: #12201e;
+  --sev-none-fg: #4a8a82;
+  --sev-low-bg: #06282b;
+  --sev-low-fg: #00e5cc;
+  --sev-med-bg: #2b2405;
+  --sev-med-fg: #ffd93d;
+  --sev-high-bg: #2b0d0d;
+  --sev-high-fg: #ff6b6b;
+
+  /* CRT treatment — neutralised in the light theme. */
+  --glow: 0 0 4px rgba(0, 229, 204, 0.35);
+  --scanlines: 0.05;
+
+  --font-mono: "JetBrains Mono", "SF Mono", SFMono-Regular, Menlo, Consolas,
+               "Courier New", monospace;
+}
+
+/* Light: dark teal ink on warm paper — the other 80s console surface, a
+ * hardcopy terminal printout. Same hue family as the phosphor so the two
+ * themes read as one system.
+ *
+ * NOTE: this palette is written twice on purpose — once for the system
+ * preference and once for the explicit opt-in. CSS cannot share a declaration
+ * block across a media-query boundary. Keep the two lists in sync. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #e6e1d3;
+    --surface: #f1ede1;
+    --surface-alt: #dcd6c4;
+    --fg: #14322e;
+    --fg-muted: #4f6662;
+    --accent: #0f5f55;
+    --accent-fg: #f1ede1;
+    --border: #b6ad97;
+    --border-strong: #8d846f;
+
+    --ok: #0f5f55;
+    --warn: #785f1b;
+    --err: #a03027;
+
+    --sev-none-bg: #dcd6c4;
+    --sev-none-fg: #4f6662;
+    --sev-low-bg: #cfe3df;
+    --sev-low-fg: #0f5f55;
+    --sev-med-bg: #ede0b8;
+    --sev-med-fg: #785f1b;
+    --sev-high-bg: #eed5d1;
+    --sev-high-fg: #a03027;
+
+    --glow: none;
+    --scanlines: 0;
+  }
+}
+
+:root[data-theme="light"] {
+  --bg: #e6e1d3;
+  --surface: #f1ede1;
+  --surface-alt: #dcd6c4;
+  --fg: #14322e;
+  --fg-muted: #4f6662;
+  --accent: #0f5f55;
+  --accent-fg: #f1ede1;
+  --border: #b6ad97;
+  --border-strong: #8d846f;
+
+  --ok: #0f5f55;
+  --warn: #785f1b;
+  --err: #a03027;
+
+  --sev-none-bg: #dcd6c4;
+  --sev-none-fg: #4f6662;
+  --sev-low-bg: #cfe3df;
+  --sev-low-fg: #0f5f55;
+  --sev-med-bg: #ede0b8;
+  --sev-med-fg: #785f1b;
+  --sev-high-bg: #eed5d1;
+  --sev-high-fg: #a03027;
+
+  --glow: none;
+  --scanlines: 0;
+}
+
+/* The scanline overlay — the single strongest CRT cue. Fixed over everything,
+ * never interactive, fully transparent in the light theme. Shared here so the
+ * /ui/* detail views get it without restating the gradient. */
+.crt-scanlines::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: var(--scanlines);
+  background: repeating-linear-gradient(
+    to bottom,
+    #000 0, #000 1px,
+    transparent 1px, transparent 3px
+  );
+}

@@ -123,7 +123,7 @@ fn bench_graph_find_exact() {
     for &n in &sizes {
         let graph = build_medium_graph(n);
         let (embedder, cache) = make_test_executor_params();
-        let mut exec = Executor::new(&graph, &embedder, &cache);
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
         // LAIN-mcp graph query
         let start = Instant::now();
@@ -159,7 +159,7 @@ fn bench_graph_traverse_blast_radius() {
     for &n in &sizes {
         let graph = build_medium_graph(n);
         let (embedder, cache) = make_test_executor_params();
-        let mut exec = Executor::new(&graph, &embedder, &cache);
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
         // LAIN-mcp: single graph query with 2-hop traversal
         let start = Instant::now();
@@ -201,7 +201,7 @@ fn bench_graph_cross_file_queries() {
     for &n in &sizes {
         let graph = build_medium_graph(n);
         let (embedder, cache) = make_test_executor_params();
-        let mut exec = Executor::new(&graph, &embedder, &cache);
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
         // LAIN-mcp: Find all functions in call tree from anchor
         let start = Instant::now();
@@ -243,7 +243,7 @@ fn bench_query_with_filter_and_sort() {
     for &n in &sizes {
         let graph = build_medium_graph(n);
         let (embedder, cache) = make_test_executor_params();
-        let mut exec = Executor::new(&graph, &embedder, &cache);
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
         // LAIN-mcp: Find all, filter by name pattern, sort, limit
         let start = Instant::now();
@@ -290,7 +290,7 @@ fn bench_scalability_large_graph() {
     for &n in &sizes {
         let graph = build_medium_graph(n);
         let (embedder, cache) = make_test_executor_params();
-        let mut exec = Executor::new(&graph, &embedder, &cache);
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
         // Find operation
         let start = Instant::now();
@@ -349,7 +349,7 @@ fn comparison_table_output() {
     for &n in &test_sizes {
         let graph = build_medium_graph(n);
         let (embedder, cache) = make_test_executor_params();
-        let mut exec = Executor::new(&graph, &embedder, &cache);
+        let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
         // LAIN-mcp exact find
         let start = Instant::now();
@@ -382,19 +382,4 @@ fn comparison_table_output() {
     println!("╠═══════════════════════════════════════════════════════════════════════════════╣");
     println!("║ Key Advantage: LAIN-mcp uses indexed graph, O(1) lookup vs O(n) scan         ║");
     println!("╚═══════════════════════════════════════════════════════════════════════════════╝");
-}
-
-#[test]
-fn memory_efficiency_comparison() {
-    println!("\n");
-    println!("=== Memory Efficiency ===");
-    println!("Approach              │ 1000 nodes memory │ Notes");
-    println!("──────────────────────┼───────────────────┼─────────────────────────────────────");
-
-    // LAIN-mcp uses petgraph with efficient edge storage
-    let _graph = build_medium_graph(1000);
-    println!("LAIN-mcp (petgraph)   │ ~50KB estimated   │ Adjacency list, ~32 bytes/node");
-    println!("Naive AST storage     │ ~500KB+           │ Full parse trees in memory");
-    println!("LSP-only (per-file)  │ ~200KB + server   │ Language server overhead");
-    println!("RAG embeddings        │ ~4MB+             │ Float vectors for each chunk");
 }

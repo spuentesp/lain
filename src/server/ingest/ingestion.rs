@@ -2,10 +2,11 @@ use crate::error::LainError;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{GraphEdge, GraphNode};
+use crate::server::overlay::VolatileOverlay;
 use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -46,7 +47,12 @@ impl LainServer {
         };
 
         if files.is_empty() {
-            info!("No files to process.");
+            // Same trap as the federation pipeline: a deletion-only
+            // commit produces an empty scan list, and returning here
+            // without sweeping strands the deleted file's nodes while
+            // advancing the marker past the commit that removed them.
+            info!("No files to scan; sweeping orphans.");
+            sweep_orphans(&self.config.workspace, &self.graph, &self.git.lock());
             self.graph.set_last_commit(latest_commit)?;
             return Ok(());
         }
@@ -87,6 +93,20 @@ impl LainServer {
 
         let mut scanned = 0usize;
         let mut failed = 0usize;
+        // True when this pass did NOT cover every changed file: either the
+        // scan-phase timeout aborted the remaining tasks, or `max_files_per_scan`
+        // capped the input. A partial pass must persist whatever it produced but
+        // must NOT advance `set_last_commit` — otherwise the graph claims to be
+        // current at HEAD while missing files, which is worse than being visibly
+        // behind. See the guarded `set_last_commit` at the end of this function.
+        let mut partial = files.len() > files_to_scan.len();
+        if partial {
+            warn!(
+                "Scan capped at max_files_per_scan={} of {} changed files;                  this pass is partial and will not advance the indexed-commit marker",
+                files_to_scan.len(),
+                files.len()
+            );
+        }
         let scan_timeout = std::time::Duration::from_secs(self.tuning.ingestion.scan_timeout_secs);
 
         while let Some(res) = set.join_next().await {
@@ -94,6 +114,7 @@ impl LainServer {
             if scan_start.elapsed() >= scan_timeout {
                 warn!("Scan phase timed out after {:?}, aborting {} remaining tasks",
                       scan_timeout, set.len());
+                partial = true;
                 set.abort_all();
                 break;
             }
@@ -121,11 +142,31 @@ impl LainServer {
                     // Incremental flush every batch_size files
                     if batch_nodes.len() >= batch_size {
                         info!("Flush phase 1: writing {} nodes ({} files scanned)", batch_nodes.len(), scanned);
-                        if let Err(e) = self.graph.insert_nodes_batch(&batch_nodes) {
+                        // Replace rather than insert, so a re-scan drops the
+                        // symbols a file no longer defines instead of layering
+                        // new nodes on top of stale ones. Scan results arrive
+                        // whole-file and this flush runs between chunks, so
+                        // every path here has all of its nodes in this batch.
+                        // One call per flush, not per file: per-file would take
+                        // a write lock hundreds of times while readers query.
+                        let paths: Vec<String> = batch_nodes
+                            .iter()
+                            .map(|n| n.path.clone())
+                            .collect::<HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                             warn!("Batch node write error: {}", e);
                         }
-                        if let Err(e) = self.graph.insert_edges_batch(&batch_edges) {
-                            warn!("Batch edge write error: {}", e);
+                        insert_edges_best_effort(&self.graph, &batch_edges, "batch");
+                        // Durably persist the flush. The in-memory inserts above
+                        // are lost if the outer re-index timeout drops this task,
+                        // which is why a 90s budget could never converge: every
+                        // batch of parsing was discarded. Writing here means a
+                        // killed run still leaves progress on disk and successive
+                        // runs converge instead of restarting from the same graph.
+                        if let Err(e) = self.graph.save_to_disk().await {
+                            warn!("Batch persist error: {}", e);
                         }
                         batch_nodes.clear();
                         batch_edges.clear();
@@ -141,12 +182,16 @@ impl LainServer {
         // Final partial flush
         if !batch_nodes.is_empty() {
             info!("Flush phase 1 (final): writing {} nodes", batch_nodes.len());
-            if let Err(e) = self.graph.insert_nodes_batch(&batch_nodes) {
+            let paths: Vec<String> = batch_nodes
+                .iter()
+                .map(|n| n.path.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                 warn!("Final batch node write error: {}", e);
             }
-            if let Err(e) = self.graph.insert_edges_batch(&batch_edges) {
-                warn!("Final batch edge write error: {}", e);
-            }
+            insert_edges_best_effort(&self.graph, &batch_edges, "final batch");
         }
 
         info!("Scanned {} files, {} failed, collected {} external refs, {} static refs, {} pattern refs",
@@ -154,166 +199,26 @@ impl LainServer {
 
         // 3. Resolve Phase: Link external references to internal nodes (CALLS/USES)
         info!("Resolving topology: Linking {} external references...", all_external_refs.len());
-        let mut call_edges = Vec::new();
-        for (source_id, ref_loc) in all_external_refs {
-            let path_str = ref_loc.path.to_string_lossy().to_string();
-            if let Some(target_node) = self.graph.get_node_at_location(&path_str, ref_loc.line) {
-                if target_node.id != source_id {
-                    call_edges.push(GraphEdge::new(EdgeType::Calls, source_id, target_node.id));
-                }
-            }
-        }
+        let call_edges =
+            super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs);
         info!("Ingesting {} call edges", call_edges.len());
-        self.graph.insert_edges_batch(&call_edges)?;
+        insert_edges_reporting(&self.graph, &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
         info!("Resolving {} tree-sitter static references...", all_static_refs.len());
-        {
-            // Build name → node IDs index for O(1) target resolution
-            let mut name_index: HashMap<String, Vec<(String, NodeType)>> = HashMap::new();
-            for node in self.graph.get_all_nodes() {
-                name_index
-                    .entry(node.name.clone())
-                    .or_default()
-                    .push((node.id.clone(), node.node_type.clone()));
-            }
-
-            let mut static_edges: Vec<GraphEdge> = Vec::new();
-            let mut seen: HashSet<(String, String)> = HashSet::new();
-
-            for sr in all_static_refs {
-                let Some(source_node) =
-                    self.graph.get_node_at_location(&sr.file_path, sr.source_line)
-                else {
-                    continue;
-                };
-
-                let Some(candidates) = name_index.get(&sr.target_name) else {
-                    continue;
-                };
-
-                for (target_id, target_type) in candidates {
-                    if *target_id == source_node.id {
-                        continue; // no self-edges
-                    }
-                    // Uses edges only towards type-level nodes
-                    if matches!(sr.edge_type, EdgeType::Uses)
-                        && !matches!(
-                            target_type,
-                            NodeType::Struct
-                                | NodeType::Enum
-                                | NodeType::Trait
-                                | NodeType::Class
-                                | NodeType::Interface
-                        )
-                    {
-                        continue;
-                    }
-                    let key = (source_node.id.clone(), target_id.clone());
-                    if seen.insert(key) {
-                        static_edges.push(GraphEdge::new(
-                            sr.edge_type.clone(),
-                            source_node.id.clone(),
-                            target_id.clone(),
-                        ));
-                    }
-                }
-            }
-
-            info!("Ingesting {} static tree-sitter edges", static_edges.len());
-            self.graph.insert_edges_batch(&static_edges)?;
-        }
+        let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs);
+        info!("Ingesting {} static tree-sitter edges", static_edges.len());
+        insert_edges_reporting(&self.graph, &static_edges, "static")?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
         info!("Resolving {} pattern references for cross-boundary detection...", all_pattern_refs.len());
-        {
-            use std::collections::HashMap as Map;
-            // Pre-compute file path → node ID for O(1) lookups
-            let file_nodes: Map<String, GraphNode> = self.graph.get_all_nodes()
-                .into_iter()
-                .filter(|n| matches!(n.node_type, NodeType::File))
-                .map(|n| (n.path.clone(), n))
-                .collect();
-
-            // Group by pattern value: pattern_value -> list of file paths that reference it
-            let mut value_to_files: Map<String, Vec<String>> = Map::new();
-            for pr in &all_pattern_refs {
-                // Deduplicate by file path - multiple refs from same file count as one
-                let entry = value_to_files.entry(pr.value.clone()).or_default();
-                if !entry.contains(&pr.file_path) {
-                    entry.push(pr.file_path.clone());
-                }
-            }
-
-            // Score patterns: count cross-directory pairs. Higher = more interesting.
-            // Only keep patterns with 2-20 references (too few = noise, too many = common libs)
-            let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
-            for (value, files) in value_to_files {
-                if files.len() < 2 || files.len() > 20 {
-                    continue;
-                }
-                // Count unique directories
-                let mut dirs: HashSet<String> = HashSet::new();
-                for f in &files {
-                    if let Some(parent) = std::path::Path::new(f).parent() {
-                        dirs.insert(parent.to_string_lossy().to_string());
-                    }
-                }
-                if dirs.len() < 2 {
-                    continue;
-                }
-                // Score = number of directory pairs (combinatorial size of coupling)
-                let pairs = dirs.len() * (dirs.len() - 1) / 2;
-                scored.push((pairs, value, files));
-            }
-
-            // Sort by score descending; take top patterns until edge budget exhausted
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
-            // Proportional cap: 10 edges per pattern, max 200. Prevents combinatorial blowup while scaling with pattern count.
-            let max_pattern_edges = (scored.len() * 10).min(200);
-            let mut pattern_edges: Vec<GraphEdge> = Vec::new();
-            let mut seen: HashSet<(String, String)> = HashSet::new();
-
-            for (_score, _value, files) in scored {
-                if pattern_edges.len() >= max_pattern_edges {
-                    break;
-                }
-                // Group by directory, pick one representative file per dir
-                let mut dirs: Map<String, String> = Map::new(); // dir -> representative file
-                for f in &files {
-                    if let Some(parent) = std::path::Path::new(f).parent() {
-                        let parent_str = parent.to_string_lossy().to_string();
-                        dirs.entry(parent_str).or_insert_with(|| f.clone());
-                    }
-                }
-                let all_dirs: Vec<_> = dirs.into_iter().collect();
-                // Connect representative files across directory pairs (1 edge per pair)
-                for i in 0..all_dirs.len() {
-                    if pattern_edges.len() >= max_pattern_edges {
-                        break;
-                    }
-                    for j in (i + 1)..all_dirs.len() {
-                        let (_dir_a, file_a) = &all_dirs[i];
-                        let (_dir_b, file_b) = &all_dirs[j];
-                        let key = (file_a.clone(), file_b.clone());
-                        if seen.insert(key) {
-                            if let (Some(node_a), Some(node_b)) = (
-                                file_nodes.get(file_a),
-                                file_nodes.get(file_b),
-                            ) {
-                                pattern_edges.push(GraphEdge::new(EdgeType::Pattern, node_a.id.clone(), node_b.id.clone()));
-                            }
-                        }
-                        if pattern_edges.len() >= max_pattern_edges {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
-            self.graph.insert_edges_batch(&pattern_edges)?;
-        }
+        let pattern_edges = super::resolve::resolve_pattern_edges(
+            &self.graph,
+            &all_pattern_refs,
+            super::resolve::PatternLimits::DEFAULT,
+        );
+        info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
+        insert_edges_reporting(&self.graph, &pattern_edges, "pattern")?;
 
         // 4. Temporal Analysis Phase: Co-changes
         let co_change_pairs = {
@@ -342,6 +247,9 @@ impl LainServer {
         let nlp_prewarm_count = self.tuning.ingestion.nlp_prewarm_count;
         let nlp_batch_size = self.tuning.ingestion.nlp_batch_size;
         let nlp_budget_per_pass = self.tuning.ingestion.nlp_budget_per_pass;
+        // The NLP pass runs detached, so it needs its own copy of the
+        // workspace root to resolve workspace-relative node paths.
+        let ws_for_nlp = self.config.workspace.clone();
         tokio::spawn(async move {
             let all_nodes = graph_clone.get_all_nodes();
             // Top anchors get embedded first (pre-warm)
@@ -360,7 +268,7 @@ impl LainServer {
             for node in &prewarm {
                 if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                     if gn.embedding.is_none() {
-                        let text = crate::tools::utils::build_enriched_text(&gn);
+                        let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                         if let Ok(emb) = embedder_clone.embed(&text) {
                             gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
                             if graph_clone.insert_node(&gn).is_ok() {
@@ -381,7 +289,7 @@ impl LainServer {
                 for node in &to_embed {
                     if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                         if gn.embedding.is_none() {
-                            let text = crate::tools::utils::build_enriched_text(&gn);
+                            let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                             if let Ok(emb) = embedder_clone.embed(&text) {
                                 gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
                                 let _ = graph_clone.insert_node(&gn);
@@ -394,8 +302,57 @@ impl LainServer {
             info!("NLP lazy enrichment pass complete.");
         });
 
-        self.graph.set_last_commit(latest_commit)?;
+        // Orphan sweep. Reclaims nodes whose file is no longer tracked: files
+        // deleted or renamed outside this pass's view, and any backlog left by
+        // builds that never deleted anything. Gated on a complete pass — after
+        // a partial one, "not scanned this round" is indistinguishable from
+        // "gone", and sweeping would delete live nodes.
+        if !partial {
+            match self.git.lock().get_all_tracked_files() {
+                Ok(tracked_paths) => {
+                    // Reduced with the same helper the scanner mints node paths
+                    // with. Comparing git's absolute paths against relative node
+                    // keys would mark every node an orphan, and that reads as a
+                    // full sweep rather than as an error.
+                    let tracked: HashSet<String> = tracked_paths
+                        .iter()
+                        .map(|p| crate::graph::graph_path(&self.config.workspace, p))
+                        .collect();
+                    if tracked.is_empty() {
+                        warn!("Skipping orphan sweep: git reported no tracked files");
+                    } else {
+                        match self.graph.prune_orphans(&tracked) {
+                            Ok(0) => info!("Orphan sweep: nothing to prune"),
+                            Ok(n) => info!("Orphan sweep: pruned {n} nodes for untracked files"),
+                            Err(e) => warn!("Orphan sweep failed: {e}"),
+                        }
+                    }
+                }
+                Err(e) => warn!("Skipping orphan sweep: cannot list tracked files: {e}"),
+            }
+        }
+
+        // Only claim "fully indexed through <commit>" when this pass actually
+        // covered every changed file. A partial pass still persists its nodes and
+        // edges below, so the work is kept and the next run resumes from it — but
+        // the marker stays behind so `get_health` keeps reporting the true
+        // commits-behind count instead of silently claiming to be current.
+        if partial {
+            warn!(
+                "Partial index pass ({} files scanned, {} failed);                  leaving indexed-commit marker unchanged",
+                scanned, failed
+            );
+        } else {
+            self.graph.set_last_commit(latest_commit)?;
+        }
         self.graph.save_to_disk().await?;
+
+        // Bump the overlay freshness so the indexer doesn't read as
+        // "stale" the moment the server comes up. The index path
+        // doesn't insert through the overlay (it writes the static
+        // graph), so without this touch every freshly-indexed server
+        // would start with `Overlay freshness: stale`.
+        self.overlay.touch();
 
         let duration = scan_start.elapsed();
         info!("Lain fully restored and ready in {:?}", duration);
@@ -424,7 +381,7 @@ impl LainServer {
         let symbols = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
-            match lsp.get_document_symbols_hierarchical(path).await {
+            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("No LSP symbols for changed file {:?}: {}", path, e);
@@ -455,11 +412,83 @@ impl LainServer {
 /// block the per-repo write on it. The signature takes `&GitSensor` (not
 /// `Arc<Mutex<GitSensor>>`) so the caller decides the locking strategy;
 /// `RepoIndex::index` wraps the lock in a single `let _g = ...` scope.
+/// Prune nodes whose file is no longer tracked by git.
+///
+/// Split out so both exits from `index_one_repo` run it. The
+/// `files.is_empty()` early return did not, and that was a permanent
+/// leak: `get_changed_files_since` deliberately skips paths that are no
+/// longer on disk, so a commit that *only* deletes files yields an
+/// empty scan list. The early return then advanced the last-commit
+/// marker past that deletion, so no later pass ever revisited it and
+/// the deleted file's symbols stayed in the graph forever. That is the
+/// most likely reason a long-lived index carried more nodes than a
+/// fresh index of the same commit (observed: 3769 vs 3340).
+/// Insert edges and report any the graph refused.
+///
+/// `insert_edges_batch` skips edges whose endpoints are missing from the
+/// index — necessary, since an edge to a node that isn't there can't be
+/// added, but it must never be silent: that silence is what hid 37 of
+/// 335 files whose symbols had no `Contains` edge from their own file
+/// node, in a graph that reported itself healthy.
+///
+/// `label` names the phase ("call", "static", "batch") so a warning
+/// says which part of the pipeline lost them.
+fn insert_edges_reporting(
+    db: &GraphDatabase,
+    edges: &[GraphEdge],
+    label: &str,
+) -> Result<(), LainError> {
+    match db.insert_edges_batch(edges) {
+        Ok(0) => Ok(()),
+        Ok(dropped) => {
+            warn!(
+                "{dropped} of {} {label} edges dropped (endpoint not in index)",
+                edges.len()
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Same as [`insert_edges_reporting`] but for the flush path, where a
+/// write error is logged and the pass continues rather than aborting.
+fn insert_edges_best_effort(db: &GraphDatabase, edges: &[GraphEdge], label: &str) {
+    if let Err(e) = insert_edges_reporting(db, edges, label) {
+        warn!("{label} edge write error: {e}");
+    }
+}
+
+fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
+    match git.get_all_tracked_files() {
+        Ok(tracked_paths) => {
+            // Reduced with the same helper the scanner mints node paths with:
+            // git returns absolute paths, and comparing those to relative node
+            // keys marks every node an orphan rather than raising an error.
+            let tracked: HashSet<String> = tracked_paths
+                .iter()
+                .map(|p| crate::graph::graph_path(path, p))
+                .collect();
+            if tracked.is_empty() {
+                warn!("[federation] Skipping orphan sweep for {:?}: no tracked files", path);
+            } else {
+                match db.prune_orphans(&tracked) {
+                    Ok(0) => info!("[federation] {:?}: orphan sweep found nothing", path),
+                    Ok(n) => info!("[federation] {:?}: orphan sweep pruned {n} nodes", path),
+                    Err(e) => warn!("[federation] {:?}: orphan sweep failed: {e}", path),
+                }
+            }
+        }
+        Err(e) => warn!("[federation] Skipping orphan sweep for {:?}: {e}", path),
+    }
+}
+
 pub async fn index_one_repo(
     path: &Path,
     db: &GraphDatabase,
     lsp: &LspPool,
     git: &GitSensor,
+    overlay: &VolatileOverlay,
 ) -> Result<(), LainError> {
     let scan_start = std::time::Instant::now();
     let (latest_commit, latest_time) = git.get_latest_commit_info()?;
@@ -483,7 +512,12 @@ pub async fn index_one_repo(
     };
 
     if files.is_empty() {
-        info!("[federation] No files to process for {:?}.", path);
+        // "No files to scan" is not "nothing changed": a deletion-only
+        // commit lands here, because `get_changed_files_since` skips
+        // paths that are gone from disk. Sweep before advancing the
+        // marker, or those nodes are stranded permanently.
+        info!("[federation] No files to scan for {:?}; sweeping orphans.", path);
+        sweep_orphans(path, db, git);
         db.set_last_commit(latest_commit)?;
         db.save_to_disk_sync()?;
         return Ok(());
@@ -502,10 +536,6 @@ pub async fn index_one_repo(
     const COCHANGE_COMMIT_WINDOW: usize = 100;
     const COCHANGE_MIN_PAIR_COUNT: usize = 2;
     const COCHANGE_MAX_COMMIT_FILES: usize = 50;
-    const PATTERN_MAX_REF_COUNT: usize = 20;
-    const PATTERN_MIN_DIRS: usize = 2;
-    const PATTERN_MAX_EDGES: usize = 200;
-    const PATTERN_EDGES_PER_VALUE: usize = 10;
 
     let files_to_scan: Vec<_> = files.into_iter().collect();
     let file_chunks: Vec<Vec<PathBuf>> = files_to_scan
@@ -556,12 +586,22 @@ pub async fn index_one_repo(
                 }
 
                 if batch_nodes.len() >= INGEST_BATCH_SIZE {
-                    if let Err(e) = db.insert_nodes_batch(&batch_nodes) {
+                    // Replace, so a re-scan drops what a file no longer
+                    // defines. Mirrors the single-workspace pipeline; without
+                    // it a federated repo accumulates a node for every symbol
+                    // ever deleted or moved. Scan results arrive whole-file and
+                    // this runs between chunks, so each path here has all of
+                    // its nodes in this batch.
+                    let paths: Vec<String> = batch_nodes
+                        .iter()
+                        .map(|n| n.path.clone())
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
                         warn!("[federation] Batch node write error: {}", e);
                     }
-                    if let Err(e) = db.insert_edges_batch(&batch_edges) {
-                        warn!("[federation] Batch edge write error: {}", e);
-                    }
+                    insert_edges_best_effort(db, &batch_edges, "batch");
                     batch_nodes.clear();
                     batch_edges.clear();
                 }
@@ -574,12 +614,16 @@ pub async fn index_one_repo(
     }
 
     if !batch_nodes.is_empty() {
-        if let Err(e) = db.insert_nodes_batch(&batch_nodes) {
+        let paths: Vec<String> = batch_nodes
+            .iter()
+            .map(|n| n.path.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
             warn!("[federation] Final batch node write error: {}", e);
         }
-        if let Err(e) = db.insert_edges_batch(&batch_edges) {
-            warn!("[federation] Final batch edge write error: {}", e);
-        }
+        insert_edges_best_effort(db, &batch_edges, "final batch");
     }
 
     info!(
@@ -593,149 +637,23 @@ pub async fn index_one_repo(
     );
 
     // Resolve phase: link external references to internal nodes (CALLS)
-    let mut call_edges: Vec<GraphEdge> = Vec::new();
-    for (source_id, ref_loc) in all_external_refs {
-        let path_str = ref_loc.path.to_string_lossy().to_string();
-        if let Some(target_node) = db.get_node_at_location(&path_str, ref_loc.line) {
-            if target_node.id != source_id {
-                call_edges.push(GraphEdge::new(EdgeType::Calls, source_id, target_node.id));
-            }
-        }
-    }
+    let call_edges = super::resolve::resolve_call_edges(db, path, &all_external_refs);
     info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
-    db.insert_edges_batch(&call_edges)?;
+    insert_edges_reporting(db, &call_edges, "call")?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
-    {
-        let mut name_index: HashMap<String, Vec<(String, NodeType)>> = HashMap::new();
-        for node in db.get_all_nodes() {
-            name_index
-                .entry(node.name.clone())
-                .or_default()
-                .push((node.id.clone(), node.node_type.clone()));
-        }
-
-        let mut static_edges: Vec<GraphEdge> = Vec::new();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-
-        for sr in all_static_refs {
-            let Some(source_node) = db.get_node_at_location(&sr.file_path, sr.source_line) else {
-                continue;
-            };
-            let Some(candidates) = name_index.get(&sr.target_name) else {
-                continue;
-            };
-            for (target_id, target_type) in candidates {
-                if *target_id == source_node.id {
-                    continue;
-                }
-                if matches!(sr.edge_type, EdgeType::Uses)
-                    && !matches!(
-                        target_type,
-                        NodeType::Struct
-                            | NodeType::Enum
-                            | NodeType::Trait
-                            | NodeType::Class
-                            | NodeType::Interface
-                    )
-                {
-                    continue;
-                }
-                let key = (source_node.id.clone(), target_id.clone());
-                if seen.insert(key) {
-                    static_edges.push(GraphEdge::new(
-                        sr.edge_type.clone(),
-                        source_node.id.clone(),
-                        target_id.clone(),
-                    ));
-                }
-            }
-        }
-        info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
-        db.insert_edges_batch(&static_edges)?;
-    }
+    let static_edges = super::resolve::resolve_static_edges(db, &all_static_refs);
+    info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
+    insert_edges_reporting(db, &static_edges, "static")?;
 
     // Pattern resolve: cross-boundary detection
-    {
-        let file_nodes: HashMap<String, GraphNode> = db.get_all_nodes()
-            .into_iter()
-            .filter(|n| matches!(n.node_type, NodeType::File))
-            .map(|n| (n.path.clone(), n))
-            .collect();
-
-        let mut value_to_files: HashMap<String, Vec<String>> = HashMap::new();
-        for pr in &all_pattern_refs {
-            let entry = value_to_files.entry(pr.value.clone()).or_default();
-            if !entry.contains(&pr.file_path) {
-                entry.push(pr.file_path.clone());
-            }
-        }
-
-        let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
-        for (value, files) in value_to_files {
-            if files.len() < 2 || files.len() > PATTERN_MAX_REF_COUNT {
-                continue;
-            }
-            let mut dirs: HashSet<String> = HashSet::new();
-            for f in &files {
-                if let Some(parent) = std::path::Path::new(f).parent() {
-                    dirs.insert(parent.to_string_lossy().to_string());
-                }
-            }
-            if dirs.len() < PATTERN_MIN_DIRS {
-                continue;
-            }
-            let pairs = dirs.len() * (dirs.len() - 1) / 2;
-            scored.push((pairs, value, files));
-        }
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-
-        let max_pattern_edges = (scored.len() * PATTERN_EDGES_PER_VALUE).min(PATTERN_MAX_EDGES);
-        let mut pattern_edges: Vec<GraphEdge> = Vec::new();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-
-        for (_score, _value, files) in scored {
-            if pattern_edges.len() >= max_pattern_edges {
-                break;
-            }
-            let mut dirs: HashMap<String, String> = HashMap::new();
-            for f in &files {
-                if let Some(parent) = std::path::Path::new(f).parent() {
-                    let parent_str = parent.to_string_lossy().to_string();
-                    dirs.entry(parent_str).or_insert_with(|| f.clone());
-                }
-            }
-            let all_dirs: Vec<_> = dirs.into_iter().collect();
-            for i in 0..all_dirs.len() {
-                if pattern_edges.len() >= max_pattern_edges {
-                    break;
-                }
-                for j in (i + 1)..all_dirs.len() {
-                    let (_dir_a, file_a) = &all_dirs[i];
-                    let (_dir_b, file_b) = &all_dirs[j];
-                    let key = (file_a.clone(), file_b.clone());
-                    if seen.insert(key) {
-                        if let (Some(node_a), Some(node_b)) = (
-                            file_nodes.get(file_a),
-                            file_nodes.get(file_b),
-                        ) {
-                            pattern_edges.push(GraphEdge::new(
-                                EdgeType::Pattern,
-                                node_a.id.clone(),
-                                node_b.id.clone(),
-                            ));
-                        }
-                    }
-                    if pattern_edges.len() >= max_pattern_edges {
-                        break;
-                    }
-                }
-            }
-        }
-
-        info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
-        db.insert_edges_batch(&pattern_edges)?;
-    }
+    let pattern_edges = super::resolve::resolve_pattern_edges(
+        db,
+        &all_pattern_refs,
+        super::resolve::PatternLimits::FEDERATION,
+    );
+    info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
+    db.insert_edges_batch(&pattern_edges)?;
 
     // Co-change analysis
     let co_change_pairs = git
@@ -755,6 +673,13 @@ pub async fn index_one_repo(
     db.calculate_anchor_scores()?;
     db.calculate_depths()?;
 
+    // Orphan sweep. This function has no scan-phase timeout and no
+    // max-files cap, and the reduce loop always drains the JoinSet, so
+    // reaching this point means the pass covered every changed file —
+    // there is no partial case to gate on here, unlike the
+    // single-workspace pipeline.
+    sweep_orphans(path, db, git);
+
     db.set_last_commit(latest_commit)?;
     db.save_to_disk_sync()?;
 
@@ -763,5 +688,6 @@ pub async fn index_one_repo(
         path,
         scan_start.elapsed()
     );
+    overlay.touch();
     Ok(())
 }

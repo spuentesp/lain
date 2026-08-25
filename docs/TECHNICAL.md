@@ -81,12 +81,19 @@ The graph is a **petgraph** directed acyclic graph stored at `.lain/graph.bin`.
 | Edge | Meaning | Source |
 |------|---------|--------|
 | `Calls` | Function invocation | LSP `find_references` (high confidence) or Tree-sitter heuristic (medium) |
-| `Contains` | File contains module | Tree-sitter AST |
-| `Defines` | Module defines symbol | Tree-sitter AST |
-| `Inherits` | Class inheritance | Tree-sitter AST |
+| `Contains` | File/module contains a symbol | Tree-sitter AST |
+| `Uses` | Code uses a variable or type | Tree-sitter AST |
+| `Implements` | Class implements an interface | Tree-sitter AST |
 | `Imports` | Import/use statement | Tree-sitter AST |
-| `CO_CHANGED_WITH` | Historical co-change | Git history analysis |
+| `CoChangedWith` | Historical co-change | Git history analysis |
 | `Pattern` | Cross-boundary pattern | Tree-sitter pattern detection |
+
+**Call counts vs fan:** `fan_in` / `fan_out` count edges of *every*
+kind, including the `Contains` edge each symbol has from its own file —
+so `fan_in == 0` is essentially never true and is useless as "has no
+callers". `calls_in` / `calls_out` count `Calls` edges only. Anything
+asking "who calls this?" must read the latter; a dead-code check
+written against `fan_in` silently reports nothing at all.
 
 **Node Identity:** UUID v5 derived from `(NodeType, FilePath, SymbolName)` for deterministic, stable IDs across runs. The `(NodeType, FilePath, SymbolName, line_start?)` quadruple is used when line_start is known (tree-sitter path) so two same-named symbols at different lines get distinct IDs.
 
@@ -129,7 +136,9 @@ Local ONNX-based semantic search using [ORT (ONNX Runtime)](https://onnxruntime.
 - **Model-agnostic** — any ONNX model producing fixed-dimension embeddings works
 - **Recommended model:** `bge-small-en-v1.5` (BAAI, 384 dimensions, ~120MB) — better MTEB scores than MiniLM
 - **Default model:** `all-MiniLM-L6-v2` (384 dimensions, ~80MB)
-- **BGE asymmetric retrieval:** set `query_prefix = "Represent this sentence for searching relevant passages: "` in `.lain/tuning.toml` — prepended to queries at embed time, leaving documents unchanged. Required for optimal BGE performance on short queries.
+- **BGE asymmetric retrieval:** set `query_prefix = "Represent this sentence for searching relevant passages: "` in `.lain/tuning.toml`. Required for optimal BGE performance on short queries; leave empty (the default) for MiniLM, which expects no instruction.
+
+  The asymmetry is the point: **queries** carry the instruction, the **corpus** does not. The embedder enforces it — `embed_query()` applies the prefix, `embed()` never does — so every query path gets it and no document path can. It was previously a convention at the call sites, and two of the three query paths (`query_graph`'s `semantic_filter` op and `find_dead_code --like`) had silently omitted it, embedding queries in document space while `semantic_search` alone did the right thing. Prefixing documents too would collapse the two spaces into one and make the setting worse than useless.
 - **Tokenization:** Hugging Face `tokenizers` crate
 - **Threading:** `nlp_max_threads` in `.lain/tuning.toml` (0 = auto-detect `min(cores, 4)`). BGE-small inference doesn't benefit from more than 4 threads per call.
 
@@ -151,7 +160,7 @@ Analyzes git history for co-change patterns:
 1. **Walk commits** — extract file-change sets per commit
 2. **Build co-change matrix** — how often files change together
 3. **Compute coupling scores** — Jaccard similarity between file sets
-4. **Attach `CO_CHANGED_WITH` edges** to graph nodes
+4. **Attach `CoChangedWith` edges** to graph nodes
 
 The `get_coupling_radar` tool uses this to find files that "live together" across commits.
 
@@ -243,7 +252,7 @@ tokenization is intentionally simple — the embedding pipeline planned for
 the redundancy sub-project can replace it later for richer similarity.
 
 Deferred sub-projects (2–7 of the 7 in the org-wide code intelligence
-vision, see `docs/superpowers/specs/2026-08-07-federated-indexer-design.md`):
+vision):
 **Service Identity** (sub-project 2 — no `Service` node type yet),
 **IaC/schema ingestion** (sub-project 3 — `Resource` / `Schema` types exist
 in `schema.rs` but have no ingesters), **Redundancy detection** (sub-project
@@ -436,7 +445,7 @@ Wird exposes a JSON-based ops-array query interface for flexible graph traversal
 - `id`: node UUID
 
 **Connect:**
-- `edge`: `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`
+- `edge`: `Calls`, `Contains`, `Uses`, `Implements`, `Imports`, `CoChangedWith`, `Pattern`, `CallsHttp`, `Produces`, `Consumes`, `DeployedTo`, `CrossRepoSameSymbol` (the full list is generated from the `EdgeType` enum — call `describe_schema`)
 - `direction`: `outgoing`, `incoming`, `both`
 - `depth`: `1` or `{ "min": 1, "max": 3 }`
 - `target`: optional nested `FindOp` for multi-hop queries
@@ -541,12 +550,31 @@ Not all graph edges are equally reliable:
 | `Calls` (LSP) | `find_references` | **High** | Language-aware, precise |
 | `Calls` (heuristic) | Tree-sitter patterns | **Medium** | May have false positives |
 | `Contains` | Tree-sitter AST | **High** | Structural, unambiguous |
-| `Defines` | Tree-sitter AST | **High** | Based on AST node type |
-| `Inherits` | Tree-sitter superclass | **High** | Language grammar |
+| `Implements` | Tree-sitter impl block | **High** | Language grammar |
 | `Imports` | Tree-sitter import | **High** | Import statements |
-| `CO_CHANGED_WITH` | Git history | **Historical** | Reflects past patterns |
+| `CoChangedWith` | Git history | **Historical** | Reflects past patterns |
 
 Use `get_health` to see which LSP servers are ready (affects `Calls` edge quality).
+
+### Reading `get_health`
+
+Two fields exist specifically so an agent can tell whether to trust the
+rest of the answer:
+
+- **`Build:`** — the version and git SHA of the process that is
+  answering, plus a warning when a newer binary exists on disk. An MCP
+  stdio server is spawned once by its client and outlives every
+  rebuild, so the code answering your calls can be older than the source
+  you are reading. Nothing in the protocol used to expose which build
+  it was.
+- **`Status:`** — `Operational ✅`, or `Degraded ⚠` when the last
+  re-index failed and the graph being served may not match HEAD. It
+  used to print `Operational ✅` beside its own re-index-failure warning
+  in the same payload, which is how a two-day-old graph went unnoticed.
+
+A "symbol not found" answer from a degraded server means "not in this
+graph", not "does not exist" — the not-found responses say so and point
+at `get_health` for how far behind the index is.
 
 ---
 
@@ -621,7 +649,7 @@ The query engine is separate from named tools — it accepts ops-array JSON for 
 - `id`: node UUID
 
 **Connect:**
-- `edge`: `Calls`, `Contains`, `Defines`, `Inherits`, `Imports`, `CO_CHANGED_WITH`
+- `edge`: `Calls`, `Contains`, `Uses`, `Implements`, `Imports`, `CoChangedWith`, `Pattern`, `CallsHttp`, `Produces`, `Consumes`, `DeployedTo`, `CrossRepoSameSymbol` (the full list is generated from the `EdgeType` enum — call `describe_schema`)
 - `direction`: `outgoing`, `incoming`, `both`
 - `depth`: `1` or `{ "min": 1, "max": 3 }`
 - `target`: optional nested `FindOp` for multi-hop queries
@@ -654,8 +682,9 @@ RepoIdentity { owner: "owner", name: "repo" }
 - `get_branch_status` — Current branch
 
 ### System
-- `get_health` — LSP status, staleness
-- `sync_state` — Refresh graph from git HEAD
+- `get_health` — build identity, status, LSP readiness, staleness
+- `get_server_status` — pid, version, git SHA, transport, repo counts
+- `sync_state` — Refresh graph from git HEAD (returns a `job_id`; poll `get_job_status`)
 - `run_enrichment` — Full co-change + anchor recalc
 - `install_language_server(lang)` — Install LSP
 - `export_graph_json` — Dump graph for auditing

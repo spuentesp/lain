@@ -5,7 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::{GraphNode, NodeType};
 use crate::server::tools::utils::resolve_node;
-use crate::server::tools::{UiSession, UiSessionData, DIAGNOSTICS_PORT};
+use crate::server::tools::{UiSession, UiSessionData};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -65,7 +65,7 @@ pub async fn get_call_chain(
     overlay: &VolatileOverlay,
     from: &str,
     to: &str,
-    ui_sessions: Option<&Arc<AsyncMutex<HashMap<String, UiSession>>>>,
+    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16)>,
 ) -> Result<String, LainError> {
     let start = resolve_node(graph, overlay, from)?;
     let end = resolve_node(graph, overlay, to)?;
@@ -118,7 +118,7 @@ pub async fn get_call_chain(
     let mut output = format!("## Call Chain: {} -> {}\n\n{}", from, to, path.join(" → "));
 
     // Store UI session if rich format requested
-    if let Some(sessions) = ui_sessions {
+    if let Some((sessions, port)) = ui_sessions {
         let session_id = Uuid::new_v4().to_string();
         let session = UiSession {
             id: session_id.clone(),
@@ -146,7 +146,7 @@ pub async fn get_call_chain(
 
         output.push_str(&format!(
             "\n\n[Interactive call chain: http://localhost:{}/ui/call-chain/{}]",
-            DIAGNOSTICS_PORT, session_id
+            port, session_id
         ));
         output.push_str("\nClick nodes to explore, then describe your selection to the agent.");
     }
@@ -226,7 +226,16 @@ pub fn get_layered_map(
     granularity: &str
 ) -> Result<String, LainError> {
     let mut all_nodes = Vec::new();
-    for node_type in [NodeType::File, NodeType::Namespace, NodeType::Class, NodeType::Function] {
+    // Includes `Method` — a layered map that omits impl blocks is a
+    // map with most of the code missing.
+    for node_type in [
+        NodeType::File,
+        NodeType::Namespace,
+        NodeType::Module,
+        NodeType::Class,
+        NodeType::Function,
+        NodeType::Method,
+    ] {
         all_nodes.extend(graph.get_nodes_by_type(node_type)?);
     }
 

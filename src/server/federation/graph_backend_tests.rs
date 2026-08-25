@@ -23,6 +23,21 @@ impl GraphBackend for HashMapBackend {
         self.nodes.write().unwrap().insert(node.id.clone(), node);
         Ok(())
     }
+    fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError> {
+        let mut nodes = self.nodes.write().unwrap();
+        let mut removed = 0usize;
+        for id in global_ids {
+            if nodes.remove(id).is_some() {
+                removed += 1;
+            }
+        }
+        drop(nodes);
+        self.edges
+            .write()
+            .unwrap()
+            .retain(|e| !global_ids.contains(&e.source_id) && !global_ids.contains(&e.target_id));
+        Ok(removed)
+    }
     fn upsert_node_global(
         &self,
         global_id: &str,
@@ -36,6 +51,18 @@ impl GraphBackend for HashMapBackend {
     }
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.edges.write().unwrap().push(edge);
+        Ok(())
+    }
+    fn upsert_edges_batch(&self, edges: &[GraphEdge]) -> Result<(), LainError> {
+        let mut g = self.edges.write().unwrap();
+        g.extend_from_slice(edges);
+        Ok(())
+    }
+    fn upsert_nodes_batch(&self, nodes: &[GraphNode]) -> Result<(), LainError> {
+        let mut g = self.nodes.write().unwrap();
+        for node in nodes {
+            g.insert(node.id.clone(), node.clone());
+        }
         Ok(())
     }
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError> {

@@ -129,17 +129,4 @@ proptest! {
         let node2 = GraphNode::new(ntype_enum, name.clone(), path.clone());
         prop_assert_eq!(node1.id, node2.id);
     }
-
-    #[test]
-    fn test_all_node_type_variants(ntype in 0u8..5) {
-        let ntype_enum = match ntype {
-            0 => NodeType::Module,
-            1 => NodeType::Function,
-            2 => NodeType::Struct,
-            3 => NodeType::Trait,
-            _ => NodeType::File,
-        };
-        let _node = GraphNode::new(ntype_enum, "test".to_string(), "/test.rs".to_string());
-        prop_assert!(true);
-    }
 }

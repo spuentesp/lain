@@ -7,7 +7,7 @@ use crate::schema::{GraphNode, NodeType};
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Helper to resolve a handle (name, path, or ID) to a node
 pub fn resolve_node(
@@ -31,10 +31,96 @@ pub fn resolve_node(
     if let Some(n) = overlay_names.iter().find(|n| n.name == canonical_handle) { return Ok(n.clone()); }
     // 4. Try Graph by Name
     if let Some(n) = graph.find_node_by_name(&canonical_handle) { return Ok(n); }
-    // 5. Try Graph by Path
+    // 5. Try Graph by Path. Try the handle verbatim first: graph keys are
+    //    workspace-relative, and a caller asking about "src/cli/hooks.rs" is
+    //    already using the canonical form — canonicalizing it to an absolute
+    //    path would match nothing. The canonicalized form stays as a fallback
+    //    for absolute handles and out-of-tree nodes.
+    if let Some(n) = graph.find_node_by_path(handle) { return Ok(n); }
     if let Some(n) = graph.find_node_by_path(&canonical_handle) { return Ok(n); }
 
-    Err(LainError::NotFound(format!("Node not found for handle: {}", handle)))
+    // An empty graph means this "not found" is not about the symbol at
+    // all — nothing would resolve, so the committed-code explanation
+    // below would be a confident, specific, wrong answer. Say what is
+    // actually true instead.
+    if graph.node_count() == 0 && overlay.stats().node_count == 0 {
+        return Err(LainError::NotFound(format!(
+            "Node not found for handle: {handle} — but the graph being \
+             searched is empty (0 nodes), so nothing would resolve. The \
+             workspace has probably not finished indexing; check \
+             `get_health`. In federation mode, pass `repo_id` (or a symbol \
+             that resolves to one repo) so the call binds to that repo's \
+             graph rather than the staging placeholder."
+        )));
+    }
+
+    // The graph indexes committed state, so a symbol written but not yet
+    // committed is genuinely absent rather than misplaced. Saying so turns a
+    // dead end into a next step; the bare message reads as "does not exist".
+    Err(LainError::NotFound(format!(
+        "Node not found for handle: {handle} — the graph indexes committed code, \
+         so a symbol added since the last commit will not appear until it is \
+         committed and re-indexed"
+    )))
+}
+
+/// Resolve `handle`, and report the other definitions that share the
+/// name.
+///
+/// A bare name is the ergonomic way to call these tools and will stay
+/// that way — but with eleven `fn parse` definitions in this repo, "the
+/// node named parse" is not a question with one answer. The tools used
+/// to pick one and say nothing, so two of them could describe two
+/// different functions while appearing to disagree about one.
+///
+/// The second element is the *other* candidates, empty when the name is
+/// unique. Callers surface it; nobody is refused an answer over it,
+/// because erroring on ambiguity would break every call that is
+/// perfectly clear today.
+pub fn resolve_node_ambiguous(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+    handle: &str,
+) -> Result<(GraphNode, Vec<GraphNode>), LainError> {
+    let node = resolve_node(graph, overlay, handle)?;
+    // Only a bare-name lookup can be ambiguous: an id or a path already
+    // names one node.
+    let others: Vec<GraphNode> = if node.name == handle {
+        graph
+            .find_all_nodes_by_name(handle)
+            .into_iter()
+            .filter(|n| n.id != node.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok((node, others))
+}
+
+/// A one-line warning naming the other definitions that share this
+/// name, or empty when there is nothing to warn about.
+pub fn ambiguity_note(chosen: &GraphNode, others: &[GraphNode]) -> String {
+    if others.is_empty() {
+        return String::new();
+    }
+    let mut note = format!(
+        "⚠ '{}' is defined {} times; this answer is about the one in {}. \
+         Others: ",
+        chosen.name,
+        others.len() + 1,
+        chosen.path
+    );
+    let shown: Vec<String> = others
+        .iter()
+        .take(5)
+        .map(|n| format!("{} ({})", n.path, n.id))
+        .collect();
+    note.push_str(&shown.join(", "));
+    if others.len() > 5 {
+        note.push_str(&format!(", and {} more", others.len() - 5));
+    }
+    note.push_str(". Pass a node id to choose one.\n\n");
+    note
 }
 
 /// Resolves a node at a specific location using the "Overlay Mask" pattern
@@ -59,8 +145,10 @@ pub fn resolve_node_at_location(
         if match_node.is_some() { return match_node; }
     }
 
-    // 2. Fallback to Static Backbone
-    graph.get_node_at_location(&canonical_path, line)
+    // 2. Fallback to Static Backbone. Same ordering rationale as
+    //    `resolve_node`: the verbatim (already-relative) form first.
+    graph.get_node_at_location(path, line)
+        .or_else(|| graph.get_node_at_location(&canonical_path, line))
 }
 
 /// Extract string argument
@@ -93,13 +181,40 @@ pub fn str_arg(args: &Map<String, Value>, key: &str) -> String {
         .to_string()
 }
 
+/// Name a JSON value's type for error messages.
+pub fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// Extract a required string argument. Returns `LainError::NotFound`
-/// when the key is missing or the value isn't a string.
+/// when the key is missing, and a distinct type error when it is
+/// present but not a string.
+///
+/// The two cases must not report the same message. `depth: 2` on
+/// `get_cross_repo_blast_radius` answered "Missing required argument:
+/// depth" while depth was sitting right there in the call — sending the
+/// caller to hunt for an omission instead of showing them that the
+/// argument is a string range (`"1..3"`), not a number.
 pub fn required_str_arg(args: &Map<String, Value>, key: &str) -> Result<String, LainError> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| LainError::NotFound(format!("Missing required argument: {}", key)))
+    match args.get(key) {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(other) => Err(LainError::NotFound(format!(
+            "Argument '{}' must be a string, got {}",
+            key,
+            json_type_name(other)
+        ))),
+        None => Err(LainError::NotFound(format!(
+            "Missing required argument: {}",
+            key
+        ))),
+    }
 }
 
 /// Extract an optional usize argument.
@@ -131,7 +246,7 @@ pub fn opt_str_arg(args: &Map<String, Value>, key: &str) -> String {
 /// because terms like `bincode`, `Tokenizer`, `LSP` only appear in the
 /// implementation, not in the signature or docstring. Without this, the
 /// embedder has no signal that `GraphDatabase::save` is about persistence.
-pub fn build_enriched_text(node: &GraphNode) -> String {
+pub fn build_enriched_text(node: &GraphNode, workspace: &Path) -> String {
     let mut parts = vec![node.name.clone()];
 
     // Add signature (function parameters, return types)
@@ -157,7 +272,7 @@ pub fn build_enriched_text(node: &GraphNode) -> String {
     // effective limit while preserving meaningful behavior signals).
     if let (Some(start), Some(end)) = (node.line_start, node.line_end) {
         if end > start && (end - start) < 200 {
-            if let Ok(body) = read_body_excerpt(&node.path, start, end, 200) {
+            if let Ok(body) = read_body_excerpt(workspace, &node.path, start, end, 200) {
                 if !body.is_empty() {
                     parts.push(body);
                 }
@@ -170,7 +285,26 @@ pub fn build_enriched_text(node: &GraphNode) -> String {
 
 /// Read lines [start, end) from `path`, collapse to single-line whitespace,
 /// and keep the first `max_tokens` whitespace-separated tokens.
-fn read_body_excerpt(path: &str, start: u32, end: u32, max_tokens: usize) -> std::io::Result<String> {
+/// Read a slice of a source file.
+///
+/// `path` is a graph key, which is workspace-relative (see `graph::graph_path`),
+/// so it must be resolved against `workspace` rather than the process cwd.
+/// Reading it directly worked only while the server happened to be launched
+/// from the workspace root, and silently returned nothing otherwise — losing
+/// the source excerpt from `explain_symbol` and the body text from embeddings.
+fn read_body_excerpt(
+    workspace: &Path,
+    path: &str,
+    start: u32,
+    end: u32,
+    max_tokens: usize,
+) -> std::io::Result<String> {
+    let resolved = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        workspace.join(path)
+    };
+    let path = resolved.as_path();
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     let f = File::open(path)?;
@@ -310,13 +444,13 @@ pub fn lex_tokens(text: &str) -> std::collections::HashSet<String> {
 /// modules with deep config classes run hundreds of lines); we still
 /// want to show their bodies. Above 2000 lines, fall back to the
 /// first 200 lines via read_body_excerpt's internal cap.
-pub fn read_body_summary(node: &GraphNode, max_chars: usize) -> Option<String> {
+pub fn read_body_summary(node: &GraphNode, max_chars: usize, workspace: &Path) -> Option<String> {
     let start = node.line_start?;
     let end = node.line_end?;
     if end <= start || (end - start) > 2000 {
         return None;
     }
-    let body = read_body_excerpt(&node.path, start, end, 30).ok()?;
+    let body = read_body_excerpt(workspace, &node.path, start, end, 30).ok()?;
     let trimmed: String = body.chars().take(max_chars).collect();
     if trimmed.is_empty() {
         None
@@ -341,4 +475,72 @@ pub fn token_recall(query: &str, candidate: &str) -> f32 {
     let c: std::collections::HashSet<String> = lex_tokens(candidate);
     let hits = q.intersection(&c).count();
     hits as f32 / q.len() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A present-but-wrong-typed argument must not report as missing.
+    /// Live probe of `get_cross_repo_blast_radius` with `depth: 2`
+    /// answered "Missing required argument: depth" with depth right
+    /// there in the call, which sends the caller hunting for the wrong
+    /// bug instead of showing them it wants the range string "1..3".
+    #[test]
+    fn required_str_arg_separates_missing_from_wrong_type() {
+        let mut args = Map::new();
+        args.insert("depth".to_string(), json!(2));
+
+        let err = required_str_arg(&args, "depth").unwrap_err().to_string();
+        assert!(
+            err.contains("must be a string") && err.contains("a number"),
+            "wrong-typed arg should name the type it got, got: {err}"
+        );
+        assert!(
+            !err.contains("Missing"),
+            "a present argument must never report as missing, got: {err}"
+        );
+
+        let missing = required_str_arg(&args, "symbol").unwrap_err().to_string();
+        assert!(
+            missing.contains("Missing required argument: symbol"),
+            "an absent argument should still report as missing, got: {missing}"
+        );
+    }
+
+    /// An empty graph must not answer "this symbol does not exist".
+    /// In a multi-repo federation the per-repo tools keep the empty
+    /// staging placeholder, so every structural query returned a
+    /// confident false negative for symbols that plainly exist.
+    #[test]
+    fn resolve_node_on_an_empty_graph_names_the_real_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        assert_eq!(graph.node_count(), 0, "fixture must start empty");
+
+        let err = resolve_node(&graph, &overlay, "some_symbol")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("empty (0 nodes)"),
+            "an empty graph should say so, got: {err}"
+        );
+        assert!(
+            err.contains("federation") || err.contains("indexed"),
+            "the message should point at the actual cause, got: {err}"
+        );
+        assert!(
+            !err.contains("until it is committed"),
+            "the committed-code explanation is the wrong cause here: {err}"
+        );
+    }
+
+    #[test]
+    fn required_str_arg_returns_the_string() {
+        let mut args = Map::new();
+        args.insert("depth".to_string(), json!("1..3"));
+        assert_eq!(required_str_arg(&args, "depth").unwrap(), "1..3");
+    }
 }

@@ -156,7 +156,7 @@ pub async fn run_rebuild(
 ) -> Result<(), LainError> {
     bus.set_state(ReloadState::Rebuilding).await;
 
-    let repos_yaml = match server.repos_yaml_path() {
+    let repos_yaml = match server.repos_yaml() {
         Some(p) => p.to_path_buf(),
         None => {
             // Single-workspace server — nothing to reload. Treat as a
@@ -363,12 +363,13 @@ mod tests {
             repos_yaml: &Path,
             fed: Arc<FederatedIndex>,
         ) -> LainServer {
-            // `with_federation` builds a placeholder git repo at
-            // `/tmp/lain-federation-{pid}` and refuses to re-init one
-            // that's missing. A prior test in the same process may
-            // have torn it down between `with_federation` calls, so
-            // we proactively remove the dir if it exists.
-            let staging = std::env::temp_dir()
+            // `with_federation` builds a placeholder git repo under
+            // the state dir and refuses to re-init one that's missing.
+            // A prior test in the same process may have torn it down
+            // between `with_federation` calls, so we proactively remove
+            // the dir if it exists.
+            let staging = crate::config::state_dir()
+                .join("federation")
                 .join(format!("lain-federation-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&staging);
             LainServer::with_federation(fed, Transport::Http, 9999, Some(repos_yaml.to_path_buf()), None)

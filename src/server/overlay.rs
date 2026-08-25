@@ -11,12 +11,13 @@ pub mod stream;
 pub use stream::{
     broadcast_overlay_diff, subscribe_apply, subscribe_channel, OverlayDiff, RevisionId,
 };
+use crate::server::revision_log::{LookupResult, RevisionLog};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// Volatile overlay graph using petgraph
@@ -27,7 +28,19 @@ pub struct VolatileOverlay {
     bloom_filter: Arc<RwLock<Vec<u8>>>, // Simple Bloom Filter for fast existence checks
     /// Last time the overlay was modified
     last_updated: Arc<RwLock<Instant>>,
+    /// Bounded history of overlay mutations, fed by `insert_node` /
+    /// `insert_edge`. Wrapped in its own `Mutex` so enqueue does not widen
+    /// the surface of the existing RwLocks; the lock is held only for the
+    /// `VecDeque` push. See Task 1.2 of the coordination staleness/audit
+    /// design for the lock-decision rationale.
+    log: Arc<Mutex<RevisionLog>>,
 }
+
+/// Cheap clone (already provided by the `#[derive(Clone)]` on the
+/// struct — every field is an `Arc`, so duplicating the overlay just
+/// bumps the reference counts). Used for sharing one overlay between
+/// `FederatedIndex` (so index() can touch it) and `LainServer`
+/// (which the tool executor dispatches against).
 
 impl VolatileOverlay {
     /// Create a new volatile overlay
@@ -37,6 +50,7 @@ impl VolatileOverlay {
             node_index_map: Arc::new(RwLock::new(HashMap::new())),
             bloom_filter: Arc::new(RwLock::new(vec![0u8; 1024])), // 8192 bits
             last_updated: Arc::new(RwLock::new(Instant::now())),
+            log: Arc::new(Mutex::new(RevisionLog::new())),
         }
     }
 
@@ -44,6 +58,31 @@ impl VolatileOverlay {
     pub fn last_update_age_secs(&self) -> f64 {
         let last = *self.last_updated.read();
         last.elapsed().as_secs_f64()
+    }
+
+    /// Bump the overlay's last-updated timestamp without changing
+    /// nodes. Used after a successful indexing pass so the freshness
+    /// indicator reflects "we just indexed" rather than "no edits
+    /// ever". The index path doesn't insert nodes through the
+    /// overlay (it writes the static graph), so without this the
+    /// freshness banner stays "stale" forever on a freshly-indexed
+    /// server.
+    pub fn touch(&self) {
+        *self.last_updated.write() = Instant::now();
+    }
+
+    /// Highest revision id assigned by this overlay's internal `RevisionLog`.
+    /// Returns 0 when nothing has been inserted yet. See Task 1.2 of the
+    /// coordination staleness/audit design.
+    pub fn current_revision(&self) -> RevisionId {
+        self.log.lock().current_revision()
+    }
+
+    /// All retained diffs strictly newer than `rev`. See
+    /// `RevisionLog::diffs_since` for the meaning of each `LookupResult`
+    /// arm.
+    pub fn diffs_since(&self, rev: RevisionId) -> Result<Vec<OverlayDiff>, LookupResult> {
+        self.log.lock().diffs_since(rev)
     }
 
     fn update_bloom(&self, id: &str) {
@@ -88,6 +127,21 @@ impl VolatileOverlay {
 
         // Update freshness timestamp
         *self.last_updated.write() = Instant::now();
+
+        // Record this mutation in the revision log. The lock is held only
+        // for the `VecDeque::push_back` inside `enqueue`; nothing else is
+        // touched here. The `added` vector carries the node that was just
+        // upserted so subscribers replaying the diffs reconstruct the same
+        // state we have in the graph above.
+        {
+            let mut log = self.log.lock();
+            log.enqueue(OverlayDiff {
+                revision: 0, // overwritten by `enqueue`; the log owns numbering
+                added: vec![node.clone()],
+                removed: vec![],
+                updated: vec![],
+            });
+        }
 
         debug!("Upserted node into volatile overlay: {}", node.name);
         index
@@ -150,6 +204,24 @@ impl VolatileOverlay {
 
         graph.add_edge(source_idx, target_idx, edge.edge_type.clone());
         *self.last_updated.write() = Instant::now();
+
+        // Record this mutation in the revision log. `OverlayDiff` has no
+        // dedicated edge field today (the broadcast bus carries node
+        // diffs only), so we enqueue an empty diff purely so the revision
+        // counter advances in lockstep with the petgraph mutation. This
+        // keeps `current_revision` monotonic across both insert paths;
+        // once `OverlayDiff` grows an edges field this site should carry
+        // it. Same lock-decision story as `insert_node`: only the log is
+        // touched, briefly.
+        {
+            let mut log = self.log.lock();
+            log.enqueue(OverlayDiff {
+                revision: 0,
+                added: vec![],
+                removed: vec![],
+                updated: vec![],
+            });
+        }
 
         debug!("Inserted edge into volatile overlay: {} -> {}", edge.source_id, edge.target_id);
         Ok(())

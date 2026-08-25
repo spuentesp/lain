@@ -15,13 +15,25 @@
 //!    out), and a no-op fallback (Windows / `--no-process-attribution`)
 //!    share a single interface.
 //! 2. **Single-agent heuristic.** If no PID match and exactly one
-//!    *interactive* agent is currently connected, attribute the edit to
-//!    that agent. (Two-or-more agents with no PID match is treated as
-//!    unattributed; the audit log gets a "unattributed edit" entry.)
+//!    *interactive* agent is connected, attribute the edit to that
+//!    agent. (Two-or-more agents with no PID match is unattributed.)
+//!    This carries most real attributions: a write closes its fd long
+//!    before the inotify event is handled, so the PID lookup usually
+//!    finds nothing.
 //!
-//! Successful attribution auto-claims the file for the agent (intent:
+//! Events are filtered by [`is_attributable`] before either strategy
+//! runs, so VCS internals, build output and editor scratch never reach
+//! attribution at all. That filter is what makes the heuristic safe:
+//! unfiltered, it attributed *any* write under the workspace to
+//! whichever agent happened to be connected, and a `curl`-driven agent
+//! that never ran git was found holding `<repo>/.git/index.lock` for
+//! its entire lifetime.
+//!
+//! Successful attribution claims the file for the agent (intent:
 //! `Edit`) on the shared `OccupancyMap` and broadcasts a `ClaimGranted`
-//! event so SSE subscribers see the update.
+//! event so SSE subscribers see the update. Such claims are marked
+//! `inferred` and carry a short TTL: they are a guess, they say so, and
+//! a wrong one expires on its own.
 
 use crate::server::presence::{
     ClaimIntent, ClaimRequest, OccupancyMap, PresenceEvent, PresenceRegistry,
@@ -231,8 +243,13 @@ impl AttributionBackend for NoopBackend {
 pub struct AttributionWatcher {
     presence: Arc<PresenceRegistry>,
     occupancy: Arc<OccupancyMap>,
-    event_tx: broadcast::Sender<PresenceEvent>,
-    config_dir: PathBuf,
+    event_tx: broadcast::Sender<(u64, PresenceEvent)>,
+    events_log: Arc<crate::server::events_log::EventsLog>,
+    /// Roots to watch — the registered repos' local checkouts, not
+    /// `repos.yaml`'s parent dir (which swept in unrelated files like
+    /// server logs and auto-claimed them under the single-agent
+    /// heuristic).
+    roots: Vec<PathBuf>,
     backend: Arc<dyn AttributionBackend>,
 }
 
@@ -247,15 +264,16 @@ impl AttributionWatcher {
     pub fn new(
         presence: Arc<PresenceRegistry>,
         occupancy: Arc<OccupancyMap>,
-        event_tx: broadcast::Sender<PresenceEvent>,
-        config_dir: PathBuf,
+        event_tx: broadcast::Sender<(u64, PresenceEvent)>,
+        events_log: Arc<crate::server::events_log::EventsLog>,
+        roots: Vec<PathBuf>,
     ) -> Self {
         let backend: Arc<dyn AttributionBackend> = if cfg!(target_os = "linux") {
             Arc::new(ProcFsBackend)
         } else {
             Arc::new(NoopBackend)
         };
-        Self::new_with_backend(backend, presence, occupancy, event_tx, config_dir)
+        Self::new_with_backend(backend, presence, occupancy, event_tx, events_log, roots)
     }
 
     /// Construct a watcher with an explicit [`AttributionBackend`]. This
@@ -265,29 +283,38 @@ impl AttributionWatcher {
         backend: Arc<dyn AttributionBackend>,
         presence: Arc<PresenceRegistry>,
         occupancy: Arc<OccupancyMap>,
-        event_tx: broadcast::Sender<PresenceEvent>,
-        config_dir: PathBuf,
+        event_tx: broadcast::Sender<(u64, PresenceEvent)>,
+        events_log: Arc<crate::server::events_log::EventsLog>,
+        roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             presence,
             occupancy,
             event_tx,
-            config_dir,
+            events_log,
+            roots,
             backend,
         }
     }
 
-    /// Watch the config directory's parent (the project root) for file
-    /// changes. Spawn a watcher thread; auto-attribute each change to the
-    /// agent whose PID has the file open for write.
+    /// Watch every root for file changes. Spawns a watcher thread;
+    /// auto-attributes each change to the agent whose PID has the file
+    /// open for write. An empty `roots` list means "nothing to watch":
+    /// the thread exits immediately (federation mode passes the
+    /// registered repos' checkouts; if there are none, watching
+    /// `repos.yaml`'s parent would only pick up noise).
     pub fn start(self) -> std::thread::JoinHandle<()> {
         let presence = self.presence;
         let occupancy = self.occupancy;
         let event_tx = self.event_tx;
-        let root = self.config_dir;
+        let events_log = self.events_log;
+        let roots = self.roots;
         let backend = self.backend;
 
         std::thread::spawn(move || {
+            if roots.is_empty() {
+                return;
+            }
             let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
             let mut watcher = match RecommendedWatcher::new(
                 move |res| {
@@ -298,7 +325,35 @@ impl AttributionWatcher {
                 Ok(w) => w,
                 Err(_) => return,
             };
-            if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+            // One git sensor per root, opened on this thread because
+            // that is the only place they are read. Lets the repo's own
+            // `.gitignore` decide what is build output instead of a
+            // hardcoded list that drifts per project. A root that is
+            // not a git repo simply gets no opinion.
+            let ignore_sensors: Vec<(PathBuf, crate::server::git::GitSensor)> = roots
+                .iter()
+                .filter_map(|r| {
+                    crate::server::git::GitSensor::new(r).ok().map(|g| (r.clone(), g))
+                })
+                .collect();
+            let is_ignored = |p: &Path| -> Option<bool> {
+                let (_, sensor) = ignore_sensors
+                    .iter()
+                    .filter(|(root, _)| p.starts_with(root))
+                    // Deepest matching root wins, for nested checkouts.
+                    .max_by_key(|(root, _)| root.as_os_str().len())?;
+                sensor.is_ignored(p).ok()
+            };
+
+            // Watch each repo root; a root that fails to register
+            // (deleted checkout, permissions) is skipped, not fatal.
+            let mut watched = 0usize;
+            for root in &roots {
+                if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
+                    watched += 1;
+                }
+            }
+            if watched == 0 {
                 return;
             }
 
@@ -309,12 +364,13 @@ impl AttributionWatcher {
                         EventKind::Modify(_) | EventKind::Create(_)
                     ) {
                         for path in event.paths {
-                            if path.is_file() {
+                            if path.is_file() && is_attributable(&path, is_ignored(&path)) {
                                 attribute_edit(
                                     &path,
                                     &presence,
                                     &occupancy,
                                     &event_tx,
+                                    &events_log,
                                     backend.as_ref(),
                                 );
                             }
@@ -326,6 +382,55 @@ impl AttributionWatcher {
     }
 }
 
+/// Directories git itself will not report as ignored, so gitignore
+/// cannot cover them.
+///
+/// Build output, `node_modules`, virtualenvs and caches are all
+/// deliberately absent: the repo's own `.gitignore` already declares
+/// those, and consulting it beats maintaining a parallel list that
+/// drifts per project. What is left is what git structurally cannot
+/// tell us — its own directory, and lain's.
+const NEVER_ATTRIBUTED_DIRS: &[&str] = &[".git", ".lain"];
+
+/// True when a filesystem event on `path` could plausibly be an agent
+/// editing source.
+///
+/// Without this filter every write anywhere under a watched checkout
+/// became a claim: a `curl`-driven agent that never ran git was found
+/// holding `<repo>/.git/index.lock`, written by an unrelated shell
+/// command, for its entire lifetime, and a single `cargo build` would
+/// have flooded the registry with `target/` artifacts.
+///
+/// `ignored` is the repo's own gitignore verdict for this path, when a
+/// `GitSensor` could be opened for its root. `None` means "no opinion"
+/// — an unopenable repo must not make everything unattributable.
+fn is_attributable(path: &Path, ignored: Option<bool>) -> bool {
+    if ignored == Some(true) {
+        return false;
+    }
+    if path
+        .components()
+        .any(|c| NEVER_ATTRIBUTED_DIRS.contains(&c.as_os_str().to_string_lossy().as_ref()))
+    {
+        return false;
+    }
+    let name = match path.file_name() {
+        Some(n) => n.to_string_lossy().to_string(),
+        None => return false,
+    };
+    // Editor and tool scratch: vim swap/backup, Emacs lock files,
+    // generic temporaries, and the `.#` / `~` conventions.
+    let scratch = name.ends_with('~')
+        || name.ends_with(".swp")
+        || name.ends_with(".swx")
+        || name.ends_with(".tmp")
+        || name.ends_with(".lock")
+        || name.starts_with(".#")
+        || name.starts_with('#');
+    !scratch
+}
+
+
 /// Best-effort attribution of a single file edit. See the module-level
 /// docs for the strategy order: PID lookup, then single-agent fallback,
 /// then "unattributed" (logged to stderr; the audit sink is wired in
@@ -334,7 +439,8 @@ fn attribute_edit(
     path: &Path,
     presence: &PresenceRegistry,
     occupancy: &OccupancyMap,
-    event_tx: &broadcast::Sender<PresenceEvent>,
+    event_tx: &broadcast::Sender<(u64, PresenceEvent)>,
+    events_log: &crate::server::events_log::EventsLog,
     backend: &dyn AttributionBackend,
 ) {
     // 1. Try PID attribution via the injected backend.
@@ -350,6 +456,19 @@ fn attribute_edit(
     };
 
     // 2. Fallback: single interactive agent heuristic.
+    //
+    // Kept, deliberately. PID lookup loses most real edits — a write
+    // closes its fd long before the inotify event is processed, so
+    // `/proc/<pid>/fd` no longer shows the file — and without this
+    // fallback attribution would discover almost nothing.
+    //
+    // What made it harmful was never the heuristic itself but what it
+    // was allowed to claim: with no path filter, *any* filesystem event
+    // under the workspace became a claim, so a `curl`-driven agent that
+    // never ran git ended up holding `<repo>/.git/index.lock` for its
+    // whole lifetime. `is_attributable` removes that class outright, and
+    // what remains is marked `inferred` with a short TTL — visible as a
+    // guess, and self-healing when the guess is wrong.
     let agent_id = agent_id.or_else(|| {
         let active: Vec<_> = presence.list_active(false);
         if active.len() == 1 {
@@ -360,23 +479,89 @@ fn attribute_edit(
     });
 
     if let Some(agent_id) = agent_id {
-        let result = occupancy.claim(
+        let result = occupancy.claim_inferred(
             &agent_id,
             vec![ClaimRequest {
                 path: path.to_path_buf(),
                 symbols: vec![],
                 intent: ClaimIntent::Edit,
-                ttl_seconds: None,
+                // A guess must be able to expire on its own.
+                ttl_seconds: Some(
+                    crate::server::tuning::PresenceConfig::default().inferred_claim_ttl_secs,
+                ),
+                plan_revision: None,
             }],
         );
         if !result.granted.is_empty() {
-            let _ = event_tx.send(PresenceEvent::ClaimGranted {
+            let ev = PresenceEvent::ClaimGranted {
                 agent_id: agent_id.clone(),
                 path: path.to_path_buf(),
-            });
+            };
+            let eid = events_log.append(&ev);
+            let _ = event_tx.send((eid, ev));
         }
     } else {
         // Unattributed edit — log to audit (Task 7 wires the sink).
         eprintln!("[attribution] unattributed edit: {}", path.display());
+    }
+}
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    /// git structurally cannot report its own directory as ignored, so
+    /// these stay hardcoded. The live failure: a `curl`-driven agent
+    /// that never ran git was found holding `<repo>/.git/index.lock`,
+    /// written by an unrelated shell command.
+    #[test]
+    fn vcs_internals_are_never_attributed_without_git_help() {
+        for p in ["/ws/.git/index.lock", "/ws/.git/COMMIT_EDITMSG", "/ws/.lain/graph.bin"] {
+            assert!(!is_attributable(Path::new(p), None), "{p} must not be attributed");
+        }
+    }
+
+    /// Build output is the repo's own declaration, not ours: whatever
+    /// `.gitignore` says is not source, we do not attribute. Keeping a
+    /// parallel list here would drift per project.
+    #[test]
+    fn gitignored_paths_are_never_attributed() {
+        for p in [
+            "/ws/target/debug/build/foo/output",
+            "/ws/node_modules/left-pad/index.js",
+            "/ws/dist/bundle.js",
+        ] {
+            assert!(!is_attributable(Path::new(p), Some(true)), "{p} must not be attributed");
+        }
+    }
+
+    #[test]
+    fn editor_scratch_files_are_never_attributed() {
+        for p in [
+            "/ws/src/main.rs~",
+            "/ws/src/.main.rs.swp",
+            "/ws/src/.#main.rs",
+            "/ws/src/main.rs.tmp",
+        ] {
+            assert!(!is_attributable(Path::new(p), None), "{p} must not be attributed");
+        }
+    }
+
+    #[test]
+    fn ordinary_source_files_are_attributed() {
+        for p in [
+            "/ws/src/main.rs",
+            "/ws/src/server/presence.rs",
+            "/ws/tests/presence.rs",
+            "/ws/README.md",
+        ] {
+            assert!(is_attributable(Path::new(p), Some(false)), "{p} must be attributed");
+        }
+    }
+
+    /// An unopenable repo must not make everything unattributable —
+    /// "no opinion" is not "ignored".
+    #[test]
+    fn no_git_opinion_still_attributes_source() {
+        assert!(is_attributable(Path::new("/ws/src/main.rs"), None));
     }
 }

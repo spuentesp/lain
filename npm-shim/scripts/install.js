@@ -28,19 +28,19 @@ function getPlatform() {
   const platform = process.platform;
   const arch = process.arch;
   if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
-  if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin';
   if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-gnu';
-  if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc.exe';
+  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
+  if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc';
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
 function getAssetName(platform, version) {
   const versionSlug = version.replace(/^v/, '');
   const map = {
-    'aarch64-apple-darwin': `lain-${versionSlug}-aarch64-apple-darwin`,
-    'x86_64-apple-darwin': `lain-${versionSlug}-x86_64-apple-darwin`,
-    'x86_64-unknown-linux-gnu': `lain-${versionSlug}-x86_64-unknown-linux-gnu`,
-    'x86_64-pc-windows-msvc.exe': `lain-${versionSlug}-x86_64-pc-windows-msvc.exe`,
+    'aarch64-apple-darwin': `lain-${versionSlug}-aarch64-apple-darwin.tar.gz`,
+    'x86_64-unknown-linux-gnu': `lain-${versionSlug}-x86_64-unknown-linux-gnu.tar.gz`,
+    'aarch64-unknown-linux-gnu': `lain-${versionSlug}-aarch64-unknown-linux-gnu.tar.gz`,
+    'x86_64-pc-windows-msvc': `lain-${versionSlug}-x86_64-pc-windows-msvc.tar.gz`,
   };
   const asset = map[platform];
   if (!asset) throw new Error(`Unsupported platform for binary download: ${platform}`);
@@ -54,11 +54,12 @@ function ensureDir(dir) {
   }
 }
 
-// Download file with curl, fallback to PowerShell on Windows
+// Download file with curl (-f: fail on HTTP errors instead of saving
+// the 404 page as the binary), fallback to PowerShell on Windows
 function download(url, dest) {
   console.log(`  Downloading ${path.basename(dest)}...`);
   try {
-    execSync(`curl -L "${url}" -o "${dest}" --progress-bar`, { stdio: 'inherit' });
+    execSync(`curl -fsSL "${url}" -o "${dest}" --progress-bar`, { stdio: 'inherit' });
   } catch (e) {
     if (process.platform === 'win32') {
       console.log('  curl not found, using PowerShell...');
@@ -178,24 +179,27 @@ async function install() {
   const platform = getPlatform();
   const version = `v${require('../package.json').version}`;
   const assetName = getAssetName(platform, version);
-  // On unix the asset IS the binary; on windows it's .exe
+  // Assets are tarballs containing the binary (`lain` / `lain.exe`).
   const binaryName = process.platform === 'win32' ? 'lain.exe' : 'lain';
-  // Download to a staging name first, then rename to avoid overwriting launcher
-  const stagingPath = path.join(BIN_DIR, binaryName + '.new');
   const binaryPath = path.join(BIN_DIR, binaryName);
+  const archivePath = path.join(BIN_DIR, assetName);
   const githubRepo = 'spuentesp/lain';
   const url = `https://github.com/${githubRepo}/releases/download/${version}/${assetName}`;
 
   console.log(`  Platform: ${platform}`);
   console.log(`  Binary:   ${binaryPath}`);
 
-  // Download binary
+  // Download + extract binary
   if (fs.existsSync(binaryPath)) {
     console.log('  Binary already exists — skipping download');
   } else {
     console.log(`  Downloading from GitHub releases...`);
-    download(url, stagingPath);
-    fs.renameSync(stagingPath, binaryPath);
+    download(url, archivePath);
+    execSync(`tar xzf "${archivePath}" -C "${BIN_DIR}"`, { stdio: 'inherit' });
+    fs.unlinkSync(archivePath);
+    if (!fs.existsSync(binaryPath)) {
+      throw new Error(`Archive ${assetName} did not contain ${binaryName}`);
+    }
     if (!process.platform.startsWith('win')) {
       fs.chmodSync(binaryPath, 0o755);
     }
@@ -228,15 +232,16 @@ async function install() {
   createSymlink();
 
   // Post-install: nothing more to do. The user configures their
-  // project + agent MCP wiring themselves by editing their agent's
-  // MCP config to point at `lain server --config ./repos.yaml`.
+  // agent's MCP wiring themselves, pointing it at the zero-config
+  // `lain mcp` entry (walks up for .git, no repos.yaml needed).
 
   console.log('\n=== Installation complete ===\n');
-  console.log('  To run the MCP server for a project:');
-  console.log(`    ${binaryPath} server --config /path/to/repos.yaml`);
-  console.log('\n  Add the same command to your agent\'s MCP config and');
-  console.log('  see `lain --help` for the full subcommand surface');
-  console.log('  (server, workspaces, repos, query, ask).');
+  console.log('  The zero-config MCP entry point (run from any git repo):');
+  console.log(`    ${binaryPath} mcp`);
+  console.log('\n  Add it to your agent\'s MCP config as:');
+  console.log('    { "mcpServers": { "lain": { "command": "lain", "args": ["mcp"] } } }');
+  console.log('\n  See `lain --help` for the full subcommand surface');
+  console.log('  (server, mcp, workspaces, repos, query, hooks, doctor).');
   console.log('\n  Or add lain to your PATH:');
   console.log(`    export PATH="$HOME/.lain/bin:$PATH"\n`);
 }

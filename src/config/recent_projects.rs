@@ -17,7 +17,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const FILE_NAME: &str = "recent_projects.json";
 const MAX_ENTRIES: usize = 20;
@@ -31,16 +30,6 @@ pub struct RecentProject {
 
 fn file_path_in(dir: &Path) -> PathBuf {
     dir.join(FILE_NAME)
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        // SystemTime can theoretically be before the epoch; in practice
-        // lain never runs on a clock that wrong, but the test harness
-        // shouldn't crash if it does.
-        .unwrap_or(0)
 }
 
 /// Record `project_path` as the most-recently-used project. Removes any
@@ -60,7 +49,7 @@ pub fn record_in(dir: &Path, project_path: &Path) -> Result<()> {
         0,
         RecentProject {
             path: project_path.to_path_buf(),
-            last_used: now_unix(),
+            last_used: crate::server::time::now_unix(),
         },
     );
     list.truncate(MAX_ENTRIES);

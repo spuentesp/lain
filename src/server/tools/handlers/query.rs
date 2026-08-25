@@ -50,6 +50,7 @@ fn occupancy_payload(presence: &PresenceRegistry, occupancy: &OccupancyMap) -> V
 /// When no agents have registered (the default for the sidecar /
 /// read-only executor), `active_agents` is an empty list.
 pub fn query_graph(
+    workspace: &std::path::Path,
     graph: &GraphDatabase,
     embedder: &NlpEmbedder,
     embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
@@ -57,7 +58,7 @@ pub fn query_graph(
     occupancy: &OccupancyMap,
     arguments: Option<&Map<String, Value>>,
 ) -> Result<String, LainError> {
-    let mut executor = Executor::new(graph, embedder, embedding_cache);
+    let mut executor = Executor::new(graph, embedder, embedding_cache, workspace);
 
     // Parse query spec from arguments.
     // Accepts: {"spec": {...}} (per docs/query-language.md), {"query": {...}} (legacy),

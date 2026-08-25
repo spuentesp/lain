@@ -37,7 +37,11 @@ pub struct ToolContext {
     pub ui_sessions: Arc<AsyncMutex<std::collections::HashMap<String, UiSession>>>,
     pub jobs: Arc<AsyncMutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
-    pub diagnostics_port: u16,
+    /// Port the HTTP transport is listening on, shared as an atomic so
+    /// `run_http` can publish it after construction. 0 = no UI server
+    /// (stdio mode); tool handlers then omit the interactive `/ui/...`
+    /// link instead of emitting a dead URL.
+    pub diagnostics_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     /// Workspace root path. Used as the default `cwd` for execution tools
     /// (`run_build`, `run_tests`, `run_clippy`) so they don't fail just
     /// because the binary was launched from a different directory.
@@ -64,6 +68,16 @@ pub struct ToolContext {
     /// swaps in the live `Arc<Mutex<RefreshOutcome>>` from the
     /// constructed `LainServer`.
     pub last_outcome: Arc<parking_lot::Mutex<crate::server::refresh::RefreshOutcome>>,
+    /// The federation, when the server runs in federation mode.
+    ///
+    /// `graph` / `workspace` above are bound at construction: to the one
+    /// repo when the federation holds exactly one, and to an empty
+    /// staging placeholder otherwise. With several repos that made every
+    /// per-repo tool answer against an empty graph. The dispatcher
+    /// already resolves which repo a call targets and injects `repo_id`
+    /// into the args; this handle is what lets [`Self::for_repo`] turn
+    /// that id back into the right graph and checkout.
+    pub federation: Option<Arc<crate::server::federation::federated_index::FederatedIndex>>,
 }
 
 impl ToolContext {
@@ -92,7 +106,7 @@ impl ToolContext {
             ui_sessions,
             jobs,
             job_webhooks,
-            diagnostics_port: crate::server::tools::DIAGNOSTICS_PORT,
+            diagnostics_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             workspace: std::path::PathBuf::from("."),
             // Default to empty registries so standalone / sidecar
             // executors (which don't carry a `LainServer`) still
@@ -109,7 +123,47 @@ impl ToolContext {
             last_outcome: Arc::new(parking_lot::Mutex::new(
                 crate::server::refresh::RefreshOutcome::skipped(),
             )),
+            // Set by `with_federation` when the server runs in
+            // federation mode; single-workspace executors leave it None
+            // and `for_repo` is then a no-op.
+            federation: None,
         }
+    }
+
+    /// Attach the federation so per-repo tools can be rebound per call.
+    pub fn with_federation(
+        mut self,
+        fed: Arc<crate::server::federation::federated_index::FederatedIndex>,
+    ) -> Self {
+        self.federation = Some(fed);
+        self
+    }
+
+    /// A copy of this context whose `graph` and `workspace` point at
+    /// `repo_id`'s checkout instead of the construction-time binding.
+    ///
+    /// Returns `None` when there is no federation, the id does not
+    /// parse, or no such repo is registered — callers then keep the
+    /// context they already have, which is correct for single-workspace
+    /// mode and for the single-repo federation that is already bound to
+    /// the right graph.
+    pub fn for_repo(&self, repo_id: &str) -> Option<Self> {
+        let fed = self.federation.as_ref()?;
+        let rid = crate::server::federation::repo_id::RepoId::new(repo_id).ok()?;
+        let repo = fed.get_repo(&rid)?;
+        let mut bound = self.clone();
+        bound.graph = repo.db().clone();
+        let root = repo.source().local_path().to_path_buf();
+        // Git-backed tools (history, diff, branch status) read through
+        // `git`, so it has to follow the repo too — otherwise they keep
+        // answering from whichever checkout the server was built
+        // against. A repo whose checkout is not a git work tree keeps
+        // the existing sensor rather than failing the call.
+        if let Ok(sensor) = GitSensor::new(&root) {
+            bound.git = Arc::new(Mutex::new(sensor));
+        }
+        bound.workspace = root;
+        Some(bound)
     }
 
     /// Replace the default empty presence + occupancy registries with
@@ -194,6 +248,23 @@ impl ToolRegistry {
         name: &str,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
+        // Bind to the repo the caller resolved, when there is one. The
+        // MCP dispatcher injects `repo_id` after resolving the symbol or
+        // an explicit argument; without this the id was injected and
+        // then ignored, so in a multi-repo federation every per-repo
+        // tool read the empty staging placeholder and answered "not
+        // found" for symbols that plainly exist.
+        let rebound;
+        let ctx = match args.get("repo_id").and_then(|v| v.as_str()) {
+            Some(rid) => match ctx.for_repo(rid) {
+                Some(bound) => {
+                    rebound = bound;
+                    &rebound
+                }
+                None => ctx,
+            },
+            None => ctx,
+        };
         for entry in iter::<ToolHandlerEntry>() {
             if entry.0.name() == name {
                 return entry.0.call(ctx, args).await;
@@ -215,5 +286,108 @@ impl ToolRegistry {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod federation_binding_tests {
+    use super::*;
+    use crate::federation::federated_index::FederatedIndex;
+    use crate::federation::graph_backend::PetgraphBackend;
+    use crate::federation::repo_id::RepoId;
+    use crate::federation::repo_source::WorkspaceDirSource;
+    use crate::schema::{GraphNode, NodeType};
+
+    /// `graph` / `workspace` are bound once at construction, and with
+    /// several repos that binding is an empty staging placeholder. The
+    /// dispatcher resolves which repo a call targets and injects
+    /// `repo_id`; `for_repo` is what turns that id back into the right
+    /// graph and checkout. Without it every per-repo tool in a
+    /// multi-repo federation answered against an empty graph — a
+    /// confident "not found" for symbols that plainly exist.
+    #[tokio::test]
+    async fn for_repo_rebinds_graph_and_workspace_per_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = Arc::new(FederatedIndex::new(Arc::new(
+            PetgraphBackend::new(tmp.path()).unwrap(),
+        )));
+
+        // Two repos, each with its own checkout on disk.
+        let mut roots = Vec::new();
+        for name in ["alpha", "beta"] {
+            let dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(dir.path()).unwrap();
+            let root = dir.path().to_path_buf();
+            let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), root.clone()).unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+            // Keep the tempdir alive for the length of the test.
+            roots.push((name, root, dir));
+        }
+
+        // Put a distinct symbol in each repo's own graph.
+        for (name, _, _) in &roots {
+            let rid = RepoId::new(name).unwrap();
+            let repo = fed.get_repo(&rid).expect("repo registered");
+            repo.db()
+                .upsert_node(GraphNode::new(
+                    NodeType::Function,
+                    format!("{name}_only"),
+                    "src/lib.rs".to_string(),
+                ))
+                .unwrap();
+        }
+
+        // A context bound to an empty placeholder graph, as the
+        // multi-repo constructor leaves it.
+        let placeholder = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(
+            crate::graph::GraphDatabase::new(&placeholder.path().join("graph.bin")).unwrap(),
+            crate::overlay::VolatileOverlay::new(),
+            crate::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
+            crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
+            Arc::new(Mutex::new(
+                GitSensor::new(&roots[0].1).expect("git sensor"),
+            )),
+            Arc::new(LspPool::new(&roots[0].1, 1).unwrap()),
+            Arc::new(TuningConfig::default()),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+            Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+            Arc::new(AsyncMutex::new(Vec::new())),
+        )
+        .with_federation(Arc::clone(&fed));
+
+        assert_eq!(
+            ctx.graph.node_count(),
+            0,
+            "the multi-repo binding starts on an empty placeholder"
+        );
+
+        for (name, root, _) in &roots {
+            let bound = ctx.for_repo(name).expect("repo should rebind");
+            assert!(
+                bound.graph.find_node_by_name(&format!("{name}_only")).is_some(),
+                "{name}'s own symbol must resolve after rebinding"
+            );
+            let other = if *name == "alpha" { "beta" } else { "alpha" };
+            assert!(
+                bound
+                    .graph
+                    .find_node_by_name(&format!("{other}_only"))
+                    .is_none(),
+                "rebinding to {name} must not expose {other}'s symbols"
+            );
+            assert_eq!(
+                bound.workspace, *root,
+                "workspace must follow the repo, so relative paths read the right checkout"
+            );
+        }
+
+        assert!(
+            ctx.for_repo("no-such-repo").is_none(),
+            "an unknown repo leaves the caller's context alone"
+        );
     }
 }

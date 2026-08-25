@@ -5,26 +5,106 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Blast Radius</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="/theme.css">
+    <script>
+      // Apply the saved theme before first paint so the page never flashes the
+      // wrong palette. No stored choice => fall through to prefers-color-scheme,
+      // which theme.css handles on its own. The key is shared with the Command
+      // Center, so a choice made there carries over to these detail views.
+      try {
+        var t = localStorage.getItem('lain-theme');
+        if (t === 'light' || t === 'dark') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch (e) { /* storage blocked — system preference still applies */ }
+    </script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0a0a0f; color: #e0e0e0; padding: 20px; }
-        h1 { color: #00e5cc; margin-bottom: 10px; }
-        .info { background: #14141f; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px; color: #888; }
-        #graph { width: 100%; height: 500px; background: #0d0d15; border-radius: 8px; }
+        body {
+            font-family: var(--font-mono);
+            background: var(--bg);
+            color: var(--fg);
+            font-size: 13px;
+            line-height: 1.5;
+            padding: 20px;
+        }
+        h1 {
+            color: var(--accent);
+            margin-bottom: 12px;
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            text-shadow: var(--glow);
+        }
+        .info {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 2px solid var(--accent);
+            padding: 10px 15px;
+            margin-bottom: 20px;
+            color: var(--fg-muted);
+            font-size: 0.8rem;
+        }
+        .instructions {
+            margin-top: 15px;
+            color: var(--fg-muted);
+            font-size: 0.78rem;
+        }
+        /* Federation selector + form. */
+        #repo-selector label, #query-form label {
+            margin-right: 0.5rem;
+            color: var(--fg-muted);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+        }
+        #repo-selector select, #query-form input {
+            background: var(--surface);
+            color: var(--fg);
+            border: 1px solid var(--border);
+            padding: 5px 8px;
+            font-family: inherit;
+            font-size: 0.8rem;
+        }
+        #repo-selector select:focus, #query-form input:focus {
+            border-color: var(--accent);
+            outline: none;
+        }
+        #query-form button {
+            background: var(--accent);
+            color: var(--accent-fg);
+            border: 1px solid var(--accent);
+            padding: 6px 14px;
+            cursor: pointer;
+            margin-left: 0.5rem;
+            font-family: inherit;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+        }
+        #query-form button:hover { filter: brightness(1.15); }
+        #graph {
+            width: 100%;
+            height: 500px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+        }
         .node { cursor: pointer; }
-        .node:hover rect { stroke: #00e5cc; stroke-width: 2px; }
-        .instructions { margin-top: 15px; color: #666; font-size: 0.9rem; }
-        .node-label { fill: #e0e0e0; font-size: 11px; }
-        .direct rect { fill: #ff6b6b; }
-        .indirect rect { fill: #2a2a3a; }
-        .selected rect { fill: #00e5cc !important; }
-        /* Federation selector + form — matches the page's dark theme. */
-        #repo-selector label, #query-form label { margin-right: 0.5rem; color: #e0e0e0; }
-        #repo-selector select, #query-form input { background: #14141f; color: #e0e0e0; border: 1px solid #2a2a3a; padding: 4px 8px; border-radius: 4px; font-family: inherit; }
-        #query-form button { background: #00e5cc; color: #0a0a0f; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; margin-left: 0.5rem; font-family: inherit; }
+        .node rect { stroke: var(--border); stroke-width: 1px; }
+        .node:hover rect { stroke: var(--accent); stroke-width: 2px; }
+        .node-label { fill: var(--fg); font-size: 11px; font-family: var(--font-mono); }
+        /* Fills come from CSS, not the `fill` attribute, so both themes work:
+           a CSS rule outranks a presentation attribute. */
+        .direct rect { fill: var(--sev-high-bg); stroke: var(--err); }
+        .direct .node-label { fill: var(--err); }
+        .indirect rect { fill: var(--surface-alt); }
+        .selected rect { fill: var(--accent) !important; }
+        .selected .node-label { fill: var(--accent-fg); }
+        #graph line { stroke: var(--border); }
     </style>
 </head>
-<body>
+<body class="crt-scanlines">
     <div id="repo-selector" style="display: none; margin-bottom: 1rem;">
       <label>Repo:
         <select id="repo-select"></select>
@@ -57,7 +137,6 @@
             .selectAll("line")
             .data([])
             .join("line")
-            .attr("stroke", "#333")
             .attr("stroke-opacity", 0.6);
 
         const node = svg.append("g")
@@ -75,8 +154,7 @@
             .attr("height", 40)
             .attr("x", -60)
             .attr("y", -20)
-            .attr("rx", 6)
-            .attr("fill", d => d.is_direct ? "#ff6b6b" : "#2a2a3a");
+            .attr("rx", 0);
 
         node.append("text")
             .attr("class", "node-label")

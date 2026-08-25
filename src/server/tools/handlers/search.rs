@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub fn semantic_search(
+    workspace: &std::path::Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
@@ -67,16 +68,10 @@ pub fn semantic_search(
         return Ok("No nodes found for semantic search in Merged Brain. Run 'run_enrichment' first.".to_string());
     }
 
-    // 2. Compute query embedding once
-    // Apply query_prefix if configured (BGE-style asymmetric retrieval).
-    // Documents embedded during ingestion are NOT prefixed — only the
-    // user's query string gets the instruction.
-    let query_for_embedding = if tuning.query_prefix.is_empty() {
-        query.to_string()
-    } else {
-        format!("{}{}", tuning.query_prefix, query)
-    };
-    let query_emb = embedder.embed(&query_for_embedding)?;
+    // 2. Compute query embedding once. `embed_query` applies the
+    //    configured prefix; documents go through `embed` and stay
+    //    plain, which is what makes the retrieval asymmetric.
+    let query_emb = embedder.embed_query(query)?;
 
     // 3. Batch Scoring with Shadow Masking
     let mut scored: Vec<(&GraphNode, f32)> = Vec::new();
@@ -100,7 +95,7 @@ pub fn semantic_search(
             // reuse these 200 instead of recomputing, so cold cost amortizes
             // across the session rather than every call.
             volatile_embed_count += 1;
-            let text = build_enriched_text(node);
+            let text = build_enriched_text(node, workspace);
             embedder.embed(&text).ok()
         } else {
             None
@@ -135,7 +130,7 @@ pub fn semantic_search(
             // "GraphDatabase") surface even when the cosine score alone
             // is borderline.
             let lex = if tuning.lexical_weight > 0.0 {
-                let text = build_enriched_text(node);
+                let text = build_enriched_text(node, workspace);
                 token_recall(query, &text)
             } else {
                 0.0
@@ -147,21 +142,23 @@ pub fn semantic_search(
         }
     }
 
-    // 4. Sort by hybrid score: combine similarity with anchor score (Importance Sorting).
-    // anchor_score is normalized to [0, 1] within this candidate set via min-max
-    // so the formula behaves consistently regardless of corpus size or
-    // how many times the indexer has re-run. Without this, anchor scores
-    // can grow to 1000+ across reindexes and the formula
-    //   sim + anchor_weight * anchor
-    // becomes anchor-dominated even with anchor_weight=0.05, burying
-    // semantically better matches.
-    let max_anchor = scored.iter()
-        .map(|(n, _)| n.anchor_score.unwrap_or(0.0))
-        .fold(0.0f32, f32::max);
-    let norm = if max_anchor > 0.0 { max_anchor } else { 1.0 };
+    // 4. Sort by hybrid score: similarity plus a bounded importance bonus.
+    //
+    // `anchor_score` is already normalized against the whole corpus by
+    // `calculate_anchor_scores` — the top symbol scores 100. Divide by
+    // that known scale, not by the maximum within the result set.
+    //
+    // Min-max within the set was the previous approach, and it inflated
+    // noise: whichever candidate had the highest anchor got the *full*
+    // bonus even when nothing in the set was an anchor at all. Observed
+    // live — a result with anchor 0.59 out of 100 received the maximum
+    // +0.3 and outranked a candidate with 0.56 similarity against its
+    // 0.36. Against the global scale that bonus is 0.3 × 0.0059 ≈ 0.002,
+    // which is the honest weight for a symbol nothing depends on.
+    const ANCHOR_SCALE: f32 = 100.0;
     scored.sort_by(|a, b| {
-        let anchor_a = a.0.anchor_score.unwrap_or(0.0) / norm;
-        let anchor_b = b.0.anchor_score.unwrap_or(0.0) / norm;
+        let anchor_a = (a.0.anchor_score.unwrap_or(0.0) / ANCHOR_SCALE).clamp(0.0, 1.0);
+        let anchor_b = (b.0.anchor_score.unwrap_or(0.0) / ANCHOR_SCALE).clamp(0.0, 1.0);
         // Hybrid: similarity + anchor_weight * normalized_anchor_score
         let hybrid_a = a.1 + tuning.anchor_weight * anchor_a;
         let hybrid_b = b.1 + tuning.anchor_weight * anchor_b;
@@ -189,7 +186,7 @@ pub fn semantic_search(
         let k = tuning.cross_encoder_top_k.min(scored.len());
         let mut reranked: Vec<Scored> = Vec::with_capacity(k);
         for (node, hybrid) in scored.iter().take(k) {
-            let text = build_enriched_text(node);
+            let text = build_enriched_text(node, workspace);
             let ce_score = cross_encoder.score(query, &text).unwrap_or(0.0);
             reranked.push(Scored { node, hybrid: *hybrid, score: ce_score, kind: ScoreKind::CrossLogit });
         }
@@ -215,7 +212,7 @@ pub fn semantic_search(
             let sig = s.node.signature.as_ref().map(|x| format!(" | {}", x)).unwrap_or_default();
             // Short body excerpt so behavior-shaped terms (e.g. `bincode`
             // in GraphDatabase::save_to_disk) appear in the response text.
-            let body = read_body_summary(s.node, 80)
+            let body = read_body_summary(s.node, 80, workspace)
                 .map(|b| format!(" | {}", b))
                 .unwrap_or_default();
             // Label depends on which score drives the ranking. Cross-encoder

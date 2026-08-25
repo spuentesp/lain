@@ -237,3 +237,54 @@ fn test_git_sensor_get_repo_identity() {
     // May be None if no origin remote or not GitHub
     assert!(identity.is_ok());
 }
+/// `get_new_commits_since` must return commits *newer* than the given hash.
+///
+/// A revwalk from HEAD yields newest-first, and the original loop skipped until
+/// it saw `since_hash` and then collected everything after — i.e. the history
+/// *older* than the last indexed commit, the exact inverse. Incremental
+/// indexing therefore never saw recent work while re-scanning ancient history
+/// on every pass. Nothing in this file covered the function, which is why the
+/// defect survived so long.
+#[test]
+fn get_new_commits_since_returns_newer_commits_not_older() {
+    use std::fs;
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join("lain_git_test_revwalk_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let git = |args: &[&str]| {
+        Command::new("git").args(args).current_dir(&dir).output().unwrap();
+    };
+    git(&["init"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+
+    let mut shas = Vec::new();
+    for i in 0..3 {
+        fs::write(dir.join(format!("f{i}.txt")), format!("{i}")).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", &format!("c{i}")]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        shas.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+
+    let sensor = GitSensor::new(&dir).unwrap();
+
+    // From the first commit, the two later ones are "new".
+    let since_first = sensor.get_new_commits_since(&shas[0]).unwrap();
+    let ids: Vec<&str> = since_first.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(since_first.len(), 2, "expected the two commits after c0, got {ids:?}");
+    assert!(ids.contains(&shas[1].as_str()), "c1 missing from {ids:?}");
+    assert!(ids.contains(&shas[2].as_str()), "c2 missing from {ids:?}");
+    assert!(!ids.contains(&shas[0].as_str()), "the since-commit itself must be excluded");
+
+    // From HEAD, nothing is newer — the old code returned the entire history here.
+    let since_head = sensor.get_new_commits_since(&shas[2]).unwrap();
+    assert!(since_head.is_empty(), "HEAD has no newer commits, got {} ", since_head.len());
+}

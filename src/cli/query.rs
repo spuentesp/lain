@@ -11,21 +11,36 @@ use crate::query::spec::{
     QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp, TypeSelector,
 };
 
-pub fn run_query(expression: &str, workspace: &std::path::Path) -> Result<()> {
-    let memory_path = workspace.join(".lain/graph.bin");
+pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Result<()> {
+    // Resolve the workspace root: explicit `--workspace`, else walk up
+    // for `.git` like `lain mcp` does. The graph lives at
+    // `<workspace>/.lain/graph.bin` (written by `lain mcp` / `lain
+    // server` indexing).
+    let root = match workspace {
+        Some(p) => p.to_path_buf(),
+        None => crate::cli::workspace::find_git_workspace_root(None)
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no `.git` found in any parent directory — pass `--workspace PATH` to override"
+                )
+            })?,
+    };
+    let memory_path = root.join(".lain/graph.bin");
 
     let graph = match GraphDatabase::new(&memory_path) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error: Failed to load graph at {:?}: {}", memory_path, e);
-            eprintln!("\nHint: Run 'lain' first to build the code graph.");
+            eprintln!("\nHint: Run 'lain mcp' (or 'lain server') first to build the code graph.");
             std::process::exit(1);
         }
     };
 
     let embedder = NlpEmbedder::new()?;
     let cache = Arc::new(Mutex::new(HashMap::new()));
-    let mut executor = Executor::new(&graph, &embedder, &cache);
+    let mut executor = Executor::new(&graph, &embedder, &cache, &root);
     let spec = parse_query_string(expression);
 
     match executor.execute(&spec) {

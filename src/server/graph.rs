@@ -14,12 +14,49 @@ use serde::{Deserialize, Serialize};
 use petgraph::stable_graph::{StableGraph, NodeIndex};
 use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use petgraph::Direction;
+use tracing::warn;
+
+/// Bumped whenever the meaning of `GraphNode.path` changes. Version 2 is
+/// the switch from mixed absolute/relative paths to a single
+/// workspace-relative form. A graph written by an older lain deserializes
+/// fine (the bincode layout is unchanged) but its keys are absolute, so
+/// merging it into a v2 graph would double every node instead of updating
+/// it. `load_from_disk` therefore discards anything that isn't v2 and lets
+/// the caller rebuild from source.
+pub const PATH_FORMAT_VERSION: u32 = 2;
+
+/// The canonical graph key for a file: workspace-relative, forward-slashed.
+///
+/// Every site that mints or looks up a path key goes through this. That is
+/// the property the orphan sweep depends on — producer keys (from the
+/// scanner) and consumer keys (from `git.get_all_tracked_files`, which
+/// returns absolute paths) are only comparable because both sides are
+/// reduced here first. Checking for a mismatch defensively would not work:
+/// an absolute-vs-relative set difference looks like "every node is an
+/// orphan", not like an error.
+///
+/// Paths outside `workspace` (out-of-tree dependencies surfaced by LSP) are
+/// kept in their own string form rather than being forced into a bogus
+/// relative path; they are stable, just not workspace-relative.
+pub fn graph_path(workspace: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(workspace).unwrap_or(path);
+    let s = rel.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '/' {
+        s.into_owned()
+    } else {
+        s.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct GraphState {
     graph: StableGraph<GraphNode, GraphEdge>,
     index_map: HashMap<String, NodeIndex>,
     last_commit: Option<String>,
+    /// Absent in graphs written before the canonical-path change; serde
+    /// defaults it to 0, which fails the version check and forces a rebuild.
+    #[serde(default)]
+    path_format_version: u32,
 }
 
 #[derive(Clone)]
@@ -34,6 +71,55 @@ pub struct GraphDatabase {
     /// used by sidecar processes that subscribe to an owner's overlay
     /// stream and never mutate the static graph on disk.
     read_only: bool,
+}
+
+/// How current the graph is for one file.
+///
+/// The index is driven by git commits, so a file edited but not yet committed
+/// is invisible to it. That is the common case while an agent is working, and
+/// the graph cannot detect it from commit history alone — only by comparing the
+/// file on disk against when it was last scanned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Freshness {
+    /// The file has not changed since it was indexed.
+    Fresh,
+    /// The file was modified after it was last scanned. Answers about it may
+    /// omit new symbols or still show ones that were removed.
+    Dirty { modified_ago: std::time::Duration },
+    /// No nodes for this path — never indexed, or not tracked by git.
+    Absent,
+}
+
+impl Freshness {
+    /// One line to prepend to a tool response, or `None` when the file is
+    /// current and there is nothing worth saying.
+    ///
+    /// Scoped to the file backing the answer rather than the whole graph: a
+    /// global "N commits behind" banner on every response is noise that trains
+    /// the reader to ignore it, while "this file changed 4m ago" is a fact they
+    /// can act on.
+    pub fn note(&self, path: &str) -> Option<String> {
+        match self {
+            Freshness::Fresh => None,
+            Freshness::Dirty { modified_ago } => {
+                let secs = modified_ago.as_secs();
+                let ago = if secs < 90 {
+                    format!("{secs}s")
+                } else if secs < 5400 {
+                    format!("{}m", secs / 60)
+                } else {
+                    format!("{}h", secs / 3600)
+                };
+                Some(format!(
+                    "⚠ {path} was modified {ago} ago, after it was last indexed — \
+                     this answer may be missing recent changes."
+                ))
+            }
+            Freshness::Absent => Some(format!(
+                "⚠ {path} is not in the graph — it may be untracked by git, or not yet indexed."
+            )),
+        }
+    }
 }
 
 impl GraphDatabase {
@@ -133,6 +219,326 @@ impl GraphDatabase {
         Ok(())
     }
 
+    /// Replace every node recorded under `paths` with `nodes`, so a re-scan
+    /// of a file is idempotent instead of additive.
+    ///
+    /// Without this the graph only ever grows: a symbol deleted from a file,
+    /// a file deleted from the repo, or a file moved to a new path all leave
+    /// their nodes behind forever. Those orphans are not merely inert — name
+    /// resolution can pick one, and since it carries no live edges the caller
+    /// gets a confident answer with a stale path and no callers.
+    ///
+    /// Atomicity: removals and insertions happen inside one graph write lock,
+    /// and each path's `path_index` entry is swapped in a single operation
+    /// rather than cleared and refilled. A concurrent reader therefore never
+    /// observes a file with zero symbols — which matters because lain's whole
+    /// premise is several agents querying while one indexes.
+    ///
+    /// `Namespace` nodes are never removed: their key is a directory shared by
+    /// every file beneath it, so scoping them to a file would delete a module
+    /// each time any one of its files was scanned.
+    ///
+    /// Passing a path with no corresponding entries in `nodes` deletes that
+    /// path's nodes outright — the deleted-file case.
+    ///
+    /// Returns the number of nodes removed.
+    pub fn replace_nodes_for_paths(
+        &self,
+        paths: &[String],
+        nodes: &[GraphNode],
+    ) -> Result<usize, LainError> {
+        use std::collections::HashMap as StdHashMap;
+
+        self.check_writable()?;
+
+        // Group incoming nodes by their own path key so each path's index
+        // entry can be swapped wholesale below.
+        let mut by_path: StdHashMap<&str, Vec<&GraphNode>> = StdHashMap::new();
+        for node in nodes {
+            by_path.entry(node.path.as_str()).or_default().push(node);
+        }
+
+        let mut removed_ids: Vec<String> = Vec::new();
+        let mut new_entries: Vec<(String, Vec<NodeIndex>)> = Vec::new();
+        // Incoming edges that must survive the replacement.
+        //
+        // `remove_node` takes every incident edge with it. For the file
+        // being re-scanned that is correct — its own outgoing edges are
+        // rebuilt from the fresh scan. But *incoming* edges from files
+        // that are NOT in this pass are collateral: an incremental
+        // re-index only re-resolves refs from the files it scanned, so
+        // a caller in an untouched file is never restored and its edge
+        // is gone for good. Left unhandled this erodes the graph on
+        // every incremental pass — the observed end state was 37 of 335
+        // files whose symbols had no edges at all, and functions that
+        // were demonstrably called reporting zero callers.
+        //
+        // Node ids are deterministic (same path + name + kind), so a
+        // symbol that still exists after the re-scan comes back under
+        // the same id and the edge is still meaningful. A symbol that
+        // was genuinely deleted does not come back, and the edge stays
+        // dropped — which is also correct.
+        let replaced_paths: HashSet<&str> = paths.iter().map(|p| p.as_str()).collect();
+        let mut preserved_incoming: Vec<GraphEdge> = Vec::new();
+        let mut collateral_edges = 0usize;
+        let mut restored_edges = 0usize;
+
+        {
+            let mut graph = self.graph.write();
+
+            for path in paths {
+                // Drop the old nodes for this path, keeping Namespace nodes.
+                let old = self
+                    .path_index
+                    .get(path)
+                    .map(|r| r.value().clone())
+                    .unwrap_or_default();
+                let mut kept: Vec<NodeIndex> = Vec::new();
+                for idx in old {
+                    match graph.node_weight(idx) {
+                        Some(n) if n.node_type == NodeType::Namespace => {
+                            kept.push(idx);
+                        }
+                        Some(n) => {
+                            let id = n.id.clone();
+                            collateral_edges += graph.edges(idx).count();
+                            // Capture inbound edges from files this pass
+                            // is not rebuilding, before they go with the
+                            // node. Sources inside `replaced_paths` are
+                            // skipped: those files are being re-scanned
+                            // and will re-resolve their own edges, so
+                            // restoring them here would duplicate.
+                            for e in graph.edges_directed(idx, Direction::Incoming) {
+                                let src_is_replaced = graph
+                                    .node_weight(e.source())
+                                    .map(|s| replaced_paths.contains(s.path.as_str()))
+                                    .unwrap_or(true);
+                                if !src_is_replaced {
+                                    preserved_incoming.push(e.weight().clone());
+                                }
+                            }
+                            graph.remove_node(idx); // incident edges go with it
+                            // Remove the stale id → index entry NOW, not
+                            // after the replacements are inserted: node ids
+                            // are deterministic (same path+name → same id),
+                            // so a deferred removal wipes the *fresh* entry
+                            // inserted below and every id-keyed lookup
+                            // (get_edges_to, blast radius) silently returns
+                            // empty while name-keyed lookups still work.
+                            self.index_map.remove(&id);
+                            removed_ids.push(id);
+                        }
+                        // index pointed at a vacated slot; nothing to remove
+                        None => {}
+                    }
+                }
+
+                // Add this path's replacements in the same locked section.
+                let mut fresh = kept;
+                let mut seen_ids: HashSet<String> = HashSet::new();
+                for node in by_path.get(path.as_str()).into_iter().flatten() {
+                    // Two source files in the same directory emit the
+                    // same `Namespace` node (deterministic id) — without
+                    // a guard the second `add_node` creates an orphan
+                    // petgraph entry that holds incident edges but is
+                    // invisible to the id-keyed index. Keep the first.
+                    if !seen_ids.insert(node.id.clone()) {
+                        continue;
+                    }
+                    let idx = graph.add_node((*node).clone());
+                    self.index_map.insert(node.id.clone(), idx);
+                    fresh.push(idx);
+                }
+                new_entries.push((path.clone(), fresh));
+            }
+
+            // Swap the indexes while still holding the graph write lock.
+            // Doing it after releasing the lock left a window in which
+            // `path_index` still pointed at NodeIndex values already removed
+            // from the graph, so a concurrent reader resolved every one of
+            // them to `None` and concluded the file had no nodes at all. That
+            // was observable: two tools in the same batch disagreed about
+            // whether a file was in the graph. Readers that consult
+            // `path_index` under the graph read lock now see the old pair or
+            // the new pair, never a mix.
+            // (`index_map` entries for removed ids were already dropped
+            // inline above — see the removal loop for why deferring that
+            // wipes freshly re-inserted entries for deterministic ids.)
+            // Restore the inbound edges whose endpoints both still
+            // exist. Done inside the same write lock so no reader ever
+            // observes the node back without its callers.
+            for edge in &preserved_incoming {
+                if let (Some(s), Some(t)) = (
+                    self.index_map.get(&edge.source_id).map(|r| *r.value()),
+                    self.index_map.get(&edge.target_id).map(|r| *r.value()),
+                ) {
+                    let already = graph
+                        .edges_connecting(s, t)
+                        .any(|e| e.weight().edge_type == edge.edge_type);
+                    if !already {
+                        graph.add_edge(s, t, edge.clone());
+                        restored_edges += 1;
+                    }
+                }
+            }
+
+            for (path, indices) in new_entries {
+                if indices.is_empty() {
+                    self.path_index.remove(&path);
+                } else {
+                    self.path_index.insert(path, indices);
+                }
+            }
+        }
+
+        if collateral_edges > 0 {
+            tracing::debug!(
+                "replace_nodes_for_paths: {} path(s), {} node(s) removed, \
+                 {collateral_edges} incident edge(s) removed with them, \
+                 {restored_edges} inbound edge(s) restored from unchanged files",
+                paths.len(),
+                removed_ids.len()
+            );
+        }
+
+        Ok(removed_ids.len())
+    }
+
+    /// Remove nodes by id, with their incident edges. Companion to
+    /// [`Self::replace_nodes_for_paths`] for callers that key by id rather than
+    /// by file — the federated backend rewrites every node to a global id, and
+    /// two repos can share a path, so path is not a usable key there.
+    pub fn remove_nodes_by_ids(&self, ids: &[String]) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        let mut removed = 0usize;
+        let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
+        {
+            let mut graph = self.graph.write();
+            for id in ids {
+                let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
+                    continue;
+                };
+                if let Some(node) = graph.node_weight(idx) {
+                    cleared_paths.push((node.path.clone(), idx));
+                }
+                if graph.remove_node(idx).is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        for id in ids {
+            self.index_map.remove(id);
+        }
+        // Keep path_index consistent with the graph, or later lookups resolve
+        // through a vacated slot.
+        for (path, idx) in cleared_paths {
+            let now_empty = if let Some(mut entry) = self.path_index.get_mut(&path) {
+                entry.retain(|i| *i != idx);
+                entry.is_empty()
+            } else {
+                false
+            };
+            if now_empty {
+                self.path_index.remove(&path);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// How current the graph is for `path` (a graph key, i.e. workspace-relative).
+    ///
+    /// Uses `last_lsp_sync`, the wall-clock second at which the scan read the
+    /// file, which every node already carries — so this needs no extra state.
+    /// A file whose mtime is newer than that was edited after being scanned.
+    ///
+    /// Both sides are whole seconds, so an edit landing in the same second as
+    /// the scan reads as `Fresh`. That is an acceptable miss for a hint.
+    pub fn freshness(&self, workspace: &Path, path: &str) -> Freshness {
+        // Hold the graph lock across the `path_index` read: the writer updates
+        // both under this same lock, so this observes a consistent pair rather
+        // than an index that has outlived the nodes it points at.
+        let last_scan = {
+            let graph = self.graph.read();
+            let Some(indices) = self.path_index.get(path).map(|r| r.value().clone()) else {
+                return Freshness::Absent;
+            };
+            indices
+                .iter()
+                .filter_map(|idx| graph.node_weight(*idx))
+                .filter_map(|n| n.last_lsp_sync)
+                .max()
+        };
+        let Some(last_scan) = last_scan else {
+            return Freshness::Absent;
+        };
+
+        let resolved = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            workspace.join(path)
+        };
+        let Ok(mtime) = std::fs::metadata(&resolved).and_then(|m| m.modified()) else {
+            // Gone from disk. The orphan sweep reclaims it on the next complete
+            // pass; until then say nothing rather than guess.
+            return Freshness::Fresh;
+        };
+        let mtime_secs = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if mtime_secs > last_scan {
+            Freshness::Dirty {
+                modified_ago: std::time::SystemTime::now()
+                    .duration_since(mtime)
+                    .unwrap_or_default(),
+            }
+        } else {
+            Freshness::Fresh
+        }
+    }
+
+    /// Drop every node whose file is no longer tracked, and report how many.
+    ///
+    /// This is a net, not the mechanism: per-file replacement during a scan and
+    /// explicit handling of git-reported deletions are what keep the graph
+    /// honest. The sweep catches what those miss (a file removed outside git's
+    /// view, an interrupted earlier run) and clears any backlog inherited from
+    /// builds that never deleted anything.
+    ///
+    /// `tracked` must be built with [`graph_path`], the same helper the scanner
+    /// mints node paths with. That is the actual safety property here, and it
+    /// cannot be replaced by a check: `git.get_all_tracked_files` returns
+    /// absolute paths, and comparing those against relative node keys does not
+    /// look like an error — it looks like every node being an orphan, and the
+    /// sweep would delete the entire graph. Routing both sides through one
+    /// helper makes the mismatch unrepresentable.
+    ///
+    /// Callers must skip the sweep when `tracked` is empty (git failed) and
+    /// when the index pass was partial (files simply not visited yet).
+    /// Deliberately has no "refuses to delete more than N%" tripwire: the first
+    /// sweep against a graph built by an older lain legitimately drops about
+    /// half of it, so a ratio guard would block exactly the cleanup wanted.
+    pub fn prune_orphans(&self, tracked: &HashSet<String>) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        // Iterate the per-path index rather than every node: distinct paths are
+        // a fraction of node count, and each stale one drops as a whole bucket.
+        let stale: Vec<String> = self
+            .path_index
+            .iter()
+            .map(|r| r.key().clone())
+            .filter(|key| !tracked.contains(key))
+            .collect();
+
+        let mut removed = 0usize;
+        for key in stale {
+            removed += self.replace_nodes_for_paths(&[key], &[])?;
+        }
+        Ok(removed)
+    }
+
     pub fn upsert_nodes_batch(&self, new_nodes: Vec<GraphNode>) -> Result<(), LainError> {
         for node in new_nodes {
             self.upsert_node(node)?;
@@ -155,22 +561,53 @@ impl GraphDatabase {
         Ok(())
     }
 
-    pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<(), LainError> {
+    /// Insert a batch of edges, skipping any whose endpoints aren't in
+    /// the graph. Returns the number that were **dropped**.
+    ///
+    /// The skip itself is necessary — an edge to a node that no longer
+    /// exists can't be added — but it used to be silent, and that
+    /// silence hid a real defect: in one production graph, 37 of 335
+    /// files had symbols with no `Contains` edge from their own file
+    /// node, so their symbols were orphaned and every structural query
+    /// about them came back empty. Nothing logged it, no counter
+    /// recorded it, and the graph reported itself healthy.
+    ///
+    /// Callers should log a non-zero return. An indexing pass that
+    /// drops edges produced a graph that does not describe the code.
+    pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
 
+        let mut dropped = 0usize;
         for edge in new_edges {
             if let (Some(s), Some(t)) = (
                 self.index_map.get(&edge.source_id).map(|r| *r.value()),
                 self.index_map.get(&edge.target_id).map(|r| *r.value())
             ) {
                 graph.add_edge(s, t, edge.clone());
+            } else {
+                dropped += 1;
             }
         }
-        Ok(())
+        Ok(dropped)
     }
 
+    /// Insert an edge idempotently: same `(source, target, edge_type)`
+    /// triple is added at most once. `project_repo` runs on every
+    /// add_repo / reload / watcher-triggered index, so without dedup
+    /// the federation backend accumulates N copies of each edge over
+    /// the lifetime of the server (observed: `total_edges` = 127k
+    /// instead of the per-repo 15k on the lain repo itself).
     pub fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
+        let graph = self.graph.read();
+        let source_idx = self.index_map.get(&edge.source_id).map(|r| *r.value());
+        let target_idx = self.index_map.get(&edge.target_id).map(|r| *r.value());
+        if let (Some(s), Some(t)) = (source_idx, target_idx) {
+            if graph.edges_connecting(s, t).any(|e| e.weight().edge_type == edge.edge_type) {
+                return Ok(());
+            }
+        }
+        drop(graph);
         self.insert_edge(&edge)
     }
 
@@ -344,8 +781,33 @@ impl GraphDatabase {
         graph.edge_weights().cloned().collect()
     }
 
+    /// One node with this name, chosen deterministically.
+    ///
+    /// This used to be `node_weights().find(...)` — petgraph iteration
+    /// order, which is neither meaningful nor stable across reindexes.
+    /// With eleven `fn parse` definitions in this repo, two calls could
+    /// legitimately answer about two different functions, which is how
+    /// `find_anchors` and `get_anchor_score` ended up reporting
+    /// different scores "for `parse`". Sorting by (path, id) at least
+    /// makes the choice repeatable; [`Self::find_all_nodes_by_name`]
+    /// is what callers should use when they need to know a name was
+    /// ambiguous at all.
     pub fn find_node_by_name(&self, name: &str) -> Option<GraphNode> {
-        self.graph.read().node_weights().find(|n| n.name == name).cloned()
+        self.find_all_nodes_by_name(name).into_iter().next()
+    }
+
+    /// Every node with this name, sorted by (path, id) so the order is
+    /// stable across reindexes.
+    pub fn find_all_nodes_by_name(&self, name: &str) -> Vec<GraphNode> {
+        let mut hits: Vec<GraphNode> = self
+            .graph
+            .read()
+            .node_weights()
+            .filter(|n| n.name == name)
+            .cloned()
+            .collect();
+        hits.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+        hits
     }
 
     pub fn find_node_by_path(&self, path: &str) -> Option<GraphNode> {
@@ -479,13 +941,13 @@ impl GraphDatabase {
         self.check_writable()?;
         let mut graph = self.graph.write();
 
-        // Two-pass: compute raw anchor ratios, find the corpus-wide max,
+        // Two-pass: compute raw hub scores, find the corpus-wide max,
         // then normalize every node so the top symbol scores 100 and
         // everything else scales accordingly.
         //
-        // Without this normalization, anchor_score = fan_in / (fan_out+1)
-        // grows unbounded as the corpus grows (we've observed values up
-        // to 1063 in production). That makes the search ranking
+        // Without this normalization the raw score grows unbounded as
+        // the corpus grows (we've observed values up to 1063 in
+        // production). That makes the search ranking
         // `sim + anchor_weight * anchor` anchor-dominated, hiding
         // semantically better matches and producing different rankings
         // across reindexes of the same code.
@@ -499,13 +961,75 @@ impl GraphDatabase {
         //     normalization in search.rs
         let indices: Vec<_> = graph.node_indices().collect();
 
-        // Pass 1: compute raw ratios, find max
+        // Pass 1: compute raw hub scores, find max.
+        //
+        // Hub semantics. An anchor is an ORCHESTRATION hub — called
+        // by many (calls_in), coordinating many (calls_out), with a
+        // real body (size_factor):
+        //
+        //     raw = calls_in * log2(1 + calls_out) * size_factor
+        //     size_factor = min(1, body_lines / 8)
+        //
+        // Only Calls edges count. The superseded fan_in/(fan_out+1)
+        // counted every edge type (including Contains from the parent
+        // file) and actively punished fan_out, which is backwards for
+        // hubs — it put 1-line helpers like `as_str` at the top of
+        // find_anchors.
+        //
+        // The approved design wrote `log2(2 + calls_out)`, so that
+        // calls_out = 0 yielded a factor of 1. This uses `1 +`
+        // deliberately: a function that calls nothing coordinates
+        // nothing, so it scores 0 however many callers it has — the
+        // stronger form of the same intent. Pinned by
+        // `anchor_hub_tests::{leaf_utility_scores_zero,
+        // hub_outranks_trivial_helper}`.
+        //
+        // Known limit: Calls edges are name-resolved when LSP type
+        // info is unavailable, so every `.as_str()` in the repo
+        // collapses onto one node and inflates its calls_in. A
+        // ubiquitous method name can still surface at the top;
+        // `find_anchors` reports the path so you can see which
+        // definition was scored.
         let mut max_raw: f32 = 0.0;
         let mut raws: Vec<(petgraph::graph::NodeIndex, f32)> = Vec::with_capacity(indices.len());
         for idx in &indices {
-            let fan_in = graph.neighbors_directed(*idx, Direction::Incoming).count() as f32;
-            let fan_out = graph.neighbors_directed(*idx, Direction::Outgoing).count() as f32;
-            let raw = fan_in / (fan_out + 1.0);
+            let node = &graph[*idx];
+            // Test code is hub-shaped (fixtures call everything and are
+            // called by every test) but anchors are entry points into
+            // the PRODUCT. Test-path symbols score 0, and Calls edges
+            // with a test-path endpoint don't count toward fan-in/out
+            // either (fifty `test_*` callers don't make `default` an
+            // orchestration hub). Inline `#[cfg(test)]` modules inside
+            // regular src files are only detectable via the
+            // `*_tests.rs` / `tests.rs` file-stem conventions.
+            if is_test_path(&node.path) {
+                raws.push((*idx, 0.0));
+                continue;
+            }
+            let raw = match node.node_type {
+                NodeType::Function | NodeType::Method => {
+                    let calls_in = graph
+                        .edges_directed(*idx, Direction::Incoming)
+                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                        .filter(|e| !is_test_path(&graph[e.source()].path))
+                        .count() as f32;
+                    let calls_out = graph
+                        .edges_directed(*idx, Direction::Outgoing)
+                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                        .filter(|e| !is_test_path(&graph[e.target()].path))
+                        .count() as f32;
+                    let body_lines = match (node.line_start, node.line_end) {
+                        (Some(s), Some(e)) => e.saturating_sub(s) as f32 + 1.0,
+                        _ => 1.0,
+                    };
+                    let size_factor = (body_lines / 8.0).min(1.0);
+                    // log2(1 + calls_out): a leaf that calls nothing is
+                    // not an orchestration hub and scores 0 — no matter
+                    // how many callers it has (the `as_str` problem).
+                    calls_in * (1.0 + calls_out).log2() * size_factor
+                }
+                _ => 0.0,
+            };
             if raw > max_raw {
                 max_raw = raw;
             }
@@ -516,6 +1040,21 @@ impl GraphDatabase {
         for (idx, raw) in raws {
             let fan_in = graph.neighbors_directed(idx, Direction::Incoming).count() as u32;
             let fan_out = graph.neighbors_directed(idx, Direction::Outgoing).count() as u32;
+            // Calls-only counts, stored alongside the all-edge ones.
+            // "How many callers?" is a different question from "how
+            // coupled is this?", and answering the first with the
+            // second is why a dead-code check could never fire: the
+            // `Contains` edge from a symbol's own file guarantees
+            // `fan_in >= 1`. No test-path filter here — that is an
+            // anchor-scoring policy, not a fact about the graph.
+            let calls_in = graph
+                .edges_directed(idx, Direction::Incoming)
+                .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                .count() as u32;
+            let calls_out = graph
+                .edges_directed(idx, Direction::Outgoing)
+                .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                .count() as u32;
             // 100.0 scale so display "anchor 12.34" is human-readable;
             // top-of-corpus symbol always scores 100 regardless of how
             // big the codebase grows.
@@ -527,12 +1066,22 @@ impl GraphDatabase {
             if let Some(node) = graph.node_weight_mut(idx) {
                 node.fan_in = Some(fan_in);
                 node.fan_out = Some(fan_out);
+                node.calls_in = Some(calls_in);
+                node.calls_out = Some(calls_out);
                 node.anchor_score = Some(normalized);
             }
         }
         Ok(())
     }
 
+    /// Top symbols by `anchor_score`. Many real codebases contain
+    /// dozens of identically-named trivial helpers (e.g. `as_str()` calls
+    /// everywhere); without dedup `find_anchors` would return the same
+    /// name 20 times in a row. We dedup by NAME and keep the
+    /// best-scoring instance of each, so the top-N output reads as a
+    /// meaningful list of distinct anchors. The key is the name alone,
+    /// not (name, kind): a `parse` function and a `parse` method are
+    /// the same anchor for a reader skimming the list.
     pub fn find_anchors(&self, limit: usize) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
         let mut sorted: Vec<_> = graph.node_weights().cloned().collect();
@@ -541,7 +1090,22 @@ impl GraphDatabase {
                 .unwrap_or(0.0)
                 .total_cmp(&a.anchor_score.unwrap_or(0.0))
         });
-        Ok(sorted.into_iter().take(limit).collect())
+        let mut by_name: std::collections::HashMap<String, GraphNode> =
+            std::collections::HashMap::new();
+        for n in sorted {
+            // Insert only the first (best-scoring) instance per name.
+            // `sorted` is already descending by score.
+            by_name.entry(n.name.clone()).or_insert(n);
+        }
+        // Re-sort the deduped set by score (the HashMap insert order
+        // is not guaranteed to be sorted).
+        let mut out: Vec<GraphNode> = by_name.into_values().collect();
+        out.sort_by(|a, b| {
+            b.anchor_score
+                .unwrap_or(0.0)
+                .total_cmp(&a.anchor_score.unwrap_or(0.0))
+        });
+        Ok(out.into_iter().take(limit).collect())
     }
 
     pub fn calculate_depths(&self) -> Result<(), LainError> {
@@ -610,7 +1174,7 @@ impl GraphDatabase {
             edges.push(edge);
         }
         // Use batch insertion which is inherently resilient to missing nodes
-        self.insert_edges_batch(&edges)
+        self.insert_edges_batch(&edges).map(|_| ())
     }
 
     pub fn get_co_change_partners(&self, file_path: &str) -> Result<Vec<(String, usize)>, LainError> {
@@ -620,13 +1184,30 @@ impl GraphDatabase {
         let id = GraphNode::generate_id(&NodeType::File, file_path, &filename, None);
         let Some(idx) = self.index_map.get(&id).map(|r| *r.value()) else { return Ok(Vec::new()); };
 
-        Ok(graph.edges_directed(idx, Direction::Outgoing)
+        // Fold by target path before returning. The graph can hold more
+        // than one node for a path (and more than one edge into them),
+        // and the raw edge list was emitted verbatim — which is why
+        // co-change output showed `src/server/presence_lock.rs (2 times)`
+        // three separate times in a four-row list.
+        //
+        // Max, not sum: the weights are counts of the same underlying
+        // co-change relationship observed through different nodes, so
+        // adding them would inflate the number rather than merge it.
+        let mut by_path: HashMap<String, usize> = HashMap::new();
+        for e in graph
+            .edges_directed(idx, Direction::Outgoing)
             .filter(|e| e.weight().edge_type == EdgeType::CoChangedWith)
-            .map(|e| {
-                let target_node = &graph[e.target()];
-                (target_node.path.clone(), e.weight().weight.unwrap_or(0.0) as usize)
-            })
-            .collect())
+        {
+            let target_node = &graph[e.target()];
+            let count = e.weight().weight.unwrap_or(0.0) as usize;
+            let slot = by_path.entry(target_node.path.clone()).or_insert(0);
+            *slot = (*slot).max(count);
+        }
+        let mut out: Vec<(String, usize)> = by_path.into_iter().collect();
+        // Strongest partner first, then by path so equal counts are
+        // stable across runs instead of following HashMap order.
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
     }
 
     pub fn get_last_commit(&self) -> Result<Option<String>, LainError> {
@@ -653,7 +1234,7 @@ impl GraphDatabase {
     /// is "every impact query returns nothing," which is the exact
     /// failure the user reported as Bug 2.
     pub fn edge_counts_by_type(&self) -> std::collections::BTreeMap<String, usize> {
-        use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+        use petgraph::visit::IntoEdgeReferences;
         use std::collections::BTreeMap;
         let graph = self.graph.read();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -692,43 +1273,36 @@ impl GraphDatabase {
     pub async fn save_to_disk(&self) -> Result<(), LainError> {
         self.check_writable()?;
         // Clone state under lock (fast)
-        let (data, tmp_path, persistence_path) = {
+        let (data, persistence_path) = {
             let state = GraphState {
+                path_format_version: PATH_FORMAT_VERSION,
                 graph: self.graph.read().clone(),
                 index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
                 last_commit: self.last_commit.read().clone(),
             };
             let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
-            let tmp_path = self.persistence_path.with_extension("tmp");
             let persistence_path = self.persistence_path.clone();
-            (data, tmp_path, persistence_path)
+            (data, persistence_path)
         };
 
-        // Create parent dir and write file (I/O - async)
-        if let Some(parent) = persistence_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| LainError::Database(e.to_string()))?;
-        }
-
-        // Atomic save: write to .tmp and rename
-        tokio::fs::write(&tmp_path, data).await.map_err(|e| LainError::Database(e.to_string()))?;
-        tokio::fs::rename(&tmp_path, &persistence_path).await.map_err(|e| LainError::Database(e.to_string()))?;
+        // Atomic save: write to .tmp and rename via shared helper
+        crate::cli::io::tokio_write_file_atomic(&persistence_path, &data)
+            .await
+            .map_err(|e| LainError::Database(e.to_string()))?;
 
         Ok(())
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
         let state = GraphState {
+                path_format_version: PATH_FORMAT_VERSION,
             graph: self.graph.read().clone(),
             index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
             last_commit: self.last_commit.read().clone(),
         };
         let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
-        if let Some(parent) = self.persistence_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| LainError::Database(e.to_string()))?;
-        }
-        let tmp_path = self.persistence_path.with_extension("tmp");
-        std::fs::write(&tmp_path, data).map_err(|e| LainError::Database(e.to_string()))?;
-        std::fs::rename(&tmp_path, &self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
+        crate::cli::io::write_file_atomic(&self.persistence_path, &data)
+            .map_err(|e| LainError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -737,7 +1311,35 @@ impl GraphDatabase {
         // the static sidecar view from the owner's on-disk snapshot. Only
         // *mutations* are gated by `check_writable`.
         let data = std::fs::read(&self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
-        let state: GraphState = bincode::deserialize(&data).map_err(|e| LainError::Database(e.to_string()))?;
+
+        // Fail soft. A graph we cannot read is not a fatal condition: the
+        // source tree is the source of truth and the caller re-indexes. This
+        // path used to `?` the deserialize error straight out of
+        // `GraphDatabase::new`, which turned any format change into a startup
+        // crash instead of a rebuild.
+        let state: GraphState = match bincode::deserialize(&data) {
+            Ok(state) => state,
+            Err(e) => {
+                warn!(
+                    "Ignoring unreadable graph at {}: {e}. Starting empty; \
+                     the next index pass will rebuild it.",
+                    self.persistence_path.display()
+                );
+                return Ok(());
+            }
+        };
+
+        if state.path_format_version != PATH_FORMAT_VERSION {
+            warn!(
+                "Ignoring graph at {} written with path format v{} (this build expects v{}). \
+                 Starting empty; the next index pass will rebuild it. Its node ids encode a \
+                 different path convention, so merging would duplicate every node.",
+                self.persistence_path.display(),
+                state.path_format_version,
+                PATH_FORMAT_VERSION
+            );
+            return Ok(());
+        }
 
         let mut path_index = HashMap::new();
         for (idx, node) in state.graph.node_references() {
@@ -759,10 +1361,399 @@ impl GraphDatabase {
 
     pub fn export_to_json(&self) -> Result<String, LainError> {
         let state = GraphState {
+                path_format_version: PATH_FORMAT_VERSION,
             graph: self.graph.read().clone(),
             index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
             last_commit: self.last_commit.read().clone(),
         };
         serde_json::to_string_pretty(&state).map_err(|e| LainError::Database(e.to_string()))
+    }
+}
+
+/// Test code is hub-shaped (fixtures call everything, every test calls
+/// fixtures) but anchors are entry points into the PRODUCT. Detect by
+/// path conventions: a `tests/` directory component, or the Rust
+/// `*_tests.rs` / `*_test.rs` / `tests.rs` file-stem conventions used
+/// for `#[cfg(test)]` modules under `src/`. Inline cfg(test) modules
+/// in regular src files are not detectable by path.
+fn is_test_path(path: &str) -> bool {
+    if path.split('/').any(|c| c == "tests") {
+        return true;
+    }
+    let stem = path.rsplit('/').next().unwrap_or(path);
+    let stem = stem.strip_suffix(".rs").unwrap_or(stem);
+    stem == "tests" || stem.ends_with("_tests") || stem.ends_with("_test")
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    /// Re-scanning a file must drop the symbols it no longer defines. Before
+    /// `replace_nodes_for_paths` the graph only ever grew, so a deleted
+    /// function kept answering queries — with a stale path and no live edges.
+    #[test]
+    fn replace_drops_symbols_the_file_no_longer_defines() {
+        let g = db("lain_test_replace_drop");
+        let alpha = GraphNode::new(NodeType::Function, "alpha".into(), "src/probe.rs".into());
+        let beta = GraphNode::new(NodeType::Function, "beta".into(), "src/probe.rs".into());
+        g.insert_nodes_batch(&[alpha.clone(), beta]).unwrap();
+        assert!(g.find_node_by_name("beta").is_some(), "precondition");
+
+        let removed = g
+            .replace_nodes_for_paths(&["src/probe.rs".to_string()], &[alpha])
+            .unwrap();
+
+        assert_eq!(removed, 2, "both old nodes removed before reinsert");
+        assert!(g.find_node_by_name("alpha").is_some(), "alpha survives");
+        assert!(g.find_node_by_name("beta").is_none(), "beta is gone");
+    }
+
+    /// A path with no replacement nodes is the deleted-file case.
+    #[test]
+    fn replace_with_no_nodes_deletes_the_file() {
+        let g = db("lain_test_replace_del");
+        let gone = GraphNode::new(NodeType::Function, "gone".into(), "src/gone.rs".into());
+        let keep = GraphNode::new(NodeType::Function, "keep".into(), "src/keep.rs".into());
+        g.insert_nodes_batch(&[gone, keep]).unwrap();
+
+        g.replace_nodes_for_paths(&["src/gone.rs".to_string()], &[]).unwrap();
+
+        assert!(g.find_node_by_name("gone").is_none());
+        assert!(g.find_node_by_name("keep").is_some(), "other files untouched");
+    }
+
+    /// Namespace nodes are directory-scoped and shared by every file beneath
+    /// them, so a per-file replace must leave them alone.
+    #[test]
+    fn replace_preserves_namespace_nodes() {
+        let g = db("lain_test_replace_ns");
+        let ns = GraphNode::new(NodeType::Namespace, "src".into(), "src".into());
+        g.insert_nodes_batch(&[ns]).unwrap();
+
+        g.replace_nodes_for_paths(&["src".to_string()], &[]).unwrap();
+
+        assert!(g.find_node_by_name("src").is_some(), "namespace must survive");
+    }
+
+    /// The sweep drops files git no longer tracks and leaves the rest alone.
+    #[test]
+    fn prune_orphans_removes_untracked_only() {
+        let g = db("lain_test_prune");
+        let live = GraphNode::new(NodeType::Function, "live".into(), "src/live.rs".into());
+        let dead = GraphNode::new(NodeType::Function, "dead".into(), "src/dead.rs".into());
+        g.insert_nodes_batch(&[live, dead]).unwrap();
+
+        let tracked: HashSet<String> = ["src/live.rs".to_string()].into_iter().collect();
+        let removed = g.prune_orphans(&tracked).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(g.find_node_by_name("live").is_some());
+        assert!(g.find_node_by_name("dead").is_none());
+    }
+}
+
+#[cfg(test)]
+mod remove_by_id_tests {
+    use super::*;
+
+    /// The federated backend keys by global id, and two repos can share a file
+    /// path, so removal there cannot go through the path index.
+    #[test]
+    fn remove_nodes_by_ids_drops_only_the_named_nodes() {
+        let tmp = std::env::temp_dir().join("lain_test_rm_by_id");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+
+        let a = GraphNode::new(NodeType::Function, "a".into(), "src/x.rs".into());
+        let b = GraphNode::new(NodeType::Function, "b".into(), "src/x.rs".into());
+        let (a_id, b_id) = (a.id.clone(), b.id.clone());
+        g.insert_nodes_batch(&[a, b]).unwrap();
+
+        let removed = g.remove_nodes_by_ids(&[a_id]).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(g.find_node_by_name("a").is_none());
+        assert!(g.find_node_by_name("b").is_some(), "sibling in same file survives");
+        assert!(g.get_node(&b_id).unwrap().is_some(), "survivor still resolves by id");
+    }
+
+    /// Removing the last node for a path must clear the path entry too, or a
+    /// later lookup resolves through a vacated slot.
+    #[test]
+    fn remove_nodes_by_ids_clears_emptied_path_entry() {
+        let tmp = std::env::temp_dir().join("lain_test_rm_path_clear");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+
+        let only = GraphNode::new(NodeType::Function, "only".into(), "src/solo.rs".into());
+        let id = only.id.clone();
+        g.insert_nodes_batch(&[only]).unwrap();
+
+        g.remove_nodes_by_ids(&[id]).unwrap();
+
+        assert!(g.find_node_by_path("src/solo.rs").is_none(), "path entry cleared");
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    fn node_at(path: &str, scanned_at: i64) -> GraphNode {
+        let mut n = GraphNode::new(NodeType::Function, "f".into(), path.into());
+        n.last_lsp_sync = Some(scanned_at);
+        n
+    }
+
+    #[test]
+    fn absent_when_path_has_no_nodes() {
+        let tmp = std::env::temp_dir().join("lain_test_fresh_absent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+        assert_eq!(g.freshness(Path::new("/nowhere"), "src/nope.rs"), Freshness::Absent);
+    }
+
+    /// The signal that matters: a file edited but not committed is invisible to
+    /// a commit-driven index, so mtime is the only thing that reveals it.
+    #[test]
+    fn dirty_when_file_is_newer_than_the_scan() {
+        let ws = std::env::temp_dir().join("lain_test_fresh_dirty_ws");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/a.rs"), "fn f() {}").unwrap();
+
+        let tmp = std::env::temp_dir().join("lain_test_fresh_dirty");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+        // Scanned long ago; the file on disk is from just now.
+        g.insert_nodes_batch(&[node_at("src/a.rs", 1)]).unwrap();
+
+        match g.freshness(&ws, "src/a.rs") {
+            Freshness::Dirty { .. } => {}
+            other => panic!("expected Dirty, got {other:?}"),
+        }
+        assert!(g.freshness(&ws, "src/a.rs").note("src/a.rs").is_some());
+    }
+
+    #[test]
+    fn fresh_when_scan_is_newer_than_the_file() {
+        let ws = std::env::temp_dir().join("lain_test_fresh_ok_ws");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/b.rs"), "fn f() {}").unwrap();
+
+        let tmp = std::env::temp_dir().join("lain_test_fresh_ok");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+        let far_future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 3600;
+        g.insert_nodes_batch(&[node_at("src/b.rs", far_future)]).unwrap();
+
+        assert_eq!(g.freshness(&ws, "src/b.rs"), Freshness::Fresh);
+        // A current file must produce no banner — a note on every answer is
+        // noise, and noise gets ignored.
+        assert!(g.freshness(&ws, "src/b.rs").note("src/b.rs").is_none());
+    }
+}
+
+#[cfg(test)]
+mod anchor_hub_tests {
+    use super::*;
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    fn func(name: &str, path: &str, lines: (u32, u32)) -> GraphNode {
+        let mut n = GraphNode::new(NodeType::Function, name.into(), path.into());
+        n.line_start = Some(lines.0);
+        n.line_end = Some(lines.1);
+        n
+    }
+
+    /// A trivial 1-line helper with 20 callers must rank BELOW a
+    /// 30-line hub with 5 callers and 10 callees. This is the
+    /// `as_str` problem: the old fan_in/(fan_out+1) formula put
+    /// the helper on top; hub scoring must not.
+    #[test]
+    fn hub_outranks_trivial_helper() {
+        let g = db("lain_test_anchor_hub");
+        let helper = func("as_str", "src/util.rs", (10, 10));
+        let hub = func("orchestrate", "src/core.rs", (1, 30));
+        let mut nodes = vec![helper.clone(), hub.clone()];
+        let mut edges = Vec::new();
+        for i in 0..20 {
+            let caller = func(&format!("caller{i}"), "src/a.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), helper.id.clone()));
+            nodes.push(caller);
+        }
+        for i in 0..5 {
+            let caller = func(&format!("hubcaller{i}"), "src/b.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), hub.id.clone()));
+            nodes.push(caller);
+        }
+        for i in 0..10 {
+            let callee = func(&format!("callee{i}"), "src/c.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, hub.id.clone(), callee.id.clone()));
+            nodes.push(callee);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        for e in edges {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let helper_score = g.get_node(&helper.id).unwrap().unwrap().anchor_score.unwrap();
+        let hub_score = g.get_node(&hub.id).unwrap().unwrap().anchor_score.unwrap();
+        assert!(
+            hub_score > helper_score,
+            "hub ({hub_score}) should outrank trivial helper ({helper_score})"
+        );
+        assert_eq!(hub_score, 100.0, "hub is the corpus max, normalizes to 100");
+    }
+
+    /// Types/structs/namespaces never rank as anchors — the handler
+    /// filters them out anyway, so the scorer aligns with display.
+    #[test]
+    fn non_functions_score_zero() {
+        let g = db("lain_test_anchor_nonfn");
+        let s = GraphNode::new(NodeType::Struct, "Config".into(), "src/cfg.rs".into());
+        let caller = func("use_cfg", "src/a.rs", (1, 10));
+        let edge = GraphEdge::new(EdgeType::Calls, caller.id.clone(), s.id.clone());
+        let sid = s.id.clone();
+        g.insert_nodes_batch(&[s, caller]).unwrap();
+        g.upsert_edge(edge).unwrap();
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&sid).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "struct must score 0");
+    }
+
+    /// A leaf utility called by everyone but calling nothing is NOT an
+    /// orchestration hub: calls_out=0 must zero the score. Live check
+    /// on the lain repo showed `as_str` (91 callers, 0 callees) still
+    /// ranking top-3 when the log used `2 +` (factor 1 for leaves).
+    #[test]
+    fn leaf_utility_scores_zero() {
+        let g = db("lain_test_anchor_leaf");
+        let leaf = func("as_str", "src/util.rs", (1, 10));
+        let mut nodes = vec![leaf.clone()];
+        let mut edges = Vec::new();
+        for i in 0..50 {
+            let caller = func(&format!("caller{i}"), "src/a.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), leaf.id.clone()));
+            nodes.push(caller);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        for e in edges {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&leaf.id).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "leaf with calls_out=0 must score 0");
+    }
+
+    /// Test helpers are hubs of the test suite, not of the product.
+    /// Live check: `make_test_graph` (tests/common) ranked #1 on the
+    /// lain repo. Symbols under a `tests/` path never rank as anchors,
+    /// and neither do the `*_tests.rs` / `tests.rs` file-stem
+    /// conventions used for `#[cfg(test)]` modules under src/.
+    #[test]
+    fn test_code_scores_zero() {
+        let g = db("lain_test_anchor_testcode");
+        let test_hub = func("make_test_graph", "tests/common/mod.rs", (1, 60));
+        let cfg_test_hub = func("make_test_graph", "src/server/graph_tests.rs", (1, 60));
+        let caller = func("a_test", "tests/foo.rs", (1, 20));
+        let callee = func("helper", "src/util.rs", (1, 8));
+        let e1 = GraphEdge::new(EdgeType::Calls, caller.id.clone(), test_hub.id.clone());
+        let e2 = GraphEdge::new(EdgeType::Calls, test_hub.id.clone(), callee.id.clone());
+        let e3 = GraphEdge::new(EdgeType::Calls, caller.id.clone(), cfg_test_hub.id.clone());
+        let e4 = GraphEdge::new(EdgeType::Calls, cfg_test_hub.id.clone(), callee.id.clone());
+        let tid = test_hub.id.clone();
+        let cid = cfg_test_hub.id.clone();
+        g.insert_nodes_batch(&[test_hub, cfg_test_hub, caller, callee]).unwrap();
+        for e in [e1, e2, e3, e4] {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&tid).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "tests/ dir symbol must score 0");
+        let score = g.get_node(&cid).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "*_tests.rs (cfg(test) module) must score 0");
+    }
+
+    /// Calls FROM test code don't make a production function an
+    /// orchestration hub. Live check: `Default::default` impls ranked
+    /// top-3 because fifty `test_*` functions call them.
+    #[test]
+    fn calls_from_test_code_do_not_count() {
+        let g = db("lain_test_anchor_testcallers");
+        let prod = func("default", "src/config.rs", (1, 15));
+        let callee = func("helper", "src/util.rs", (1, 8));
+        let mut nodes = vec![prod.clone(), callee.clone()];
+        // calls_out = 1 so the leaf rule alone can't zero the score;
+        // only the test-caller filter can.
+        let mut edges = vec![GraphEdge::new(EdgeType::Calls, prod.id.clone(), callee.id.clone())];
+        for i in 0..30 {
+            let tcaller = func(&format!("test_caller{i}"), "tests/it.rs", (1, 10));
+            edges.push(GraphEdge::new(EdgeType::Calls, tcaller.id.clone(), prod.id.clone()));
+            nodes.push(tcaller);
+        }
+        g.insert_nodes_batch(&nodes).unwrap();
+        for e in edges {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let score = g.get_node(&prod.id).unwrap().unwrap().anchor_score.unwrap();
+        assert_eq!(score, 0.0, "called only from tests must score 0");
+    }
+
+    /// A Function and a Method sharing a name are the same anchor for
+    /// a reader — `parse` the fn and `parse` the method showed up as
+    /// two entries on the lain repo. Dedup is by name, not (name, kind).
+    #[test]
+    fn same_name_function_and_method_dedup_to_one() {
+        let g = db("lain_test_anchor_namededup");
+        let f = func("parse", "src/a.rs", (1, 30));
+        let mut m = GraphNode::new(NodeType::Method, "parse".into(), "src/b.rs".into());
+        m.line_start = Some(1);
+        m.line_end = Some(30);
+        let hub_caller = func("caller", "src/c.rs", (1, 20));
+        let callee = func("helper", "src/util.rs", (1, 8));
+        // Give both `parse` nodes the same score-relevant shape.
+        let e1 = GraphEdge::new(EdgeType::Calls, hub_caller.id.clone(), f.id.clone());
+        let e2 = GraphEdge::new(EdgeType::Calls, hub_caller.id.clone(), m.id.clone());
+        let e3 = GraphEdge::new(EdgeType::Calls, f.id.clone(), callee.id.clone());
+        let e4 = GraphEdge::new(EdgeType::Calls, m.id.clone(), callee.id.clone());
+        g.insert_nodes_batch(&[f, m, hub_caller, callee]).unwrap();
+        for e in [e1, e2, e3, e4] {
+            g.upsert_edge(e).unwrap();
+        }
+
+        g.calculate_anchor_scores().unwrap();
+
+        let anchors = g.find_anchors(10).unwrap();
+        let parses = anchors.iter().filter(|n| n.name == "parse").count();
+        assert_eq!(parses, 1, "function+method `parse` must dedup to one entry");
     }
 }

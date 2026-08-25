@@ -34,3 +34,5 @@ mod cross_runtime_tests;
 mod enrichment_tests;
 #[cfg(test)]
 mod architecture_tests;
+#[cfg(test)]
+mod search_tests;

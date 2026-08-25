@@ -230,8 +230,11 @@ on `name` or `path`. Results are deduplicated by `global_id`, sorted by
 ### `get_cross_repo_blast_radius`
 
 The headline federation tool. Resolves a symbol across the federation,
-then traverses outgoing `Calls` edges in the federated graph and groups
-the visited nodes by repo.
+then traverses **incoming** `Calls` edges in the federated graph — the
+symbol's callers, answering "if I change this, what breaks?" — and
+groups the visited nodes by repo. (The prose here previously said
+"outgoing" while the example below listed `caller_*` nodes; the example
+was the accurate half.)
 
 - **Arguments:**
   - `symbol` (string, required) — the function/symbol name
@@ -530,9 +533,7 @@ Workspaces are named groups of repos that the federation engine indexes
 together as a coherent unit. A workspace = a subset of `repos.yaml`'s
 repos, picked at server start via `--workspace <name>` (or `auto` to
 read the operator's `~/.config/lain/active_workspace` pointer). The
-workspace config lives in `workspaces.yaml` next to `repos.yaml`; see
-the [Workspaces spec](../superpowers/specs/2026-08-12-lain-workspaces-design.md)
-for the full design. This section is a quick reference.
+workspace config lives in `workspaces.yaml` next to `repos.yaml`.
 
 ### When to use workspaces
 

@@ -4,10 +4,10 @@ use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use crate::federation::manifest::{FederationManifest, RepoEntry};
 use crate::federation::workspace::{WorkspacesFile, WorkspaceIndex, filter_repos_by_workspace};
+use crate::server::time;
 use crate::state::resolve_active_workspace;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {
@@ -168,7 +168,7 @@ fn save_manifest(fed: &FederatedIndex, path: &Path) -> Result<(), LainError> {
             // mid-`remove_repo`) doesn't tear down a successful load.
             continue;
         };
-        let last_indexed_unix = system_time_to_unix_secs(repo.last_indexed());
+        let last_indexed_unix = time::unix_secs(repo.last_indexed());
         manifest.add_repo(RepoEntry {
             id: id.clone(),
             source_kind: repo.source().kind().to_string(),
@@ -181,12 +181,4 @@ fn save_manifest(fed: &FederatedIndex, path: &Path) -> Result<(), LainError> {
         });
     }
     manifest.save(path)
-}
-
-fn system_time_to_unix_secs(t: SystemTime) -> i64 {
-    t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        // A pre-epoch `SystemTime` (rare, only `SystemTime::UNIX_EPOCH`
-        // itself in practice) collapses to 0 rather than underflowing.
-        .unwrap_or(0)
 }

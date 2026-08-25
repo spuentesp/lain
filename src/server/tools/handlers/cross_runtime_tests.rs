@@ -47,3 +47,24 @@ fn test_get_cross_runtime_callers_not_found() {
     let result = get_cross_runtime_callers(&graph, &overlay, "nonexistent_node_id");
     assert!(result.is_err());
 }
+/// The tool is documented as taking "a symbol", so a symbol name must
+/// work. It used to look the id up directly and answer
+/// `Node resolve_program not found` for exactly the input its own
+/// description advertised.
+#[test]
+fn a_symbol_name_resolves_like_every_other_tool() {
+    let (graph, overlay) = make_test_graph();
+    let by_name = get_cross_runtime_callers(&graph, &overlay, "handle_request");
+    assert!(
+        by_name.is_ok(),
+        "a symbol name must resolve: {:?}",
+        by_name.err()
+    );
+    assert!(by_name.unwrap().contains("handle_request"));
+}
+
+#[test]
+fn an_unknown_symbol_still_reports_not_found() {
+    let (graph, overlay) = make_test_graph();
+    assert!(get_cross_runtime_callers(&graph, &overlay, "no_such_symbol_xyz").is_err());
+}

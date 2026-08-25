@@ -88,6 +88,18 @@ impl RefreshOutcome {
 
     /// One-line banner for `get_health` and (later) the dispatcher.
     /// `None` for the Ok / Skipped cases — those don't need a banner.
+    /// `true` when the last refresh did not complete, so the graph
+    /// being served may not match HEAD. Drives the `Status:` line in
+    /// `get_health` — which used to print `Operational ✅` beside its
+    /// own `⚠ startup re-index failed` warning, for two days, while
+    /// serving a graph 94 files behind the working tree.
+    pub fn is_degraded(&self) -> bool {
+        matches!(
+            self.result,
+            RefreshResult::Timeout | RefreshResult::Failed(_)
+        )
+    }
+
     pub fn banner_line(&self) -> Option<String> {
         match &self.result {
             RefreshResult::Ok | RefreshResult::Skipped => None,

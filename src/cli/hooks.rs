@@ -6,6 +6,7 @@
 //! scripts invoked by Claude / Cursor / Copilot etc. call this binary
 //! to register the agent and claim files before editing.
 
+use crate::cli::mcp_client::{mcp_endpoint, post_tool_call};
 use crate::config::hooks_dir;
 use crate::server::presence::{AgentId, AgentKind, ClaimIntent};
 use crate::server::presence_lock;
@@ -25,11 +26,20 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        #[arg(long)]
+        ///
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// the codebase but ignored here, so exporting it and omitting
+        /// `--url` failed with "the following required arguments were
+        /// not provided" — a flag that looked optional and was not.
+        #[arg(long, default_value = "")]
         url: String,
-        /// Absolute file path being claimed.
-        #[arg(long)]
-        path: String,
+        /// File path being claimed. Repeat for a multi-file claim:
+        /// `--path a.rs --path b.rs`. All paths go in one `claim_files`
+        /// call, so the set is granted or refused together — one
+        /// invocation per file could half-succeed and leave the agent
+        /// holding an inconsistent subset.
+        #[arg(long, required = true)]
+        path: Vec<String>,
         /// Optional symbol name within the file.
         #[arg(long, default_value = "")]
         symbol: String,
@@ -53,7 +63,12 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        #[arg(long)]
+        ///
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// the codebase but ignored here, so exporting it and omitting
+        /// `--url` failed with "the following required arguments were
+        /// not provided" — a flag that looked optional and was not.
+        #[arg(long, default_value = "")]
         url: String,
         /// Absolute file path being released.
         #[arg(long)]
@@ -79,7 +94,12 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        #[arg(long)]
+        ///
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// the codebase but ignored here, so exporting it and omitting
+        /// `--url` failed with "the following required arguments were
+        /// not provided" — a flag that looked optional and was not.
+        #[arg(long, default_value = "")]
         url: String,
         /// Base ref — commit SHA, branch name, or `HEAD~N`. Resolved
         /// to a full SHA before being sent to the server.
@@ -185,32 +205,6 @@ fn write_session(agent_name: &str, sess: &HookSession) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct McpRequest {
-    jsonrpc: &'static str,
-    method: &'static str,
-    params: serde_json::Value,
-    id: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpResponse {
-    result: Option<McpResult>,
-    error: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpResult {
-    content: Vec<McpContent>,
-    #[serde(default, rename = "isError")]
-    is_error: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpContent {
-    text: String,
-}
-
 /// Normalize the `--url` flag value to the canonical MCP endpoint URL.
 ///
 /// Accepts both shapes for backwards compatibility with the project-wide
@@ -221,58 +215,23 @@ struct McpContent {
 ///
 /// The hook scripts and e2e tests now pass the bare form; older callers
 /// that still pass the full form continue to work.
-fn mcp_endpoint(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/mcp") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/mcp")
+/// Resolve the server URL from the flag, falling back to `$LAIN_URL`.
+///
+/// `--url` used to be mandatory while `LAIN_URL` was read elsewhere in
+/// the codebase and ignored here, so exporting it and omitting the flag
+/// failed with clap's "required arguments were not provided" — the
+/// error names the flag but not the variable that should have covered
+/// for it.
+pub fn resolve_url(flag: &str) -> Result<String> {
+    if !flag.is_empty() {
+        return Ok(flag.to_string());
     }
-}
-
-/// Build the shared reqwest blocking client used by every MCP call.
-/// Wired up once with a short total request timeout so a wedged
-/// server can't hang the agent hook for the OS's full TCP connect
-/// timeout (~75s on Linux). Wishlist #1 (fail open) is meaningless if
-/// the hook hangs for a minute before falling through to exit 0.
-/// Orca's own hook uses `--connect-timeout 0.5 --max-time 1.5` on
-/// curl; we mirror that with a 2-second ceiling.
-fn mcp_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
-}
-
-fn post_mcp(url: &str, method: &'static str, params: serde_json::Value) -> Result<McpResult> {
-    let endpoint = mcp_endpoint(url);
-    let req = McpRequest {
-        jsonrpc: "2.0",
-        method,
-        params,
-        id: 1,
-    };
-    let client = mcp_client();
-    let resp = client.post(&endpoint).json(&req).send().context("HTTP send")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("HTTP {} from lain server", resp.status());
+    match std::env::var("LAIN_URL") {
+        Ok(v) if !v.is_empty() => Ok(v),
+        _ => anyhow::bail!(
+            "no lain server URL: pass --url http://localhost:9999 or set LAIN_URL"
+        ),
     }
-    let body: McpResponse = resp.json().context("parse JSON-RPC")?;
-    if let Some(err) = body.error {
-        anyhow::bail!("MCP error: {}", err);
-    }
-    body.result.context("no result in MCP response")
-}
-
-fn text_of(r: McpResult) -> Result<serde_json::Value> {
-    let text = r
-        .content
-        .into_iter()
-        .next()
-        .map(|c| c.text)
-        .context("empty result")?;
-    serde_json::from_str(&text).context("parse result text")
 }
 
 fn register_if_needed(
@@ -287,7 +246,7 @@ fn register_if_needed(
         // with non-JSON text like "heartbeat: unknown agent"; treat that
         // as a stale session and re-register instead of returning a dead
         // agent_id that claim/release will fail against.
-        let stale = match post_mcp(
+        let stale = match post_tool_call(
             url,
             "tools/call",
             serde_json::json!({
@@ -295,7 +254,10 @@ fn register_if_needed(
                 "arguments": { "agent_id": s.agent_id, "session_token": s.session_token }
             }),
         ) {
-            Ok(r) => r.is_error,
+            Ok(r) => r
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             Err(_) => true,
         };
         if !stale {
@@ -313,7 +275,7 @@ fn register_if_needed(
     if let Some(parent) = parent_session_id {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -321,13 +283,14 @@ fn register_if_needed(
             "arguments": args
         }),
     )?;
-    let text = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let sess = HookSession {
-        agent_id: text["agent_id"]
+        agent_id: parsed["agent_id"]
             .as_str()
             .context("no agent_id")?
             .to_string(),
-        session_token: text["session_token"]
+        session_token: parsed["session_token"]
             .as_str()
             .context("no session_token")?
             .to_string(),
@@ -355,15 +318,21 @@ fn chrono_now_unix() -> u64 {
 /// is authoritative and the filesystem write happens as a side-effect.
 pub fn claim(
     url: &str,
-    path: &str,
+    paths: &[String],
     symbol: &str,
     intent: &str,
     agent_name: &str,
     agent_kind: &str,
     parent_session_id: &str,
 ) -> Result<()> {
+    let url = &resolve_url(url)?;
     if !server_reachable(url, Duration::from_millis(200)) {
-        return claim_filesystem(path, symbol, intent, agent_name, agent_kind);
+        // The filesystem fallback is per-path; claim each in turn and
+        // fail on the first refusal.
+        for path in paths {
+            claim_filesystem(path, symbol, intent, agent_name, agent_kind)?;
+        }
+        return Ok(());
     }
     let parent = if parent_session_id.is_empty() {
         None
@@ -371,16 +340,26 @@ pub fn claim(
         Some(parent_session_id)
     };
     let sess = register_if_needed(url, agent_name, agent_kind, parent)?;
-    let mut files = serde_json::Map::new();
-    files.insert("path".into(), serde_json::Value::String(path.to_string()));
-    if !symbol.is_empty() {
-        files.insert("symbols".into(), serde_json::json!([symbol]));
-    }
-    files.insert(
-        "intent".into(),
-        serde_json::Value::String(intent.to_string()),
+    // `--symbol` scopes every path in the request. It is only
+    // meaningful for a single-path claim; with several paths the caller
+    // is claiming whole files.
+    let files_arr = serde_json::Value::Array(
+        paths
+            .iter()
+            .map(|path| {
+                let mut files = serde_json::Map::new();
+                files.insert("path".into(), serde_json::Value::String(path.clone()));
+                if !symbol.is_empty() && paths.len() == 1 {
+                    files.insert("symbols".into(), serde_json::json!([symbol]));
+                }
+                files.insert(
+                    "intent".into(),
+                    serde_json::Value::String(intent.to_string()),
+                );
+                serde_json::Value::Object(files)
+            })
+            .collect(),
     );
-    let files_arr = serde_json::Value::Array(vec![serde_json::Value::Object(files)]);
     let mut args = serde_json::json!({
         "agent_id": sess.agent_id,
         "session_token": sess.session_token,
@@ -389,7 +368,7 @@ pub fn claim(
     if let Some(parent) = parent {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -397,7 +376,8 @@ pub fn claim(
             "arguments": args
         }),
     )?;
-    let parsed = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let granted = parsed["granted"].as_array().map(|a| a.len()).unwrap_or(0);
     let conflicts = parsed["conflicts"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: {granted} granted, {conflicts} conflict(s)");
@@ -420,6 +400,7 @@ pub fn release(
     agent_kind: &str,
     parent_session_id: &str,
 ) -> Result<()> {
+    let url = &resolve_url(url)?;
     if !server_reachable(url, Duration::from_millis(200)) {
         return release_filesystem(path);
     }
@@ -437,7 +418,7 @@ pub fn release(
     if let Some(parent) = parent {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -445,7 +426,8 @@ pub fn release(
             "arguments": args
         }),
     )?;
-    let parsed = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let released = parsed["released"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: released {released} file(s)");
     Ok(())
@@ -501,28 +483,6 @@ fn server_reachable(url: &str, timeout: Duration) -> bool {
 /// stale `.lain` directories in system temp dirs that break later
 /// test runs. `.git` is the right anchor: it's never created by
 /// lain itself, so the walk-up can't be confused by our own state.
-fn find_workspace_root(path: &Path) -> PathBuf {
-    let mut current = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| path.to_path_buf());
-    for _ in 0..16 {
-        if current.join(".git").exists() {
-            return current;
-        }
-        match current.parent() {
-            Some(p) => current = p.to_path_buf(),
-            None => break,
-        }
-    }
-    // Fallback: file's parent dir. The lock sentinel still works, just
-    // scoped to the immediate directory.
-    path.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| path.to_path_buf())
-}
 
 /// Filesystem-only counterpart to the in-memory `claim_files` MCP tool.
 /// No server round trip, no `register_agent` heartbeat — just an
@@ -537,7 +497,18 @@ fn claim_filesystem(
     agent_kind: &str,
 ) -> Result<()> {
     let file_path = Path::new(path);
-    let workspace_root = find_workspace_root(file_path);
+    // Walk up from `file_path` for `.git`; if none is found within 16
+    // levels (or the walk itself errors), fall back to the file's parent
+    // directory so the lock sentinel still works locally.
+    let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            file_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| file_path.to_path_buf())
+        });
     let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
     let kind = AgentKind::parse(agent_kind);
     let parsed_intent = match intent {
@@ -584,7 +555,18 @@ fn claim_filesystem(
 /// wasn't claimed via the filesystem layer in the first place).
 fn release_filesystem(path: &str) -> Result<()> {
     let file_path = Path::new(path);
-    let workspace_root = find_workspace_root(file_path);
+    // Walk up from `file_path` for `.git`; if none is found within 16
+    // levels (or the walk itself errors), fall back to the file's parent
+    // directory so the lock sentinel still works locally.
+    let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            file_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| file_path.to_path_buf())
+        });
     let lock_path = presence_lock::lock_path_for(&workspace_root, file_path);
     presence_lock::release_lock_at(&lock_path)
         .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
@@ -626,12 +608,13 @@ pub fn overlap_check(
     head: Option<&str>,
     workspace: &str,
 ) -> Result<()> {
+    let url = &resolve_url(url)?;
     let base_sha = git_rev_parse_full(base)
         .with_context(|| format!("resolving base ref {base:?}"))?;
     let head_input = head.unwrap_or("HEAD");
     let head_sha = git_rev_parse_full(head_input)
         .with_context(|| format!("resolving head ref {head_input:?}"))?;
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -643,7 +626,8 @@ pub fn overlap_check(
             }
         }),
     )?;
-    let parsed = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     println!("{}", serde_json::to_string(&parsed)?);
     Ok(())
 }
@@ -730,11 +714,11 @@ pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{find_workspace_root, mcp_endpoint, sanitize_agent_name, server_reachable};
+    use super::{mcp_endpoint, sanitize_agent_name, server_reachable};
     use std::time::Duration;
 
     /// `mcp_endpoint` is the bridge between the `--url` flag (bare server
-    /// URL, the new convention) and the post-MCP path that `post_mcp`
+    /// URL, the new convention) and the post-MCP path that `post_tool_call`
     /// needs. Both shapes must round-trip cleanly so existing hook
     /// scripts with `LAIN_URL=http://localhost:9999/mcp` keep working
     /// after the refactor.
@@ -804,30 +788,47 @@ mod tests {
         ));
     }
 
-    /// `find_workspace_root` is what keeps two agents on the same
-    /// machine from writing to different sentinel files for the same
-    /// source path. A file under `.git/`'s parent must resolve to that
-    /// parent; a file with no `.git` in the tree must fall back to
-    /// its immediate parent dir. (`.lain/` is intentionally NOT an
-    /// anchor — see `find_workspace_root` doc comment; honoring it
-    /// broke a test that was running after a zero-daemon hook run
-    /// had littered `.lain/locks/` into a system temp dir.)
+    /// The hooks' filesystem fallback (claim/release without a running
+    /// server) walks up from the file path for `.git` to pick the
+    /// workspace root, so two agents on the same machine write to the
+    /// same lock directory. With a `.git` ancestor the canonical
+    /// helper returns that workspace; without one, the call-site
+    /// fallback returns the file's immediate parent dir so the lock
+    /// sentinel still works locally. `.lain/` is intentionally NOT an
+    /// anchor (the zero-daemon fallback creates `.lain/locks/`, which
+    /// would otherwise be mistaken for a workspace marker and break
+    /// later test runs in shared tempdirs).
     #[test]
-    fn find_workspace_root_walks_up_to_git() {
+    fn hooks_walks_up_to_git() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Create a fake git repo layout.
         std::fs::create_dir_all(root.join("src/sub")).unwrap();
         std::fs::write(root.join("src/sub/file.rs"), "fn x() {}").unwrap();
-        // No .git yet — should fall back to file's parent (src/sub).
-        let no_marker = find_workspace_root(&root.join("src/sub/file.rs"));
+        let file_path = root.join("src/sub/file.rs");
+
+        // No .git yet — the call-site fallback should yield file's
+        // parent (src/sub). Inline the same wrapper the production
+        // call sites use so the assertion exercises real behavior.
+        let no_marker = crate::cli::workspace::find_git_workspace_root(Some(&file_path))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                file_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| file_path.to_path_buf())
+            });
         assert_eq!(
             no_marker.canonicalize().unwrap(),
             root.join("src/sub").canonicalize().unwrap()
         );
+
         // Now drop a .git marker one level up — root should win.
         std::fs::create_dir(root.join(".git")).unwrap();
-        let with_git = find_workspace_root(&root.join("src/sub/file.rs"));
+        let with_git = crate::cli::workspace::find_git_workspace_root(Some(&file_path))
+            .unwrap()
+            .expect(".git exists in this controlled tree");
         assert_eq!(
             with_git.canonicalize().unwrap(),
             root.canonicalize().unwrap()
@@ -838,23 +839,61 @@ mod tests {
     /// workspace anchor — `.lain/locks/` is exactly what the
     /// zero-daemon fallback writes, so a previous run can leave a
     /// `.lain/` in a system temp dir that would otherwise mislead
-    /// `find_workspace_root` for the next test. Only `.git` is a
-    /// valid anchor.
+    /// the walk. Only `.git` is a valid anchor; the canonical helper
+    /// honors that, and the inlined call-site fallback yields the
+    /// file's parent dir.
     #[test]
-    fn find_workspace_root_ignores_dot_lain_marker() {
+    fn hooks_ignores_dot_lain_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("src/sub")).unwrap();
         std::fs::write(root.join("src/sub/file.rs"), "fn x() {}").unwrap();
-        // A `.lain` directory exists, but no `.git`. `find_workspace_root`
-        // must NOT treat `.lain` as a workspace anchor — it falls
-        // through to the file's parent (src/sub).
+        // A `.lain` directory exists, but no `.git`.
         std::fs::create_dir_all(root.join(".lain/locks")).unwrap();
-        let no_marker = find_workspace_root(&root.join("src/sub/file.rs"));
+        let file_path = root.join("src/sub/file.rs");
+        let no_marker = crate::cli::workspace::find_git_workspace_root(Some(&file_path))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                file_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| file_path.to_path_buf())
+            });
         assert_eq!(
             no_marker.canonicalize().unwrap(),
             root.join("src/sub").canonicalize().unwrap(),
             "`.lain` must not be honored as a workspace anchor"
         );
+    }
+}
+
+#[cfg(test)]
+mod url_resolution_tests {
+    use super::*;
+
+    /// `--url` was mandatory while `LAIN_URL` was read elsewhere in the
+    /// codebase and ignored here, so exporting the variable and
+    /// omitting the flag failed with clap's "required arguments were
+    /// not provided" — an error that names the flag but not the
+    /// variable that should have covered for it.
+    #[test]
+    fn explicit_flag_wins() {
+        assert_eq!(
+            resolve_url("http://localhost:9999").unwrap(),
+            "http://localhost:9999"
+        );
+    }
+
+    #[test]
+    fn missing_url_names_both_ways_to_supply_it() {
+        // `env::remove_var` is process-wide; this test only asserts the
+        // message shape, which holds regardless of ambient LAIN_URL.
+        let err = match std::env::var("LAIN_URL") {
+            Ok(v) if !v.is_empty() => return, // ambient value; nothing to assert
+            _ => resolve_url("").unwrap_err().to_string(),
+        };
+        assert!(err.contains("--url"), "must name the flag: {err}");
+        assert!(err.contains("LAIN_URL"), "must name the env var: {err}");
     }
 }

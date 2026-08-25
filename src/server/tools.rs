@@ -100,9 +100,16 @@ impl ToolExecutor {
     pub fn overlay(&self) -> &VolatileOverlay { &self.ctx.overlay }
     pub fn embedder(&self) -> &NlpEmbedder { &self.ctx.embedder }
     pub fn ui_sessions(&self) -> &AsyncMutex<HashMap<String, UiSession>> { &self.ctx.ui_sessions }
+    /// Record the port the HTTP transport is actually listening on, so
+    /// tool output can link to `/ui/...` sessions. 0 (the default) means
+    /// "no UI server" (stdio mode) — handlers then skip the link instead
+    /// of emitting a dead URL.
+    pub fn set_diagnostics_port(&self, port: u16) {
+        self.ctx
+            .diagnostics_port
+            .store(port, std::sync::atomic::Ordering::Relaxed);
+    }
 }
-
-pub const DIAGNOSTICS_PORT: u16 = 9999;
 
 impl ToolExecutor {
     pub fn new(
@@ -406,9 +413,25 @@ impl ToolExecutor {
             _ => last_commit.clone(),
         };
 
+        // Status reflects the last refresh outcome. Printing
+        // `Operational ✅` beside a re-index failure in the same
+        // payload is how a two-day-old graph went unnoticed.
+        let degraded = self.ctx.last_outcome.lock().is_degraded();
+        let status = if degraded {
+            "Degraded ⚠ (serving a stale graph — see the warning below)"
+        } else {
+            "Operational ✅"
+        };
         let mut output = format!(
-            "## Lain Server Health\n\n- **Workspace:** {}\n- **Status:** Operational ✅\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
-            workspace_display, nodes, edges, overlay_stats.node_count, commit_status, embedder_status
+            "## Lain Server Health\n\n- **Workspace:** {}\n- **Build:** {}\n- **Status:** {}\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
+            workspace_display,
+            crate::server::build_info::summary(),
+            status,
+            nodes,
+            edges,
+            overlay_stats.node_count,
+            commit_status,
+            embedder_status
         );
 
         // Last refresh outcome (from the spawn in run_stdio / run_http).
@@ -538,7 +561,8 @@ impl ToolExecutor {
         sections.push(
             "When the user's question spans multiple repos (e.g. \"who else uses this function?\", \
              \"what depends on this service?\"), switch to federation mode by launching the server \
-             with `lain server --config repos.yaml` instead of single-workspace mode (`lain --workspace PATH`).\n"
+             with `lain server --config repos.yaml` instead of single-workspace mode (`lain mcp`, \
+             run from inside the repo).\n"
                 .to_string(),
         );
         sections.push("\n### Federation Tools\n".to_string());

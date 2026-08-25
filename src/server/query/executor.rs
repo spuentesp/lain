@@ -22,6 +22,9 @@ pub struct Executor<'a> {
     graph: &'a GraphDatabase,
     embedder: &'a NlpEmbedder,
     embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    /// Workspace root. Node paths are workspace-relative graph keys, so
+    /// on-demand embedding needs this to read a symbol's body off disk.
+    workspace: &'a std::path::Path,
     nodes_visited: usize,
 }
 
@@ -30,11 +33,13 @@ impl<'a> Executor<'a> {
         graph: &'a GraphDatabase,
         embedder: &'a NlpEmbedder,
         embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
+        workspace: &'a std::path::Path,
     ) -> Self {
         Self {
             graph,
             embedder,
             embedding_cache,
+            workspace,
             nodes_visited: 0,
         }
     }
@@ -265,8 +270,10 @@ impl<'a> Executor<'a> {
             return Ok(());
         }
 
-        // Embed the query once
-        let query_emb = self.embedder.embed(&sem.like)
+        // Embed the query once. `embed_query`, not `embed`: this is a
+        // user query and must carry the configured prefix, which this
+        // call site silently omitted.
+        let query_emb = self.embedder.embed_query(&sem.like)
             .map_err(|e| LainError::Nlp(format!("Failed to embed query: {}", e)))?;
 
         // Get full graph nodes to access their embeddings
@@ -308,7 +315,7 @@ impl<'a> Executor<'a> {
         }
 
         // On-demand embed
-        let text = build_enriched_text(node);
+        let text = build_enriched_text(node, self.workspace);
         self.embedder.embed(&text).ok().map(|emb| {
             self.embedding_cache.lock().insert(node.id.clone(), emb.clone());
             emb

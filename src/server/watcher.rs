@@ -135,7 +135,7 @@ const DEBOUNCE_MS: u64 = 100;
 /// `AddDirectory` (from the notify callback); `Shutdown` is the
 /// clean-stop hook used by tests that own the channel and want to
 /// drain the thread without leaking it.
-enum WatchCommand {
+pub(crate) enum WatchCommand {
     /// Register a directory-create path the notify callback just saw.
     AddDirectory(PathBuf),
     /// Stop the watcher thread's command-receive loop.
@@ -169,15 +169,12 @@ impl FileWatcher {
         // dispatch path. Production has no use for the test-only
         // readiness/command-done hooks, so both are passed as `None`.
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
-        let _join = run_watcher_thread(
+        let _join = run_watcher_thread(WatcherThreadArgs::production(
             workspace,
             file_sender,
             git,
-            cmd_tx,
-            cmd_rx,
-            None,
-            None,
-        );
+            (cmd_tx, cmd_rx),
+        ));
 
         // Spawn the event processor task
         tokio::spawn(async move {
@@ -327,15 +324,92 @@ fn register_directory(
 ///   `handle_watch_command` call so tests can wait for dynamic
 ///   registration to finish before exercising downstream behavior.
 ///   `FileWatcher::start` passes `None`.
-fn run_watcher_thread(
-    workspace: PathBuf,
-    file_sender: mpsc::Sender<PathBuf>,
-    git: Arc<Mutex<GitSensor>>,
-    command_sender: std::sync::mpsc::Sender<WatchCommand>,
-    command_receiver: std::sync::mpsc::Receiver<WatchCommand>,
-    ready_signal: Option<tokio::sync::oneshot::Sender<usize>>,
-    command_done: Option<tokio::sync::mpsc::Sender<()>>,
-) -> std::thread::JoinHandle<()> {
+/// Optional hooks used by tests to gate on watcher lifecycle events.
+/// `FileWatcher::start` passes `None` for every field; the test bodies
+/// in `mod tests` populate what they need via [`WatcherThreadArgs::for_test`].
+#[derive(Default)]
+pub(crate) struct WatcherTestHooks {
+    /// If `Some`, the watcher thread sends the number of registered
+    /// directories through it once startup registration completes.
+    /// Tests use this to avoid racing the initial notify registration.
+    pub ready_signal: Option<tokio::sync::oneshot::Sender<usize>>,
+    /// If `Some`, the watcher thread sends `()` after each
+    /// `WatchCommand::AddDirectory` is processed. Tests use this to
+    /// confirm a dynamic registration actually ran (without having to
+    /// poll a file event or reconstruct the watcher themselves).
+    pub command_done: Option<tokio::sync::mpsc::Sender<()>>,
+}
+
+/// Bundle the 7 parameters that `run_watcher_thread` historically
+/// took positionally. Four of them are channels and easy to swap by
+/// accident in call sites — the struct form + named constructors
+/// (`production` / `for_test`) makes the intent explicit.
+pub(crate) struct WatcherThreadArgs {
+    pub workspace: PathBuf,
+    pub file_sender: mpsc::Sender<PathBuf>,
+    pub git: Arc<Mutex<GitSensor>>,
+    pub command_pair: (
+        std::sync::mpsc::Sender<WatchCommand>,
+        std::sync::mpsc::Receiver<WatchCommand>,
+    ),
+    pub test_hooks: WatcherTestHooks,
+}
+
+impl WatcherThreadArgs {
+    /// Production wiring: no test hooks. Used by
+    /// `FileWatcher::start` and `spawn_config_watcher`.
+    pub fn production(
+        workspace: PathBuf,
+        file_sender: mpsc::Sender<PathBuf>,
+        git: Arc<Mutex<GitSensor>>,
+        command_pair: (
+            std::sync::mpsc::Sender<WatchCommand>,
+            std::sync::mpsc::Receiver<WatchCommand>,
+        ),
+    ) -> Self {
+        Self {
+            workspace,
+            file_sender,
+            git,
+            command_pair,
+            test_hooks: WatcherTestHooks::default(),
+        }
+    }
+
+    /// Test wiring: caller provides whichever hooks they need.
+    #[cfg(test)]
+    pub fn for_test(
+        workspace: PathBuf,
+        file_sender: mpsc::Sender<PathBuf>,
+        git: Arc<Mutex<GitSensor>>,
+        command_pair: (
+            std::sync::mpsc::Sender<WatchCommand>,
+            std::sync::mpsc::Receiver<WatchCommand>,
+        ),
+        hooks: WatcherTestHooks,
+    ) -> Self {
+        Self {
+            workspace,
+            file_sender,
+            git,
+            command_pair,
+            test_hooks: hooks,
+        }
+    }
+}
+
+fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
+    let WatcherThreadArgs {
+        workspace,
+        file_sender,
+        git,
+        command_pair: (command_sender, command_receiver),
+        test_hooks,
+    } = args;
+    let WatcherTestHooks {
+        ready_signal,
+        command_done,
+    } = test_hooks;
     std::thread::spawn(move || {
         let cb_command_sender = command_sender;
         let cb_git = Arc::clone(&git);
@@ -547,7 +621,7 @@ async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn st
     let symbols = {
         let lsp = server.lsp_pool.next();
         let mut lsp = lsp.lock().await;
-        match lsp.get_document_symbols_hierarchical(path).await {
+        match lsp.get_document_symbols_hierarchical(path, &server.config.workspace).await {
             Ok(s) => s,
             Err(e) => {
                 debug!("FileWatcher: No LSP symbols for {:?}: {}", path, e);
@@ -822,15 +896,13 @@ mod tests {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<usize>();
 
-        let join = run_watcher_thread(
+        let join = run_watcher_thread(WatcherThreadArgs::for_test(
             repo.clone(),
             file_tx.clone(),
             git.clone(),
-            cmd_tx.clone(),
-            cmd_rx,
-            Some(ready_tx),
-            None,
-        );
+            (cmd_tx.clone(), cmd_rx),
+            WatcherTestHooks { ready_signal: Some(ready_tx), command_done: None },
+        ));
 
         // Wait for the watcher thread's startup registration to
         // complete. Without this gate, the test could race the
@@ -987,15 +1059,13 @@ mod tests {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<usize>();
         let (cmd_done_tx, mut cmd_done_rx) = tokio::sync::mpsc::channel::<()>(16);
 
-        let join = run_watcher_thread(
+        let join = run_watcher_thread(WatcherThreadArgs::for_test(
             repo.clone(),
             file_tx.clone(),
             git.clone(),
-            cmd_tx.clone(),
-            cmd_rx,
-            Some(ready_tx),
-            Some(cmd_done_tx),
-        );
+            (cmd_tx.clone(), cmd_rx),
+            WatcherTestHooks { ready_signal: Some(ready_tx), command_done: Some(cmd_done_tx) },
+        ));
 
         // Gate on the startup registration completing.
         let initial_count = tokio::time::timeout(Duration::from_secs(5), ready_rx)

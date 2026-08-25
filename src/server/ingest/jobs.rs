@@ -1,4 +1,4 @@
-use crate::schema::{GraphEdge, NodeType, EdgeType};
+use crate::schema::{is_type_level_target, GraphEdge, NodeType, EdgeType};
 use super::LainServer;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
@@ -22,7 +22,7 @@ impl LainServer {
                 if let Ok(Some(last)) = self.graph.get_last_commit() {
                     if last != commit {
                         info!("Background sync: new commits detected, triggering sync");
-                        let mut s = self.clone();
+                        let s = self.clone();
                         if let Err(e) = s.build_core_memory().await {
                             warn!("Background sync failed: {}", e);
                         }
@@ -83,7 +83,7 @@ impl LainServer {
                 let lsp = self.lsp_pool.next();
                 let mut lsp = lsp.lock().await;
 
-                match lsp.get_document_symbols_hierarchical(path).await {
+                match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
                     Ok(symbols) => {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -143,11 +143,7 @@ impl LainServer {
                             if let Some(candidates) = name_index.get(&r.target_name) {
                                 for (target_id, target_type) in candidates {
                                     if *target_id == source.id { continue; }
-                                    if matches!(r.edge_type, EdgeType::Uses)
-                                        && !matches!(target_type,
-                                            NodeType::Struct | NodeType::Enum | NodeType::Trait
-                                            | NodeType::Class | NodeType::Interface)
-                                    {
+                                    if r.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
                                         continue;
                                     }
                                     let key = (source.id.clone(), target_id.clone());
@@ -164,7 +160,7 @@ impl LainServer {
 
             // Persist edges immediately (edge insert is cheap, non-blocking)
             if !new_edges.is_empty() {
-                if let Err(e) = self.graph.insert_edges_batch(&new_edges) {
+                if let Err(e) = self.graph.insert_edges_batch(&new_edges).map(|_| ()) {
                     warn!("Sliding window: edge insert failed: {}", e);
                 } else {
                     debug!("Sliding window: {} new edges from {} files", new_edges.len(), dirty_paths.len());
@@ -177,12 +173,13 @@ impl LainServer {
                 let graph_clone = self.graph.clone();
                 let embedder_clone = self.embedder.clone();
                 let ids = refreshed_ids.clone();
+                let ws_for_nlp = self.config.workspace.clone();
                 tokio::spawn(async move {
                     let mut count = 0;
                     for id in ids.iter().take(MAX_EMBED_PER_PASS) {
                         if let Ok(Some(mut gn)) = graph_clone.get_node(id) {
                             if gn.embedding.is_none() {
-                                let text = crate::tools::utils::build_enriched_text(&gn);
+                                let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                                 if let Ok(emb) = embedder_clone.embed(&text) {
                                     gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
                                     if graph_clone.insert_node(&gn).is_ok() {

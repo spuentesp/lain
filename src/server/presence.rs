@@ -11,6 +11,9 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+
+use crate::server::revision_log::RevisionId;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct AgentId(pub String);
@@ -133,13 +136,37 @@ impl<'de> serde::Deserialize<'de> for SymbolHash {
     }
 }
 
-/// `SystemTime::default()` is not in `std`; provide a fixed UNIX_EPOCH
-/// default for the timestamps that we deliberately leave out of the
-/// persisted JSON (started_at, last_heartbeat, claimed_at). Hydrating
-/// the registries from disk leaves these at UNIX_EPOCH; downstream code
-/// that cares about real timestamps (the federation expiry loop) reloads
-/// them via the live `heartbeat` flow, not via persistence.
-fn epoch() -> SystemTime { SystemTime::UNIX_EPOCH }
+/// Serialize a `SystemTime` as UNIX seconds.
+///
+/// These fields used to be `skip_serializing`, on the reasoning that
+/// live in-memory state always wins over the persisted snapshot. That
+/// stopped being true when presence became shared through the state
+/// file: every call now reloads it, so a dropped timestamp came back as
+/// the epoch almost immediately. Two agents driving a live server both
+/// reported `claimed_at: 0` on every claim they held, and a conflict's
+/// `last_seen_unix` froze — leaving no way to tell a fresh claim from a
+/// stale one, which is exactly what those fields are for.
+mod unix_secs {
+    use super::SystemTime;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
+        let secs = t
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        s.serialize_u64(secs)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SystemTime, D::Error> {
+        let secs = u64::deserialize(d)?;
+        Ok(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    }
+}
+
+/// `serde(default)` companion for [`unix_secs`], for snapshots written
+/// before the timestamps were persisted.
+fn epoch_secs() -> SystemTime { SystemTime::UNIX_EPOCH }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
@@ -157,7 +184,7 @@ pub struct Claim {
     /// define the symbol.
     pub content_hash: Option<SymbolHash>,
     pub intent: ClaimIntent,
-    #[serde(skip_serializing, default = "epoch")]
+    #[serde(with = "unix_secs", default = "epoch_secs")]
     pub claimed_at: SystemTime,
     /// Wall-clock time of the most recent touch (claim grant or
     /// heartbeat refresh) on this claim. Surfaced in conflict reports
@@ -165,14 +192,30 @@ pub struct Claim {
     /// not just *who* is holding it. Defaults to `claimed_at` on
     /// construction and is serialized as epoch on persistence reload
     /// (same durability story as `claimed_at`: live state wins).
-    #[serde(skip_serializing, default = "epoch")]
+    #[serde(with = "unix_secs", default = "epoch_secs")]
     pub last_touched_unix: SystemTime,
     /// Optional expiry timestamp (PR 10 Task 3 hook). `None` means
     /// "no expiry set"; the federation expiry loop will ignore it.
     pub expires_at: Option<SystemTime>,
+    /// Last plan revision the agent saw at the moment this claim was
+    /// granted (Task 1.4, PR 1). `None` for legacy claims or for
+    /// callers that don't track revisions yet. Tolerated on load via
+    /// `default` so older state files hydrate without migration, and
+    /// omitted from the wire JSON when absent (`skip_serializing_if`)
+    /// so unchanged claims don't bloat the persist payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_revision: Option<RevisionId>,
+    /// `true` when the server *guessed* this claim from filesystem
+    /// activity rather than the agent declaring it (see
+    /// `server::attribution`). A consumer should weigh "this agent told
+    /// me" differently from "the server inferred it": inferred claims
+    /// come from a heuristic that can and does misfire, and they carry
+    /// a short TTL so a wrong guess heals itself.
+    #[serde(default)]
+    pub inferred: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConflictEntry {
     pub agent_id: AgentId,
     pub path: PathBuf,
@@ -184,6 +227,12 @@ pub struct ConflictEntry {
     /// downstream renderers — they can branch on `intent` without
     /// re-deriving the semantics from `path`.
     pub intent: ClaimIntent,
+    /// `true` when the conflicting claim was inferred from filesystem
+    /// activity rather than declared by its holder. Lets a blocked
+    /// agent distinguish "alice said she is editing this" from "the
+    /// server saw a write and guessed it was alice".
+    #[serde(default)]
+    pub inferred: bool,
     /// When the conflicting claim was last touched (typically claim
     /// grant time). Serialized as a UNIX-epoch second count in the
     /// MCP conflict JSON so callers can show "alice has been holding
@@ -199,10 +248,31 @@ pub struct SymbolOccupancy {
     pub agents: Vec<AgentId>,
 }
 
+/// One agent's hold on a file, with the detail needed to decide whether
+/// it is in your way.
+///
+/// `agents` alone was not enough. Two agents driving a live server both
+/// stumbled here: one saw a peer listed on a file it held for `edit`,
+/// could not see that the peer's hold was a non-blocking `read`, and
+/// reported that mutual exclusion was broken. It was not — the listing
+/// simply could not express the difference.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Holder {
+    pub agent_id: AgentId,
+    /// `edit` blocks other edits; `read` never blocks anything.
+    pub intent: ClaimIntent,
+    /// True when the attribution watcher guessed this hold rather than
+    /// the agent declaring it.
+    pub inferred: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OccupancyEntry {
     pub path: PathBuf,
+    /// Agent ids holding this path. Kept for compatibility; prefer
+    /// [`Self::holders`], which says *how* each one holds it.
     pub agents: Vec<AgentId>,
+    pub holders: Vec<Holder>,
     pub symbols: Vec<SymbolOccupancy>,
 }
 
@@ -313,8 +383,16 @@ impl std::fmt::Debug for PresenceRegistry {
 }
 
 impl PresenceRegistry {
+    /// Registry with the shipped defaults from
+    /// [`crate::server::tuning::PresenceConfig`].
+    ///
+    /// The lifetimes used to be compile-time constants here. Every other
+    /// timeout in lain is tunable, so these are declared alongside them
+    /// and read from there — one place to change the number, and an
+    /// operator whose agents behave differently can actually change it.
     pub fn new() -> Self {
-        Self::with_expiry(Duration::from_secs(60))
+        let cfg = crate::server::tuning::PresenceConfig::default();
+        Self::with_expiry(Duration::from_secs(cfg.interactive_session_ttl_secs))
     }
 
     pub fn with_expiry(expires_after: Duration) -> Self {
@@ -382,13 +460,40 @@ impl PresenceRegistry {
         Ok(())
     }
 
+    /// How long a given session may go without proof of life.
+    ///
+    /// Interactive agents get the registry default (10 minutes), which
+    /// is sized for model latency: a single LLM turn — thinking plus a
+    /// couple of tool round-trips — routinely runs past a minute, and
+    /// an agent has no timer between turns with which to heartbeat.
+    /// Background agents (cron, CI) keep the fast 60-second reap: they
+    /// are scripted, they can heartbeat on a schedule, and a wedged one
+    /// should release its claims promptly.
+    pub fn expires_after_for(&self, mode: &AgentMode) -> Duration {
+        match mode {
+            AgentMode::Background => Duration::from_secs(
+                crate::server::tuning::PresenceConfig::default().background_session_ttl_secs,
+            ),
+            AgentMode::Interactive => self.expires_after(),
+        }
+    }
+
     pub fn expire_stale(&self) -> Vec<AgentId> {
         let now = SystemTime::now();
         let expires_after = self.inner.lock().expires_after;
         let stale: Vec<AgentId> = {
             let mut s = self.inner.lock();
             let stale: Vec<AgentId> = s.sessions.iter()
-                .filter(|(_, sess)| now.duration_since(sess.last_heartbeat).unwrap_or_default() >= expires_after)
+                .filter(|(_, sess)| {
+                    let ttl = match sess.mode {
+                        AgentMode::Background => Duration::from_secs(
+                            crate::server::tuning::PresenceConfig::default()
+                                .background_session_ttl_secs,
+                        ),
+                        AgentMode::Interactive => expires_after,
+                    };
+                    now.duration_since(sess.last_heartbeat).unwrap_or_default() >= ttl
+                })
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in &stale {
@@ -444,7 +549,7 @@ impl Default for PresenceRegistry {
 use std::collections::HashSet;
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ClaimRequest {
     pub path: PathBuf,
     pub symbols: Vec<String>,
@@ -456,12 +561,38 @@ pub struct ClaimRequest {
     /// TTL of its own and is only released explicitly or when the
     /// owning agent's session expires.
     pub ttl_seconds: Option<u64>,
+    /// Last plan revision the caller saw when issuing this claim
+    /// (Task 1.4). Threads onto the resulting `Claim` so the value
+    /// survives persistence and reachability-checks against the
+    /// overlay can flag stale claims. `None` for callers that don't
+    /// supply a revision.
+    pub plan_revision: Option<RevisionId>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ClaimResult {
     pub granted: Vec<ClaimRequest>,
     pub conflicts: Vec<ConflictEntry>,
+    /// Non-blocking notices about claims that were *granted anyway*.
+    ///
+    /// A read claim never conflicts — readers shouldn't block on
+    /// writers. But returning `{"conflicts": [], "granted": [...]}` and
+    /// nothing else told a reader nothing about the agent rewriting the
+    /// file underneath it, which is the most common way agent teams
+    /// actually collide: B reads, reasons for two minutes, and patches
+    /// a version A already replaced. Same shape as `conflicts`, but
+    /// advisory: proceed, and re-read before you patch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<ConflictEntry>,
+    /// Snapshot of (current_revision, plan_revision) at claim time, plus
+    /// the symbols that changed since the caller's `plan_revision` and a
+    /// free-form `note` for `BeyondCurrent` / `TooOld` error paths.
+    /// `None` when the caller didn't supply a `plan_revision` and no
+    /// staleness info applies (omitted from the wire JSON by
+    /// `skip_serializing_if`). Populated by the static-graph retract
+    /// detector (Task 1.6, PR 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_state: Option<WorldState>,
 }
 
 #[derive(Debug, Default)]
@@ -484,6 +615,10 @@ struct FileOccupancy {
     /// `ConflictEntry` so callers can tell when the conflicting
     /// claim was first (or most recently) recorded.
     last_touched: HashMap<String, HashMap<AgentId, SystemTime>>,
+    /// Agents whose presence on this file was inferred from filesystem
+    /// activity rather than declared. Mirrored onto `ConflictEntry` so
+    /// a conflicting agent can tell a guess from a declaration.
+    inferred: HashSet<AgentId>,
 }
 
 impl FileOccupancy {
@@ -555,6 +690,85 @@ struct OccupancyState {
     by_agent: HashMap<AgentId, Vec<Claim>>,
 }
 
+/// Lexically normalize a path: resolve `.` and `..` components without
+/// touching the filesystem. `/a/../b` becomes `/b`, `./a/b` becomes
+/// `a/b`, and `/..` stays `/`. A leading `..` on a relative path is
+/// kept — there is nothing to pop it against.
+///
+/// Lexical on purpose: a claim may name a file the agent is about to
+/// *create*, so `fs::canonicalize` would fail on exactly the paths that
+/// matter most.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // `/..` is `/`; a prefix behaves the same way.
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Canonical key for a claim path.
+///
+/// Claims used to be keyed on the caller's raw spelling, so
+/// `/ws/src/a.rs`, `src/a.rs`, `./src/a.rs` and `src/../src/a.rs` were
+/// four independent claims on one file and never conflicted with each
+/// other. That split ran straight down the middle of the product:
+/// `lain hooks claim` writes absolute paths while MCP callers write
+/// repo-relative ones, so the CLI and the MCP surface could never
+/// collide.
+///
+/// Resolution runs in two steps.
+///
+/// First the path is made absolute: an absolute path is normalized as
+/// given; a relative one is anchored to the first root under which the
+/// file actually exists, falling back to the primary root for a file
+/// the agent is about to create.
+///
+/// Then it is presented workspace-relative when it lives under the
+/// primary workspace root, and absolute when it does not. That keeps
+/// the common single-repo case on the short, readable key agents
+/// already send, while federation — where the primary root is a `/tmp`
+/// staging placeholder that no real file lives under — falls through to
+/// absolute keys, so `src/main.rs` in two federated repos stays two
+/// distinct claims instead of colliding.
+///
+/// With no roots configured at all the path is normalized and left as
+/// it came in; it still collides with itself, which is the best
+/// available answer.
+fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        lexical_normalize(path)
+    } else {
+        let anchored = roots
+            .iter()
+            .map(|root| lexical_normalize(&root.join(path)))
+            .find(|candidate| candidate.exists());
+        match anchored.or_else(|| roots.first().map(|root| lexical_normalize(&root.join(path)))) {
+            Some(p) => p,
+            None => return lexical_normalize(path),
+        }
+    };
+
+    match roots.first() {
+        Some(primary) => match absolute.strip_prefix(primary) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => absolute,
+        },
+        None => absolute,
+    }
+}
+
 #[derive(Clone)]
 pub struct OccupancyMap {
     inner: std::sync::Arc<Mutex<OccupancyState>>,
@@ -570,6 +784,12 @@ pub struct OccupancyMap {
     /// `claim` reads this under a small lock so the side-effect
     /// doesn't race with a `set_workspace_root` swap.
     workspace_root: std::sync::Arc<parking_lot::Mutex<Option<PathBuf>>>,
+    /// Roots a relative claim path may be anchored to, in priority
+    /// order. Seeded with the workspace root; federation servers extend
+    /// it with every registered repo path, because there the workspace
+    /// is a staging placeholder and the real files live under the repo
+    /// roots. Read by `canonical_claim_path`.
+    claim_roots: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
 }
 
 impl std::fmt::Debug for OccupancyMap {
@@ -589,6 +809,7 @@ impl OccupancyMap {
             inner: std::sync::Arc::new(Mutex::new(OccupancyState::default())),
             persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             workspace_root: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            claim_roots: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
@@ -612,6 +833,36 @@ impl OccupancyMap {
     pub fn set_workspace_root(&self, workspace_root: &Path) {
         let mut slot = self.workspace_root.lock();
         *slot = Some(workspace_root.to_path_buf());
+        drop(slot);
+        // The workspace is also the first anchor for relative claim
+        // paths. Kept at the front so it wins over repo roots added
+        // later by `add_claim_roots`.
+        let mut roots = self.claim_roots.lock();
+        let root = lexical_normalize(workspace_root);
+        roots.retain(|r| r != &root);
+        roots.insert(0, root);
+    }
+
+    /// Register additional roots that a relative claim path may be
+    /// anchored to. Federation servers call this with every registered
+    /// repo path: there `config.workspace` is a `/tmp` staging
+    /// placeholder, so the repo roots are the only anchors that can
+    /// turn `src/server/presence.rs` into the same key the CLI produces
+    /// from an absolute path.
+    pub fn add_claim_roots(&self, paths: &[PathBuf]) {
+        let mut roots = self.claim_roots.lock();
+        for p in paths {
+            let root = lexical_normalize(p);
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+
+    /// Snapshot the claim-path anchors. Taken before the occupancy lock
+    /// so normalization never runs under it.
+    fn claim_roots_snapshot(&self) -> Vec<PathBuf> {
+        self.claim_roots.lock().clone()
     }
 
     /// Snapshot the workspace root, if configured. Used by
@@ -629,7 +880,14 @@ impl OccupancyMap {
     }
 
     pub fn claim(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
-        self.claim_in_memory(agent_id, requests)
+        self.claim_in_memory(agent_id, requests, false)
+    }
+
+    /// Claim on behalf of an agent that never asked — the attribution
+    /// watcher saw a write and guessed who made it. Marked `inferred`
+    /// so every consumer can tell it apart from a declared claim.
+    pub fn claim_inferred(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
+        self.claim_in_memory(agent_id, requests, true)
     }
 
     /// Same as [`Self::claim`] but additionally writes the filesystem
@@ -645,7 +903,7 @@ impl OccupancyMap {
         session: &AgentSession,
         requests: Vec<ClaimRequest>,
     ) -> ClaimResult {
-        let result = self.claim_in_memory(&session.id, requests);
+        let result = self.claim_in_memory(&session.id, requests, false);
         if !result.granted.is_empty() {
             self.write_lock_files(session, &result.granted);
         }
@@ -656,11 +914,29 @@ impl OccupancyMap {
     /// `claim` (no FS side-effect, agent-id-only callers) and
     /// `claim_with_session` (FS side-effect + full session) share
     /// the same conflict / book-keeping logic.
-    fn claim_in_memory(&self, agent_id: &AgentId, requests: Vec<ClaimRequest>) -> ClaimResult {
-        let (granted, conflicts) = {
+    fn claim_in_memory(
+        &self,
+        agent_id: &AgentId,
+        requests: Vec<ClaimRequest>,
+        inferred: bool,
+    ) -> ClaimResult {
+        // Canonicalize before anything is keyed, so two agents naming
+        // one file in two spellings land on the same entry. Done
+        // outside the occupancy lock: the relative-path branch stats
+        // the filesystem.
+        let roots = self.claim_roots_snapshot();
+        let requests: Vec<ClaimRequest> = requests
+            .into_iter()
+            .map(|mut r| {
+                r.path = canonical_claim_path(&roots, &r.path);
+                r
+            })
+            .collect();
+        let (granted, conflicts, advisories) = {
             let mut s = self.inner.lock();
             let mut granted = Vec::new();
             let mut conflicts = Vec::new();
+            let mut advisories = Vec::new();
 
             for req in requests {
                 let entry = s.by_file.entry(req.path.clone()).or_default();
@@ -670,6 +946,34 @@ impl OccupancyMap {
                 // item #5. They still update the agent/symbol
                 // bookkeeping below so the granting agent becomes
                 // observable for occupancy listings.
+                if req.intent == ClaimIntent::Read {
+                    // A read is granted regardless, but the reader
+                    // deserves to know someone is rewriting the file
+                    // while it reads. Advisory, never blocking.
+                    for other in entry.agents.iter().filter(|a| *a != agent_id) {
+                        let holder_intent = entry
+                            .intent_for(other, "__file_level__")
+                            .or_else(|| entry.any_symbol_intent(other));
+                        if holder_intent == Some(ClaimIntent::Edit) {
+                            advisories.push(ConflictEntry {
+                                agent_id: other.clone(),
+                                inferred: entry.inferred.contains(other),
+                                path: req.path.clone(),
+                                symbols: entry
+                                    .symbols
+                                    .iter()
+                                    .filter(|(sym, agents)| {
+                                        sym.as_str() != "__file_level__" && agents.contains(other)
+                                    })
+                                    .map(|(sym, _)| sym.clone())
+                                    .collect(),
+                                intent: ClaimIntent::Edit,
+                                last_seen_unix: entry.last_touched_unix_for(other),
+                            });
+                        }
+                    }
+                }
+
                 if req.intent == ClaimIntent::Edit {
                     // File-level Edit collision: only conflicts with
                     // another agent's Edit-intent claim — at any scope
@@ -699,6 +1003,7 @@ impl OccupancyMap {
                             }
                             req_conflicts.push(ConflictEntry {
                                 agent_id: other.clone(),
+                                inferred: entry.inferred.contains(&other),
                                 path: req.path.clone(),
                                 symbols: vec![],
                                 intent: other_intent,
@@ -717,6 +1022,7 @@ impl OccupancyMap {
                                     if entry.intent_for(other, sym) == Some(ClaimIntent::Edit) {
                                         req_conflicts.push(ConflictEntry {
                                             agent_id: other.clone(),
+                                            inferred: entry.inferred.contains(&other),
                                             path: req.path.clone(),
                                             symbols: vec![sym.clone()],
                                             intent: ClaimIntent::Edit,
@@ -740,6 +1046,7 @@ impl OccupancyMap {
                                 if entry.intent_for(&other, "__file_level__") == Some(ClaimIntent::Edit) {
                                     req_conflicts.push(ConflictEntry {
                                         agent_id: other.clone(),
+                                        inferred: entry.inferred.contains(&other),
                                         path: req.path.clone(),
                                         symbols: vec![],
                                         intent: ClaimIntent::Edit,
@@ -756,7 +1063,23 @@ impl OccupancyMap {
                     // Apply: add agent to file; add to symbol sets; record
                     // intent and last-touched under each scope (real
                     // symbol name or the `__file_level__` sentinel).
+                    // A declaration always wins over a guess; a guess
+                    // never downgrades a declaration. So `inferred`
+                    // marks only claims the agent did not already hold,
+                    // while an explicit claim clears the marker outright
+                    // — the agent has now said out loud what the watcher
+                    // had only inferred.
+                    let already_held = entry.agents.contains(agent_id);
                     entry.agents.insert(agent_id.clone());
+                    if !inferred {
+                        entry.inferred.remove(agent_id);
+                    } else if !already_held {
+                        entry.inferred.insert(agent_id.clone());
+                    }
+                    // Read the resolved flag now: `entry` borrows
+                    // `s.by_file`, and the `Claim` below writes through
+                    // `s.by_agent`.
+                    let claim_is_inferred = entry.inferred.contains(agent_id);
                     if req.symbols.is_empty() {
                         entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
                         entry.intents.entry("__file_level__".into()).or_default().insert(agent_id.clone(), req.intent.clone());
@@ -788,7 +1111,17 @@ impl OccupancyMap {
                     // session expires.
                     let expires_at = req.ttl_seconds
                         .map(|s| now + std::time::Duration::from_secs(s));
-                    s.by_agent.entry(agent_id.clone()).or_default().push(Claim {
+                    // Re-claiming a scope replaces the previous entry
+                    // rather than appending beside it. Without this,
+                    // an agent that claimed the same file twice — or
+                    // whose declared claim was re-observed by the
+                    // attribution watcher — accumulated duplicate rows
+                    // in `my_claims`, inflating `claims_count` and
+                    // leaving a stale `inferred` flag behind the fresh
+                    // one.
+                    let agent_claims = s.by_agent.entry(agent_id.clone()).or_default();
+                    agent_claims.retain(|c| !(c.path == req.path && c.symbols == req.symbols));
+                    agent_claims.push(Claim {
                         agent_id: agent_id.clone(),
                         path: req.path.clone(),
                         symbols: req.symbols.clone(),
@@ -797,6 +1130,8 @@ impl OccupancyMap {
                         claimed_at: now,
                         last_touched_unix: now,
                         expires_at,
+                        plan_revision: req.plan_revision,
+                        inferred: claim_is_inferred,
                     });
                     granted.push(req);
                 } else {
@@ -804,12 +1139,12 @@ impl OccupancyMap {
                 }
             }
 
-            (granted, conflicts)
+            (granted, conflicts, advisories)
         };
         if !granted.is_empty() {
             if let Some(cb) = self.cloned_persist_cb() { cb(); }
         }
-        ClaimResult { granted, conflicts }
+        ClaimResult { granted, conflicts, advisories, world_state: None }
     }
 
     /// Refresh the `last_touched` timestamp on every claim this agent
@@ -834,12 +1169,20 @@ impl OccupancyMap {
     }
 
     pub fn release(&self, agent_id: &AgentId, paths: &[PathBuf]) -> Vec<PathBuf> {
+        // Same canonicalization as `claim_in_memory`, so a release
+        // spelled differently from the claim still finds it.
+        let roots = self.claim_roots_snapshot();
+        let paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| canonical_claim_path(&roots, p))
+            .collect();
         let released = {
             let mut s = self.inner.lock();
             let mut released = Vec::new();
-            for path in paths {
+            for path in &paths {
                 if let Some(entry) = s.by_file.get_mut(path) {
                     entry.agents.remove(agent_id);
+                    entry.inferred.remove(agent_id);
                     let syms_to_remove: Vec<String> = entry.symbols.iter()
                         .filter(|(_, agents)| agents.contains(agent_id))
                         .map(|(s, _)| s.clone())
@@ -927,6 +1270,7 @@ impl OccupancyMap {
             for (agent_id, path, symbols) in &to_drop {
                 if let Some(entry) = s.by_file.get_mut(path) {
                     entry.agents.remove(agent_id);
+                    entry.inferred.remove(agent_id);
                     // Remove the agent from any symbol set it claimed.
                     // For file-level claims (`symbols` empty) the
                     // bookkeeping lives under the `__file_level__`
@@ -1015,6 +1359,10 @@ impl OccupancyMap {
     }
 
     pub fn list_for_path(&self, path: &Path) -> Option<OccupancyEntry> {
+        // Readers canonicalize on the same rule as `claim`, so asking
+        // "who is in this file?" with an absolute path finds a claim
+        // taken with a relative one, and vice versa.
+        let path = &canonical_claim_path(&self.claim_roots_snapshot(), path);
         let s = self.inner.lock();
         s.by_file.get(path).map(|entry| {
             let mut symbols: Vec<SymbolOccupancy> = entry.symbols.iter()
@@ -1022,9 +1370,25 @@ impl OccupancyMap {
                 .map(|(sym, agents)| SymbolOccupancy { symbol: sym.clone(), agents: agents.iter().cloned().collect() })
                 .collect();
             symbols.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+            let mut holders: Vec<Holder> = entry
+                .agents
+                .iter()
+                .map(|a| Holder {
+                    agent_id: a.clone(),
+                    // Strongest intent at any scope: file-level first,
+                    // then any symbol-level. Read everywhere means read.
+                    intent: entry
+                        .intent_for(a, "__file_level__")
+                        .or_else(|| entry.any_symbol_intent(a))
+                        .unwrap_or(ClaimIntent::Read),
+                    inferred: entry.inferred.contains(a),
+                })
+                .collect();
+            holders.sort_by(|x, y| x.agent_id.as_str().cmp(y.agent_id.as_str()));
             OccupancyEntry {
                 path: path.to_path_buf(),
                 agents: entry.agents.iter().cloned().collect(),
+                holders,
                 symbols,
             }
         })
@@ -1062,14 +1426,40 @@ impl Default for OccupancyMap {
 /// - `HeartbeatExpired` — the expiry loop dropped a stale session.
 /// - `ClaimGranted` / `ClaimReleased` — occupancy map changes.
 /// - `ConflictDetected` — an occupancy claim came back with conflicts.
-#[derive(Debug, Clone, serde::Serialize)]
+/// - `EditLanded` — a successful write path appended an `AuditEvent`
+///   (PR 2 / Task 2.4). The wire JSON for this variant carries the
+///   `EditLanded` tag wrapping the inner `AuditEvent`'s fields
+///   (serde's external-tag default). Downstream consumers read the
+///   audit data from `data["EditLanded"]`. The SSE frame's `event:`
+///   field is set to `"edit_landed"`, so the stream shape is symmetric
+///   with `get_audit_log`'s responses — both serialize the seven
+///   `AuditEvent` fields under the same JSON keys.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PresenceEvent {
     AgentJoined(AgentSession),
     AgentLeft(AgentId),
     HeartbeatExpired(AgentId),
     ClaimGranted { agent_id: AgentId, path: PathBuf },
     ClaimReleased { agent_id: AgentId, path: PathBuf },
-    ConflictDetected { agent_id: AgentId, conflicts: Vec<ConflictEntry> },
+    /// A claim taken away from an agent that did not ask to give it up:
+    /// its session expired, or the claim's own TTL ran out. Distinct
+    /// from `ClaimReleased` (a voluntary `release_files`) because the
+    /// holder may still believe it owns the file — a subscriber seeing
+    /// this should treat the holder's in-flight edit as unprotected.
+    /// `reason` is `session_expired` or `ttl_expired`.
+    ClaimRevoked {
+        agent_id: AgentId,
+        path: PathBuf,
+        reason: String,
+    },
+    ConflictDetected {
+        agent_id: AgentId,
+        conflicts: Vec<ConflictEntry>,
+        severity: String,
+    },
+    EditLanded {
+        event: crate::server::audit::AuditEvent,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,17 +1498,50 @@ struct PersistedState {
     occupancy_by_file: Vec<(PathBuf, Vec<String>, Vec<(String, Vec<String>)>)>,
     /// `(agent_id_string, [claim])`. Mirrored into `by_file` on load.
     occupancy_by_agent: Vec<(String, Vec<Claim>)>,
+    /// Offset (in bytes) into `audit.jsonl` at which the next audit
+    /// append should start on the next restart. Task 2.6 reads this
+    /// out of the audit module on save and writes it back on load so
+    /// crash-safe append continuation crosses process boundaries.
+    #[serde(default)]
+    audit_offset_bytes: u64,
+    /// Unix-epoch seconds at which `audit.jsonl` was last reset
+    /// because it was missing or corrupt on load. `None` until
+    /// Task 2.6 wires up the loader's reset detection.
+    #[serde(default)]
+    audit_reset_at_unix: Option<f64>,
 }
 
 /// Serialize the in-memory presence registry + occupancy map to a JSON
 /// file at `path`. The write is atomic: serialise to `path.tmp` first,
 /// then `rename` over `path`. Returns a string error on any IO / JSON
 /// failure; callers wrap as needed.
+///
+/// The `audit_offset_bytes` field is populated from the live
+/// `audit.jsonl` file (sibling of `path` under the same state
+/// directory) at save time — Task 2.6 wiring. The state file is
+/// always co-located with the audit log on disk (see
+/// `LainServer::state_dir_for_audit`), so `path.parent()` is the
+/// correct audit directory in every production code path. A bare
+/// filename with no parent (which `LainServer::state_path` never
+/// produces, but tests might) falls back to the current dir, which
+/// at worst yields a `0` offset for a missing audit log.
 pub fn save_pair(
     path: &Path,
     reg: &PresenceRegistry,
     occ: &OccupancyMap,
 ) -> Result<(), String> {
+    // Task 2.6 — read the live audit log size now so the value
+    // persisted on this save reflects "how much audit data was on
+    // disk at the moment of this write," not a placeholder. The
+    // sibling relationship between the state file and the audit log
+    // holds in production; the parent-unwrap_or("") fallback keeps
+    // this safe even for synthetic test paths with no parent.
+    let audit_dir: PathBuf = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(""));
+    let audit_offset_bytes = crate::server::audit::current_offset_bytes(&audit_dir);
+
     let state = {
         let s = reg.inner.lock();
         let o = occ.inner.lock();
@@ -1137,19 +1560,22 @@ pub fn save_pair(
             occupancy_by_agent: o.by_agent.iter()
                 .map(|(k, v)| (k.0.clone(), v.clone()))
                 .collect(),
+            // Task 2.6 — these fields are now driven by the audit
+            // module instead of placeholders. `audit_offset_bytes`
+            // is the live size of `audit.jsonl`; `audit_reset_at_unix`
+            // is set by `load_pair` when it detects a missing or
+            // unreadable audit log on the way in, and simply
+            // round-trips here on the way out. Additive-compat
+            // (state files from before Task 2.2 still load via
+            // `#[serde(default)]`).
+            audit_offset_bytes,
+            audit_reset_at_unix: None,
         }
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
-    }
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("serialize PersistedState: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    crate::cli::io::write_file_atomic(path, json.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -1160,6 +1586,15 @@ pub fn save_pair(
 /// On a successful read, prior contents of `reg` / `occ` are **not**
 /// wiped before merge — callers should pass freshly-constructed
 /// registries. Same string-error convention as `save_pair`.
+///
+/// Task 2.6: after a successful parse, if the live `audit.jsonl` is
+/// missing or unreadable in the state directory (`path.parent()`),
+/// the loader rewrites the state file with `audit_offset_bytes = 0`
+/// and `audit_reset_at_unix = Some(now)`. The spec calls for a WARN
+/// here; we surface it through `tracing::warn!` so operators see it
+/// in the server log. The next `save_pair` then persists the reset
+/// timestamp out to the world; subsequent restarts see the marker
+/// and don't re-warn.
 pub fn load_pair(
     path: &Path,
     reg: &PresenceRegistry,
@@ -1170,8 +1605,44 @@ pub fn load_pair(
     }
     let json = std::fs::read_to_string(path)
         .map_err(|e| format!("read {}: {e}", path.display()))?;
-    let state: PersistedState = serde_json::from_str(&json)
+    let mut state: PersistedState = serde_json::from_str(&json)
         .map_err(|e| format!("parse {}: {e}", path.display()))?;
+
+    // Task 2.6 — audit log present-or-not check + reset rewrite,
+    // before we start consuming `state`'s `Vec` fields below. The
+    // same `path.parent()` rule from `save_pair` applies: the state
+    // file and audit log are siblings under the state directory,
+    // and a bare path with no parent falls back to the current dir
+    // for the check (which yields a fresh "missing" verdict,
+    // triggering the reset — correct, since no audit log is
+    // colocated there). Doing the rewrite here keeps `state` fully
+    // owned so we can `&state` for the on-disk rewrite; the on-disk
+    // marker is independent of the in-memory hydration that follows
+    // so the order doesn't matter for the data flow.
+    let audit_dir: PathBuf = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(""));
+    if !crate::server::audit::audit_log_present_and_readable(&audit_dir) {
+        tracing::warn!(
+            "audit log missing or unreadable at {}; resetting audit_offset_bytes and stamping audit_reset_at_unix",
+            audit_dir.join(crate::server::audit::AUDIT_LOG_FILENAME).display(),
+        );
+        state.audit_offset_bytes = 0;
+        state.audit_reset_at_unix = Some(crate::server::time::now_unix_f64());
+        // Persist the reset marker immediately so a crash between
+        // load and the first save doesn't lose it. The write goes
+        // through the same atomic-rename path as `save_pair` so a
+        // half-written state file can't be observed by a concurrent
+        // reader. A concurrent mutator racing the rewrite would
+        // still write its own (possibly newer) state on top of ours
+        // — that's the same race the regular save path already
+        // accepts, so it doesn't widen the surface here.
+        let json = serde_json::to_string_pretty(&state)
+            .map_err(|e| format!("serialize PersistedState (reset): {e}"))?;
+        crate::cli::io::write_file_atomic(path, json.as_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
 
     let mut s = reg.inner.lock();
     let mut o = occ.inner.lock();
@@ -1195,6 +1666,7 @@ pub fn load_pair(
     for (k, claims) in state.occupancy_by_agent {
         o.by_agent.insert(AgentId(k), claims);
     }
+
     Ok(())
 }
 
@@ -1224,4 +1696,344 @@ fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
         return None;
     }
     Some(SymbolHash::from_bytes(&bytes[start..end]))
+}
+
+// ── WorldState / ChangedSymbol / ChangedKind (Task 1.5, PR 1) ────────────────
+//
+// The claim response carries a `world_state` snapshot so the caller can
+// tell whether its plan is stale without a second round-trip. The shapes
+// here are populated by the static-graph retract detector (Task 1.6)
+// and surfaced on `ClaimResult`. `LookupResult` lives in
+// `crate::server::revision_log` and is re-exported from `revision_log`
+// for callers that want to reason about `diffs_since` outcomes.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ChangedKind {
+    Edited,
+    /// The symbol was in the graph and is not any more — something the
+    /// caller was working on disappeared under it.
+    Retracted,
+    /// The graph has no record of this symbol at all. Distinct from
+    /// `Retracted`, which used to cover both cases: asking about a name
+    /// that is a match arm rather than a definition, or one added since
+    /// the last index, returned `Retracted` and told the agent its
+    /// target had been deleted. "I have never seen this" and "this was
+    /// removed" call for opposite reactions.
+    NotIndexed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ChangedSymbol {
+    pub name: String,
+    pub change_kind: ChangedKind,
+    pub at_revision: RevisionId,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WorldState {
+    pub current: RevisionId,
+    pub plan: RevisionId,
+    #[serde(default)]
+    pub changed_symbols: Vec<ChangedSymbol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl ChangedSymbol {
+    /// Collapse a stream of `OverlayDiff`s into one `ChangedSymbol` per
+    /// name, keeping the *latest* `at_revision` we saw for that name.
+    ///
+    /// The brief leaves `plan` unused in the helper — the caller in
+    /// `run_claim_files` filters by the claim's paths/symbols after
+    /// construction, so this just does the structural dedup. Returns
+    /// `ChangedKind::Edited` for every entry: distinguishing retracted
+    /// from edited is the static-graph retract detector's job
+    /// (Task 1.6), which compares the diff against the indexed graph.
+    pub fn from_diffs(
+        diffs: &[crate::server::overlay::stream::OverlayDiff],
+        _plan: RevisionId,
+        _current: RevisionId,
+    ) -> Vec<ChangedSymbol> {
+        use std::collections::BTreeMap;
+        let mut by_name: BTreeMap<String, RevisionId> = BTreeMap::new();
+        for d in diffs {
+            for n in &d.added {
+                // `BTreeMap::insert` keeps the *latest* `d.revision`
+                // because we iterate `diffs` in order; later diffs on
+                // the same symbol overwrite earlier ones.
+                by_name.insert(n.name.clone(), d.revision);
+            }
+            for n in &d.updated {
+                by_name.insert(n.name.clone(), d.revision);
+            }
+        }
+        by_name
+            .into_iter()
+            .map(|(name, at)| ChangedSymbol {
+                name,
+                change_kind: ChangedKind::Edited,
+                at_revision: at,
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod world_state_tests {
+    //! Unit tests for the `WorldState` / `ChangedSymbol` /
+    //! `ChangedSymbol::from_diffs` contract (Task 1.5, PR 1).
+    //!
+    //! These live alongside the types so the serialization shape
+    //! can't drift from the implementation without a test failure.
+    use super::*;
+    use crate::server::overlay::stream::OverlayDiff;
+    use crate::server::schema::{GraphNode, NodeType};
+
+    #[test]
+    fn world_state_serializes_note_only_when_some() {
+        let ws = WorldState {
+            current: 10,
+            plan: 5,
+            changed_symbols: vec![ChangedSymbol {
+                name: "verify_token".into(),
+                change_kind: ChangedKind::Retracted,
+                at_revision: 10,
+            }],
+            note: Some("plan_revision beyond current — server restarted".into()),
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(json.contains("\"note\""));
+        assert!(json.contains("\"Retracted\""));
+    }
+
+    #[test]
+    fn world_state_with_no_note_omits_field() {
+        let ws = WorldState {
+            current: 10,
+            plan: 5,
+            changed_symbols: vec![],
+            note: None,
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(!json.contains("\"note\""));
+    }
+
+    #[test]
+    fn changed_symbols_deduplicated_in_construction_helper() {
+        // Two diffs on the same symbol name should collapse into one
+        // entry with the latest `at_revision` (revision 7 wins).
+        let diffs = vec![
+            OverlayDiff {
+                revision: 6,
+                added: vec![GraphNode::new(NodeType::Function, "f".into(), "/x.rs".into())],
+                removed: vec![],
+                updated: vec![],
+            },
+            OverlayDiff {
+                revision: 7,
+                added: vec![GraphNode::new(NodeType::Function, "f".into(), "/x.rs".into())],
+                removed: vec![],
+                updated: vec![],
+            },
+        ];
+        let out = ChangedSymbol::from_diffs(&diffs, 5, 8);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].at_revision, 7);
+    }
+}
+
+#[cfg(test)]
+mod audit_persistence_tests {
+    //! Round-trip tests for the new `audit_offset_bytes` /
+    //! `audit_reset_at_unix` fields on `PersistedState` (Task 2.2).
+    //!
+    //! These live alongside the type so the on-disk shape can't drift
+    //! from the implementation without a test failure. The struct
+    //! fields are private to the module, so we test from inside rather
+    //! than via the `tests/` integration tree — that way we can assert
+    //! on the field values directly.
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn audit_offset_and_reset_round_trip_through_persisted_state() {
+        // Task 2.2: `audit_offset_bytes` + `audit_reset_at_unix` are new
+        // additive fields on `PersistedState`. They must round-trip
+        // through serde so the audit module can resume append safely
+        // after a restart.
+        let json = r#"{
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": [],
+            "audit_offset_bytes": 12345,
+            "audit_reset_at_unix": 1700000000.5
+        }"#;
+        let state: PersistedState = serde_json::from_str(json)
+            .expect("PersistedState should accept audit fields");
+        assert_eq!(state.audit_offset_bytes, 12345);
+        assert_eq!(state.audit_reset_at_unix, Some(1700000000.5));
+    }
+
+    #[test]
+    fn pre_task_2_2_state_loads_with_defaults() {
+        // State files written before Task 2.2 don't have the audit
+        // fields. `#[serde(default)]` lets them load with `0` / `None`
+        // instead of failing the parser — no migration required.
+        let json = r#"{
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": []
+        }"#;
+        let state: PersistedState = serde_json::from_str(json)
+            .expect("Legacy state files without audit fields must still load");
+        assert_eq!(state.audit_offset_bytes, 0);
+        assert_eq!(state.audit_reset_at_unix, None);
+    }
+
+    #[test]
+    fn save_pair_writes_audit_fields_with_placeholder_defaults() {
+        // For Task 2.2 the audit module isn't wired up yet, so the
+        // values written to disk are placeholders (`0` / `None`). Task
+        // 2.6 swaps these for live audit-module values. We still want
+        // the round-trip through `save_pair` / a JSON re-parse to
+        // succeed and emit both fields — that way the on-disk shape is
+        // stable from this commit onward.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        save_pair(&path, &reg, &occ).expect("save_pair");
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("\"audit_offset_bytes\""), "save_pair must emit audit_offset_bytes; got:\n{written}");
+        assert!(written.contains("\"audit_reset_at_unix\""), "save_pair must emit audit_reset_at_unix; got:\n{written}");
+
+        // Round-trip back through `load_pair` -> PersistedState with no
+        // parse error, then double-check we read what we wrote.
+        load_pair(&path, &reg, &occ).expect("load_pair");
+        let parsed: PersistedState = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed.audit_offset_bytes, 0);
+        assert_eq!(parsed.audit_reset_at_unix, None);
+    }
+
+    /// Task 2.6 / brief: `save_pair` must read the current size of
+    /// `audit.jsonl` (its sibling under the same state directory) and
+    /// emit that as `audit_offset_bytes`, not the placeholder `0`.
+    /// Pre-create the audit log with a known size, call `save_pair`,
+    /// re-parse the state file, and assert the offset matches.
+    #[test]
+    fn offset_round_trips_across_state_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+
+        // 12345 bytes of known sentinel content. The exact byte
+        // count is what the test pins — `save_pair` must surface
+        // this on disk, not a placeholder.
+        const EXPECTED: u64 = 12_345;
+        std::fs::write(&audit_path, vec![b'x'; EXPECTED as usize]).unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        save_pair(&state_path, &reg, &occ).expect("save_pair");
+
+        let written = fs::read_to_string(&state_path).unwrap();
+        let parsed: PersistedState = serde_json::from_str(&written)
+            .expect("state file must round-trip after save");
+        assert_eq!(
+            parsed.audit_offset_bytes, EXPECTED,
+            "save_pair must read audit.jsonl size and emit it as audit_offset_bytes; \
+             got {} expected {} (state file:\n{written})",
+            parsed.audit_offset_bytes, EXPECTED,
+        );
+    }
+
+    /// Task 2.6 / spec: if `audit.jsonl` is missing on load, the
+    /// loader must mark `audit_reset_at_unix` with a recent timestamp
+    /// so the next save persists the reset, and `get_audit_log`
+    /// consumers can report the gap. This test pre-writes a state
+    /// file with `audit_reset_at_unix: None`, runs `load_pair` with
+    /// no audit file present, and asserts the state file now carries
+    /// a reset timestamp.
+    #[test]
+    fn load_pair_marks_reset_when_audit_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        // No `audit.jsonl` is created — the missing-file case is
+        // the entire point of the test.
+        assert!(!dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME).exists());
+
+        // Seed a state file with a prior offset and no reset marker
+        // (the "pre-reset" state: we thought we had an audit log
+        // pointing at byte 9999, but it's gone).
+        let seeded = serde_json::json!({
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": [],
+            "audit_offset_bytes": 9_999_u64,
+            "audit_reset_at_unix": serde_json::Value::Null,
+        });
+        std::fs::write(&state_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        load_pair(&state_path, &reg, &occ).expect("load_pair");
+
+        // The state file on disk must now have `audit_reset_at_unix`
+        // set to a recent timestamp (not null). The loader rewrites
+        // the file when it detects the missing audit log.
+        let after = fs::read_to_string(&state_path).unwrap();
+        let parsed: PersistedState = serde_json::from_str(&after)
+            .expect("state file must round-trip after load-induced reset");
+        let reset = parsed
+            .audit_reset_at_unix
+            .expect("load_pair must set audit_reset_at_unix when audit.jsonl is missing");
+        let now = crate::server::time::now_unix_f64();
+        assert!(
+            (now - reset).abs() < 5.0,
+            "reset timestamp should be recent: reset={reset} now={now}",
+        );
+        // The offset is also reset to 0 (the spec says "reset offset
+        // to 0" when the audit log is missing).
+        assert_eq!(
+            parsed.audit_offset_bytes, 0,
+            "load_pair must reset audit_offset_bytes to 0 when audit.jsonl is missing",
+        );
+    }
+
+    /// Counterpart of the previous test: when `audit.jsonl` IS
+    /// present on load, `load_pair` must not clobber the persisted
+    /// offset or stamp a spurious reset. Existing offset survives.
+    #[test]
+    fn load_pair_preserves_offset_when_audit_file_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+        // Create a 100-byte audit log so the file exists and is
+        // readable; the loader must not flag a reset.
+        std::fs::write(&audit_path, vec![b'x'; 100]).unwrap();
+
+        let seeded = serde_json::json!({
+            "sessions": [],
+            "occupancy_by_file": [],
+            "occupancy_by_agent": [],
+            "audit_offset_bytes": 100_u64,
+            "audit_reset_at_unix": serde_json::Value::Null,
+        });
+        std::fs::write(&state_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        load_pair(&state_path, &reg, &occ).expect("load_pair");
+
+        let after = fs::read_to_string(&state_path).unwrap();
+        let parsed: PersistedState = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            parsed.audit_offset_bytes, 100,
+            "load_pair must preserve the persisted offset when audit.jsonl exists",
+        );
+        assert!(
+            parsed.audit_reset_at_unix.is_none(),
+            "load_pair must not stamp a reset when audit.jsonl is present",
+        );
+    }
 }

@@ -1,17 +1,23 @@
-pub mod query;
 pub mod ask;
-pub mod server;
-pub mod workspaces;
-pub mod repos;
 pub mod dispatch;
-pub mod signal;
-pub mod hooks;
 pub mod doctor;
+pub mod hooks;
+pub mod init;
+pub mod io;
 pub mod mcp;
+pub mod mcp_client;
+pub mod oneshot;
+pub mod query;
+pub mod repos;
+pub mod server;
+pub mod signal;
+pub mod workspace;
+pub mod workspaces;
 
 pub use query::run_query;
 pub use ask::run_ask;
 pub use server::run_server;
+pub use crate::resolve_repos_config;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -86,11 +92,40 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::cli::repos::ReposAction,
     },
-    /// Run a query against the project's persisted graph.
+    /// Run a query against the project's persisted graph
+    /// (`<workspace>/.lain/graph.bin`). Without `--workspace`, walks
+    /// up from the current directory for `.git` like `lain mcp`.
     Query {
-        #[arg(long, default_value = "./repos.yaml")]
-        config: PathBuf,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
         expression: String,
+    },
+    /// One-shot MCP query: boots a transient `lain mcp` server
+    /// (stdin/stdout), sends a single `tools/call` for the named
+    /// tool, prints the result as a pretty table, and exits. The
+    /// ergonomic shortcut for "I just want to grep the symbols
+    /// without keeping a server alive".
+    ///
+    /// Built-in shortcuts:
+    /// - `find_anchors` — top symbols by anchor score (deduped)
+    /// - `get_blast_radius <symbol>` — incoming callers of `<symbol>`
+    /// - `find_dead_code` — symbols with no incoming call edges
+    /// - `get_call_chain <from> <to>` — call path between two symbols
+    ///
+    /// Any tool name registered in the stdio MCP server works.
+    /// Arguments after the tool name are passed as the tool's
+    /// `arguments` object (positional, in the order the tool
+    /// declares them).
+    Oneshot {
+        /// Workspace root (default: walk up from cwd for `.git`).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Tool name, e.g. `find_anchors` or `get_blast_radius`.
+        tool: String,
+        /// Positional arguments forwarded as the tool's `arguments`.
+        /// Numbers are parsed as integers; everything else as strings.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Single-user LLM-assisted query.
     Ask {
@@ -125,6 +160,24 @@ pub enum Commands {
         #[arg(long)]
         reindex_timeout: Option<u64>,
     },
+    /// Scaffold a `repos.yaml` for the current directory. Walks up for
+    /// `.git` (same as `lain mcp`), then writes a minimal
+    /// `repos.yaml` pointing the only repo at the discovered workspace
+    /// and a per-repo `data_dir` at `./.lain/data`. The ergonomic
+    /// onboarding: `cd` into any clone, run `lain init`, run
+    /// `lain server` — no hand-written YAML.
+    ///
+    /// Fails if `./repos.yaml` already exists (refuse to clobber).
+    /// Add `--force` to overwrite. With `--print` print the would-be
+    /// file and exit (useful for piping into `tee` or for CI).
+    Init {
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        print: bool,
+    },
     /// Agent pre-edit hook entry point (claim/release files).
     Hooks {
         #[command(subcommand)]
@@ -135,4 +188,27 @@ pub enum Commands {
     /// reports. Always exits 0 on a clean install, 1 on hard
     /// failures (missing hook script, un-creatable dirs).
     Doctor,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_repos_config;
+    use std::path::Path;
+
+    #[test]
+    fn reexport_resolves_to_canonical_implementation() {
+        // Locks the property the duplicate violated. With both copies
+        // present this passes (they're byte-identical); after Step 3
+        // the CLI re-export and the crate-root canonical must remain
+        // the same function pointer, and any future re-introduction
+        // of the duplicate breaks the build.
+        assert!(std::ptr::eq(
+            resolve_repos_config as *const (),
+            crate::resolve_repos_config as *const (),
+        ));
+        // Signature lock: the cast above is well-typed only if both
+        // items resolve to `fn(&Path) -> PathBuf`. Future drift in
+        // `lib.rs::resolve_repos_config`'s signature breaks the build.
+        let _: fn(&Path) -> std::path::PathBuf = resolve_repos_config;
+    }
 }

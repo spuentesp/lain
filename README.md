@@ -60,7 +60,8 @@ After install, `lain` exposes exactly five subcommands:
 | `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
 | `lain ask` | Single-user LLM-assisted query (uses `semantic_search` + `explain_symbol` heuristics). |
 | `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
-| `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs, presence registry, and (if `LAIN_URL` set) server reachability. |
+| `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs (reaping session files older than 30 days), presence registry, and — when `LAIN_URL`/`LAIN_SERVER_URL` is set — both server reachability **and the live MCP surface**, calling `tools/list` and failing if it errors or advertises zero tools. Exits 0 clean, 1 on a hard failure. |
+| `scripts/demo.sh` | Capability demonstration and benchmark. Boots a real server against a synthetic repo whose call graph is known by construction, checks lain's answers against that ground truth (not merely that it answered), then benchmarks the same tools against this repo at ~3.5k nodes. `--quick` skips the build and benchmark phases; `--json FILE` writes machine-readable results. Exits non-zero if any check fails. |
 
 The cut surface (`init`, `agents`, `hook`, `projects`, top-level
 `use`) is gone — those concerns are reached through the five commands
@@ -433,6 +434,35 @@ curl -s -X POST http://localhost:9999/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_agent_strategy","arguments":{}},"id":1}'
 ```
+
+**`run_build` / `run_tests` fail with "not found"?**
+
+The server inherits the environment of whatever launched it, and an
+editor-launched MCP server usually has no version-manager shims on
+`PATH`. lain searches the toolchain's known install locations (rustup,
+nvm, pyenv, volta, mise, asdf and friends) before giving up, and the
+error names every way to fix it. To teach it a manager it doesn't know,
+add `program_dirs` / `program_resolver` to that toolchain's profile —
+see [`toolchains/README.md`](toolchains/README.md).
+
+**Answers look stale, or a symbol "doesn't exist" that clearly does?**
+
+Check `get_health`:
+
+- **`Build:`** tells you the version and git SHA of the process
+  answering, and warns when a newer binary is on disk. An MCP stdio
+  server is spawned once by its client and outlives every rebuild, so
+  it can be older than your source tree — restart the client to pick up
+  a new build.
+- **`Status:`** reads `Degraded ⚠` when the last re-index failed, which
+  means "not in this graph", not "does not exist".
+
+**Two agents not seeing each other?**
+
+They must share one workspace. Presence is exchanged through the state
+file under `~/.local/lain/state/`, so agents on the same repo see each
+other's claims even when each console spawned its own stdio server.
+`list_active_agents` and `list_occupancy` are the quickest check.
 
 ---
 

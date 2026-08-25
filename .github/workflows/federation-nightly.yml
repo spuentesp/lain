@@ -9,8 +9,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  large-fixture:
-    name: Large Federation Fixture
+  real-multi-agent-benchmark:
+    name: Real multi-agent benchmark
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config cmake git
+          sudo apt-get install -y libssl-dev pkg-config cmake git python3 curl
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
@@ -28,5 +28,20 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run large-fixture benchmark
-        run: cargo test --features test-utils --test federation_benchmark large_fixture -- --ignored --nocapture --test-threads=1
+      - name: Build release binary
+        run: cargo build --release
+
+      # Drives a real `lain server` over HTTP against this repo with 6
+      # concurrent scripted agents (claim → search → blast radius →
+      # heartbeat → release). Exits non-zero if p99 blows the 2s budget
+      # or no advisory conflicts were exercised. Replaces the old
+      # `federation_benchmark` target removed in the consolidation.
+      - name: Run real multi-agent benchmark
+        run: bash tests/e2e/real-bench.sh
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-bench-report
+          path: /tmp/lain-real-bench/report.md

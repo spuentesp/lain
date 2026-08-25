@@ -31,8 +31,12 @@ pub fn explore_architecture(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // `max_depth` filters on `depth_from_main`, which only exists after
+    // enrichment. Without it every depth returned the same list, so
+    // `max_depth: 2` and `max_depth: 3` produced byte-identical output
+    // and the parameter looked broken. Say so instead of pretending.
     let depths_computed = files.iter().any(|f| f.depth_from_main.is_some());
-    let filtered: Vec<_> = files.iter()
+    let in_depth: Vec<_> = files.iter()
         .filter(|f| {
             if depths_computed {
                 f.depth_from_main.unwrap_or(u32::MAX) as usize <= max_depth
@@ -40,8 +44,10 @@ pub fn explore_architecture(
                 true // show all if enrichment hasn't run yet
             }
         })
-        .take(20)
         .collect();
+    let total_in_depth = in_depth.len();
+    const SHOWN: usize = 20;
+    let filtered: Vec<_> = in_depth.into_iter().take(SHOWN).collect();
 
     // Group filtered files by top-level directory so the response shows the
     // module structure (src/, tests/, docs/, ...) instead of a flat list.
@@ -59,20 +65,39 @@ pub fn explore_architecture(
 
     let body = by_dir.iter()
         .map(|(dir, fs)| {
-            let header = format!("### {}/ ({} files)\n", dir, fs.len());
+            // "N shown" — not "N files". The group is built from the
+            // truncated top-20, so printing `### src/ (1 files)` for a
+            // directory holding 144 of them is the first thing an
+            // onboarding agent reads, and it is false.
+            let header = format!("### {}/ ({} shown)\n", dir, fs.len());
             let entries = fs.iter().map(|f| {
                 let depth = f.depth_from_main.map(|d| format!(" (depth: {})", d)).unwrap_or_default();
                 let anchor = f.anchor_score.map(|s| format!(" — anchor {:.2}", s)).unwrap_or_default();
-                format!("- {}{}{}", f.name, depth, anchor)
+                // Path, not bare name: grouping is by top-level
+                // directory only, so several `pre-edit.sh` under
+                // different `hooks/*` subdirectories rendered as three
+                // identical, unnavigable rows.
+                format!("- {}{}{}", f.path, depth, anchor)
             }).collect::<Vec<_>>().join("\n");
             format!("{}\n{}", header, entries)
         })
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok(format!("## Architecture Overview (Max Depth: {})\n\nFound {} total files in Merged Brain. Showing top {} (sorted by anchor score):\n\n{}",
-        max_depth,
+    let depth_note = if depths_computed {
+        format!("Max Depth: {max_depth}")
+    } else {
+        format!(
+            "Max Depth: {max_depth} — not applied: depth_from_main is unset, so run \
+             `run_enrichment` first. Every max_depth returns the same list until then."
+        )
+    };
+    Ok(format!(
+        "## Architecture Overview ({})\n\n{} files in Merged Brain, {} within depth, \
+         showing {} (sorted by anchor score):\n\n{}",
+        depth_note,
         files.len(),
+        total_in_depth,
         filtered.len(),
         body
     ))

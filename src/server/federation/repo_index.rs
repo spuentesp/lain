@@ -6,6 +6,7 @@ use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
 use crate::server::ingest::ingestion::index_one_repo;
+use crate::server::overlay::VolatileOverlay;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
@@ -51,6 +52,13 @@ pub struct RepoIndex {
     git: Arc<AsyncMutex<GitSensor>>,
     health: Arc<RwLock<RepoHealth>>,
     last_indexed: Arc<RwLock<SystemTime>>,
+    /// Shared handle to the federation's `VolatileOverlay`. `index()`
+    /// touches it after a successful index pass so the `Overlay
+    /// freshness` banner doesn't read as "stale" the moment the
+    /// server comes up. Defaults to a fresh, unconnected overlay
+    /// (tests); production wires the federation's overlay in via
+    /// [`Self::set_overlay`] right after `add_repo`.
+    server_overlay: parking_lot::Mutex<Arc<VolatileOverlay>>,
     /// Active file-system watcher for this repo. `None` until
     /// `start_watcher` is called. The watcher is dropped (and the
     /// background thread stops) when the `RepoIndex` is dropped.
@@ -84,6 +92,7 @@ impl RepoIndex {
             git,
             health: Arc::new(RwLock::new(RepoHealth::Indexing)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
+            server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
             watcher: parking_lot::Mutex::new(None),
         })
     }
@@ -100,6 +109,17 @@ impl RepoIndex {
         *self.health.read()
     }
 
+
+    /// Install the federation's shared `VolatileOverlay`. Called by
+    /// [`crate::server::federation::federated_index::FederatedIndex::install_overlay`]
+    /// so a successful `index()` can touch the overlay and the
+    /// freshness banner stops reading as "stale" forever on a
+    /// freshly-indexed server. The Mutex<Arc> makes the swap atomic
+    /// w.r.t. concurrent `index()` calls (each one clones the Arc
+    /// inside the lock).
+    pub fn set_overlay(&self, overlay: Arc<VolatileOverlay>) {
+        *self.server_overlay.lock() = overlay;
+    }
     pub fn set_health(&self, health: RepoHealth) {
         *self.health.write() = health;
     }
@@ -136,7 +156,16 @@ impl RepoIndex {
     /// polling rather than wedging the federation.
     pub async fn index(self: &Arc<Self>) -> Result<(), LainError> {
         let path = self.source.local_path().to_path_buf();
-        let db = self.db.clone();
+        // Borrow `self.db` directly instead of cloning. `GraphDatabase`
+        // derives Clone but `DashMap` clones its shards independently —
+        // every `index_map` / `path_index` mutation lands on the clone,
+        // and the server's bound `&self.db` reads from an empty index
+        // map while the on-disk file (and the clone) hold the real
+        // graph. `get_edges_to` and friends return empty even though
+        // the edges exist in petgraph (which IS Arc-shared and survives
+        // the clone). `git_guard` already serializes writers, so a
+        // shared `&self.db` borrow across the pipeline is safe.
+        let db = &self.db;
         let lsp = self.lsp.clone();
         let git = Arc::clone(&self.git);
 
@@ -145,7 +174,8 @@ impl RepoIndex {
         let git_guard = git.lock().await;
 
         let pipeline = async {
-            index_one_repo(&path, &db, &lsp, &*git_guard).await
+            let overlay = self.server_overlay.lock().clone();
+            index_one_repo(&path, &db, &lsp, &*git_guard, &overlay).await
         };
         let result = match tokio::time::timeout(INDEX_TIMEOUT, pipeline).await {
             Ok(r) => r,

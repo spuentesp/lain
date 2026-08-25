@@ -9,6 +9,12 @@ use std::path::Path;
 /// Tuning parameters for graph construction and query ranking.
 /// Loaded from .lain/tuning.toml in the workspace root.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Every field defaults, so a `tuning.toml` may set only the keys it
+/// cares about. Without container-level `serde(default)` a partial file
+/// failed to parse outright, `load_tuning_config` logged a warning most
+/// operators never see, and *every* setting silently reverted — so a
+/// file setting one key was worse than no file at all.
+#[serde(default)]
 pub struct TuningConfig {
     /// Semantic search: minimum cosine similarity to include a result.
     /// Range: [0.0, 1.0]. Higher = more precise, lower = more recall.
@@ -45,6 +51,9 @@ pub struct TuningConfig {
     pub ingestion: IngestionConfig,
     /// Execution: timeouts for command/tool execution.
     pub runtime: RuntimeConfig,
+    /// Multiplayer: session lifetimes and presence-state locking.
+    #[serde(default)]
+    pub presence: PresenceConfig,
 }
 
 impl Default for TuningConfig {
@@ -58,12 +67,14 @@ impl Default for TuningConfig {
             max_pattern_edges: 200,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),
+            presence: PresenceConfig::default(),
         }
     }
 }
 
 /// Ingestion pipeline tuning — affects scanning, embedding, and graph construction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IngestionConfig {
     /// Number of concurrent LSP language servers for parallel file analysis.
     /// Higher = more parallel scanning, more memory/CPU.
@@ -123,8 +134,60 @@ impl Default for IngestionConfig {
     }
 }
 
+
+/// Multiplayer tuning — session lifetimes and the locks around shared
+/// presence state.
+///
+/// These were compile-time constants scattered across `presence`,
+/// `attribution` and `state_lock`, which meant an operator whose agents
+/// or filesystem behaved differently had no way to adjust them. Every
+/// other timeout in lain is tunable; these are now too.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PresenceConfig {
+    /// How long an interactive agent may go without proof of life.
+    ///
+    /// Was 60s, which is shorter than a single LLM turn: an agent that
+    /// claimed a file, reasoned about it, and came back found its
+    /// session expired and its claims silently released. Any
+    /// authenticated tool call now counts as a heartbeat, so this is a
+    /// backstop for a departed agent rather than a liveness treadmill.
+    pub interactive_session_ttl_secs: u64,
+    /// Same, for background (cron / CI) agents. Kept short: they are
+    /// scripted, so heartbeating on a schedule is something they can
+    /// actually do, and a wedged one should give its claims back fast.
+    pub background_session_ttl_secs: u64,
+    /// How long a claim inferred by the attribution watcher survives
+    /// without being re-observed. Inferred claims are a guess; a wrong
+    /// one must heal itself rather than stick until the session dies.
+    pub inferred_claim_ttl_secs: u64,
+    /// How long to retry the presence state-file lock before proceeding
+    /// without it. The layer is advisory: losing a concurrent write is
+    /// a nuisance, wedging an agent's tool call is not.
+    pub state_lock_acquire_timeout_ms: u64,
+    /// Gap between attempts while waiting for that lock.
+    pub state_lock_retry_interval_ms: u64,
+    /// A state lock older than this is presumed abandoned by a dead
+    /// holder and may be taken over.
+    pub state_lock_stale_after_secs: u64,
+}
+
+impl Default for PresenceConfig {
+    fn default() -> Self {
+        Self {
+            interactive_session_ttl_secs: 600,
+            background_session_ttl_secs: 60,
+            inferred_claim_ttl_secs: 120,
+            state_lock_acquire_timeout_ms: 2000,
+            state_lock_retry_interval_ms: 20,
+            state_lock_stale_after_secs: 10,
+        }
+    }
+}
+
 /// Runtime tuning — timeouts and limits for command execution and LSP operations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeConfig {
     /// Default timeout for arbitrary command execution (seconds).
     pub default_command_timeout_secs: u64,
@@ -172,4 +235,44 @@ pub fn save_tuning_config(workspace: &Path, config: &TuningConfig) -> std::io::R
     std::fs::write(dir.join("tuning.toml"), contents)?;
     tracing::info!("Saved tuning config to {:?}", dir.join("tuning.toml"));
     Ok(())
+}
+
+#[cfg(test)]
+mod partial_config_tests {
+    //! A `tuning.toml` must be able to set one key.
+    //!
+    //! Without container-level `serde(default)` a partial file failed to
+    //! parse, `load_tuning_config` logged a warning to a stream most
+    //! operators never read, and every setting silently reverted to its
+    //! default — so the documented workflow ("set `query_prefix` in
+    //! `.lain/tuning.toml`") quietly did nothing.
+    use super::*;
+
+    #[test]
+    fn a_single_key_file_keeps_every_other_default() {
+        let cfg: TuningConfig = toml::from_str(r#"query_prefix = "Represent: ""#).unwrap();
+        assert_eq!(cfg.query_prefix, "Represent: ");
+        assert_eq!(cfg.semantic_similarity_threshold, 0.3);
+        assert_eq!(cfg.presence.interactive_session_ttl_secs, 600);
+    }
+
+    #[test]
+    fn a_partial_nested_table_keeps_its_siblings() {
+        let cfg: TuningConfig =
+            toml::from_str("[presence]\ninteractive_session_ttl_secs = 900\n").unwrap();
+        assert_eq!(cfg.presence.interactive_session_ttl_secs, 900);
+        assert_eq!(cfg.presence.background_session_ttl_secs, 60);
+        assert_eq!(cfg.presence.inferred_claim_ttl_secs, 120);
+    }
+
+    #[test]
+    fn an_empty_file_is_the_default_config() {
+        let cfg: TuningConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.presence.interactive_session_ttl_secs, 600);
+        assert_eq!(cfg.ingestion.lsp_pool_size, IngestionConfig::default().lsp_pool_size);
+        assert_eq!(
+            cfg.runtime.default_test_timeout_secs,
+            RuntimeConfig::default().default_test_timeout_secs
+        );
+    }
 }

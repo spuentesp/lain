@@ -66,16 +66,12 @@ impl ActiveWorkspace {
         if self.name.is_empty() {
             return Err(LainError::Config("active workspace name cannot be empty".into()));
         }
-        let dir = config_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| LainError::Io(e.to_string()))?;
-        let path = active_workspace_file();
         let text = match &self.config_path {
             Some(p) => format!("{}\n{}\n", p.display(), self.name),
             None => format!("{}\n", self.name),
         };
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, text).map_err(|e| LainError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, &path).map_err(|e| LainError::Io(e.to_string()))?;
+        crate::cli::io::write_file_atomic(&active_workspace_file(), text.as_bytes())
+            .map_err(|e| LainError::Io(e.to_string()))?;
         Ok(())
     }
 

@@ -118,21 +118,14 @@ fn try_lock_once(
     kind: AgentKind,
     intent: ClaimIntent,
 ) -> Result<FileLock, StaleOrConflict> {
-    let lock_dir = workspace_root.join(".lain").join("locks");
-    // Best-effort dir creation. `create_dir_all` on an existing dir
-    // is a no-op; an unwritable workspace surfaces as `Err` on the
-    // `create_new` below, which `OccupancyMap::claim` logs and
-    // ignores (in-memory state stays authoritative).
-    let _ = std::fs::create_dir_all(&lock_dir);
     let lock_path = lock_path_for(workspace_root, path);
 
-    use std::fs::OpenOptions;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-    {
-        Ok(mut file) => {
+    // Shared with `state_lock` via `server::sentinel`: atomic create,
+    // mtime-as-liveness, remove-to-release. The policy below — holder
+    // metadata and conflict reporting — is what makes this a *claim*
+    // lock rather than a plain critical section.
+    match crate::server::sentinel::try_acquire(&lock_path, LOCK_TTL) {
+        crate::server::sentinel::Acquire::Acquired(mut file) => {
             // Write the holder metadata so an operator inspecting
             // the lock file directly can see *who* is holding it
             // without round-tripping through `lain`.
@@ -161,22 +154,23 @@ fn try_lock_once(
                 claimed_at: now,
             })
         }
-        Err(_) => {
-            // Existing lock — read and classify as conflict or stale.
+        crate::server::sentinel::Acquire::Held => {
+            // A live holder — report who, so the caller can say more
+            // than "denied".
             let (holder, kind, intent, mtime) = read_current_holder(&lock_path);
-            let now = SystemTime::now();
-            let age = now.duration_since(mtime).unwrap_or(Duration::ZERO);
-            if age < LOCK_TTL {
-                Err(StaleOrConflict::Conflict(LockConflict {
-                    holder,
-                    kind,
-                    intent,
-                    mtime,
-                }))
-            } else {
-                Err(StaleOrConflict::Stale)
-            }
+            Err(StaleOrConflict::Conflict(LockConflict {
+                holder,
+                kind,
+                intent,
+                mtime,
+            }))
         }
+        crate::server::sentinel::Acquire::Stale => Err(StaleOrConflict::Stale),
+        // An unwritable workspace is not a conflict. Reported as stale
+        // so the bounded retry in `try_lock` surfaces it as a conflict
+        // rather than looping — the in-memory `OccupancyMap` stays
+        // authoritative either way.
+        crate::server::sentinel::Acquire::Unavailable(_) => Err(StaleOrConflict::Stale),
     }
 }
 

@@ -23,6 +23,11 @@ use clap::{CommandFactory, Parser};
 use lain::cli::{Args, Commands};
 
 fn main() -> Result<()> {
+    // Stamp the executable's mtime before anything can rebuild
+    // underneath a long-running server, so `get_health` /
+    // `get_server_status` can tell an agent when the binary answering
+    // its calls has been superseded on disk.
+    lain::server::build_info::record_startup_exe_mtime();
     let args = Args::parse();
     match args.command {
         Some(Commands::Server {
@@ -42,7 +47,7 @@ fn main() -> Result<()> {
                 .build()
                 .context("build tokio runtime for server subcommand")?;
             rt.block_on(lain::cli::server::run_server(
-                &config,
+                &lain::cli::resolve_repos_config(&config),
                 &transport,
                 port,
                 &log_level,
@@ -57,18 +62,14 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()
                 .context("build tokio runtime for workspaces subcommand")?;
-            rt.block_on(lain::cli::workspaces::run(action, &config))
+            rt.block_on(lain::cli::workspaces::run(action, &lain::cli::resolve_repos_config(&config)))
         }
-        Some(Commands::Repos { config, action }) => lain::cli::repos::run(action, &config),
-        Some(Commands::Query { config, expression }) => {
-            // NOTE: Task 1.9 keeps the pre-consolidation semantics
-            // for `query` — `cli::query::run_query` reads the second
-            // arg as the workspace directory (it joins
-            // `.lain/graph.bin` onto it). The `--config` flag here
-            // defaults to `./repos.yaml` for shape parity with the
-            // other subcommands; PR 2 will rewire it to a real
-            // workspace path. For now, the value is forwarded as-is.
-            lain::cli::query::run_query(&expression, &config)
+        Some(Commands::Repos { config, action }) => lain::cli::repos::run(action, &lain::cli::resolve_repos_config(&config)),
+        Some(Commands::Query { workspace, expression }) => {
+            // `query` reads `<workspace>/.lain/graph.bin`; without
+            // `--workspace` it walks up for `.git` exactly like
+            // `lain mcp` (see cli::query::run_query).
+            lain::cli::query::run_query(&expression, workspace.as_deref())
         }
         Some(Commands::Ask { config: _, question: _ }) => {
             // NOTE: `cli::ask::run_ask` is the PreToolUse hook handler
@@ -101,7 +102,21 @@ fn main() -> Result<()> {
                 reindex_timeout.map(std::time::Duration::from_secs),
             ))
         }
+        Some(Commands::Init {
+            workspace,
+            force,
+            print,
+        }) => lain::cli::init::run_init(workspace.as_deref(), force, print),
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
+        Some(Commands::Oneshot {
+            workspace,
+            tool,
+            args,
+        }) => lain::cli::oneshot::run_oneshot(
+            workspace.as_deref(),
+            &tool,
+            &args,
+        ),
         Some(Commands::Doctor) => {
             // `doctor` returns its own exit code (0 clean, 1 hard
             // failure). Anything else (e.g. a network error from

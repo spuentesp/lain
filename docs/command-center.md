@@ -12,9 +12,9 @@ lain server --config ./repos.yaml --transport http --port 9999
 open http://localhost:9999
 ```
 
-The Command Center shell is served at `/` and pulls `app.js`, `styles.css`, and
-the vendored D3 v7 bundle from `/assets/d3.v7.min.js`. Everything else is
-fetched from the running server over MCP.
+The Command Center shell is served at `/` and pulls `app.js`, `theme.css`,
+`styles.css`, and the vendored D3 v7 bundle from `/assets/d3.v7.min.js`.
+Everything else is fetched from the running server over MCP.
 
 ## Sections
 
@@ -45,7 +45,43 @@ fetched from the running server over MCP.
   `inputSchema`. Buttons: *Call* (executes the tool) and *Copy as cURL* (copies
   a `curl -X POST http://localhost:9999/mcp ...` snippet to the clipboard).
 - **Status bar** (footer) — pid, transport, repo / workspace counts, and the
-  last-sync timestamp. Polled every 2 s via `get_server_status`.
+  last-sync timestamp. Polled every 2 s via `get_server_status`. Rendered in
+  reverse video, like a terminal status line.
+- **Theme toggle** (topbar, right) — flips between *phosphor* (dark) and
+  *paper* (light). See [Theme](#theme).
+
+## Theme
+
+The palette is an 80s console look ported from the pre-SPA UI
+(`src/mcp/front_end_monitor.html`, dropped in 49f5f82). Both themes are
+monospace throughout, square-cornered, with hairline borders and letterspaced
+uppercase panel labels.
+
+| | Surface | Ink |
+|---|---|---|
+| **phosphor** (dark) | near-black `#05080f` | cyan `#00e5cc` |
+| **paper** (light) | warm paper `#e6e1d3` | teal ink `#14322e` |
+
+Dark is the default — it is lain's identity — and light applies when the
+system asks for it. Three states, in precedence order:
+
+1. an explicit `[data-theme]` on `<html>`, set by the topbar toggle and
+   persisted to `localStorage` under `lain-theme`
+2. otherwise `prefers-color-scheme: light` → paper
+3. otherwise → phosphor
+
+Two knobs carry the CRT treatment, both neutralised in the light theme:
+`--glow` (phosphor bloom on accent text) and `--scanlines` (the overlay
+opacity behind `.crt-scanlines`). The blinking block cursor after the wordmark
+respects `prefers-reduced-motion`.
+
+Every colour lives in `theme.css` as a custom property; no other stylesheet
+hardcodes one, so both themes come from a single rule set and only the token
+values swap. The standalone `/ui/*` detail views load the same `theme.css` and
+read the same `localStorage` key, so a choice made in the Command Center
+carries over to them. `command_center_assets_tests.rs` fails the build if a
+consumer hardcodes a colour or if the two light-theme declaration blocks
+drift apart.
 
 ## Wire format
 
@@ -82,7 +118,12 @@ Scalar fields render as `<input type="text">` (default), `number`, or
 src/server/mcp/command_center/
 ├── index.html      # SPA shell (topbar, sidebar, tabs, status bar)
 ├── app.js          # Vanilla JS — MCP helpers + every render fn
-├── styles.css      # Light theme, flexbox layout
+├── theme.css       # 80s console palette (phosphor + paper), shared
+├── styles.css      # Layout and components; reads tokens from theme.css
 └── assets/
     └── d3.v7.min.js  # Vendored D3 v7 (for the future Graph tab)
 ```
+
+`theme.css` is also served to the standalone detail views under `src/ui/`
+(`blast-radius.html`, `call-chain.html`, `coupling.html`), which is why it is a
+separate file rather than a block at the top of `styles.css`.

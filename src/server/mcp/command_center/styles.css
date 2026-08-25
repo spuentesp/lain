@@ -1,20 +1,9 @@
-/* LAIN Command Center — light theme, basic layout */
-
-:root {
-  --bg: #ffffff;
-  --bg-alt: #f5f7fa;
-  --bg-sidebar: #fafbfc;
-  --fg: #1f2328;
-  --fg-muted: #57606a;
-  --accent: #0969da;
-  --accent-fg: #ffffff;
-  --border: #d0d7de;
-  --tab-active-bg: #ffffff;
-  --tab-inactive-bg: #eaeef2;
-  --statusbar-bg: #24292f;
-  --statusbar-fg: #f0f6fc;
-  --topbar-bg: #f6f8fa;
-}
+/* LAIN Command Center — layout and components.
+ *
+ * The 80s-console palette lives in `theme.css`, which index.html loads first.
+ * Every colour below reads a token from there; nothing here is hardcoded, so
+ * the light and dark themes come from this one rule set.
+ */
 
 * { box-sizing: border-box; }
 
@@ -22,9 +11,9 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
-               sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
-  font-size: 14px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--fg);
   background: var(--bg);
 }
@@ -34,25 +23,80 @@ body {
   flex-direction: column;
 }
 
+/* Square corners everywhere. 80s UIs had no rounded rectangles. */
+button, input, select, table, pre, code, li, .severity, .conflict-card {
+  border-radius: 0;
+}
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── Topbar ────────────────────────────────────────────────────────────── */
+
 .topbar {
   display: flex;
   align-items: baseline;
   gap: 1rem;
   padding: 0.5rem 1rem;
-  background: var(--topbar-bg);
-  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border-strong);
 }
 
 .topbar h1 {
   margin: 0;
-  font-size: 1.15rem;
-  letter-spacing: 0.05em;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  color: var(--accent);
+  text-shadow: var(--glow);
+}
+
+/* Blinking block cursor after the wordmark. */
+.topbar h1::after {
+  content: "\2588";
+  margin-left: 0.15em;
+  animation: cursor-blink 1.1s steps(1) infinite;
+}
+
+@keyframes cursor-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topbar h1::after { animation: none; }
 }
 
 .topbar span {
   color: var(--fg-muted);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
 }
+
+/* Theme toggle — reverse-video square button, far right. */
+.theme-toggle {
+  margin-left: auto;
+  align-self: center;
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.6rem;
+  font-family: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.theme-toggle:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+/* ── Layout ────────────────────────────────────────────────────────────── */
 
 .layout {
   flex: 1;
@@ -61,23 +105,29 @@ body {
 }
 
 .sidebar {
-  width: 220px;
+  width: 236px;
   flex-shrink: 0;
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
+  background: var(--surface);
+  border-right: 1px solid var(--border-strong);
   padding: 0.75rem;
   overflow-y: auto;
 }
 
 .sidebar section { margin-bottom: 1.25rem; }
 
+/* Bracketed, letterspaced section headers — console panel labels. */
 .sidebar h2 {
-  margin: 0 0 0.4rem 0;
-  font-size: 0.75rem;
+  margin: 0 0 0.45rem 0;
+  font-size: 0.68rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.16em;
   color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.25rem;
 }
+
+.sidebar h2::before { content: "\2022 "; color: var(--accent); }
 
 .sidebar ul {
   list-style: none;
@@ -87,7 +137,6 @@ body {
 
 .sidebar li {
   padding: 0.25rem 0.4rem;
-  border-radius: 4px;
   cursor: default;
 }
 
@@ -103,25 +152,40 @@ main {
   min-width: 0;
 }
 
+/* ── Tabs ──────────────────────────────────────────────────────────────── */
+
 .tabs {
   display: flex;
-  gap: 0.25rem;
-  padding: 0.5rem 0.75rem;
-  background: var(--bg-alt);
-  border-bottom: 1px solid var(--border);
+  gap: 0;
+  padding: 0.5rem 0.75rem 0;
+  background: var(--surface-alt);
+  border-bottom: 1px solid var(--border-strong);
 }
 
 .tabs button {
-  background: var(--tab-inactive-bg);
+  background: transparent;
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.3rem 0.8rem;
-  font-size: 0.85rem;
+  border-bottom: none;
+  margin-right: -1px;
+  padding: 0.35rem 1rem;
+  font-family: inherit;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
   cursor: pointer;
-  color: var(--fg);
+  color: var(--fg-muted);
 }
 
-.tabs button:hover { background: var(--tab-active-bg); }
+.tabs button:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+.tabs button.active {
+  background: var(--bg);
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
 
 .tab {
   flex: 1;
@@ -132,13 +196,17 @@ main {
 
 .tab:not(:first-of-type) { display: none; }
 
+/* ── Status bar — reverse video, like a terminal status line ───────────── */
+
 .statusbar {
   display: flex;
-  gap: 1.25rem;
-  padding: 0.35rem 1rem;
-  background: var(--statusbar-bg);
-  color: var(--statusbar-fg);
-  font-size: 0.8rem;
+  gap: 1.5rem;
+  padding: 0.3rem 1rem;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 /* ── Sidebar: recent projects switcher ─────────────────────────────────── */
@@ -150,23 +218,32 @@ main {
   gap: 0.2rem;
   padding: 0.4rem;
   border: 1px solid var(--border);
-  border-radius: 4px;
   margin-bottom: 0.4rem;
   cursor: default;
 }
 
 .sidebar li.recent-project code {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   word-break: break-all;
+  color: var(--fg-muted);
 }
 
 .sidebar li.recent-project button {
-  font-size: 0.75rem;
-  padding: 0.15rem 0.4rem;
+  font-size: 0.68rem;
+  padding: 0.15rem 0.5rem;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  background: var(--bg);
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
   cursor: pointer;
+}
+
+.sidebar li.recent-project button:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
 }
 
 .sidebar li.muted,
@@ -174,29 +251,40 @@ main {
   cursor: default;
   color: var(--fg-muted);
 }
-.sidebar li.error { color: #cf222e; }
+.sidebar li.error { color: var(--err); }
 
 /* ── Tab content shared elements ───────────────────────────────────────── */
 
 .muted { color: var(--fg-muted); }
-.error { color: #cf222e; }
+.error { color: var(--err); }
+
+h3 {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+a { color: var(--accent); }
 
 pre.output {
-  background: var(--bg-alt);
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-left: 2px solid var(--accent);
   padding: 0.75rem;
   margin: 0.75rem 0;
   overflow: auto;
-  font-size: 0.8rem;
+  font-family: inherit;
+  font-size: 0.78rem;
   max-height: 60vh;
   white-space: pre-wrap;
+  color: var(--fg);
 }
 
 table.repo-table {
   border-collapse: collapse;
   width: 100%;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
 }
 table.repo-table th,
 table.repo-table td {
@@ -205,8 +293,12 @@ table.repo-table td {
   text-align: left;
 }
 table.repo-table th {
-  background: var(--bg-alt);
-  font-weight: 600;
+  background: var(--surface-alt);
+  color: var(--fg-muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.7rem;
 }
 
 /* ── Query tab ─────────────────────────────────────────────────────────── */
@@ -222,29 +314,43 @@ table.repo-table th {
 .query-form label {
   display: flex;
   flex-direction: column;
-  font-size: 0.75rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
   color: var(--fg-muted);
-  gap: 0.2rem;
+  gap: 0.25rem;
 }
 
 .query-form input,
 .query-form select {
-  padding: 0.3rem 0.5rem;
+  padding: 0.35rem 0.5rem;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  font-size: 0.85rem;
+  background: var(--surface);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.8rem;
   min-width: 8rem;
 }
 
+.query-form input:focus,
+.query-form select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
 .query-form button {
-  padding: 0.4rem 1rem;
+  padding: 0.4rem 1.1rem;
   background: var(--accent);
   color: var(--accent-fg);
-  border: none;
-  border-radius: 3px;
+  border: 1px solid var(--accent);
   cursor: pointer;
-  font-size: 0.85rem;
+  font-family: inherit;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
 }
+
+.query-form button:hover { filter: brightness(1.15); }
 
 /* ── Tools tab ─────────────────────────────────────────────────────────── */
 
@@ -270,13 +376,14 @@ table.repo-table th {
   display: flex;
   flex-direction: column;
   padding: 0.3rem 0.4rem;
-  border-radius: 3px;
   cursor: default;
   margin-bottom: 0.2rem;
+  border-left: 2px solid transparent;
 }
 
 .tools-list li.active {
-  background: var(--bg-alt);
+  background: var(--surface);
+  border-left-color: var(--accent);
 }
 
 .tools-list li button {
@@ -284,14 +391,15 @@ table.repo-table th {
   background: none;
   border: none;
   padding: 0;
-  font-size: 0.85rem;
-  font-weight: 600;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
   color: var(--accent);
   cursor: pointer;
 }
 
 .tools-list li span {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   color: var(--fg-muted);
   margin-top: 0.1rem;
 }
@@ -303,7 +411,7 @@ table.repo-table th {
 
 .tool-form h3 {
   margin: 0 0 0.25rem 0;
-  font-size: 1rem;
+  font-size: 0.9rem;
 }
 
 .tool-form form {
@@ -316,17 +424,27 @@ table.repo-table th {
 .tool-form form label {
   display: flex;
   flex-direction: column;
-  font-size: 0.75rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
   color: var(--fg-muted);
-  gap: 0.15rem;
+  gap: 0.2rem;
 }
 
 .tool-form form input,
 .tool-form form select {
-  padding: 0.3rem 0.5rem;
+  padding: 0.35rem 0.5rem;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  font-size: 0.85rem;
+  background: var(--surface);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.8rem;
+}
+
+.tool-form form input:focus,
+.tool-form form select:focus {
+  border-color: var(--accent);
+  outline: none;
 }
 
 .tool-buttons {
@@ -338,10 +456,18 @@ table.repo-table th {
 .tool-buttons button {
   padding: 0.35rem 0.9rem;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  background: var(--bg-alt);
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.tool-buttons button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .tool-buttons button:first-child {
@@ -349,6 +475,8 @@ table.repo-table th {
   color: var(--accent-fg);
   border-color: var(--accent);
 }
+
+.tool-buttons button:first-child:hover { filter: brightness(1.15); }
 
 /* ── Sidebar: agents online + rooms (Task 9) ─────────────────────────── */
 
@@ -362,21 +490,67 @@ table.repo-table th {
 
 .agent-row .kind,
 .agent-row .mode {
-  font-size: 0.75em;
-  color: #888;
+  font-size: 0.72em;
+  color: var(--fg-muted);
 }
 
 .agent-row .claims {
-  font-size: 0.75em;
-  color: #666;
+  font-size: 0.72em;
+  color: var(--fg-muted);
   margin-left: auto;
 }
 
+.only-my-session {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+}
+
+.only-my-session .toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--fg);
+}
+
+.only-my-session .agent-id-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+}
+
+.only-my-session input[type="text"] {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-family: inherit;
+  background: var(--surface);
+  color: var(--fg);
+}
+
+.only-my-session input[type="text"]:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Square, accent-coloured checkbox to match the console furniture. */
+.only-my-session input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
 .rooms-panel code {
-  background: #f4f4f4;
+  background: var(--surface-alt);
+  color: var(--fg);
   padding: 0.1em 0.3em;
-  border-radius: 3px;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   word-break: break-all;
 }
 
@@ -387,5 +561,105 @@ table.repo-table th {
   padding: 0.3rem 0.4rem;
   margin-bottom: 0.25rem;
   border: 1px solid var(--border);
-  border-radius: 4px;
+}
+
+.conflict-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.4rem;
+  align-items: center;
+  margin-bottom: 0.25rem;
+  border: 1px solid var(--border);
+}
+
+.conflict-card code {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+  color: var(--fg-muted);
+}
+
+/* Severity chips — square and bracketed, not pills. */
+.severity {
+  padding: 0.05rem 0.4rem;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+
+.severity-none { background: var(--sev-none-bg); color: var(--sev-none-fg); }
+.severity-low { background: var(--sev-low-bg); color: var(--sev-low-fg); }
+.severity-medium { background: var(--sev-med-bg); color: var(--sev-med-fg); }
+.severity-high { background: var(--sev-high-bg); color: var(--sev-high-fg); }
+
+/* PR 3 / Task 3.3 — burst-collapsed cards. The header row uses a denser
+   grid to fit severity + agent + path + count + window + toggle. The
+   inner expanded list nests one row per event. */
+.conflict-card.burst {
+  grid-template-columns: auto auto 1fr auto;
+  background: var(--surface-alt);
+}
+
+.conflict-card.burst.expanded {
+  background: var(--surface);
+}
+
+.burst-count {
+  background: var(--sev-low-bg);
+  color: var(--sev-low-fg);
+  border: 1px solid currentColor;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.burst-window {
+  font-size: 0.68rem;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.burst-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 0.05rem 0.45rem;
+  font-family: inherit;
+  font-size: 0.68rem;
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.burst-toggle:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+.burst-items {
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0 0;
+  border-top: 1px dashed var(--border);
+}
+
+.burst-item {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 0.2rem 0.4rem;
+  align-items: center;
+  padding: 0.15rem 0;
+  font-size: 0.8rem;
+}
+
+.burst-item code {
+  overflow-wrap: anywhere;
+}
+
+.burst-item-ts {
+  font-size: 0.68rem;
+  color: var(--fg-muted);
+  white-space: nowrap;
 }

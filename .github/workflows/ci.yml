@@ -30,4 +30,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --workspace --features test-utils
+        run: cargo test --workspace

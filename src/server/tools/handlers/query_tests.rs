@@ -59,7 +59,7 @@ fn test_query_graph_default() {
     let (embedder, cache) = test_embedder_and_cache();
     let (presence, occupancy) = empty_presence();
 
-    let result = query_graph(&graph, &embedder, &cache, &presence, &occupancy, None);
+    let result = query_graph(std::path::Path::new(""), &graph, &embedder, &cache, &presence, &occupancy, None);
     assert!(result.is_ok());
     let text = result.unwrap();
     // Should be valid JSON
@@ -86,7 +86,7 @@ fn test_query_graph_with_query_arg() {
         }),
     );
 
-    let result = query_graph(&graph, &embedder, &cache, &presence, &occupancy, Some(&args));
+    let result = query_graph(std::path::Path::new(""), &graph, &embedder, &cache, &presence, &occupancy, Some(&args));
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
@@ -106,7 +106,7 @@ fn test_query_graph_with_empty_ops() {
         }),
     );
 
-    let result = query_graph(&graph, &embedder, &cache, &presence, &occupancy, Some(&args));
+    let result = query_graph(std::path::Path::new(""), &graph, &embedder, &cache, &presence, &occupancy, Some(&args));
     assert!(result.is_ok());
 }
 
@@ -141,7 +141,7 @@ fn test_query_graph_schema_matches_docs() {
             ]
         }),
     );
-    let result = query_graph(
+    let result = query_graph(std::path::Path::new(""), 
         &graph,
         &embedder,
         &cache,
@@ -168,7 +168,7 @@ fn test_query_graph_schema_matches_docs() {
             ]
         }),
     );
-    let result = query_graph(
+    let result = query_graph(std::path::Path::new(""), 
         &graph,
         &embedder,
         &cache,

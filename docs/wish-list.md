@@ -1,5 +1,12 @@
 # Lain Multiplayer — Customer Wish List
 
+> **Read this as a historical complaint, not as current behavior.**
+> Sections 1–12 are the original agent-seat report, kept verbatim because
+> the framing is the useful part. Most of what they describe is fixed.
+> The verified current state is at the bottom, under
+> [Status — verified 2026-08-22](#status--verified-2026-08-22); where a
+> section below contradicts it, the bottom section is right.
+
 Written from the seat of a coding agent (Claude Code) that shares a repo with
 other agent consoles. Based on hands-on use of the `consolidation` worktree's
 multiplayer layer (`docs/multiplayer.md`, `docs/hooks.md`) plus one direct
@@ -55,7 +62,7 @@ seconds and shouldn't have to go through `register_agent` → `heartbeat` →
 
 ## 5. Advisory conflicts should say *what*, not just *that*
 
-Per `docs/multiplayer-e2e-report.md`, Scenario D's second agent edits "despite
+In the end-to-end run this list came from, a second agent edited "despite
 the conflict warning" — conflicts are advisory, which I think is the right
 default (a hard lock would just cause agents to sit blocked or retry-storm).
 But the warning payload should tell me enough to make a real decision:
@@ -76,9 +83,8 @@ lockout into a one-line diagnostic.
 
 ## 7. Reconcile the two roadmaps
 
-`docs/superpowers/plans/2026-08-14-lain-consolidation.md` (sitting uncommitted
-on `main`) explicitly deletes `hook.rs`, `projects.rs`, and the
-owner/sidecar/lock machinery as "multi-user coordination" out of scope — dated
+The 2026-08-14 consolidation plan explicitly deleted `hook.rs`, `projects.rs`,
+and the owner/sidecar/lock machinery as "multi-user coordination" out of scope — dated
 before the multiplayer work (2026-08-15 through 2026-08-18) that built exactly
 that surface back out, more thoroughly, in this worktree. As a customer I
 don't need both to survive intact, but I do need to know which one is the
@@ -126,14 +132,14 @@ opt-in-by-registration, so an agent that doesn't participate costs nothing.
 ### Status (2026-08-20, after Round 2)
 
 - **#8 per-repo tools must answer** → **partially addressed in `577a444`**. When the federation has exactly one repo, the executor's `ToolContext::graph` is now that repo's indexed `GraphDatabase`, not the empty staging dir. `find_anchors` / `explain_symbol` / `get_blast_radius` / etc. now answer against the real graph for the single-repo case (the typical `lain` user setup). **Multi-repo federation still binds to the placeholder** — per-repo tools with no explicit `repo_id` will return the wrong repo's data or empty. Round-2 follow-up: pass `&FederatedIndex` to per-repo handlers and have them pick the right `RepoIndex::db()` based on `repo_id` (already in args from the round-1 fix).
-- **#9 tools/list filter for inert tools** → open. Quick win on top of #8 round-2.
-- **#10 `doctor` should verify the integration surface** → partially addressed. The on-disk hook check now also tries the install layout (`$bindir/../share/lain/hooks/`) so release binaries report OK, not FAIL (commit `f643f68`). **Open**: `doctor` still doesn't call `tools/list` on a live MCP endpoint. The "all checks passed" on a broken MCP registration remains the most embarrassing single failure — the check covers the wrong surface.
-- **#11 single-workspace mode was removed** → **design decision still owed**. Two reasonable answers: (a) restore a no-args `lain mcp` for the single-repo case (walk up for `.git`, index, serve stdio), or (b) keep federation-only and rewrite the strategy guide / `SKILL.md` / tool list to match what federation can actually do. Current state is the worst of both. The single-repo binding fix in #8 unblocks option (a) only if we also add a `lain mcp` entrypoint; right now there's no MCP-friendly single-repo mode.
-- **#12a `semantic_search` unreachable (NLP model not loaded)** → open. `lain server` has no `--embedding-model` flag, so the model never loads. The ONNX model is on disk and unused.
-- **#12b `query_graph` schema mismatch** → open. Documented `{"ops":[{"find":"Function"},{"limit":3}]}` errors with `missing field 'op'`. Either the docs or the handler is wrong.
-- **#12c `get_cross_repo_blast_radius` traverses outgoing, not incoming** → open. "Blast radius" to an agent means *incoming* callers ("if I change X, what breaks?"). Outgoing edges answer "what does X depend on", which is `trace_dependency`. Either flip it or rename.
+- **#9 tools/list filter for inert tools** → CLOSED 2026-08-23. `semantic_search` is not advertised when no NLP model is loaded (63 tools instead of 64); it returns as soon as one is. Only fully-inert tools are filtered — see the section at the end.
+- **#10 `doctor` should verify the integration surface** → partially addressed. The on-disk hook check now also tries the install layout (`$bindir/../share/lain/hooks/`) so release binaries report OK, not FAIL (commit `f643f68`). **CLOSED 2026-08-22**: `doctor` now calls `tools/list` on the live MCP endpoint and fails on an empty surface. Previously open: The "all checks passed" on a broken MCP registration remains the most embarrassing single failure — the check covers the wrong surface.
+- **#11 single-workspace mode was removed** → **CLOSED**: option (a) was taken — `lain mcp` exists. Original note: Two reasonable answers: (a) restore a no-args `lain mcp` for the single-repo case (walk up for `.git`, index, serve stdio), or (b) keep federation-only and rewrite the strategy guide / `SKILL.md` / tool list to match what federation can actually do. Current state is the worst of both. The single-repo binding fix in #8 unblocks option (a) only if we also add a `lain mcp` entrypoint; right now there's no MCP-friendly single-repo mode.
+- **#12a `semantic_search` unreachable (NLP model not loaded)** → CLOSED (see bottom).~~open.~~ `lain server` has no `--embedding-model` flag, so the model never loads. The ONNX model is on disk and unused.
+- **#12b `query_graph` schema mismatch** → NOT A DEFECT (see bottom).~~open.~~ Documented `{"ops":[{"find":"Function"},{"limit":3}]}` errors with `missing field 'op'`. Either the docs or the handler is wrong.
+- **#12c `get_cross_repo_blast_radius` traverses outgoing, not incoming** → CLOSED; the traversal was already incoming, the *descriptions* were wrong (see bottom).~~open.~~ "Blast radius" to an agent means *incoming* callers ("if I change X, what breaks?"). Outgoing edges answer "what does X depend on", which is `trace_dependency`. Either flip it or rename.
 - **#12d running the tool can break its own test suite** → **addressed in `6d71a75`**. `find_workspace_root` no longer honors `.lain/` as a workspace anchor; only `.git`. The `/tmp/.lain` CI-red problem is gone.
-- **#12e session files accumulate one per PPID** → open. `~/.config/lain/hooks/` grows unbounded. `doctor` counts them; nothing reaps them. Worth a TTL-based cleanup or at least an "old sessions" warning.
+- **#12e session files accumulate one per PPID** → CLOSED, `doctor` reaps >30d (see bottom).~~open.~~ `~/.config/lain/hooks/` grows unbounded. `doctor` counts them; nothing reaps them. Worth a TTL-based cleanup or at least an "old sessions" warning.
 
 ---
 
@@ -258,13 +264,169 @@ is the worst of both.
 
 ## What a customer actually uses today
 
-Working and genuinely useful: `search_org` (better than grep — it
-distinguishes a `Function` from a similarly-named test), `list_repos`,
-and the entire multiplayer surface (`claim_files`, `list_occupancy`,
-`who_am_i`, `list_subagents`). That layer is solid.
+*(Historical — this paragraph described the state on 2026-08-19 and is
+no longer true. Superseded by the status section below.)*
 
-Not usable: everything structural — blast radius, anchors, dependency
-traces, semantic search. Which is the frustrating part, because that is
-precisely the work lain exists to replace, and the graph is right there:
-3007 nodes, 12641 edges, `health: ready`. It simply isn't wired to the
-tools that would read it.
+The original text read: "Not usable: everything structural — blast
+radius, anchors, dependency traces, semantic search." Every one of those
+answers today; see below.
+
+## Status — verified 2026-08-22
+
+Each line re-probed against a live server (`lain server`, HTTP transport,
+real ONNX model loaded, this repo indexed) rather than read off the code.
+
+**Closed:**
+
+- **#1–#7** — closed earlier (PR 12 / PR 18); see the 2026-08-20 section.
+- **#8 per-repo tools must answer** → closed, both halves. Single-repo
+  (the setup `lain init` scaffolds) was bound first; multi-repo is bound
+  per call as of 2026-08-23 — see the section at the end.
+  `find_dead_code`, `get_blast_radius`, `find_anchors`, `explain_symbol`,
+  `semantic_search`, `get_call_sites` and `query_graph` all answer
+  against the right repo's graph.
+- **#10 `doctor` should verify the integration surface** → closed.
+  `doctor` now calls `tools/list` on the live MCP endpoint when
+  `LAIN_URL`/`LAIN_SERVER_URL` is set and reports the advertised tool
+  count, failing hard on an error envelope or an empty surface.
+  Verified against a stub that answers `/health` 200 with zero tools:
+  `[FAIL] MCP surface empty: tools/list advertises 0 tools`, exit 1.
+  The "all checks passed on a broken registration" failure is caught.
+- **#11 single-workspace mode was removed** → closed. `lain mcp` walks
+  up for `.git` and serves the per-repo surface on stdio, so the MCP
+  config is `{"command":"lain","args":["mcp"]}`. `lain init` scaffolds
+  `repos.yaml` for the server path.
+- **#12a `semantic_search` unreachable** → closed. `lain server
+  --embedding-model PATH` loads the ONNX bi-encoder; the tool returns
+  ranked results. Unset, it says `NLP Model: Not loaded` rather than
+  failing silently.
+- **#12b `query_graph` schema mismatch** → **not a defect.** The report
+  quoted `{"ops":[{"find":"Function"}]}`, a shorthand the docs never
+  specified. Every example in `docs/query-language.md` and
+  `docs/quickstart-query.md` uses the tagged form
+  (`{"op":"find","type":"Function","name":"handle"}`) and all five were
+  re-run successfully. No code or doc change was needed.
+- **#12c `get_cross_repo_blast_radius` direction** → closed, and the
+  reverse of what was reported: the *traversal* was already fixed to
+  incoming `Calls` (callers). What was still wrong was the **tool
+  description and `docs/FEDERATION.md`, which both still said
+  "outgoing"** — while FEDERATION.md's own example listed `caller_*`
+  nodes. Both now say incoming.
+- **#12d test suite self-break** → closed (`6d71a75`).
+- **#12e session files accumulate** → closed. `doctor` reaps session
+  JSON older than 30 days via `prune_old_sessions` and reports the count.
+
+**Closed 2026-08-23 — #9, `tools/list` filter for inert tools:**
+
+`tools/list` advertised the full surface regardless of mode, so a caller
+learned by trial which tools answer. A tool guaranteed to fail is worse
+than one not offered: the agent spends a round trip and then has to
+decide whether to trust the next thing lain says.
+
+`semantic_search` returns `Unavailable` on every call without an NLP
+model, so it is dropped from `tools/list` when the model is absent — 63
+tools rather than 64 — and returns the moment one is loaded. Only
+*fully* inert tools are filtered. `find_dead_code` stays advertised:
+without the model it refuses the `like` argument and answers normally
+otherwise, so hiding it would remove a working tool. A test pins both
+directions, because a filter that hides working tools is worse than the
+problem it solves.
+
+**Open: nothing.**
+
+**Closed 2026-08-23 — multi-repo binding (#8, second half):**
+
+Per-repo tools now bind to whichever repo the call resolves to.
+`ToolContext` carries the federation and grows a `for_repo(repo_id)`
+that returns a context with `graph` and `workspace` swapped for that
+repo's; `ToolRegistry::dispatch` applies it using the `repo_id` the MCP
+dispatcher already resolved and injected. That id had been injected and
+then ignored — the code comment said so out loud — which is why every
+per-repo tool in a multi-repo federation read the empty staging
+placeholder.
+
+Verified on a real two-repo federation (`alpha`, `beta`, both `ready`):
+
+- `explain_symbol alpha_only_helper` and `explain_symbol
+  beta_only_helper` each resolve in their own repo.
+- `get_blast_radius beta_inner` reports `beta_only_helper` as its
+  direct dependent.
+- `find_anchors {"repo_id":"alpha"}` lists only alpha's symbols, and
+  the same for beta — no cross-repo leakage.
+- `get_code_snippet` reads `/tmp/multirepo/alpha/src/lib.rs` vs
+  `/tmp/multirepo/beta/src/lib.rs` for the same relative path.
+
+That last one was a second bug the first fix exposed: `get_code_snippet`
+passed its path straight to `std::fs`, which resolves a relative path
+against the *process* working directory. `src/lib.rs` exists in every
+repo, so it returned a same-named file from wherever the server was
+launched — lain's own checkout — with no error. Paths now resolve
+against the bound repo's workspace.
+
+## Live three-agent sweep — 2026-08-23
+
+Three agents (alpha, beta, gamma) driven against one server, verifying
+the server's claims against the repo with `grep` rather than trusting
+them. Confirmed working: path canonicalization across spellings,
+`conflicts` vs `advisories` as separate arrays, holder `name`/`intent`
+on both, node ids round-tripping between `query_graph`,
+`explain_symbol` and `get_blast_radius`, and the blast-radius
+direct/indirect split (checked caller by caller — complete, nothing
+invented).
+
+Found and fixed:
+
+- **`find_dead_code` reported 9 symbols, 7 of them false.** All seven
+  were called from *another file*; the reference check only looked
+  inside the symbol's own file. One of them, `edge_counts_by_type`,
+  generates a section of `get_health`'s own output — the server used
+  the function to answer the agent and then said nothing calls it. The
+  check is now workspace-wide, and the list is back to the 2 the agent
+  independently confirmed as genuinely unreferenced.
+- **`get_call_sites` reported enclosing functions as call sites.**
+  `build_core_memory at ...:19-360` is a 341-line definition range, and
+  a function calling the target twice counted once. It now reports the
+  real lines (`sweep_orphans` → 3 calls at 55, 520, 681, matching grep).
+- **`release_files` rejected `["src/a.rs"]`** with `expected struct
+  ReleaseFilesEntry` — an internal Rust type name, for input that was
+  never ambiguous. Both spellings are accepted now.
+- **`register_agent` never declared `kind` or `mode`**, which it accepts
+  and reports to peers via `list_active_agents`. A schema-following
+  agent silently lost its own identity metadata.
+- **`_meta.revision` read 0 across eight state-changing presence calls.**
+  Correct — it counts overlay diffs, not claims — but undocumented, and
+  `docs/multiplayer.md` additionally placed it at the top level rather
+  than under `_meta`. Both corrected there.
+
+### Name collisions — closed 2026-08-23
+
+Reported above as a documented limitation; fixed rather than left
+documented. Two separate defects were hiding behind one symptom.
+
+**Edges were manufactured.** `resolve_static_edges` looked a reference
+name up in an index and emitted an edge to *every* definition sharing
+it. With eleven `fn parse` in this repo, each `.parse()` in the tree —
+clap's `Args::parse()`, stdlib `str::parse` — produced eleven edges.
+`get_call_sites parse` answered with 61 callers and returned the *same*
+list for all eleven nodes. A name several definitions share is not
+resolvable by name alone, so resolution now prefers a definition in the
+calling file and otherwise emits nothing: a missing edge is a gap, N
+wrong edges are a lie, and the lie also inflated `find_anchors` and
+`get_blast_radius`. `parse` now reports 1 caller; `sweep_orphans`, whose
+name is unique, still reports its 3 real call sites.
+
+The knock-on effect is visible in `find_anchors`, which used to rank
+`as_str`, `parse`, `default`, `next`, `drop` — one-line accessors riding
+fabricated in-edges. It now ranks `required_str_arg`, `resolve_node`,
+`calculate_anchor_scores`, `insert_nodes_batch`: actual hubs, which is
+what the scoring was designed to surface all along.
+
+**Ambiguity was silent.** `find_node_by_name` returned
+`node_weights().find(...)` — petgraph iteration order, so the choice was
+both arbitrary and unstable across reindexes. It is now sorted by (path,
+id), and `explain_symbol`, `get_anchor_score`, `get_call_sites` and
+`get_blast_radius` open with a `⚠` line naming how many definitions
+share the name, which one they answered about, and the ids of the rest.
+Nobody is refused an answer over it — erroring would break every call
+that is perfectly clear — but nobody is silently handed the wrong node
+either.

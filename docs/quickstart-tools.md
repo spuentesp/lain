@@ -78,6 +78,31 @@ Everything affected by changing a symbol (transitive).
 { "name": "get_blast_radius", "arguments": { "symbol": "my_function" } }
 ```
 
+The report separates **direct dependents** (they call or use the symbol
+themselves) from **indirect** ones (they only reach it through those
+callers, each tagged `[depth N]`):
+
+```
+Blast radius for 'canonical_claim_path':
+- Direct dependents (3):
+  - claim_in_memory (Method) in src/server/presence.rs
+  - release (Method) in src/server/presence.rs
+  - list_all (Method) in src/server/presence.rs
+- Indirect dependents (431), reaching it only through the callers above; deepest chain 7 levels:
+  - run_list_occupancy (Function) in src/server/mcp/presence_tools.rs [depth 2]
+  - explain_symbol (Function) in src/server/tools/handlers/metrics.rs [depth 2]
+  …18 more names…
+  ... and 411 more indirect, by depth:
+  - depth 2: 18
+  - depth 3: 96
+- Total transitively affected nodes: 434
+```
+
+Read the total as reach, not as work. Transitive closure through a
+central dispatcher is large and still correct — a three-caller helper
+legitimately reports hundreds. The three lines you act on are the direct
+ones; that is why they are listed first and separately.
+
 ### get_call_chain
 Shortest path between two functions.
 ```json
@@ -101,7 +126,7 @@ Files that co-change with this one.
 ### semantic_search
 Find code by meaning, not just names. Uses local ONNX embeddings with hybrid scoring (cosine similarity + stemmed token-overlap) and shows body excerpts in the response.
 
-Best results with the **BGE** model family (`bge-small-en-v1.5` recommended); set `query_prefix` in `.lain/tuning.toml` for asymmetric retrieval.
+Best results with the **BGE** model family (`bge-small-en-v1.5` recommended); set `query_prefix` in `.lain/tuning.toml` for asymmetric retrieval — it is applied to queries only, never to the indexed corpus, and covers every tool that embeds a query (`semantic_search`, `find_dead_code --like`, and `semantic_filter` in `query_graph`).
 
 ```json
 { "name": "semantic_search", "arguments": { "query": "error handling", "limit": 5 } }
@@ -272,3 +297,65 @@ Run cargo clippy.
 ```json
 { "name": "run_clippy", "arguments": { "cwd": "/path/to/project", "fix": false } }
 ```
+
+---
+
+## Multiplayer
+
+Coordination tools, for when more than one agent shares the repo. Full
+contract in [`multiplayer.md`](multiplayer.md).
+
+### register_agent
+Once at startup. Returns `agent_id`, `session_token`, `expires_at_unix`.
+```json
+{ "name": "register_agent", "arguments": { "name": "claude", "kind": "claude-code" } }
+```
+No heartbeat loop is needed — any authenticated call refreshes the
+session.
+
+### claim_files
+Before editing. Returns `granted`, `conflicts` (refused — someone else
+holds it) and `advisories` (granted, but someone is editing it anyway).
+```json
+{ "name": "claim_files", "arguments": {
+    "agent_id": "…", "session_token": "…",
+    "files": [{ "path": "src/auth.rs", "symbols": ["login"], "intent": "edit" }] } }
+```
+Paths are canonicalized, so `src/auth.rs`, `./src/auth.rs` and the
+absolute form are one claim.
+
+### release_files / my_claims / list_occupancy / who_am_i
+```json
+{ "name": "list_occupancy", "arguments": {} }
+```
+
+---
+
+## Reading the answers
+
+A few tools are easy to over-trust. What they actually mean:
+
+| Tool | Reports | Does **not** mean |
+|------|---------|-------------------|
+| `find_dead_code` | No incoming `Calls` edges **and** no textual reference anywhere in the workspace | "Safe to delete." It excludes tests, unindexed files, and any symbol whose name appears elsewhere in the tree — and reports each exclusion count. The textual sweep exists because `Calls` edges depend on how far indexing got: on a partial index the call graph alone reported 9 dead symbols of which 7 were called from another file. A name reached only through a macro-built identifier is still invisible to both checks. |
+| `get_blast_radius` | Transitive `Calls`/`Uses` dependents, split into direct and indirect | "Everything in these files", and the total is not a work estimate. It deliberately does not follow `Contains`; a file is not a dependent of its own symbols. Reach through a central dispatcher is genuinely large — act on the **direct** list. |
+| `get_call_sites` | The exact lines where the symbol is called, grouped by calling function | "All callers." A call inside a macro argument may not be indexed. Lines come from scanning the caller's body, so a call written differently than the symbol's name (via an alias or a trait object) is not located. |
+| `find_anchors` | Orchestration hubs — called by many, calling many, with a real body. Each row names the node's type and path | "Most important." A leaf that calls nothing scores 0 by design. Results are deduped by name keeping the best-scoring definition, so read the path to see which one it means. |
+| `explain_symbol` / `get_anchor_score` / `get_call_sites` / `get_blast_radius` by **name** | One node that has that name, chosen deterministically (by path), with a `⚠` line naming the other definitions and their ids when the name is not unique | "The only node with that name." The warning tells you the answer is about one of several; pass a node **id** (from `query_graph`, or from the warning itself) to pick a different one. Ids round-trip between all these tools. |
+| `get_coupling_radar` | Files that change together in git history | A static dependency. It is temporal correlation. |
+| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` or `get_call_sites` for those. Needs `--embedding-model`; without it the tool says `NLP Model: Not loaded` rather than returning a wrong answer. |
+| `get_cross_repo_blast_radius` | Callers across the federation (**incoming** `Calls`) | What the symbol depends on — that is `trace_dependency`. `depth` is a string range (`"1..3"`), not a number. |
+
+When the graph is behind HEAD, `get_health` says so and "not found"
+answers point at it. Treat a `Degraded ⚠` server's silence as "not in
+this graph", never as "does not exist".
+
+A "not found" against a graph with **0 nodes** says so explicitly rather
+than blaming uncommitted code — usually the workspace has not finished
+indexing; check `get_health`.
+
+In federation mode, per-repo tools bind to the repo the call resolves
+to: pass `repo_id`, or a `symbol` that resolves to exactly one repo.
+With a single repo there is nothing to choose and it binds there
+automatically. Relative paths resolve against that repo's checkout, so
+`src/lib.rs` means *that* repo's `src/lib.rs`.

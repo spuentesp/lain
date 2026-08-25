@@ -9,13 +9,19 @@ use crate::schema::EdgeType;
 use crate::error::LainError;
 
 /// Find protocol-level callers (HTTP routes, gRPC services, etc.) for a symbol
+/// `node_id` accepts a symbol *name* as well as a raw graph id.
+///
+/// The tool is documented as taking "a symbol", and every other tool on
+/// this surface resolves names — but this one looked up the id directly,
+/// so passing the documented thing returned `Node <name> not found`.
+/// `resolve_node` handles id, name, and path alike.
 pub fn get_cross_runtime_callers(
     graph: &GraphDatabase,
-    _overlay: &VolatileOverlay,
+    overlay: &VolatileOverlay,
     node_id: &str,
 ) -> Result<String, LainError> {
-    let node = graph.get_node(node_id)?
-        .ok_or_else(|| LainError::NotFound(format!("Node {} not found", node_id)))?;
+    let node = crate::server::tools::utils::resolve_node(graph, overlay, node_id)?;
+    let node_id = node.id.as_str();
 
     let mut output = format!("## Cross-Runtime Callers for: {}\n\n", node.name);
 

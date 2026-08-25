@@ -9,11 +9,35 @@ use crate::error::LainError;
 use crate::server::tools::handlers;
 use crate::server::tools::registry::{ToolCapability, ToolContext, ToolHandler, ToolHandlerEntry};
 use crate::server::tools::utils::{
-    bool_arg, opt_str_arg, required_str_arg, str_arg, u32_arg, usize_arg,
+    bool_arg, opt_str_arg, required_str_arg, u32_arg, usize_arg,
 };
 use async_trait::async_trait;
 use inventory;
 use serde_json::{Map, Value};
+
+/// Build the `(sessions, port)` pair the UI-session handlers need to
+/// emit an interactive `/ui/...` link. Returns `None` when no HTTP
+/// transport is serving (stdio mode, `diagnostics_port == 0`) —
+/// emitting a link there produces a dead URL.
+fn ui_link(
+    ctx: &ToolContext,
+) -> Option<(
+    &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, crate::server::tools::UiSession>,
+        >,
+    >,
+    u16,
+)> {
+    let port = ctx
+        .diagnostics_port
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if port == 0 {
+        None
+    } else {
+        Some((&ctx.ui_sessions, port))
+    }
+}
 
 // ─── Handler macros ────────────────────────────────────────────────────────────
 
@@ -190,7 +214,7 @@ impl ToolHandler for GetCallChainHandler {
             &ctx.overlay,
             &from,
             &to,
-            Some(&ctx.ui_sessions),
+            ui_link(ctx),
         )
         .await
     }
@@ -298,13 +322,23 @@ impl ToolHandler for SemanticSearchHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         if ctx.embedder.is_stub() {
+            // Never name a command that does not exist: `lain
+            // install-embeddings` returned `error: unrecognized
+            // subcommand`, so an agent that followed the instruction
+            // got an error and then had to decide whether to trust the
+            // next thing lain told it. These three paths are real.
             return Err(LainError::Unavailable(
-                "Semantic search unavailable: NLP model not loaded. Install embeddings with: lain install-embeddings".to_string(),
+                "Semantic search unavailable: NLP model not loaded. Get one with \
+                 `install.sh --download-model`, point the LAIN_EMBEDDING_MODEL env var \
+                 at a model directory containing model.onnx + tokenizer.json, or place \
+                 one in `.lain/models/`."
+                    .to_string(),
             ));
         }
         let query = required_str_arg(args, "query")?;
         let limit = usize_arg(args, "limit").unwrap_or(10);
         handlers::search::semantic_search(
+            &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             &ctx.embedder,
@@ -347,7 +381,7 @@ impl ToolHandler for GetBlastRadiusHandler {
             &ctx.overlay,
             &symbol,
             include_coupling,
-            Some(&ctx.ui_sessions),
+            ui_link(ctx),
         )
         .await
     }
@@ -379,7 +413,7 @@ impl ToolHandler for GetCouplingRadarHandler {
             &ctx.graph,
             &ctx.overlay,
             &symbol,
-            Some(&ctx.ui_sessions),
+            ui_link(ctx),
         )
         .await
     }
@@ -488,6 +522,7 @@ impl ToolHandler for FindDeadCodeHandler {
     ) -> Result<String, LainError> {
         let like = args.get("like").and_then(|v| v.as_str());
         handlers::metrics::find_dead_code(
+            &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             like,
@@ -519,7 +554,7 @@ impl ToolHandler for ExplainSymbolHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::metrics::explain_symbol(&ctx.graph, &ctx.overlay, &ctx.occupancy, &symbol)
+        handlers::metrics::explain_symbol(&ctx.workspace, &ctx.graph, &ctx.overlay, &ctx.occupancy, &symbol)
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
@@ -573,6 +608,7 @@ impl ToolHandler for QueryGraphHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         handlers::query::query_graph(
+            &ctx.workspace,
             &ctx.graph,
             &ctx.embedder,
             &ctx.embedding_cache,
@@ -680,7 +716,7 @@ impl ToolHandler for SyncStateHandler {
         ctx: &ToolContext,
         _args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::enrichment::sync_state(&ctx.graph, &ctx.git, &ctx.tuning.ingestion)
+        handlers::enrichment::sync_state(&ctx.graph, &ctx.git, &ctx.tuning.ingestion, &ctx.jobs, &ctx.last_outcome)
     }
 }
 inventory::submit!(ToolHandlerEntry(&SyncStateHandler));
@@ -847,7 +883,14 @@ impl ToolHandler for GetCodeSnippetHandler {
         let path = required_str_arg(args, "path")?;
         let line = u32_arg(args, "line");
         let context_lines = usize_arg(args, "context_lines");
-        handlers::context::get_code_snippet(&ctx.graph, &ctx.overlay, &path, line, context_lines)
+        handlers::context::get_code_snippet(
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.workspace,
+            &path,
+            line,
+            context_lines,
+        )
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCodeSnippetHandler));
@@ -873,7 +916,7 @@ impl ToolHandler for GetCallSitesHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::context::get_call_sites(&ctx.graph, &ctx.overlay, &symbol)
+        handlers::context::get_call_sites(&ctx.workspace, &ctx.graph, &ctx.overlay, &symbol)
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCallSitesHandler));

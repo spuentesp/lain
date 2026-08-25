@@ -72,3 +72,35 @@ fn resolve_symbol_multiple_matches_returns_ambiguous() {
     let err = fed.resolve_symbol("shared").unwrap_err();
     assert!(matches!(err, crate::error::LainError::AmbiguousSymbol(_)));
 }
+
+/// A symbol defined more than once inside a *single* repo is not
+/// ambiguous. The fast-path symbol index pushed one entry per
+/// definition, so `resolve_symbol` returned
+/// `AmbiguousSymbol(["lain", "lain"])` — asking the caller to
+/// disambiguate between one repo and itself, through a `repo_id`
+/// parameter the tool schema does not expose.
+#[test]
+fn distinct_repos_collapses_repeated_definitions_in_one_repo() {
+    use crate::federation::federated_index::distinct_repos;
+    let lain = RepoId::new("lain").unwrap();
+    // Three definitions of `parse` in one repo.
+    let entries = vec![lain.clone(), lain.clone(), lain.clone()];
+    assert_eq!(distinct_repos(&entries), vec![lain]);
+}
+
+#[test]
+fn distinct_repos_keeps_genuine_cross_repo_ambiguity() {
+    use crate::federation::federated_index::distinct_repos;
+    let a = RepoId::new("repo-a").unwrap();
+    let b = RepoId::new("repo-b").unwrap();
+    // Same name in two repos really is ambiguous, and order is kept so
+    // the reported candidate list is stable.
+    let entries = vec![a.clone(), b.clone(), a.clone()];
+    assert_eq!(distinct_repos(&entries), vec![a, b]);
+}
+
+#[test]
+fn distinct_repos_on_empty_is_empty() {
+    use crate::federation::federated_index::distinct_repos;
+    assert!(distinct_repos(&[]).is_empty());
+}
