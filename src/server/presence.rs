@@ -1636,7 +1636,7 @@ pub fn load_pair(
             audit_dir.join(crate::server::audit::AUDIT_LOG_FILENAME).display(),
         );
         state.audit_offset_bytes = 0;
-        state.audit_reset_at_unix = Some(system_time_now_unix());
+        state.audit_reset_at_unix = Some(crate::server::time::now_unix_f64());
         // Persist the reset marker immediately so a crash between
         // load and the first save doesn't lose it. The write goes
         // through the same atomic-rename path as `save_pair` so a
@@ -2001,7 +2001,7 @@ mod audit_persistence_tests {
         let reset = parsed
             .audit_reset_at_unix
             .expect("load_pair must set audit_reset_at_unix when audit.jsonl is missing");
-        let now = system_time_now_unix();
+        let now = crate::server::time::now_unix_f64();
         assert!(
             (now - reset).abs() < 5.0,
             "reset timestamp should be recent: reset={reset} now={now}",
@@ -2050,16 +2050,4 @@ mod audit_persistence_tests {
             "load_pair must not stamp a reset when audit.jsonl is present",
         );
     }
-}
-
-/// `SystemTime::now()` as a fractional UNIX-epoch second, matching
-/// the `ts_unix: f64` field on `AuditEvent` and `audit_reset_at_unix`.
-/// Free function (not a method) so unit tests in this module can use
-/// it without standing up a `LainServer` or touching the real clock.
-fn system_time_now_unix() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    dur.as_secs() as f64 + dur.subsec_millis() as f64 / 1_000.0
 }
