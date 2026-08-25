@@ -6,14 +6,7 @@
 use crate::error::LainError;
 use crate::server::LainServer;
 use crate::server::reload::ReloadBus;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Format `t` as seconds-since-UNIX-epoch. Used by `get_server_status`
-/// for `started_at` / `last_sync_at`. Returns 0 for pre-epoch timestamps
-/// rather than panicking, since `SystemTime` subtraction is saturating.
-fn system_time_to_unix(t: SystemTime) -> i64 {
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
+use std::time::SystemTime;
 
 /// Render the per-process server status payload consumed by the
 /// dashboard's status bar.
@@ -62,8 +55,8 @@ pub fn render_server_status(f: ServerStatusFields) -> serde_json::Value {
             (Some("http"), Some(p)) => serde_json::Value::from(p),
             _ => serde_json::Value::Null,
         },
-        "started_at": system_time_to_unix(f.started_at),
-        "last_sync_at": system_time_to_unix(f.last_sync_at),
+        "started_at": crate::server::time::unix_secs(f.started_at),
+        "last_sync_at": crate::server::time::unix_secs(f.last_sync_at),
         "last_error": f.last_error,
         "repo_count": f.repo_count,
         "workspace_count": f.workspace_count,
