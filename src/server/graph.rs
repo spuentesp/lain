@@ -1273,7 +1273,7 @@ impl GraphDatabase {
     pub async fn save_to_disk(&self) -> Result<(), LainError> {
         self.check_writable()?;
         // Clone state under lock (fast)
-        let (data, tmp_path, persistence_path) = {
+        let (data, persistence_path) = {
             let state = GraphState {
                 path_format_version: PATH_FORMAT_VERSION,
                 graph: self.graph.read().clone(),
@@ -1281,19 +1281,14 @@ impl GraphDatabase {
                 last_commit: self.last_commit.read().clone(),
             };
             let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
-            let tmp_path = self.persistence_path.with_extension("tmp");
             let persistence_path = self.persistence_path.clone();
-            (data, tmp_path, persistence_path)
+            (data, persistence_path)
         };
 
-        // Create parent dir and write file (I/O - async)
-        if let Some(parent) = persistence_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| LainError::Database(e.to_string()))?;
-        }
-
-        // Atomic save: write to .tmp and rename
-        tokio::fs::write(&tmp_path, data).await.map_err(|e| LainError::Database(e.to_string()))?;
-        tokio::fs::rename(&tmp_path, &persistence_path).await.map_err(|e| LainError::Database(e.to_string()))?;
+        // Atomic save: write to .tmp and rename via shared helper
+        crate::cli::io::tokio_write_file_atomic(&persistence_path, &data)
+            .await
+            .map_err(|e| LainError::Database(e.to_string()))?;
 
         Ok(())
     }
@@ -1306,12 +1301,8 @@ impl GraphDatabase {
             last_commit: self.last_commit.read().clone(),
         };
         let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
-        if let Some(parent) = self.persistence_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| LainError::Database(e.to_string()))?;
-        }
-        let tmp_path = self.persistence_path.with_extension("tmp");
-        std::fs::write(&tmp_path, data).map_err(|e| LainError::Database(e.to_string()))?;
-        std::fs::rename(&tmp_path, &self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
+        crate::cli::io::write_file_atomic(&self.persistence_path, &data)
+            .map_err(|e| LainError::Database(e.to_string()))?;
         Ok(())
     }
 

@@ -21,6 +21,23 @@ pub fn write_file_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()>
     fs::rename(&tmp, path)
 }
 
+/// Async counterpart to `write_file_atomic` for callers running
+/// inside a Tokio runtime. Currently consumed by
+/// `server::graph::save_to_disk`.
+pub async fn tokio_write_file_atomic(
+    path: &Path,
+    bytes: impl AsRef<[u8]>,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+    let tmp = path.with_extension("tmp");
+    tokio::fs::write(&tmp, bytes).await?;
+    tokio::fs::rename(&tmp, path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,5 +74,22 @@ mod tests {
         write_file_atomic(&path, b"ok").unwrap();
         // The .tmp sibling should be gone (rename moved it).
         assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn tokio_write_file_atomic_writes_and_renames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("graph.bin");
+        tokio_write_file_atomic(&path, b"\x01\x02\x03").await.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"\x01\x02\x03");
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn tokio_write_file_atomic_creates_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("a/b/c/state.bin");
+        tokio_write_file_atomic(&path, b"x").await.unwrap();
+        assert!(path.exists());
     }
 }
