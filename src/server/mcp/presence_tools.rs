@@ -74,8 +74,8 @@ fn run_register_agent_inner(server: &LainServer, a: RegisterAgentArgs) -> Result
     // default — background agents are reaped faster than interactive
     // ones, and an agent that plans around the wrong number loses its
     // claims without warning.
-    let expires_at_unix = system_time_to_unix_secs(session.started_at)
-        + system_time_to_unix_secs_delta(server.presence.expires_after_for(&session.mode));
+    let expires_at_unix = crate::server::time::unix_secs_u64(session.started_at)
+        + server.presence.expires_after_for(&session.mode).as_secs();
     Ok(json!({
         "agent_id": session.id.as_str(),
         "session_token": session.session_token,
@@ -126,8 +126,8 @@ pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value,
             "name": s.name,
             "kind": s.kind.as_str(),
             "mode": s.mode.as_str(),
-            "started_at": system_time_to_unix_secs(s.started_at),
-            "last_heartbeat": system_time_to_unix_secs(s.last_heartbeat),
+            "started_at": crate::server::time::unix_secs_u64(s.started_at),
+            "last_heartbeat": crate::server::time::unix_secs_u64(s.last_heartbeat),
             "claims_count": claims.len(),
         })
     }).collect();
@@ -156,7 +156,7 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
             "symbols": c.symbols,
             "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
         "inferred": c.inferred,
-            "claimed_at": system_time_to_unix_secs(c.claimed_at),
+            "claimed_at": crate::server::time::unix_secs_u64(c.claimed_at),
         })).collect::<Vec<_>>(),
     }))
 }
@@ -187,8 +187,8 @@ pub fn run_list_subagents(server: &LainServer, args: Value) -> Result<Value, Str
                 "name": child.name,
                 "kind": child.kind.as_str(),
                 "mode": child.mode.as_str(),
-                "started_at_unix": system_time_to_unix_secs(child.started_at),
-                "last_heartbeat_unix": system_time_to_unix_secs(child.last_heartbeat),
+                "started_at_unix": crate::server::time::unix_secs_u64(child.started_at),
+                "last_heartbeat_unix": crate::server::time::unix_secs_u64(child.last_heartbeat),
             }));
         }
     }
@@ -376,7 +376,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
         "inferred": c.inferred,
-        "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
+        "last_seen_unix": crate::server::time::unix_secs_u64(c.last_seen_unix),
     })).collect()));
     // Advisories: granted, but somebody else is editing this file.
     // Omitted when empty so unchanged responses keep their shape.
@@ -388,7 +388,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             "symbols": c.symbols,
             "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
             "inferred": c.inferred,
-            "last_seen_unix": system_time_to_unix_secs(c.last_seen_unix),
+            "last_seen_unix": crate::server::time::unix_secs_u64(c.last_seen_unix),
             "note": "granted — another agent holds an edit claim here; re-read before you patch",
         })).collect()));
     }
@@ -638,7 +638,7 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         let last_seen_unix: Option<u64> = e.agents.iter()
             .filter_map(|id| server.presence.get(id))
             .next()
-            .map(|s| system_time_to_unix_secs(s.last_heartbeat));
+            .map(|s| crate::server::time::unix_secs_u64(s.last_heartbeat));
         json!({
             "path": e.path.to_string_lossy(),
             "agents": e.agents.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
@@ -680,15 +680,9 @@ pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> 
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
         "inferred": c.inferred,
-        "claimed_at": system_time_to_unix_secs(c.claimed_at),
+        "claimed_at": crate::server::time::unix_secs_u64(c.claimed_at),
     })).collect::<Vec<_>>()))
 }
-
-fn system_time_to_unix_secs(t: std::time::SystemTime) -> u64 {
-    t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn system_time_to_unix_secs_delta(d: std::time::Duration) -> u64 { d.as_secs() }
 
 // ── detect_overlap ───────────────────────────────────────────────────────────
 
