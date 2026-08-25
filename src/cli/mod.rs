@@ -5,6 +5,7 @@ pub mod hooks;
 pub mod init;
 pub mod io;
 pub mod mcp;
+pub mod mcp_client;
 pub mod oneshot;
 pub mod query;
 pub mod repos;

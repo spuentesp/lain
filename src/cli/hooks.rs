@@ -6,6 +6,7 @@
 //! scripts invoked by Claude / Cursor / Copilot etc. call this binary
 //! to register the agent and claim files before editing.
 
+use crate::cli::mcp_client::{mcp_endpoint, post_tool_call};
 use crate::config::hooks_dir;
 use crate::server::presence::{AgentId, AgentKind, ClaimIntent};
 use crate::server::presence_lock;
@@ -204,32 +205,6 @@ fn write_session(agent_name: &str, sess: &HookSession) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct McpRequest {
-    jsonrpc: &'static str,
-    method: &'static str,
-    params: serde_json::Value,
-    id: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpResponse {
-    result: Option<McpResult>,
-    error: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpResult {
-    content: Vec<McpContent>,
-    #[serde(default, rename = "isError")]
-    is_error: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct McpContent {
-    text: String,
-}
-
 /// Normalize the `--url` flag value to the canonical MCP endpoint URL.
 ///
 /// Accepts both shapes for backwards compatibility with the project-wide
@@ -259,60 +234,6 @@ pub fn resolve_url(flag: &str) -> Result<String> {
     }
 }
 
-fn mcp_endpoint(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/mcp") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/mcp")
-    }
-}
-
-/// Build the shared reqwest blocking client used by every MCP call.
-/// Wired up once with a short total request timeout so a wedged
-/// server can't hang the agent hook for the OS's full TCP connect
-/// timeout (~75s on Linux). Wishlist #1 (fail open) is meaningless if
-/// the hook hangs for a minute before falling through to exit 0.
-/// Orca's own hook uses `--connect-timeout 0.5 --max-time 1.5` on
-/// curl; we mirror that with a 2-second ceiling.
-fn mcp_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
-}
-
-fn post_mcp(url: &str, method: &'static str, params: serde_json::Value) -> Result<McpResult> {
-    let endpoint = mcp_endpoint(url);
-    let req = McpRequest {
-        jsonrpc: "2.0",
-        method,
-        params,
-        id: 1,
-    };
-    let client = mcp_client();
-    let resp = client.post(&endpoint).json(&req).send().context("HTTP send")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("HTTP {} from lain server", resp.status());
-    }
-    let body: McpResponse = resp.json().context("parse JSON-RPC")?;
-    if let Some(err) = body.error {
-        anyhow::bail!("MCP error: {}", err);
-    }
-    body.result.context("no result in MCP response")
-}
-
-fn text_of(r: McpResult) -> Result<serde_json::Value> {
-    let text = r
-        .content
-        .into_iter()
-        .next()
-        .map(|c| c.text)
-        .context("empty result")?;
-    serde_json::from_str(&text).context("parse result text")
-}
-
 fn register_if_needed(
     url: &str,
     name: &str,
@@ -325,7 +246,7 @@ fn register_if_needed(
         // with non-JSON text like "heartbeat: unknown agent"; treat that
         // as a stale session and re-register instead of returning a dead
         // agent_id that claim/release will fail against.
-        let stale = match post_mcp(
+        let stale = match post_tool_call(
             url,
             "tools/call",
             serde_json::json!({
@@ -333,7 +254,10 @@ fn register_if_needed(
                 "arguments": { "agent_id": s.agent_id, "session_token": s.session_token }
             }),
         ) {
-            Ok(r) => r.is_error,
+            Ok(r) => r
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             Err(_) => true,
         };
         if !stale {
@@ -351,7 +275,7 @@ fn register_if_needed(
     if let Some(parent) = parent_session_id {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -359,13 +283,14 @@ fn register_if_needed(
             "arguments": args
         }),
     )?;
-    let text = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let sess = HookSession {
-        agent_id: text["agent_id"]
+        agent_id: parsed["agent_id"]
             .as_str()
             .context("no agent_id")?
             .to_string(),
-        session_token: text["session_token"]
+        session_token: parsed["session_token"]
             .as_str()
             .context("no session_token")?
             .to_string(),
@@ -443,7 +368,7 @@ pub fn claim(
     if let Some(parent) = parent {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -451,7 +376,8 @@ pub fn claim(
             "arguments": args
         }),
     )?;
-    let parsed = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let granted = parsed["granted"].as_array().map(|a| a.len()).unwrap_or(0);
     let conflicts = parsed["conflicts"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: {granted} granted, {conflicts} conflict(s)");
@@ -492,7 +418,7 @@ pub fn release(
     if let Some(parent) = parent {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -500,7 +426,8 @@ pub fn release(
             "arguments": args
         }),
     )?;
-    let parsed = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let released = parsed["released"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: released {released} file(s)");
     Ok(())
@@ -689,7 +616,7 @@ pub fn overlap_check(
     let head_input = head.unwrap_or("HEAD");
     let head_sha = git_rev_parse_full(head_input)
         .with_context(|| format!("resolving head ref {head_input:?}"))?;
-    let result = post_mcp(
+    let result = post_tool_call(
         url,
         "tools/call",
         serde_json::json!({
@@ -701,7 +628,8 @@ pub fn overlap_check(
             }
         }),
     )?;
-    let parsed = text_of(result)?;
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     println!("{}", serde_json::to_string(&parsed)?);
     Ok(())
 }
@@ -792,7 +720,7 @@ mod tests {
     use std::time::Duration;
 
     /// `mcp_endpoint` is the bridge between the `--url` flag (bare server
-    /// URL, the new convention) and the post-MCP path that `post_mcp`
+    /// URL, the new convention) and the post-MCP path that `post_tool_call`
     /// needs. Both shapes must round-trip cleanly so existing hook
     /// scripts with `LAIN_URL=http://localhost:9999/mcp` keep working
     /// after the refactor.
