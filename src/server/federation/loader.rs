@@ -17,6 +17,7 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
 
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);
     let fed = Arc::new(FederatedIndex::new(backend));
+    fed.set_ready_threshold(config.ready_threshold);
 
     let sources = config.build_sources()?;
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
@@ -62,7 +63,13 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     // manifest is an observability snapshot of what *was* loaded rather
     // than the source of truth for repo membership — see the inline notes
     // in `save_manifest` for the full rationale.
-    let _ = save_manifest(&fed, &manifest_path);
+    // Discarding this hid a failed save entirely: the federation came up
+    // with no persisted snapshot and nothing said so. The manifest is
+    // observability rather than source of truth, so a failure must not
+    // abort startup — but it must be visible.
+    if let Err(e) = save_manifest(&fed, &manifest_path) {
+        tracing::warn!("federation manifest not saved to {manifest_path:?}: {e}");
+    }
     Ok(fed)
 }
 
@@ -104,6 +111,7 @@ pub async fn load_federation_with_workspace(
     // Build the federation.
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);
     let fed = Arc::new(FederatedIndex::new(backend));
+    fed.set_ready_threshold(config.ready_threshold);
 
     // Spawn per-repo indexers up to `max_concurrent_indexers` in flight, then
     // await them all. Mirrors `load_federation`'s per-repo loop exactly —
@@ -131,7 +139,13 @@ pub async fn load_federation_with_workspace(
         h.await.map_err(|e| LainError::Other(format!("join: {e}")))??;
     }
 
-    let _ = save_manifest(&fed, &manifest_path);
+    // Discarding this hid a failed save entirely: the federation came up
+    // with no persisted snapshot and nothing said so. The manifest is
+    // observability rather than source of truth, so a failure must not
+    // abort startup — but it must be visible.
+    if let Err(e) = save_manifest(&fed, &manifest_path) {
+        tracing::warn!("federation manifest not saved to {manifest_path:?}: {e}");
+    }
     Ok(fed)
 }
 

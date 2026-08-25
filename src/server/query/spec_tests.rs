@@ -293,17 +293,20 @@ fn test_query_spec_named_unknown() {
     assert!(spec.is_none());
 }
 
+/// This asserted only that each prebuilt query *existed*, never that it
+/// could match anything — so it stayed green over `get_function_imports`
+/// (edge `Import`) and `get_test_coverage` (edge `TestedBy`), neither of
+/// which is an EdgeType. Both were removed; the correctness half now
+/// lives in `spec::named_query_validity_tests`.
 #[test]
 fn test_query_spec_named_all() {
     let names = [
         "get_blast_radius",
         "get_call_chain",
         "get_file_functions",
-        "get_function_imports",
         "get_callers",
         "get_callees",
         "get_module_functions",
-        "get_test_coverage",
         "get_deprecated_functions",
     ];
     for name in names {

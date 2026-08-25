@@ -30,7 +30,10 @@ impl Default for FederationConfig {
 
 fn default_data_dir() -> PathBuf { PathBuf::from("./.lain/federation") }
 fn default_max_concurrent_indexers() -> usize { 8 }
-fn default_ready_threshold() -> f32 { 0.8 }
+/// Default fraction of repos that must be `Ready`.
+pub const DEFAULT_READY_THRESHOLD: f32 = 0.8;
+
+fn default_ready_threshold() -> f32 { DEFAULT_READY_THRESHOLD }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepoConfig {

@@ -215,10 +215,27 @@ impl LainServer {
         let pattern_edges = super::resolve::resolve_pattern_edges(
             &self.graph,
             &all_pattern_refs,
-            super::resolve::PatternLimits::DEFAULT,
+            super::resolve::PatternLimits::from_tuning(
+                &self.tuning,
+                super::resolve::PatternLimits::DEFAULT,
+            ),
         );
         info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
         insert_edges_reporting(&self.graph, &pattern_edges, "pattern")?;
+
+        // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
+        // WebSocket. Runs after the symbol nodes exist, because
+        // `routes_to_graph` links a route to its handler by name and
+        // needs that handler already in the graph.
+        //
+        // Nothing called `server::sensors` before this, so the node and
+        // edge types it produces — `HttpRoute`, `CallsHttp`, `Implements`
+        // — could never appear in a graph, while `describe_schema`
+        // advertised them and `get_cross_runtime_callers` read them.
+        let sensor_counts = crate::server::sensors::run_all(&self.graph, &self.config.workspace);
+        if sensor_counts.total() > 0 {
+            info!("Protocol sensors contributed {:?}", sensor_counts);
+        }
 
         // 4. Temporal Analysis Phase: Co-changes
         let co_change_pairs = {
@@ -270,9 +287,25 @@ impl LainServer {
                     if gn.embedding.is_none() {
                         let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                         if let Ok(emb) = embedder_clone.embed(&text) {
-                            gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
-                            if graph_clone.insert_node(&gn).is_ok() {
-                                count += 1;
+                            // Never store a default on serialize failure.
+                            // `unwrap_or_default()` wrote `Some("")`, which
+                            // marks the node as embedded — `is_none()` is
+                            // false, so it is never retried — while
+                            // `executor.rs` fails to parse the empty string
+                            // and skips it. The symbol disappears from
+                            // `semantic_search` permanently and silently.
+                            match serde_json::to_string(&emb) {
+                                Ok(json) => {
+                                    gn.embedding = Some(json);
+                                    if graph_clone.insert_node(&gn).is_ok() {
+                                        count += 1;
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    "embedding not serialised for {}: {e}; leaving it \
+                                     unembedded so a later pass retries",
+                                    gn.name
+                                ),
                             }
                         }
                     }
@@ -291,8 +324,24 @@ impl LainServer {
                         if gn.embedding.is_none() {
                             let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                             if let Ok(emb) = embedder_clone.embed(&text) {
-                                gn.embedding = Some(serde_json::to_string(&emb).unwrap_or_default());
-                                let _ = graph_clone.insert_node(&gn);
+                                // Same reasoning as the prewarm pass above:
+                                // a default here poisons the node with an
+                                // unparseable embedding it will never retry.
+                                match serde_json::to_string(&emb) {
+                                    Ok(json) => {
+                                        gn.embedding = Some(json);
+                                        // A dropped insert silently costs the
+                                        // node its embedding, which surfaces
+                                        // later as `semantic_search` missing
+                                        // code that is plainly there.
+                                        if let Err(e) = graph_clone.insert_node(&gn) {
+                                            warn!("embedding not stored for {}: {e}", gn.name);
+                                        }
+                                    }
+                                    Err(e) => warn!(
+                                        "embedding not serialised for {}: {e}", gn.name
+                                    ),
+                                }
                             }
                         }
                     }
@@ -654,6 +703,13 @@ pub async fn index_one_repo(
     );
     info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
     db.insert_edges_batch(&pattern_edges)?;
+
+    // Protocol sensors — same rationale as the single-workspace pipeline;
+    // runs after symbol nodes exist so route->handler links resolve.
+    let sensor_counts = crate::server::sensors::run_all(db, path);
+    if sensor_counts.total() > 0 {
+        info!("[federation] {:?}: protocol sensors contributed {:?}", path, sensor_counts);
+    }
 
     // Co-change analysis
     let co_change_pairs = git

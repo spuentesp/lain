@@ -580,3 +580,354 @@ fn find_dead_code_does_not_report_a_symbol_called_from_another_file() {
 
     std::fs::remove_dir_all(&ws).ok();
 }
+
+// ── Behaviour pinned after mutation testing ───────────────────────────
+//
+// A mutation run flipped operators in these predicates and the suite
+// stayed green, which means nothing verified what they actually decide:
+// which symbols `find_dead_code` reports, and what advice
+// `suggest_refactor_targets` gives. Both feed answers an agent acts on.
+
+/// `whole_word_hits` gates on `boundary(before) && boundary(after)`.
+/// With `||` a substring match counts as a whole word, so `run` would
+/// match inside `run_tests` and a genuinely dead symbol would look live.
+#[test]
+fn whole_word_hits_requires_a_boundary_on_both_sides() {
+    use super::metrics::whole_word_hits;
+
+    assert_eq!(whole_word_hits("call run() here", "run"), 1, "standalone word");
+    assert_eq!(whole_word_hits("run_tests()", "run"), 0, "prefix of a longer ident");
+    assert_eq!(whole_word_hits("do_run()", "run"), 0, "suffix of a longer ident");
+    assert_eq!(whole_word_hits("a_run_b", "run"), 0, "infix of a longer ident");
+    assert_eq!(whole_word_hits("run; run()", "run"), 2, "counts each occurrence");
+}
+
+/// `is_trait_context` is a path heuristic. Both halves matter: the
+/// filter that keeps trait definitions out of the dead-code report.
+#[test]
+fn trait_context_is_detected_from_the_path() {
+    use super::metrics::is_trait_context;
+
+    assert!(is_trait_context("src/server/traits.rs"));
+    assert!(is_trait_context("src/repo_trait.rs"));
+    assert!(!is_trait_context("src/server/graph.rs"));
+}
+
+/// The dead-code candidate filter drops false-positive names *and*
+/// trait-context paths. Flipping that `&&` to `||` survived mutation,
+/// meaning nothing checked that both filters apply.
+#[test]
+fn the_dead_code_filter_applies_both_halves() {
+    use super::metrics::{is_false_positive_name, is_trait_context};
+
+    // A trait-context path with an ordinary name: only the trait half
+    // rejects it, so an `||` would let it through.
+    assert!(!is_false_positive_name("compute_widget"));
+    assert!(is_trait_context("src/widget_trait.rs"));
+
+    // A false-positive name in an ordinary path: only the name half
+    // rejects it.
+    assert!(is_false_positive_name("new"));
+    assert!(!is_trait_context("src/server/graph.rs"));
+}
+
+/// `suggest_refactor_targets` classifies with `fan_in > 10 && fan_out > 10`
+/// and `co_change > 5 && anchor < 0.2`. Both `&&`s survived mutation to
+/// `||`, so nothing checked that a node has to satisfy *both* halves —
+/// with `||` every high-fan-in symbol in the codebase gets labelled a
+/// "God Object", which is advice an agent acts on.
+#[tokio::test]
+async fn refactor_advice_requires_both_halves_of_each_heuristic() {
+    use crate::schema::{GraphNode, NodeType};
+
+    let tmp = std::env::temp_dir().join("lain_refactor_heuristics");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = crate::graph::GraphDatabase::new(&tmp).unwrap();
+    let overlay = crate::overlay::VolatileOverlay::new();
+
+    let mk = |name: &str, fan_in: u32, fan_out: u32, co: usize, anchor: f32| {
+        let mut n = GraphNode::new(NodeType::Class, name.to_string(), format!("src/{name}.rs"));
+        n.fan_in = Some(fan_in);
+        n.fan_out = Some(fan_out);
+        n.co_change_count = Some(co);
+        n.anchor_score = Some(anchor);
+        graph.upsert_node(n).unwrap();
+    };
+
+    // High fan-in but low fan-out: NOT a God Object.
+    mk("only_fan_in", 50, 1, 0, 5.0);
+    // High fan-out but low fan-in: also NOT a God Object.
+    mk("only_fan_out", 1, 15, 0, 5.0);
+    // Both high: a God Object.
+    mk("both_high", 50, 15, 0, 5.0);
+
+    let out = crate::server::tools::handlers::metrics::suggest_refactor_targets(
+        &graph, &overlay, 50,
+    )
+    .expect("suggest_refactor_targets");
+
+    assert!(
+        out.contains("both_high"),
+        "a node high on both axes is a God Object: {out}"
+    );
+    assert!(
+        !out.contains("God Object (high fan-in/fan-out)") || !out.contains("only_fan_in"),
+        "high fan-in alone must not be labelled a God Object: {out}"
+    );
+    assert!(
+        !out.contains("only_fan_out") || !out.contains("God Object"),
+        "high fan-out alone must not be labelled a God Object: {out}"
+    );
+}
+
+/// The coupling heuristic needs high co-change *and* low stability.
+/// A heavily co-changed but rock-solid anchor is not "fragile".
+#[tokio::test]
+async fn a_stable_symbol_is_not_called_fragile_however_much_it_co_changes() {
+    use crate::schema::{GraphNode, NodeType};
+
+    let tmp = std::env::temp_dir().join("lain_refactor_fragile");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = crate::graph::GraphDatabase::new(&tmp).unwrap();
+    let overlay = crate::overlay::VolatileOverlay::new();
+
+    let mut n = GraphNode::new(NodeType::Class, "stable_hub".into(), "src/hub.rs".into());
+    n.fan_in = Some(1);
+    n.fan_out = Some(1);
+    n.co_change_count = Some(50); // very high coupling
+    n.anchor_score = Some(9.0); // but extremely stable
+    graph.upsert_node(n).unwrap();
+
+    let out = crate::server::tools::handlers::metrics::suggest_refactor_targets(
+        &graph, &overlay, 50,
+    )
+    .expect("suggest_refactor_targets");
+
+    assert!(
+        !out.contains("Fragile/Spaghetti"),
+        "high co-change with a high anchor score is not fragile: {out}"
+    );
+}
+
+/// `unindexed_files` decides which files `find_dead_code` refuses to
+/// report on, using `count >= UNINDEXED_FILE_MIN_FUNCTIONS && fan_out == 0`.
+/// The `>=` boundary survived mutation to `>`, so the exact threshold —
+/// the line between "a module of small leaf helpers" and "we failed to
+/// index this file" — was never checked. Getting it wrong either
+/// suppresses real dead code or reports live code as dead, which is the
+/// worst answer this tool has historically given.
+#[test]
+fn the_unindexed_file_threshold_is_exact() {
+    use crate::schema::{GraphNode, NodeType};
+    use crate::server::tools::handlers::metrics::unindexed_files;
+
+    let mk = |path: &str, n: usize, calls_out: u32| -> Vec<GraphNode> {
+        (0..n)
+            .map(|i| {
+                let mut g = GraphNode::new(
+                    NodeType::Function,
+                    format!("f{i}"),
+                    path.to_string(),
+                );
+                g.calls_out = Some(calls_out);
+                g
+            })
+            .collect()
+    };
+
+    // Two edgeless functions is ordinary; three is the documented line.
+    let two = mk("src/two.rs", 2, 0);
+    assert!(
+        !unindexed_files(&two).contains("src/two.rs"),
+        "2 edgeless functions is below the threshold"
+    );
+
+    let three = mk("src/three.rs", 3, 0);
+    assert!(
+        unindexed_files(&three).contains("src/three.rs"),
+        "3 edgeless functions is at the threshold and counts as unindexed"
+    );
+
+    // Any outgoing calls at all means the file *was* indexed.
+    let called = mk("src/called.rs", 5, 1);
+    assert!(
+        !unindexed_files(&called).contains("src/called.rs"),
+        "a file with call edges is indexed, however many functions it has"
+    );
+}
+
+/// `find_dead_code` filters candidates with
+/// `!is_false_positive_name(name) && !is_trait_context(path)`. That `&&`
+/// survived mutation to `||`, which means no test exercised both filters
+/// through the real tool — only the predicates in isolation. With `||` a
+/// symbol needs to fail just one check to be reported, so ordinary
+/// trait-file functions and conventional names flood back into the
+/// answer, which is the specific way this tool has been wrong before.
+#[test]
+fn find_dead_code_applies_the_name_and_trait_filters_together() {
+    let tmp = std::env::temp_dir().join("test_metrics_both_filters");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    // Two files, each with enough functions to avoid the "unindexed"
+    // suppression, and each with a live call so fan-out is non-zero.
+    let add_file = |path: &str, names: [&str; 3]| {
+        let file = GraphNode::new(NodeType::File, path.to_string(), path.to_string());
+        graph.upsert_node(file.clone()).unwrap();
+        let mut made = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let mut n =
+                GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
+            n.calls_in = Some(0);
+            // One function per file must have an outgoing call, or
+            // `unindexed_files` suppresses the whole file and this test
+            // passes without the name/trait filters ever running — which
+            // is exactly what mutation testing caught it doing.
+            n.calls_out = Some(if i == 0 { 1 } else { 0 });
+            n.fan_in = Some(1);
+            n.fan_out = Some(1);
+            graph.upsert_node(n.clone()).unwrap();
+            graph
+                .upsert_edge(GraphEdge::new(EdgeType::Contains, file.id.clone(), n.id.clone()))
+                .unwrap();
+            made.push(n);
+        }
+        // One real call so the file is not treated as unindexed.
+        graph
+            .upsert_edge(GraphEdge::new(
+                EdgeType::Calls,
+                made[0].id.clone(),
+                made[1].id.clone(),
+            ))
+            .unwrap();
+        made
+    };
+
+    // A trait-context path: ordinary names, must be filtered by the
+    // *path* half alone.
+    add_file("/src/widget_trait.rs", ["driver_a", "size_widget", "drop_widget"]);
+    // An ordinary path: a conventional name must be filtered by the
+    // *name* half alone.
+    add_file("/src/plain.rs", ["driver_b", "new", "genuinely_dead_helper"]);
+
+    let embedder = NlpEmbedder::new_stub();
+    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let text = find_dead_code(
+        std::path::Path::new(""),
+        &graph,
+        &VolatileOverlay::new(),
+        None,
+        &embedder,
+        &cache,
+    )
+    .unwrap();
+
+    // `size_widget` is a candidate (no callers, no callees) with an
+    // ordinary name, so only the *path* half can remove it.
+    assert!(
+        !text.contains("- size_widget ("),
+        "a candidate in a trait-context path must be filtered by the path half:\n{text}"
+    );
+    // The fixture must actually produce candidates, or this test would
+    // pass on an empty report.
+    assert!(
+        text.contains("- genuinely_dead_helper ("),
+        "the fixture must yield at least one genuine dead symbol:\n{text}"
+    );
+    // `new` is a candidate in an ordinary path, so only the *name* half
+    // can remove it.
+    assert!(
+        !text.contains("- new ("),
+        "a conventional name must be filtered by the name half:\n{text}"
+    );
+}
+
+/// `explain_symbol` annotates a symbol with who else is on its file and
+/// whether they are *reading* or *editing* — the signal that tells an
+/// agent to pause. The check is
+/// `c.path == node.path && matches!(c.intent, ClaimIntent::Edit)`, and
+/// that `&&` survived mutation to `||`: with it, a Read claim reports as
+/// "edit", and so does a claim on an entirely different file. Both make
+/// the collaborator look busier than they are, and neither test failed.
+#[test]
+fn occupancy_reports_read_intent_as_read() {
+    use crate::server::presence::{AgentId, ClaimIntent, ClaimRequest, OccupancyMap};
+
+    let tmp = std::env::temp_dir().join("test_metrics_occupancy_read");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+    let overlay = VolatileOverlay::new();
+    let occupancy = OccupancyMap::new();
+
+    let node = GraphNode::new(NodeType::Function, "login".into(), "auth.rs".into());
+    graph.upsert_node(node).unwrap();
+
+    let agent = AgentId("reader".into());
+    occupancy.claim(
+        &agent,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Read,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+
+    let text =
+        explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "login").unwrap();
+    assert!(text.contains("Occupancy"), "an active claim must be surfaced:\n{text}");
+    assert!(
+        text.contains("\"read\""),
+        "a Read claim must report as read, not edit:\n{text}"
+    );
+    assert!(
+        !text.contains("\"edit\""),
+        "nothing is editing this file:\n{text}"
+    );
+}
+
+/// And an Edit claim on a *different* file must not colour this symbol.
+#[test]
+fn occupancy_ignores_edit_claims_on_other_files() {
+    use crate::server::presence::{AgentId, ClaimIntent, ClaimRequest, OccupancyMap};
+
+    let tmp = std::env::temp_dir().join("test_metrics_occupancy_other_file");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+    let overlay = VolatileOverlay::new();
+    let occupancy = OccupancyMap::new();
+
+    let node = GraphNode::new(NodeType::Function, "login".into(), "auth.rs".into());
+    graph.upsert_node(node).unwrap();
+
+    let agent = AgentId("busy".into());
+    occupancy.claim(
+        &agent,
+        vec![
+            // Reading the file we ask about...
+            ClaimRequest {
+                path: std::path::PathBuf::from("auth.rs"),
+                symbols: vec!["login".into()],
+                intent: ClaimIntent::Read,
+                ttl_seconds: None,
+                plan_revision: None,
+            },
+            // ...while editing an unrelated one.
+            ClaimRequest {
+                path: std::path::PathBuf::from("billing.rs"),
+                symbols: vec!["charge".into()],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            },
+        ],
+    );
+
+    let text =
+        explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "login").unwrap();
+    assert!(
+        !text.contains("\"edit\""),
+        "an Edit claim on billing.rs must not mark auth.rs as being edited:\n{text}"
+    );
+}

@@ -49,6 +49,8 @@ fn occupancy_payload(presence: &PresenceRegistry, occupancy: &OccupancyMap) -> V
 /// `docs/superpowers/plans/2026-08-15-lain-multiplayer-awareness.md`.
 /// When no agents have registered (the default for the sidecar /
 /// read-only executor), `active_agents` is an empty list.
+#[allow(clippy::too_many_arguments)] // one more than the lint's 7; the
+// alternative is a parameter struct used by exactly one call site.
 pub fn query_graph(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
@@ -57,8 +59,10 @@ pub fn query_graph(
     presence: &PresenceRegistry,
     occupancy: &OccupancyMap,
     arguments: Option<&Map<String, Value>>,
+    default_limit: usize,
 ) -> Result<String, LainError> {
-    let mut executor = Executor::new(graph, embedder, embedding_cache, workspace);
+    let mut executor =
+        Executor::with_default_limit(graph, embedder, embedding_cache, workspace, default_limit);
 
     // Parse query spec from arguments.
     // Accepts: {"spec": {...}} (per docs/query-language.md), {"query": {...}} (legacy),

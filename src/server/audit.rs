@@ -147,9 +147,21 @@ pub fn append_edit_event(state_dir: &Path, event: &AuditEvent) -> std::io::Resul
         .create(true)
         .append(true)
         .open(&path)?;
-    let line = serde_json::to_string(event)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writeln!(f, "{line}")?;
+    // Build the whole record, newline included, and issue exactly one
+    // `write_all`. `writeln!` on a bare `File` emits the payload and the
+    // newline as separate `write(2)` calls, and O_APPEND only makes each
+    // individual call atomic — so two agents appending at once interleaved
+    // into torn lines like `{"a":1}{"b":2}\n\n`. `read_audit_log`
+    // "silently skips malformed lines", so the record was not corrupted
+    // in a visible way: it was simply gone from the audit trail.
+    //
+    // That is a real loss for a tool whose premise is several agents
+    // sharing one repo, and it is what made
+    // `get_recent_activity_tool_groups_by_path` fail intermittently under
+    // parallel test load — four events written, three read back.
+    let mut line = serde_json::to_string(event).map_err(std::io::Error::other)?;
+    line.push('\n');
+    f.write_all(line.as_bytes())?;
     Ok(())
 }
 
@@ -252,6 +264,61 @@ mod tests {
             plan_revision: None,
             landed_revision: 1,
         }
+    }
+
+    /// Concurrent appenders must not tear each other's records.
+    ///
+    /// `writeln!` on a bare `File` wrote the payload and the newline as
+    /// two syscalls; O_APPEND makes each call atomic but not the pair, so
+    /// simultaneous writers interleaved and produced lines that
+    /// `read_audit_log` then silently discarded. With N agents on one
+    /// repo — the case lain exists for — audit records vanished with no
+    /// error anywhere.
+    #[test]
+    fn concurrent_appends_do_not_tear_records() {
+        use std::sync::Arc;
+
+        let tmp = tempdir().unwrap();
+        let dir: Arc<std::path::PathBuf> = Arc::new(tmp.path().to_path_buf());
+
+        const WRITERS: usize = 8;
+        const PER_WRITER: usize = 40;
+
+        let mut handles = Vec::new();
+        for w in 0..WRITERS {
+            let dir = Arc::clone(&dir);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..PER_WRITER {
+                    let ev = sample_event(1.0, &format!("agent-{w}-{i}"));
+                    append_edit_event(&dir, &ev).expect("append");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+
+        let raw = std::fs::read_to_string(dir.join(AUDIT_LOG_FILENAME)).unwrap();
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            WRITERS * PER_WRITER,
+            "every append must produce exactly one line"
+        );
+        for l in &lines {
+            serde_json::from_str::<serde_json::Value>(l)
+                .unwrap_or_else(|e| panic!("torn line {l:?}: {e}"));
+        }
+
+        // And the reader must see all of them, since it drops anything
+        // it cannot parse.
+        let events = read_audit_log(&dir, None).expect("read");
+        assert_eq!(
+            events.len(),
+            WRITERS * PER_WRITER,
+            "read_audit_log silently skips malformed lines, so a torn write \
+             shows up here as a missing record rather than an error"
+        );
     }
 
     /// One append produces one JSONL line containing the `ts_unix`

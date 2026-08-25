@@ -302,7 +302,7 @@ fn build_federation_server(
     // subject repo's history.
     let git_root = single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf());
     let git = Arc::new(Mutex::new(GitSensor::new(&git_root)?));
-    let lsp_pool = Arc::new(LspPool::new(&ws, 1)?);
+    let lsp_pool = Arc::new(LspPool::new(&ws, 1, &tuning.runtime)?);
 
     let tool_executor = ToolExecutor::new(
         graph.clone(),
@@ -496,7 +496,7 @@ impl LainServer {
         }
 
         let git = Arc::new(Mutex::new(GitSensor::new(workspace)?));
-        let lsp_pool = Arc::new(LspPool::new(workspace, tuning.ingestion.lsp_pool_size)?);
+        let lsp_pool = Arc::new(LspPool::new(workspace, tuning.ingestion.lsp_pool_size, &tuning.runtime)?);
 
         let tool_executor = ToolExecutor::new(
             graph.clone(),

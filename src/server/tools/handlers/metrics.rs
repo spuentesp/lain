@@ -120,12 +120,12 @@ const FALSE_POSITIVE_PATTERNS: &[&str] = &[
 ];
 
 /// Check if a function name matches known false-positive patterns
-fn is_false_positive_name(name: &str) -> bool {
+pub(crate) fn is_false_positive_name(name: &str) -> bool {
     FALSE_POSITIVE_PATTERNS.iter().any(|p| name == *p || name.ends_with(p))
 }
 
 /// Check if function appears in a trait definition (heuristic: path contains "trait")
-fn is_trait_context(path: &str) -> bool {
+pub(crate) fn is_trait_context(path: &str) -> bool {
     path.contains("trait") || path.contains("_trait")
 }
 
@@ -197,7 +197,7 @@ const UNINDEXED_FILE_MIN_FUNCTIONS: usize = 3;
 /// producing materially different graphs. Until that is fixed, a file
 /// with definitions and no call edges means "we failed to index this",
 /// and saying so is the honest answer.
-fn unindexed_files(functions: &[crate::schema::GraphNode]) -> HashSet<String> {
+pub(crate) fn unindexed_files(functions: &[crate::schema::GraphNode]) -> HashSet<String> {
     let mut per_file: HashMap<String, (usize, u32)> = HashMap::new();
     // Counts `calls_out`, not `fan_out`: a file whose symbols have
     // structural edges but no call edges is exactly the case this
@@ -335,7 +335,7 @@ fn names_referenced_anywhere(
 }
 
 /// Count whole-word occurrences of `name` in `text`.
-fn whole_word_hits(text: &str, name: &str) -> usize {
+pub(crate) fn whole_word_hits(text: &str, name: &str) -> usize {
     let mut hits = 0usize;
     for (i, _) in text.match_indices(name) {
         let before = text[..i].chars().next_back();

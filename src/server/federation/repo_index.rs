@@ -82,8 +82,11 @@ impl RepoIndex {
     pub fn new(source: Box<dyn RepoSource>, data_dir: &Path) -> Result<Self, LainError> {
         let local_path = source.local_path().to_path_buf();
         let db = GraphDatabase::new(&data_dir.join("graph.bin"))?;
-        // Match the existing default ingestion tuning until RepoIndex accepts configuration.
-        let lsp = LspPool::new(&local_path, 4)?;
+        // Read the repo's own `.lain/tuning.toml` (falling back to
+        // defaults when absent) rather than hard-coding. The LSP poll
+        // settings in particular were documented knobs that nothing read.
+        let runtime = crate::tuning::load_tuning_config(&local_path).runtime;
+        let lsp = LspPool::new(&local_path, 4, &runtime)?;
         let git = Arc::new(AsyncMutex::new(GitSensor::new(&local_path)?));
         Ok(Self {
             source,

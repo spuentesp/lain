@@ -85,6 +85,7 @@ fn main() -> Result<()> {
             workspace,
             embedding_model,
             reindex_timeout,
+            owner_url,
         }) => {
             // `lain mcp` — single-repo MCP server on stdio. Walks up
             // for `.git` if `--workspace` is not given, then serves
@@ -96,11 +97,17 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()
                 .context("build tokio runtime for mcp subcommand")?;
-            rt.block_on(lain::cli::mcp::run_mcp(
-                workspace.as_deref(),
-                embedding_model.as_deref(),
-                reindex_timeout.map(std::time::Duration::from_secs),
-            ))
+            match owner_url {
+                Some(url) => rt.block_on(lain::cli::mcp::run_sidecar(
+                    workspace.as_deref(),
+                    &url,
+                )),
+                None => rt.block_on(lain::cli::mcp::run_mcp(
+                    workspace.as_deref(),
+                    embedding_model.as_deref(),
+                    reindex_timeout.map(std::time::Duration::from_secs),
+                )),
+            }
         }
         Some(Commands::Init {
             workspace,

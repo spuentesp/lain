@@ -31,6 +31,19 @@ pub struct PatternLimits {
 }
 
 impl PatternLimits {
+    /// Build limits from the workspace's tuning config.
+    ///
+    /// `TuningConfig::max_pattern_edges` shipped in `.lain/tuning.toml`
+    /// with the same value the constants below hard-code, and nothing
+    /// ever read it — raising the cap in config had no effect on the
+    /// number of `Pattern` edges produced.
+    pub fn from_tuning(tuning: &crate::tuning::TuningConfig, base: PatternLimits) -> PatternLimits {
+        PatternLimits {
+            max_edges: tuning.max_pattern_edges,
+            ..base
+        }
+    }
+
     /// The single-workspace defaults — values lifted from the
     /// pre-extraction constants in `ingestion.rs`.
     pub const DEFAULT: PatternLimits = PatternLimits {
@@ -75,6 +88,54 @@ pub fn resolve_call_edges(
     edges
 }
 
+/// The language family a source path belongs to, for the purpose of
+/// deciding whether a name reference may link to it.
+///
+/// Extensions that compile as one language share a group, so a `.ts`
+/// caller can still reach a `.tsx` definition and a `.h` declaration
+/// pairs with its `.cpp`.
+fn language_group(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" => "c",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "scala" => "scala",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        _ => return None,
+    })
+}
+
+/// Whether a name reference in `from` may resolve to a definition in `to`.
+///
+/// Name matching is language-blind, so a reference only had to be *unique*
+/// to link — and a name that exists once in the whole repo produced a
+/// single candidate regardless of what language it was written in. That
+/// is how `main` in `tests/e2e/lain_test.py` became a caller of the Rust
+/// `run_tests` in `execution.rs`, which put a Python test script inside
+/// the blast radius of a Rust function. The same-file preference could
+/// not catch it: with one candidate there was nothing to disambiguate.
+///
+/// Unknown extensions fall back to exact extension equality rather than
+/// linking freely.
+fn may_link_across(from: &str, to: &str) -> bool {
+    match (language_group(from), language_group(to)) {
+        (Some(a), Some(b)) => a == b,
+        _ => {
+            let ext = |p: &str| p.rsplit_once('.').map(|(_, e)| e.to_string());
+            ext(from) == ext(to)
+        }
+    }
+}
+
 /// Resolve tree-sitter-derived `Calls`/`Uses` references to internal
 /// nodes by name. Self-edges are dropped; `Uses` edges are only kept
 /// when the target is a type-level declaration
@@ -116,11 +177,19 @@ pub fn resolve_static_edges(db: &GraphDatabase, refs: &[StaticFileRef]) -> Vec<G
         // that is actually decidable. Otherwise emit nothing: a missing
         // edge is a gap, N wrong edges are a lie, and the lie also
         // inflates `find_anchors` and `get_blast_radius`.
+        // Drop candidates written in another language before counting.
+        // A cross-language hit is never a real call here: these refs come
+        // from a single-language tree-sitter parse of one file.
+        let candidates: Vec<&(String, crate::schema::NodeType, String)> = candidates
+            .iter()
+            .filter(|(_, _, path)| may_link_across(&sr.file_path, path))
+            .collect();
+
         let resolved: Vec<&(String, crate::schema::NodeType, String)> = if candidates.len() == 1 {
-            candidates.iter().collect()
+            candidates
         } else {
             candidates
-                .iter()
+                .into_iter()
                 .filter(|(_, _, path)| path == &sr.file_path)
                 .collect()
         };
@@ -318,6 +387,167 @@ mod ambiguous_name_tests {
         let edges = resolve_static_edges(&db, &refs);
         assert_eq!(edges.len(), 1, "exactly one edge, to the local definition");
         assert_eq!(edges[0].target_id, local_id);
+    }
+
+
+    /// A tree-sitter name reference must not link across languages. A
+    /// name that happens to be unique repo-wide still had exactly one
+    /// candidate, so a Python caller linked straight to a Rust
+    /// definition.
+    #[test]
+    fn a_name_reference_does_not_link_across_languages() {
+        let tmp = std::env::temp_dir().join("lain_resolve_crosslang");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        db.upsert_node(fn_node("run_tests", "src/server/execution.rs", (1, 50)))
+            .unwrap();
+        db.upsert_node(fn_node("main", "tests/e2e/lain_test.py", (1, 30)))
+            .unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "tests/e2e/lain_test.py".to_string(),
+            source_line: 10,
+            target_name: "run_tests".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs);
+        assert!(
+            edges.is_empty(),
+            "a .py caller must not link to a .rs definition; got {} edge(s)",
+            edges.len()
+        );
+    }
+
+
+    /// The same-language case must keep working, including across the
+    /// extensions that belong to one language family.
+    #[test]
+    fn a_name_reference_still_links_within_a_language_family() {
+        let tmp = std::env::temp_dir().join("lain_resolve_same_family");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let target = fn_node("renderWidget", "src/ui/widget.tsx", (1, 20));
+        let target_id = target.id.clone();
+        db.upsert_node(target).unwrap();
+        db.upsert_node(fn_node("caller", "src/ui/app.ts", (1, 30)))
+            .unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "src/ui/app.ts".to_string(),
+            source_line: 10,
+            target_name: "renderWidget".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs);
+        assert_eq!(edges.len(), 1, ".ts -> .tsx is the same language family");
+        assert_eq!(edges[0].target_id, target_id);
+    }
+
+    /// A cross-language name collision must not defeat the same-file
+    /// preference either: the Rust definition is filtered out first, so
+    /// the Python caller resolves to its own file's definition.
+    #[test]
+    fn a_cross_language_twin_does_not_block_same_file_resolution() {
+        let tmp = std::env::temp_dir().join("lain_resolve_crosslang_twin");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        db.upsert_node(fn_node("run_tests", "src/server/execution.rs", (1, 50)))
+            .unwrap();
+        let py = fn_node("run_tests", "tests/e2e/lain_test.py", (1, 40));
+        let py_id = py.id.clone();
+        db.upsert_node(py).unwrap();
+        db.upsert_node(fn_node("main", "tests/e2e/lain_test.py", (50, 80)))
+            .unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "tests/e2e/lain_test.py".to_string(),
+            source_line: 60,
+            target_name: "run_tests".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs);
+        assert_eq!(edges.len(), 1, "exactly one edge, to the Python definition");
+        assert_eq!(edges[0].target_id, py_id);
+    }
+
+    /// The `max_edges` budget must be a hard ceiling, not off by one.
+    /// Every `edges.len() >= max_edges` guard survived mutation to `>`,
+    /// meaning nothing checked the cap actually holds — and this is the
+    /// budget `.lain/tuning.toml`'s `max_pattern_edges` now controls, so
+    /// a caller who lowers it is trusting a bound no test verified.
+    #[test]
+    fn the_pattern_edge_budget_is_a_hard_ceiling() {
+        let tmp = std::env::temp_dir().join("lain_pattern_budget");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        // Enough files across enough directories that the unbounded
+        // pairing would produce far more than the cap.
+        let mut refs = Vec::new();
+        for d in 0..6 {
+            for f in 0..4 {
+                let path = format!("src/dir{d}/file{f}.rs");
+                db.upsert_node(crate::schema::GraphNode::new(
+                    crate::schema::NodeType::File,
+                    format!("file{f}.rs"),
+                    path.clone(),
+                ))
+                .unwrap();
+                refs.push(PatternRef {
+                    file_path: path,
+                    value: "SHARED_CONSTANT".to_string(),
+                    source_line: 1,
+                });
+            }
+        }
+
+        for cap in [1usize, 3, 7] {
+            let limits = PatternLimits {
+                max_edges: cap,
+                ..PatternLimits::DEFAULT
+            };
+            let edges = resolve_pattern_edges(&db, &refs, limits);
+            assert!(
+                edges.len() <= cap,
+                "budget {cap} exceeded: produced {} edges",
+                edges.len()
+            );
+        }
+    }
+
+    /// And the budget must be reachable — a cap that always yields zero
+    /// would satisfy the ceiling test while breaking the feature.
+    #[test]
+    fn a_generous_budget_still_produces_pattern_edges() {
+        let tmp = std::env::temp_dir().join("lain_pattern_budget_generous");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let mut refs = Vec::new();
+        for d in 0..4 {
+            let path = format!("src/dir{d}/file.rs");
+            db.upsert_node(crate::schema::GraphNode::new(
+                crate::schema::NodeType::File,
+                "file.rs".to_string(),
+                path.clone(),
+            ))
+            .unwrap();
+            refs.push(PatternRef {
+                file_path: path,
+                value: "SHARED_CONSTANT".to_string(),
+                source_line: 1,
+            });
+        }
+
+        let edges = resolve_pattern_edges(&db, &refs, PatternLimits::DEFAULT);
+        assert!(
+            !edges.is_empty(),
+            "a shared literal across 4 directories should produce Pattern edges"
+        );
+        assert!(edges.iter().all(|e| e.edge_type == EdgeType::Pattern));
     }
 
     /// An unambiguous name is unaffected — this is the common case and

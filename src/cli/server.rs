@@ -83,6 +83,20 @@ pub async fn run_server(
                     );
                 }
             }
+
+            // Re-index this repo when its checkout changes.
+            // `RepoIndex::start_watcher` had a test but no production
+            // caller, so a federated repo was frozen at whatever commit
+            // it was first indexed at — the same staleness that left this
+            // repo's own graph 29 commits behind. The comment above
+            // ("the watcher would eventually pick up filesystem events")
+            // described a watcher that nothing started.
+            if let Err(e) = repo.start_watcher() {
+                tracing::warn!(
+                    "lain server: could not watch repo '{}' for re-index: {e}",
+                    id.as_str()
+                );
+            }
         }
     }
 
@@ -121,6 +135,9 @@ pub async fn run_server(
     // workspaces.yaml still works (no workspace tools, today's behavior).
     let workspaces = load_workspaces_for_server(config_path).ok().flatten();
     let repos_yaml = Some(config_path.to_path_buf());
+    // Captured before `fed` is moved into the server: the source watcher
+    // needs one root per indexed repo.
+    let fed_repo_paths = fed.repo_paths();
     let server = if let Some(workspaces) = workspaces {
         LainServer::with_federation_and_workspaces_with_attribution(
             fed,
@@ -157,6 +174,19 @@ pub async fn run_server(
 
     // Hot-reload subsystem: file watcher, Unix socket, rebuild loop.
     spawn_hot_reload(config_path, &server).await;
+
+    // Source-file watcher: keeps the volatile overlay fresh between
+    // reindexes. One per indexed repo — `spawn_config_watcher` above
+    // only watches `repos.yaml`/`workspaces.yaml`, not source.
+    for root in fed_repo_paths {
+        crate::server::ingest::background::start_source_watcher(root, server.clone());
+    }
+
+    // Reap expired `/ui/...` sessions; the HTTP transport creates one per
+    // interactive blast-radius link and nothing ever removed them.
+    crate::server::ingest::background::spawn_ui_session_reaper(
+        server.tool_executor.ctx.clone(),
+    );
 
     info!(
         "lain server: starting on {:?} transport (port {})",

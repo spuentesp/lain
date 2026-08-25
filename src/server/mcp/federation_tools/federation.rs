@@ -71,6 +71,8 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
         degraded: 0,
         unavailable: 0,
         missing: 0,
+        healthy: false,
+        ready_threshold: fed.ready_threshold(),
         total_nodes: fed.backend().node_count(),
         total_edges: fed.backend().edge_count(),
         memory_estimate_bytes: 0,
@@ -85,6 +87,15 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
         }
     }
     h.memory_estimate_bytes = (h.total_nodes as u64) * 200 + (h.total_edges as u64) * 100;
+
+    // `docs/REPOS_YAML.md`: "Fraction of repos that must reach `Ready`
+    // health before the federation reports `healthy`." An empty
+    // federation is healthy — there is nothing failing to be ready.
+    h.healthy = if h.total_repos == 0 {
+        true
+    } else {
+        (h.ready as f32 / h.total_repos as f32) >= h.ready_threshold
+    };
     h
 }
 
@@ -486,5 +497,65 @@ mod tests {
         let result = get_cross_repo_blast_radius(&fed, "lonely", 1..3).unwrap();
         assert_eq!(result.by_repo.get("repo-only").map(|v| v.len()).unwrap_or(0), 1);
         assert_eq!(result.total_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod ready_threshold_tests {
+    use super::*;
+    use crate::federation::graph_backend::PetgraphBackend;
+
+    fn empty_fed() -> (tempfile::TempDir, FederatedIndex) {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+        (tmp, FederatedIndex::new(backend))
+    }
+
+    /// `repos.yaml`'s `ready_threshold` is documented as the fraction of
+    /// repos that must be `Ready` "before the federation reports
+    /// `healthy`". Nothing read the setting, and `FederationHealth` had
+    /// no `healthy` field for it to report through, so the documented
+    /// behaviour did not exist at all.
+    #[test]
+    fn the_configured_threshold_is_reported_and_defaults_sanely() {
+        let (_tmp, fed) = empty_fed();
+        assert_eq!(
+            fed.ready_threshold(),
+            crate::federation::config::DEFAULT_READY_THRESHOLD
+        );
+
+        let h = get_federation_health(&fed);
+        assert_eq!(h.ready_threshold, crate::federation::config::DEFAULT_READY_THRESHOLD);
+        assert!(h.healthy, "an empty federation has nothing failing to be ready");
+    }
+
+    #[test]
+    fn the_threshold_is_settable_and_clamped() {
+        let (_tmp, fed) = empty_fed();
+        fed.set_ready_threshold(0.5);
+        assert_eq!(fed.ready_threshold(), 0.5);
+        assert_eq!(get_federation_health(&fed).ready_threshold, 0.5);
+
+        // A nonsense value in `repos.yaml` must not make `healthy`
+        // unreachable or trivially true.
+        fed.set_ready_threshold(4.2);
+        assert_eq!(fed.ready_threshold(), 1.0);
+        fed.set_ready_threshold(-1.0);
+        assert_eq!(fed.ready_threshold(), 0.0);
+    }
+
+    /// The loader must install the configured value, or the knob is
+    /// still decorative no matter what the health tool reports.
+    #[test]
+    fn the_loader_installs_the_configured_threshold() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/server/federation/loader.rs"),
+        )
+        .unwrap();
+        assert!(
+            src.contains("set_ready_threshold(config.ready_threshold)"),
+            "the loader must push `repos.yaml`'s ready_threshold into the federation"
+        );
     }
 }

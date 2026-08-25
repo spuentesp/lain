@@ -166,20 +166,9 @@ impl ToolContext {
         Some(bound)
     }
 
-    /// Replace the default empty presence + occupancy registries with
-    /// the live `Arc`s from the constructed `LainServer`. Called by
-    /// `LainMcpServer::with_server` after the orchestrator is built so
-    /// the handler dispatch path observes the same multiplayer state
-    /// the dedicated `register_agent` / `claim_files` tools do.
-    pub fn with_presence_and_occupancy(
-        mut self,
-        presence: Arc<PresenceRegistry>,
-        occupancy: Arc<OccupancyMap>,
-    ) -> Self {
-        self.presence = presence;
-        self.occupancy = occupancy;
-        self
-    }
+    // `with_presence_and_occupancy` was a second, unused way to install the
+    // live registries. `LainMcpServer::with_server` is the one that runs, and
+    // it assigns `ctx.presence` / `ctx.occupancy` directly.
 
     pub fn with_workspace(mut self, workspace: std::path::PathBuf) -> Self {
         self.workspace = workspace;
@@ -350,7 +339,7 @@ mod federation_binding_tests {
             Arc::new(Mutex::new(
                 GitSensor::new(&roots[0].1).expect("git sensor"),
             )),
-            Arc::new(LspPool::new(&roots[0].1, 1).unwrap()),
+            Arc::new(LspPool::new(&roots[0].1, 1, &crate::tuning::RuntimeConfig::default()).unwrap()),
             Arc::new(TuningConfig::default()),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             Arc::new(AsyncMutex::new(std::collections::HashMap::new())),

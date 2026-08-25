@@ -33,6 +33,6 @@ mod spec_tests;
 #[cfg(test)]
 mod executor_tests;
 
-pub use spec::{QuerySpec, GraphOp, QueryResult, QueryExplanation};
+pub use spec::{QuerySpec, GraphOp, QueryResult};
 pub use executor::Executor;
 pub use schema::describe_schema;

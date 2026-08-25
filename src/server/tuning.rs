@@ -227,15 +227,10 @@ pub fn load_tuning_config(workspace: &Path) -> TuningConfig {
     TuningConfig::default()
 }
 
-/// Save tuning config to .lain/tuning.toml, creating the directory if needed.
-pub fn save_tuning_config(workspace: &Path, config: &TuningConfig) -> std::io::Result<()> {
-    let dir = workspace.join(".lain");
-    std::fs::create_dir_all(&dir)?;
-    let contents = toml::to_string_pretty(config).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(dir.join("tuning.toml"), contents)?;
-    tracing::info!("Saved tuning config to {:?}", dir.join("tuning.toml"));
-    Ok(())
-}
+// `save_tuning_config` lived here: a writer for `.lain/tuning.toml`
+// with no caller and no test. `tuning.toml` is authored by hand (the
+// README documents editing it directly) and only ever read back by
+// `load_tuning_config`, so nothing in the product ever wrote one.
 
 #[cfg(test)]
 mod partial_config_tests {
@@ -273,6 +268,131 @@ mod partial_config_tests {
         assert_eq!(
             cfg.runtime.default_test_timeout_secs,
             RuntimeConfig::default().default_test_timeout_secs
+        );
+    }
+}
+
+#[cfg(test)]
+mod knob_reachability_tests {
+    //! Every documented tuning knob must be read by something.
+    //!
+    //! Seven of them were not. `.lain/tuning.toml` accepted
+    //! `default_command_timeout_secs`, `lsp_symbol_poll_timeout_secs`,
+    //! `lsp_symbol_poll_interval_ms`, `max_pattern_edges`,
+    //! `ui_session_ttl_secs`, `default_query_limit` and
+    //! `ready_threshold`, and nothing anywhere read any of them — in
+    //! several cases because the value they were meant to control was
+    //! still a literal a few files away, with the same number in it.
+    //! Editing the documented setting did nothing, silently.
+
+    use std::path::Path;
+
+    /// Source of every production `.rs` file, with `#[cfg(test)]` blocks
+    /// and `*_tests.rs` files excluded — a knob "read" only by its own
+    /// round-trip test is still dead in production.
+    fn production_sources() -> Vec<(String, String)> {
+        fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+        }
+        fn strip_tests(src: &str) -> String {
+            let mut out = String::new();
+            let mut i = 0;
+            while let Some(rel) = src[i..].find("#[cfg(test)]") {
+                let start = i + rel;
+                out.push_str(&src[i..start]);
+                let Some(open) = src[start..].find('{').map(|o| start + o) else { break };
+                let (mut depth, mut k) = (0usize, open);
+                for (idx, ch) in src[open..].char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                k = open + idx;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i = k + 1;
+            }
+            out.push_str(&src[i.min(src.len())..]);
+            out
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        files
+            .into_iter()
+            .filter(|p| {
+                !p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("_tests.rs"))
+            })
+            .filter_map(|p| {
+                let text = std::fs::read_to_string(&p).ok()?;
+                Some((p.display().to_string(), strip_tests(&text)))
+            })
+            .collect()
+    }
+
+    /// A knob counts as read when it appears somewhere other than the
+    /// file that declares it.
+    fn is_read(knob: &str, declaring_file: &str, sources: &[(String, String)]) -> bool {
+        sources.iter().any(|(path, text)| {
+            !path.ends_with(declaring_file)
+                && text.lines().any(|l| {
+                    let t = l.trim();
+                    !t.starts_with("//") && !t.starts_with("///") && t.contains(knob)
+                })
+        })
+    }
+
+    #[test]
+    fn every_tuning_knob_is_read_by_production_code() {
+        let sources = production_sources();
+        assert!(!sources.is_empty());
+
+        let knobs: &[(&str, &str)] = &[
+            ("max_pattern_edges", "tuning.rs"),
+            ("ui_session_ttl_secs", "tuning.rs"),
+            ("default_query_limit", "tuning.rs"),
+            ("default_command_timeout_secs", "tuning.rs"),
+            ("default_test_timeout_secs", "tuning.rs"),
+            ("lsp_symbol_poll_timeout_secs", "tuning.rs"),
+            ("lsp_symbol_poll_interval_ms", "tuning.rs"),
+            ("lsp_pool_size", "tuning.rs"),
+            ("nlp_max_threads", "tuning.rs"),
+            ("cochange_commit_window", "tuning.rs"),
+            ("cochange_min_pair_count", "tuning.rs"),
+            ("cochange_max_commit_files", "tuning.rs"),
+            // Lives in `federation/config.rs`, same failure mode.
+            ("ready_threshold", "federation/config.rs"),
+            ("max_concurrent_indexers", "federation/config.rs"),
+        ];
+
+        let mut unread = Vec::new();
+        for (knob, decl) in knobs {
+            if !is_read(knob, decl, &sources) {
+                unread.push(*knob);
+            }
+        }
+
+        assert!(
+            unread.is_empty(),
+            "these tuning knobs are accepted from `.lain/tuning.toml` and read \
+             by nothing — setting them does nothing, silently:\n  {}",
+            unread.join("\n  ")
         );
     }
 }

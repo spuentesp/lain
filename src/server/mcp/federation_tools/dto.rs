@@ -29,6 +29,13 @@ pub struct FederationHealth {
     pub total_nodes: usize,
     pub total_edges: usize,
     pub memory_estimate_bytes: u64,
+    /// Whether the ready fraction meets `repos.yaml`'s `ready_threshold`.
+    ///
+    /// This field did not exist, so the documented threshold had nothing
+    /// to report through and no caller could act on it.
+    pub healthy: bool,
+    /// The threshold `healthy` was computed against.
+    pub ready_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

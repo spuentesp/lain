@@ -55,6 +55,17 @@ pub struct HierarchicalSymbol {
 
 pub struct LspMultiplexer {
     bridge: LspBridge,
+    /// How long to keep asking the language server for document symbols
+    /// before giving up, and how long to wait between asks.
+    ///
+    /// These were literals (`2s` / `50ms`) here while
+    /// `RuntimeConfig::lsp_symbol_poll_timeout_secs` and
+    /// `lsp_symbol_poll_interval_ms` sat in `.lain/tuning.toml` with the
+    /// exact same default values and no reader — someone added the knobs
+    /// to match the constants and never replaced the constants. Editing
+    /// the documented setting did nothing.
+    poll_timeout: Duration,
+    poll_interval: Duration,
     /// ext -> language server configuration
     registry: HashMap<String, &'static LspConfig>,
     /// binary name -> started
@@ -65,13 +76,15 @@ pub struct LspMultiplexer {
 }
 
 impl LspMultiplexer {
-    pub fn new(workspace: &Path) -> Result<Self, LainError> {
+    pub fn new(workspace: &Path, runtime: &crate::tuning::RuntimeConfig) -> Result<Self, LainError> {
         let mut registry = HashMap::new();
         for (ext, config) in LANGUAGE_MAP {
             registry.insert(ext.to_string(), config);
         }
         Ok(Self {
             bridge: LspBridge::new(),
+            poll_timeout: Duration::from_secs(runtime.lsp_symbol_poll_timeout_secs),
+            poll_interval: Duration::from_millis(runtime.lsp_symbol_poll_interval_ms),
             registry,
             started: HashSet::new(),
             unavailable: HashSet::new(),
@@ -149,8 +162,8 @@ impl LspMultiplexer {
         // Wait for LSP to analyze (intelligent polling)
         let mut symbols = Vec::new();
         let start = std::time::Instant::now();
-        let poll_timeout = std::time::Duration::from_secs(2);
-        let tick = std::time::Duration::from_millis(50);
+        let poll_timeout = self.poll_timeout;
+        let tick = self.poll_interval;
 
         while start.elapsed() < poll_timeout {
             symbols = match tokio::time::timeout(LSP_REQUEST_TIMEOUT, self.bridge.get_document_symbols(&server_id, &uri)).await {
@@ -209,19 +222,7 @@ impl LspMultiplexer {
         }
         results
     }
-
-    pub async fn get_hover_info(&mut self, path: &Path, line: u32, col: u32) -> Option<String> {
-        let server_id = self.ensure_server(path).await.ok()?;
-        let uri = format!("file://{}", path.display());
-        
-        let position = Position::new(line, col);
-        let hover = self.bridge.get_hover(&server_id, &uri, position).await.ok()??;
-        match hover.contents {
-            lsp_types::HoverContents::Scalar(marked) => Some(marked_string_to_string(marked)),
-            lsp_types::HoverContents::Array(arr) => Some(arr.into_iter().map(marked_string_to_string).collect::<Vec<_>>().join("\n")),
-            lsp_types::HoverContents::Markup(m) => Some(m.value),
-        }
-    }
+    // (removed: had no caller and no test anywhere in the tree)
 
     /// Get all references to a symbol at a specific location
     pub async fn get_references(&mut self, path: &Path, line: u32, col: u32) -> Result<Vec<ReferenceLocation>, LainError> {
@@ -286,10 +287,23 @@ impl LspMultiplexer {
         }
     }
 
+    /// Report each registered extension with whether its language server
+    /// can actually be started.
+    ///
+    /// `unavailable` is a *negative cache*: it only gains entries once a
+    /// spawn has already failed, so on a fresh process it is empty and
+    /// every binary read as available. `get_health` renders this list, so
+    /// a fresh server told the agent that gopls, jdtls, omnisharp and ten
+    /// others were live on a machine where only rust-analyzer existed —
+    /// an agent trusting it would assume it could get real symbols out of
+    /// a `.go` file. `ensure_server` has always resolved the binary with
+    /// `which::which` before starting it; this now asks the same question
+    /// so the report matches the behaviour instead of contradicting it.
     pub fn get_supported_languages(&self) -> Vec<(String, String, bool)> {
         let mut langs = Vec::new();
         for (ext, config) in &self.registry {
-            let is_available = !self.unavailable.contains(config.binary);
+            let is_available =
+                !self.unavailable.contains(config.binary) && which::which(config.binary).is_ok();
             langs.push((ext.clone(), config.binary.to_string(), is_available));
         }
         langs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -323,13 +337,8 @@ impl LspMultiplexer {
         }
     }
 }
-
-fn marked_string_to_string(m: lsp_types::MarkedString) -> String {
-    match m {
-        lsp_types::MarkedString::String(s) => s,
-        lsp_types::MarkedString::LanguageString(ls) => ls.value,
-    }
-}
+// `marked_string_to_string` existed only to format hover contents for
+// `get_hover_info`, which was removed as dead.
 
 /// Map a friendly language name to its canonical file extension. Returns
 /// `None` if the input looks like an extension already (so we don't try to
@@ -430,10 +439,14 @@ impl Clone for LspPool {
 }
 
 impl LspPool {
-    pub fn new(workspace: &Path, size: usize) -> Result<Self, LainError> {
+    pub fn new(
+        workspace: &Path,
+        size: usize,
+        runtime: &crate::tuning::RuntimeConfig,
+    ) -> Result<Self, LainError> {
         let mut multiplexers = Vec::with_capacity(size);
         for _ in 0..size {
-            multiplexers.push(Arc::new(AsyncMutex::new(LspMultiplexer::new(workspace)?)));
+            multiplexers.push(Arc::new(AsyncMutex::new(LspMultiplexer::new(workspace, runtime)?)));
         }
         Ok(Self {
             multiplexers,
@@ -452,5 +465,55 @@ impl LspPool {
         for m in &self.multiplexers {
             m.lock().await.shutdown().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+
+    /// `get_health` renders `get_supported_languages`, so "available"
+    /// has to mean "this binary can actually be started", not "nothing
+    /// has failed yet". The negative cache alone reported every server
+    /// as live on a machine that had none of them installed.
+    #[test]
+    fn availability_reflects_what_is_installed_not_an_empty_negative_cache() {
+        let m = LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
+        let langs = m.get_supported_languages();
+        assert!(!langs.is_empty(), "registry should not be empty");
+
+        for (ext, binary, available) in &langs {
+            let on_path = which::which(binary).is_ok();
+            assert_eq!(
+                *available, on_path,
+                "{ext} -> {binary}: reported available={available} but which() says {on_path}"
+            );
+        }
+    }
+
+    /// The bug was specifically that a *fresh* multiplexer — one that
+    /// has never attempted a spawn, so `unavailable` is empty — claimed
+    /// everything worked. Pin that a binary that cannot exist is never
+    /// reported as available.
+    #[test]
+    fn a_binary_that_is_not_installed_is_never_reported_available() {
+        let mut m = LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
+        let bogus: &'static LspConfig = Box::leak(Box::new(LspConfig {
+            binary: "definitely-not-a-real-language-server-xyz",
+            install_cmd: None,
+        }));
+        m.registry.insert("zzz".to_string(), bogus);
+
+        assert!(m.unavailable.is_empty(), "fresh multiplexer has an empty negative cache");
+
+        let reported = m
+            .get_supported_languages()
+            .into_iter()
+            .find(|(ext, _, _)| ext == "zzz")
+            .expect("the injected extension should be reported");
+        assert!(
+            !reported.2,
+            "an uninstalled binary must report unavailable even before any spawn attempt"
+        );
     }
 }

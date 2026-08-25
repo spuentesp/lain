@@ -90,7 +90,13 @@ impl FederationManifest {
         }
         let bytes = bincode::serialize(self)
             .map_err(|e| LainError::Serialization(format!("bincode: {e}")))?;
-        std::fs::write(path, bytes)
+        // Write through a temp file and rename. A plain `fs::write`
+        // truncates the destination first, so a crash — or a reader
+        // arriving mid-write — sees a half-length bincode blob, and
+        // `Manifest::load` rejects it. That loses the federation's whole
+        // repo registry to an interrupted save. `graph::save_to_disk`
+        // already went through this helper; the manifest did not.
+        crate::cli::io::write_file_atomic(path, bytes)
             .map_err(|e| LainError::Io(format!("write manifest: {e}")))?;
         Ok(())
     }
@@ -101,5 +107,52 @@ impl FederationManifest {
 
     pub fn remove_repo(&mut self, id: &RepoId) {
         self.repos.retain(|r| r.id != *id);
+    }
+}
+
+#[cfg(test)]
+mod atomic_save_tests {
+    use super::*;
+
+    /// `save` must never leave a partially-written manifest where the
+    /// real one was. A plain `fs::write` truncates the destination
+    /// first, so an interrupted save destroys the federation's repo
+    /// registry — `load` then rejects the short bincode blob.
+    #[test]
+    fn save_replaces_the_file_atomically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("manifest.bin");
+
+        let entry = |id: &str| RepoEntry {
+            id: crate::federation::repo_id::RepoId::new(id).unwrap(),
+            source_kind: "workspace_dir".to_string(),
+            source_config: serde_yaml::Value::Null,
+            last_indexed_unix: 0,
+            content_hash: String::new(),
+            health: crate::federation::health::RepoHealth::Ready,
+        };
+
+        let mut first = FederationManifest::default();
+        first.add_repo(entry("alpha"));
+        first.save(&path).expect("first save");
+        assert!(path.exists(), "save creates parent directories");
+
+        // A second save must land whole, and must not leave the temp
+        // file behind for the next reader to trip over.
+        let mut second = FederationManifest::default();
+        second.add_repo(entry("beta"));
+        second.save(&path).expect("second save");
+
+        let loaded = FederationManifest::load_or_default(&path).expect("manifest still parses");
+        assert_eq!(loaded.repos.len(), 1);
+        assert_eq!(loaded.repos[0].id.as_str(), "beta");
+
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp file left behind: {leftovers:?}");
     }
 }

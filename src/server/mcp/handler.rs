@@ -1227,16 +1227,8 @@ impl LainMcpServer {
         Self::new(executor)
     }
 
-    /// Convenience: build a sidecar server directly from a read-only graph
-    /// and a freshly-allocated overlay.
-    pub fn from_read_only_graph(
-        graph: crate::graph::GraphDatabase,
-        overlay: crate::overlay::VolatileOverlay,
-        workspace: std::path::PathBuf,
-    ) -> Self {
-        let executor = crate::tools::ToolExecutor::new_read_only(graph, overlay, workspace);
-        Self::new(executor)
-    }
+    // `from_read_only_graph` was a convenience wrapper over `new_read_only`
+    // with no caller and no test; `new_read_only` remains the sidecar entry.
 
     /// Serve on a specific `SocketAddr`. Used by the sidecar so it can bind
     /// to `127.0.0.1:<port>` without going through `run_http`'s

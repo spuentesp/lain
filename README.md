@@ -4,6 +4,39 @@ LAIN builds a map of how all the code in your project connects — what calls wh
 
 <img width="1511" height="767" alt="Screenshot 2026-04-29 at 9 18 15 PM" src="https://github.com/user-attachments/assets/3bfbfe83-6813-416a-8dfc-c1c17959a00d" />
 
+## How it fits together
+
+```mermaid
+flowchart LR
+    A["AI Agent<br/>(Claude Code / Kimi / Cursor)"] -->|MCP<br/>JSON-RPC| L["lain"]
+    L -->|reads| FS[".lain/<br/>graph.bin"]
+    L -->|runs| ENG["LSP / NLP / git<br/>engines"]
+    L -->|answers| T["MCP tools<br/>(get_blast_radius,<br/>explain_symbol, …)"]
+    A --> T
+```
+
+`lain` is a long-running MCP server that indexes your code once and
+keeps it fresh while you work. The agent speaks MCP (JSON-RPC over
+stdio or HTTP); the server answers structural questions across one
+repo (`lain mcp`) or many repos (`lain server --config repos.yaml`).
+
+## Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| **[`docs/QUICKSTART.md`](docs/QUICKSTART.md)** | Five-minute tour |
+| **[`docs/USER_MANUAL.md`](docs/USER_MANUAL.md)** | Operator + agent manual |
+| **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** | How and why — design rationale |
+| **[`docs/TECHNICAL.md`](docs/TECHNICAL.md)** | Source-level internals |
+| **[`docs/FEDERATION.md`](docs/FEDERATION.md)** | Multi-repo operating guide |
+| **[`docs/REPOS_YAML.md`](docs/REPOS_YAML.md)** | `repos.yaml` schema |
+| **[`docs/query-language.md`](docs/query-language.md)** | `query_graph` ops-array reference |
+| **[`docs/quickstart-tools.md`](docs/quickstart-tools.md)** | All MCP tools |
+| **[`docs/command-center.md`](docs/command-center.md)** | Command Center SPA |
+| **[`docs/hot-reload.md`](docs/hot-reload.md)** | Config hot-reload |
+| **[`docs/multiplayer.md`](docs/multiplayer.md)** | Multi-agent coordination |
+| **[`docs/hooks.md`](docs/hooks.md)** | Pre-edit hooks |
+| **[`docs/INDEX.md`](docs/INDEX.md)** | Docs index |
 
 ## TL;DR
 
@@ -47,9 +80,9 @@ its `repos.yaml` / `workspaces.yaml` config without a restart.
 
 ---
 
-## The five commands
+## The commands
 
-After install, `lain` exposes exactly five subcommands:
+After install, `lain` exposes these subcommands:
 
 | Command | Purpose |
 |---------|---------|
@@ -58,16 +91,21 @@ After install, `lain` exposes exactly five subcommands:
 | `lain workspaces` | Manage `workspaces.yaml`. Create, list, show, activate (`use`), forget named groups of repos. |
 | `lain repos` | Manage `repos.yaml`. Add, list, remove a repo entry. |
 | `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
+| `lain oneshot` | One-shot MCP query: boots a transient `lain mcp` server, sends a single `tools/call`, prints the result as a table, and exits. For "just grep the symbols without keeping a server alive". |
+| `lain init` | Scaffold a `repos.yaml` for the current directory. Walks up for `.git`, then writes a minimal config pointing at the discovered workspace. |
 | `lain ask` | Single-user LLM-assisted query (uses `semantic_search` + `explain_symbol` heuristics). |
 | `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
 | `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs (reaping session files older than 30 days), presence registry, and — when `LAIN_URL`/`LAIN_SERVER_URL` is set — both server reachability **and the live MCP surface**, calling `tools/list` and failing if it errors or advertises zero tools. Exits 0 clean, 1 on a hard failure. |
 | `scripts/demo.sh` | Capability demonstration and benchmark. Boots a real server against a synthetic repo whose call graph is known by construction, checks lain's answers against that ground truth (not merely that it answered), then benchmarks the same tools against this repo at ~3.5k nodes. `--quick` skips the build and benchmark phases; `--json FILE` writes machine-readable results. Exits non-zero if any check fails. |
 
-The cut surface (`init`, `agents`, `hook`, `projects`, top-level
-`use`) is gone — those concerns are reached through the five commands
-above. `server` plus the two config CLIs (`workspaces`, `repos`)
-cover everything the prior surface did, scoped to a single project
-directory that owns a `repos.yaml`.
+The cut surface (`agents`, `hook`, `projects`, top-level `use`) is
+gone — those concerns are reached through the commands above. `server`
+plus the two config CLIs (`workspaces`, `repos`) cover everything the
+prior surface did, scoped to a single project directory that owns a
+`repos.yaml`.
+
+This table is checked against `lain --help` by
+`tests/cli_surface.rs`, so it cannot drift from the binary again.
 
 ---
 
@@ -104,7 +142,7 @@ source ~/.zshrc   # or ~/.bashrc
 # Verify
 lain --version
 
-# Show the five commands
+# Show the available commands
 lain --help
 ```
 

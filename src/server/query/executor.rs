@@ -5,8 +5,8 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::query::spec::{
     ConnectOp, Direction, EdgeSelector, FilterOp, GraphNodeRef, GraphPath, GraphEdgeRef,
-    GroupBy, GroupOp, LimitOp, QueryExplanation, QueryGroup, QueryMeta,
-    QueryResult, QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp, TypeSelector,
+    GroupBy, GroupOp, LimitOp, QueryGroup, QueryMeta, QueryMode,
+    QueryResult, QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp,
     FindOp,
 };
 use crate::tools::utils::{build_enriched_text, cosine_similarity};
@@ -26,6 +26,9 @@ pub struct Executor<'a> {
     /// on-demand embedding needs this to read a symbol's body off disk.
     workspace: &'a std::path::Path,
     nodes_visited: usize,
+    /// Cap applied when a query specifies no `limit` of its own.
+    /// 0 disables the cap.
+    default_limit: usize,
 }
 
 impl<'a> Executor<'a> {
@@ -35,21 +38,78 @@ impl<'a> Executor<'a> {
         embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
         workspace: &'a std::path::Path,
     ) -> Self {
+        Self::with_default_limit(
+            graph,
+            embedder,
+            embedding_cache,
+            workspace,
+            crate::tuning::IngestionConfig::default().default_query_limit,
+        )
+    }
+
+    /// Like [`Self::new`] but with an explicit default result cap, so
+    /// callers holding a `TuningConfig` can honour
+    /// `ingestion.default_query_limit`.
+    pub fn with_default_limit(
+        graph: &'a GraphDatabase,
+        embedder: &'a NlpEmbedder,
+        embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
+        workspace: &'a std::path::Path,
+        default_limit: usize,
+    ) -> Self {
         Self {
             graph,
             embedder,
             embedding_cache,
             workspace,
             nodes_visited: 0,
+            default_limit,
         }
     }
 
     /// Execute a query spec and return results
+    ///
+    /// `spec.mode` is honoured here. It used to be deserialized from the
+    /// caller's JSON and then never read by anything: an agent could send
+    /// `{"mode":"tool"}` — documented in `docs/query-language.md` as
+    /// "delegate to legacy named tool handlers" — and silently get
+    /// auto-mode behaviour instead, with nothing to indicate the option
+    /// had no effect. An advertised knob that does nothing is the same
+    /// failure as an advertised edge type nothing produces.
     pub fn execute(&mut self, spec: &QuerySpec) -> Result<QueryResult, LainError> {
         let start = Instant::now();
 
-        if let Some(name) = &spec.named {
-            return self.execute_named(name);
+        match spec.mode {
+            // Named handler only. Asking for it without naming one is a
+            // mistake worth reporting rather than quietly running the ops.
+            QueryMode::Tool => {
+                let Some(name) = &spec.named else {
+                    return Err(LainError::Mcp(
+                        "mode \"tool\" runs a named query, but no `named` was given; \
+                         set `named`, or use mode \"query\" to run the ops array"
+                            .to_string(),
+                    ));
+                };
+                return self.execute_named(name);
+            }
+            // Ops only. `named` alongside it is contradictory input.
+            QueryMode::Query => {
+                if spec.named.is_some() {
+                    return Err(LainError::Mcp(
+                        "mode \"query\" runs the ops array, but `named` was also given; \
+                         drop one of them, or use mode \"auto\""
+                            .to_string(),
+                    ));
+                }
+            }
+            // Documented as "try ops first, fallback to named"; in
+            // practice a spec carries one or the other, and a named
+            // query wins when both are somehow present.
+            QueryMode::Auto => {
+                if let Some(name) = &spec.named {
+                    return self.execute_named(name);
+                }
+            }
         }
 
         let mut current_nodes: Vec<GraphNodeRef> = Vec::new();
@@ -89,6 +149,24 @@ impl<'a> Executor<'a> {
             }
         }
 
+        // Apply the configured default cap when the query did not set its
+        // own `limit`. `ingestion.default_query_limit` is documented as
+        // "Default query result limit when not specified" and was never
+        // read, so `{"op":"find","type":"Function"}` returned every match
+        // — on this repo alone that is well over a thousand nodes into the
+        // caller's context. The trim is reported in `meta` rather than
+        // applied silently.
+        let asked_for_a_limit = spec
+            .ops
+            .iter()
+            .any(|op| matches!(op, crate::query::spec::GraphOp::Limit(_)));
+        let matched = current_nodes.len();
+        let mut truncated = false;
+        if !asked_for_a_limit && self.default_limit > 0 && matched > self.default_limit {
+            current_nodes.truncate(self.default_limit);
+            truncated = true;
+        }
+
         let exec_us = start.elapsed().as_micros() as u64;
         let count = current_nodes.len();
 
@@ -102,6 +180,8 @@ impl<'a> Executor<'a> {
                 exec_us,
                 nodes_visited: self.nodes_visited,
                 plan: None,
+                truncated,
+                matched_before_limit: truncated.then_some(matched),
             }),
             groups,
         })
@@ -189,6 +269,24 @@ impl<'a> Executor<'a> {
         depth_range: RangeInclusive<u32>,
         direction: PetDirection,
     ) -> Result<(Vec<GraphNodeRef>, Vec<GraphEdgeRef>, Vec<GraphPath>), LainError> {
+        // Reject an edge name that is not a real EdgeType rather than
+        // traversing and returning nothing. A silent empty answer reads
+        // as "no such relationship in this codebase" when it actually
+        // means "you named an edge that does not exist".
+        let unknown = edge_selector.unknown_types();
+        if !unknown.is_empty() {
+            let mut valid: Vec<String> = crate::server::schema::EdgeType::all()
+                .iter()
+                .map(|e| e.to_string())
+                .collect();
+            valid.sort();
+            return Err(LainError::Mcp(format!(
+                "unknown edge type(s) {}: valid edge types are {}",
+                unknown.join(", "),
+                valid.join(", ")
+            )));
+        }
+
         let mut found_nodes = Vec::new();
 
         let mut visited = HashMap::new();
@@ -208,7 +306,17 @@ impl<'a> Executor<'a> {
                 }
             }
 
-            if !depth_range.contains(&((current_depth + 1) as u32)) {
+            // Keep walking while the next hop is within `max`. This used
+            // to require the next depth to be *inside* the whole range,
+            // which conflates "which depths do I report" with "how far do
+            // I walk". Reaching depth `min` means passing through depths
+            // 1..min — exactly the ones a `min > 1` range excludes — so
+            // the walk stopped at the start node and any query with
+            // `{"depth":{"min":2,...}}` returned nothing at all. That form
+            // is documented in `docs/query-language.md`, and it answered
+            // empty rather than erroring, so it read as "no such
+            // relationship" instead of "this never worked".
+            if (current_depth as u32).saturating_add(1) > *depth_range.end() {
                 continue;
             }
 
@@ -372,83 +480,10 @@ impl<'a> Executor<'a> {
         let end = (limit.offset.saturating_add(limit.count)).min(edges.len());
         edges.drain(start..end);
     }
+    // `explain` built a `QueryExplanation` describing a query plan. It had
+    // no caller and no test, and nothing else ever constructed the type, so
+    // the whole explain path was unreachable.
 
-    pub fn explain(&self, spec: &QuerySpec) -> QueryExplanation {
-        let mut steps = Vec::new();
-        let mut warnings = Vec::new();
-
-        for (i, op) in spec.ops.iter().enumerate() {
-            match op {
-                crate::query::spec::GraphOp::Find(find) => {
-                    let mut desc = String::from("Find nodes");
-                    if let Some(ref ty) = find.type_selector {
-                        match ty {
-                            TypeSelector::Single(s) => desc.push_str(&format!(" of type '{}'", s)),
-                            TypeSelector::Or(types) => desc.push_str(&format!(" of types {:?}", types)),
-                        }
-                    }
-                    if let Some(ref name) = find.name {
-                        desc.push_str(&format!(" matching '{:?}'", name));
-                    }
-                    if let Some(ref label) = find.label_selector {
-                        desc.push_str(&format!(" with label '{:?}'", label));
-                    }
-                    steps.push(desc);
-                }
-                crate::query::spec::GraphOp::Connect(connect) => {
-                    let dir = match connect.direction {
-                        Direction::Outgoing => "outgoing",
-                        Direction::Incoming => "incoming",
-                        Direction::Both => "both",
-                    };
-                    let depth = connect.depth.to_range();
-                    let depth_str = if depth.start() == depth.end() {
-                        format!("{}", depth.start())
-                    } else {
-                        format!("{}..={}", depth.start(), depth.end())
-                    };
-                    steps.push(format!(
-                        "Traverse {:?} edges ({}) up to depth {}",
-                        connect.edge, dir, depth_str
-                    ));
-                }
-                crate::query::spec::GraphOp::Filter(filter) => {
-                    let mut desc = String::from("Filter results");
-                    if let Some(ref ty) = filter.type_filter {
-                        desc.push_str(&format!(", type = '{:?}'", ty));
-                    }
-                    if let Some(ref label) = filter.label_filter {
-                        desc.push_str(&format!(", label = '{:?}'", label));
-                    }
-                    steps.push(desc);
-                }
-                crate::query::spec::GraphOp::Sort(sort) => {
-                    steps.push(format!("Sort by {:?} ({:?})", sort.by, sort.direction));
-                }
-                crate::query::spec::GraphOp::Limit(limit) => {
-                    steps.push(format!("Limit to {} results, offset {}", limit.count, limit.offset));
-                }
-                crate::query::spec::GraphOp::Group(group) => {
-                    steps.push(format!("Group by {:?}", group.by));
-                }
-                crate::query::spec::GraphOp::SemanticFilter(sem) => {
-                    steps.push(format!("Semantic filter: like '{}' (threshold {:.2})", sem.like, sem.threshold));
-                }
-            }
-
-            if i > 0 {
-                if matches!(op, crate::query::spec::GraphOp::Connect(_)) {
-                    warnings.push("Deep traversals can be expensive on large graphs".into());
-                }
-            }
-        }
-
-        QueryExplanation {
-            plan: format!("Execute {} ops: {}", spec.ops.len(), steps.join(" -> ")),
-            steps,
-            warnings: if warnings.is_empty() { None } else { Some(warnings) },
-        }
-    }
 }
 
 impl From<Direction> for PetDirection {

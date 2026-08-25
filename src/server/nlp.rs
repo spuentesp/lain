@@ -105,10 +105,8 @@ impl NlpEmbedder {
 
         Self::with_max_threads(&model_path, &tokenizer_path, max_threads)
     }
-
-    pub fn new_with_paths(model_path: &Path, tokenizer_path: &Path) -> Result<Self, LainError> {
-        Self::with_max_threads(model_path, tokenizer_path, 0)
-    }
+    // `new_with_paths` forwarded to `with_max_threads` and had no caller;
+    // production builds embedders via `with_max_threads` / `new_with_threads`.
 
     /// Like new_with_paths but lets the caller cap intra-op threads.
     /// max_threads = 0 means auto-detect: min(system cores, 4).

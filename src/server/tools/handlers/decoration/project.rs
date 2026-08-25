@@ -49,14 +49,8 @@ impl Toolchain {
             Toolchain::Matlab => "matlab",
         }
     }
+    // (removed: had no caller and no test anywhere in the tree)
 
-    pub fn all_names() -> &'static [&'static str] {
-        &[
-            "python", "c", "cpp", "java", "csharp", "javascript",
-            "go", "rust", "ruby", "php", "typescript", "swift", "kotlin", "scala",
-            "zig", "r", "perl", "matlab",
-        ]
-    }
 }
 
 /// Project profile containing detected toolchains and metadata
@@ -85,10 +79,8 @@ impl ProjectProfile {
         self.toolchains.len() > 1
     }
 
-    /// List available toolchains as strings
-    pub fn available_toolchains(&self) -> Vec<String> {
-        self.toolchains.iter().map(|t| t.name().to_string()).collect()
-    }
+    // (removed: had no caller and no test anywhere in the tree)
+
 }
 
 /// Priority order for heuristic: Rust > Go > Python > Node > Java > C# > Ruby > PHP > C/C++

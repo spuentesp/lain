@@ -15,10 +15,14 @@ use async_trait::async_trait;
 use inventory;
 use serde_json::{Map, Value};
 
-/// Build the `(sessions, port)` pair the UI-session handlers need to
-/// emit an interactive `/ui/...` link. Returns `None` when no HTTP
+/// Build the `(sessions, port, ttl)` triple the UI-session handlers need
+/// to emit an interactive `/ui/...` link. Returns `None` when no HTTP
 /// transport is serving (stdio mode, `diagnostics_port == 0`) —
 /// emitting a link there produces a dead URL.
+///
+/// The TTL rides along because the handlers have no other route to the
+/// tuning config; it was a literal `600` in two places while
+/// `ingestion.ui_session_ttl_secs` carried the same default and no reader.
 fn ui_link(
     ctx: &ToolContext,
 ) -> Option<(
@@ -28,6 +32,7 @@ fn ui_link(
         >,
     >,
     u16,
+    std::time::Duration,
 )> {
     let port = ctx
         .diagnostics_port
@@ -35,7 +40,11 @@ fn ui_link(
     if port == 0 {
         None
     } else {
-        Some((&ctx.ui_sessions, port))
+        Some((
+            &ctx.ui_sessions,
+            port,
+            std::time::Duration::from_secs(ctx.tuning.ingestion.ui_session_ttl_secs),
+        ))
     }
 }
 
@@ -615,6 +624,7 @@ impl ToolHandler for QueryGraphHandler {
             &ctx.presence,
             &ctx.occupancy,
             Some(args),
+            ctx.tuning.ingestion.default_query_limit,
         )
     }
 }
@@ -751,7 +761,7 @@ impl ToolHandler for RunBuildHandler {
             opt_str_arg(args, "cwd")
         };
         let release = bool_arg(args, "release").unwrap_or(false);
-        handlers::execution::run_build(&ctx.graph, &ctx.overlay, Some(&cwd), release).await
+        handlers::execution::run_build(&ctx.graph, &ctx.overlay, Some(&cwd), release, &ctx.tuning.runtime).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&RunBuildHandler));
@@ -826,7 +836,7 @@ impl ToolHandler for RunClippyHandler {
             opt_str_arg(args, "cwd")
         };
         let fix = bool_arg(args, "fix").unwrap_or(false);
-        handlers::execution::run_clippy(&ctx.graph, &ctx.overlay, Some(&cwd), fix).await
+        handlers::execution::run_clippy(&ctx.graph, &ctx.overlay, Some(&cwd), fix, &ctx.tuning.runtime).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&RunClippyHandler));

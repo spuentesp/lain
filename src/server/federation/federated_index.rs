@@ -38,6 +38,15 @@ pub struct FederatedIndex {
     /// through the overlay. `None` until [`Self::install_overlay`]
     /// is called (the test harness never calls it).
     federation_overlay: RwLock<Option<Arc<VolatileOverlay>>>,
+    /// Fraction of repos that must reach `Ready` before the federation
+    /// reports itself healthy. From `repos.yaml`'s `ready_threshold`.
+    ///
+    /// `docs/REPOS_YAML.md` documents this as "Fraction of repos that
+    /// must reach `Ready` health before the federation reports
+    /// `healthy`" — but nothing read the setting and `FederationHealth`
+    /// had no `healthy` field at all, so the documented behaviour did
+    /// not exist in any form.
+    ready_threshold: RwLock<f32>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -67,7 +76,19 @@ impl FederatedIndex {
             backend,
             symbol_to_repos: DashMap::new(),
             federation_overlay: RwLock::new(None),
+            ready_threshold: RwLock::new(crate::federation::config::DEFAULT_READY_THRESHOLD),
         }
+    }
+
+    /// Install the readiness threshold from `repos.yaml`.
+    pub fn set_ready_threshold(&self, threshold: f32) {
+        *self.ready_threshold.write() = threshold.clamp(0.0, 1.0);
+    }
+
+    /// Fraction of repos that must be `Ready` for the federation to
+    /// report healthy.
+    pub fn ready_threshold(&self) -> f32 {
+        *self.ready_threshold.read()
     }
 
     /// Wire the federation's shared `VolatileOverlay` into every

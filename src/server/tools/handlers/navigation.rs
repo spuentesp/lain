@@ -65,7 +65,7 @@ pub async fn get_call_chain(
     overlay: &VolatileOverlay,
     from: &str,
     to: &str,
-    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16)>,
+    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16, std::time::Duration)>,
 ) -> Result<String, LainError> {
     let start = resolve_node(graph, overlay, from)?;
     let end = resolve_node(graph, overlay, to)?;
@@ -118,14 +118,14 @@ pub async fn get_call_chain(
     let mut output = format!("## Call Chain: {} -> {}\n\n{}", from, to, path.join(" → "));
 
     // Store UI session if rich format requested
-    if let Some((sessions, port)) = ui_sessions {
+    if let Some((sessions, port, ttl)) = ui_sessions {
         let session_id = Uuid::new_v4().to_string();
         let session = UiSession {
             id: session_id.clone(),
             session_type: "call-chain".to_string(),
             created_at: std::time::SystemTime::now(),
             expires_at: std::time::SystemTime::now()
-                + std::time::Duration::from_secs(600),
+                + ttl,
             data: UiSessionData::CallChain {
                 from: from.to_string(),
                 to: to.to_string(),

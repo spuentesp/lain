@@ -132,12 +132,20 @@ pub fn parse_openapi(content: &str, spec_path: &str) -> Vec<OpenApiOperation> {
 pub fn enrich_with_openapi(
     graph: &GraphDatabase,
     spec_path: &Path,
+    root: &Path,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
     }
+    // `root` is needed only to key nodes the way the rest of the graph is
+    // keyed. The walker yields absolute paths; every other node path is
+    // relative to the workspace, and the orphan sweep compares against
+    // `graph_path`-reduced tracked files — so an absolute path made these
+    // nodes look untracked and they were pruned in the same index pass
+    // that created them.
+
     let content = std::fs::read_to_string(spec_path)?;
-    let operations = parse_openapi(&content, &spec_path.to_string_lossy());
+    let operations = parse_openapi(&content, &crate::graph::graph_path(root, spec_path));
 
     let mut count = 0;
     for op in &operations {
@@ -173,6 +181,21 @@ pub fn enrich_with_openapi(
 }
 
 /// Scan workspace for OpenAPI specs
+/// Largest prefix read when deciding whether a file is an OpenAPI spec.
+const SPEC_SNIFF_BYTES: usize = 8 * 1024;
+
+/// Cheap test for "does this look like an OpenAPI/Swagger document".
+/// Reads at most [`SPEC_SNIFF_BYTES`] and never loads the whole file.
+fn sniff_is_openapi(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let mut buf = vec![0u8; SPEC_SNIFF_BYTES];
+    let Ok(n) = f.read(&mut buf) else { return false };
+    buf.truncate(n);
+    let head = String::from_utf8_lossy(&buf);
+    head.contains("openapi") || head.contains("swagger")
+}
+
 pub fn scan_workspace(
     graph: &GraphDatabase,
     root: &Path,
@@ -188,18 +211,28 @@ pub fn scan_workspace(
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        let is_spec = name.contains("openapi") || name.contains("swagger") ||
-           matches!(path.extension().and_then(|e| e.to_str()), Some("yaml" | "yml" | "json"));
+        let named_like_a_spec = name.contains("openapi") || name.contains("swagger");
+        let spec_extension = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("yaml" | "yml" | "json")
+        );
+        if !named_like_a_spec && !spec_extension {
+            continue;
+        }
 
-        if is_spec {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if content.contains("openapi") || content.contains("swagger") {
-                    match enrich_with_openapi(graph, path) {
-                        Ok(n) => count += n,
-                        Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
-                    }
-                }
-            }
+        // Sniff a bounded prefix rather than reading the file whole.
+        // This previously did `read_to_string` on *every* `.json` and
+        // `.yaml` in the tree just to test for the substring "openapi" —
+        // lockfiles, fixtures and vendored bundles included. A spec
+        // declares its version in the first few lines, so a prefix is
+        // enough and a huge file costs a bounded read instead of its
+        // full size in memory.
+        if !sniff_is_openapi(path) {
+            continue;
+        }
+        match enrich_with_openapi(graph, path, root) {
+            Ok(n) => count += n,
+            Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
         }
     }
 

@@ -104,12 +104,20 @@ fn to_snake_case(name: &str) -> String {
 pub fn enrich_with_proto(
     graph: &GraphDatabase,
     proto_path: &Path,
+    root: &Path,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
     }
+    // `root` is needed only to key nodes the way the rest of the graph is
+    // keyed. The walker yields absolute paths; every other node path is
+    // relative to the workspace, and the orphan sweep compares against
+    // `graph_path`-reduced tracked files — so an absolute path made these
+    // nodes look untracked and they were pruned in the same index pass
+    // that created them.
+
     let content = std::fs::read_to_string(proto_path)?;
-    let services = parse_proto(&content, &proto_path.to_string_lossy());
+    let services = parse_proto(&content, &crate::graph::graph_path(root, proto_path));
 
     let mut count = 0;
     for svc in &services {
@@ -160,7 +168,7 @@ pub fn scan_workspace(
     for entry in walker.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("proto") {
-            match enrich_with_proto(graph, path) {
+            match enrich_with_proto(graph, path, root) {
                 Ok(n) => count += n,
                 Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
             }

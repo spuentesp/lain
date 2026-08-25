@@ -122,12 +122,7 @@ pub fn serve_sse(
     SseStream { rx, backlog }
 }
 
-/// Static placeholder body for `GET /events` until Task 11 wires the
-/// real streaming body. Emits exactly one well-formed SSE frame so a
-/// `curl -N` client sees a valid `text/event-stream` response shape.
-pub fn sse_placeholder_body() -> Vec<u8> {
-    b"event: ready\ndata: {}\n\n".to_vec()
-}
+// (removed: had no caller and no test anywhere in the tree)
 
 #[cfg(test)]
 mod tests {

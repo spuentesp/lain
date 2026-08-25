@@ -84,7 +84,12 @@ impl QuerySpec {
                     ..Default::default()
                 }),
                 GraphOp::Connect(ConnectOp {
-                    edge: EdgeSelector::Single("Defines".into()),
+                    // `Defines` is not an EdgeType. File -> Symbol is
+                    // `Contains`. The documented schema was purged of
+                    // `Defines`/`Import`/`TestedBy` once; this prebuilt
+                    // table kept them, so the named queries below shipped
+                    // matching nothing.
+                    edge: EdgeSelector::Single("Contains".into()),
                     direction: Direction::Outgoing,
                     depth: DepthSpec::Single(1),
                     target: Some(Box::new(FindOp {
@@ -93,18 +98,10 @@ impl QuerySpec {
                     })),
                 }),
             ]),
-            "get_function_imports" => QuerySpec::new(vec![
-                GraphOp::Find(FindOp {
-                    type_selector: Some(TypeSelector::Single("Function".into())),
-                    ..Default::default()
-                }),
-                GraphOp::Connect(ConnectOp {
-                    edge: EdgeSelector::Single("Import".into()),
-                    direction: Direction::Outgoing,
-                    depth: DepthSpec::Single(1),
-                    target: None,
-                }),
-            ]),
+            // "get_function_imports" was removed. It connected over
+            // `Import`, which is not an EdgeType at all; the closest real
+            // one, `Imports`, has no producer in any indexer, so the query
+            // could only ever return nothing.
             "get_callers" => QuerySpec::new(vec![
                 GraphOp::Find(FindOp::default()),
                 GraphOp::Connect(ConnectOp {
@@ -138,18 +135,9 @@ impl QuerySpec {
                     })),
                 }),
             ]),
-            "get_test_coverage" => QuerySpec::new(vec![
-                GraphOp::Find(FindOp {
-                    type_selector: Some(TypeSelector::Single("Function".into())),
-                    ..Default::default()
-                }),
-                GraphOp::Connect(ConnectOp {
-                    edge: EdgeSelector::Single("TestedBy".into()),
-                    direction: Direction::Incoming,
-                    depth: DepthSpec::Single(1),
-                    target: None,
-                }),
-            ]),
+            // "get_test_coverage" was removed. It connected over
+            // `TestedBy`, which is not an EdgeType and has no equivalent —
+            // nothing in the graph records a test-to-subject relationship.
             "get_deprecated_functions" => QuerySpec::new(vec![GraphOp::Find(FindOp {
                 type_selector: Some(TypeSelector::Single("Function".into())),
                 label_selector: Some(LabelSelector::Single("deprecated".into())),
@@ -268,6 +256,37 @@ impl EdgeSelector {
             EdgeSelector::Or(types) => types.iter().any(|t| t == edge_type),
             EdgeSelector::Not(types) => !types.iter().any(|t| t == edge_type),
         }
+    }
+
+    /// Every edge name this selector mentions, in any variant.
+    pub fn named_types(&self) -> &[String] {
+        match self {
+            EdgeSelector::Single(s) => std::slice::from_ref(s),
+            EdgeSelector::Or(types) | EdgeSelector::Not(types) => types,
+        }
+    }
+
+    /// Names that are not real [`EdgeType`]s.
+    ///
+    /// Edge names are matched as raw strings against
+    /// `edge.edge_type.to_string()`, so a name that does not exist simply
+    /// never matches and the traversal returns `count: 0` — indistinguishable
+    /// from a correct query over a part of the graph that happens to be
+    /// empty. That is how `describe_schema`'s own `file_functions` example
+    /// shipped connecting over `"Defines"`, an edge that has never existed:
+    /// nothing ever failed, it just always answered nothing. In a `Not`
+    /// selector a typo is worse than useless — it silently *widens* the
+    /// match to every edge in the graph.
+    pub fn unknown_types(&self) -> Vec<String> {
+        let valid: std::collections::HashSet<String> = crate::server::schema::EdgeType::all()
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+        self.named_types()
+            .iter()
+            .filter(|n| !valid.contains(*n))
+            .cloned()
+            .collect()
     }
 }
 
@@ -684,6 +703,18 @@ pub struct QueryMeta {
     pub nodes_visited: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// Set when the default result cap trimmed the answer. A query that
+    /// specifies its own `limit` never sets this.
+    ///
+    /// The cap has to be visible: silently returning 100 of 1500 matches
+    /// is indistinguishable from a codebase that only has 100, which is
+    /// the same failure as an edge type nothing produces.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub truncated: bool,
+    /// How many nodes matched before the default cap was applied. Only
+    /// present when `truncated` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_before_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -693,13 +724,10 @@ pub struct QueryGroup {
     pub count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryExplanation {
-    pub plan: String,
-    pub steps: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warnings: Option<Vec<String>>,
-}
+// `QueryExplanation` was only ever constructed by `Executor::explain`,
+// which had no caller and no test. With that gone the type could not be
+// produced by anything, so it went with it rather than staying as a
+// re-exported shape no code path can return.
 
 #[cfg(test)]
 mod tests {
@@ -725,5 +753,111 @@ mod tests {
     fn test_named_query() {
         let spec = QuerySpec::named("get_blast_radius").unwrap();
         assert!(!spec.ops.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod named_query_validity_tests {
+    use super::*;
+    use crate::server::schema::{EdgeType, NodeType};
+    use std::collections::HashSet;
+
+    /// Every prebuilt query must name real, actually-produced types.
+    ///
+    /// `describe_schema`'s type lists were rebuilt from the enums to stop
+    /// them advertising `Defines`, `Import` and `TestedBy` — none of which
+    /// exist. This table was not, and kept all three: `get_file_functions`
+    /// connected over `Defines`, `get_function_imports` over `Import`, and
+    /// `get_test_coverage` over `TestedBy`. Each shipped as a named,
+    /// documented, prebuilt query that could only ever match nothing.
+    #[test]
+    fn every_named_query_uses_real_indexed_edges() {
+        let names = [
+            "get_blast_radius",
+            "get_call_chain",
+            "get_file_functions",
+            "get_callers",
+            "get_callees",
+            "get_module_functions",
+            "get_deprecated_functions",
+        ];
+
+        let valid: HashSet<String> = EdgeType::all().iter().map(|e| e.to_string()).collect();
+        let indexed: HashSet<String> = EdgeType::all()
+            .iter()
+            .filter(|e| e.is_indexed())
+            .map(|e| e.to_string())
+            .collect();
+
+        for name in names {
+            let spec = QuerySpec::named(name)
+                .unwrap_or_else(|| panic!("named query `{name}` should exist"));
+            for op in &spec.ops {
+                if let GraphOp::Connect(c) = op {
+                    for edge in c.edge.named_types() {
+                        assert!(
+                            valid.contains(edge),
+                            "named query `{name}` connects over `{edge}`, which is not an EdgeType"
+                        );
+                        assert!(
+                            indexed.contains(edge),
+                            "named query `{name}` connects over `{edge}`, which no indexer \
+                             produces — it can only ever return nothing"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Node types named by prebuilt queries must be real too.
+    #[test]
+    fn every_named_query_uses_real_node_types() {
+        let valid: HashSet<String> = NodeType::all().iter().map(|t| t.to_string()).collect();
+        for name in [
+            "get_file_functions",
+            "get_module_functions",
+            "get_deprecated_functions",
+        ] {
+            let spec = QuerySpec::named(name).unwrap();
+            let json = serde_json::to_value(&spec).unwrap();
+            fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+                match v {
+                    serde_json::Value::Object(m) => {
+                        for (k, val) in m {
+                            if k == "type" {
+                                if let serde_json::Value::String(s) = val {
+                                    out.push(s.clone());
+                                }
+                            }
+                            walk(val, out);
+                        }
+                    }
+                    serde_json::Value::Array(a) => a.iter().for_each(|i| walk(i, out)),
+                    _ => {}
+                }
+            }
+            let mut types = Vec::new();
+            walk(&json, &mut types);
+            for t in types {
+                assert!(
+                    valid.contains(&t),
+                    "named query `{name}` uses node type `{t}`, which is not a NodeType"
+                );
+            }
+        }
+    }
+
+    /// The three removed queries must stay gone rather than being
+    /// reinstated pointing at the same fictional edges.
+    #[test]
+    fn the_queries_built_on_fictional_edges_are_not_reinstated() {
+        for gone in ["get_function_imports", "get_test_coverage"] {
+            assert!(
+                QuerySpec::named(gone).is_none(),
+                "`{gone}` connected over an edge that does not exist; if it is \
+                 brought back it needs a real, produced edge behind it"
+            );
+        }
     }
 }

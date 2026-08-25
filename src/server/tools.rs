@@ -32,7 +32,8 @@ use serde::{Deserialize, Serialize};
 use reqwest::Client;
 
 pub use definitions::ToolDefinition;
-use utils::*;
+// `use utils::*;` was only needed by `augment_knowledge`'s
+// `resolve_node_at_location` call, which was removed with it.
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum JobState {
@@ -143,12 +144,23 @@ impl ToolExecutor {
         let jobs_path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         if let Ok(contents) = std::fs::read_to_string(&jobs_path) {
             let jobs_registry = Arc::clone(&jobs_registry);
+            let jobs_path_for_log = jobs_path.clone();
             task::spawn(async move {
-                if let Ok(vec) = serde_json::from_str::<Vec<JobInfo>>(&contents) {
-                    let mut guard = jobs_registry.lock().await;
-                    for j in vec {
-                        guard.insert(j.id.clone(), j);
+                match serde_json::from_str::<Vec<JobInfo>>(&contents) {
+                    Ok(vec) => {
+                        let mut guard = jobs_registry.lock().await;
+                        for j in vec {
+                            guard.insert(j.id.clone(), j);
+                        }
                     }
+                    // A store that exists but will not parse means jobs
+                    // were lost, most likely to an interrupted write.
+                    // Skipping in silence made that indistinguishable
+                    // from having had no jobs at all.
+                    Err(e) => tracing::warn!(
+                        "job store at {jobs_path_for_log} could not be read ({e}); \
+                         previously running jobs will not be resumed"
+                    ),
                 }
             });
         }
@@ -204,14 +216,15 @@ impl ToolExecutor {
             crate::git::GitSensor::new(&git_root)
                 .expect("sidecar git sensor must succeed after stub init"),
         ));
-        let lsp_root = match crate::lsp::LspPool::new(&workspace, 1) {
+        let runtime = crate::tuning::load_tuning_config(&workspace).runtime;
+        let lsp_root = match crate::lsp::LspPool::new(&workspace, 1, &runtime) {
             Ok(pool) => pool,
             Err(_) => {
                 // `LspPool::new` only fails on unexpected errors; an empty
                 // multiplex registry is fine for the sidecar, so retry on
                 // the stub root if the workspace cannot be used.
                 let _ = Self::ensure_stub_git_repo();
-                crate::lsp::LspPool::new(&git_root, 1).unwrap_or_else(|e| {
+                crate::lsp::LspPool::new(&git_root, 1, &runtime).unwrap_or_else(|e| {
                     panic!("sidecar lsp pool fallback failed: {e}");
                 })
             }
@@ -240,13 +253,26 @@ impl ToolExecutor {
         }
     }
 
-    async fn persist_jobs_snapshot(jobs: Arc<AsyncMutex<HashMap<String, JobInfo>>>) -> Result<(), ()> {
+    /// Persist the job registry for resumeability.
+    ///
+    /// This used to `fs::write` directly and discard the result with
+    /// `let _ =`, then return `Ok(())` either way — so it reported
+    /// success having written nothing, and a crash mid-write left a
+    /// truncated `jobs.json` that the loader silently skipped. Same
+    /// shape as the torn audit line: a partial write plus a tolerant
+    /// reader is indistinguishable from "there were no jobs".
+    async fn persist_jobs_snapshot(
+        jobs: Arc<AsyncMutex<HashMap<String, JobInfo>>>,
+    ) -> Result<(), LainError> {
         let path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
-        let guard = jobs.lock().await;
-        let vec: Vec<JobInfo> = guard.values().cloned().collect();
-        if let Ok(json) = serde_json::to_string(&vec) {
-            let _ = std::fs::write(&path, json);
-        }
+        let vec: Vec<JobInfo> = {
+            let guard = jobs.lock().await;
+            guard.values().cloned().collect()
+        };
+        let json = serde_json::to_string(&vec)
+            .map_err(|e| LainError::Serialization(format!("jobs snapshot: {e}")))?;
+        crate::cli::io::write_file_atomic(std::path::Path::new(&path), json)
+            .map_err(|e| LainError::Io(format!("write {path}: {e}")))?;
         Ok(())
     }
 
@@ -326,7 +352,9 @@ impl ToolExecutor {
                                 let _ = client.post(&url).json(&payload).send().await;
                             }
                         }
-                        let _ = Self::persist_jobs_snapshot(Arc::clone(&jobs_registry)).await;
+                        if let Err(e) = Self::persist_jobs_snapshot(Arc::clone(&jobs_registry)).await {
+                            tracing::warn!("job snapshot not persisted: {e}");
+                        }
                     });
 
                     return Ok(format!("{{\"job_id\":\"{}\"}}", job_id));
@@ -610,65 +638,17 @@ impl ToolExecutor {
         Ok(sections.join(""))
     }
 
-    /// On-demand ingestion of references for a specific symbol (Augmentation)
-    pub async fn augment_knowledge(&self, symbol_name: &str) -> Result<(), LainError> {
-        let node = if let Some(n) = self.ctx.overlay.get_node(symbol_name) {
-            Some(n)
-        } else {
-            self.ctx.graph.get_node(symbol_name)?
-        };
+    // `augment_knowledge` lived here: an on-demand LSP reference fetch
+    // for a symbol that has no `Calls` edges yet. It had no caller and no
+    // test, so it never ran once. It also duplicates the resolve phase
+    // (`resolve_call_edges`), and wiring it into a query path would put
+    // an unbounded language-server round trip inside a tool call.
+    //
+    // When a file genuinely has definitions and no call edges that is an
+    // indexing gap, and `find_dead_code` already reports it as one rather
+    // than silently guessing. Fixing that belongs in the resolve phase,
+    // not in a lazy side-channel that no code path reaches.
 
-        let Some(target_node) = node else { return Ok(()); };
-
-        if let Ok(edges) = self.ctx.graph.get_edges_from(&target_node.id) {
-            if edges.iter().any(|e| e.edge_type == crate::schema::EdgeType::Calls) {
-                return Ok(());
-            }
-        }
-
-        info!("Augmenting knowledge for '{}' on-demand", symbol_name);
-
-        let refs = {
-            let lsp = self.ctx.lsp_pool.next();
-            let mut lsp = lsp.lock().await;
-            lsp.get_references(
-                std::path::Path::new(&target_node.path),
-                target_node.line_start.unwrap_or(0),
-                0
-            ).await.unwrap_or_default()
-        };
-
-        for r in refs {
-            let path_str = r.path.to_string_lossy().to_string();
-            if let Some(source_node) = resolve_node_at_location(&self.ctx.graph, &self.ctx.overlay, &path_str, r.line) {
-                if source_node.id != target_node.id {
-                    let edge = crate::schema::GraphEdge::new(
-                        crate::schema::EdgeType::Calls,
-                        source_node.id.clone(),
-                        target_node.id.clone()
-                    );
-                    self.ctx.graph.insert_edge(&edge)?;
-                }
-            } else {
-                let mut ghost_node = crate::schema::GraphNode::new(
-                    crate::schema::NodeType::Function,
-                    format!("unknown:{}", r.line),
-                    path_str.clone()
-                );
-                ghost_node.is_hydrated = false;
-                self.ctx.graph.upsert_node(ghost_node.clone())?;
-
-                let edge = crate::schema::GraphEdge::new(
-                    crate::schema::EdgeType::Calls,
-                    ghost_node.id.clone(),
-                    target_node.id.clone()
-                );
-                self.ctx.graph.insert_edge(&edge)?;
-            }
-        }
-
-        Ok(())
-    }
 }
 
 #[doc(hidden)]
@@ -682,7 +662,8 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
         }),
     ));
     let lsp_pool = Arc::new(
-        crate::lsp::LspPool::new(Path::new("."), 2).expect("lsp pool"),
+        crate::lsp::LspPool::new(Path::new("."), 2, &crate::tuning::RuntimeConfig::default())
+            .expect("lsp pool"),
     );
     let tuning = Arc::new(crate::tuning::TuningConfig::default());
     let cross_encoder = crate::nlp::CrossEncoder::from_dir(Path::new("/nonexistent"));

@@ -394,7 +394,7 @@ mod tests {
         .expect("write");
 
         let lsp = Arc::new(AsyncMutex::new(
-            LspMultiplexer::new(tmp.path()).expect("lsp mux"),
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default()).expect("lsp mux"),
         ));
         // These tests verify the tree-sitter fallback, not a real LSP server.
         // Mark rust-analyzer unavailable so no child process is spawned; the
@@ -456,7 +456,7 @@ mod tests {
         std::fs::write(&file, "pub fn hello() {}\n").expect("write");
 
         let lsp = Arc::new(AsyncMutex::new(
-            LspMultiplexer::new(tmp.path()).expect("lsp mux"),
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default()).expect("lsp mux"),
         ));
         // These tests verify the tree-sitter fallback, not a real LSP server.
         // Mark rust-analyzer unavailable so no child process is spawned; the

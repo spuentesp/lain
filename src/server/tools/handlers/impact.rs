@@ -15,6 +15,9 @@ use uuid::Uuid;
 /// insert races the agent's immediate fetch of the URL we return.
 /// `port` is the actual HTTP listener port (stdio mode passes none and
 /// the link is never emitted).
+/// `ttl` comes from `IngestionConfig::ui_session_ttl_secs`. It was a
+/// literal `600` here and in `navigation.rs` while the documented knob
+/// carried the same default and no reader, so editing it did nothing.
 async fn store_ui_session_and_append_link(
     sessions: &Arc<AsyncMutex<HashMap<String, UiSession>>>,
     port: u16,
@@ -22,13 +25,14 @@ async fn store_ui_session_and_append_link(
     data: UiSessionData,
     url_path: &str,
     output: &mut String,
+    ttl: std::time::Duration,
 ) {
     let session_id = Uuid::new_v4().to_string();
     let session = UiSession {
         id: session_id.clone(),
         session_type: session_type.to_string(),
         created_at: std::time::SystemTime::now(),
-        expires_at: std::time::SystemTime::now() + std::time::Duration::from_secs(600),
+        expires_at: std::time::SystemTime::now() + ttl,
         data,
     };
 
@@ -53,7 +57,7 @@ pub async fn get_blast_radius(
     overlay: &VolatileOverlay,
     symbol: &str,
     include_coupling: bool,
-    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16)>,
+    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16, std::time::Duration)>,
 ) -> Result<String, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
@@ -242,12 +246,12 @@ pub async fn get_blast_radius(
     }
 
     // Store UI session if rich format requested
-    if let Some((sessions, port)) = ui_sessions {
+    if let Some((sessions, port, ttl)) = ui_sessions {
         let data = UiSessionData::BlastRadius {
             symbol: symbol.to_string(),
             nodes: session_nodes,
         };
-        store_ui_session_and_append_link(sessions, port, "blast-radius", data, "blast-radius", &mut output).await;
+        store_ui_session_and_append_link(sessions, port, "blast-radius", data, "blast-radius", &mut output, ttl).await;
         output.push_str("\nClick nodes to mark approved, then describe your selection to the agent.");
     }
 
@@ -258,7 +262,7 @@ pub async fn get_coupling_radar(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
-    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16)>,
+    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16, std::time::Duration)>,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
 
@@ -282,13 +286,13 @@ pub async fn get_coupling_radar(
     );
 
     // Store UI session if rich format requested
-    if let Some((sessions, port)) = ui_sessions {
+    if let Some((sessions, port, ttl)) = ui_sessions {
         let data = UiSessionData::Coupling {
             symbol: symbol.to_string(),
             matrix: vec![],
             files: partners.iter().map(|(p, _)| p.clone()).take(20).collect(),
         };
-        store_ui_session_and_append_link(sessions, port, "coupling", data, "coupling", &mut output).await;
+        store_ui_session_and_append_link(sessions, port, "coupling", data, "coupling", &mut output, ttl).await;
         output.push_str("\nClick cells to see co-change details, then describe your selection to the agent.");
     }
 

@@ -60,6 +60,51 @@ impl NodeType {
         ]
     }
 
+
+    /// Whether any indexer in this build actually emits this node type.
+    ///
+    /// `describe_schema` is what an agent calls to learn what it may
+    /// query, and it was built from [`Self::all`] — so it advertised
+    /// every variant of the enum, including the ones no code path
+    /// produces. `HttpRoute`, `Topic`, `Resource` and `Schema` were
+    /// declared, documented, given descriptions and property lists, and
+    /// never written to the graph by anything: the `sensors/` module that
+    /// would emit them has no caller in the ingest pipeline, and
+    /// `http_sensor.rs` was not even declared as a module. An agent that
+    /// followed the schema and queried `type: "HttpRoute"` got `count: 0`
+    /// forever and had no way to tell "this codebase has no HTTP routes"
+    /// apart from "lain cannot see HTTP routes".
+    ///
+    /// Kept honest by `describe_schema`'s `indexed_flags_match_reality`
+    /// test, which greps for a producer of each variant.
+    pub fn is_indexed(&self) -> bool {
+        match self {
+            NodeType::File
+            | NodeType::Namespace
+            | NodeType::Module
+            | NodeType::Package
+            | NodeType::Class
+            | NodeType::Interface
+            | NodeType::Struct
+            | NodeType::Enum
+            | NodeType::Trait
+            | NodeType::Function
+            | NodeType::Method
+            | NodeType::Property
+            | NodeType::Variable
+            | NodeType::Constant
+            // Emitted by `http_sensor` and `openapi_sensor`, which
+            // `sensors::run_all` now runs from both ingest pipelines.
+            | NodeType::HttpRoute => true,
+            // No producer anywhere in the codebase. The sensors cover
+            // HTTP, OpenAPI, proto, GraphQL and WebSocket; none of them
+            // emits a queue topic, an IaC resource, or a standalone
+            // schema node. Writing an indexer is the prerequisite for
+            // advertising these, not wiring one up.
+            NodeType::Topic | NodeType::Resource | NodeType::Schema => false,
+        }
+    }
+
     /// One-line description for `describe_schema`.
     pub fn description(&self) -> &'static str {
         match self {
@@ -162,6 +207,32 @@ impl EdgeType {
             EdgeType::DeployedTo,
             EdgeType::CrossRepoSameSymbol,
         ]
+    }
+
+
+    /// Whether any indexer in this build actually emits this edge type.
+    /// See [`NodeType::is_indexed`] for why this exists.
+    pub fn is_indexed(&self) -> bool {
+        match self {
+            EdgeType::Contains
+            | EdgeType::Calls
+            | EdgeType::Uses
+            | EdgeType::CoChangedWith
+            | EdgeType::Pattern
+            | EdgeType::CrossRepoSameSymbol
+            // `proto_sensor` emits Implements; `http_sensor` and
+            // `openapi_sensor` emit CallsHttp. `sensors::run_all` now
+            // runs from both ingest pipelines, so both reach a real graph.
+            | EdgeType::Implements
+            | EdgeType::CallsHttp => true,
+            // No producer anywhere in the codebase. `Imports` in
+            // particular reads like a core relationship and has never
+            // been emitted by any indexer.
+            EdgeType::Imports
+            | EdgeType::Produces
+            | EdgeType::Consumes
+            | EdgeType::DeployedTo => false,
+        }
     }
 
     pub fn description(&self) -> &'static str {

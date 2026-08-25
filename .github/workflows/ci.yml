@@ -31,3 +31,41 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      # Every `mod foo;` must resolve to a *committed* file. Catches the
+      # failure local tests structurally cannot: the module compiles from
+      # the working tree while the commit omits the file, so a clean
+      # checkout fails with E0583. The script called itself a pre-push
+      # check and nothing ever invoked it.
+      - name: Module declarations resolve to committed files
+        run: bash scripts/check-mod-resolution.sh
+
+  capability:
+    name: Capability suite (demo.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config cmake git
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      # `scripts/demo.sh` boots a real server against a fixture whose call
+      # graph is known by construction and asserts lain's answers against
+      # that ground truth — 113 checks, and the claim the README leads
+      # with. Nothing ran it, so it could rot between manual invocations
+      # and the README would keep advertising it.
+      - name: Ground-truth capability checks
+        run: bash scripts/demo.sh --quick

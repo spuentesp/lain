@@ -95,6 +95,7 @@ pub async fn run_build(
     overlay: &VolatileOverlay,
     cwd: Option<&str>,
     release: bool,
+    runtime: &RuntimeConfig,
 ) -> Result<String, LainError> {
     let work_dir = cwd.map(Path::new).unwrap_or(Path::new("."));
 
@@ -130,10 +131,25 @@ pub async fn run_build(
     }
     cmd.current_dir(work_dir);
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| spawn_error(&program, work_dir, e))?;
+    // `run_tests` has always been wrapped in a timeout; this was not, so a
+    // build that hung — a stuck linker, a lock on the target dir, a script
+    // waiting on stdin — hung the MCP call with it, forever. For an agent a
+    // call that never returns is worse than one that fails: there is
+    // nothing to react to. `default_command_timeout_secs` is documented as
+    // the timeout "for arbitrary command execution" and was never read by
+    // anything.
+    let cmd_timeout = Duration::from_secs(runtime.default_command_timeout_secs);
+    let output = match timeout(cmd_timeout, cmd.output()).await {
+        Ok(r) => r.map_err(|e| spawn_error(&program, work_dir, e))?,
+        Err(_) => {
+            return Err(LainError::Mcp(format!(
+                "`{program}` timed out after {}s in {} \
+                 (raise `runtime.default_command_timeout_secs` in .lain/tuning.toml)",
+                runtime.default_command_timeout_secs,
+                work_dir.display()
+            )))
+        }
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.status.code().unwrap_or(-1);
@@ -250,6 +266,7 @@ pub async fn run_clippy(
     overlay: &VolatileOverlay,
     cwd: Option<&str>,
     fix: bool,
+    runtime: &RuntimeConfig,
 ) -> Result<String, LainError> {
     let work_dir = cwd.map(Path::new).unwrap_or(Path::new("."));
 
@@ -273,10 +290,20 @@ pub async fn run_clippy(
     cmd.arg("--message-format=json");
     cmd.current_dir(work_dir);
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| spawn_error("cargo", work_dir, e))?;
+    // Same unbounded wait as `run_build` had; clippy on a large workspace
+    // is exactly the call most likely to outlive an agent's patience.
+    let cmd_timeout = Duration::from_secs(runtime.default_command_timeout_secs);
+    let output = match timeout(cmd_timeout, cmd.output()).await {
+        Ok(r) => r.map_err(|e| spawn_error("cargo", work_dir, e))?,
+        Err(_) => {
+            return Err(LainError::Mcp(format!(
+                "clippy timed out after {}s in {} \
+                 (raise `runtime.default_command_timeout_secs` in .lain/tuning.toml)",
+                runtime.default_command_timeout_secs,
+                work_dir.display()
+            )))
+        }
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.status.code().unwrap_or(-1);

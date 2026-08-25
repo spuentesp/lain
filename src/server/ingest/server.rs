@@ -193,12 +193,7 @@ impl LainServer {
         &self.attribution
     }
 
-    /// How long a presence session stays valid after the last heartbeat.
-    /// The MCP `register_agent` tool surfaces this in its `expires_at_unix`
-    /// reply so agents know when to renew.
-    pub fn presence_expires_after(&self) -> std::time::Duration {
-        self.presence.expires_after()
-    }
+    // (removed: had no caller and no test anywhere in the tree)
 
     /// Process start time, captured at construction. Used by
     /// `get_server_status` to report uptime.
@@ -339,10 +334,7 @@ impl LainServer {
             updated: vec![],
         });
     }
-
-    pub fn is_git_repo(&self) -> bool {
-        self.git.lock().is_valid()
-    }
+    // (removed: had no caller and no test anywhere in the tree)
 
     /// Add a repo to the live federation, then project its nodes/edges
     /// into the global backend. No-op if `self.federation` is `None`

@@ -3,7 +3,7 @@
 //! Shared helpers for argument parsing, text enrichment, and similarity.
 
 use serde_json::{Map, Value};
-use crate::schema::{GraphNode, NodeType};
+use crate::schema::GraphNode;
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
@@ -123,33 +123,8 @@ pub fn ambiguity_note(chosen: &GraphNode, others: &[GraphNode]) -> String {
     note
 }
 
-/// Resolves a node at a specific location using the "Overlay Mask" pattern
-pub fn resolve_node_at_location(
-    graph: &GraphDatabase,
-    overlay: &VolatileOverlay,
-    path: &str,
-    line: u32
-) -> Option<GraphNode> {
-    let canonical_path = dunce::canonicalize(path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or(path.to_string());
-
-    // 1. Check Overlay first (Priority Filter)
-    let overlay_nodes = overlay.find_nodes_by_path(&canonical_path);
-    if !overlay_nodes.is_empty() {
-        let match_node = overlay_nodes.iter()
-            .filter(|n| n.node_type != NodeType::File)
-            .filter(|n| n.line_start.unwrap_or(0) <= line && n.line_end.unwrap_or(0) >= line)
-            .min_by_key(|n| n.line_end.unwrap_or(0).saturating_sub(n.line_start.unwrap_or(0)))
-            .cloned();
-        if match_node.is_some() { return match_node; }
-    }
-
-    // 2. Fallback to Static Backbone. Same ordering rationale as
-    //    `resolve_node`: the verbatim (already-relative) form first.
-    graph.get_node_at_location(path, line)
-        .or_else(|| graph.get_node_at_location(&canonical_path, line))
-}
+// `resolve_node_at_location` existed only for `augment_knowledge`, which
+// was removed as dead; nothing else ever called it.
 
 /// Extract string argument
 pub fn get_str_arg<'a>(args: Option<&'a Map<String, Value>>, key: &str) -> &'a str {

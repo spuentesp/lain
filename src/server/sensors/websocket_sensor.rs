@@ -64,10 +64,19 @@ fn find_handler(graph: &GraphDatabase, name: &str) -> Option<GraphNode> {
 pub fn enrich_with_websocket(
     graph: &GraphDatabase,
     file_path: &Path,
+    root: &Path,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
     }
+    // `root` is needed only to key nodes the way the rest of the graph is
+    // keyed. The walker yields absolute paths; every other node path is
+    // relative to the workspace, and the orphan sweep compares against
+    // `graph_path`-reduced tracked files — so an absolute path made these
+    // nodes look untracked and they were pruned in the same index pass
+    // that created them.
+    let node_path = crate::graph::graph_path(root, file_path);
+
     let content = std::fs::read_to_string(file_path)?;
     let patterns = extract_websocket_patterns(&content);
 
@@ -83,7 +92,7 @@ pub fn enrich_with_websocket(
 
         let node_id = GraphNode::generate_id(
             &NodeType::Variable,
-            &file_path.to_string_lossy(),
+            &node_path,
             &display_name,
             None,
         );
@@ -91,7 +100,7 @@ pub fn enrich_with_websocket(
         let mut node = GraphNode::new(
             NodeType::Variable,
             display_name,
-            file_path.to_string_lossy().to_string(),
+            node_path.clone(),
         );
         node.id = node_id.clone();
         node.line_start = Some(line);
@@ -136,7 +145,7 @@ pub fn scan_workspace(
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ["js", "ts", "jsx", "tsx", "py", "go", "rs"].contains(&ext) {
-            match enrich_with_websocket(graph, path) {
+            match enrich_with_websocket(graph, path, root) {
                 Ok(n) => count += n,
                 Err(e) => tracing::warn!("Failed to scan {:?}: {}", path, e),
             }

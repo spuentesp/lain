@@ -185,14 +185,25 @@ impl FileWatcher {
             loop {
                 tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
 
-                // Collect pending paths
-                match receiver.try_recv() {
-                    Ok(path) => { pending.insert(path); }
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        warn!("FileWatcher: channel disconnected, stopping processor");
-                        break;
+                // Drain everything queued during the debounce window, not
+                // one path per tick. A single `try_recv` meant a save that
+                // touched N files took N debounce intervals to catch up.
+                let mut disconnected = false;
+                loop {
+                    match receiver.try_recv() {
+                        Ok(path) => {
+                            pending.insert(path);
+                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            warn!("FileWatcher: channel disconnected, stopping processor");
+                            disconnected = true;
+                            break;
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
                     }
-                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+                if disconnected {
+                    break;
                 }
 
                 if pending.is_empty() {
@@ -200,7 +211,7 @@ impl FileWatcher {
                 }
 
                 // Process batch
-                let batch: Vec<_> = pending.drain().take(BATCH_SIZE).collect();
+                let batch = take_batch(&mut pending, BATCH_SIZE);
                 let remaining = pending.len();
 
                 debug!(
@@ -217,6 +228,22 @@ impl FileWatcher {
             }
         });
     }
+}
+
+/// Take up to `limit` paths out of `pending`, leaving the rest queued.
+///
+/// This was `pending.drain().take(limit).collect()`. `HashSet::drain`
+/// empties the set when the iterator is dropped regardless of how many
+/// items were actually consumed, so a batch of 20 silently discarded
+/// every further changed file — and `pending.len()` afterwards was always
+/// 0, which is why the "N remaining" log never reported a backlog. A
+/// checkout or a rename touching more than `limit` files lost the tail.
+fn take_batch(pending: &mut HashSet<PathBuf>, limit: usize) -> Vec<PathBuf> {
+    let batch: Vec<PathBuf> = pending.iter().take(limit).cloned().collect();
+    for p in &batch {
+        pending.remove(p);
+    }
+    batch
 }
 
 impl Default for FileWatcher {
@@ -733,6 +760,56 @@ mod tests {
         index.write().expect("write index");
 
         (tmp, repo_path)
+    }
+
+    /// `pending.drain().take(limit)` empties the whole set when the
+    /// `Drain` is dropped, so everything past `limit` vanished and the
+    /// "N remaining" log always printed 0. A branch switch touching more
+    /// than `BATCH_SIZE` files silently lost the tail.
+    #[test]
+    fn take_batch_leaves_the_overflow_queued() {
+        let mut pending: HashSet<PathBuf> = (0..25)
+            .map(|i| PathBuf::from(format!("/src/f{i}.rs")))
+            .collect();
+
+        let batch = super::take_batch(&mut pending, 20);
+
+        assert_eq!(batch.len(), 20, "takes up to the limit");
+        assert_eq!(
+            pending.len(),
+            5,
+            "the remaining 5 must stay queued, not be discarded"
+        );
+        for p in &batch {
+            assert!(!pending.contains(p), "a taken path must not remain pending");
+        }
+    }
+
+    #[test]
+    fn take_batch_drains_everything_when_under_the_limit() {
+        let mut pending: HashSet<PathBuf> =
+            [PathBuf::from("/src/a.rs"), PathBuf::from("/src/b.rs")].into_iter().collect();
+        let batch = super::take_batch(&mut pending, 20);
+        assert_eq!(batch.len(), 2);
+        assert!(pending.is_empty());
+    }
+
+    /// The whole `FileWatcher` type — thread, debounce loop, `process_file`,
+    /// and its `overlay.insert_node` — was never constructed outside this
+    /// test module, so the volatile overlay was dead in every running
+    /// server while the README advertised live freshness. Nothing failed;
+    /// there was simply no caller. Pin that both entrypoints start it.
+    #[test]
+    fn both_bootstraps_start_the_source_watcher() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for f in ["src/cli/mcp.rs", "src/cli/server.rs"] {
+            let src = std::fs::read_to_string(root.join(f)).unwrap();
+            assert!(
+                src.contains("start_source_watcher"),
+                "{f} must start the source-file watcher, or the volatile \
+                 overlay is never written to and freshness is a fiction"
+            );
+        }
     }
 
     /// Step 1: discover_watch_directories must skip Git-ignored and

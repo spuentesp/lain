@@ -159,6 +159,18 @@ pub enum Commands {
         /// guessing."
         #[arg(long)]
         reindex_timeout: Option<u64>,
+        /// Run as a *sidecar* against an owner server instead of
+        /// indexing locally: open the persisted graph read-only, then
+        /// follow the owner's `/overlay/subscribe` stream so live edits
+        /// it sees are answerable here too.
+        ///
+        /// The owner half of this shipped working — the server serves
+        /// `/overlay/subscribe` and `/overlay/get_snapshot`, the client
+        /// (`overlay::subscribe`) and the read-only executor both exist
+        /// and are tested — but nothing could ever *start* a sidecar,
+        /// because no command exposed it. This flag is that entry point.
+        #[arg(long, value_name = "URL")]
+        owner_url: Option<String>,
     },
     /// Scaffold a `repos.yaml` for the current directory. Walks up for
     /// `.git` (same as `lain mcp`), then writes a minimal
