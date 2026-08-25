@@ -14,56 +14,7 @@ pub mod workspaces;
 pub use query::run_query;
 pub use ask::run_ask;
 pub use server::run_server;
-
-/// Resolve a `repos.yaml` path passed to a subcommand.
-///
-/// When the caller passes `--config PATH`, use that path verbatim.
-/// When the default `./repos.yaml` is used and the file exists,
-/// use it. When the default doesn't exist, fall back to the
-/// discoverable candidates in this order:
-///
-/// 1. `./.lain/repos.yaml` — local override (gitignored in teams
-///    that prefer per-developer federation configs).
-/// 2. `$XDG_CONFIG_HOME/lain/repos.yaml` (or
-///    `~/.config/lain/repos.yaml`) — the per-user default.
-///
-/// If none of these exist, return the original path (which the
-/// server will fail on with a clear "not found" error). This keeps
-/// the current failure mode unchanged for typos while removing the
-/// `--config ./repos.yaml` boilerplate for the common case where the
-/// operator already has a federation file at one of these locations.
-pub fn resolve_repos_config(path: &std::path::Path) -> std::path::PathBuf {
-    // If the user passed an explicit --config (not the default),
-    // respect it. We can't tell "default" from "explicit" here — the
-    // helper is only invoked when the caller wants discovery, which
-    // is exactly the default path. Callers who want to force a path
-    // pass it through unchanged.
-    if path != std::path::Path::new("./repos.yaml") {
-        return path.to_path_buf();
-    }
-    if path.exists() {
-        return path.to_path_buf();
-    }
-    let candidates = [
-        std::path::PathBuf::from("./.lain/repos.yaml"),
-        user_config_dir().join("lain/repos.yaml"),
-    ];
-    for c in candidates {
-        if c.exists() {
-            return c;
-        }
-    }
-    path.to_path_buf()
-}
-
-fn user_config_dir() -> std::path::PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return std::path::PathBuf::from(xdg);
-        }
-    }
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
-}
+pub use crate::resolve_repos_config;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -234,4 +185,26 @@ pub enum Commands {
     /// reports. Always exits 0 on a clean install, 1 on hard
     /// failures (missing hook script, un-creatable dirs).
     Doctor,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_repos_config;
+    use std::path::Path;
+
+    #[test]
+    fn reexport_resolves_to_canonical_implementation() {
+        // Locks the property the duplicate violated. With both copies
+        // present this passes (they're byte-identical); after Step 3
+        // the CLI re-export and the crate-root canonical must remain
+        // the same function pointer, and any future re-introduction
+        // of the duplicate breaks the build.
+        assert!(std::ptr::eq(
+            resolve_repos_config as *const (),
+            crate::resolve_repos_config as *const (),
+        ));
+        // The unused import silencer — both items must resolve to the
+        // same signature for the cast above to be well-typed.
+        let _: fn(&Path) -> std::path::PathBuf = resolve_repos_config;
+    }
 }
