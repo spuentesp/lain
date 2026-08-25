@@ -9,6 +9,7 @@ pub mod query;
 pub mod repos;
 pub mod server;
 pub mod signal;
+pub mod workspace;
 pub mod workspaces;
 
 pub use query::run_query;
