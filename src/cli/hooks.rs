@@ -499,8 +499,7 @@ fn claim_filesystem(
     let file_path = Path::new(path);
     // Walk up from `file_path` for `.git`; if none is found within 16
     // levels (or the walk itself errors), fall back to the file's parent
-    // directory so the lock sentinel still works locally. Mirrors the
-    // previous `find_workspace_root` fallback semantics.
+    // directory so the lock sentinel still works locally.
     let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
         .ok()
         .flatten()
@@ -558,8 +557,7 @@ fn release_filesystem(path: &str) -> Result<()> {
     let file_path = Path::new(path);
     // Walk up from `file_path` for `.git`; if none is found within 16
     // levels (or the walk itself errors), fall back to the file's parent
-    // directory so the lock sentinel still works locally. Mirrors the
-    // previous `find_workspace_root` fallback semantics.
+    // directory so the lock sentinel still works locally.
     let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
         .ok()
         .flatten()

@@ -206,8 +206,9 @@ mod tests {
             resolve_repos_config as *const (),
             crate::resolve_repos_config as *const (),
         ));
-        // The unused import silencer — both items must resolve to the
-        // same signature for the cast above to be well-typed.
+        // Signature lock: the cast above is well-typed only if both
+        // items resolve to `fn(&Path) -> PathBuf`. Future drift in
+        // `lib.rs::resolve_repos_config`'s signature breaks the build.
         let _: fn(&Path) -> std::path::PathBuf = resolve_repos_config;
     }
 }

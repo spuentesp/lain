@@ -88,6 +88,8 @@ Both `pub fn`s have the same signature `fn(&Path) -> PathBuf` and the same doc c
 
 **Suggested fix:** Delete one. Keep `lib.rs::resolve_repos_config` (canonical re-export surface) and have `cli/mod.rs` either `pub use crate::resolve_repos_config;` or call `crate::resolve_repos_config` directly.
 
+**Resolved by:** plan `2026-08-25-helper-deduplication`, Task 1 (commit `b3521fd`).
+
 ---
 
 ### P0-3 `find_git_workspace_root` walk-up-for-`.git` duplicated 5x
@@ -102,6 +104,8 @@ Both `pub fn`s have the same signature `fn(&Path) -> PathBuf` and the same doc c
 Each has slightly different return shape (`Option` vs `Result<Option>`), error handling, and `canonicalize` behavior. Two of the five carry comments saying "mirrors" the others. A bug fix in one will be forgotten in the others.
 
 **Suggested fix:** Single helper `pub fn find_git_workspace_root(start: Option<&Path>) -> Result<Option<PathBuf>>` in `cli/mod.rs` (or `cli/workspace.rs`). All five callers delegate.
+
+**Resolved by:** plan `2026-08-25-helper-deduplication`, Tasks 2–3 (commits `fd2d9b4`, `bf7fc0c`, `8ec9321`, `8d36b32`, `ee93643`, `8f6d07f`).
 
 ---
 
@@ -130,6 +134,8 @@ Each copy re-encodes the same five-step logic: cache → stored embedding → on
 - `src/server/presence.rs:2059` (`system_time_now_unix`, returns `f64`)
 
 **Suggested fix:** One helper in `src/server/mod.rs` (or a new `time.rs`) with all three return types and a `delta` variant. `recent_projects::now_unix` becomes `system_time_to_unix_secs(SystemTime::now())`.
+
+**Resolved by:** plan `2026-08-25-helper-deduplication`, Tasks 4–5 (commits `fc5e433`, `d4dae9f`, `8e6c122`, `c84ec50`, `5f95ceb`, `2ed87d9`).
 
 ---
 
@@ -261,6 +267,8 @@ Two separate `match op` blocks enumerate the same seven `GraphOp` variants with 
 
 **Suggested fix:** `pub fn write_file_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()>` in `config/` (or new `cli/io.rs`). All callers use it. The graph's async/sync split can be one helper taking a `tokio::fs`/`std::fs` enum.
 
+**Resolved by:** plan `2026-08-25-helper-deduplication`, Tasks 6–7 (commits `947132b`, `6d7a14a`, `d398e11`, `ef043e1`). The async/sync split is preserved as two named helpers (`write_file_atomic` sync + `tokio_write_file_atomic` async) per the brief's Global Constraint.
+
 ---
 
 ### P1-7 MCP-over-HTTP client implemented 3x
@@ -271,6 +279,8 @@ Two separate `match op` blocks enumerate the same seven `GraphOp` variants with 
 - `src/cli/doctor.rs:63-114` (`emit_tools_list_check` builds own URL + body)
 
 **Suggested fix:** Extract `cli::mcp_client::post_tool_call(url, name, args) -> Result<Value>`. All three call sites use it.
+
+**Resolved by:** plan `2026-08-25-helper-deduplication`, Task 8 (commits `4b3b24f`, `3dcee27`). HTTP only; `cli::oneshot.rs` stdio case deferred (different transport, not in scope).
 
 ---
 
