@@ -1572,17 +1572,10 @@ pub fn save_pair(
             audit_reset_at_unix: None,
         }
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
-    }
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("serialize PersistedState: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    crate::cli::io::write_file_atomic(path, json.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -1647,15 +1640,8 @@ pub fn load_pair(
         // accepts, so it doesn't widen the surface here.
         let json = serde_json::to_string_pretty(&state)
             .map_err(|e| format!("serialize PersistedState (reset): {e}"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create_dir_all({}): {e}", parent.display()))?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)
-            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+        crate::cli::io::write_file_atomic(path, json.as_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
 
     let mut s = reg.inner.lock();
