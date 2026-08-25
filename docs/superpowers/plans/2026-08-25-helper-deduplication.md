@@ -4,9 +4,9 @@
 
 **Goal:** Eliminate five categories of helper duplication (P0-2, P0-3, P0-5, P1-6, P1-7) by introducing canonical helpers in `cli::workspace`, `server::time`, `cli::io`, and `cli::mcp_client`, then migrating every call site. Net: ~150 LoC removed and a one-line bug killed (P0-2).
 
-**Architecture:** Each finding follows the same shape — extract a canonical helper with a single signature, delete each local re-implementation, and adjust the caller to the canonical signature. No behavior change at any call site; this is a pure refactor. Where the existing copies disagree on return type (P0-5: `i64` / `u64` / `f64`) the canonical module exposes all three wrappers; where they disagree on signature (P0-3: `fn()` vs `fn(&Path)` vs `fn() -> Result<…>`) the canonical signature is the most general form (`fn(start: Option<&Path>) -> Result<Option<PathBuf>>`) and callers adjust.
+**Architecture:** Each finding follows the same shape — extract a canonical helper, delete each local re-implementation, adjust callers. Where the existing copies disagree on return type (P0-5: `i64` / `u64` / `f64`) the canonical module exposes all three; where they disagree on signature (P0-3: `fn()` vs `fn(&Path)` vs `fn() -> Result<…>`) the canonical signature is the most general form and callers adjust.
 
-**Tech Stack:** Rust 1.75+, `std::time::{SystemTime, UNIX_EPOCH}`, `std::path::{Path, PathBuf}`, `tempfile` (test dep, already in repo), `reqwest::blocking` (already in repo). No new dependencies.
+**Tech Stack:** Rust 1.75+, `std::time::{SystemTime, UNIX_EPOCH}`, `tempfile` (test dep, already in repo), `reqwest::blocking` (already in repo). No new dependencies.
 
 **Source spec:** `docs/superpowers/reviews/2026-08-25-solid-dry-simplification.md` § P0-2, P0-3, P0-5, P1-6, P1-7.
 
@@ -92,7 +92,7 @@ cd /home/sebastian/lain
 cargo test --lib cli::tests::reexport_resolves -- --nocapture
 ```
 
-Expected: passes today (the duplicate is byte-identical). The test exists to lock the invariant — re-run after Step 3 to confirm it still passes against the `pub use`.
+Expected: passes today (the duplicate is byte-identical). The test exists to lock the invariant — re-run after Step 3.
 
 ### Step 3: Delete the duplicate and add the re-export
 
@@ -313,20 +313,15 @@ git commit -m "Route cli::hooks through cli::workspace::find_git_workspace_root"
 ### Step 6: Verify no remaining local definitions
 
 ```bash
-cd /home/sebastian/lain
 grep -rn "fn find_git_workspace\|fn walk_up_for_git\|fn find_workspace_root" src/
 ```
 
-Expected: zero hits in production files (the canonical `pub fn find_git_workspace_root` in `src/cli/workspace.rs` is the only definition).
+Expected: zero hits in production files.
 
 ### Step 7: Full test sweep
 
 ```bash
-cd /home/sebastian/lain
-cargo test --lib
-cargo test --test cli_surface
-cargo test --test doctor_smoke
-cargo test --test e2e_behavior 2>/dev/null | tail -20
+cargo test --lib && cargo test --test cli_surface && cargo test --test doctor_smoke
 ```
 
 Expected: all pass; no behavior change.
@@ -519,7 +514,6 @@ git commit -m "Route server::presence through server::time::now_unix_f64"
 ### Step 6: Verify no remaining local definitions
 
 ```bash
-cd /home/sebastian/lain
 grep -rn "fn system_time_to_unix_secs\|fn system_time_to_unix_secs_delta\|fn system_time_to_unix\b\|fn system_time_now_unix\|fn now_unix\b" src/
 ```
 
@@ -528,10 +522,7 @@ Expected: only the canonical definitions in `src/server/time.rs`; zero local cop
 ### Step 7: Full test sweep
 
 ```bash
-cd /home/sebastian/lain
-cargo test --lib
-cargo test --test federation_integration
-cargo test --test audit_integration
+cargo test --lib && cargo test --test federation_integration && cargo test --test audit_integration
 ```
 
 Expected: all pass.
@@ -791,17 +782,7 @@ Expected: 6 passed (4 sync + 2 async).
 
 ### Step 5: Migrate `graph.rs::save_to_disk` (async, lines 1290-1296)
 
-Replace:
-
-```rust
-if let Some(parent) = persistence_path.parent() {
-    tokio::fs::create_dir_all(parent).await.map_err(|e| LainError::Database(e.to_string()))?;
-}
-tokio::fs::write(&tmp_path, data).await.map_err(|e| LainError::Database(e.to_string()))?;
-tokio::fs::rename(&tmp_path, &persistence_path).await.map_err(|e| LainError::Database(e.to_string()))?;
-```
-
-with:
+Replace the `mkdir + write + rename` block with:
 
 ```rust
 crate::cli::io::tokio_write_file_atomic(&persistence_path, &data)
@@ -811,18 +792,7 @@ crate::cli::io::tokio_write_file_atomic(&persistence_path, &data)
 
 ### Step 6: Migrate `graph.rs::save_to_disk_sync` (sync, lines 1309-1314)
 
-Replace:
-
-```rust
-if let Some(parent) = self.persistence_path.parent() {
-    std::fs::create_dir_all(parent).map_err(|e| LainError::Database(e.to_string()))?;
-}
-let tmp_path = self.persistence_path.with_extension("tmp");
-std::fs::write(&tmp_path, data).map_err(|e| LainError::Database(e.to_string()))?;
-std::fs::rename(&tmp_path, &self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
-```
-
-with:
+Replace the `mkdir + write + rename` block with:
 
 ```rust
 crate::cli::io::write_file_atomic(&self.persistence_path, &data)
@@ -832,7 +802,6 @@ crate::cli::io::write_file_atomic(&self.persistence_path, &data)
 ### Step 7: Run tests, verify pass
 
 ```bash
-cd /home/sebastian/lain
 cargo test --lib server::graph::tests -- --nocapture
 cargo test --test e2e_behavior 2>/dev/null | tail -20
 ```
