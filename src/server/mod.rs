@@ -19,6 +19,7 @@ pub mod lsp;
 pub mod treesitter;
 pub mod tuning;
 pub mod error;
+pub mod time;
 
 // Analytical side
 pub mod nlp;
