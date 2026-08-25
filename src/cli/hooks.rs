@@ -556,28 +556,6 @@ fn server_reachable(url: &str, timeout: Duration) -> bool {
 /// stale `.lain` directories in system temp dirs that break later
 /// test runs. `.git` is the right anchor: it's never created by
 /// lain itself, so the walk-up can't be confused by our own state.
-fn find_workspace_root(path: &Path) -> PathBuf {
-    let mut current = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| path.to_path_buf());
-    for _ in 0..16 {
-        if current.join(".git").exists() {
-            return current;
-        }
-        match current.parent() {
-            Some(p) => current = p.to_path_buf(),
-            None => break,
-        }
-    }
-    // Fallback: file's parent dir. The lock sentinel still works, just
-    // scoped to the immediate directory.
-    path.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| path.to_path_buf())
-}
 
 /// Filesystem-only counterpart to the in-memory `claim_files` MCP tool.
 /// No server round trip, no `register_agent` heartbeat — just an
@@ -592,7 +570,19 @@ fn claim_filesystem(
     agent_kind: &str,
 ) -> Result<()> {
     let file_path = Path::new(path);
-    let workspace_root = find_workspace_root(file_path);
+    // Walk up from `file_path` for `.git`; if none is found within 16
+    // levels (or the walk itself errors), fall back to the file's parent
+    // directory so the lock sentinel still works locally. Mirrors the
+    // previous `find_workspace_root` fallback semantics.
+    let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            file_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| file_path.to_path_buf())
+        });
     let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
     let kind = AgentKind::parse(agent_kind);
     let parsed_intent = match intent {
@@ -639,7 +629,19 @@ fn claim_filesystem(
 /// wasn't claimed via the filesystem layer in the first place).
 fn release_filesystem(path: &str) -> Result<()> {
     let file_path = Path::new(path);
-    let workspace_root = find_workspace_root(file_path);
+    // Walk up from `file_path` for `.git`; if none is found within 16
+    // levels (or the walk itself errors), fall back to the file's parent
+    // directory so the lock sentinel still works locally. Mirrors the
+    // previous `find_workspace_root` fallback semantics.
+    let workspace_root = crate::cli::workspace::find_git_workspace_root(Some(file_path))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            file_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| file_path.to_path_buf())
+        });
     let lock_path = presence_lock::lock_path_for(&workspace_root, file_path);
     presence_lock::release_lock_at(&lock_path)
         .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
@@ -786,7 +788,7 @@ pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{find_workspace_root, mcp_endpoint, sanitize_agent_name, server_reachable};
+    use super::{mcp_endpoint, sanitize_agent_name, server_reachable};
     use std::time::Duration;
 
     /// `mcp_endpoint` is the bridge between the `--url` flag (bare server
@@ -860,30 +862,47 @@ mod tests {
         ));
     }
 
-    /// `find_workspace_root` is what keeps two agents on the same
-    /// machine from writing to different sentinel files for the same
-    /// source path. A file under `.git/`'s parent must resolve to that
-    /// parent; a file with no `.git` in the tree must fall back to
-    /// its immediate parent dir. (`.lain/` is intentionally NOT an
-    /// anchor — see `find_workspace_root` doc comment; honoring it
-    /// broke a test that was running after a zero-daemon hook run
-    /// had littered `.lain/locks/` into a system temp dir.)
+    /// The hooks' filesystem fallback (claim/release without a running
+    /// server) walks up from the file path for `.git` to pick the
+    /// workspace root, so two agents on the same machine write to the
+    /// same lock directory. With a `.git` ancestor the canonical
+    /// helper returns that workspace; without one, the call-site
+    /// fallback returns the file's immediate parent dir so the lock
+    /// sentinel still works locally. `.lain/` is intentionally NOT an
+    /// anchor (the zero-daemon fallback creates `.lain/locks/`, which
+    /// would otherwise be mistaken for a workspace marker and break
+    /// later test runs in shared tempdirs).
     #[test]
-    fn find_workspace_root_walks_up_to_git() {
+    fn hooks_walks_up_to_git() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Create a fake git repo layout.
         std::fs::create_dir_all(root.join("src/sub")).unwrap();
         std::fs::write(root.join("src/sub/file.rs"), "fn x() {}").unwrap();
-        // No .git yet — should fall back to file's parent (src/sub).
-        let no_marker = find_workspace_root(&root.join("src/sub/file.rs"));
+        let file_path = root.join("src/sub/file.rs");
+
+        // No .git yet — the call-site fallback should yield file's
+        // parent (src/sub). Inline the same wrapper the production
+        // call sites use so the assertion exercises real behavior.
+        let no_marker = crate::cli::workspace::find_git_workspace_root(Some(&file_path))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                file_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| file_path.to_path_buf())
+            });
         assert_eq!(
             no_marker.canonicalize().unwrap(),
             root.join("src/sub").canonicalize().unwrap()
         );
+
         // Now drop a .git marker one level up — root should win.
         std::fs::create_dir(root.join(".git")).unwrap();
-        let with_git = find_workspace_root(&root.join("src/sub/file.rs"));
+        let with_git = crate::cli::workspace::find_git_workspace_root(Some(&file_path))
+            .unwrap()
+            .expect(".git exists in this controlled tree");
         assert_eq!(
             with_git.canonicalize().unwrap(),
             root.canonicalize().unwrap()
@@ -894,19 +913,27 @@ mod tests {
     /// workspace anchor — `.lain/locks/` is exactly what the
     /// zero-daemon fallback writes, so a previous run can leave a
     /// `.lain/` in a system temp dir that would otherwise mislead
-    /// `find_workspace_root` for the next test. Only `.git` is a
-    /// valid anchor.
+    /// the walk. Only `.git` is a valid anchor; the canonical helper
+    /// honors that, and the inlined call-site fallback yields the
+    /// file's parent dir.
     #[test]
-    fn find_workspace_root_ignores_dot_lain_marker() {
+    fn hooks_ignores_dot_lain_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("src/sub")).unwrap();
         std::fs::write(root.join("src/sub/file.rs"), "fn x() {}").unwrap();
-        // A `.lain` directory exists, but no `.git`. `find_workspace_root`
-        // must NOT treat `.lain` as a workspace anchor — it falls
-        // through to the file's parent (src/sub).
+        // A `.lain` directory exists, but no `.git`.
         std::fs::create_dir_all(root.join(".lain/locks")).unwrap();
-        let no_marker = find_workspace_root(&root.join("src/sub/file.rs"));
+        let file_path = root.join("src/sub/file.rs");
+        let no_marker = crate::cli::workspace::find_git_workspace_root(Some(&file_path))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                file_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| file_path.to_path_buf())
+            });
         assert_eq!(
             no_marker.canonicalize().unwrap(),
             root.join("src/sub").canonicalize().unwrap(),
