@@ -123,6 +123,12 @@ impl RepoIndex {
     pub fn set_overlay(&self, overlay: Arc<VolatileOverlay>) {
         *self.server_overlay.lock() = overlay;
     }
+
+    /// Public read accessor for the shared volatile overlay. Used by tests
+    /// and by the watcher's receiver task.
+    pub fn server_overlay(&self) -> Arc<VolatileOverlay> {
+        self.server_overlay.lock().clone()
+    }
     pub fn set_health(&self, health: RepoHealth) {
         *self.health.write() = health;
     }
@@ -256,6 +262,65 @@ impl RepoIndex {
             .map_err(|e| LainError::Other(format!("watcher.watch({:?}): {e}", path)))?;
 
         *self.watcher.lock() = Some(watcher);
+        Ok(())
+    }
+
+    /// Refresh the volatile overlay from uncommitted working-tree changes.
+    /// Mirrors `LainServer::sync_volatile_overlay` (in `src/server/ingest/ingestion.rs:412`)
+    /// but operates on this repo's own `git`/`lsp`/`overlay` so the federation
+    /// watcher can re-populate the overlay without holding a `LainServer`
+    /// reference.
+    ///
+    /// Sidecars (read-only graph) skip — their overlay is populated by the
+    /// owner's `/overlay/subscribe` stream, not by working-tree scans.
+    pub async fn sync_overlay(self: &Arc<Self>) -> Result<(), LainError> {
+        if self.db.is_read_only() {
+            return Ok(());
+        }
+        let overlay = self.server_overlay.lock().clone();
+        overlay.clear();
+
+        let changes = self.git.lock().await.get_uncommitted_changes()?;
+
+        for change in &changes {
+            if let Err(e) = self.process_overlay_change(&change.path, &overlay).await {
+                tracing::warn!(
+                    "[federation] overlay refresh: failed for {:?}: {}",
+                    change.path,
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// LSP-then-overlay-insert flow for a single file. Mirrors
+    /// `LainServer::process_change` (in `src/server/ingest/ingestion.rs:429`)
+    /// but takes the overlay as a parameter and uses `self.source.local_path()`
+    /// as the workspace root. The federation has no `LainServer` reference,
+    /// so we re-implement the flow here.
+    async fn process_overlay_change(
+        self: &Arc<Self>,
+        path: &Path,
+        overlay: &Arc<crate::server::overlay::VolatileOverlay>,
+    ) -> Result<(), LainError> {
+        let symbols = {
+            let lsp = self.lsp.next();
+            let mut lsp = lsp.lock().await;
+            match lsp
+                .get_document_symbols_hierarchical(path, self.source.local_path())
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("[federation] no LSP symbols for {:?}: {}", path, e);
+                    return Ok(());
+                }
+            }
+        };
+        for symbol in symbols {
+            overlay.insert_node(symbol.node.clone());
+        }
         Ok(())
     }
 }
