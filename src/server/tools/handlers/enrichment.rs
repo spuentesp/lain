@@ -94,18 +94,27 @@ pub fn sync_state(
     ingestion: &IngestionConfig,
     jobs: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     last_outcome: &Arc<Mutex<crate::server::refresh::RefreshOutcome>>,
+    fed: Option<&Arc<crate::federation::federated_index::FederatedIndex>>,
 ) -> Result<String, LainError> {
     let last_commit = graph.get_last_commit()?;
     let latest_commit = git.lock().get_latest_commit().unwrap_or_default();
-
-    if last_commit.as_ref() == Some(&latest_commit) {
-        return Ok("No new commits. State is already up to date.".to_string());
+    // Whether HEAD has moved does NOT gate the overlay-refresh phase —
+    // a brand-new untracked file with no new commit must still become
+    // visible. We log the no-op commit case so callers reading the
+    // logs can see why a sync ran without touching co-change edges.
+    let no_new_commits = last_commit.as_ref() == Some(&latest_commit);
+    if no_new_commits {
+        tracing::info!("sync_state: no new commits, but overlay refresh will still run");
     }
 
     let graph_clone = graph.clone();
     let git_clone = Arc::clone(git);
     // Copy fields so they can be moved into async block
     let cochange_max_commit_files = ingestion.cochange_max_commit_files;
+    // Clone the Arc so the spawned task owns a `'static` handle.
+    // `Option<&Arc<...>>` lets the caller pass `ctx.federation.as_ref()`
+    // without forcing an extra clone at every call site.
+    let fed_handle = fed.map(Arc::clone);
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let jobs_registry = Arc::clone(jobs);
@@ -226,9 +235,39 @@ pub fn sync_state(
             }
         }
 
+        // Phase 2: refresh volatile overlays for every repo in the
+        // federation. Runs regardless of whether there were new
+        // commits, so a brand-new untracked file becomes visible
+        // immediately after `sync_state` instead of waiting on the
+        // next watcher tick (which, on a freshly-created workspace,
+        // may be hours away).
+        let mut overlay_refresh_count = 0usize;
+        if let Some(fed_ref) = fed_handle.as_ref() {
+            for (id, _) in fed_ref.list_repos() {
+                let Some(repo) = fed_ref.get_repo(&id) else {
+                    continue;
+                };
+                match repo.sync_overlay().await {
+                    Ok(()) => overlay_refresh_count += 1,
+                    Err(e) => {
+                        tracing::warn!(
+                            "[sync_state] overlay refresh for {} failed: {}",
+                            id,
+                            e
+                        );
+                        *outcome_slot.lock() = crate::server::refresh::RefreshOutcome::failed(
+                            std::time::SystemTime::now(),
+                            format!("sync_state overlay refresh for {}: {}", id, e),
+                        );
+                    }
+                }
+            }
+        }
+
         let summary = format!(
-            "synced {} commits in {:?}",
+            "enrichment: {} new commits; overlay: refreshed ({} repos) in {:?}",
             new_commits.len(),
+            overlay_refresh_count,
             start_time.elapsed()
         );
         tracing::info!("Background sync job completed: {summary}");

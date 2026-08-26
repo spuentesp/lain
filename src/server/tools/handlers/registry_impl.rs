@@ -726,7 +726,7 @@ impl ToolHandler for SyncStateHandler {
         ctx: &ToolContext,
         _args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::enrichment::sync_state(&ctx.graph, &ctx.git, &ctx.tuning.ingestion, &ctx.jobs, &ctx.last_outcome)
+        handlers::enrichment::sync_state(&ctx.graph, &ctx.git, &ctx.tuning.ingestion, &ctx.jobs, &ctx.last_outcome, ctx.federation.as_ref())
     }
 }
 inventory::submit!(ToolHandlerEntry(&SyncStateHandler));

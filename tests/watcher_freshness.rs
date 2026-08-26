@@ -144,3 +144,134 @@ async fn watcher_does_not_panic_on_edit() {
     // drop — see tests/federation_integration.rs:184-192 for why).
     std::mem::forget(ri);
 }
+
+/// Regression test for the `sync_state` freshness bug: the MCP tool
+/// short-circuited on git-commit equality and never refreshed the
+/// volatile overlay, so a brand-new uncommitted file stayed invisible
+/// until the next watcher tick (which never came for the first 15
+/// minutes after the create). After the fix, `sync_state` must touch
+/// the overlay regardless of whether HEAD has moved.
+#[tokio::test]
+async fn sync_state_refreshes_overlay_for_new_file() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::PetgraphBackend;
+    use lain::graph::GraphDatabase;
+    use lain::overlay::VolatileOverlay;
+    use lain::server::tools::handlers::enrichment::sync_state;
+    use lain::tuning::IngestionConfig;
+    use std::collections::HashMap;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_dir = std::path::PathBuf::from(tmp.path());
+
+    // Build the same shared overlay we'll wire into the federation.
+    let shared_overlay = Arc::new(VolatileOverlay::new());
+
+    // RepoIndex fixture identical to `build_repo_index`, but rebinds
+    // its overlay to the shared one before the federation is built.
+    let src_dir = repo_dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "pub fn existing() {}\n").unwrap();
+    init_temp_git_repo(&repo_dir);
+
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let source = Box::new(
+        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap(),
+    );
+    let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
+    ri.set_overlay(shared_overlay.clone());
+
+    // Build a real `FederatedIndex` containing the same repo. The
+    // brief's `fed = None` path skips the overlay-refresh phase by
+    // design, so the cleanest test path is to construct a real fed
+    // and pass it as `Some(&fed)`.
+    let fed_data_dir = tmp.path().join("fed");
+    std::fs::create_dir_all(&fed_data_dir).unwrap();
+    let backend: Arc<dyn lain::server::federation::graph_backend::GraphBackend> =
+        Arc::new(PetgraphBackend::new(&fed_data_dir).expect("PetgraphBackend"));
+    let fed = Arc::new(FederatedIndex::new(backend));
+    // Install BEFORE add_repo so the new RepoIndex picks up the shared
+    // overlay in its constructor branch.
+    fed.install_overlay(shared_overlay.clone());
+    let fed_source = Box::new(
+        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap(),
+    );
+    fed.add_repo(fed_source, &fed_data_dir)
+        .await
+        .expect("add_repo");
+
+    // Pre-condition: the federation sees exactly one repo and the
+    // overlay is empty (no LSP scan has run yet).
+    assert_eq!(fed.list_repos().len(), 1);
+    assert!(
+        shared_overlay.get_all_nodes().is_empty(),
+        "shared overlay should be empty before sync_state"
+    );
+
+    // Create a new untracked file BEFORE calling sync_state. The
+    // overlay-refresh phase must end up reflecting this file.
+    std::fs::write(
+        tmp.path().join("src").join("post_sync.rs"),
+        "pub fn post_sync_symbol() {}\n",
+    )
+    .unwrap();
+
+    // Build the args sync_state takes. Many of them are zero-value
+    // because this test exercises only the overlay-refresh path.
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+    let git = std::sync::Arc::new(parking_lot::Mutex::new(
+        lain::git::GitSensor::new(&repo_dir).unwrap(),
+    ));
+    let ingestion = IngestionConfig::default();
+    let jobs = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::<
+        String,
+        lain::server::tools::JobInfo,
+    >::new()));
+    let last_outcome = std::sync::Arc::new(parking_lot::Mutex::new(
+        lain::server::refresh::RefreshOutcome::default(),
+    ));
+
+    let _response = tokio::task::spawn_blocking({
+        let jobs = std::sync::Arc::clone(&jobs);
+        let last_outcome = std::sync::Arc::clone(&last_outcome);
+        let fed = std::sync::Arc::clone(&fed);
+        move || {
+            sync_state(
+                &graph,
+                &git,
+                &ingestion,
+                &jobs,
+                &last_outcome,
+                Some(&fed),
+            )
+        }
+    })
+    .await
+    .expect("spawn_blocking join")
+    .expect("sync_state should not error");
+
+    // The spawned task is async; poll the overlay for up to ~2s.
+    // Pre-fix, sync_state short-circuited on commit equality and the
+    // overlay stayed empty. After the fix, sync_state walks every
+    // repo in the federation and calls sync_overlay, which writes
+    // the new file's symbols into the shared overlay.
+    let mut populated = false;
+    for _ in 0..40 {
+        if !shared_overlay.get_all_nodes().is_empty() {
+            populated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        populated,
+        "sync_state with fed=Some(&fed) should refresh the overlay so \
+         a brand-new untracked file becomes visible"
+    );
+
+    // Hold both handles alive so the spawned background task doesn't
+    // race with their drop.
+    std::mem::forget(ri);
+    std::mem::forget(fed);
+}
