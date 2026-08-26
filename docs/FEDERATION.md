@@ -13,6 +13,41 @@ what other services depend on it, and which repos are degraded right
 now. Federation is the headline of `lain`: a single long-running
 process that owns the index, the workspaces, and the MCP tool surface.
 
+```mermaid
+flowchart LR
+    subgraph FED["FederatedIndex"]
+        MAP["RwLock&lt;HashMap&lt;RepoId, Arc&lt;RepoIndex&gt;&gt;&gt;"]
+        GB["Arc&lt;dyn GraphBackend&gt;<br/>PetgraphBackend<br/>federated_graph.bin"]
+        RES["resolve_symbol()<br/>symbol_to_repos index<br/>+ backend fallback"]
+    end
+
+    subgraph R1["RepoIndex auth-svc"]
+        LSP1["LSP pool"]
+        PG1["per-repo petgraph"]
+        FW1["file watcher"]
+    end
+
+    subgraph R2["RepoIndex billing-svc"]
+        LSP2["LSP pool"]
+        PG2["per-repo petgraph"]
+        FW2["file watcher"]
+    end
+
+    MAP --> R1
+    MAP --> R2
+    R1 -->|project_repo| GB
+    R2 -->|project_repo| GB
+    RES --> MAP
+    RES --> GB
+    GB --> TOOLS["federation_tools<br/>(6 MCP tools)"]
+```
+
+The diagram shows the two-tier model: each `RepoIndex` runs its own
+engines (LSP pool, petgraph, file watcher) on its own clone, and the
+`FederatedIndex` projects each worker's nodes into one global
+petgraph via `project_repo()`. The six federation MCP tools then
+read the global graph and bucket results by repo.
+
 This document is the central reference for federation mode. The schema
 of the `repos.yaml` config lives in [`docs/REPOS_YAML.md`](REPOS_YAML.md);
 this doc covers the operating model, the MCP tools, the resolver rules,
@@ -42,6 +77,29 @@ Federation mode is configured by a `repos.yaml` file and started by
 `lain server`. The schema is documented in
 [`docs/REPOS_YAML.md`](REPOS_YAML.md); this section is the operational
 quickstart.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as Operator
+    participant CLI as lain repos add
+    participant YAML as repos.yaml
+    participant Sock as Unix socket
+    participant Bus as ReloadBus
+    participant Srv as lain server
+
+    Op->>CLI: lain repos add auth-svc <url>
+    CLI->>YAML: atomic write (temp + rename)
+    CLI->>Sock: write "reload\n"
+    Sock->>Bus: request_reload()
+    Bus->>Srv: rebuild task
+    Srv->>Srv: diff new vs live<br/>add/remove operations
+    Srv-->>Op: list_repos() now shows auth-svc
+```
+
+The flow covers the most common operator action: a CLI write that
+reaches the running server without a restart. Hand-edits take the
+same path through the `notify` watcher.
 
 ### 1. Write a `repos.yaml`
 
@@ -79,12 +137,14 @@ lain server --config /etc/lain/repos.yaml --transport http --port 9999
 Flags (all have defaults):
 
 - `--config <path>` — required; path to `repos.yaml`
-- `--transport <http|stdio>` — default `http`
+- `--transport <http|stdio>` — default `stdio` (set to `http` for the Command Center dashboard)
 - `--port <u16>` — default `9999`, only meaningful for HTTP
-- `--log_level <env-filter>` — default `info`; passed to `tracing`'s `EnvFilter`
+- `--log-level <env-filter>` — default `info`; passed to `tracing`'s `EnvFilter`
 - `--workspace <name>` — optional; pin to a workspace declared in
   `workspaces.yaml`. Use `auto` to read the operator's
   `~/.config/lain/active_workspace` pointer.
+- `--embedding-model <path>` — optional; ONNX model for `semantic_search`
+- `--no-process-attribution` — disable `/proc/<pid>/fd` attribution on Linux/macOS
 
 The loader reads the config, builds per-repo sources, and indexes each
 repo up to `max_concurrent_indexers` at a time. After loading, the
@@ -304,6 +364,22 @@ Federation tools that take a `repo_id` (currently `get_repo_info`,
 single-workspace mode that are resolved against a federation) use
 `resolve_repo_for_tool` in `src/mcp/handler.rs`. The rule, in order:
 
+```mermaid
+flowchart TB
+    A["args received"] --> B{"repo_id present<br/>and valid?"}
+    B -->|yes| R1["use repo_id"]
+    B -->|no| C{"symbol present?"}
+    C -->|yes| D["resolve_symbol(symbol)"]
+    D -->|0 repos| E["NotFound"]
+    D -->|1 repo| R2["that repo"]
+    D -->|>1 repos| F["AmbiguousSymbol"]
+    C -->|no| G{"0 repos registered?"}
+    G -->|yes| H["Config: no repos registered"]
+    G -->|no| I{"exactly 1 repo?"}
+    I -->|yes| R3["that repo"]
+    I -->|no| J["Config: multiple repos<br/>specify repo_id or symbol"]
+```
+
 1. **Explicit `repo_id`.** If the call's `args.repo_id` is present and
    non-empty, use it as-is. If it's malformed (fails `RepoId::new`'s
    validation), return `Invalid repo id: <id>`.
@@ -341,6 +417,14 @@ the candidates and pick one for the next call.
 ---
 
 ## Performance
+
+```mermaid
+flowchart LR
+    Q["MCP tool call"] --> RI["resolve_symbol<br/>O(1) lookup"]
+    RI --> T["GraphBackend::traverse<br/>BFS, depth-bounded"]
+    T --> CAP["cap at 1000 nodes"]
+    CAP --> OUT["CrossRepoBlastRadius"]
+```
 
 The federation has two measured workloads; both are in
 `tests/federation_benchmark.rs`.
@@ -534,6 +618,30 @@ together as a coherent unit. A workspace = a subset of `repos.yaml`'s
 repos, picked at server start via `--workspace <name>` (or `auto` to
 read the operator's `~/.config/lain/active_workspace` pointer). The
 workspace config lives in `workspaces.yaml` next to `repos.yaml`.
+
+```mermaid
+flowchart LR
+    subgraph Y["repos.yaml"]
+        R1[auth-svc]
+        R2[billing-svc]
+        R3[db-client]
+        R4[web]
+    end
+
+    subgraph W["workspaces.yaml"]
+        WS1["backend-team<br/>members: [auth-svc, billing-svc, db-client]"]
+        WS2["payments-ws<br/>members: [billing-svc, db-client]"]
+    end
+
+    R1 --> WS1
+    R2 --> WS1
+    R2 --> WS2
+    R3 --> WS1
+    R3 --> WS2
+
+    WS1 --> ACT["active workspace<br/>(~/.config/lain/active_workspace)"]
+    ACT --> SRV["--workspace auto → federation loads only WS1's repos"]
+```
 
 ### When to use workspaces
 

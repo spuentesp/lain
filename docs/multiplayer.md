@@ -4,6 +4,47 @@
 > Kimi, Cursor, OpenCode, humans) can edit the same workspace without
 > stomping on each other. This page is the operator + agent quickstart.
 
+```mermaid
+flowchart TB
+    subgraph A1["Agent A (claude-code)"]
+        REG1["register_agent → agent_id_A"]
+        CL1["claim_files(auth.rs, edit)"]
+    end
+
+    subgraph A2["Agent B (kimi)"]
+        REG2["register_agent → agent_id_B"]
+        CL2["claim_files(auth.rs, read)"]
+    end
+
+    subgraph REG["Presence registry (in-process)"]
+        PR["PresenceRegistry<br/>(agents map, sessions)"]
+        OM["OccupancyMap<br/>(path → holders[])"]
+        LOCK["state_lock<br/>(advisory file lock)"]
+        ST["~/.local/lain/state/&lt;hash&gt;.json"]
+    end
+
+    SSE["SSE feed /events"]
+    CC["Command Center"]
+
+    A1 --> REG1 --> PR
+    A2 --> REG2 --> PR
+    CL1 --> OM
+    CL2 --> OM
+    PR <--> LOCK
+    OM <--> LOCK
+    LOCK <--> ST
+    PR -.events.-> SSE
+    OM -.events.-> SSE
+    SSE --> CC
+```
+
+Two agents register, both want to look at the same file. The
+registry holds their sessions; the occupancy map holds the per-path
+claims; the state file is the cross-process coordination point (so
+two `lain mcp` processes spawned by two agent consoles see each
+other). Every mutation pushes an event into the SSE feed the
+Command Center consumes.
+
 ## Operator quickstart
 
 Multiplayer is always on. Start `lain server` like you already do — the
@@ -30,6 +71,38 @@ multiplayer works.
 ## Agent quickstart
 
 Every agent that wants to participate goes through this 4-call dance:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent
+    participant Lain as lain server
+    participant Lock as state_lock
+    participant State as state file (config-stem-hash.json)
+
+    Agent->>Lain: register_agent(name, kind)
+    Lain->>Lock: acquire (timeout 2s)
+    Lock->>State: read
+    State-->>Lock: registry snapshot
+    Lock-->>Lain: snapshot
+    Lain->>Lain: add session
+    Lain->>State: write (under lock)
+    Lain-->>Agent: {agent_id, session_token, expires_at_unix}
+
+    Agent->>Lain: claim_files(auth.rs, symbols:[login])
+    Lain->>Lock: acquire
+    Lock->>State: re-read (peer may have written)
+    State-->>Lain: fresh snapshot
+    Lain->>Lain: check conflicts/advisories
+    Lain->>State: write (under lock)
+    Lain-->>Agent: {granted, conflicts, advisories}
+
+    Agent->>Lain: edit auth.rs
+    Agent->>Lain: release_files(auth.rs)
+    Lain->>Lock: acquire
+    Lain->>State: write
+    Lain-->>Agent: ok
+```
 
 ```js
 const { agent_id, session_token, expires_at_unix } = await mcp.call("register_agent", {name: "claude", kind: "claude-code", pid: process.pid});
@@ -122,6 +195,25 @@ curl -N http://localhost:9999/events
 # data: {"agent_id":"5f74f...", "path":"auth.rs"}
 ```
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Srv as lain server
+    participant Bus as event channel
+    participant Client as SSE consumer
+    participant CC as Command Center
+
+    Srv->>Bus: agent_joined(agent_id, name, kind)
+    Bus->>Client: event: agent_joined\ndata: {…}
+    Bus->>CC: event: agent_joined\ndata: {…}
+    Srv->>Bus: claim_granted(agent_id, path)
+    Bus->>Client: event: claim_granted\ndata: {…}
+    Bus->>CC: event: claim_granted\ndata: {…}
+    Srv->>Bus: conflict_detected(a, b, path)
+    Bus->>Client: event: conflict_detected\ndata: {…}
+    Bus->>CC: event: conflict_detected\ndata: {…}
+```
+
 Event types: `ready` (initial sync), `agent_joined`, `agent_left`,
 `heartbeat_expired`, `claim_granted`, `claim_released`, `claim_revoked`,
 `conflict_detected`, `edit_landed`. The Command Center consumes this
@@ -137,6 +229,21 @@ revocation should treat that agent's in-flight edit as unprotected.
 ## How attribution works (defensive layer)
 
 If an agent forgets to call `claim_files`, lain still knows:
+
+```mermaid
+flowchart TB
+    W["notify inotify event"] --> F1{".gitignore filter<br/>(.git, .lain, build output)"}
+    F1 -->|ignored| SKIP["drop"]
+    F1 -->|kept| W2["writer pid?"]
+    W2 --> P{"/proc/&lt;pid&gt;/fd<br/>registered agent?"}
+    P -->|yes| A1["attribute to agent"]
+    P -->|no| S1{"single agent<br/>connected?"}
+    S1 -->|yes| A2["attribute to that agent"]
+    S1 -->|no| LOG["audit log<br/>(unattributed)"]
+    A1 --> INF["inferred claim<br/>(TTL 120s)"]
+    A2 --> INF
+    LOG --> INF
+```
 
 1. **Inotify** watches the workspace. Events are filtered first: the
    repo's own `.gitignore` decides what is build output, plus `.git/`

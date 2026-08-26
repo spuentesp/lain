@@ -23,11 +23,13 @@ lain server --config /etc/lain/repos.yaml --transport http --port 9999
 ```
 
 - `--config <path>` (required) — path to a `repos.yaml` file
-- `--transport http|stdio` (default `http`)
+- `--transport http|stdio` (default `stdio`; set to `http` for the Command Center)
 - `--port <u16>` (default `9999`)
-- `--log_level <EnvFilter>` (default `info`)
+- `--log-level <EnvFilter>` (default `info`)
 - `--workspace <name>` (optional) — pin to a workspace declared in
   `workspaces.yaml`. `auto` reads `~/.config/lain/active_workspace`.
+- `--embedding-model <path>` (optional) — ONNX model for `semantic_search`
+- `--no-process-attribution` (flag) — disable `/proc/<pid>/fd` attribution
 
 If the file is missing, malformed, or contains an unknown `source.type`,
 `lain server` exits with a `LainError::Config` message and a non-zero code.
@@ -327,7 +329,7 @@ PY
 #    stdio session — Ctrl-D exits cleanly, timeout forces exit otherwise).
 #    Skipped automatically if `lain` is not on PATH.
 if command -v lain >/dev/null 2>&1; then
-    timeout 3s lain server --config /tmp/repos.yaml --transport stdio --log_level warn </dev/null \
+    timeout 3s lain server --config /tmp/repos.yaml --transport stdio --log-level warn </dev/null \
         || true   # any exit code is fine; we only care that it did NOT print "yaml:" / "config:"
     echo "lain server exited without a parse error"
 else

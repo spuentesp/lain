@@ -26,31 +26,31 @@ its federation state when they change. No restart needed.
 
 ## How it works
 
-```
-   ┌──────────────┐         ┌──────────────┐         ┌──────────────┐
-   │ notify file  │         │ Unix socket  │         │ MCP request_ │
-   │ watcher      │         │ listener     │         │ reload tool  │
-   └──────┬───────┘         └──────┬───────┘         └──────┬───────┘
-          │                        │                        │
-          ▼                        ▼                        ▼
-   ┌──────────────────────────────────────────────────────────────┐
-   │                        ReloadBus                              │
-   │  ┌───────────────────────────────────────────────────────┐   │
-   │  │ broadcast::Sender<()>  (capacity 16)                  │   │
-   │  │ Arc<Mutex<ReloadStatus>> (state, started_at, ...)      │   │
-   │  └───────────────────────────────────────────────────────┘   │
-   └──────────────────────┬───────────────────────────────────────┘
-                          │ try_recv
-                          ▼
-                ┌──────────────────────┐
-                │ rebuild task loop    │
-                │ run_rebuild(server)  │
-                └──────────┬───────────┘
-                           ▼
-                ┌──────────────────────┐
-                │ FederatedIndex       │
-                │ add/remove/proj      │
-                └──────────────────────┘
+```mermaid
+flowchart TB
+    subgraph SIG["Signal sources"]
+        N["notify file watcher<br/>(repos.yaml, workspaces.yaml)"]
+        U["Unix socket listener<br/>~/.local/lain/run/&lt;stem&gt;.sock"]
+        M["MCP request_reload tool"]
+    end
+
+    subgraph BUS["ReloadBus"]
+        TX["broadcast::Sender&lt;()&gt;<br/>(capacity 16)"]
+        ST["Arc&lt;AsyncMutex&lt;ReloadStatus&gt;&gt;<br/>(state, started_at, last_error)"]
+    end
+
+    RT["rebuild task loop<br/>run_rebuild(server)"]
+    DIFF["diff new vs live<br/>FederationConfig"]
+    FED["FederatedIndex<br/>add/remove/project"]
+
+    N -->|notify event| TX
+    U -->|"reload from CLI"| TX
+    M -->|tool call| TX
+    TX --> RT
+    RT --> DIFF
+    DIFF --> FED
+    RT -->|state transitions| ST
+    ST -->|get_reload_status| M
 ```
 
 1. **Signal sources** fire `bus.request_reload()`:
@@ -112,15 +112,17 @@ absent from the federation is fetched (for `local_clone` /
 
 ## Caveats
 
-- `LainServer::set_workspace` updates the workspaces file the server
-  holds, but the **in-flight** `LainMcpServer` (stdio/HTTP) keeps
-  its own copy of the workspaces file from startup. Workspace tools
-  visible to MCP clients therefore reflect the workspaces that
-  existed at server start; restarting is the only way to pick up a
-  `workspaces.yaml` change in MCP responses (the federation's repo
-  membership is hot-reloaded correctly). This limitation is tracked
-  in `src/server/ingest/mod.rs::set_workspace`'s doc comment.
+None — workspace edits propagate live; the federation's repo
+membership is hot-reloaded correctly; the build / embedding model
+flags are restart-only as listed at the top of this document.
 - The `notify` watcher uses non-recursive directory watches, so
   hand-edits that move the file across directories may be missed.
   All CLI writes go through atomic rename so the watcher sees the
   old or new contents, never a partial write.
+- Workspace edits propagate live: `set_workspace`
+  (`src/server/ingest/server.rs`) writes through the same
+  `Arc<RwLock<WorkspacesFile>>` the running `LainMcpServer` holds,
+  so the next `list_workspaces` / `get_workspace` dispatch
+  observes the new contents without a restart. Verified by
+  `rebuild_replaces_workspaces_yaml_when_present` in
+  `src/server/reload.rs`.

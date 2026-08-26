@@ -5,6 +5,34 @@ The Command Center is the operator's primary surface for inspecting and steering
 MCP HTTP transport. Every panel talks to the running server via the JSON-RPC
 `tools/call` endpoint at `POST /mcp` — no separate API, no auth portal.
 
+```mermaid
+flowchart LR
+    subgraph BROWSER["Browser"]
+        SPA["SPA shell<br/>index.html + app.js"]
+        D3["D3 v7<br/>(vendored)"]
+        TH["theme.css<br/>(phosphor/paper tokens)"]
+    end
+
+    subgraph SERVER["lain server (HTTP transport)"]
+        CC["/         → SPA shell"]
+        ASSETS["/assets/ → JS/CSS/D3"]
+        MCP["/mcp      → JSON-RPC tools/call"]
+        EV["/events   → SSE feed"]
+        HC["/health   → health JSON"]
+    end
+
+    SPA -->|HTTP GET| CC
+    SPA -->|HTTP GET| ASSETS
+    SPA -->|JSON-RPC POST| MCP
+    SPA -->|EventSource| EV
+    SPA --> TH
+    SPA --> D3
+```
+
+Every panel talks to the running server over the same JSON-RPC
+endpoint — there is no separate API. The SPA is the *only* consumer;
+every state mutation is a tool call.
+
 ## Launch
 
 ```bash
@@ -17,6 +45,37 @@ The Command Center shell is served at `/` and pulls `app.js`, `theme.css`,
 Everything else is fetched from the running server over MCP.
 
 ## Sections
+
+```mermaid
+flowchart TB
+    subgraph TOP["Topbar"]
+        PROJ["active project path"]
+        WS["active workspace"]
+        TH2["theme toggle"]
+    end
+
+    subgraph SIDE["Sidebar"]
+        WSSW["workspace switcher"]
+        REPOSW["repo summary (id+health)"]
+        RECENT["recent projects switcher"]
+    end
+
+    subgraph TABS["Tabs"]
+        OVW["Overview<br/>get_health + get_federation_health"]
+        GRAPH["Graph<br/>D3 force-directed"]
+        REPOSTAB["Repos<br/>id, path, health, counts"]
+        Q["Query<br/>query_graph form"]
+        TOOLS["Tools<br/>auto-generated form per tool<br/>(from inputSchema)"]
+    end
+
+    subgraph FOOT["Footer"]
+        SB["status bar (2s poll)<br/>pid, transport, counts"]
+    end
+
+    TOP --- SIDE
+    SIDE --- TABS
+    TABS --- FOOT
+```
 
 - **Topbar** — active project path and active workspace name. The active
   workspace is highlighted in the sidebar list.

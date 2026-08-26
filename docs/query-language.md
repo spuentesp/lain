@@ -4,6 +4,19 @@ Query the LAIN knowledge graph via `query_graph` MCP tool.
 
 > **Federation note:** cross-repo queries (`get_cross_repo_blast_radius`, `search_org`) require federation mode (`lain server --config repos.yaml`). See [`docs/FEDERATION.md`](./FEDERATION.md) for the full guide.
 
+```mermaid
+flowchart LR
+    OPS["ops[]"] --> F["find"] --> C1["connect"] --> FL["filter"] --> SF["semantic_filter"] --> G["group"] --> S["sort"] --> L["limit"]
+    C1 -.0..n more connects.-> C2["connect"]
+    C1 -.alternative.-> T["target<br/>(nested FindOp)"]
+```
+
+The `query_graph` pipeline runs each op in declaration order,
+streaming a working-set of nodes from one stage into the next. Any
+op may be omitted (e.g. `find → limit` is valid). `semantic_filter`
+is the only op that hits the ONNX embedder; everything else reads
+the in-memory petgraph.
+
 ---
 
 ## Tool Call
@@ -64,6 +77,16 @@ Name selector object:
 ### connect
 
 Traverse edges from found nodes.
+
+```mermaid
+flowchart LR
+    N["seed node"] -->|"outgoing<br/>depth 1"| A1[adjacent]
+    N -->|"outgoing<br/>depth 2"| A2[2-hop]
+    A1 --> A2
+    N -->|"incoming<br/>depth 1"| B1[predecessor]
+    N -->|"both"| A1
+    N -->|"both"| B1
+```
 
 ```json
 { "op": "connect", "edge": "Calls", "direction": "outgoing", "depth": 3 }
