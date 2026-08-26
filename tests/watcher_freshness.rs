@@ -232,6 +232,13 @@ async fn sync_state_refreshes_overlay_for_new_file() {
         lain::server::refresh::RefreshOutcome::default(),
     ));
 
+    // `sync_state` is a sync function that calls `jobs_registry.blocking_lock()`
+    // on a `tokio::sync::Mutex` (see handlers::enrichment::sync_state).
+    // `blocking_lock()` panics on a `current_thread` Tokio runtime — which
+    // is exactly what `#[tokio::test]` defaults to. Production calls
+    // `sync_state` from a `new_multi_thread` runtime (see src/main.rs:45),
+    // where `blocking_lock` is safe; we don't, so we hop to the blocking
+    // thread pool here. Removing the wrapper would panic this test.
     let _response = tokio::task::spawn_blocking({
         let jobs = std::sync::Arc::clone(&jobs);
         let last_outcome = std::sync::Arc::clone(&last_outcome);

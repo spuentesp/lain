@@ -225,11 +225,12 @@ impl RepoIndex {
     /// Attach a `notify::RecommendedWatcher` to this repo's local path.
     ///
     /// The watcher callback runs on notify's inotify thread and pushes the
-    /// raw `notify::Result<notify::Event>` into a
-    /// `tokio::sync::mpsc::UnboundedSender`. A Tokio-spawned receiver
-    /// task owns the matching `Receiver` and an `Arc<RepoIndex>`; per
-    /// event it runs `me.index().await` (commit-based pipeline) followed
-    /// by `me.sync_overlay().await` (working-tree refresh). Failures from
+    /// raw `notify::Result<notify::Event>` into a bounded
+    /// (`WATCHER_CHANNEL_DEPTH = 1024`) `tokio::sync::mpsc::Sender` via
+    /// `try_send`. A Tokio-spawned receiver task owns the matching
+    /// `Receiver` and an `Arc<RepoIndex>`; per event it runs
+    /// `me.index().await` (commit-based pipeline) followed by
+    /// `me.sync_overlay().await` (working-tree refresh). Failures from
     /// either call are logged via `tracing::debug!` and do not propagate.
     ///
     /// The channel handoff keeps `tokio::spawn` and `.await` off the
@@ -241,7 +242,19 @@ impl RepoIndex {
     /// the receiver task exits on the next `rx.recv()` returning `None`,
     /// the inotify watch is released by `RecommendedWatcher::drop`, and
     /// any events that arrive on a now-dropped channel are silently
-    /// dropped (the closure is `let _ = tx.send(res)`).
+    /// dropped (the closure uses `tx.try_send` and ignores `Full`).
+    ///
+    /// The mpsc channel is **bounded at 1024 events**. `index()` is
+    /// itself bounded at `INDEX_TIMEOUT = 60s`; a stuck LSP child process
+    /// or a slow-to-warm LSP could let a `git checkout` storm (hundreds
+    /// of files in seconds) **block the receiver task** while it
+    /// processes one event at a time. An unbounded queue would let the
+    /// inotify-side sender grow without bound until the receiver
+    /// unblocked — a memory bomb under pathological workloads. The
+    /// bounded queue caps worst-case memory at ~1024 serialized events;
+    /// when full, the sender drops the event at `tracing::debug!` level
+    /// and the next event from `notify` retries shortly (cooperative
+    /// backpressure).
     pub async fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
         use notify::{RecommendedWatcher, RecursiveMode, Watcher};
         use std::time::Duration;
@@ -250,11 +263,14 @@ impl RepoIndex {
         let path = self.source.local_path().to_path_buf();
         let me_for_task = Arc::clone(self);
 
-        // Channel to hand events from notify's inotify thread to a Tokio
-        // task. The closure no longer calls `tokio::spawn` directly — that
-        // panicked because the inotify thread is not a Tokio runtime
-        // context.
-        let (tx, mut rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+        // Bounded channel to hand events from notify's inotify thread to
+        // a Tokio task. The closure no longer calls `tokio::spawn`
+        // directly — that panicked because the inotify thread is not a
+        // Tokio runtime context. The closure uses `tx.try_send` and
+        // ignores `Full` (logs at debug) so a stuck LSP child or a
+        // `git checkout` storm cannot grow the queue without bound.
+        const WATCHER_CHANNEL_DEPTH: usize = 1024;
+        let (tx, mut rx) = mpsc::channel::<notify::Result<notify::Event>>(WATCHER_CHANNEL_DEPTH);
 
         // Receiver task: drains the channel and runs both the commit-based
         // pipeline (`index`) and the working-tree pipeline (`sync_overlay`)
@@ -280,12 +296,31 @@ impl RepoIndex {
             }
         });
 
-        // Watcher callback: runs on notify's inotify thread. Just pushes
-        // the event into the channel. If the receiver was dropped (because
-        // the RepoIndex is being torn down), silently drop the event.
+        // Watcher callback: runs on notify's inotify thread. Pushes the
+        // event into the bounded channel with `try_send`. Two
+        // recoverable error shapes:
+        //   - `Full`: receiver is slow (e.g. `index()` is mid-flight on
+        //     a stuck LSP child). Drop the event; the next `notify`
+        //     event will retry shortly, and the next legitimate file
+        //     modification will eventually refresh the index. We log at
+        //     `debug!` so the drop is observable but not noisy.
+        //   - `Closed`: receiver task has exited (RepoIndex is being
+        //     dropped). Silently drop — there's no one to wake up.
+        let tx_for_closure = tx.clone();
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
-                let _ = tx.send(res);
+                if let Err(e) = tx_for_closure.try_send(res) {
+                    match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                            tracing::debug!(
+                                "[federation] watcher channel full; dropping event (receiver is slow)"
+                            );
+                        }
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            // Receiver gone — RepoIndex is being torn down.
+                        }
+                    }
+                }
             },
             notify::Config::default().with_poll_interval(Duration::from_secs(2)),
         )
