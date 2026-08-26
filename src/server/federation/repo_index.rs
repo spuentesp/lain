@@ -222,36 +222,70 @@ impl RepoIndex {
         Ok(())
     }
 
-    /// Attach a `notify::RecommendedWatcher` to this repo's local path. On
-    /// any filesystem event, the watcher re-runs `index()` on a spawned
-    /// tokio task. Errors from the re-index are logged inside `index()` and
-    /// do not propagate out of the watcher callback.
+    /// Attach a `notify::RecommendedWatcher` to this repo's local path.
     ///
-    /// The watcher is moved into `self.watcher` so it stays alive for the
-    /// lifetime of the `RepoIndex`. The watcher holds a `Fn(Arc<RepoIndex>)`
-    /// closure, which is `Send + 'static` because `Arc<RepoIndex>: Send +
-    /// Sync + 'static`.
-    pub fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
+    /// The watcher callback runs on notify's inotify thread and pushes the
+    /// raw `notify::Result<notify::Event>` into a
+    /// `tokio::sync::mpsc::UnboundedSender`. A Tokio-spawned receiver
+    /// task owns the matching `Receiver` and an `Arc<RepoIndex>`; per
+    /// event it runs `me.index().await` (commit-based pipeline) followed
+    /// by `me.sync_overlay().await` (working-tree refresh). Failures from
+    /// either call are logged via `tracing::debug!` and do not propagate.
+    ///
+    /// The channel handoff keeps `tokio::spawn` and `.await` off the
+    /// inotify thread, which is not a Tokio runtime context — calling
+    /// either from the watcher closure directly would panic.
+    ///
+    /// The watcher is moved into `self.watcher` so it stays alive for
+    /// the lifetime of the `RepoIndex`. When the `RepoIndex` is dropped
+    /// the receiver task exits on the next `rx.recv()` returning `None`,
+    /// the inotify watch is released by `RecommendedWatcher::drop`, and
+    /// any events that arrive on a now-dropped channel are silently
+    /// dropped (the closure is `let _ = tx.send(res)`).
+    pub async fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
         use notify::{RecommendedWatcher, RecursiveMode, Watcher};
         use std::time::Duration;
+        use tokio::sync::mpsc;
 
         let path = self.source.local_path().to_path_buf();
-        let me = Arc::clone(self);
+        let me_for_task = Arc::clone(self);
 
+        // Channel to hand events from notify's inotify thread to a Tokio
+        // task. The closure no longer calls `tokio::spawn` directly — that
+        // panicked because the inotify thread is not a Tokio runtime
+        // context.
+        let (tx, mut rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+
+        // Receiver task: drains the channel and runs both the commit-based
+        // pipeline (`index`) and the working-tree pipeline (`sync_overlay`)
+        // per event. Runs in Tokio, so `.await` and `tokio::spawn` are sound.
+        tokio::spawn(async move {
+            while let Some(res) = rx.recv().await {
+                if res.is_ok() {
+                    if let Err(e) = me_for_task.index().await {
+                        tracing::debug!(
+                            "[federation] watcher-triggered index failed for {:?}: {}",
+                            me_for_task.source.local_path(),
+                            e
+                        );
+                    }
+                    if let Err(e) = me_for_task.sync_overlay().await {
+                        tracing::debug!(
+                            "[federation] watcher-triggered overlay refresh failed for {:?}: {}",
+                            me_for_task.source.local_path(),
+                            e
+                        );
+                    }
+                }
+            }
+        });
+
+        // Watcher callback: runs on notify's inotify thread. Just pushes
+        // the event into the channel. If the receiver was dropped (because
+        // the RepoIndex is being torn down), silently drop the event.
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
-                if let Ok(_event) = res {
-                    let me = Arc::clone(&me);
-                    tokio::spawn(async move {
-                        if let Err(e) = me.index().await {
-                            tracing::debug!(
-                                "[federation] watcher-triggered index failed for {:?}: {}",
-                                me.source.local_path(),
-                                e
-                            );
-                        }
-                    });
-                }
+                let _ = tx.send(res);
             },
             notify::Config::default().with_poll_interval(Duration::from_secs(2)),
         )

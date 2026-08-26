@@ -91,7 +91,7 @@ pub async fn run_server(
             // repo's own graph 29 commits behind. The comment above
             // ("the watcher would eventually pick up filesystem events")
             // described a watcher that nothing started.
-            if let Err(e) = repo.start_watcher() {
+            if let Err(e) = repo.start_watcher().await {
                 tracing::warn!(
                     "lain server: could not watch repo '{}' for re-index: {e}",
                     id.as_str()

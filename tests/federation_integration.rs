@@ -206,7 +206,7 @@ async fn repo_index_start_watcher_does_not_panic() {
 
     // start_watcher should succeed. The notify watcher spawns its own
     // background thread; we don't need to wait for events.
-    ri.start_watcher().expect("start_watcher should succeed");
+    ri.start_watcher().await.expect("start_watcher should succeed");
 
     // Give the inotify backend a moment to register the watch. If
     // registration failed (e.g. on a sandboxed filesystem), the watcher
