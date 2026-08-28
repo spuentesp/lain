@@ -658,18 +658,18 @@ impl ServerHandler for LainHandler {
                     ));
                 }
                 "get_repo_info" => {
-                    let id_str = match args_owned.get("id").and_then(|v| v.as_str()) {
+                    let repo_id_str = match args_owned.get("repo_id").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
-                                "Missing required argument: id".to_string(),
+                                "Missing required argument: repo_id".to_string(),
                                 true,
                                 &self.executor.overlay(),
                         static_graph_generation_unix,
                             ));
                         }
                     };
-                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                    let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
                         Ok(r) => r,
                         Err(e) => {
                             return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix));
@@ -2035,11 +2035,11 @@ async fn handle_request(
                                     return Ok(jsonrpc_tool_result(id, &text, false));
                                 }
                                 "get_repo_info" => {
-                                    let id_str = match args_map.get("id").and_then(|v| v.as_str()) {
+                                    let repo_id_str = match args_map.get("repo_id").and_then(|v| v.as_str()) {
                                         Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: id", true)),
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: repo_id", true)),
                                     };
-                                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                                    let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
                                     };

@@ -75,7 +75,7 @@ pub const FEDERATION_TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "get_repo_info",
         description: "Get info about a single repository in the federation by id.",
-        required_args: &["id"],
+        required_args: &["repo_id"],
         optional_args: &[],
     },
     ToolDef {
