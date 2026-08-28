@@ -230,6 +230,17 @@ That's it. The next time your agent starts, it sees the workspace
 (single-repo form) or the federation, the active workspace, and the
 full MCP tool surface.
 
+> **Kimi users:** Kimi's plugin security model pins the MCP subprocess
+> cwd to the plugin root, so a naive `lain mcp` invocation would walk
+> up from the plugin directory instead of your project. As of 0.6.1,
+> `lain mcp` reads `/proc/$PPID/cwd` on Linux (the parent agent's
+> cwd) before falling back to its own cwd, so the same
+> `{"command":"lain","args":["mcp"]}` config works under Kimi with no
+> wrapper. If you're pinned to 0.6.0, ship
+> `src/cli/kimi_plugin_wrapper.sh` from the source tree and point the
+> plugin manifest at it — the wrapper does the same `/proc/$PPID/cwd`
+> lookup outside the binary. macOS is unsupported in either path.
+
 ---
 
 ## Command Center
@@ -238,6 +249,8 @@ When `lain server` runs with `--transport http`, it serves the Command
 Center dashboard at `GET /`. It's a self-contained vanilla-JS SPA that
 talks back to the running server over the same JSON-RPC endpoint the
 MCP tools use. No separate API, no auth portal.
+
+![Command Center — Overview tab](docs/screenshots/command-center-overview.png)
 
 Tabs:
 
@@ -249,6 +262,8 @@ Tabs:
   renders a form per tool by introspecting its `inputSchema`. *Copy as
   cURL* copies a `curl -X POST http://localhost:9999/mcp ...` snippet
   to the clipboard.
+
+![Command Center — Repos tab](docs/screenshots/command-center-repos.png)
 
 The status bar in the footer polls every 2 s for `get_server_status`
 and `get_reload_status` so hand-edits to `repos.yaml` /

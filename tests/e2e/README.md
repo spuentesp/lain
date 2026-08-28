@@ -99,7 +99,9 @@ Both scripts:
 - The agent harness uses the shared HTTP singleton on port 9999 (override with
   `LAIN_PORT`). Make sure an owner is running before invoking the harness or
   smoke tests.
-- Kimi's plugin security model requires stdio MCP `command` and `cwd` to be
-  `./` paths inside the plugin root. The Kimi adapter therefore generates a
-  wrapper script at `~/.kimi-code/plugins/managed/lain/bin/lain` and references
-  it as `./bin/lain` in `kimi.plugin.json`.
+- Any agent harness can run `lain mcp` on stdio. Kimi's plugin security
+  model pins the subprocess cwd to the plugin root, so `lain mcp` resolves
+  the workspace from `/proc/$PPID/cwd` (the parent agent's cwd) — no
+  per-agent wrapper script is needed. The Kimi plugin manifest is just
+  `{"command": "lain", "args": ["mcp"]}` and lives at
+  `~/.kimi-code/plugins/managed/lain/kimi.plugin.json`.

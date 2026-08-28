@@ -60,11 +60,32 @@ can be reorganized without changing the wire protocol.
 1. `--config` flag → 2. `./repos.yaml` → 3. `./.lain/repos.yaml` →
 4. `~/.config/lain/repos.yaml` → 5. original path (fails not-found).
 
-### Workspace resolution (`--workspace` not given)
+### Workspace resolution for `lain mcp`
 
-1. `--workspace <name>` → 2. `--workspace auto` reads
-   `~/.config/lain/active_workspace` → 3. federation loads all
-   workspaces; tools that need one fall back to active.
+1. Repeated `--workspace PATH` (one or many, in argv order).
+2. `LAIN_WORKSPACE` env var — comma-separated list of paths.
+3. Walk up from the agent harness's cwd, read via `/proc/$PPID/cwd`
+   on Linux. This is what makes `lain mcp` work under Kimi's
+   plugin-security cwd pinning without any wrapper script.
+4. Fall back to walking up from the process's own cwd.
+
+Flag > env > /proc > process cwd. Whichever step produces a path
+with a `.git` ancestor wins.
+
+Single resolved workspace: `lain mcp` boots `LainServer::new` for
+that repo and serves the per-repo MCP tool surface on stdio.
+
+Multiple resolved workspaces: `lain mcp` synthesizes an in-memory
+`repos.yaml` (one `workspace_dir` source per workspace) and
+delegates to `lain server --transport stdio`. Agents that ask for
+two or more repos get the same federation surface
+(`list_repos`, `search_org`, `get_federation_health`) as `lain
+server`, without having to author a config file themselves.
+
+For federation (`lain server --config repos.yaml`), the workspace
+resolution is unchanged: `--workspace <name>` → `--workspace auto`
+reads `~/.config/lain/active_workspace` → federation loads all
+workspaces; tools that need one fall back to active.
 
 ## Knowledge graph (`src/graph.rs`)
 

@@ -29,6 +29,13 @@ fn main() -> Result<()> {
     // its calls has been superseded on disk.
     lain::server::build_info::record_startup_exe_mtime();
     let args = Args::parse();
+    if args.print_mcp_protocol_version {
+        // Single source of truth: rust-mcp-schema's ProtocolVersion
+        // enum. The 2025_11_25 feature in Cargo.toml selects this
+        // version; bumping the feature flag bumps this output.
+        println!("{}", rust_mcp_schema::ProtocolVersion::latest());
+        return Ok(());
+    }
     match args.command {
         Some(Commands::Server {
             config,
@@ -87,23 +94,22 @@ fn main() -> Result<()> {
             reindex_timeout,
             owner_url,
         }) => {
-            // `lain mcp` — single-repo MCP server on stdio. Walks up
-            // for `.git` if `--workspace` is not given, then serves
-            // the per-repo tool surface (no federation). Wishlist #11
-            // (option A): stable MCP config
-            // `{"command":"lain","args":["mcp"]}` that doesn't
-            // depend on `repos.yaml`.
+            // `lain mcp` — MCP server on stdio. Resolves the workspace
+            // list from `--workspace` (repeatable), the `LAIN_WORKSPACE`
+            // env var (comma-separated), or the agent-harness cwd
+            // walk-up. See `cli::mcp::resolve_workspaces` for the
+            // full resolution policy.
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .context("build tokio runtime for mcp subcommand")?;
             match owner_url {
                 Some(url) => rt.block_on(lain::cli::mcp::run_sidecar(
-                    workspace.as_deref(),
+                    &workspace,
                     &url,
                 )),
                 None => rt.block_on(lain::cli::mcp::run_mcp(
-                    workspace.as_deref(),
+                    &workspace,
                     embedding_model.as_deref(),
                     reindex_timeout.map(std::time::Duration::from_secs),
                 )),

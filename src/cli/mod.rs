@@ -39,6 +39,14 @@ use std::path::PathBuf;
     long_about = None
 )]
 pub struct Args {
+    /// Print the MCP protocol version this binary negotiates and exit.
+    /// Single source of truth for the version is
+    /// `rust_mcp_schema::ProtocolVersion::latest()` — driven by the
+    /// `2025_11_25` feature on the `rust-mcp-schema` crate. Tests
+    /// (`tests/e2e/`) source this rather than hand-rolling the string.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub print_mcp_protocol_version: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -133,21 +141,34 @@ pub enum Commands {
         config: PathBuf,
         question: String,
     },
-    /// Start a single-repo MCP server on stdio. Walks up from the
-    /// current directory for `.git` and serves the per-repo tool
-    /// surface directly. Wishlist #11: this is the stable MCP
-    /// config — `{"command":"lain","args":["mcp"]}` — that
-    /// doesn't depend on a `repos.yaml` or the federation plumbing.
-    /// Optional `--workspace PATH` overrides the walk-up; the
-    /// `embedding_model` flag works the same as in `Server`.
+    /// Start an MCP server on stdio.
+    ///
+    /// Single repo: walks up from the agent harness's cwd for `.git`
+    /// and serves the per-repo tool surface directly. Wishlist #11:
+    /// this is the stable MCP config — `{"command":"lain","args":["mcp"]}`
+    /// — that doesn't depend on a `repos.yaml` or the federation
+    /// plumbing.
+    ///
+    /// Multiple repos: pass `--workspace PATH` more than once (or set
+    /// `LAIN_WORKSPACE=/a,/b`). `lain mcp` synthesizes an in-memory
+    /// `repos.yaml` with one `workspace_dir` source per entry and
+    /// delegates to `lain server --transport stdio`, which provides
+    /// the federation tool surface (`list_repos`, `search_org`,
+    /// `get_federation_health`) alongside the per-repo tools.
+    /// Agents that want to work across multiple repos get the same
+    /// federation surface as `lain server` without having to author
+    /// a `repos.yaml` themselves.
     Mcp {
-        /// Workspace root (the directory containing `.git/`).
-        /// When omitted, walks up from the current directory until
-        /// it finds a `.git` marker and uses that parent. This
-        /// matches the zero-config use case (run from anywhere
-        /// inside a clone and it Just Works).
-        #[arg(long)]
-        workspace: Option<PathBuf>,
+        /// Workspace root(s) (directories containing `.git/`).
+        /// Repeatable: `lain mcp --workspace /repo/a --workspace /repo/b`.
+        /// When omitted, the binary reads `LAIN_WORKSPACE` (a
+        /// comma-separated list); if that's also unset, it walks up
+        /// from the agent harness's cwd (via `/proc/$PPID/cwd`),
+        /// falling back to the process's own cwd. That policy is
+        /// what makes `lain mcp` Just Work under any agent harness,
+        /// including Kimi's plugin-security cwd pinning.
+        #[arg(long, value_name = "PATH")]
+        workspace: Vec<PathBuf>,
         /// Path to the ONNX bi-encoder model directory. See
         /// `lain server --help` for details.
         #[arg(long)]

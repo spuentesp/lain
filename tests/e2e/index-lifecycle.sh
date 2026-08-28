@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end acceptance for the index-convergence / pruning / freshness work.
 set -u
+
+# Source shared helpers — single source of truth for the MCP
+# protocol version, queried from the binary at runtime.
+source "$(dirname "$0")/lib.sh"
+
 SP="${TMPDIR:-/tmp}/lain-acceptance"; mkdir -p "$SP"
 L="${LAIN_BIN:-$(git rev-parse --show-toplevel)/target/release/lain}"
 REPO="$(git rev-parse --show-toplevel)"
@@ -14,14 +19,14 @@ nochk(){ # name  forbidden-substring  actual
 
 # index <budget> — run one process purely to index, and let it exit.
 index(){ local budget=$1
-  { printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}},"id":1}\n'
+  { printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"'"'"'$LAIN_MCP_PROTOCOL_VERSION'"'"'","capabilities":{},"clientInfo":{"name":"t","version":"1"}},"id":1}\n'
     sleep $((budget+25)); } \
   | LAIN_REINDEX_TIMEOUT=$budget timeout $((budget+45)) $L mcp --workspace "$W" >/dev/null 2>&1
 }
 
 # ask <timeout> <reindex_budget> <json-lines-file> -> prints "id<TAB>text" per result
 ask(){ local wait=$1 budget=$2 file=$3
-  { printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}},"id":1}\n'
+  { printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"'"'"'$LAIN_MCP_PROTOCOL_VERSION'"'"'","capabilities":{},"clientInfo":{"name":"t","version":"1"}},"id":1}\n'
     sleep "$wait"; cat "$file"; sleep 12; } \
   | LAIN_REINDEX_TIMEOUT=$budget timeout $((wait+40)) $L mcp --workspace "$W" 2>/dev/null \
   | python3 -c '
@@ -184,7 +189,7 @@ repos:
     source: { type: workspace_dir, path: $W }
 EOF
 fedask(){ local wait=$1 file=$2
-  { printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}},"id":1}\n'
+  { printf '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"'$LAIN_MCP_PROTOCOL_VERSION'","capabilities":{},"clientInfo":{"name":"t","version":"1"}},"id":1}\n'
     sleep "$wait"; cat "$file"; sleep 12; } \
   | timeout $((wait+40)) $L server --config "$SP/acc.yaml" --transport stdio 2>/dev/null \
   | python3 -c '

@@ -106,12 +106,16 @@ pub fn run_oneshot(
         // Minimal MCP initialize + tools/call. The MCP spec requires
         // `notifications/initialized` after initialize; we skip it (the
         // server tolerates the omission for short-lived clients).
+        // Single source of truth for the protocol version — driven by
+        // the `2025_11_25` feature on `rust-mcp-schema`. Bumping the
+        // feature in Cargo.toml propagates here without a code change.
+        let protocol_version = rust_mcp_schema::ProtocolVersion::latest().to_string();
         let init = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": protocol_version,
                 "capabilities": {},
                 "clientInfo": {"name": "lain-oneshot", "version": "0.6.0"}
             }

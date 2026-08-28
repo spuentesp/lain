@@ -44,6 +44,26 @@ The Command Center shell is served at `/` and pulls `app.js`, `theme.css`,
 `styles.css`, and the vendored D3 v7 bundle from `/assets/d3.v7.min.js`.
 Everything else is fetched from the running server over MCP.
 
+### Screenshots
+
+| Tab | What it shows |
+|-----|---------------|
+| **Overview** | `get_health` + `get_federation_health` output side-by-side. Federation row totals: `total_repos`, `ready`, `indexing`, `degraded`, `total_nodes`, `total_edges`, `healthy`. |
+
+![Command Center — Overview](screenshots/command-center-overview.png)
+
+| Tab | What it shows |
+|-----|---------------|
+| **Repos** | Per-repo table (id, path, health, node count, edge count). Each row is a live `get_repo_info` call. |
+
+![Command Center — Repos](screenshots/command-center-repos.png)
+
+| Tab | What it shows |
+|-----|---------------|
+| **Tools** | Auto-generated tester from `tools/list` + per-tool `inputSchema`. Click any tool on the left to render a form; *Call* executes it; *Copy as cURL* copies a copy-pasteable `curl` against `POST /mcp`. |
+
+![Command Center — Tools](screenshots/command-center-tools.png)
+
 ## Sections
 
 ```mermaid

@@ -17,8 +17,50 @@ import argparse
 import os
 from typing import Optional
 
-BINARY = "./target/release/lain"
+# Locate the lain binary. Order:
+#   1. LAIN_BIN env var (matches the bash convention).
+#   2. <repo>/target/release/lain — the path the harness historically used.
+#   3. <repo>/target/debug/lain.
+#   4. `lain` on PATH.
+# We don't fail here if nothing is found — `_query_protocol_version`
+# and the subprocess spawns below will fail loudly with a clear error.
+def _resolve_binary() -> str:
+    if os.environ.get("LAIN_BIN"):
+        return os.environ["LAIN_BIN"]
+    # tests/e2e/lain_test.py -> tests/e2e -> tests -> <repo>
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    for candidate in (
+        os.path.join(repo_root, "target", "release", "lain"),
+        os.path.join(repo_root, "target", "debug", "lain"),
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "lain"  # hope it's on PATH
+
+BINARY = _resolve_binary()
 WORKSPACE = "."
+
+# ── MCP protocol version ──────────────────────────────────────────────────────
+# Single source of truth: query the binary itself. If neither the
+# env var nor the binary resolves the version, fall through with
+# None — the harness raises loudly on first MCP call rather than
+# silently negotiating against a stale literal.
+def _query_protocol_version(binary_path: str) -> Optional[str]:
+    try:
+        out = subprocess.run(
+            [binary_path, "--print-mcp-protocol-version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+PROTOCOL_VERSION = (
+    os.environ.get("LAIN_MCP_PROTOCOL_VERSION")
+    or _query_protocol_version(BINARY)
+)
 
 # ── colours ──────────────────────────────────────────────────────────────────
 GRN = "\033[92m"
@@ -74,7 +116,7 @@ class LainClient:
 
     def initialize(self):
         return self.send("initialize", {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": PROTOCOL_VERSION,
             "clientInfo": {"name": "lain-test", "version": "1.0"},
             "capabilities": {},
         })
