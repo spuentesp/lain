@@ -3341,6 +3341,91 @@ mod tests {
             );
         }
     }
+
+    /// D-H4 regression sweep across the eight tools that originally
+    /// surfaced the bare "multiple repos; specify repo_id or symbol"
+    /// message. After Part A (name the tool) and Part B (skip the
+    /// resolver for federation-wide tools) every one of them must land
+    /// in the right bucket:
+    ///
+    ///   * `explain_symbol`, `find_anchors`, `get_call_chain`,
+    ///     `get_blast_radius`, `trace_dependency`, `find_dead_code`,
+    ///     `semantic_search` — still require a repo scope, and the
+    ///     resulting Config error must name the requesting tool so the
+    ///     agent can tell which call misfired.
+    ///   * `query_graph` — operates on the federation aggregate, so the
+    ///     resolver must be skipped before it sees the call (verified
+    ///     by `requires_repo_scope` returning `false`).
+    ///
+    /// Drift in either direction (a tool that should be skipped gets
+    /// routed through the resolver, or a tool that should error starts
+    /// silently returning Ok) fails this test.
+    #[tokio::test]
+    async fn eight_original_failures_classify_correctly() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        // Two-repo federation — required to trigger the multi-repo
+        // Config branch in `resolve_repo_for_tool`. The setup mirrors
+        // `multi_repo_config_error_names_the_tool` above so any future
+        // change to that branch is caught at the same seam.
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(
+                    RepoId::new(name).unwrap(),
+                    src_dir.path().to_path_buf(),
+                )
+                .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        // Tools that still require scoping — must surface an error that
+        // names the tool. These are seven of the eight originally
+        // failing tools; the eighth (`query_graph`) is federation-wide
+        // and handled separately below.
+        let scoping_required = [
+            "explain_symbol",
+            "find_anchors",
+            "get_call_chain",
+            "get_blast_radius",
+            "trace_dependency",
+            "find_dead_code",
+            "semantic_search",
+        ];
+        for tool in scoping_required {
+            assert!(
+                requires_repo_scope(tool),
+                "{tool}: should still require repo scope (the resolver is its only routing path)",
+            );
+            // No scoping args → Config error naming the tool.
+            let args = Map::new();
+            let text = resolve_repo_or_error(&fed, tool, &args).expect_err(&format!(
+                "{tool}: scoping-required tool must error without repo_id or symbol"
+            ));
+            assert!(
+                text.contains(tool),
+                "{tool}: error must name the tool, got {text:?}",
+            );
+        }
+
+        // Federation-wide tool — must NOT pass through the resolver.
+        // The Part B fix added `query_graph` to the
+        // `requires_repo_scope` exclusion list; the dispatcher checks
+        // that list before calling `resolve_repo_or_error`, so the
+        // resolver is never invoked for these tools. A regression that
+        // sends `query_graph` through the resolver would re-surface the
+        // original "multiple repos" message on every call, so we pin
+        // the classifier here.
+        assert!(
+            !requires_repo_scope("query_graph"),
+            "query_graph must not require scope; the resolver should be skipped before it sees the call",
+        );
+    }
 }
 
 // -------------------------------------------------------------------------
