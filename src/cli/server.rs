@@ -277,20 +277,25 @@ async fn spawn_hot_reload(
         Arc::clone(&bus),
     );
 
-    // Unix socket — CLI signals.
-    let sock_path = crate::cli::signal::socket_path_for(config_path);
-    if let Err(e) = crate::cli::signal::spawn_signal_listener_at(&sock_path, Arc::clone(&bus)).await {
-        tracing::warn!(
-            "hot reload: could not bind signal socket at {}: {e}",
-            sock_path.display()
-        );
-        // Continue: the file watcher is still up; only CLI-prompted
-        // reloads are unavailable.
-    } else {
-        tracing::info!(
-            "hot reload: signal listener at {}",
-            sock_path.display()
-        );
+    // Unix socket — CLI signals. Unix only; on Windows the file watcher
+    // is still the reload path (CLI-prompted reloads via the
+    // `lain repos add` / `lain workspaces create` socket are unavailable).
+    #[cfg(unix)]
+    {
+        let sock_path = crate::cli::signal::socket_path_for(config_path);
+        if let Err(e) = crate::cli::signal::spawn_signal_listener_at(&sock_path, Arc::clone(&bus)).await {
+            tracing::warn!(
+                "hot reload: could not bind signal socket at {}: {e}",
+                sock_path.display()
+            );
+            // Continue: the file watcher is still up; only CLI-prompted
+            // reloads are unavailable.
+        } else {
+            tracing::info!(
+                "hot reload: signal listener at {}",
+                sock_path.display()
+            );
+        }
     }
 
     // Rebuild loop: subscribes to the bus and runs `run_rebuild` on

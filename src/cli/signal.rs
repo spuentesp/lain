@@ -10,10 +10,14 @@
 //! is a no-op — the YAML file was already saved atomically, so a
 //! later server start will pick up the new contents naturally.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use tokio::io::AsyncReadExt;
+#[cfg(unix)]
 use tokio::net::UnixListener;
 
 /// Compute the socket path the server is expected to be listening on
@@ -33,6 +37,12 @@ pub fn socket_path_for(repos_yaml: &Path) -> PathBuf {
 /// previous run; treating it as "not running" keeps the CLI's atomic
 /// YAML write useful and prevents tests / hooks from breaking on
 /// leftover state.)
+///
+/// Unix only — Windows has no Unix domain sockets. On Windows this is
+/// a no-op: hand-edits to `repos.yaml` / `workspaces.yaml` are still
+/// picked up by the file watcher (`spawn_config_watcher`), so the
+/// only thing lost is CLI-prompted reloads.
+#[cfg(unix)]
 pub fn signal_reload(repos_yaml: &Path) -> anyhow::Result<()> {
     let sock = socket_path_for(repos_yaml);
     if !sock.exists() {
@@ -53,6 +63,13 @@ pub fn signal_reload(repos_yaml: &Path) -> anyhow::Result<()> {
         }
         Err(e) => Err(anyhow::Error::from(e)),
     }
+}
+
+/// Windows stub: no Unix domain sockets, no CLI-prompted reloads.
+/// The file watcher still picks up hand-edits.
+#[cfg(not(unix))]
+pub fn signal_reload(_repos_yaml: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Spawn a Unix socket listener at `path`. On receipt of `"reload\n"`,
