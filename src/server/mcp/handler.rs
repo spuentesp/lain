@@ -3342,6 +3342,44 @@ mod tests {
         }
     }
 
+    /// D-H4 regression guard: the old bare error string must never reappear
+    /// without the tool-name prefix. Any caller still seeing it has hit a
+    /// path that bypasses Part A's formatter.
+    ///
+    /// Pins the entire wrapped message byte-exactly — both the
+    /// `LainError::Config` "Config error: " prefix and the agreed
+    /// `tool '<name>' requires scoping: multiple repos; pass repo_id or symbol`
+    /// body. Drift in either layer (e.g. someone rewording the body,
+    /// dropping the tool-name prefix, or changing how `LainError`
+    /// formats `Config`) fails this test loudly.
+    #[tokio::test]
+    async fn bare_multi_repos_string_does_not_appear_alone() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        let args = Map::new();
+        let text = resolve_repo_or_error(&fed, "explain_symbol", &args)
+            .expect_err("two repos without scoping must surface a Config error");
+
+        assert_eq!(
+            text,
+            "Config error: tool 'explain_symbol' requires scoping: multiple repos; pass repo_id or symbol",
+            "scoping error format drift — bare 'multiple repos; ...' string reappeared or wrapper changed",
+        );
+    }
+
     /// D-H4 regression sweep across the eight tools that originally
     /// surfaced the bare "multiple repos; specify repo_id or symbol"
     /// message. After Part A (name the tool) and Part B (skip the
