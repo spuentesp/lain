@@ -605,7 +605,7 @@ async function renderReposTab() {
   for (const repo of list) {
     let info = repo;
     try {
-      const r = await mcpCall('get_repo_info', {id: repo.id});
+      const r = await mcpCall('get_repo_info', {repo_id: repo.id});
       info = parseJson(r) || repo;
     } catch (_) { /* fall back to the row from list_repos */ }
     rows.push(`<tr>
