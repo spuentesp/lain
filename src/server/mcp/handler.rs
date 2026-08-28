@@ -2585,7 +2585,7 @@ async fn handle_request(
 /// channel that is fed by a tokio task that pumps broadcast events into
 /// JSON bytes. When the client disconnects (the channel is closed), the
 /// body returns `None` and hyper finishes the response.
-fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> {
+pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> {
     use crate::tools::definitions::ToolDefinition;
     vec![
         ToolDefinition {
