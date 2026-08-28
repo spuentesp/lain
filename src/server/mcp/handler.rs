@@ -92,6 +92,7 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
 /// already binds to the single repo).
 pub fn resolve_repo_for_tool(
     fed: &FederatedIndex,
+    tool_name: &str,
     symbol_hint: Option<&str>,
     explicit_repo: Option<&str>,
 ) -> Result<RepoId, LainError> {
@@ -126,9 +127,9 @@ pub fn resolve_repo_for_tool(
             } else if listed.len() == 1 {
                 Ok(listed[0].0.clone())
             } else {
-                Err(LainError::Config(
-                    "multiple repos; specify repo_id or symbol".into(),
-                ))
+                Err(LainError::Config(format!(
+                    "tool '{tool_name}' requires scoping: multiple repos; pass repo_id or symbol"
+                )))
             }
         }
     }
@@ -148,20 +149,24 @@ pub fn resolve_repo_for_tool(
 /// the report.
 fn resolve_repo_or_error(
     fed: &FederatedIndex,
+    tool_name: &str,
     args: &Map<String, serde_json::Value>,
 ) -> Result<RepoId, String> {
     let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
     let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
-    match resolve_repo_for_tool(fed, symbol_hint, explicit_repo) {
+    match resolve_repo_for_tool(fed, tool_name, symbol_hint, explicit_repo) {
         Ok(rid) => Ok(rid),
         Err(LainError::AmbiguousSymbol(candidates)) => {
             let payload = serde_json::json!({
                 "error": "ambiguous_symbol",
+                "tool": tool_name,
                 "candidates": candidates
                     .iter()
                     .map(|c| c.as_str())
                     .collect::<Vec<_>>(),
-                "message": "Multiple repos match this symbol; specify repo_id or disambiguate."
+                "message": format!(
+                    "tool '{tool_name}' requires scoping: symbol matches multiple repos; pass repo_id or disambiguate."
+                ),
             });
             Err(payload.to_string())
         }
@@ -1010,7 +1015,7 @@ impl ServerHandler for LainHandler {
         }
 
         if let Some(fed) = &self.federation {
-            match resolve_repo_or_error(fed, &args_owned) {
+            match resolve_repo_or_error(fed, params.name.as_str(), &args_owned) {
                 Ok(rid) => {
                     // Inject the resolved `repo_id` into the args the
                     // executor will see. Existing per-repo tools resolve
@@ -2279,7 +2284,7 @@ async fn handle_request(
                         }
 
                         if let Some(fed) = &federation {
-                            match resolve_repo_or_error(fed, &args_map) {
+                            match resolve_repo_or_error(fed, name, &args_map) {
                                 Ok(rid) => {
                                     // Inject the resolved `repo_id` into
                                     // the args the executor will see (Task
@@ -2725,7 +2730,7 @@ mod tests {
     fn explicit_repo_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        let rid = resolve_repo_for_tool(&fed, None, Some("repo-a")).unwrap();
+        let rid = resolve_repo_for_tool(&fed, "", None, Some("repo-a")).unwrap();
         assert_eq!(rid.as_str(), "repo-a");
     }
 
@@ -2755,6 +2760,7 @@ mod tests {
         // A node id, not a name — nothing the symbol index can match.
         let rid = resolve_repo_for_tool(
             &fed,
+            "",
             Some("3d139b4e-688d-51a9-af69-0c164e9aea92"),
             None,
         )
@@ -2766,7 +2772,7 @@ mod tests {
     fn no_symbol_no_explicit_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        assert!(matches!(resolve_repo_for_tool(&fed, None, None), Err(LainError::Config(_))));
+        assert!(matches!(resolve_repo_for_tool(&fed, "", None, None), Err(LainError::Config(_))));
     }
 
     /// Verifies the round-1 fix: when `resolve_repo_or_error` resolves a
@@ -2796,7 +2802,7 @@ mod tests {
             "symbol".into(),
             serde_json::Value::String("only_one".into()),
         );
-        let rid = resolve_repo_or_error(&fed, &args).expect("unique symbol should resolve");
+        let rid = resolve_repo_or_error(&fed, "", &args).expect("unique symbol should resolve");
         assert_eq!(rid.as_str(), "repo-x");
         args.insert(
             "repo_id".into(),
@@ -2840,7 +2846,7 @@ mod tests {
 
         let mut args = Map::new();
         args.insert("symbol".into(), serde_json::Value::String("shared".into()));
-        let text = resolve_repo_or_error(&fed, &args)
+        let text = resolve_repo_or_error(&fed, "", &args)
             .expect_err("duplicate symbol must surface as AmbiguousSymbol");
 
         // The payload must be valid JSON with the documented shape.
@@ -2879,9 +2885,43 @@ mod tests {
             "symbol".into(),
             serde_json::Value::String("any-symbol".into()),
         );
-        let rid = resolve_repo_or_error(&fed, &args)
+        let rid = resolve_repo_or_error(&fed, "", &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    /// D-H4 Part A: the multi-repo Config error must name the tool that
+    /// triggered it. The bare "multiple repos; specify repo_id or symbol"
+    /// string gave no hint which of the eight tools the agent miscalled.
+    #[tokio::test]
+    async fn multi_repo_config_error_names_the_tool() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        let args = Map::new();
+        // No symbol, no repo_id — both repos registered → resolver must error.
+        let err = resolve_repo_or_error(&fed, "explain_symbol", &args)
+            .expect_err("two repos without scoping must surface a Config error");
+        assert!(
+            err.contains("explain_symbol"),
+            "scoping error must name the requesting tool, got {err:?}",
+        );
+        assert!(
+            err.contains("multiple repos"),
+            "scoping error must still point at the cause, got {err:?}",
+        );
     }
 
     /// `GET /health` must serialize the federation summary so the UI
