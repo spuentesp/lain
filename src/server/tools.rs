@@ -664,8 +664,8 @@ impl ToolExecutor {
         sections.push("- **get_workspace_graph(filter?)**: node + edge data for the dashboard view\n".to_string());
         sections.push(
             "\nThe 6 federation tools (`list_repos`, `search_org`, `get_cross_repo_blast_radius`, etc.) \
-             operate over the active workspace's repo subset. `get_repo_info(<id>)` returns `NotFound` \
-             if the id isn't in the active workspace — that's correct, not a bug.\n"
+             operate over the active workspace's repo subset. `get_repo_info(<repo_id>)` returns `NotFound` \
+             if the repo isn't in the active workspace — that's correct, not a bug.\n"
                 .to_string(),
         );
         sections.push("\n### Detection\n".to_string());
