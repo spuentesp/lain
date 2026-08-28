@@ -582,7 +582,7 @@ if [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ]; then
   check_contains "search_org finds symbols across repos" "beta_only_helper" \
     "$(fcall search_org '{"query":"only_helper","limit":20}')"
   check_contains "get_repo_info describes a repo" "alpha" \
-    "$(fcall get_repo_info '{"id":"alpha"}')"
+    "$(fcall get_repo_info '{"repo_id":"alpha"}')"
   # Aggregate health, not a roster: both fixture repos must be `ready`.
   FH=$(fcall get_federation_health)
   check_contains "federation health counts both repos" '"total_repos":2' "$FH"
