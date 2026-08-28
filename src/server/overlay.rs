@@ -230,11 +230,55 @@ impl VolatileOverlay {
     /// Get a node by ID
     pub fn get_node(&self, id: &str) -> Option<GraphNode> {
         if !self.check_bloom(id) { return None; }
-        
+
         let graph = self.graph.read();
         let index_map = self.node_index_map.read();
-        
+
         index_map.get(id).and_then(|idx| graph.node_weight(*idx).cloned())
+    }
+
+    /// Remove every overlay node whose `path` equals the given path.
+    /// Returns the number of nodes removed (zero if the path was not
+    /// represented in the overlay).
+    ///
+    /// Used by `RepoIndex::sync_overlay` and
+    /// `LainServer::process_change` to drop stale entries for a file
+    /// before re-scanning it via LSP. Without a path-keyed remove the
+    /// caller would have to either `overlay.clear()` (which wipes
+    /// every repo's entries in the shared federation overlay) or
+    /// enumerate every node id it knows about (which it doesn't).
+    ///
+    /// Concurrency: this holds the index_map lock briefly to copy the
+    /// candidate ids, then calls `remove_node` for each (which takes
+    /// per-node locks). Other writers can insert nodes between
+    /// iterations; a concurrent insert for the same path is fine —
+    /// `insert_node` is upsert, so the next sync will reconcile.
+    pub fn remove_nodes_for_path(&self, path: &str) -> usize {
+        let ids: Vec<String> = {
+            let graph = self.graph.read();
+            let index_map = self.node_index_map.read();
+            graph
+                .node_indices()
+                .filter_map(|idx| {
+                    let node = graph.node_weight(idx)?;
+                    if node.path == path {
+                        index_map
+                            .iter()
+                            .find(|(_, v)| **v == idx)
+                            .map(|(k, _)| k.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut removed = 0usize;
+        for id in ids {
+            if self.remove_node(&id) {
+                removed += 1;
+            }
+        }
+        removed
     }
 
     /// Get all nodes

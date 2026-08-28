@@ -91,7 +91,7 @@ pub struct BlastRadiusNode {
 #[derive(Clone)]
 pub struct ToolExecutor {
     pub ctx: ToolContext,
-    jobs: Arc<AsyncMutex<HashMap<String, JobInfo>>>,
+    jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     job_webhooks: Arc<AsyncMutex<Vec<String>>>,
     pub tuning: Arc<TuningConfig>,
 }
@@ -123,7 +123,7 @@ impl ToolExecutor {
         tuning: Arc<TuningConfig>,
         workspace: std::path::PathBuf,
     ) -> Self {
-        let jobs_registry = Arc::new(AsyncMutex::new(HashMap::<String, JobInfo>::new()));
+        let jobs_registry = Arc::new(Mutex::new(HashMap::<String, JobInfo>::new()));
         let webhooks = Arc::new(AsyncMutex::new(Vec::new()));
 
         let ctx = ToolContext::new(
@@ -148,7 +148,7 @@ impl ToolExecutor {
             task::spawn(async move {
                 match serde_json::from_str::<Vec<JobInfo>>(&contents) {
                     Ok(vec) => {
-                        let mut guard = jobs_registry.lock().await;
+                        let mut guard = jobs_registry.lock();
                         for j in vec {
                             guard.insert(j.id.clone(), j);
                         }
@@ -190,7 +190,7 @@ impl ToolExecutor {
         overlay: VolatileOverlay,
         workspace: std::path::PathBuf,
     ) -> Self {
-        let jobs_registry = Arc::new(AsyncMutex::new(HashMap::<String, JobInfo>::new()));
+        let jobs_registry = Arc::new(Mutex::new(HashMap::<String, JobInfo>::new()));
         let webhooks = Arc::new(AsyncMutex::new(Vec::new()));
         let tuning = Arc::new(TuningConfig::default());
 
@@ -262,11 +262,11 @@ impl ToolExecutor {
     /// shape as the torn audit line: a partial write plus a tolerant
     /// reader is indistinguishable from "there were no jobs".
     async fn persist_jobs_snapshot(
-        jobs: Arc<AsyncMutex<HashMap<String, JobInfo>>>,
+        jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     ) -> Result<(), LainError> {
         let path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         let vec: Vec<JobInfo> = {
-            let guard = jobs.lock().await;
+            let guard = jobs.lock();
             guard.values().cloned().collect()
         };
         let json = serde_json::to_string(&vec)
@@ -311,7 +311,7 @@ impl ToolExecutor {
 
                     const MAX_CONCURRENT_JOBS: usize = 10;
                     {
-                        let guard = self.jobs.lock().await;
+                        let guard = self.jobs.lock();
                         let running = guard.values().filter(|j| matches!(j.state, JobState::Running)).count();
                         if running >= MAX_CONCURRENT_JOBS {
                             return Err(LainError::Mcp(format!("Too many concurrent jobs (max {})", MAX_CONCURRENT_JOBS)));
@@ -322,7 +322,7 @@ impl ToolExecutor {
                     let job = JobInfo { id: job_id.clone(), created_at: std::time::SystemTime::now(), state: JobState::Running };
 
                     {
-                        let mut guard = self.jobs.lock().await;
+                        let mut guard = self.jobs.lock();
                         guard.insert(job_id.clone(), job.clone());
                     }
 
@@ -332,7 +332,7 @@ impl ToolExecutor {
                     task::spawn(async move {
                         let res = exec.call_inner(&name_owned, Some(&owned)).await;
                         {
-                            let mut guard = jobs_registry.lock().await;
+                            let mut guard = jobs_registry.lock();
                             if let Some(j) = guard.get_mut(&job_id_clone) {
                                 match &res {
                                     Ok(out) => j.state = JobState::Completed { success: true, output: Some(out.clone()), error: None },
@@ -386,7 +386,7 @@ impl ToolExecutor {
             }
             "get_job_status" => {
                 let job_id = get_str_arg(arguments, "job_id");
-                let guard = self.jobs.lock().await;
+                let guard = self.jobs.lock();
                 match guard.get(job_id) {
                     Some(job) => return Ok(serde_json::to_string(job).unwrap_or_default()),
                     None => return Err(LainError::NotFound(format!("Job not found: {}", job_id))),
@@ -413,6 +413,26 @@ impl ToolExecutor {
             "Not loaded (semantic search unavailable)".to_string()
         } else {
             format!("Loaded ({}d embeddings)", self.ctx.embedder.embedding_dim())
+        };
+
+        // Live LSP-failure count: sum every repo's
+        // `last_overlay_lsp_failures` counter at call time. This
+        // includes watcher-driven refreshes (which never touch the
+        // cached `RefreshOutcome::lsp_failures_last_cycle`) so the
+        // banner reflects the actual current state of the
+        // federation, not the most recent sync_state result.
+        //
+        // Falls back to the cached `outcome.lsp_failures_last_cycle`
+        // when the federation isn't wired in (single-repo executor
+        // without a `FederatedIndex`).
+        let live_lsp_failures: u32 = match self.ctx.federation.as_ref() {
+            Some(fed) => fed
+                .list_repos()
+                .into_iter()
+                .filter_map(|(id, _)| fed.get_repo(&id))
+                .map(|repo| repo.last_overlay_lsp_failures())
+                .sum(),
+            None => 0,
         };
 
         // Surface the resolved workspace so callers can confirm
@@ -469,6 +489,27 @@ impl ToolExecutor {
         // This is the in-tool-output visibility path.
         if let Some(line) = self.ctx.last_outcome.lock().banner_line() {
             output.push_str(&format!("- **{line}**\n"));
+        }
+
+        // LSP-failure banner from the most recent `sync_overlay` cycle.
+        // Independent of `banner_line()`: an `Ok` refresh can still
+        // leave overlay gaps when the LSP returned no symbols for some
+        // files (cold start, missing language server, etc.). The
+        // per-file cause is logged at `tracing::warn!` by
+        // `RepoIndex::process_overlay_change`; this banner is the
+        // aggregate count operators see in `get_health` without
+        // having to grep logs.
+        //
+        // Uses the live count summed across the federation's repos at
+        // call time (so watcher-driven refreshes, which never touch
+        // the cached `RefreshOutcome::lsp_failures_last_cycle`, are
+        // included). The cached field is the value non-`get_health`
+        // callers see.
+        if live_lsp_failures > 0 {
+            output.push_str(&format!(
+                "- **⚠ overlay refresh: {live_lsp_failures} file(s) skipped due to LSP \
+                 unavailability; overlay coverage is partial this cycle**\n"
+            ));
         }
 
         // Edge-type histogram — operators need this to tell whether the

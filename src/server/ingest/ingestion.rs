@@ -415,10 +415,35 @@ impl LainServer {
         if self.graph.is_read_only() {
             return Ok(());
         }
-        self.overlay.clear();
+        // Drop entries for THIS server's changed paths BEFORE scanning.
+        // Mirrors the federation-side fix in
+        // `RepoIndex::sync_overlay`: a blanket `overlay.clear()` wipes
+        // every entry in the overlay, which is correct today only
+        // because `LainServer` owns a single overlay and there is
+        // nothing else to clobber. Per-path removal is the safe
+        // default and matches the Federation's contract, so any
+        // future code that shares or merges overlays stays sound.
         let changes = self.git.lock().get_uncommitted_changes()?;
+        for change in &changes {
+            let removed = self
+                .overlay
+                .remove_nodes_for_path(&change.path.to_string_lossy());
+            if removed > 0 {
+                tracing::debug!(
+                    "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
+                    removed,
+                    change.path
+                );
+            }
+        }
 
         for change in &changes {
+            // Skip LSP re-scan for files that were deleted — there's
+            // nothing to scan, and the entry removal above already
+            // wiped them.
+            if matches!(change.change_type, crate::git::ChangeType::Deleted) {
+                continue;
+            }
             if let Err(e) = self.process_change(&change.path).await {
                 warn!("Failed to process change {:?}: {}", change.path, e);
             }

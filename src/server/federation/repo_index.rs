@@ -22,6 +22,41 @@ use tokio::sync::Mutex as AsyncMutex;
 /// polling — the federation stays up.
 pub const INDEX_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Run `f` on a fresh OS thread and wait up to `budget` for it to
+/// signal completion. If `f` finishes within `budget`, the thread is
+/// joined and the function returns `true`. If `budget` elapses first,
+/// the function returns `false` and drops the [`JoinHandle`]; the
+/// thread continues in the background with whatever captures `f`
+/// took, and any resources owned by those captures are released when
+/// the thread eventually exits.
+///
+/// The detached-thread semantics are load-bearing for callers like
+/// [`RepoIndex::drop`] that need to bound their own wall-clock time
+/// even when the spawned work refuses to make progress. An unbounded
+/// `JoinHandle::join()` after a timeout would block the caller
+/// indefinitely; dropping the handle returns control to the caller
+/// while letting the thread clean up at its own pace.
+pub fn run_with_budget<F>(name: &str, f: F, budget: Duration) -> bool
+where
+    F: FnOnce() + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            f();
+            let _ = tx.send(());
+        })
+        .expect("spawn thread");
+    let completed = rx.recv_timeout(budget).is_ok();
+    if completed {
+        let _ = handle.join();
+    }
+    // On timeout: drop `handle` without joining. The thread runs to
+    // completion in the background; the OS reaps it when it exits.
+    completed
+}
+
 pub struct RepoIndex {
     source: Box<dyn RepoSource>,
     db: GraphDatabase,
@@ -63,6 +98,22 @@ pub struct RepoIndex {
     /// `start_watcher` is called. The watcher is dropped (and the
     /// background thread stops) when the `RepoIndex` is dropped.
     watcher: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
+    /// Fires after every receiver-task iteration completes
+    /// (`me.index().await` + `me.sync_overlay().await`). Tests await
+    /// this with a timeout instead of `tokio::time::sleep`, so they
+    /// wake as soon as the receiver has actually processed the edit
+    /// rather than guessing a wall-clock budget. The notify fires
+    /// once per event; if a test needs to observe N events it must
+    /// call `notified().await` N times (or re-await after each
+    /// `notify_one`).
+    overlay_updated: Arc<tokio::sync::Notify>,
+    /// Number of files whose overlay refresh was skipped due to LSP
+    /// unavailability during the most recent `sync_overlay` cycle.
+    /// Read by `sync_state` to populate
+    /// `RefreshOutcome::lsp_failures_last_cycle` so `get_health` can
+    /// surface the aggregate without grepping logs. Reset to 0 at
+    /// the start of each `sync_overlay` call.
+    last_overlay_lsp_failures: std::sync::atomic::AtomicU32,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -97,7 +148,31 @@ impl RepoIndex {
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
             watcher: parking_lot::Mutex::new(None),
+            overlay_updated: Arc::new(tokio::sync::Notify::new()),
+            last_overlay_lsp_failures: std::sync::atomic::AtomicU32::new(0),
         })
+    }
+
+    /// Handle on the [`Notify`] the receiver task fires after each
+    /// `index()` + `sync_overlay()` cycle. Tests clone this and
+    /// `notified().await` instead of polling `tokio::time::sleep`
+    /// with a guessed budget. Production code does not need it.
+    pub fn overlay_updated(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.overlay_updated)
+    }
+
+    /// Number of files whose overlay refresh was skipped due to LSP
+    /// unavailability during the most recent `sync_overlay` cycle.
+    /// Returns 0 if `sync_overlay` hasn't run yet, or if the cycle
+    /// ran cleanly.
+    ///
+    /// `sync_state` reads this from every repo and aggregates the
+    /// totals into `RefreshOutcome::lsp_failures_last_cycle` so
+    /// `get_health` can answer "did the last refresh have any LSP
+    /// issues?" without grepping logs.
+    pub fn last_overlay_lsp_failures(&self) -> u32 {
+        self.last_overlay_lsp_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn source(&self) -> &dyn RepoSource {
@@ -275,6 +350,14 @@ impl RepoIndex {
         // Receiver task: drains the channel and runs both the commit-based
         // pipeline (`index`) and the working-tree pipeline (`sync_overlay`)
         // per event. Runs in Tokio, so `.await` and `tokio::spawn` are sound.
+        //
+        // `overlay_updated.notify_one()` fires after every successful
+        // `sync_overlay()` so tests awaiting the receiver can wake as
+        // soon as the overlay reflects the event instead of guessing
+        // a wall-clock budget. `notify_one` (not `notify_waiters`)
+        // because tests hold their own clone of the `Arc<Notify>`
+        // and call `notified().await` once per event they want to
+        // observe.
         tokio::spawn(async move {
             while let Some(res) = rx.recv().await {
                 if res.is_ok() {
@@ -292,6 +375,7 @@ impl RepoIndex {
                             e
                         );
                     }
+                    me_for_task.overlay_updated.notify_one();
                 }
             }
         });
@@ -347,18 +431,64 @@ impl RepoIndex {
             return Ok(());
         }
         let overlay = self.server_overlay.lock().clone();
-        overlay.clear();
+
+        // Reset the per-cycle LSP-failure counter at the start so a
+        // healthy cycle doesn't inherit a previous cycle's count.
+        // `sync_state` reads this via `last_overlay_lsp_failures()`
+        // after each per-repo refresh to aggregate the federation-
+        // wide count into `RefreshOutcome`.
+        self.last_overlay_lsp_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let changes = self.git.lock().await.get_uncommitted_changes()?;
 
+        // Drop entries for THIS repo's changed paths BEFORE scanning.
+        // The federation's overlay is shared across repos (one
+        // `VolatileOverlay` per federation, not per repo), so a
+        // blanket `overlay.clear()` would wipe every other repo's
+        // entries — the single-repo behavior was correct only because
+        // there was nothing else to clobber. Per-path removal
+        // preserves the rest of the federation's working tree.
         for change in &changes {
-            if let Err(e) = self.process_overlay_change(&change.path, &overlay).await {
+            let removed = overlay.remove_nodes_for_path(&change.path.to_string_lossy());
+            if removed > 0 {
+                tracing::debug!(
+                    "[federation] sync_overlay: dropped {} stale overlay node(s) for {:?}",
+                    removed,
+                    change.path
+                );
+            }
+        }
+
+        for change in &changes {
+            // Skip LSP re-scan for files that were deleted — there's
+            // nothing to scan, and the entry removal above already
+            // wiped them.
+            if matches!(
+                change.change_type,
+                crate::git::ChangeType::Deleted
+            ) {
+                continue;
+            }
+            if let Err(e) = self
+                .process_overlay_change(&change.path, &overlay, &self.last_overlay_lsp_failures)
+                .await
+            {
                 tracing::warn!(
                     "[federation] overlay refresh: failed for {:?}: {}",
                     change.path,
                     e
                 );
             }
+        }
+
+        let failed = self.last_overlay_lsp_failures();
+        if failed > 0 {
+            tracing::warn!(
+                "[federation] overlay refresh: {} file(s) skipped due to LSP unavailability; \
+                 overlay coverage is partial this cycle",
+                failed
+            );
         }
         Ok(())
     }
@@ -368,10 +498,15 @@ impl RepoIndex {
     /// but takes the overlay as a parameter and uses `self.source.local_path()`
     /// as the workspace root. The federation has no `LainServer` reference,
     /// so we re-implement the flow here.
+    ///
+    /// `lsp_failures` is incremented when the LSP lookup errors out (cold
+    /// server, missing language server for this file type, etc.). The caller
+    /// aggregates this for a per-cycle warning at the end of `sync_overlay`.
     async fn process_overlay_change(
         self: &Arc<Self>,
         path: &Path,
         overlay: &Arc<crate::server::overlay::VolatileOverlay>,
+        lsp_failures: &std::sync::atomic::AtomicU32,
     ) -> Result<(), LainError> {
         let symbols = {
             let lsp = self.lsp.next();
@@ -382,7 +517,15 @@ impl RepoIndex {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::debug!("[federation] no LSP symbols for {:?}: {}", path, e);
+                    // Promoted from debug! so operators have signal when
+                    // overlay coverage is incomplete. The aggregate count
+                    // is logged at the end of `sync_overlay`.
+                    lsp_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        "[federation] no LSP symbols for {:?}: {} (overlay entry skipped)",
+                        path,
+                        e
+                    );
                     return Ok(());
                 }
             }
@@ -442,10 +585,15 @@ impl Drop for RepoIndex {
             return;
         }
         let lsp = self.lsp.clone();
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let shutdown_thread = std::thread::Builder::new()
-            .name("lain-repo-index-lsp-shutdown".into())
-            .spawn(move || {
+        // Bounded shutdown: see [`run_with_budget`] for the contract.
+        // If `shutdown_all` hangs past `LSP_SHUTDOWN_BUDGET`, the
+        // shutdown thread is detached and runs to completion in the
+        // background; it holds its own `Arc<LspPool>` clone, which
+        // drops the LSP child via `kill_on_drop` when the thread's
+        // runtime exits. We return from `Drop` promptly either way.
+        run_with_budget(
+            "lain-repo-index-lsp-shutdown",
+            move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -453,11 +601,9 @@ impl Drop for RepoIndex {
                 rt.block_on(async move {
                     lsp.shutdown_all().await;
                 });
-                let _ = tx.send(());
-            })
-            .expect("spawn shutdown thread");
-        let _ = rx.recv_timeout(LSP_SHUTDOWN_BUDGET);
-        let _ = shutdown_thread.join();
+            },
+            LSP_SHUTDOWN_BUDGET,
+        );
     }
 }
 

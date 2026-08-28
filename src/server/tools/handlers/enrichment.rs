@@ -92,7 +92,7 @@ pub fn sync_state(
     graph: &GraphDatabase,
     git: &Arc<Mutex<GitSensor>>,
     ingestion: &IngestionConfig,
-    jobs: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
+    jobs: &Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     last_outcome: &Arc<Mutex<crate::server::refresh::RefreshOutcome>>,
     fed: Option<&Arc<crate::federation::federated_index::FederatedIndex>>,
 ) -> Result<String, LainError> {
@@ -120,7 +120,7 @@ pub fn sync_state(
     let jobs_registry = Arc::clone(jobs);
     let outcome_slot = Arc::clone(last_outcome);
     {
-        let mut guard = jobs_registry.blocking_lock();
+        let mut guard = jobs_registry.lock();
         guard.insert(
             job_id.clone(),
             crate::server::tools::JobInfo {
@@ -137,10 +137,10 @@ pub fn sync_state(
         // Every early return below must land in the job record, so the
         // caller's `get_job_status` can distinguish "still running"
         // from "failed two minutes ago".
-        let finish = |registry: Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
+        let finish = |registry: Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
                       id: String,
                       result: Result<String, String>| async move {
-            let mut guard = registry.lock().await;
+            let mut guard = registry.lock();
             if let Some(j) = guard.get_mut(&id) {
                 j.state = match result {
                     Ok(out) => crate::server::tools::JobState::Completed {
@@ -241,15 +241,48 @@ pub fn sync_state(
         // immediately after `sync_state` instead of waiting on the
         // next watcher tick (which, on a freshly-created workspace,
         // may be hours away).
+        //
+        // Repos are refreshed in parallel via `JoinSet`. Each repo
+        // owns its git/LSP mutexes, so concurrent refreshes don't
+        // contend on the same repo's state. Cross-repo contention
+        // only happens on the shared `VolatileOverlay`, which is
+        // safe under concurrent inserts because `insert_node` is
+        // upsert. Pre-parallelism, an N-repo federation paid
+        // N×(per-repo sync_overlay cost); with parallelism the
+        // cost is bounded by the slowest single repo.
+        //
+        // The JoinSet result type carries both the outcome and the
+        // per-repo LSP-failure count so we can aggregate the
+        // federation-wide total into `RefreshOutcome` for `get_health`.
         let mut overlay_refresh_count = 0usize;
+        let mut total_lsp_failures: u32 = 0;
         if let Some(fed_ref) = fed_handle.as_ref() {
+            let mut set: tokio::task::JoinSet<
+                Result<(crate::federation::repo_id::RepoId, u32), (crate::federation::repo_id::RepoId, LainError)>,
+            > = tokio::task::JoinSet::new();
             for (id, _) in fed_ref.list_repos() {
                 let Some(repo) = fed_ref.get_repo(&id) else {
                     continue;
                 };
-                match repo.sync_overlay().await {
-                    Ok(()) => overlay_refresh_count += 1,
-                    Err(e) => {
+                let id_for_task = id.clone();
+                set.spawn(async move {
+                    let id_for_err = id_for_task.clone();
+                    match repo.sync_overlay().await {
+                        Ok(()) => {
+                            let lsp_failures = repo.last_overlay_lsp_failures();
+                            Ok((id_for_task, lsp_failures))
+                        }
+                        Err(e) => Err((id_for_err, e)),
+                    }
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok(Ok((_id, lsp_failures))) => {
+                        overlay_refresh_count += 1;
+                        total_lsp_failures = total_lsp_failures.saturating_add(lsp_failures);
+                    }
+                    Ok(Err((id, e))) => {
                         tracing::warn!(
                             "[sync_state] overlay refresh for {} failed: {}",
                             id,
@@ -260,8 +293,27 @@ pub fn sync_state(
                             format!("sync_state overlay refresh for {}: {}", id, e),
                         );
                     }
+                    Err(join_err) => {
+                        // A panic in the spawned task — the future
+                        // itself doesn't panic today, but a panic
+                        // from a future inside it would surface here.
+                        tracing::error!(
+                            "[sync_state] overlay refresh task panicked: {}",
+                            join_err
+                        );
+                    }
                 }
             }
+        }
+
+        // Surface the aggregated LSP-failure count via
+        // `RefreshOutcome` so `get_health` can render it. The
+        // outcome may have been overwritten by individual-repo
+        // failures above; we patch the count on the final value
+        // rather than discarding it.
+        {
+            let mut outcome = outcome_slot.lock();
+            outcome.lsp_failures_last_cycle = total_lsp_failures;
         }
 
         let summary = format!(

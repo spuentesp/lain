@@ -67,9 +67,17 @@ async fn sync_overlay_picks_up_new_file() {
     // after the refresh.
     let overlay = ri.server_overlay();
     let nodes = overlay.get_all_nodes();
+    // Content check: assert the LSP-derived symbol from new_module.rs
+    // actually landed in the overlay. A bare `!is_empty()` would also
+    // pass if the overlay picked up an unrelated symbol (e.g., from the
+    // repo's pre-existing lib.rs before the new file was added), so
+    // this matches the regression we actually want to catch — the
+    // watcher receiver not picking up the new file.
+    let names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
     assert!(
-        !nodes.is_empty(),
-        "sync_overlay should have populated the overlay with at least one node from new_module.rs"
+        names.iter().any(|n| n.contains("new_symbol")),
+        "sync_overlay should have populated the overlay with the new \
+         symbol from new_module.rs; got nodes: {names:?}"
     );
 
     // Hold the RepoIndex alive for the rest of the test process so the
@@ -89,14 +97,29 @@ async fn watcher_does_not_panic_on_edit() {
     // Give the inotify backend a moment to register the watch.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+    // Subscribe to the receiver's "I finished an index + sync_overlay
+    // cycle" signal so we wake as soon as the receiver has processed
+    // each edit, instead of guessing a wall-clock sleep budget. The
+    // 5 s ceiling catches a wedged receiver without making the test
+    // slow on healthy runs.
+    let overlay_notify = ri.overlay_updated();
+    let wait_for_refresh = |label: String| {
+        let overlay_notify = Arc::clone(&overlay_notify);
+        async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                overlay_notify.notified(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 5s"))
+        }
+    };
+
     // Modify a tracked file. Pre-fix, this would panic the inotify thread.
     let target = tmp.path().join("src").join("lib.rs");
     std::fs::write(&target, "pub fn existing() { /* edited */ }\n").unwrap();
 
-    // Give the receiver task time to drain the channel and process the
-    // event. Pre-fix, the channel handoff did not exist and the panic
-    // would happen synchronously inside the watcher closure.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_refresh("first edit".to_string()).await;
 
     // The watcher / receiver task must still be alive. We assert this
     // indirectly by re-reading the overlay after each edit + wait: a
@@ -109,23 +132,19 @@ async fn watcher_does_not_panic_on_edit() {
     // ran). Pre-fix, the inotify thread panicked on the first event and
     // the overlay stayed at whatever it had before the test.
     let overlay = ri.server_overlay();
-    // `snapshot()` doesn't exist on `VolatileOverlay`; the public read
-    // accessor is `get_all_nodes()`. The assertion below is the real
-    // regression check: an empty overlay after the first edit + wait
-    // means the receiver task never made it past the first event.
     let before = overlay.get_all_nodes();
     assert!(
         !before.is_empty(),
-        "after the first edit + 500ms wait, the receiver task should have \
-         refreshed the overlay with at least one node from the edited \
-         lib.rs; an empty overlay here means the receiver panicked or \
-         never ran `sync_overlay`"
+        "after the first edit, the receiver task should have refreshed \
+         the overlay with at least one node from the edited lib.rs; an \
+         empty overlay here means the receiver panicked or never ran \
+         `sync_overlay`"
     );
 
     // Second edit — verify the receiver task is still processing events
     // (this is the regression check for the panic).
     std::fs::write(&target, "pub fn existing() { /* second edit */ }\n").unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_refresh("second edit".to_string()).await;
 
     // Re-read the overlay after the second edit. If the receiver task
     // had died after the first event, this call returns an empty
@@ -135,9 +154,9 @@ async fn watcher_does_not_panic_on_edit() {
     let after = overlay.get_all_nodes();
     assert!(
         !after.is_empty(),
-        "after the second edit + 500ms wait, the overlay should still be \
-         populated by the receiver task; an empty overlay here means the \
-         receiver stopped processing events after the first one"
+        "after the second edit, the overlay should still be populated by \
+         the receiver task; an empty overlay here means the receiver \
+         stopped processing events after the first one"
     );
 
     // Hold the RepoIndex alive for the rest of the test process (do NOT
@@ -224,7 +243,7 @@ async fn sync_state_refreshes_overlay_for_new_file() {
         lain::git::GitSensor::new(&repo_dir).unwrap(),
     ));
     let ingestion = IngestionConfig::default();
-    let jobs = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::<
+    let jobs = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::<
         String,
         lain::server::tools::JobInfo,
     >::new()));
@@ -232,30 +251,18 @@ async fn sync_state_refreshes_overlay_for_new_file() {
         lain::server::refresh::RefreshOutcome::default(),
     ));
 
-    // `sync_state` is a sync function that calls `jobs_registry.blocking_lock()`
-    // on a `tokio::sync::Mutex` (see handlers::enrichment::sync_state).
-    // `blocking_lock()` panics on a `current_thread` Tokio runtime — which
-    // is exactly what `#[tokio::test]` defaults to. Production calls
-    // `sync_state` from a `new_multi_thread` runtime (see src/main.rs:45),
-    // where `blocking_lock` is safe; we don't, so we hop to the blocking
-    // thread pool here. Removing the wrapper would panic this test.
-    let _response = tokio::task::spawn_blocking({
-        let jobs = std::sync::Arc::clone(&jobs);
-        let last_outcome = std::sync::Arc::clone(&last_outcome);
-        let fed = std::sync::Arc::clone(&fed);
-        move || {
-            sync_state(
-                &graph,
-                &git,
-                &ingestion,
-                &jobs,
-                &last_outcome,
-                Some(&fed),
-            )
-        }
-    })
-    .await
-    .expect("spawn_blocking join")
+    // `sync_state` is a sync function. Its jobs-registry argument is a
+    // `parking_lot::Mutex`, so we can call it directly from the
+    // `current_thread` runtime that `#[tokio::test]` defaults to — no
+    // `spawn_blocking` hop required.
+    sync_state(
+        &graph,
+        &git,
+        &ingestion,
+        &jobs,
+        &last_outcome,
+        Some(&fed),
+    )
     .expect("sync_state should not error");
 
     // The spawned task is async; poll the overlay for up to ~2s.
@@ -263,23 +270,183 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     // overlay stayed empty. After the fix, sync_state walks every
     // repo in the federation and calls sync_overlay, which writes
     // the new file's symbols into the shared overlay.
-    let mut populated = false;
+    //
+    // Content check: not just "non-empty" but specifically contains
+    // the LSP-derived symbol from the new untracked file. A bare
+    // `!is_empty()` would pass against a stale overlay (e.g., the
+    // pre-existing `existing()` from lib.rs), which is the kind of
+    // false-pass the original bug relied on.
+    let expected = "post_sync_symbol";
+    let mut found = false;
     for _ in 0..40 {
-        if !shared_overlay.get_all_nodes().is_empty() {
-            populated = true;
+        let names: Vec<String> = shared_overlay
+            .get_all_nodes()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        if names.iter().any(|n| n.contains(expected)) {
+            found = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(
-        populated,
+        found,
         "sync_state with fed=Some(&fed) should refresh the overlay so \
-         a brand-new untracked file becomes visible"
+         the new untracked file's symbols become visible (looking for \
+         a name containing {expected:?})"
     );
 
     // Hold both handles alive so the spawned background task doesn't
     // race with their drop.
     std::mem::forget(ri);
+    std::mem::forget(fed);
+}
+
+/// Regression test for `sync_state` with more than one repo in the
+/// federation. The pre-Phase-2-parallelism code iterated the repos
+/// serially with `for ... .await`, so a federation with N repos paid
+/// N×(per-repo sync_overlay cost) on every `sync_state` call. This
+/// test stands up two repos with distinct uncommitted files and
+/// asserts both files' symbols end up in the shared overlay.
+///
+/// Correctness-wise the test passes against the serial code too — it
+/// exists to guard against regressions when Phase 2 moves to
+/// `tokio::task::JoinSet` (any bug in the parallel handoff would
+/// surface here).
+#[tokio::test]
+async fn sync_state_refreshes_overlay_for_multiple_repos() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::PetgraphBackend;
+    use lain::federation::repo_id::RepoId as TestRepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::graph::GraphDatabase;
+    use lain::overlay::VolatileOverlay;
+    use lain::server::tools::handlers::enrichment::sync_state;
+    use lain::tuning::IngestionConfig;
+    use std::collections::HashMap;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repos_root = tmp.path().join("repos");
+    std::fs::create_dir_all(&repos_root).unwrap();
+
+    // Two repos, each with its own directory under repos_root. We
+    // register both with the federation; each gets the shared overlay
+    // wired in via `set_overlay` after construction (same trick the
+    // single-repo test uses).
+    let shared_overlay = Arc::new(VolatileOverlay::new());
+
+    let mut repo_paths = Vec::new();
+    for name in ["alpha", "beta"] {
+        let repo_dir = repos_root.join(name);
+        std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+        std::fs::write(
+            repo_dir.join("src").join("lib.rs"),
+            "pub fn existing() {}\n",
+        )
+        .unwrap();
+        init_temp_git_repo(&repo_dir);
+        repo_paths.push((name.to_string(), repo_dir));
+    }
+
+    // The graph + git fixtures only need to be valid; we exercise the
+    // overlay-refresh phase, not the commit/co-change path.
+    let graph = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+
+    let fed_data_dir = tmp.path().join("fed");
+    std::fs::create_dir_all(&fed_data_dir).unwrap();
+    let backend: Arc<dyn lain::server::federation::graph_backend::GraphBackend> =
+        Arc::new(PetgraphBackend::new(&fed_data_dir).expect("PetgraphBackend"));
+    let fed = Arc::new(FederatedIndex::new(backend));
+    fed.install_overlay(shared_overlay.clone());
+
+    let mut registered_ids = Vec::new();
+    for (name, repo_dir) in &repo_paths {
+        let source = Box::new(
+            WorkspaceDirSource::new(TestRepoId::new(name).unwrap(), repo_dir.clone()).unwrap(),
+        );
+        fed.add_repo(source, &fed_data_dir.join(name))
+            .await
+            .expect("add_repo");
+        registered_ids.push((name.clone(), repo_dir));
+    }
+
+    // Pre-condition: the federation sees exactly two repos, both with
+    // their default (empty) per-repo overlay.
+    assert_eq!(fed.list_repos().len(), 2);
+    assert!(
+        shared_overlay.get_all_nodes().is_empty(),
+        "shared overlay should be empty before sync_state"
+    );
+
+    // Drop a NEW untracked file into each repo BEFORE sync_state. The
+    // overlay-refresh phase must end up reflecting both files.
+    for (name, repo_dir) in &registered_ids {
+        std::fs::write(
+            repo_dir.join("src").join(format!("post_sync_{name}.rs")),
+            format!("pub fn post_sync_{name}_symbol() {{}}\n"),
+        )
+        .unwrap();
+    }
+
+    // Build the sync_state args. Each repo's `GitSensor` is independent
+    // (we only need one for the test; both repos are git-tracked).
+    let primary_repo_dir = &repo_paths[0].1;
+    let git = std::sync::Arc::new(parking_lot::Mutex::new(
+        lain::git::GitSensor::new(primary_repo_dir).unwrap(),
+    ));
+    let ingestion = IngestionConfig::default();
+    let jobs = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::<
+        String,
+        lain::server::tools::JobInfo,
+    >::new()));
+    let last_outcome = std::sync::Arc::new(parking_lot::Mutex::new(
+        lain::server::refresh::RefreshOutcome::default(),
+    ));
+
+    sync_state(
+        &graph,
+        &git,
+        &ingestion,
+        &jobs,
+        &last_outcome,
+        Some(&fed),
+    )
+    .expect("sync_state should not error");
+
+    // Poll the overlay for up to ~5s. Cold LSP startup can take a
+    // couple of seconds on the first repo, and with two repos the
+    // slowest leg dominates. 5s is well under the test's overall
+    // budget but generous enough to absorb first-call LSP warm-up.
+    let mut populated_alpha = false;
+    let mut populated_beta = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        let names: Vec<String> = shared_overlay
+            .get_all_nodes()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        populated_alpha = names.iter().any(|n| n.contains("post_sync_alpha"));
+        populated_beta = names.iter().any(|n| n.contains("post_sync_beta"));
+        if populated_alpha && populated_beta {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        populated_alpha,
+        "shared overlay missing post_sync_alpha_symbol after sync_state over 2 repos; nodes: {:?}",
+        shared_overlay.get_all_nodes().iter().map(|n| (&n.name, &n.node_type)).collect::<Vec<_>>()
+    );
+    assert!(
+        populated_beta,
+        "shared overlay missing post_sync_beta_symbol after sync_state over 2 repos; nodes: {:?}",
+        shared_overlay.get_all_nodes().iter().map(|n| (&n.name, &n.node_type)).collect::<Vec<_>>()
+    );
+
+    // Hold handles alive so the spawned background task doesn't race
+    // with their drop.
     std::mem::forget(fed);
 }
 
@@ -307,6 +474,25 @@ async fn watcher_survives_six_concurrent_agents() {
         "baseline overlay should be empty before any writes"
     );
 
+    // Subscribe to the receiver's "I finished an index + sync_overlay
+    // cycle" signal. Each of the six writes will produce one
+    // notification; the receiver processes events serially and fires
+    // `notify_one()` per cycle, so permits accumulate if the test
+    // hasn't awaited yet — the first `notified().await` returns as
+    // soon as at least one cycle has finished.
+    let overlay_notify = ri.overlay_updated();
+    let wait_for_one_refresh = |label: String| {
+        let overlay_notify = Arc::clone(&overlay_notify);
+        async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                overlay_notify.notified(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 5s"))
+        }
+    };
+
     // Six concurrent "agents" each writing a file in the watched path.
     // Pre-fix, the watcher would panic on the first FS event and the
     // server would silently lose its overlay-refresh capability.
@@ -321,21 +507,26 @@ async fn watcher_survives_six_concurrent_agents() {
         h.await.unwrap();
     }
 
-    // Give the receiver task time to process all six events.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Wait for the receiver to process at least one of the six events.
+    // Once that signal arrives we know the channel handoff + receiver
+    // task survived a concurrent storm — the regression we're
+    // guarding against.
+    wait_for_one_refresh("swarm".to_string()).await;
 
     // Regression check (strengthened from "no panic"): the receiver
-    // task kept the overlay populated. If the receiver had panicked
-    // mid-batch under load, the overlay would still be empty here.
+    // task kept the overlay populated, AND it picked up at least one
+    // symbol from the storm. A bare `!is_empty()` would pass if the
+    // overlay still held the pre-existing `existing` symbol from
+    // lib.rs but no agent_* entries landed — which is exactly the
+    // failure mode a wedged receiver under load would produce.
     let after_swarm = overlay.get_all_nodes();
+    let after_swarm_names: Vec<String> =
+        after_swarm.into_iter().map(|n| n.name).collect();
     assert!(
-        !after_swarm.is_empty(),
-        "after six concurrent writes + 500ms wait, the receiver task \
-         should have refreshed the overlay with nodes from the new \
-         uncommitted agent_*.rs files; an empty overlay here means the \
-         receiver panicked or never reached `sync_overlay`. \
-         after_swarm.len() = {}",
-        after_swarm.len()
+        after_swarm_names.iter().any(|n| n.starts_with("agent_")),
+        "after six concurrent writes + receiver signal, the overlay \
+         should contain at least one agent_* symbol from the new \
+         files; got: {after_swarm_names:?}"
     );
 
     // The receiver task is still alive if no panic has occurred. We
@@ -343,19 +534,20 @@ async fn watcher_survives_six_concurrent_agents() {
     // freshness advances (a follow-up edit flows through).
     let target = tmp.path().join("src").join("lib.rs");
     std::fs::write(&target, "pub fn existing() { /* after the swarm */ }\n").unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_one_refresh("follow-up".to_string()).await;
 
     // Second regression check: the receiver is still processing events
-    // after the swarm. If the receiver died after one of the six
-    // writes, this overlay would also be empty.
+    // after the swarm. Content assertion that an `agent_*` symbol
+    // still exists — the edit to lib.rs doesn't introduce new symbols,
+    // so the agent_* entries from the swarm must still be present.
     let after_followup = overlay.get_all_nodes();
+    let after_followup_names: Vec<String> =
+        after_followup.into_iter().map(|n| n.name).collect();
     assert!(
-        !after_followup.is_empty(),
-        "after the follow-up edit + 500ms wait, the receiver task \
-         should still be refreshing the overlay; an empty overlay \
-         here means the receiver stopped processing events after the \
-         six-agent swarm. after_followup.len() = {}",
-        after_followup.len()
+        after_followup_names.iter().any(|n| n.starts_with("agent_")),
+        "after the follow-up edit + receiver signal, the overlay should \
+         still contain at least one agent_* symbol from the swarm; \
+         got: {after_followup_names:?}"
     );
 
     // Hold the RepoIndex alive for the rest of the test process.

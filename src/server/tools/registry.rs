@@ -35,7 +35,7 @@ pub struct ToolContext {
     pub tuning: Arc<TuningConfig>,
     pub embedding_cache: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
     pub ui_sessions: Arc<AsyncMutex<std::collections::HashMap<String, UiSession>>>,
-    pub jobs: Arc<AsyncMutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
+    pub jobs: Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
     /// Port the HTTP transport is listening on, shared as an atomic so
     /// `run_http` can publish it after construction. 0 = no UI server
@@ -91,7 +91,7 @@ impl ToolContext {
         tuning: Arc<TuningConfig>,
         embedding_cache: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
         ui_sessions: Arc<AsyncMutex<std::collections::HashMap<String, UiSession>>>,
-        jobs: Arc<AsyncMutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
+        jobs: Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
         job_webhooks: Arc<AsyncMutex<Vec<String>>>,
     ) -> Self {
         Self {
@@ -343,7 +343,7 @@ mod federation_binding_tests {
             Arc::new(TuningConfig::default()),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
-            Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
             Arc::new(AsyncMutex::new(Vec::new())),
         )
         .with_federation(Arc::clone(&fed));

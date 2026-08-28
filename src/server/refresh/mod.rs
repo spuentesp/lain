@@ -48,6 +48,16 @@ pub struct RefreshOutcome {
     pub started_at: SystemTime,
     pub completed_at: Option<SystemTime>,
     pub result: RefreshResult,
+    /// Number of files in the federation whose overlay refresh was
+    /// skipped because the LSP returned no symbols (cold start,
+    /// missing language server, etc.) during the most recent
+    /// `sync_overlay` cycle. Zero on `Ok` / `Skipped` / `Failed` paths
+    /// that didn't exercise the overlay phase.
+    ///
+    /// The per-repo `sync_overlay` logs each skipped file at
+    /// `tracing::warn!`; this field lets `get_health` answer "did
+    /// the last refresh have any LSP issues?" without grepping logs.
+    pub lsp_failures_last_cycle: u32,
 }
 
 impl RefreshOutcome {
@@ -59,6 +69,7 @@ impl RefreshOutcome {
             started_at: SystemTime::now(),
             completed_at: Some(SystemTime::now()),
             result: RefreshResult::Skipped,
+            lsp_failures_last_cycle: 0,
         }
     }
 
@@ -67,6 +78,7 @@ impl RefreshOutcome {
             started_at,
             completed_at: Some(SystemTime::now()),
             result: RefreshResult::Ok,
+            lsp_failures_last_cycle: 0,
         }
     }
 
@@ -75,6 +87,7 @@ impl RefreshOutcome {
             started_at,
             completed_at: Some(SystemTime::now()),
             result: RefreshResult::Timeout,
+            lsp_failures_last_cycle: 0,
         }
     }
 
@@ -83,6 +96,7 @@ impl RefreshOutcome {
             started_at,
             completed_at: Some(SystemTime::now()),
             result: RefreshResult::Failed(e.into()),
+            lsp_failures_last_cycle: 0,
         }
     }
 
@@ -117,6 +131,26 @@ impl RefreshOutcome {
                 "⚠ startup re-index failed: {e}; serving existing graph"
             )),
         }
+    }
+
+    /// One-line banner for the LSP-failure counter. Returns `Some`
+    /// when the most recent `sync_overlay` cycle skipped any files
+    /// due to LSP unavailability; `None` otherwise. Independent of
+    /// the `result` — an `Ok` refresh can still have LSP gaps that
+    /// operators want to see.
+    ///
+    /// The per-file cause is logged at `tracing::warn!` by
+    /// `RepoIndex::process_overlay_change`; this banner is the
+    /// aggregate signal that `get_health` surfaces without grepping.
+    pub fn lsp_warn_line(&self) -> Option<String> {
+        if self.lsp_failures_last_cycle == 0 {
+            return None;
+        }
+        Some(format!(
+            "⚠ overlay refresh: {} file(s) skipped due to LSP unavailability; \
+             overlay coverage is partial this cycle",
+            self.lsp_failures_last_cycle
+        ))
     }
 }
 
@@ -180,6 +214,42 @@ mod tests {
         assert!(line.contains("failed"));
         assert!(line.contains("git lock contention"));
         assert!(line.contains("existing graph"));
+    }
+
+    #[test]
+    fn lsp_warn_line_is_none_when_no_failures() {
+        let o = RefreshOutcome::ok(SystemTime::now());
+        assert!(o.lsp_warn_line().is_none());
+        let mut o = RefreshOutcome::skipped();
+        o.lsp_failures_last_cycle = 0;
+        assert!(o.lsp_warn_line().is_none());
+    }
+
+    #[test]
+    fn lsp_warn_line_includes_count_when_failures_present() {
+        // The count must surface independent of the `Ok` / `Failed`
+        // distinction — an `Ok` refresh with LSP gaps is still worth
+        // a banner.
+        let mut o = RefreshOutcome::ok(SystemTime::now());
+        o.lsp_failures_last_cycle = 3;
+        let line = o.lsp_warn_line().expect("banner must appear when count > 0");
+        assert!(line.contains("3 file"));
+        assert!(line.contains("LSP"));
+        assert!(line.contains("overlay"));
+    }
+
+    #[test]
+    fn lsp_warn_line_surfaces_even_after_a_failed_outcome() {
+        // A `Failed` refresh that still ran the overlay phase should
+        // still surface its LSP-failure count, because the per-repo
+        // warnings already went to the log and the count is the
+        // aggregate signal operators use.
+        let mut o = RefreshOutcome::failed(SystemTime::now(), "git lock contention");
+        o.lsp_failures_last_cycle = 7;
+        let banner = o.banner_line();
+        assert!(banner.is_some(), "Failed outcome must keep its banner");
+        let lsp = o.lsp_warn_line().expect("LSP banner must surface independently");
+        assert!(lsp.contains("7 file"));
     }
 
     #[test]
