@@ -4,19 +4,19 @@
 class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://github.com/spuentesp/lain"
-  version "0.6.0"
+  version "0.6.1"
 
   on_macos do
     on_arm do
-      url "https://github.com/spuentesp/lain/releases/download/v0.6.0/lain-0.6.0-aarch64-apple-darwin.tar.gz"
-      sha256 "8c28d556f865b0e375d2a7f2bb8d2a81fd57c903548b73da4fbeac79d86026d1"
+      url "https://github.com/spuentesp/lain/releases/download/v0.6.1/lain-0.6.1-aarch64-apple-darwin.tar.gz"
+      sha256 "5a93905af0fcabb0e3561177144c3001ee2d78bfad342406e46c391ae13b5e36"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/spuentesp/lain/releases/download/v0.6.0/lain-0.6.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "d91554755d4df1a9360c122e577ff5c78c460673b964c5532a3b401a06b55c29"
+      url "https://github.com/spuentesp/lain/releases/download/v0.6.1/lain-0.6.1-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "dee3fe83f49ee585b2cdb0a365454fc31609d9d2caa90f4d61bd5824ce3e350b"
     end
   end
 
