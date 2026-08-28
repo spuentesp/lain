@@ -75,6 +75,20 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
     Ok(start..end)
 }
 
+/// Whether this tool's federation dispatch should pass through
+/// `resolve_repo_or_error`. Tools listed here operate against the
+/// federation aggregate (or have a dedicated dispatcher arm and never
+/// reach the resolver) and so should not error on multi-repo.
+///
+/// **Default is `true`** — new tools added without an entry keep the old
+/// strict behavior. Add to the `matches!` arm only when a tool's handler
+/// is federation-wide; for tools handled in a dedicated dispatcher arm
+/// this function is never consulted anyway, but listing them costs
+/// nothing and documents the intent.
+fn requires_repo_scope(tool_name: &str) -> bool {
+    !matches!(tool_name, "query_graph")
+}
+
 /// Resolve which repo an existing per-repo MCP tool call should be routed to
 /// when the server is in federation mode.
 ///
@@ -1015,21 +1029,23 @@ impl ServerHandler for LainHandler {
         }
 
         if let Some(fed) = &self.federation {
-            match resolve_repo_or_error(fed, params.name.as_str(), &args_owned) {
-                Ok(rid) => {
-                    // Inject the resolved `repo_id` into the args the
-                    // executor will see. Existing per-repo tools resolve
-                    // symbols against `ctx.graph` (the executor's
-                    // single-workspace context) and ignore this; future
-                    // federation-aware tool handlers can read it. This is
-                    // the round-1 fix: the previously discarded `RepoId`
-                    // now flows through dispatch.
-                    args_owned.insert(
-                        "repo_id".into(),
-                        serde_json::Value::String(rid.as_str().to_string()),
-                    );
+            if requires_repo_scope(params.name.as_str()) {
+                match resolve_repo_or_error(fed, params.name.as_str(), &args_owned) {
+                    Ok(rid) => {
+                        // Inject the resolved `repo_id` into the args the
+                        // executor will see. Existing per-repo tools resolve
+                        // symbols against `ctx.graph` (the executor's
+                        // single-workspace context) and ignore this; future
+                        // federation-aware tool handlers can read it. This is
+                        // the round-1 fix: the previously discarded `RepoId`
+                        // now flows through dispatch.
+                        args_owned.insert(
+                            "repo_id".into(),
+                            serde_json::Value::String(rid.as_str().to_string()),
+                        );
+                    }
+                    Err(text) => return Ok(tool_text_result(text, true, &self.executor.overlay(), static_graph_generation_unix)),
                 }
-                Err(text) => return Ok(tool_text_result(text, true, &self.executor.overlay(), static_graph_generation_unix)),
             }
         }
 
@@ -2284,20 +2300,22 @@ async fn handle_request(
                         }
 
                         if let Some(fed) = &federation {
-                            match resolve_repo_or_error(fed, name, &args_map) {
-                                Ok(rid) => {
-                                    // Inject the resolved `repo_id` into
-                                    // the args the executor will see (Task
-                                    // 19 round-1 fix). Existing per-repo
-                                    // tools resolve against `ctx.graph`
-                                    // and ignore this; future
-                                    // federation-aware handlers can read it.
-                                    args_map.insert(
-                                        "repo_id".into(),
-                                        serde_json::Value::String(rid.as_str().to_string()),
-                                    );
+                            if requires_repo_scope(name) {
+                                match resolve_repo_or_error(fed, name, &args_map) {
+                                    Ok(rid) => {
+                                        // Inject the resolved `repo_id` into
+                                        // the args the executor will see (Task
+                                        // 19 round-1 fix). Existing per-repo
+                                        // tools resolve against `ctx.graph`
+                                        // and ignore this; future
+                                        // federation-aware handlers can read it.
+                                        args_map.insert(
+                                            "repo_id".into(),
+                                            serde_json::Value::String(rid.as_str().to_string()),
+                                        );
+                                    }
+                                    Err(text) => return Ok(jsonrpc_tool_result(id, &text, true)),
                                 }
-                                Err(text) => return Ok(jsonrpc_tool_result(id, &text, true)),
                             }
                         }
 
@@ -3288,6 +3306,40 @@ mod tests {
             "register_agent must NOT take `agent_id` — that would force \
              callers to supply an id the server hasn't minted yet. Got: {reg:?}"
         );
+    }
+
+    /// D-H4 Part B: tools that operate on the federation aggregate must not
+    /// pass through the repo resolver. `query_graph` was the canonical
+    /// casualty — it takes no `symbol` or `repo_id`, so the resolver had
+    /// nothing to work with and surfaced "multiple repos" on every call.
+    #[test]
+    fn query_graph_does_not_require_repo_scope() {
+        assert!(
+            !requires_repo_scope("query_graph"),
+            "query_graph is federation-wide; the resolver must be skipped",
+        );
+    }
+
+    /// Default is `true`: every tool that isn't explicitly classified must
+    /// still error if called with a multi-repo federation and no scoping.
+    /// This is the regression net for new tools added without an entry.
+    #[test]
+    fn unlisted_tools_default_to_requiring_scope() {
+        for name in [
+            "explain_symbol",
+            "find_anchors",
+            "get_call_chain",
+            "get_blast_radius",
+            "trace_dependency",
+            "find_dead_code",
+            "semantic_search",
+            "made_up_tool_for_test",
+        ] {
+            assert!(
+                requires_repo_scope(name),
+                "unlisted tool {name:?} must default to requiring scope",
+            );
+        }
     }
 }
 
