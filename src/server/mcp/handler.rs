@@ -3185,6 +3185,70 @@ mod tests {
             "two-element array payload must parse to two elements",
         );
     }
+
+    /// D-H3 — every tool that takes a caller-supplied agent identifier
+    /// names that argument `agent_id`; every tool that takes a
+    /// bearer credential names that argument `session_token`; the
+    /// single non-agent identifier-taking tool takes `repo_id`.
+    /// The presence-side tools are already on this surface; `get_repo_info`
+    /// is renamed by another task. The audit happened because nothing
+    /// here was pinned, so the rename is followed (in this test) by a
+    /// check that catches the next drift.
+    ///
+    /// Read by hand against `SERVER_TOOL_DEFS` (`definitions.rs:147`)
+    /// and `FEDERATION_TOOL_DEFS` (`definitions.rs:68`) once per release.
+    #[test]
+    fn tool_args_for_caller_identity_are_named_consistently() {
+        let by_name: std::collections::HashMap<&str, &[&str]> = SERVER_TOOL_DEFS
+            .iter()
+            .chain(FEDERATION_TOOL_DEFS.iter())
+            .map(|t| (t.name, t.required_args))
+            .collect();
+
+        // Tools pinned to an exact required-args list. Exact match (not
+        // `contains`): a future tool that silently adds a new required
+        // arg must update this test, which forces a thoughtful review.
+        let expected: &[(&str, &[&str])] = &[
+            ("heartbeat",      &["agent_id", "session_token"]),
+            ("who_am_i",       &["session_token"]),
+            ("list_subagents", &["session_token"]),
+            ("claim_files",    &["agent_id", "session_token", "files"]),
+            ("release_files",  &["agent_id", "session_token", "files"]),
+            ("my_claims",      &["agent_id", "session_token"]),
+            // (D-H3) The single non-agent identifier arg on the
+            // server/federation surface. Renamed from `id` → `repo_id` in
+            // Task 3; pinned here so a future change does not bring back
+            // the generic `id`.
+            ("get_repo_info",  &["repo_id"]),
+        ];
+        for (tool, want) in expected {
+            let got = by_name.get(tool).unwrap_or_else(|| {
+                panic!("{tool} missing from SERVER/FEDERATION TOOL_DEFS")
+            });
+            assert_eq!(
+                want, got,
+                "{tool} required args mismatch"
+            );
+        }
+
+        // `register_agent` is the deliberate exception: the caller picks a
+        // display *name* (server mints the agent_id). Pin BOTH that the arg
+        // is `name` AND that it is *not* `agent_id`, so a future "consistency
+        // sweep" does not rename it and break every caller.
+        let reg: &[&str] = by_name
+            .get("register_agent")
+            .expect("register_agent missing from SERVER_TOOL_DEFS");
+        assert!(
+            reg.contains(&"name"),
+            "register_agent must continue to take the agent's chosen display \
+             name as `name` (server mints agent_id). Got: {reg:?}"
+        );
+        assert!(
+            !reg.contains(&"agent_id"),
+            "register_agent must NOT take `agent_id` — that would force \
+             callers to supply an id the server hasn't minted yet. Got: {reg:?}"
+        );
+    }
 }
 
 // -------------------------------------------------------------------------
