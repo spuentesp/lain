@@ -352,7 +352,7 @@ struct LainHandler {
 /// without the NLP model: it refuses the `like` argument and answers
 /// normally otherwise, so it stays advertised and rejects that one
 /// argument with a message naming the cause.
-fn inert_tool_names(embedder: &crate::server::nlp::NlpEmbedder) -> &'static [&'static str] {
+pub(crate) fn inert_tool_names(embedder: &crate::server::nlp::NlpEmbedder) -> &'static [&'static str] {
     if embedder.is_stub() {
         // `semantic_search` is the whole tool, not one argument: with a
         // stub embedder every call returns `Unavailable`.

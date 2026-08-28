@@ -121,6 +121,7 @@ fn main() -> Result<()> {
             print,
         }) => lain::cli::init::run_init(workspace.as_deref(), force, print),
         Some(Commands::Hooks { action }) => lain::cli::dispatch::run(action),
+        Some(Commands::Schema { action }) => lain::cli::schema::run(action),
         Some(Commands::Oneshot {
             workspace,
             tool,
