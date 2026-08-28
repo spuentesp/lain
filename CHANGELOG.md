@@ -3,6 +3,19 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] — 2026-08-28
+
+### Fixed
+
+- **D-H3 tool-arg consistency.** The `get_repo_info` MCP tool's required
+  argument is renamed from `id` to `repo_id`. The old name was confusing
+  alongside sibling tools that use `agent_id` / `session_token`, and
+  already aligned with `get_cross_repo_blast_radius_for_repo`. Callers
+  must update their request bodies; the `docs/FEDERATION.md` reference
+  page and `scripts/demo.sh` are updated alongside, and a
+  `tool_args_for_caller_identity_are_named_consistently` regression test
+  pins the surface so the next drift fails loudly.
+
 ## [0.6.1] — 2026-08-28
 
 ### Fixed
