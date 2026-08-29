@@ -97,6 +97,72 @@ async function waitForReady(baseUrl, timeoutMs) {
   throw new Error(`federation not ready within ${timeoutMs}ms: ${lastErr && lastErr.message}`);
 }
 
+// Federation cross-repo probe (Task 8 follow-up).
+//
+// After `waitForReady` confirms the federation is up, this calls the
+// `get_cross_repo_blast_radius` tool over MCP and asserts that
+// `verify_token` has at least one caller in `billing-svc`. That edge
+// is the headline of the recording (Tools tab), and it's exactly what
+// the prior broken fixture failed to produce — Task 8 caught it on a
+// content eyeball check; this probe turns it into a deterministic gate.
+async function probeFederationCrossRepoEdge(baseUrl, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          params: {
+            name: 'get_cross_repo_blast_radius',
+            arguments: { symbol: 'verify_token', depth: '1..3' },
+          },
+          id: 1,
+        }),
+      });
+      if (!res.ok) {
+        lastErr = new Error(`mcp HTTP ${res.status}`);
+      } else {
+        const env = await res.json();
+        if (env.error) {
+          lastErr = new Error(`jsonrpc error ${env.error.code}: ${env.error.message}`);
+        } else if (env.result && env.result.isError) {
+          const text = env.result.content && env.result.content[0] && env.result.content[0].text;
+          lastErr = new Error(`tool error: ${text}`);
+        } else {
+          const text = env.result && env.result.content && env.result.content[0] && env.result.content[0].text;
+          if (!text) {
+            lastErr = new Error('tool returned empty content');
+          } else {
+            let payload;
+            try { payload = JSON.parse(text); }
+            catch (e) { lastErr = new Error(`tool payload not JSON: ${e.message}`); }
+            if (payload) {
+              const byRepo = payload.by_repo || {};
+              const billing = Array.isArray(byRepo['billing-svc']) ? byRepo['billing-svc'] : [];
+              const total = Number(payload.total_count || 0);
+              if (billing.length > 0 && total > 0) {
+                console.log(`  federation probe OK: by_repo=${JSON.stringify(byRepo)} total_count=${total}`);
+                return;
+              }
+              lastErr = new Error(
+                `cross-repo edge missing — by_repo=${JSON.stringify(byRepo)} total_count=${total}`,
+              );
+            }
+          }
+        }
+      }
+    } catch (e) { lastErr = e; }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(
+    `federation probe failed: cross-repo edge for verify_token missing — check fixture (last error: ${lastErr && lastErr.message})`,
+  );
+}
+
 // ── Tab drive sequence (deterministic timings) ──────────────────────────
 
 async function clickTab(page, name) {
@@ -215,6 +281,13 @@ async function main() {
   try {
     await waitForReady(baseUrl, 120_000);
     console.log(`  federation ready`);
+
+    // Deterministic gate: confirm the cross-repo Calls edge the
+    // recording's Tools tab relies on actually exists. Catches a
+    // broken fixture (Task 1 → Task 8 bug) before we burn a
+    // recording session on it.
+    await probeFederationCrossRepoEdge(baseUrl, 30_000);
+    console.log(`  federation probe passed`);
 
     browser = await chromium.launch({
       executablePath: CHROMIUM_BIN,
