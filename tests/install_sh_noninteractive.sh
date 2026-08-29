@@ -34,7 +34,8 @@ test_auto_yes_on_non_tty() {
     echo "OPT_YES=[$OPT_YES]"
   ' ) 2>&1 )
   rc=$?
-  if echo "$out" | grep -q "OPT_YES=[yes]"; then
+  # -F: fixed-string match — without it grep treats "[yes]" as a character class.
+  if echo "$out" | grep -qF "OPT_YES=[yes]"; then
     pass "non-TTY + no --yes auto-sets OPT_YES"
   else
     fail "non-TTY + no --yes did not auto-set OPT_YES (rc=$rc, output=$out)"
@@ -61,7 +62,8 @@ test_auto_yes_skipped_on_tty() {
     echo "OPT_YES=[$OPT_YES]"
   ' 2>&1)
   if [ -t 0 ]; then
-    if echo "$out" | grep -q "OPT_YES=[]"; then
+    # -F: fixed-string match (brackets would otherwise form a char class).
+    if echo "$out" | grep -qF "OPT_YES=[]"; then
       pass "TTY leaves OPT_YES unset"
     else
       fail "TTY left OPT_YES=[$out]"
@@ -117,6 +119,25 @@ echo ""
 test_auto_yes_skipped_on_tty
 echo ""
 test_path_block_skips_mutation_on_non_tty
+echo ""
+
+# T4: When --interactive is set and stdin is /dev/null, the auto-yes
+#     override must NOT fire. The user wants to feed answers via heredoc.
+test_interactive_overrides_auto_yes() {
+  local out
+  out=$( OPT_INTERACTIVE=yes bash -c '
+    source "'"$INSTALL_SCRIPT"'" >/dev/null 2>&1
+    apply_noninteractive_defaults </dev/null
+    echo "OPT_YES=[$OPT_YES]"
+  ' 2>&1 )
+  if echo "$out" | grep -qF "OPT_YES=[]"; then
+    pass "--interactive suppresses non-TTY auto-yes"
+  else
+    fail "--interactive did not suppress non-TTY auto-yes (output=$out)"
+  fi
+}
+
+test_interactive_overrides_auto_yes
 echo ""
 
 echo "========================================"
