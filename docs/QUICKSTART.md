@@ -84,12 +84,12 @@ Add to your agent's MCP config:
 **First query**
 
 ```bash
-# The same cross-repo blast-radius query the video shows:
+# The same workspace-graph query the video shows:
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius","arguments":{"symbol":"verify_token","depth":"1..3"}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_workspace_graph","arguments":{}},"id":1}'
 ```
 
-Expected: the response names at least one caller in `billing-svc`.
+Expected: the response's `nodes[]` array contains entries from both `auth-svc` and `billing-svc`.
 
 ### Smoke test the federation
 
@@ -102,9 +102,9 @@ curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_repos","arguments":{}},"id":1}'
 
-# Cross-repo blast radius
+# Workspace graph (cross-repo)
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius","arguments":{"symbol":"verify_token","depth":"1..3"}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_workspace_graph","arguments":{}},"id":1}'
 ```
 
 ## Watch it in action
