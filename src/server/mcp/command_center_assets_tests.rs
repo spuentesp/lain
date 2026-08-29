@@ -278,3 +278,36 @@ fn graph_tab_uses_the_vendored_d3() {
         "index.html must not load D3 from a CDN"
     );
 }
+
+/// D-M8: the picker's change handler must be attached once, from init(), and
+/// never from renderGraphTab() — that function re-runs on every tab click
+/// (see the dispatch in init()), so wiring there stacks duplicate listeners.
+#[test]
+fn graph_picker_is_wired_once_from_init() {
+    let js = String::from_utf8(APP_JS.to_vec()).expect("app.js is not utf-8");
+
+    assert!(
+        js.contains("function wireGraphPicker("),
+        "app.js is missing wireGraphPicker()"
+    );
+
+    let init_at = js
+        .find("async function init()")
+        .expect("app.js has no init()");
+    assert!(
+        js[init_at..].contains("wireGraphPicker()"),
+        "init() must call wireGraphPicker() so the listener is attached exactly once"
+    );
+
+    let render_at = js
+        .find("async function renderGraphTab()")
+        .expect("app.js has no renderGraphTab()");
+    let render_end = js[render_at..]
+        .find("\nfunction wireGraphPicker")
+        .map(|off| render_at + off)
+        .expect("wireGraphPicker must be defined directly after renderGraphTab");
+    assert!(
+        !js[render_at..render_end].contains("addEventListener"),
+        "renderGraphTab() must not attach listeners — it re-runs on every tab click"
+    );
+}

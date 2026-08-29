@@ -988,6 +988,21 @@ async function renderGraphTab() {
   drawGraphSvg(svg, graph);
 }
 
+// Attach the graph workspace picker's `change` listener exactly once. Called
+// from init() — NOT from renderGraphTab(), which re-runs on every tab click
+// and would stack duplicate listeners. Enforced by
+// `graph_picker_is_wired_once_from_init` in command_center_assets_tests.rs.
+function wireGraphPicker() {
+  const select = document.getElementById('graph-workspace');
+  if (!select) return;
+  select.addEventListener('change', () => {
+    // '' is the "— pick a workspace —" placeholder; treat it as "nothing
+    // chosen" so the tab falls back to its picker empty state.
+    selectedGraphWorkspace = select.value || null;
+    renderGraphTab();
+  });
+}
+
 // ── Tab: tools (MCP tool tester) ───────────────────────────────────────────
 
 async function renderToolsTab() {
@@ -1172,6 +1187,7 @@ async function init() {
   if (firstBtn) firstBtn.classList.add('active');
 
   wireThemeToggle();
+  wireGraphPicker();
 
   // Sidebar / topbar (best-effort; one failure shouldn't block the rest).
   await Promise.allSettled([
