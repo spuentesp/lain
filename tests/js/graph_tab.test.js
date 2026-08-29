@@ -35,3 +35,55 @@ test('collapseBursts keeps events outside the window separate', () => {
   ], { window_ms: 5000 });
   assert.strictEqual(cards.length, 2);
 });
+
+// ── pickWorkspaceForGraph (D-M8) ────────────────────────────────────────────
+
+test('pickWorkspaceForGraph: no workspaces -> none', () => {
+  assert.deepStrictEqual(app.pickWorkspaceForGraph([]), {
+    mode: 'none', workspace: null,
+  });
+});
+
+test('pickWorkspaceForGraph: non-array input -> none', () => {
+  assert.deepStrictEqual(app.pickWorkspaceForGraph(null), {
+    mode: 'none', workspace: null,
+  });
+  assert.deepStrictEqual(app.pickWorkspaceForGraph(undefined), {
+    mode: 'none', workspace: null,
+  });
+});
+
+test('pickWorkspaceForGraph: exactly one workspace auto-selects it', () => {
+  assert.deepStrictEqual(
+    app.pickWorkspaceForGraph([{ name: 'solo', member_count: 1, is_active: false }]),
+    { mode: 'auto', workspace: 'solo' },
+  );
+});
+
+test('pickWorkspaceForGraph: the active workspace wins over count', () => {
+  assert.deepStrictEqual(
+    app.pickWorkspaceForGraph([
+      { name: 'a', is_active: false },
+      { name: 'b', is_active: true },
+      { name: 'c', is_active: false },
+    ]),
+    { mode: 'auto', workspace: 'b' },
+  );
+});
+
+test('pickWorkspaceForGraph: many workspaces, none active -> picker', () => {
+  assert.deepStrictEqual(
+    app.pickWorkspaceForGraph([
+      { name: 'a', is_active: false },
+      { name: 'b', is_active: false },
+    ]),
+    { mode: 'picker', workspace: null },
+  );
+});
+
+test('pickWorkspaceForGraph: entries without a name are ignored', () => {
+  assert.deepStrictEqual(
+    app.pickWorkspaceForGraph([{ member_count: 3 }, { name: 'real' }]),
+    { mode: 'auto', workspace: 'real' },
+  );
+});

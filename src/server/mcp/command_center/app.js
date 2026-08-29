@@ -686,6 +686,30 @@ async function renderQueryTab() {
   });
 }
 
+// ── Tab: graph (D-M8) ──────────────────────────────────────────────────────
+//
+// The server holds exactly one workspace — the one it was started with
+// (`lain server --workspace <name>`), and `get_workspace_graph` derives that
+// workspace from the loaded repo set rather than taking a name. So this
+// picker is a client-side affordance over a server-side fact. See
+// docs/opinions/graph-tab-data-source.md.
+
+// Pure selection rule, unit-tested in tests/js/graph_tab.test.js.
+//   'none'   — nothing indexed; show the "no workspace indexed yet" message.
+//   'auto'   — render this workspace immediately (single-repo mode, or the
+//              server told us which one is active).
+//   'picker' — several workspaces and no active one; make the operator choose.
+function pickWorkspaceForGraph(list) {
+  const named = Array.isArray(list)
+    ? list.filter(ws => ws && typeof ws.name === 'string' && ws.name !== '')
+    : [];
+  if (named.length === 0) return { mode: 'none', workspace: null };
+  const active = named.find(ws => ws.is_active === true);
+  if (active) return { mode: 'auto', workspace: active.name };
+  if (named.length === 1) return { mode: 'auto', workspace: named[0].name };
+  return { mode: 'picker', workspace: null };
+}
+
 // ── Tab: tools (MCP tool tester) ───────────────────────────────────────────
 
 async function renderToolsTab() {
@@ -909,5 +933,6 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     collapseBursts,
     filterConflictEvents,
+    pickWorkspaceForGraph,
   };
 }
