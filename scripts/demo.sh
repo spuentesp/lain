@@ -153,6 +153,15 @@ if [ "$BUILD" = 1 ]; then
 fi
 
 [ -x "$LAIN" ] || { printf '%sno binary at %s — build first or set LAIN=%s\n' "$RED" "$LAIN" "$RST"; exit 2; }
+
+# Guard against demoing a stale binary (D-L3). The warning goes to stderr from
+# check_binary_freshness; demo.sh only propagates the non-zero exit. Runs after
+# the -x check so a *missing* binary still gets the precise message above rather
+# than a misleading "may be stale".
+if ! check_binary_freshness "$LAIN" "$REPO_ROOT"; then
+  exit 2
+fi
+
 print_binary_info "$LAIN"
 
 section "Subject repo"
