@@ -2,6 +2,7 @@
   "main": "./graph_tab.test.js",
   "scripts": {
     "test:e2e": "node ./spa_e2e.test.js",
+    "record-demo": "node ./record_spa_demo.js",
     "test": "node --test ./graph_tab.test.js"
   },
   "devDependencies": {

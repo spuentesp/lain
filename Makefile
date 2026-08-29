@@ -5,7 +5,10 @@
 # fails the build if `git diff --exit-code docs/tool-schema.json`
 # reports any change.
 
-.PHONY: schema
+.PHONY: schema record-demo
 
 schema:
 	cargo run --quiet -- schema dump --out docs/tool-schema.json
+
+record-demo:
+	./scripts/record-spa-demo.sh
