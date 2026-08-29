@@ -1,6 +1,6 @@
 # Quickstart
 
-Five minutes from install to first answer.
+> Five minutes from install to first answer.
 
 ## Install
 
@@ -17,7 +17,15 @@ curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
   bash /dev/stdin --download-model --yes
 ```
 
-## Two ways to use it
+After installation:
+
+```bash
+source ~/.zshrc   # or ~/.bashrc
+lain --version
+lain --help
+```
+
+## Pick a mode
 
 | Mode | When | MCP config |
 |------|------|------------|
@@ -45,6 +53,16 @@ Start your agent inside your repo. On the first turn it indexes in
 the background; on the next turn it can ask *"if I change
 `validate_token`, what else breaks?"* via `get_blast_radius`.
 
+**First query**
+
+```bash
+# After your agent has indexed once, drop into a terminal:
+curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_blast_radius","arguments":{"symbol":"validate_token","depth":"1..3"}},"id":1}'
+```
+
+Expected: a JSON `result.content[0].text` listing the callers of `validate_token` plus their paths.
+
 ## Federation (multi-repo)
 
 ```bash
@@ -63,7 +81,17 @@ Add to your agent's MCP config:
     "--config","./repos.yaml","--transport","stdio"] } } }
 ```
 
-## Smoke test
+**First query**
+
+```bash
+# The same cross-repo blast-radius query the video shows:
+curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius","arguments":{"symbol":"verify_token","depth":"1..3"}},"id":1}'
+```
+
+Expected: the response names at least one caller in `billing-svc`.
+
+### Smoke test the federation
 
 ```bash
 # Server identity
@@ -78,6 +106,12 @@ curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius","arguments":{"symbol":"verify_token","depth":"1..3"}},"id":1}'
 ```
+
+## Watch it in action
+
+![LAIN Command Center demo](screenshots/spa-demo.gif)
+
+**Watch in HD** ([MP4](screenshots/spa-demo.mp4), [WebM](screenshots/spa-demo.webm)).
 
 ## First aid
 
