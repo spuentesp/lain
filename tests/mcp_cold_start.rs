@@ -57,6 +57,15 @@ fn protocol_version(bin: &Path) -> Option<String> {
 /// Build a one-file Rust fixture with an orchestrator function so
 /// `find_anchors` has at least one anchor to rank. Commit it so the
 /// indexer picks the file up.
+///
+/// `anchor_score` is `calls_in * log2(1 + calls_out) * size_factor`.
+/// A bare orchestrator that calls helpers but has no callers scores 0
+/// (calls_in = 0) — same as the helpers it calls (calls_out = 0). With
+/// all four fixtures tied at 0, the relative order comes from the
+/// graph's node iteration, which is not stable across reindexes. By
+/// giving `orchestrate` a caller (`entrypoint`), it ranks #1 with a
+/// non-zero score while the leaves stay at 0, so the second assertion
+/// has a deterministic anchor to look for.
 fn build_fixture() -> TempDir {
     let dir = TempDir::new().expect("tempdir");
     let root = dir.path();
@@ -69,13 +78,14 @@ fn build_fixture() -> TempDir {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("src/lib.rs"),
-        "/// Anchor: called by one, coordinates three, with a real body.\n\
+        "/// Anchor: called by `entrypoint`, coordinates three helpers.\n\
          pub fn orchestrate() -> u32 {\n\
          \x20   let a = helper_a(1);\n\
          \x20   let b = helper_b(2);\n\
          \x20   let c = helper_c(3);\n\
          \x20   a + b + c\n\
          }\n\
+         pub fn entrypoint() -> u32 { orchestrate() }\n\
          pub fn helper_a(x: u32) -> u32 { x + 1 }\n\
          pub fn helper_b(x: u32) -> u32 { x + 2 }\n\
          pub fn helper_c(x: u32) -> u32 { x + 3 }\n",
