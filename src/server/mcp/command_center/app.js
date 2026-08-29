@@ -710,6 +710,80 @@ function pickWorkspaceForGraph(list) {
   return { mode: 'picker', workspace: null };
 }
 
+// Module-level so the picker's change handler and renderGraphTab() agree on
+// which workspace is on screen. `null` means "nothing selected yet".
+let selectedGraphWorkspace = null;
+
+// Fill the picker from a list_workspaces payload, marking the current
+// selection. Hides the picker entirely when there is at most one workspace —
+// there is nothing to choose (approach (a): single-repo mode pre-picks).
+function populateGraphPicker(list, selected) {
+  const select = document.getElementById('graph-workspace');
+  const header = document.querySelector('#tab-graph .graph-header');
+  if (!select) return;
+  const named = Array.isArray(list)
+    ? list.filter(ws => ws && typeof ws.name === 'string' && ws.name !== '')
+    : [];
+  select.innerHTML = '';
+  if (named.length <= 1) {
+    if (header) header.classList.add('no-picker');
+    return;
+  }
+  if (header) header.classList.remove('no-picker');
+  if (!selected) {
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = '— pick a workspace —';
+    select.appendChild(blank);
+  }
+  for (const ws of named) {
+    const opt = document.createElement('option');
+    opt.value = ws.name;
+    const count = (ws.member_count == null) ? '?' : ws.member_count;
+    opt.textContent = `${ws.name} (${count} repos)${ws.is_active ? ' — active' : ''}`;
+    if (ws.name === selected) opt.selected = true;
+    select.appendChild(opt);
+  }
+}
+
+// Paint the tab when there is no graph to draw. `state` is the {mode, ...}
+// object from pickWorkspaceForGraph, or a synthetic {mode:'error', message}
+// / {mode:'not-loaded', workspace} for the two runtime cases.
+function renderGraphTabEmpty(state, list) {
+  const empty = document.getElementById('graph-empty');
+  const meta = document.getElementById('graph-meta');
+  const svg = document.getElementById('graph-canvas');
+  if (svg) svg.innerHTML = '';
+  if (meta) meta.textContent = '';
+  if (!empty) return;
+  populateGraphPicker(list, (state && state.workspace) || null);
+  const mode = (state && state.mode) || 'none';
+  if (mode === 'none') {
+    empty.className = 'muted';
+    empty.textContent = 'No workspace indexed yet. Start the server with ' +
+      '`lain server --config <repos.yaml> --workspace <name>`.';
+    return;
+  }
+  if (mode === 'picker') {
+    empty.className = 'muted';
+    empty.textContent = 'Pick a workspace above to draw its graph.';
+    return;
+  }
+  if (mode === 'not-loaded') {
+    // The server holds one workspace at a time; we cannot draw a workspace it
+    // never loaded. Hand the operator the exact restart line instead.
+    empty.className = 'muted';
+    empty.innerHTML =
+      `Workspace <code>${escapeHtml(state.workspace || '')}</code> is not loaded by this ` +
+      `server. Restart it with ` +
+      `<code>lain server --config &lt;repos.yaml&gt; --workspace ` +
+      `${escapeHtml(state.workspace || '')}</code>.`;
+    return;
+  }
+  empty.className = 'error';
+  empty.textContent = (state && state.message) || 'graph unavailable';
+}
+
 // ── Tab: tools (MCP tool tester) ───────────────────────────────────────────
 
 async function renderToolsTab() {
