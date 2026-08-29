@@ -131,6 +131,9 @@ mkdir -p "$WORK"
 printf '%slain — capability demonstration and benchmark%s\n' "$B" "$RST"
 printf '%ssubject: synthetic repo with a call graph known by construction%s\n' "$DIM" "$RST"
 
+# shellcheck source=./demo-freshness.sh
+source "$REPO_ROOT/scripts/demo-freshness.sh"
+
 if [ "$BUILD" = 1 ]; then
   section "Build"
   # cargo is frequently not on PATH (rustup shims live elsewhere) — the
@@ -150,7 +153,7 @@ if [ "$BUILD" = 1 ]; then
 fi
 
 [ -x "$LAIN" ] || { printf '%sno binary at %s — build first or set LAIN=%s\n' "$RED" "$LAIN" "$RST"; exit 2; }
-printf '  binary: %s (%s)\n' "$LAIN" "$("$LAIN" --version 2>/dev/null | head -1)"
+print_binary_info "$LAIN"
 
 section "Subject repo"
 bash "$REPO_ROOT/scripts/demo-fixture.sh" "$SUBJECT"
