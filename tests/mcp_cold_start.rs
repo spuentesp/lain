@@ -252,3 +252,78 @@ fn find_anchors_works_immediately_after_initialize() {
 
     child.shutdown();
 }
+
+/// D-M2 second contract: when the re-index budget elapses, the
+/// server still comes up — degraded, but alive — and `get_health`
+/// reports the timeout. This pins the `RefreshResult::Timeout`
+/// branch of `await_startup_reindex`.
+///
+/// We force the timeout with `LAIN_REINDEX_TIMEOUT=1` (one second).
+/// On a slow CI runner the fixture's first index will exceed that,
+/// which is what we want. On a fast machine the index may finish
+/// before the budget; in that case the assertion falls through to
+/// the success branch (the contract is "the server must come up AND
+/// answer queries", which holds either way).
+#[test]
+fn startup_degrades_when_reindex_times_out() {
+    let Some(bin) = lain_bin() else {
+        eprintln!("skipping: no lain binary (set LAIN_BIN or run `cargo build`)");
+        return;
+    };
+    let Some(version) = protocol_version(&bin) else {
+        eprintln!("skipping: could not determine MCP protocol version");
+        return;
+    };
+    let fixture = build_fixture();
+
+    let mut child = LainChild::spawn(
+        &bin,
+        fixture.path(),
+        &[("LAIN_REINDEX_TIMEOUT", "1")],
+    );
+
+    let init_params = serde_json::json!({
+        "protocolVersion": version,
+        "capabilities": {},
+        "clientInfo": {"name": "cold-start-test-timeout", "version": "1"},
+    });
+    let init_resp = child.send("initialize", init_params);
+    assert!(
+        init_resp.get("result").is_some(),
+        "initialize must succeed even when re-index times out: {init_resp}"
+    );
+
+    // `get_health` after initialize — must report either:
+    //   (a) `Degraded ⚠ ... timed out`  — the budget elapsed, OR
+    //   (b) `Operational ✅`             — the index finished under 1s.
+    // In both cases the server is alive and the await ran.
+    let health = child.call_tool("get_health", serde_json::json!({}));
+    let health_text = health
+        .pointer("/result/content/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let timed_out = health_text.contains("timed out");
+    let operational = health_text.contains("Operational");
+
+    assert!(
+        timed_out || operational,
+        "get_health must report either a timeout or Operational after a \
+         cold start with LAIN_REINDEX_TIMEOUT=1: {health_text}"
+    );
+
+    // Either way, the served graph must be non-empty — the await ran.
+    let anchors = child.call_tool("find_anchors", serde_json::json!({"limit": 5}));
+    let anchors_text = anchors
+        .pointer("/result/content/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !anchors_text.is_empty() && !anchors_text.contains("No anchors"),
+        "find_anchors must answer after the cold start, regardless of \
+         whether the index finished or timed out: {anchors_text}"
+    );
+
+    child.shutdown();
+}
