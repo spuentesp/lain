@@ -784,6 +784,46 @@ function renderGraphTabEmpty(state, list) {
   empty.textContent = (state && state.message) || 'graph unavailable';
 }
 
+// `list_workspaces` is only registered when the server loaded a
+// workspaces.yaml, so a plain federation answers "Unknown tool". That is a
+// configuration state, not a failure — same reasoning (and same regex) as
+// renderWorkspaces() above. Pure, so tests/js/graph_tab.test.js can cover it.
+function classifyWorkspacesResult(result, parsed) {
+  if (result && result.isError) {
+    const msg = unwrapText(result) || 'error';
+    if (/unknown tool|no workspaces file/i.test(msg)) {
+      return { ok: true, list: [], message: null, configless: true };
+    }
+    return { ok: false, list: [], message: msg, configless: false };
+  }
+  const list = Array.isArray(parsed) ? parsed : [];
+  return { ok: true, list, message: null, configless: false };
+}
+
+// Fetch the workspace list and decide what the tab should show. Commits an
+// 'auto' verdict to `selectedGraphWorkspace` so single-repo mode needs no
+// operator interaction at all (defect D-M8, fix (a)).
+async function loadGraphWorkspaces() {
+  let classified;
+  try {
+    const result = await mcpCall('list_workspaces');
+    classified = classifyWorkspacesResult(result, parseJson(result));
+  } catch (e) {
+    return {
+      state: { mode: 'error', message: `list_workspaces failed: ${e.message}` },
+      list: [],
+    };
+  }
+  if (!classified.ok) {
+    return { state: { mode: 'error', message: classified.message }, list: [] };
+  }
+  const state = pickWorkspaceForGraph(classified.list);
+  if (state.mode === 'auto') {
+    selectedGraphWorkspace = state.workspace;
+  }
+  return { state, list: classified.list };
+}
+
 // ── Tab: tools (MCP tool tester) ───────────────────────────────────────────
 
 async function renderToolsTab() {
@@ -1008,5 +1048,6 @@ if (typeof module !== 'undefined' && module.exports) {
     collapseBursts,
     filterConflictEvents,
     pickWorkspaceForGraph,
+    classifyWorkspacesResult,
   };
 }

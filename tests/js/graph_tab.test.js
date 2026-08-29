@@ -87,3 +87,53 @@ test('pickWorkspaceForGraph: entries without a name are ignored', () => {
     { mode: 'auto', workspace: 'real' },
   );
 });
+
+// ── classifyWorkspacesResult (D-M8) ─────────────────────────────────────────
+
+test('classifyWorkspacesResult: a healthy list passes through', () => {
+  const out = app.classifyWorkspacesResult(
+    { content: [{ type: 'text', text: '[]' }] },
+    [{ name: 'solo' }],
+  );
+  assert.strictEqual(out.ok, true);
+  assert.strictEqual(out.configless, false);
+  assert.deepStrictEqual(out.list, [{ name: 'solo' }]);
+});
+
+test('classifyWorkspacesResult: "Unknown tool" is a config state, not an error', () => {
+  const out = app.classifyWorkspacesResult(
+    { isError: true, content: [{ type: 'text', text: 'Unknown tool: list_workspaces' }] },
+    null,
+  );
+  assert.strictEqual(out.ok, true, 'a configless federation is not a failure');
+  assert.strictEqual(out.configless, true);
+  assert.deepStrictEqual(out.list, []);
+});
+
+test('classifyWorkspacesResult: "no workspaces file" is also a config state', () => {
+  const out = app.classifyWorkspacesResult(
+    { isError: true, content: [{ type: 'text', text: 'no workspaces file loaded' }] },
+    null,
+  );
+  assert.strictEqual(out.ok, true);
+  assert.strictEqual(out.configless, true);
+});
+
+test('classifyWorkspacesResult: a real tool error is surfaced', () => {
+  const out = app.classifyWorkspacesResult(
+    { isError: true, content: [{ type: 'text', text: 'index poisoned' }] },
+    null,
+  );
+  assert.strictEqual(out.ok, false);
+  assert.strictEqual(out.configless, false);
+  assert.match(out.message, /index poisoned/);
+});
+
+test('classifyWorkspacesResult: an unparseable body yields an empty list', () => {
+  const out = app.classifyWorkspacesResult(
+    { content: [{ type: 'text', text: 'not json' }] },
+    null,
+  );
+  assert.strictEqual(out.ok, true);
+  assert.deepStrictEqual(out.list, []);
+});
