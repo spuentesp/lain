@@ -111,9 +111,30 @@ flowchart TB
   `~/.config/lain/active_workspace` pointer matches that project's path.
 - **Overview tab** — server health (`get_health`) and federation health
   (`get_federation_health`) in a single view.
-- **Graph tab** — D3 force-directed graph of the active workspace (placeholder
-  for the future deeper rendering work; the shell tab is wired in Tasks 4.3 +
-  4.4 so the layout doesn't break).
+- **Graph tab** — D3 force-directed graph of the active workspace, drawn from
+  `get_workspace_graph` (Function/Method/Class nodes, Calls/Imports edges,
+  capped at 5000 nodes / 10000 edges server-side). Cross-repo edges are drawn
+  in the warning colour; hovering a node shows its name, repo, kind and path;
+  nodes are draggable. Labels are drawn only when the graph has 150 nodes or
+  fewer. The header line reports node / edge / cross-repo counts and flags a
+  truncated response.
+
+  Workspace selection follows the shape of the federation:
+
+  | `list_workspaces` returns | Graph tab shows |
+  | --- | --- |
+  | nothing (or no `workspaces.yaml`) | *"No workspace indexed yet."* plus the `lain server --config … --workspace …` line |
+  | exactly one workspace | that workspace, drawn immediately; the picker is hidden |
+  | several, one flagged `is_active` | the active one, drawn immediately; the picker is shown |
+  | several, none active | *"Pick a workspace above to draw its graph."* and nothing drawn |
+
+  The picker is a **client-side** affordance. `get_workspace_graph` takes no
+  workspace name — it derives the workspace from the repos the server actually
+  loaded — and a server holds exactly one workspace at a time, the one passed
+  to `lain server --workspace <name>`. Picking a workspace the server has not
+  loaded therefore prints the restart command instead of a graph. The
+  reasoning is written up in
+  [docs/opinions/graph-tab-data-source.md](opinions/graph-tab-data-source.md).
 - **Repos tab** — per-repo table with id, path, health, node count, edge
   count. Each row uses `get_repo_info` for the live numbers.
 - **Query tab** — runs a `query_graph` call against the federation. Pick a

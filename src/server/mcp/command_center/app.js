@@ -605,7 +605,7 @@ async function renderReposTab() {
   for (const repo of list) {
     let info = repo;
     try {
-      const r = await mcpCall('get_repo_info', {id: repo.id});
+      const r = await mcpCall('get_repo_info', {repo_id: repo.id});
       info = parseJson(r) || repo;
     } catch (_) { /* fall back to the row from list_repos */ }
     rows.push(`<tr>
@@ -683,6 +683,323 @@ async function renderQueryTab() {
     } catch (e) {
       out.textContent = 'error: ' + e.message;
     }
+  });
+}
+
+// ── Tab: graph (D-M8) ──────────────────────────────────────────────────────
+//
+// The server holds exactly one workspace — the one it was started with
+// (`lain server --workspace <name>`), and `get_workspace_graph` derives that
+// workspace from the loaded repo set rather than taking a name. So this
+// picker is a client-side affordance over a server-side fact. See
+// docs/opinions/graph-tab-data-source.md.
+
+// Pure selection rule, unit-tested in tests/js/graph_tab.test.js.
+//   'none'   — nothing indexed; show the "no workspace indexed yet" message.
+//   'auto'   — render this workspace immediately (single-repo mode, or the
+//              server told us which one is active).
+//   'picker' — several workspaces and no active one; make the operator choose.
+function pickWorkspaceForGraph(list) {
+  const named = Array.isArray(list)
+    ? list.filter(ws => ws && typeof ws.name === 'string' && ws.name !== '')
+    : [];
+  if (named.length === 0) return { mode: 'none', workspace: null };
+  const active = named.find(ws => ws.is_active === true);
+  if (active) return { mode: 'auto', workspace: active.name };
+  if (named.length === 1) return { mode: 'auto', workspace: named[0].name };
+  return { mode: 'picker', workspace: null };
+}
+
+// Module-level so the picker's change handler and renderGraphTab() agree on
+// which workspace is on screen. `null` means "nothing selected yet".
+let selectedGraphWorkspace = null;
+
+// Fill the picker from a list_workspaces payload, marking the current
+// selection. Hides the picker entirely when there is at most one workspace —
+// there is nothing to choose (approach (a): single-repo mode pre-picks).
+function populateGraphPicker(list, selected) {
+  const select = document.getElementById('graph-workspace');
+  const header = document.querySelector('#tab-graph .graph-header');
+  if (!select) return;
+  const named = Array.isArray(list)
+    ? list.filter(ws => ws && typeof ws.name === 'string' && ws.name !== '')
+    : [];
+  select.innerHTML = '';
+  if (named.length <= 1) {
+    if (header) header.classList.add('no-picker');
+    return;
+  }
+  if (header) header.classList.remove('no-picker');
+  if (!selected) {
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = '— pick a workspace —';
+    select.appendChild(blank);
+  }
+  for (const ws of named) {
+    const opt = document.createElement('option');
+    opt.value = ws.name;
+    const count = (ws.member_count == null) ? '?' : ws.member_count;
+    opt.textContent = `${ws.name} (${count} repos)${ws.is_active ? ' — active' : ''}`;
+    if (ws.name === selected) opt.selected = true;
+    select.appendChild(opt);
+  }
+}
+
+// Paint the tab when there is no graph to draw. `state` is the {mode, ...}
+// object from pickWorkspaceForGraph, or a synthetic {mode:'error', message}
+// / {mode:'not-loaded', workspace} for the two runtime cases.
+function renderGraphTabEmpty(state, list) {
+  const empty = document.getElementById('graph-empty');
+  const meta = document.getElementById('graph-meta');
+  const svg = document.getElementById('graph-canvas');
+  if (svg) svg.innerHTML = '';
+  if (meta) meta.textContent = '';
+  if (!empty) return;
+  populateGraphPicker(list, (state && state.workspace) || null);
+  const mode = (state && state.mode) || 'none';
+  if (mode === 'none') {
+    empty.className = 'muted';
+    empty.textContent = 'No workspace indexed yet. Start the server with ' +
+      '`lain server --config <repos.yaml> --workspace <name>`.';
+    return;
+  }
+  if (mode === 'picker') {
+    empty.className = 'muted';
+    empty.textContent = 'Pick a workspace above to draw its graph.';
+    return;
+  }
+  if (mode === 'not-loaded') {
+    // The server holds one workspace at a time; we cannot draw a workspace it
+    // never loaded. Hand the operator the exact restart line instead.
+    empty.className = 'muted';
+    empty.innerHTML =
+      `Workspace <code>${escapeHtml(state.workspace || '')}</code> is not loaded by this ` +
+      `server. Restart it with ` +
+      `<code>lain server --config &lt;repos.yaml&gt; --workspace ` +
+      `${escapeHtml(state.workspace || '')}</code>.`;
+    return;
+  }
+  empty.className = 'error';
+  empty.textContent = (state && state.message) || 'graph unavailable';
+}
+
+// `list_workspaces` is only registered when the server loaded a
+// workspaces.yaml, so a plain federation answers "Unknown tool". That is a
+// configuration state, not a failure — same reasoning (and same regex) as
+// renderWorkspaces() above. Pure, so tests/js/graph_tab.test.js can cover it.
+function classifyWorkspacesResult(result, parsed) {
+  if (result && result.isError) {
+    const msg = unwrapText(result) || 'error';
+    if (/unknown tool|no workspaces file/i.test(msg)) {
+      return { ok: true, list: [], message: null, configless: true };
+    }
+    return { ok: false, list: [], message: msg, configless: false };
+  }
+  const list = Array.isArray(parsed) ? parsed : [];
+  return { ok: true, list, message: null, configless: false };
+}
+
+// Fetch the workspace list and decide what the tab should show. Commits an
+// 'auto' verdict to `selectedGraphWorkspace` so single-repo mode needs no
+// operator interaction at all (defect D-M8, fix (a)).
+async function loadGraphWorkspaces() {
+  let classified;
+  try {
+    const result = await mcpCall('list_workspaces');
+    classified = classifyWorkspacesResult(result, parseJson(result));
+  } catch (e) {
+    return {
+      state: { mode: 'error', message: `list_workspaces failed: ${e.message}` },
+      list: [],
+    };
+  }
+  if (!classified.ok) {
+    return { state: { mode: 'error', message: classified.message }, list: [] };
+  }
+  const state = pickWorkspaceForGraph(classified.list);
+  if (state.mode === 'auto') {
+    selectedGraphWorkspace = state.workspace;
+  }
+  return { state, list: classified.list };
+}
+
+// Defensive reshaping of a get_workspace_graph payload. d3.forceLink() throws
+// on an edge whose endpoint id is not in the node array, and the server caps
+// nodes at 5000 before it caps edges at 10000 — so a truncated response can
+// legitimately carry dangling edges. Pure; covered by tests/js/graph_tab.test.js.
+function normalizeGraphPayload(payload) {
+  const rawNodes = (payload && Array.isArray(payload.nodes)) ? payload.nodes : [];
+  const rawEdges = (payload && Array.isArray(payload.edges)) ? payload.edges : [];
+  const nodes = rawNodes
+    .filter(n => n && typeof n.id === 'string' && n.id !== '')
+    .map(n => ({
+      id: n.id,
+      name: typeof n.name === 'string' ? n.name : n.id,
+      path: typeof n.path === 'string' ? n.path : '',
+      repo_id: typeof n.repo_id === 'string' ? n.repo_id : '',
+      kind: typeof n.kind === 'string' ? n.kind : '',
+    }));
+  const ids = new Set(nodes.map(n => n.id));
+  const edges = rawEdges
+    .filter(e => e && ids.has(e.source) && ids.has(e.target))
+    .map(e => ({
+      source: e.source,
+      target: e.target,
+      edge_type: typeof e.edge_type === 'string' ? e.edge_type : '',
+      cross_repo: e.cross_repo === true,
+    }));
+  return { nodes, edges, truncated: !!(payload && payload.truncated) };
+}
+
+// Paint a force-directed graph into `svgEl`. Same simulation idiom as
+// src/ui/blast-radius.html; colours come from styles.css classes so the
+// drawing follows the phosphor/paper theme without any JS colour literals.
+function drawGraphSvg(svgEl, graph) {
+  if (!svgEl || typeof d3 === 'undefined') return;
+  svgEl.innerHTML = '';
+  const width = svgEl.clientWidth || 800;
+  const height = svgEl.clientHeight || 500;
+
+  const svg = d3.select(svgEl).attr('viewBox', [0, 0, width, height]);
+
+  // forceLink mutates the edge objects (replacing ids with node refs), so
+  // hand it copies — renderGraphTab may redraw from the same payload.
+  const nodes = graph.nodes.map(n => Object.assign({}, n));
+  const links = graph.edges.map(e => Object.assign({}, e));
+
+  const simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(60))
+    .force('charge', d3.forceManyBody().strength(-160))
+    .force('center', d3.forceCenter(width / 2, height / 2));
+
+  const link = svg.append('g')
+    .selectAll('line')
+    .data(links)
+    .join('line')
+    .attr('class', d => 'graph-link' + (d.cross_repo ? ' cross-repo' : ''));
+
+  const node = svg.append('g')
+    .selectAll('circle')
+    .data(nodes)
+    .join('circle')
+    .attr('class', 'graph-node')
+    .attr('r', 5)
+    .call(d3.drag()
+      .on('start', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
+      .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
+      .on('end', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      }));
+
+  node.append('title').text(d => `${d.name}\n${d.repo_id} · ${d.kind}\n${d.path}`);
+
+  // Labels get noisy fast; only draw them on a small graph.
+  const label = nodes.length <= 150
+    ? svg.append('g')
+        .selectAll('text')
+        .data(nodes)
+        .join('text')
+        .attr('class', 'graph-label')
+        .attr('dx', 8)
+        .attr('dy', 3)
+        .text(d => d.name)
+    : null;
+
+  simulation.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('cx', d => d.x).attr('cy', d => d.y);
+    if (label) label.attr('x', d => d.x).attr('y', d => d.y);
+  });
+}
+
+// Entry point for the tab dispatch (resolved as window.renderGraphTab in
+// init()). Idempotent: safe to call on every tab click and on every picker
+// change.
+async function renderGraphTab() {
+  const empty = document.getElementById('graph-empty');
+  const meta = document.getElementById('graph-meta');
+  const svg = document.getElementById('graph-canvas');
+  if (!empty || !svg) return;
+
+  const { state, list } = await loadGraphWorkspaces();
+  if (state.mode !== 'auto' && !selectedGraphWorkspace) {
+    renderGraphTabEmpty(state, list);
+    return;
+  }
+
+  const target = selectedGraphWorkspace || state.workspace;
+  const active = list.find(ws => ws && ws.is_active === true);
+  // The server holds one workspace at a time and get_workspace_graph derives
+  // it from the loaded repos, so a non-active choice cannot be drawn.
+  // See docs/opinions/graph-tab-data-source.md.
+  if (active && target !== active.name) {
+    renderGraphTabEmpty({ mode: 'not-loaded', workspace: target }, list);
+    return;
+  }
+
+  populateGraphPicker(list, target);
+  empty.className = 'muted';
+  empty.textContent = 'Loading graph…';
+  svg.innerHTML = '';
+
+  let result;
+  try {
+    result = await mcpCall('get_workspace_graph', {});
+  } catch (e) {
+    renderGraphTabEmpty(
+      { mode: 'error', message: `get_workspace_graph failed: ${e.message}` }, list);
+    return;
+  }
+  if (result && result.isError) {
+    const msg = unwrapText(result) || 'error';
+    // The server is up but holds no matching workspace — same actionable
+    // hint as a non-active pick.
+    if (/no workspace matches|requires federation mode/i.test(msg)) {
+      renderGraphTabEmpty({ mode: 'not-loaded', workspace: target }, list);
+      return;
+    }
+    renderGraphTabEmpty({ mode: 'error', message: msg }, list);
+    return;
+  }
+
+  const graph = normalizeGraphPayload(parseJson(result));
+  if (graph.nodes.length === 0) {
+    empty.className = 'muted';
+    empty.textContent =
+      `Workspace ${target} has no Function/Method/Class nodes to draw yet.`;
+    if (meta) meta.textContent = '';
+    return;
+  }
+
+  empty.textContent = '';
+  if (meta) {
+    const cross = graph.edges.filter(e => e.cross_repo).length;
+    meta.textContent =
+      `${graph.nodes.length} nodes · ${graph.edges.length} edges · ` +
+      `${cross} cross-repo${graph.truncated ? ' · truncated' : ''}`;
+  }
+  drawGraphSvg(svg, graph);
+}
+
+// Attach the graph workspace picker's `change` listener exactly once. Called
+// from init() — NOT from renderGraphTab(), which re-runs on every tab click
+// and would stack duplicate listeners. Enforced by
+// `graph_picker_is_wired_once_from_init` in command_center_assets_tests.rs.
+function wireGraphPicker() {
+  const select = document.getElementById('graph-workspace');
+  if (!select) return;
+  select.addEventListener('change', () => {
+    // '' is the "— pick a workspace —" placeholder; treat it as "nothing
+    // chosen" so the tab falls back to its picker empty state.
+    selectedGraphWorkspace = select.value || null;
+    renderGraphTab();
   });
 }
 
@@ -870,6 +1187,7 @@ async function init() {
   if (firstBtn) firstBtn.classList.add('active');
 
   wireThemeToggle();
+  wireGraphPicker();
 
   // Sidebar / topbar (best-effort; one failure shouldn't block the rest).
   await Promise.allSettled([
@@ -895,4 +1213,22 @@ async function init() {
   setInterval(renderStatusBar, 2000);
 }
 
-init();
+// Only boot in a browser. Under Node (the `node --test` unit tests in
+// tests/js/) there is no `document`, and the pure helpers below are the
+// only thing the tests touch.
+if (typeof document !== 'undefined') {
+  init();
+}
+
+// CommonJS export footer — present only so `node --test tests/js/` can import
+// the pure helpers directly instead of re-implementing them. Browsers ignore
+// this branch (`module` is undefined there).
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    collapseBursts,
+    filterConflictEvents,
+    pickWorkspaceForGraph,
+    classifyWorkspacesResult,
+    normalizeGraphPayload,
+  };
+}

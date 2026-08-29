@@ -75,6 +75,20 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
     Ok(start..end)
 }
 
+/// Whether this tool's federation dispatch should pass through
+/// `resolve_repo_or_error`. Tools listed here operate against the
+/// federation aggregate (or have a dedicated dispatcher arm and never
+/// reach the resolver) and so should not error on multi-repo.
+///
+/// **Default is `true`** — new tools added without an entry keep the old
+/// strict behavior. Add to the `matches!` arm only when a tool's handler
+/// is federation-wide; for tools handled in a dedicated dispatcher arm
+/// this function is never consulted anyway, but listing them costs
+/// nothing and documents the intent.
+fn requires_repo_scope(tool_name: &str) -> bool {
+    !matches!(tool_name, "query_graph")
+}
+
 /// Resolve which repo an existing per-repo MCP tool call should be routed to
 /// when the server is in federation mode.
 ///
@@ -92,6 +106,7 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
 /// already binds to the single repo).
 pub fn resolve_repo_for_tool(
     fed: &FederatedIndex,
+    tool_name: &str,
     symbol_hint: Option<&str>,
     explicit_repo: Option<&str>,
 ) -> Result<RepoId, LainError> {
@@ -126,9 +141,9 @@ pub fn resolve_repo_for_tool(
             } else if listed.len() == 1 {
                 Ok(listed[0].0.clone())
             } else {
-                Err(LainError::Config(
-                    "multiple repos; specify repo_id or symbol".into(),
-                ))
+                Err(LainError::Config(format!(
+                    "tool '{tool_name}' requires scoping: multiple repos; pass repo_id or symbol"
+                )))
             }
         }
     }
@@ -148,20 +163,24 @@ pub fn resolve_repo_for_tool(
 /// the report.
 fn resolve_repo_or_error(
     fed: &FederatedIndex,
+    tool_name: &str,
     args: &Map<String, serde_json::Value>,
 ) -> Result<RepoId, String> {
     let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
     let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
-    match resolve_repo_for_tool(fed, symbol_hint, explicit_repo) {
+    match resolve_repo_for_tool(fed, tool_name, symbol_hint, explicit_repo) {
         Ok(rid) => Ok(rid),
         Err(LainError::AmbiguousSymbol(candidates)) => {
             let payload = serde_json::json!({
                 "error": "ambiguous_symbol",
+                "tool": tool_name,
                 "candidates": candidates
                     .iter()
                     .map(|c| c.as_str())
                     .collect::<Vec<_>>(),
-                "message": "Multiple repos match this symbol; specify repo_id or disambiguate."
+                "message": format!(
+                    "tool '{tool_name}' requires scoping: symbol matches multiple repos; pass repo_id or disambiguate."
+                ),
             });
             Err(payload.to_string())
         }
@@ -352,7 +371,7 @@ struct LainHandler {
 /// without the NLP model: it refuses the `like` argument and answers
 /// normally otherwise, so it stays advertised and rejects that one
 /// argument with a message naming the cause.
-fn inert_tool_names(embedder: &crate::server::nlp::NlpEmbedder) -> &'static [&'static str] {
+pub(crate) fn inert_tool_names(embedder: &crate::server::nlp::NlpEmbedder) -> &'static [&'static str] {
     if embedder.is_stub() {
         // `semantic_search` is the whole tool, not one argument: with a
         // stub embedder every call returns `Unavailable`.
@@ -658,18 +677,18 @@ impl ServerHandler for LainHandler {
                     ));
                 }
                 "get_repo_info" => {
-                    let id_str = match args_owned.get("id").and_then(|v| v.as_str()) {
+                    let repo_id_str = match args_owned.get("repo_id").and_then(|v| v.as_str()) {
                         Some(s) => s,
                         None => {
                             return Ok(tool_text_result(
-                                "Missing required argument: id".to_string(),
+                                "Missing required argument: repo_id".to_string(),
                                 true,
                                 &self.executor.overlay(),
                         static_graph_generation_unix,
                             ));
                         }
                     };
-                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                    let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
                         Ok(r) => r,
                         Err(e) => {
                             return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix));
@@ -1010,21 +1029,23 @@ impl ServerHandler for LainHandler {
         }
 
         if let Some(fed) = &self.federation {
-            match resolve_repo_or_error(fed, &args_owned) {
-                Ok(rid) => {
-                    // Inject the resolved `repo_id` into the args the
-                    // executor will see. Existing per-repo tools resolve
-                    // symbols against `ctx.graph` (the executor's
-                    // single-workspace context) and ignore this; future
-                    // federation-aware tool handlers can read it. This is
-                    // the round-1 fix: the previously discarded `RepoId`
-                    // now flows through dispatch.
-                    args_owned.insert(
-                        "repo_id".into(),
-                        serde_json::Value::String(rid.as_str().to_string()),
-                    );
+            if requires_repo_scope(params.name.as_str()) {
+                match resolve_repo_or_error(fed, params.name.as_str(), &args_owned) {
+                    Ok(rid) => {
+                        // Inject the resolved `repo_id` into the args the
+                        // executor will see. Existing per-repo tools resolve
+                        // symbols against `ctx.graph` (the executor's
+                        // single-workspace context) and ignore this; future
+                        // federation-aware tool handlers can read it. This is
+                        // the round-1 fix: the previously discarded `RepoId`
+                        // now flows through dispatch.
+                        args_owned.insert(
+                            "repo_id".into(),
+                            serde_json::Value::String(rid.as_str().to_string()),
+                        );
+                    }
+                    Err(text) => return Ok(tool_text_result(text, true, &self.executor.overlay(), static_graph_generation_unix)),
                 }
-                Err(text) => return Ok(tool_text_result(text, true, &self.executor.overlay(), static_graph_generation_unix)),
             }
         }
 
@@ -1076,6 +1097,44 @@ pub struct LainMcpServer {
     /// "use `LAIN_REINDEX_TIMEOUT` env, falling back to the
     /// placeholder default of 300s." Step 1 of the staleness fix.
     reindex_timeout: Option<std::time::Duration>,
+}
+
+/// Block until the startup re-index returns, or its budget elapses.
+/// Shared by `run_stdio` and `run_http`; see `run_stdio` for the
+/// full rationale.
+///
+/// On timeout, leave the existing graph in place and record
+/// `RefreshOutcome::Timeout` on `last_outcome` so `get_health`
+/// reports degraded state instead of silently serving an empty
+/// graph. Returns immediately when no `LainServer` is attached
+/// (sidecar / read-only servers).
+pub(crate) async fn await_startup_reindex(
+    server: Option<std::sync::Arc<LainServer>>,
+    reindex_timeout: Option<std::time::Duration>,
+) {
+    let Some(server) = server else {
+        return;
+    };
+    let started = std::time::SystemTime::now();
+    let timeout = reindex_timeout.unwrap_or_else(
+        crate::server::refresh::parse_reindex_timeout,
+    );
+    let last_outcome = server.last_outcome.clone();
+    let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
+        Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
+        Ok(Err(e)) => {
+            eprintln!("startup re-index failed: {e}");
+            crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
+        }
+        Err(_) => {
+            eprintln!(
+                "startup re-index timed out after {}s; using existing graph",
+                timeout.as_secs()
+            );
+            crate::server::refresh::RefreshOutcome::timeout(started)
+        }
+    };
+    *last_outcome.lock() = outcome;
 }
 
 impl LainMcpServer {
@@ -1280,58 +1339,30 @@ impl LainMcpServer {
     pub async fn run_stdio(self) -> SdkResult<()> {
         info!("Starting Lain MCP server on stdio");
 
-        // Re-index the underlying graph if it's stale (HEAD commit
-        // differs from the last_indexed commit). Runs in the background
-        // so the MCP server starts immediately — tools fired while
-        // indexing is in flight see the previous snapshot, but the
-        // graph is current by the time the user asks their second
-        // question. `build_core_memory` itself short-circuits when the
-        // graph is already current, so this is a no-op on a clean
-        // start. The user's two concrete failures (stale `graph.bin`,
-        // `explain_symbol` reporting a path that no longer exists)
-        // both trace to skipping this on startup.
+        // Block until the first re-index returns (or its budget
+        // elapses) before letting the stdio loop come up. Synchronous
+        // agent loops fire `find_anchors` immediately after
+        // `initialize` and must see a populated graph — a `tokio::spawn`
+        // here used to race the re-index against the stdio loop, so the
+        // first call always read an empty graph and the agent had to
+        // retry ~0.5s later.
         //
-        // The re-index is wrapped in a timeout budget (default 300s;
-        // override via `LAIN_REINDEX_TIMEOUT` env or the
-        // `--reindex-timeout` flag). Past that we give up and let the
-        // server keep running with the existing graph. A genuine hang
-        // (e.g. an LSP server that won't start) is bounded rather than
-        // blocking the spawn task forever.
+        // `build_core_memory` short-circuits when the graph is already
+        // current, so this is a no-op on a warm start. On a cold start
+        // it reads `HEAD`, parses the working tree, and writes
+        // `.lain/graph.bin`; the timeout budget (default 300s,
+        // override via `LAIN_REINDEX_TIMEOUT` env or `--reindex-timeout`
+        // flag) bounds the wait. Past that we proceed with whatever
+        // the worker has written so far and record
+        // `RefreshResult::Timeout` on `last_outcome` so `get_health`
+        // reports degraded state instead of silently serving an empty
+        // graph.
         //
-        // The outcome is written to `server.last_outcome` so
-        // `get_health` can surface failures — the previous code
-        // logged only to `tracing::warn` and stderr, neither of
-        // which a stdio MCP client surfaces to the model.
-        if let Some(server) = self.server.clone() {
-            let last_outcome = server.last_outcome.clone();
-            let reindex_timeout = self.reindex_timeout;
-            tokio::spawn(async move {
-                let started = std::time::SystemTime::now();
-                let timeout = reindex_timeout.unwrap_or_else(
-                    crate::server::refresh::parse_reindex_timeout
-                );
-                let outcome = match tokio::time::timeout(
-                    timeout,
-                    server.build_core_memory(),
-                )
-                .await
-                {
-                    Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
-                    Ok(Err(e)) => {
-                        eprintln!("startup re-index failed: {e}");
-                        crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
-                    }
-                    Err(_) => {
-                        eprintln!(
-                            "startup re-index timed out after {}s; using existing graph",
-                            timeout.as_secs()
-                        );
-                        crate::server::refresh::RefreshOutcome::timeout(started)
-                    }
-                };
-                *last_outcome.lock() = outcome;
-            });
-        }
+        // The outcome is written to `server.last_outcome` so `get_health`
+        // can surface failures — the previous code logged only to
+        // `tracing::warn` and stderr, neither of which a stdio MCP
+        // client surfaces to the model.
+        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
 
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
@@ -1364,28 +1395,9 @@ impl LainMcpServer {
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
-        // Re-index on startup. See `run_stdio` for the rationale.
-        if let Some(server) = self.server.clone() {
-            let last_outcome = server.last_outcome.clone();
-            let reindex_timeout = self.reindex_timeout;
-            tokio::spawn(async move {
-                let started = std::time::SystemTime::now();
-                let timeout = reindex_timeout.unwrap_or_else(
-                    crate::server::refresh::parse_reindex_timeout
-                );
-                let outcome = match tokio::time::timeout(
-                    timeout,
-                    server.build_core_memory(),
-                )
-                .await
-                {
-                    Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
-                    Ok(Err(e)) => crate::server::refresh::RefreshOutcome::failed(started, e.to_string()),
-                    Err(_) => crate::server::refresh::RefreshOutcome::timeout(started),
-                };
-                *last_outcome.lock() = outcome;
-            });
-        }
+        // Same awaited re-index as `run_stdio`; the HTTP path serves
+        // the same contract. See `run_stdio` for the rationale.
+        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
@@ -2035,11 +2047,11 @@ async fn handle_request(
                                     return Ok(jsonrpc_tool_result(id, &text, false));
                                 }
                                 "get_repo_info" => {
-                                    let id_str = match args_map.get("id").and_then(|v| v.as_str()) {
+                                    let repo_id_str = match args_map.get("repo_id").and_then(|v| v.as_str()) {
                                         Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: id", true)),
+                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: repo_id", true)),
                                     };
-                                    let rid = match crate::federation::repo_id::RepoId::new(id_str) {
+                                    let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
                                     };
@@ -2279,20 +2291,22 @@ async fn handle_request(
                         }
 
                         if let Some(fed) = &federation {
-                            match resolve_repo_or_error(fed, &args_map) {
-                                Ok(rid) => {
-                                    // Inject the resolved `repo_id` into
-                                    // the args the executor will see (Task
-                                    // 19 round-1 fix). Existing per-repo
-                                    // tools resolve against `ctx.graph`
-                                    // and ignore this; future
-                                    // federation-aware handlers can read it.
-                                    args_map.insert(
-                                        "repo_id".into(),
-                                        serde_json::Value::String(rid.as_str().to_string()),
-                                    );
+                            if requires_repo_scope(name) {
+                                match resolve_repo_or_error(fed, name, &args_map) {
+                                    Ok(rid) => {
+                                        // Inject the resolved `repo_id` into
+                                        // the args the executor will see (Task
+                                        // 19 round-1 fix). Existing per-repo
+                                        // tools resolve against `ctx.graph`
+                                        // and ignore this; future
+                                        // federation-aware handlers can read it.
+                                        args_map.insert(
+                                            "repo_id".into(),
+                                            serde_json::Value::String(rid.as_str().to_string()),
+                                        );
+                                    }
+                                    Err(text) => return Ok(jsonrpc_tool_result(id, &text, true)),
                                 }
-                                Err(text) => return Ok(jsonrpc_tool_result(id, &text, true)),
                             }
                         }
 
@@ -2585,7 +2599,7 @@ async fn handle_request(
 /// channel that is fed by a tokio task that pumps broadcast events into
 /// JSON bytes. When the client disconnects (the channel is closed), the
 /// body returns `None` and hyper finishes the response.
-fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> {
+pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolDefinition> {
     use crate::tools::definitions::ToolDefinition;
     vec![
         ToolDefinition {
@@ -2725,7 +2739,7 @@ mod tests {
     fn explicit_repo_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        let rid = resolve_repo_for_tool(&fed, None, Some("repo-a")).unwrap();
+        let rid = resolve_repo_for_tool(&fed, "", None, Some("repo-a")).unwrap();
         assert_eq!(rid.as_str(), "repo-a");
     }
 
@@ -2755,6 +2769,7 @@ mod tests {
         // A node id, not a name — nothing the symbol index can match.
         let rid = resolve_repo_for_tool(
             &fed,
+            "",
             Some("3d139b4e-688d-51a9-af69-0c164e9aea92"),
             None,
         )
@@ -2766,7 +2781,7 @@ mod tests {
     fn no_symbol_no_explicit_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        assert!(matches!(resolve_repo_for_tool(&fed, None, None), Err(LainError::Config(_))));
+        assert!(matches!(resolve_repo_for_tool(&fed, "", None, None), Err(LainError::Config(_))));
     }
 
     /// Verifies the round-1 fix: when `resolve_repo_or_error` resolves a
@@ -2796,7 +2811,7 @@ mod tests {
             "symbol".into(),
             serde_json::Value::String("only_one".into()),
         );
-        let rid = resolve_repo_or_error(&fed, &args).expect("unique symbol should resolve");
+        let rid = resolve_repo_or_error(&fed, "", &args).expect("unique symbol should resolve");
         assert_eq!(rid.as_str(), "repo-x");
         args.insert(
             "repo_id".into(),
@@ -2840,7 +2855,7 @@ mod tests {
 
         let mut args = Map::new();
         args.insert("symbol".into(), serde_json::Value::String("shared".into()));
-        let text = resolve_repo_or_error(&fed, &args)
+        let text = resolve_repo_or_error(&fed, "", &args)
             .expect_err("duplicate symbol must surface as AmbiguousSymbol");
 
         // The payload must be valid JSON with the documented shape.
@@ -2879,9 +2894,43 @@ mod tests {
             "symbol".into(),
             serde_json::Value::String("any-symbol".into()),
         );
-        let rid = resolve_repo_or_error(&fed, &args)
+        let rid = resolve_repo_or_error(&fed, "", &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    /// D-H4 Part A: the multi-repo Config error must name the tool that
+    /// triggered it. The bare "multiple repos; specify repo_id or symbol"
+    /// string gave no hint which of the eight tools the agent miscalled.
+    #[tokio::test]
+    async fn multi_repo_config_error_names_the_tool() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        let args = Map::new();
+        // No symbol, no repo_id — both repos registered → resolver must error.
+        let err = resolve_repo_or_error(&fed, "explain_symbol", &args)
+            .expect_err("two repos without scoping must surface a Config error");
+        assert!(
+            err.contains("explain_symbol"),
+            "scoping error must name the requesting tool, got {err:?}",
+        );
+        assert!(
+            err.contains("multiple repos"),
+            "scoping error must still point at the cause, got {err:?}",
+        );
     }
 
     /// `GET /health` must serialize the federation summary so the UI
@@ -3183,6 +3232,227 @@ mod tests {
             parsed.as_array().map(|a| a.len()),
             Some(2),
             "two-element array payload must parse to two elements",
+        );
+    }
+
+    /// D-H3 — every tool that takes a caller-supplied agent identifier
+    /// names that argument `agent_id`; every tool that takes a
+    /// bearer credential names that argument `session_token`; the
+    /// single non-agent identifier-taking tool takes `repo_id`.
+    /// The presence-side tools are already on this surface; `get_repo_info`
+    /// is renamed by another task. The audit happened because nothing
+    /// here was pinned, so the rename is followed (in this test) by a
+    /// check that catches the next drift.
+    ///
+    /// Read by hand against `SERVER_TOOL_DEFS` (`definitions.rs:147`)
+    /// and `FEDERATION_TOOL_DEFS` (`definitions.rs:68`) once per release.
+    #[test]
+    fn tool_args_for_caller_identity_are_named_consistently() {
+        let by_name: std::collections::HashMap<&str, &[&str]> = SERVER_TOOL_DEFS
+            .iter()
+            .chain(FEDERATION_TOOL_DEFS.iter())
+            .map(|t| (t.name, t.required_args))
+            .collect();
+
+        // Tools pinned to an exact required-args list. Exact match (not
+        // `contains`): a future tool that silently adds a new required
+        // arg must update this test, which forces a thoughtful review.
+        let expected: &[(&str, &[&str])] = &[
+            ("heartbeat",      &["agent_id", "session_token"]),
+            ("who_am_i",       &["session_token"]),
+            ("list_subagents", &["session_token"]),
+            ("claim_files",    &["agent_id", "session_token", "files"]),
+            ("release_files",  &["agent_id", "session_token", "files"]),
+            ("my_claims",      &["agent_id", "session_token"]),
+            // (D-H3) The single non-agent identifier arg on the
+            // server/federation surface. Renamed from `id` → `repo_id` in
+            // Task 3; pinned here so a future change does not bring back
+            // the generic `id`.
+            ("get_repo_info",  &["repo_id"]),
+        ];
+        for (tool, want) in expected {
+            let got = by_name.get(tool).unwrap_or_else(|| {
+                panic!("{tool} missing from SERVER/FEDERATION TOOL_DEFS")
+            });
+            assert_eq!(
+                want, got,
+                "{tool} required args mismatch"
+            );
+        }
+
+        // `register_agent` is the deliberate exception: the caller picks a
+        // display *name* (server mints the agent_id). Pin BOTH that the arg
+        // is `name` AND that it is *not* `agent_id`, so a future "consistency
+        // sweep" does not rename it and break every caller.
+        let reg: &[&str] = by_name
+            .get("register_agent")
+            .expect("register_agent missing from SERVER_TOOL_DEFS");
+        assert!(
+            reg.contains(&"name"),
+            "register_agent must continue to take the agent's chosen display \
+             name as `name` (server mints agent_id). Got: {reg:?}"
+        );
+        assert!(
+            !reg.contains(&"agent_id"),
+            "register_agent must NOT take `agent_id` — that would force \
+             callers to supply an id the server hasn't minted yet. Got: {reg:?}"
+        );
+    }
+
+    /// D-H4 Part B: tools that operate on the federation aggregate must not
+    /// pass through the repo resolver. `query_graph` was the canonical
+    /// casualty — it takes no `symbol` or `repo_id`, so the resolver had
+    /// nothing to work with and surfaced "multiple repos" on every call.
+    #[test]
+    fn query_graph_does_not_require_repo_scope() {
+        assert!(
+            !requires_repo_scope("query_graph"),
+            "query_graph is federation-wide; the resolver must be skipped",
+        );
+    }
+
+    /// Default is `true`: every tool that isn't explicitly classified must
+    /// still error if called with a multi-repo federation and no scoping.
+    /// This is the regression net for new tools added without an entry.
+    #[test]
+    fn unlisted_tools_default_to_requiring_scope() {
+        for name in [
+            "explain_symbol",
+            "find_anchors",
+            "get_call_chain",
+            "get_blast_radius",
+            "trace_dependency",
+            "find_dead_code",
+            "semantic_search",
+            "made_up_tool_for_test",
+        ] {
+            assert!(
+                requires_repo_scope(name),
+                "unlisted tool {name:?} must default to requiring scope",
+            );
+        }
+    }
+
+    /// D-H4 regression guard: the old bare error string must never reappear
+    /// without the tool-name prefix. Any caller still seeing it has hit a
+    /// path that bypasses Part A's formatter.
+    ///
+    /// Pins the entire wrapped message byte-exactly — both the
+    /// `LainError::Config` "Config error: " prefix and the agreed
+    /// `tool '<name>' requires scoping: multiple repos; pass repo_id or symbol`
+    /// body. Drift in either layer (e.g. someone rewording the body,
+    /// dropping the tool-name prefix, or changing how `LainError`
+    /// formats `Config`) fails this test loudly.
+    #[tokio::test]
+    async fn bare_multi_repos_string_does_not_appear_alone() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        let args = Map::new();
+        let text = resolve_repo_or_error(&fed, "explain_symbol", &args)
+            .expect_err("two repos without scoping must surface a Config error");
+
+        assert_eq!(
+            text,
+            "Config error: tool 'explain_symbol' requires scoping: multiple repos; pass repo_id or symbol",
+            "scoping error format drift — bare 'multiple repos; ...' string reappeared or wrapper changed",
+        );
+    }
+
+    /// D-H4 regression sweep across the eight tools that originally
+    /// surfaced the bare "multiple repos; specify repo_id or symbol"
+    /// message. After Part A (name the tool) and Part B (skip the
+    /// resolver for federation-wide tools) every one of them must land
+    /// in the right bucket:
+    ///
+    ///   * `explain_symbol`, `find_anchors`, `get_call_chain`,
+    ///     `get_blast_radius`, `trace_dependency`, `find_dead_code`,
+    ///     `semantic_search` — still require a repo scope, and the
+    ///     resulting Config error must name the requesting tool so the
+    ///     agent can tell which call misfired.
+    ///   * `query_graph` — operates on the federation aggregate, so the
+    ///     resolver must be skipped before it sees the call (verified
+    ///     by `requires_repo_scope` returning `false`).
+    ///
+    /// Drift in either direction (a tool that should be skipped gets
+    /// routed through the resolver, or a tool that should error starts
+    /// silently returning Ok) fails this test.
+    #[tokio::test]
+    async fn eight_original_failures_classify_correctly() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        // Two-repo federation — required to trigger the multi-repo
+        // Config branch in `resolve_repo_for_tool`. The setup mirrors
+        // `multi_repo_config_error_names_the_tool` above so any future
+        // change to that branch is caught at the same seam.
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(
+                    RepoId::new(name).unwrap(),
+                    src_dir.path().to_path_buf(),
+                )
+                .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+        }
+
+        // Tools that still require scoping — must surface an error that
+        // names the tool. These are seven of the eight originally
+        // failing tools; the eighth (`query_graph`) is federation-wide
+        // and handled separately below.
+        let scoping_required = [
+            "explain_symbol",
+            "find_anchors",
+            "get_call_chain",
+            "get_blast_radius",
+            "trace_dependency",
+            "find_dead_code",
+            "semantic_search",
+        ];
+        for tool in scoping_required {
+            assert!(
+                requires_repo_scope(tool),
+                "{tool}: should still require repo scope (the resolver is its only routing path)",
+            );
+            // No scoping args → Config error naming the tool.
+            let args = Map::new();
+            let text = resolve_repo_or_error(&fed, tool, &args).expect_err(&format!(
+                "{tool}: scoping-required tool must error without repo_id or symbol"
+            ));
+            assert!(
+                text.contains(tool),
+                "{tool}: error must name the tool, got {text:?}",
+            );
+        }
+
+        // Federation-wide tool — must NOT pass through the resolver.
+        // The Part B fix added `query_graph` to the
+        // `requires_repo_scope` exclusion list; the dispatcher checks
+        // that list before calling `resolve_repo_or_error`, so the
+        // resolver is never invoked for these tools. A regression that
+        // sends `query_graph` through the resolver would re-surface the
+        // original "multiple repos" message on every call, so we pin
+        // the classifier here.
+        assert!(
+            !requires_repo_scope("query_graph"),
+            "query_graph must not require scope; the resolver should be skipped before it sees the call",
         );
     }
 }

@@ -126,8 +126,26 @@ fn test_get_coverage_summary_all() {
     let result = get_coverage_summary(&graph, &overlay, None);
     assert!(result.is_ok());
     let text = result.unwrap();
-    assert!(text.contains("Coverage") || text.contains("functions"));
-    assert!(text.contains("Total") || text.contains("untested"));
+
+    // Structural shape: explicit named metrics, no verdict, no ambiguous
+    // single number that an LLM could quote as "line-level coverage".
+    assert!(text.contains("**Structural reach:**"), "missing structural reach label: {text}");
+    assert!(text.contains("**Entrypoint coverage:**"), "missing entrypoint coverage label: {text}");
+    assert!(text.contains("`structural_reach:"), "missing machine-readable structural_reach key: {text}");
+    assert!(text.contains("`entrypoint_coverage:"), "missing machine-readable entrypoint_coverage key: {text}");
+
+    // Old headline and verdict are gone.
+    assert!(!text.contains("Excellent coverage"), "stale 'Excellent coverage!' verdict still present");
+    assert!(!text.contains("Estimated coverage"), "stale 'Estimated coverage' headline still present");
+    assert!(!text.contains("\u{26a0}\u{fe0f} Coverage is below"), "stale warning branch still present");
+    assert!(!text.contains("\u{2139}\u{fe0f} Consider adding tests"), "stale info branch still present");
+
+    // The footer caveat must survive.
+    assert!(text.contains("structural estimate, not actual line-level coverage"));
+
+    // Existing structural data still present.
+    assert!(text.contains("Total functions"));
+    assert!(text.contains("Potentially untested"));
 }
 
 #[test]
@@ -137,5 +155,60 @@ fn test_get_coverage_summary_specific_module() {
     let result = get_coverage_summary(&graph, &overlay, Some("/src/lib.rs"));
     assert!(result.is_ok());
     let text = result.unwrap();
-    assert!(text.contains("Coverage") || text.contains("lib.rs"));
+
+    assert!(text.contains("**Structural reach:**"), "{text}");
+    assert!(text.contains("**Entrypoint coverage:**"), "{text}");
+    assert!(!text.contains("Excellent coverage"), "{text}");
+    assert!(!text.contains("Estimated coverage"), "{text}");
+    assert!(text.contains("structural estimate, not actual line-level coverage"));
+}
+
+#[test]
+fn test_get_coverage_summary_with_entry_point() {
+    // Build a graph with a real `main` entry point so entrypoint_coverage
+    // and structural_reach exercise the non-vacuous path.
+    let tmp = std::env::temp_dir().join("test_coverage_entrypoint");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let graph = GraphDatabase::new(&tmp).unwrap();
+
+    let main_node = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
+    let handler_node = GraphNode::new(NodeType::Function, "handler".to_string(), "/src/lib.rs".to_string());
+    let orphan_node = GraphNode::new(NodeType::Function, "orphan".to_string(), "/src/lib.rs".to_string());
+
+    graph.upsert_node(main_node.clone()).unwrap();
+    graph.upsert_node(handler_node.clone()).unwrap();
+    graph.upsert_node(orphan_node.clone()).unwrap();
+    graph.insert_edge(
+        &GraphEdge::new(EdgeType::Calls, main_node.id.clone(), handler_node.id.clone()),
+    ).unwrap();
+
+    let overlay = VolatileOverlay::new();
+    let result = get_coverage_summary(&graph, &overlay, None).unwrap();
+
+    // Headline shape: pipe-separated single line.
+    assert!(result.contains("**Structural reach:**") && result.contains("**Entrypoint coverage:**"),
+        "{result}");
+
+    // Backticked keys present, old headline absent.
+    assert!(result.contains("`structural_reach:"));
+    assert!(result.contains("`entrypoint_coverage:"));
+    assert!(!result.contains("Excellent coverage"));
+
+    // With 1 entry point (`main`), entrypoint_coverage is either 0.00 or 1.00
+    // depending on fan_in — the formatter must produce a literal percentage
+    // in [0%, 100%], not the vacuous "100%" fallback unconditionally.
+    let header = result
+        .lines()
+        .find(|l| l.contains("**Entrypoint coverage:**"))
+        .expect("missing entrypoint coverage line");
+    let pct_str = header
+        .split("**Entrypoint coverage:**")
+        .nth(1)
+        .and_then(|s| s.split('%').next())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .expect("non-numeric entrypoint coverage");
+    assert!((0.0..=100.0).contains(&pct_str), "out-of-range entrypoint coverage: {pct_str}");
+
+    // Footer still present.
+    assert!(result.contains("structural estimate, not actual line-level coverage"));
 }

@@ -84,7 +84,7 @@ curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
 | Symptom | Try |
 |---------|-----|
 | Agent says "no tools available" | Check MCP config; restart the agent |
-| "Symbol not found" where it exists | Check `get_health` — `Status:` Degraded means the index is behind HEAD; `Build:` may warn that the binary is older than your source tree |
+| "Symbol not found" where it exists | `lain mcp` awaits its first re-index before answering, so the first call after `initialize` should already see a populated graph. If `get_health` shows `Status: Degraded ⚠ timed out`, raise `LAIN_REINDEX_TIMEOUT` (default 300s) and restart; if it shows `Degraded ⚠ failed`, the indexer hit an error — check the stderr banner for the cause |
 | Semantic search "unavailable" | Install the model (top of page) and set `LAIN_EMBEDDING_MODEL` |
 | Federation won't start | `lain doctor` |
 | Agents not seeing each other's claims | Check `list_active_agents`; they must share `~/.config/lain/state/` |

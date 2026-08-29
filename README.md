@@ -96,7 +96,8 @@ After install, `lain` exposes these subcommands:
 | `lain ask` | Single-user LLM-assisted query (uses `semantic_search` + `explain_symbol` heuristics). |
 | `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
 | `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs (reaping session files older than 30 days), presence registry, and — when `LAIN_URL`/`LAIN_SERVER_URL` is set — both server reachability **and the live MCP surface**, calling `tools/list` and failing if it errors or advertises zero tools. Exits 0 clean, 1 on a hard failure. |
-| `scripts/demo.sh` | Capability demonstration and benchmark. Boots a real server against a synthetic repo whose call graph is known by construction, checks lain's answers against that ground truth (not merely that it answered), then benchmarks the same tools against this repo at ~3.5k nodes. `--quick` skips the build and benchmark phases; `--json FILE` writes machine-readable results. Exits non-zero if any check fails. |
+| `lain schema` | Emit the canonical tool-surface schema dump (`dump [--out PATH]` defaults to `./docs/tool-schema.json`). Pair with `make schema && git diff --exit-code docs/tool-schema.json` in CI to fail on schema drift. |
+| `scripts/demo.sh` | Capability demonstration and benchmark. Boots a real server against a synthetic repo whose call graph is known by construction, checks lain's answers against that ground truth (not merely that it answered), then benchmarks the same tools against this repo at ~3.5k nodes. `--quick` skips the build and benchmark phases; `--json FILE` writes machine-readable results; `--force-build` overrides `--quick` / `--no-build`; `--allow-stale` skips the binary-freshness check. Exits non-zero if any check fails (or if the binary is older than any source file and `--allow-stale` was not passed). |
 
 The cut surface (`agents`, `hook`, `projects`, top-level `use`) is
 gone — those concerns are reached through the commands above. `server`
@@ -131,6 +132,30 @@ curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
 # Download ONNX model for semantic search (all-MiniLM-L6-v2, ~120MB)
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
   bash /dev/stdin --download-model --yes
+```
+
+When you pipe `install.sh` from a non-TTY (CI, container init, package
+post-install), the script auto-detects the missing TTY, prints a
+banner, and runs as if you had passed `--yes`. **It will NOT modify
+your `~/.bashrc` or `~/.zshrc`** — instead it prints the exact
+`export PATH=…` line for you to append manually. Add this to your shell
+profile after the install completes:
+
+```bash
+echo 'export PATH="$HOME/.local/lain:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+To feed answers via a heredoc instead of skipping prompts, pass
+`--interactive` together with a here-document:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
+  bash /dev/stdin --interactive <<'EOF'
+auto
+y
+n
+EOF
 ```
 
 After installation:
@@ -500,15 +525,22 @@ see [`toolchains/README.md`](toolchains/README.md).
 
 **Answers look stale, or a symbol "doesn't exist" that clearly does?**
 
-Check `get_health`:
+`lain mcp` blocks on the first re-index before its stdio loop comes
+up, so the first tool call after `initialize` already sees a
+populated graph (or `LAIN_REINDEX_TIMEOUT` was exceeded — see below).
+The legacy "second call works, first doesn't" footgun is gone.
+
+If you still see stale or missing symbols, check `get_health`:
 
 - **`Build:`** tells you the version and git SHA of the process
   answering, and warns when a newer binary is on disk. An MCP stdio
   server is spawned once by its client and outlives every rebuild, so
   it can be older than your source tree — restart the client to pick up
   a new build.
-- **`Status:`** reads `Degraded ⚠` when the last re-index failed, which
-  means "not in this graph", not "does not exist".
+- **`Status:`** reads `Degraded ⚠` when the last re-index failed OR
+  timed out, which means "not in this graph", not "does not exist". A
+  timeout banner means `LAIN_REINDEX_TIMEOUT` (default 300s) was too
+  short for your working tree — raise it and restart.
 
 **Two agents not seeing each other?**
 

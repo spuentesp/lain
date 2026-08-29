@@ -11,9 +11,15 @@
 # answer is not knowable (semantic ranking, wall-clock timings) the
 # check says what it is really testing instead of pretending to more.
 #
-#   ./scripts/demo.sh                 # full run
-#   ./scripts/demo.sh --quick         # skip build + benchmark phases
-#   ./scripts/demo.sh --json out.json # also write machine-readable results
+#   ./scripts/demo.sh                  # full run
+#   ./scripts/demo.sh --quick          # skip build + benchmark phases
+#   ./scripts/demo.sh --json out.json  # also write machine-readable results
+#   ./scripts/demo.sh --force-build    # rebuild even under --quick / --no-build
+#   ./scripts/demo.sh --allow-stale    # skip the binary-freshness check
+#
+# Freshness: if any source file (Cargo.toml, Cargo.lock, src/**/*.rs) is
+# newer than the binary, demo.sh prints a yellow warning and exits 2.
+# Use --force-build to rebuild, or --allow-stale to ignore the warning.
 #
 # Exit code: 0 iff every check passed.
 set -uo pipefail
@@ -27,20 +33,35 @@ MCP="$URL/mcp"
 LAIN="${LAIN:-$REPO_ROOT/target/release/lain}"
 MODEL="${LAIN_EMBEDDING_MODEL:-/tmp/lainmodel}"
 QUICK=0
+NO_BUILD=0
+FORCE_BUILD=0
+ALLOW_STALE=0
 JSON_OUT=""
-BUILD=1
+BUILD=1  # recomputed below
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --quick) QUICK=1; BUILD=0 ;;
-    --no-build) BUILD=0 ;;
-    --json) JSON_OUT="${2:?--json needs a path}"; shift ;;
-    --port) PORT="${2:?--port needs a value}"; URL="http://127.0.0.1:$PORT"; MCP="$URL/mcp"; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
-    *) echo "unknown flag: $1" >&2; exit 2 ;;
+    --quick)       QUICK=1 ;;
+    --no-build)    NO_BUILD=1 ;;
+    --force-build) FORCE_BUILD=1 ;;
+    --allow-stale) ALLOW_STALE=1 ;;
+    --json)        JSON_OUT="${2:?--json needs a path}"; shift ;;
+    --port)        PORT="${2:?--port needs a value}"; URL="http://127.0.0.1:$PORT"; MCP="$URL/mcp"; shift ;;
+    -h|--help)     sed -n '2,24p' "$0"; exit 0 ;;
+    *)             echo "unknown flag: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+# --quick implies --no-build unless --force-build is also passed.
+[ "$QUICK" = 1 ] && [ "$FORCE_BUILD" = 0 ] && NO_BUILD=1
+
+# Build runs unless explicitly skipped.
+[ "$NO_BUILD" = 1 ] && BUILD=0
+[ "$FORCE_BUILD" = 1 ] && BUILD=1
+
+# Export so the sourced helper can read it.
+export ALLOW_STALE
 
 # ── output ────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -131,6 +152,9 @@ mkdir -p "$WORK"
 printf '%slain — capability demonstration and benchmark%s\n' "$B" "$RST"
 printf '%ssubject: synthetic repo with a call graph known by construction%s\n' "$DIM" "$RST"
 
+# shellcheck source=./demo-freshness.sh
+source "$REPO_ROOT/scripts/demo-freshness.sh"
+
 if [ "$BUILD" = 1 ]; then
   section "Build"
   # cargo is frequently not on PATH (rustup shims live elsewhere) — the
@@ -150,7 +174,16 @@ if [ "$BUILD" = 1 ]; then
 fi
 
 [ -x "$LAIN" ] || { printf '%sno binary at %s — build first or set LAIN=%s\n' "$RED" "$LAIN" "$RST"; exit 2; }
-printf '  binary: %s (%s)\n' "$LAIN" "$("$LAIN" --version 2>/dev/null | head -1)"
+
+# Guard against demoing a stale binary (D-L3). The warning goes to stderr from
+# check_binary_freshness; demo.sh only propagates the non-zero exit. Runs after
+# the -x check so a *missing* binary still gets the precise message above rather
+# than a misleading "may be stale".
+if ! check_binary_freshness "$LAIN" "$REPO_ROOT"; then
+  exit 2
+fi
+
+print_binary_info "$LAIN"
 
 section "Subject repo"
 bash "$REPO_ROOT/scripts/demo-fixture.sh" "$SUBJECT"
@@ -582,7 +615,7 @@ if [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ]; then
   check_contains "search_org finds symbols across repos" "beta_only_helper" \
     "$(fcall search_org '{"query":"only_helper","limit":20}')"
   check_contains "get_repo_info describes a repo" "alpha" \
-    "$(fcall get_repo_info '{"id":"alpha"}')"
+    "$(fcall get_repo_info '{"repo_id":"alpha"}')"
   # Aggregate health, not a roster: both fixture repos must be `ready`.
   FH=$(fcall get_federation_health)
   check_contains "federation health counts both repos" '"total_repos":2' "$FH"

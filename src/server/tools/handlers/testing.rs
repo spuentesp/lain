@@ -3,7 +3,8 @@
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::NodeType;
+use crate::schema::{GraphNode, NodeType, EdgeType};
+use std::collections::{HashSet, VecDeque};
 
 pub fn find_untested_functions(
     graph: &GraphDatabase,
@@ -166,28 +167,99 @@ pub fn get_coverage_summary(
         (funcs.len(), untested)
     };
 
-    let coverage_pct = if total_functions > 0 {
+    let _coverage_pct = if total_functions > 0 {
         ((total_functions - untested_functions) as f64 / total_functions as f64) * 100.0
     } else {
         100.0
     };
 
+    let entry_points = graph.find_entry_points()?;
+    let reachable_ids = reachable_via_calls(graph, &entry_points);
+
+    // Re-scope via the same filter to make module_path respected for both
+    // counts and the reach metric.
+    let scoped: Vec<&crate::schema::GraphNode> = if let Some(path) = module_path {
+        all_nodes.iter()
+            .filter(|n| n.path.contains(path) && n.node_type == NodeType::Function)
+            .collect()
+    } else {
+        all_nodes.iter()
+            .filter(|n| n.node_type == NodeType::Function)
+            .collect()
+    };
+    let reached_in_scope = scoped.iter().filter(|n| reachable_ids.contains(&n.id)).count();
+    let structural_reach = if scoped.is_empty() {
+        1.0
+    } else {
+        reached_in_scope as f64 / scoped.len() as f64
+    };
+
+    // Entry-point coverage: fraction of declared entry points (e.g. `main`,
+    // `App`) that have fan_in > 0 — i.e., exercised by at least one caller
+    // or test. Vacuously 1.0 when the codebase declares no entry points.
+    let total_eps = entry_points.len();
+    let reached_eps = entry_points.iter()
+        .filter(|ep| ep.fan_in.unwrap_or(0) > 0)
+        .count();
+    let entrypoint_coverage = if total_eps > 0 {
+        reached_eps as f64 / total_eps as f64
+    } else {
+        1.0
+    };
+
     let mut result = String::from("## Code Coverage Estimate\n\n");
     result.push_str(&format!("**Total functions:** {}\n", total_functions));
     result.push_str(&format!("**Potentially untested:** {}\n", untested_functions));
-    result.push_str(&format!("**Estimated coverage:** {:.1}%\n\n", coverage_pct));
 
-    if coverage_pct < 70.0 {
-        result.push_str("⚠️ Coverage is below recommended levels. Consider adding more tests.\n");
-    } else if coverage_pct >= 90.0 {
-        result.push_str("✅ Excellent coverage!\n");
-    } else {
-        result.push_str("ℹ️ Consider adding tests for untested functions.\n");
-    }
-
+    result.push_str(&format!(
+        "\n**Structural reach:** {:.1}% | **Entrypoint coverage:** {:.1}%\n",
+        structural_reach * 100.0,
+        entrypoint_coverage * 100.0,
+    ));
+    result.push_str(&format!(
+        "\n`structural_reach: {:.2}` | `entrypoint_coverage: {:.2}`\n",
+        structural_reach,
+        entrypoint_coverage,
+    ));
     result.push_str("\n*Note: This is a structural estimate, not actual line-level coverage.*\n");
 
     Ok(result)
+}
+
+/// BFS over outgoing `Calls` edges starting from every entry point.
+///
+/// Returns a set of node IDs: the entry points themselves (trivially reached
+/// from themselves) plus every function reachable from them via `Calls`.
+/// Used by `get_coverage_summary` to compute `structural_reach`.
+fn reachable_via_calls(graph: &GraphDatabase, entry_points: &[GraphNode]) -> HashSet<String> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+
+    for ep in entry_points {
+        if visited.insert(ep.id.clone()) {
+            queue.push_back(ep.id.clone());
+        }
+    }
+
+    while let Some(id) = queue.pop_front() {
+        // `get_edges_from` returns an empty Vec when the node is missing
+        // from the index, so this loop also serves as the safe terminator.
+        let edges = match graph.get_edges_from(&id) {
+            Ok(es) => es,
+            Err(_) => continue,
+        };
+        for edge in edges {
+            if edge.edge_type != EdgeType::Calls {
+                continue;
+            }
+            let Ok(Some(target)) = graph.get_node(&edge.target_id) else { continue; };
+            if visited.insert(target.id.clone()) {
+                queue.push_back(target.id);
+            }
+        }
+    }
+
+    visited
 }
 
 fn extract_return_type(signature: &str) -> &str {

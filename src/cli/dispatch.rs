@@ -99,12 +99,14 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
 mod tests {
     /// The top-level help text must list the kept subcommands
     /// (`server`, `workspaces`, `repos`, `query`, `ask`, `hooks`,
-    /// `init`) and must NOT list the removed ones (`init` as the
-    /// old top-level `Use`, `agents`, `projects`). `hooks` is now
-    /// a kept subcommand (agent pre-edit hook entry point — see
-    /// `cli::hooks`), so the pre-consolidation guard against the
-    /// bare `hook` token is dropped. This is still a regression
-    /// guard against re-introducing the old multi-command surface.
+    /// `init`, `schema`) and must NOT list the removed ones
+    /// (`init` as the old top-level `Use`, `agents`, `projects`).
+    /// `hooks` is now a kept subcommand (agent pre-edit hook entry
+    /// point — see `cli::hooks`), so the pre-consolidation guard
+    /// against the bare `hook` token is dropped. `schema` is the
+    /// `tools/list` dump subcommand (see `cli::schema`). This is
+    /// still a regression guard against re-introducing the old
+    /// multi-command surface.
     #[test]
     fn top_level_help_lists_only_kept_subcommands() {
         let mut cmd = crate::main_command_factory();
@@ -118,6 +120,7 @@ mod tests {
         assert!(help.contains("query"), "help must list `query`: {help}");
         assert!(help.contains("ask"), "help must list `ask`: {help}");
         assert!(help.contains("hooks"), "help must list `hooks`: {help}");
+        assert!(help.contains("schema"), "help must list `schema`: {help}");
         // Removed subcommands must not appear.
         // `init` was reintroduced in B (the ergonomic shortcut commit)
         // as a kept subcommand. Make sure the help string reflects that.

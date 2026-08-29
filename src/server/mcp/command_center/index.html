@@ -61,7 +61,16 @@
         <button data-tab="tools">Tools</button>
       </nav>
       <section id="tab-overview" class="tab"></section>
-      <section id="tab-graph" class="tab"></section>
+      <section id="tab-graph" class="tab">
+        <div class="graph-header">
+          <label for="graph-workspace">workspace
+            <select id="graph-workspace"></select>
+          </label>
+          <span id="graph-meta" class="muted"></span>
+        </div>
+        <div id="graph-empty" class="muted"></div>
+        <svg id="graph-canvas" role="img" aria-label="workspace call graph"></svg>
+      </section>
       <section id="tab-repos" class="tab"></section>
       <section id="tab-query" class="tab"></section>
       <section id="tab-tools" class="tab"></section>

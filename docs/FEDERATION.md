@@ -535,7 +535,7 @@ retry.
 
 Only raised by `get_cross_repo_blast_radius_for_repo`. The repo is
 registered but doesn't own a symbol with that name. Check
-`get_repo_info(<id>)` to confirm the repo is `ready`, then
+`get_repo_info(<repo_id>)` to confirm the repo is `ready`, then
 `search_org` to find what the repo does own.
 
 ### `Config: no repos registered`

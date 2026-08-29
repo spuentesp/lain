@@ -75,7 +75,7 @@ pub const FEDERATION_TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "get_repo_info",
         description: "Get info about a single repository in the federation by id.",
-        required_args: &["id"],
+        required_args: &["repo_id"],
         optional_args: &[],
     },
     ToolDef {
@@ -306,4 +306,178 @@ pub fn defs_to_value_tools(defs: &[ToolDef]) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// Build the on-disk schema dump — the JSON array `lain schema dump`
+/// writes to `docs/tool-schema.json`. The shape must match the
+/// HTTP `tools/list` arm in `handler.rs:1824-1856` byte-for-byte
+/// (see the drift-detection test in `tests/schema_dump_smoke.rs`).
+///
+/// Five sources, in the order `tools/list` appends them:
+///   1. `ToolRegistry::definitions()` — `inventory`-discovered tools.
+///   2. `special_tool_definitions()` — the 6 tools that bypass
+///      `ToolHandler` (get_health, get_agent_strategy, etc.).
+///   3. `FEDERATION_TOOL_DEFS` — federation-mode MCP tools (only
+///      included here so the doc surface is the *maximum* an agent
+///      could see).
+///   4. `WORKSPACE_TOOL_DEFS` — workspace-aware MCP tools.
+///   5. `SERVER_TOOL_DEFS` — always-on server-status tools.
+///
+/// The HTTP `tools/list` arm conditionalizes (3) and (4) on whether
+/// the server was constructed with a federation or workspaces; the
+/// dump always emits all five. The drift-detection test in Task 6
+/// boots the server with `--workspace auto` so the live response
+/// includes all five, and the on-disk artifact then byte-matches.
+///
+/// `inert` is the same list `tools/list` filters with
+/// (`inert_tool_names(&embedder)`). Apply it uniformly so a doc
+/// produced against a stub embedder and a live `tools/list` from
+/// the same stub embedder byte-match.
+pub fn dump_tools_schema(inert: &[&str]) -> Vec<serde_json::Value> {
+    let not_inert = |name: &str| !inert.contains(&name);
+    let mut tools: Vec<serde_json::Value> =
+        crate::server::tools::registry::ToolRegistry::definitions()
+            .iter()
+            .filter(|def| not_inert(def.name))
+            .map(|def| {
+                serde_json::json!({
+                    "name": def.name,
+                    "description": def.description,
+                    "inputSchema": def.input_schema,
+                })
+            })
+            .collect();
+    for def in crate::server::mcp::handler::special_tool_definitions() {
+        if !not_inert(def.name) {
+            continue;
+        }
+        tools.push(serde_json::json!({
+            "name": def.name,
+            "description": def.description,
+            "inputSchema": def.input_schema,
+        }));
+    }
+    let drop_inert = |t: &serde_json::Value| -> bool {
+        t.get("name")
+            .and_then(|v| v.as_str())
+            .map_or(true, |n| not_inert(n))
+    };
+    tools.extend(
+        defs_to_value_tools(FEDERATION_TOOL_DEFS)
+            .into_iter()
+            .filter(|t| drop_inert(t)),
+    );
+    tools.extend(
+        defs_to_value_tools(WORKSPACE_TOOL_DEFS)
+            .into_iter()
+            .filter(|t| drop_inert(t)),
+    );
+    tools.extend(
+        defs_to_value_tools(SERVER_TOOL_DEFS)
+            .into_iter()
+            .filter(|t| drop_inert(t)),
+    );
+    tools
+}
+
+#[cfg(test)]
+mod dump_tools_schema_tests {
+    use super::*;
+
+    /// The dump must contain every subset the HTTP `tools/list` arm
+    /// appends. The integration test in `tests/schema_dump_smoke.rs`
+    /// pins the wire shape; this unit test pins the function-level
+    /// invariant that the function does not silently drop a subset.
+    #[test]
+    fn dump_contains_all_five_subsets() {
+        // Pass `&[]` (no inert tools filtered) so the unit test
+        // exercises the full surface.
+        let tools = dump_tools_schema(&[]);
+        let names: std::collections::HashSet<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+
+        // (1) ToolRegistry (inventory).
+        assert!(
+            names.contains("query_graph"),
+            "ToolRegistry subset missing `query_graph`: {names:?}"
+        );
+        // (2) special_tool_definitions.
+        assert!(
+            names.contains("get_health"),
+            "special subset missing `get_health`: {names:?}"
+        );
+        // (3) FEDERATION_TOOL_DEFS.
+        assert!(
+            names.contains("list_repos"),
+            "federation subset missing `list_repos`: {names:?}"
+        );
+        // (4) WORKSPACE_TOOL_DEFS.
+        assert!(
+            names.contains("list_workspaces"),
+            "workspace subset missing `list_workspaces`: {names:?}"
+        );
+        // (5) SERVER_TOOL_DEFS.
+        assert!(
+            names.contains("get_server_status"),
+            "server subset missing `get_server_status`: {names:?}"
+        );
+    }
+
+    /// Per-tool shape must be `{name, description, inputSchema}` —
+    /// the same camelCase keys the HTTP `tools/list` arm emits.
+    #[test]
+    fn dump_per_tool_shape_matches_wire() {
+        let tools = dump_tools_schema(&[]);
+        for t in &tools {
+            assert!(
+                t.get("name").and_then(|n| n.as_str()).is_some(),
+                "tool missing `name`: {t}"
+            );
+            assert!(
+                t.get("description").is_some(),
+                "tool missing `description`: {t}"
+            );
+            assert!(
+                t.get("inputSchema").is_some(),
+                "tool missing `inputSchema`: {t}"
+            );
+        }
+    }
+
+    /// `inert` filtering must be applied across all five subsets.
+    /// Drop `semantic_search` from the registry subset and
+    /// `list_repos` from the federation subset; both should be
+    /// absent from the result, and every other tool should remain.
+    #[test]
+    fn inert_filter_applies_across_all_subsets() {
+        let inert: &[&str] = &["semantic_search", "list_repos"];
+        let tools = dump_tools_schema(inert);
+        let names: std::collections::HashSet<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            !names.contains("semantic_search"),
+            "registry inert filter did not drop `semantic_search`: {names:?}"
+        );
+        assert!(
+            !names.contains("list_repos"),
+            "federation inert filter did not drop `list_repos`: {names:?}"
+        );
+        // The remaining subsets must still be present.
+        assert!(
+            names.contains("get_health"),
+            "non-inert tools dropped: {names:?}"
+        );
+        assert!(
+            names.contains("list_workspaces"),
+            "non-inert tools dropped: {names:?}"
+        );
+        assert!(
+            names.contains("get_server_status"),
+            "non-inert tools dropped: {names:?}"
+        );
+    }
 }

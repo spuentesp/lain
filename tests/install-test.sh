@@ -86,10 +86,14 @@ else
   test_failed "check_in_path function missing"
 fi
 
-if bash -c "source '$INSTALL_SCRIPT' && declare -f check_existing_installation > /dev/null"; then
-  test_passed "check_existing_installation function exists"
+# check_existing_installation was removed in the CLI consolidation:
+# the "already installed at $INSTALL_DIR" check now lives inline in
+# main(). The script still surfaces the warning, just not as a
+# standalone function — verify the equivalent text is reachable.
+if bash -c "source '$INSTALL_SCRIPT' && grep -q 'is already installed at' '$INSTALL_SCRIPT'" 2>/dev/null; then
+  test_passed "existing-installation check is present (inline in main)"
 else
-  test_failed "check_existing_installation function missing"
+  test_failed "existing-installation check is missing"
 fi
 
 if bash -c "source '$INSTALL_SCRIPT' && declare -f download_onnx_model > /dev/null"; then
@@ -102,38 +106,49 @@ echo ""
 # Test 6: Argument parsing
 echo "Test 6: Argument parsing"
 
-# Use a temporary script that sources the install script and calls parse_args explicitly
+# Use a temporary script that sources the install script and calls parse_args explicitly.
+# --workspace / --transport / --port were dropped in the CLI consolidation
+# (the shipped MCP entry is `lain mcp`, zero-config stdio). parse_args
+# still accepts them so older curl|bash invocations don't error, but
+# only to warn that they're deprecated and ignored. Verify the
+# warning fires for each legacy flag and that the live flags still
+# parse into OPT_* variables.
 TEMP_DIR=$(mktemp -d)
 TEMP_TEST="$TEMP_DIR/test_parse.sh"
 cat > "$TEMP_TEST" << 'EOF'
 #!/bin/bash
 source "$1"
-parse_args --workspace /test/path --transport both --port 8080 --agent claude --yes
-if [ "$OPT_WORKSPACE" = "/test/path" ]; then echo "WORKSPACE_OK"; else echo "WORKSPACE_FAIL"; fi
-if [ "$OPT_TRANSPORT" = "both" ]; then echo "TRANSPORT_OK"; else echo "TRANSPORT_FAIL"; fi
-if [ "$OPT_PORT" = "8080" ]; then echo "PORT_OK"; else echo "PORT_FAIL"; fi
+# Redirect parse_args output to a file (NOT $(...) which would fork a
+# subshell and lose OPT_AGENT / OPT_YES). Then inspect the file and
+# also check OPT_* in the current shell.
+parse_args --workspace /test/path --transport both --port 8080 --agent claude --yes >"$TEMP_OUT" 2>&1
+cat "$TEMP_OUT"
+if grep -q -- "--workspace is deprecated" "$TEMP_OUT"; then echo "WORKSPACE_WARN_OK"; else echo "WORKSPACE_WARN_FAIL"; fi
+if grep -q -- "--transport is deprecated" "$TEMP_OUT"; then echo "TRANSPORT_WARN_OK"; else echo "TRANSPORT_WARN_FAIL"; fi
+if grep -q -- "--port is deprecated" "$TEMP_OUT"; then echo "PORT_WARN_OK"; else echo "PORT_WARN_FAIL"; fi
 if [ "$OPT_AGENT" = "claude" ]; then echo "AGENT_OK"; else echo "AGENT_FAIL"; fi
 if [ "$OPT_YES" = "yes" ]; then echo "YES_OK"; else echo "YES_FAIL"; fi
 EOF
 chmod +x "$TEMP_TEST"
-RESULT=$("$TEMP_TEST" "$INSTALL_SCRIPT" 2>&1)
+TEMP_OUT="$TEMP_DIR/parse.out"
+RESULT=$(TEMP_OUT="$TEMP_OUT" "$TEMP_TEST" "$INSTALL_SCRIPT" 2>&1)
 
-if echo "$RESULT" | grep -q "WORKSPACE_OK"; then
-  test_passed "Workspace argument parsed correctly"
+if echo "$RESULT" | grep -q "WORKSPACE_WARN_OK"; then
+  test_passed "--workspace emits deprecation warning"
 else
-  test_failed "Workspace argument not parsed ($RESULT)"
+  test_failed "--workspace should warn that it is deprecated ($RESULT)"
 fi
 
-if echo "$RESULT" | grep -q "TRANSPORT_OK"; then
-  test_passed "Transport argument parsed correctly"
+if echo "$RESULT" | grep -q "TRANSPORT_WARN_OK"; then
+  test_passed "--transport emits deprecation warning"
 else
-  test_failed "Transport argument not parsed ($RESULT)"
+  test_failed "--transport should warn that it is deprecated ($RESULT)"
 fi
 
-if echo "$RESULT" | grep -q "PORT_OK"; then
-  test_passed "Port argument parsed correctly"
+if echo "$RESULT" | grep -q "PORT_WARN_OK"; then
+  test_passed "--port emits deprecation warning"
 else
-  test_failed "Port argument not parsed ($RESULT)"
+  test_failed "--port should warn that it is deprecated ($RESULT)"
 fi
 
 if echo "$RESULT" | grep -q "AGENT_OK"; then

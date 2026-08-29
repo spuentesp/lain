@@ -18,6 +18,10 @@ OPT_AGENT=""
 OPT_EMBEDDING_MODEL=""
 OPT_DOWNLOAD_MODEL=""
 OPT_YES=""
+# Use default-empty so callers that source install.sh with
+# OPT_INTERACTIVE already set (e.g. tests driving the helper) don't get
+# clobbered by the source-time re-initialization.
+OPT_INTERACTIVE="${OPT_INTERACTIVE:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -54,6 +58,10 @@ parse_args() {
         OPT_YES="yes"
         shift
         ;;
+      --interactive)
+        OPT_INTERACTIVE="yes"
+        shift
+        ;;
       -h|--help)
         echo "Usage: $0 [OPTIONS]"
         echo ""
@@ -62,6 +70,7 @@ parse_args() {
         echo "  --embedding-model PATH  Path to ONNX embedding model (dir with model.onnx + tokenizer.json)"
         echo "  --download-model        Download default ONNX model (all-MiniLM-L6-v2.onnx)"
         echo "  -y, --yes               Skip all confirmation prompts"
+        echo "      --interactive       Force prompts even when stdin is not a TTY"
         echo "  -h, --help              Show this help message"
         echo ""
         echo "The MCP entry point is 'lain mcp' (zero-config: walks up for .git,"
@@ -84,7 +93,86 @@ parse_args() {
 # BASH_SOURCE[0] is empty when piped via `curl | bash`
 if [[ -z "${BASH_SOURCE[0]}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   parse_args "$@"
+  apply_noninteractive_defaults
 fi
+
+# Auto-enable non-interactive mode when stdin is not a TTY (e.g. when
+# install.sh is run via `curl … | bash` from CI or a container init).
+# The user can opt back into interactive prompts with --interactive.
+apply_noninteractive_defaults() {
+  # Only override if the user hasn't explicitly chosen a mode.
+  if [ -n "$OPT_INTERACTIVE" ] || [ -n "$OPT_YES" ]; then
+    return 0
+  fi
+  if [ -t 0 ]; then
+    return 0   # stdin is a real terminal; keep existing behavior
+  fi
+  OPT_YES="yes"
+  echo "[install.sh] stdin is not a TTY — enabling --yes mode automatically."
+  echo "[install.sh] Pass --interactive to answer prompts (e.g. via heredoc)."
+  return 0
+}
+
+# Decide whether to append the `export PATH=...` line to the user's
+# shell RC. Never silently mutates ~/.bashrc / ~/.zshrc when stdin is
+# not a TTY — the actual footgun D-L1 calls out.
+prompt_path_mutation() {
+  # skip if already in PATH
+  if check_in_path; then
+    echo -e "${GREEN}[OK]${NC} $BIN_NAME is in your PATH"
+    return 0
+  fi
+
+  local shell_rc=""
+  if [ "$(basename "${SHELL:-}")" = "zsh" ] || [ -n "${ZSH_VERSION:-}" ]; then
+    shell_rc="$HOME/.zshrc"
+  elif [ "$(basename "${SHELL:-}")" = "bash" ] || [ -n "${BASH_VERSION:-}" ]; then
+    shell_rc="$HOME/.bashrc"
+  fi
+
+  local export_line="export PATH=\"$INSTALL_DIR:\$PATH\""
+  local do_add=""
+
+  if [ -n "$OPT_YES" ] && [ -t 0 ]; then
+    # TTY + explicit --yes: user confirmed on a real terminal.
+    do_add="yes"
+  elif [ -n "$OPT_YES" ] && [ ! -t 0 ]; then
+    # Non-interactive install — the footgun we're fixing.
+    echo "[PATH] stdin is not a TTY; skipping auto-mutation of $shell_rc."
+    echo "[PATH] To add lain to your PATH manually, run:"
+    echo "    echo '$export_line' >> \"$shell_rc\""
+    echo "[PATH] Then reload: source \"$shell_rc\""
+    return 0
+  elif [ -n "$shell_rc" ]; then
+    # Genuinely interactive: ask, defaulting to Y (preserves old UX).
+    echo ""
+    echo -e "${YELLOW}[PATH]${NC} lain is not in your PATH."
+    read -p "Add to $shell_rc automatically? [Y/n] " -n 1 -r path_reply || path_reply="n"
+    echo ""
+    if [[ $path_reply =~ ^[Yy]$ ]] || [ -z "$path_reply" ]; then
+      do_add="yes"
+    fi
+  fi
+
+  if [ -n "$do_add" ] && [ -n "$shell_rc" ]; then
+    if grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
+      info "PATH entry already in $shell_rc"
+    else
+      printf '\n# Added by LAIN installer\n%s\n' "$export_line" >> "$shell_rc"
+      info "Added to $shell_rc"
+    fi
+    info "Run: source $shell_rc  (or open a new terminal)"
+    # Also export for the current session so the agent registration
+    # step below can invoke the freshly installed binary.
+    export PATH="$INSTALL_DIR:$PATH"
+  elif [ -n "$shell_rc" ]; then
+    # User said "n" at the prompt — print the manual line and move on.
+    echo -e "${YELLOW}[ADD TO PATH]${NC} Add to your shell profile:"
+    echo "    $export_line"
+    echo ""
+  fi
+  return 0
+}
 
 detect_platform() {
   local os arch platform
@@ -418,49 +506,9 @@ main() {
   echo "Post-install:"
   echo ""
 
-  # Check PATH and add if missing
-  if check_in_path; then
-    echo -e "${GREEN}[OK]${NC} $BIN_NAME is in your PATH"
-  else
-    local shell_rc=""
-    if [ "$(basename "${SHELL:-}")" = "zsh" ] || [ -n "${ZSH_VERSION:-}" ]; then
-      shell_rc="$HOME/.zshrc"
-    elif [ "$(basename "${SHELL:-}")" = "bash" ] || [ -n "${BASH_VERSION:-}" ]; then
-      shell_rc="$HOME/.bashrc"
-    fi
-
-    local export_line="export PATH=\"$INSTALL_DIR:\$PATH\""
-    local do_add=""
-
-    if [ -n "$OPT_YES" ]; then
-      do_add="yes"
-    elif [ -n "$shell_rc" ]; then
-      echo ""
-      echo -e "${YELLOW}[PATH]${NC} lain is not in your PATH."
-      read -p "Add to $shell_rc automatically? [Y/n] " -n 1 -r path_reply || path_reply="y"
-      echo ""
-      if [[ $path_reply =~ ^[Yy]$ ]] || [ -z "$path_reply" ]; then
-        do_add="yes"
-      fi
-    fi
-
-    if [ -n "$do_add" ] && [ -n "$shell_rc" ]; then
-      if grep -qF "$INSTALL_DIR" "$shell_rc" 2>/dev/null; then
-        info "PATH entry already in $shell_rc"
-      else
-        printf '\n# Added by LAIN installer\n%s\n' "$export_line" >> "$shell_rc"
-        info "Added to $shell_rc"
-      fi
-      info "Run: source $shell_rc  (or open a new terminal)"
-      # Also export for the current session so the agent registration
-      # step below can invoke the freshly installed binary
-      export PATH="$INSTALL_DIR:$PATH"
-    else
-      echo -e "${YELLOW}[ADD TO PATH]${NC} Add to your shell profile:"
-      echo "    $export_line"
-      echo ""
-    fi
-  fi
+  # Check PATH and add if missing. Logic lives in prompt_path_mutation
+  # so non-TTY installs don't silently mutate ~/.bashrc / ~/.zshrc.
+  prompt_path_mutation
 
   # Offer to download ONNX model
   local model_path=""

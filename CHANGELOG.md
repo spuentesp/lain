@@ -3,6 +3,30 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] — 2026-08-28
+
+### Fixed
+
+- **D-H3 tool-arg consistency.** The `get_repo_info` MCP tool's required
+  argument is renamed from `id` to `repo_id`. The old name was confusing
+  alongside sibling tools that use `agent_id` / `session_token`, and
+  already aligned with `get_cross_repo_blast_radius_for_repo`. Callers
+  must update their request bodies; the `docs/FEDERATION.md` reference
+  page and `scripts/demo.sh` are updated alongside, and a
+  `tool_args_for_caller_identity_are_named_consistently` regression test
+  pins the surface so the next drift fails loudly.
+
+- **D-L3 demo.sh binary freshness.** `scripts/demo.sh` now prints the
+  binary's version *and* mtime on startup, and warns and exits 2 when
+  any source file (`Cargo.toml`, `Cargo.lock`, `src/**/*.rs`) is newer
+  than the binary. Previously `--quick` and `--no-build` skipped the
+  build but still ran `target/release/lain`, so a demo could silently
+  measure a stale binary and report it as current. New flags:
+  `--force-build` (rebuild even under `--quick` / `--no-build`) and
+  `--allow-stale` (skip the check). The comparison lives in a sourced
+  helper, `scripts/demo-freshness.sh`, covered by
+  `tests/demo_sh_freshness.sh`.
+
 ## [0.6.1] — 2026-08-28
 
 ### Fixed

@@ -216,3 +216,98 @@ fn detail_views_load_the_shared_palette() {
         );
     }
 }
+
+/// D-M8: the Graph tab shell must ship the picker, the empty-state slot and
+/// the SVG canvas. An empty `<section id="tab-graph">` is the defect.
+#[test]
+fn graph_tab_shell_has_picker_empty_state_and_canvas() {
+    let html = String::from_utf8(INDEX_HTML.to_vec()).expect("index.html is not utf-8");
+
+    let start = html
+        .find("id=\"tab-graph\"")
+        .expect("index.html has no #tab-graph section");
+    let end = html[start..]
+        .find("</section>")
+        .map(|off| start + off)
+        .expect("#tab-graph section is not closed");
+    let section = &html[start..end];
+
+    for needle in [
+        "id=\"graph-workspace\"",
+        "id=\"graph-empty\"",
+        "id=\"graph-canvas\"",
+        "id=\"graph-meta\"",
+    ] {
+        assert!(
+            section.contains(needle),
+            "the #tab-graph section is missing {needle}; it must not be an empty shell"
+        );
+    }
+}
+
+/// D-M8: the tab dispatch at app.js resolves `window.renderGraphTab`, so the
+/// function has to exist at top level. It did not before this defect was
+/// fixed, which is why the tab rendered nothing at all.
+#[test]
+fn app_js_defines_the_graph_tab_renderers() {
+    let js = String::from_utf8(APP_JS.to_vec()).expect("app.js is not utf-8");
+    for needle in [
+        "function renderGraphTab(",
+        "function renderGraphTabEmpty(",
+        "function pickWorkspaceForGraph(",
+        "function drawGraphSvg(",
+    ] {
+        assert!(
+            js.contains(needle),
+            "app.js is missing `{needle}` — the Graph tab dispatch would silently no-op"
+        );
+    }
+}
+
+/// The SPA vendors D3 (`/assets/d3.v7.min.js`) precisely so the dashboard
+/// works on an air-gapped box. A CDN tag would break that silently.
+#[test]
+fn graph_tab_uses_the_vendored_d3() {
+    let html = String::from_utf8(INDEX_HTML.to_vec()).expect("index.html is not utf-8");
+    assert!(
+        html.contains("/assets/d3.v7.min.js"),
+        "index.html must load the vendored D3 build"
+    );
+    assert!(
+        !html.contains("d3js.org"),
+        "index.html must not load D3 from a CDN"
+    );
+}
+
+/// D-M8: the picker's change handler must be attached once, from init(), and
+/// never from renderGraphTab() — that function re-runs on every tab click
+/// (see the dispatch in init()), so wiring there stacks duplicate listeners.
+#[test]
+fn graph_picker_is_wired_once_from_init() {
+    let js = String::from_utf8(APP_JS.to_vec()).expect("app.js is not utf-8");
+
+    assert!(
+        js.contains("function wireGraphPicker("),
+        "app.js is missing wireGraphPicker()"
+    );
+
+    let init_at = js
+        .find("async function init()")
+        .expect("app.js has no init()");
+    assert!(
+        js[init_at..].contains("wireGraphPicker()"),
+        "init() must call wireGraphPicker() so the listener is attached exactly once"
+    );
+
+    let render_at = js
+        .find("async function renderGraphTab()")
+        .expect("app.js has no renderGraphTab()");
+    let render_end = js[render_at..]
+        .find("\nfunction wireGraphPicker")
+        .map(|off| render_at + off)
+        .expect("wireGraphPicker must be defined directly after renderGraphTab");
+    assert!(
+        !js[render_at..render_end].contains("addEventListener"),
+        "renderGraphTab() must not attach listeners — it re-runs on every tab click"
+    );
+}

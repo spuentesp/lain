@@ -9,6 +9,7 @@ pub mod mcp_client;
 pub mod oneshot;
 pub mod query;
 pub mod repos;
+pub mod schema;
 pub mod server;
 pub mod signal;
 pub mod workspace;
@@ -53,7 +54,9 @@ pub struct Args {
 
 /// Kept subcommands. Each variant carries its own `--config`
 /// (default: `./repos.yaml`) so the federation file follows the
-/// subcommand instead of being a binary-level flag.
+/// subcommand instead of being a binary-level flag. `schema` does
+/// not read `repos.yaml`; the doc-comment block above the `Schema`
+/// variant explains.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Start the MCP server (the headline).
@@ -215,6 +218,14 @@ pub enum Commands {
     Hooks {
         #[command(subcommand)]
         action: crate::cli::hooks::HooksAction,
+    },
+    /// Emit the canonical tool schema dump (defect D-L2). Default
+    /// target: `./docs/tool-schema.json`. Use `make schema` to
+    /// regenerate. `schema` does not read `repos.yaml`; it dumps the
+    /// same `tools/list` surface every server config advertises.
+    Schema {
+        #[command(subcommand)]
+        action: crate::cli::schema::SchemaAction,
     },
     /// Run installation / version diagnostics — the
     /// "one-version-of-truth" page operators can paste into bug

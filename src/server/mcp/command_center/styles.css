@@ -663,3 +663,89 @@ table.repo-table th {
   color: var(--fg-muted);
   white-space: nowrap;
 }
+
+/* ── Graph tab (D-M8) ──────────────────────────────────────────────────── */
+
+.graph-header {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.graph-header label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+}
+
+.graph-header select {
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.8rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.graph-header select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Hidden entirely in single-workspace mode — there is nothing to pick. */
+.graph-header.no-picker label { display: none; }
+
+#graph-empty:empty { display: none; }
+
+#graph-empty code {
+  background: var(--surface-alt);
+  color: var(--fg);
+  padding: 0.1em 0.3em;
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+#graph-canvas {
+  width: 100%;
+  height: 60vh;
+  min-height: 320px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+#graph-canvas:empty { display: none; }
+
+.graph-link {
+  stroke: var(--border-strong);
+  stroke-opacity: 0.6;
+  stroke-width: 1;
+}
+
+.graph-link.cross-repo {
+  stroke: var(--warn);
+  stroke-opacity: 0.9;
+  stroke-width: 1.5;
+}
+
+.graph-node {
+  fill: var(--accent);
+  stroke: var(--bg);
+  stroke-width: 1;
+  cursor: grab;
+}
+
+.graph-label {
+  fill: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  pointer-events: none;
+}

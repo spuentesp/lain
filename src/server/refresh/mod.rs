@@ -183,6 +183,16 @@ pub fn parse_reindex_timeout() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // The two `parse_reindex_timeout` tests below mutate the
+    // process-global `LAIN_REINDEX_TIMEOUT` env var. Cargo runs tests
+    // in parallel by default, so without this lock the two tests
+    // race: one removes the var while the other is mid-`set_var` of
+    // it, and the unset-default assertion sees the wrong value. The
+    // Mutex is only contended by these two tests so the test-suite
+    // runtime cost is negligible.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn skipped_outcome_has_no_banner() {
@@ -254,9 +264,11 @@ mod tests {
 
     #[test]
     fn parse_reindex_timeout_uses_default_when_unset() {
-        // SAFETY: this test is single-threaded and serial; clearing
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: holding `ENV_LOCK` keeps any parallel
+        // `parse_reindex_timeout_*` test out of this body, so clearing
         // LAIN_REINDEX_TIMEOUT for the duration of the assertion is
-        // safe. The surrounding tests don't depend on the env var.
+        // safe.
         let prev = std::env::var("LAIN_REINDEX_TIMEOUT").ok();
         std::env::remove_var("LAIN_REINDEX_TIMEOUT");
         assert_eq!(parse_reindex_timeout(), Duration::from_secs(300));
@@ -267,6 +279,7 @@ mod tests {
 
     #[test]
     fn parse_reindex_timeout_honors_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("LAIN_REINDEX_TIMEOUT").ok();
         std::env::set_var("LAIN_REINDEX_TIMEOUT", "600");
         assert_eq!(parse_reindex_timeout(), Duration::from_secs(600));

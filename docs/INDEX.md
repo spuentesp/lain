@@ -14,6 +14,7 @@
 | Hot-reload internals | [hot-reload.md](hot-reload.md) |
 | Multi-agent presence | [multiplayer.md](multiplayer.md) |
 | Pre-edit hooks | [hooks.md](hooks.md) |
+| CI pipeline notes | [CI.md](CI.md) |
 
 ```mermaid
 flowchart LR
@@ -30,6 +31,7 @@ flowchart LR
     F --> R
     U --> MP[multiplayer]
     U --> HK[hooks]
+    U --> CI[CI]
 ```
 
 ## In one sentence
