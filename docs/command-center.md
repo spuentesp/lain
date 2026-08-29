@@ -5,6 +5,10 @@ The Command Center is the operator's primary surface for inspecting and steering
 MCP HTTP transport. Every panel talks to the running server via the JSON-RPC
 `tools/call` endpoint at `POST /mcp` — no separate API, no auth portal.
 
+[![LAIN Command Center demo](screenshots/spa-demo.gif)](screenshots/spa-demo.mp4)
+
+**Watch in HD** — click the GIF to open the MP4.
+
 ```mermaid
 flowchart LR
     subgraph BROWSER["Browser"]
@@ -32,6 +36,19 @@ flowchart LR
 Every panel talks to the running server over the same JSON-RPC
 endpoint — there is no separate API. The SPA is the *only* consumer;
 every state mutation is a tool call.
+
+## Tour
+
+A walkthrough that matches what you see in the demo above:
+
+1. **Server boot** — the terminal at the top of the clip runs `lain repos add …`, `lain workspaces create biller-core --members auth-svc,billing-svc`, then `lain server --config ./repos.yaml --transport http --port 9931`. Watch the federation reach `ready`.
+2. **Overview tab** — `get_health` + `get_federation_health` in one view. Federation totals: `total_repos`, `ready`, `indexing`, `degraded`, `total_nodes`, `total_edges`.
+3. **Repos tab** — the per-repo table (id, path, health, node count, edge count). Both `auth-svc` and `billing-svc` show `ready`.
+4. **Query tab** — `find` op against `auth-svc`, type `Function`, limit 50. The JSON result dumps below the form.
+5. **Tools tab** — `get_cross_repo_blast_radius` against `verify_token`, depth `1..3`. The result pane shows the cross-repo call chain into `billing-svc`.
+6. **Graph tab** — D3 force-directed layout settles; cross-repo edges render in the warning colour. Hover a node to see its name, repo, kind, and path.
+
+The sections below describe the same surface in prose.
 
 ## Launch
 
@@ -109,8 +126,10 @@ flowchart TB
   that copies the right `lain server --config <path> --workspace <name>` line
   to the clipboard. The active workspace name is shown when the operator's
   `~/.config/lain/active_workspace` pointer matches that project's path.
+- **Overview** — *(see [Tour step 2](#tour) for what this looks like)* `get_health` + `get_federation_health` in one view.
 - **Overview tab** — server health (`get_health`) and federation health
   (`get_federation_health`) in a single view.
+- **Graph** — *(see [Tour step 6](#tour) for what this looks like)* D3 force-directed graph of the active workspace.
 - **Graph tab** — D3 force-directed graph of the active workspace, drawn from
   `get_workspace_graph` (Function/Method/Class nodes, Calls/Imports edges,
   capped at 5000 nodes / 10000 edges server-side). Cross-repo edges are drawn
@@ -135,11 +154,14 @@ flowchart TB
   loaded therefore prints the restart command instead of a graph. The
   reasoning is written up in
   [docs/opinions/graph-tab-data-source.md](opinions/graph-tab-data-source.md).
+- **Repos** — *(see [Tour step 3](#tour) for what this looks like)* per-repo table (id, path, health, node count, edge count).
 - **Repos tab** — per-repo table with id, path, health, node count, edge
   count. Each row uses `get_repo_info` for the live numbers.
+- **Query** — *(see [Tour step 4](#tour) for what this looks like)* runs `query_graph` against the federation.
 - **Query tab** — runs a `query_graph` call against the federation. Pick a
   repo, an op (currently `find`), a node type, and a limit. The JSON result
   is dumped below the form.
+- **Tools** — *(see [Tour step 5](#tour) for what this looks like)* auto-generated MCP tool tester.
 - **Tools tab** — auto-generated MCP tool tester. Calls `tools/list` on load,
   then renders a form for the selected tool by introspecting its
   `inputSchema`. Buttons: *Call* (executes the tool) and *Copy as cURL* (copies
