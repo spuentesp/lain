@@ -8,7 +8,7 @@ LAIN builds a map of how all the code in your project connects — what calls wh
 
 [Download MP4](docs/screenshots/spa-demo.mp4) · [Download WebM](docs/screenshots/spa-demo.webm)
 
-- Federation overview, repo health, and blast radius — answered in well under a second.
+- Federation overview, repo health, and the call graph — answered in well under a second.
 - Edit `repos.yaml` from the Repos tab; the server hot-reloads without dropping a request.
 - Try any MCP tool straight from the Tools tab; *Copy as cURL* hands the agent a shareable snippet.
 
