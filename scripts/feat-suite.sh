@@ -263,6 +263,57 @@ else
     rm -rf "$SPA_WORK"
 fi
 
+
+# ─── 6. Negative-path tests ───────────────────────────────────────
+note "6. Negative-path tests"
+
+if PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path "$(dirname "$0")/../Cargo.toml" \
+        --test feat_negative_paths --quiet 2>"$WORK/np.err"; then
+    pass "feat_negative_paths passed"
+else
+    fail "feat_negative_paths failed: $(tail -20 "$WORK/np.err")"
+fi
+
+# ─── 7. Concurrent-agent race tests ──────────────────────────────
+note "7. Concurrent-agent race tests"
+
+if PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path "$(dirname "$0")/../Cargo.toml" \
+        --test multi_agent_concurrency --quiet -- --test-threads=1 2>"$WORK/cc.err"; then
+    pass "multi_agent_concurrency passed"
+else
+    fail "multi_agent_concurrency failed: $(tail -20 "$WORK/cc.err")"
+fi
+
+# ─── 8. Federation end-to-end tests ─────────────────────────────
+note "8. Federation end-to-end tests"
+
+if PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path "$(dirname "$0")/../Cargo.toml" \
+        --test federation_e2e --quiet -- --test-threads=1 2>"$WORK/fe.err"; then
+    pass "federation_e2e passed"
+else
+    fail "federation_e2e failed: $(tail -20 "$WORK/fe.err")"
+fi
+
+# ─── 9. Failure-mode tests ───────────────────────────────────────
+note "9. Failure-mode tests"
+
+if PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path "$(dirname "$0")/../Cargo.toml" \
+        --test failure_modes --quiet -- --test-threads=1 2>"$WORK/fm.err"; then
+    pass "failure_modes passed"
+else
+    fail "failure_modes failed: $(tail -20 "$WORK/fm.err")"
+fi
+
+# ─── 10. Performance budgets ─────────────────────────────────────
+note "10. Performance budgets"
+
+if PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path "$(dirname "$0")/../Cargo.toml" \
+        --test performance_budgets --quiet -- --test-threads=1 2>"$WORK/pb.err"; then
+    pass "performance_budgets passed"
+else
+    fail "performance_budgets failed: $(tail -20 "$WORK/pb.err")"
+fi
+
 # ─── Wrap-up ─────────────────────────────────────────────────────
 echo
 if [ "$FAIL" -eq 0 ]; then
