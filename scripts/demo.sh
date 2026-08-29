@@ -11,9 +11,15 @@
 # answer is not knowable (semantic ranking, wall-clock timings) the
 # check says what it is really testing instead of pretending to more.
 #
-#   ./scripts/demo.sh                 # full run
-#   ./scripts/demo.sh --quick         # skip build + benchmark phases
-#   ./scripts/demo.sh --json out.json # also write machine-readable results
+#   ./scripts/demo.sh                  # full run
+#   ./scripts/demo.sh --quick          # skip build + benchmark phases
+#   ./scripts/demo.sh --json out.json  # also write machine-readable results
+#   ./scripts/demo.sh --force-build    # rebuild even under --quick / --no-build
+#   ./scripts/demo.sh --allow-stale    # skip the binary-freshness check
+#
+# Freshness: if any source file (Cargo.toml, Cargo.lock, src/**/*.rs) is
+# newer than the binary, demo.sh prints a yellow warning and exits 2.
+# Use --force-build to rebuild, or --allow-stale to ignore the warning.
 #
 # Exit code: 0 iff every check passed.
 set -uo pipefail
@@ -27,20 +33,35 @@ MCP="$URL/mcp"
 LAIN="${LAIN:-$REPO_ROOT/target/release/lain}"
 MODEL="${LAIN_EMBEDDING_MODEL:-/tmp/lainmodel}"
 QUICK=0
+NO_BUILD=0
+FORCE_BUILD=0
+ALLOW_STALE=0
 JSON_OUT=""
-BUILD=1
+BUILD=1  # recomputed below
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --quick) QUICK=1; BUILD=0 ;;
-    --no-build) BUILD=0 ;;
-    --json) JSON_OUT="${2:?--json needs a path}"; shift ;;
-    --port) PORT="${2:?--port needs a value}"; URL="http://127.0.0.1:$PORT"; MCP="$URL/mcp"; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
-    *) echo "unknown flag: $1" >&2; exit 2 ;;
+    --quick)       QUICK=1 ;;
+    --no-build)    NO_BUILD=1 ;;
+    --force-build) FORCE_BUILD=1 ;;
+    --allow-stale) ALLOW_STALE=1 ;;
+    --json)        JSON_OUT="${2:?--json needs a path}"; shift ;;
+    --port)        PORT="${2:?--port needs a value}"; URL="http://127.0.0.1:$PORT"; MCP="$URL/mcp"; shift ;;
+    -h|--help)     sed -n '2,24p' "$0"; exit 0 ;;
+    *)             echo "unknown flag: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+# --quick implies --no-build unless --force-build is also passed.
+[ "$QUICK" = 1 ] && [ "$FORCE_BUILD" = 0 ] && NO_BUILD=1
+
+# Build runs unless explicitly skipped.
+[ "$NO_BUILD" = 1 ] && BUILD=0
+[ "$FORCE_BUILD" = 1 ] && BUILD=1
+
+# Export so the sourced helper can read it.
+export ALLOW_STALE
 
 # ── output ────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
