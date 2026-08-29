@@ -134,6 +134,30 @@ curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
   bash /dev/stdin --download-model --yes
 ```
 
+When you pipe `install.sh` from a non-TTY (CI, container init, package
+post-install), the script auto-detects the missing TTY, prints a
+banner, and runs as if you had passed `--yes`. **It will NOT modify
+your `~/.bashrc` or `~/.zshrc`** — instead it prints the exact
+`export PATH=…` line for you to append manually. Add this to your shell
+profile after the install completes:
+
+```bash
+echo 'export PATH="$HOME/.local/lain:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+To feed answers via a heredoc instead of skipping prompts, pass
+`--interactive` together with a here-document:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
+  bash /dev/stdin --interactive <<'EOF'
+auto
+y
+n
+EOF
+```
+
 After installation:
 
 ```bash
