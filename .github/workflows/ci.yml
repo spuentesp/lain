@@ -11,12 +11,17 @@ env:
 
 jobs:
   test:
-    name: Cargo Test
-    runs-on: ubuntu-latest
+    name: Cargo Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install dependencies (ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config cmake git
@@ -26,10 +31,14 @@ jobs:
         with:
           toolchain: stable
 
+      # Swatinem/rust-cache keys on Cargo.lock + os + toolchain, so each
+      # matrix cell gets its own target/ cache. The cross-run speedup
+      # within one OS is what the original ubuntu-only job relied on.
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
+        shell: bash
         run: cargo test --workspace
 
       # Every `mod foo;` must resolve to a *committed* file. Catches the
@@ -38,7 +47,15 @@ jobs:
       # checkout fails with E0583. The script called itself a pre-push
       # check and nothing ever invoked it.
       - name: Module declarations resolve to committed files
+        shell: bash
         run: bash scripts/check-mod-resolution.sh
+
+      - name: Run JS tests
+        shell: bash
+        run: |
+          cd tests/js
+          npm ci || npm install
+          npm test
 
   capability:
     name: Capability suite (demo.sh)
