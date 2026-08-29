@@ -1496,6 +1496,19 @@ struct PersistedState {
     /// map is filtered out before serialization; the file-level agents
     /// list is derived directly from `FileOccupancy::agents`.
     occupancy_by_file: Vec<(PathBuf, Vec<String>, Vec<(String, Vec<String>)>)>,
+    /// `(path, [(agent_id, intent)])`. File-level `ClaimIntent`
+    /// records — the only intents that survive a save/load round-trip.
+    /// Symbol-level intents (`claims` whose `symbols` field names a
+    /// specific definition) are not persisted because the
+    /// `(sym, agents)` shape in `occupancy_by_file` already records
+    /// which agent touched which symbol; the file-level intent is the
+    /// only one the cross-process presence layer can't reconstruct
+    /// from `agents` alone. Without this, an edit claim loaded from
+    /// disk looks intentless to a peer's read claim, and the
+    /// advisory branch of `OccupancyMap::claim_in_memory` skips
+    /// the warning (P1 bug surfaced by `tests/multi_agent_concurrency`).
+    #[serde(default)]
+    occupancy_file_intents: Vec<(PathBuf, Vec<(String, ClaimIntent)>)>,
     /// `(agent_id_string, [claim])`. Mirrored into `by_file` on load.
     occupancy_by_agent: Vec<(String, Vec<Claim>)>,
     /// Offset (in bytes) into `audit.jsonl` at which the next audit
@@ -1557,6 +1570,23 @@ pub fn save_pair(
                     .collect();
                 (p.clone(), agents, symbols)
             }).collect(),
+            // Save file-level intents. `__file_level__` is the only
+            // sentinel key on `intents`; symbol-level entries are
+            // reconstructed on demand from the `(sym, agents)`
+            // entries above and the agents' recorded `claim_set`
+            // (see `load_pair`). Mirrors the comment on
+            // `PersistedState::occupancy_file_intents`.
+            occupancy_file_intents: o.by_file.iter().map(|(p, fo)| {
+                let entries: Vec<(String, ClaimIntent)> = fo.intents
+                    .get("__file_level__")
+                    .map(|per_agent| {
+                        per_agent.iter()
+                            .map(|(a, i)| (a.0.clone(), i.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (p.clone(), entries)
+            }).filter(|(_, entries)| !entries.is_empty()).collect(),
             occupancy_by_agent: o.by_agent.iter()
                 .map(|(k, v)| (k.0.clone(), v.clone()))
                 .collect(),
@@ -1661,6 +1691,21 @@ pub fn load_pair(
             for a in agent_ids {
                 set.insert(AgentId(a));
             }
+        }
+    }
+    // Restore file-level intents so a peer's edit claim is visible
+    // as Edit (not as "no intent recorded") after a load. The
+    // advisory branch of `claim_in_memory` only fires for
+    // `Some(Edit)`; without this round-trip a freshly-loaded
+    // entry has no intent for `__file_level__`, the holder
+    // looks read-only, and the read-vs-edit advisory is
+    // silently dropped.
+    for (path_str, intents) in state.occupancy_file_intents {
+        let pb = PathBuf::from(path_str);
+        let entry = o.by_file.entry(pb).or_default();
+        let per_agent = entry.intents.entry("__file_level__".to_string()).or_default();
+        for (agent_id, intent) in intents {
+            per_agent.insert(AgentId(agent_id), intent);
         }
     }
     for (k, claims) in state.occupancy_by_agent {
