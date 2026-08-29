@@ -97,15 +97,19 @@ async function waitForReady(baseUrl, timeoutMs) {
   throw new Error(`federation not ready within ${timeoutMs}ms: ${lastErr && lastErr.message}`);
 }
 
-// Federation cross-repo probe (Task 8 follow-up).
+// Federation cross-repo probe (Task 8 fix-2).
 //
 // After `waitForReady` confirms the federation is up, this calls the
-// `get_cross_repo_blast_radius` tool over MCP and asserts that
-// `verify_token` has at least one caller in `billing-svc`. That edge
-// is the headline of the recording (Tools tab), and it's exactly what
-// the prior broken fixture failed to produce — Task 8 caught it on a
-// content eyeball check; this probe turns it into a deterministic gate.
-async function probeFederationCrossRepoEdge(baseUrl, timeoutMs) {
+// `get_workspace_graph` tool over MCP and asserts that the returned
+// `nodes` array spans both repos in the federation fixture
+// (`auth-svc` + `billing-svc`). The unfiltered workspace graph is the
+// Tools-tab call the recording's brief is now keyed on (Option A from
+// the Task 8 unblock) — the federation's per-repo ingest cannot resolve
+// `Calls` edges across crate boundaries, so `get_cross_repo_blast_radius`
+// always returned `by_repo={}` for `verify_token` against this fixture.
+// `get_workspace_graph` reads the same backend but is an org-wide graph
+// dump, so it visibly returns nodes from both repos on a healthy fixture.
+async function probeFederationCrossRepoGraph(baseUrl, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
   while (Date.now() < deadline) {
@@ -117,8 +121,8 @@ async function probeFederationCrossRepoEdge(baseUrl, timeoutMs) {
           jsonrpc: '2.0',
           method: 'tools/call',
           params: {
-            name: 'get_cross_repo_blast_radius',
-            arguments: { symbol: 'verify_token', depth: '1..3' },
+            name: 'get_workspace_graph',
+            arguments: {},
           },
           id: 1,
         }),
@@ -141,15 +145,19 @@ async function probeFederationCrossRepoEdge(baseUrl, timeoutMs) {
             try { payload = JSON.parse(text); }
             catch (e) { lastErr = new Error(`tool payload not JSON: ${e.message}`); }
             if (payload) {
-              const byRepo = payload.by_repo || {};
-              const billing = Array.isArray(byRepo['billing-svc']) ? byRepo['billing-svc'] : [];
-              const total = Number(payload.total_count || 0);
-              if (billing.length > 0 && total > 0) {
-                console.log(`  federation probe OK: by_repo=${JSON.stringify(byRepo)} total_count=${total}`);
+              const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+              const repos = new Set(nodes.map(n => n && n.repo_id).filter(Boolean));
+              if (nodes.length > 0 && repos.has('auth-svc') && repos.has('billing-svc')) {
+                const repoCounts = {};
+                for (const n of nodes) {
+                  if (!n || !n.repo_id) continue;
+                  repoCounts[n.repo_id] = (repoCounts[n.repo_id] || 0) + 1;
+                }
+                console.log(`  federation probe OK: workspace_graph nodes=${nodes.length} repos=${Object.keys(repoCounts).sort().join(',')}`);
                 return;
               }
               lastErr = new Error(
-                `cross-repo edge missing — by_repo=${JSON.stringify(byRepo)} total_count=${total}`,
+                `workspace graph missing cross-repo nodes — repos=${[...repos].sort().join(',') || '<none>'} node_count=${nodes.length}`,
               );
             }
           }
@@ -159,7 +167,7 @@ async function probeFederationCrossRepoEdge(baseUrl, timeoutMs) {
     await new Promise(r => setTimeout(r, 500));
   }
   throw new Error(
-    `federation probe failed: cross-repo edge for verify_token missing — check fixture (last error: ${lastErr && lastErr.message})`,
+    `federation probe failed: get_workspace_graph result doesn't span both repos — check fixture (last error: ${lastErr && lastErr.message})`,
   );
 }
 
@@ -205,7 +213,11 @@ async function driveSequence(page) {
   }, { timeout: 15_000 });
   await new Promise(r => setTimeout(r, 4000));
 
-  // 4. Tools — pick get_cross_repo_blast_radius, run with verify_token.
+  // 4. Tools — pick get_workspace_graph (Option A from Task 8 unblock).
+  // The federation's `get_cross_repo_blast_radius` can't surface
+  // cross-repo callers against the demo fixture (per-repo ingest drops
+  // cross-crate `Calls` edges), so the recording is now keyed on the
+  // workspace graph dump, which visibly returns nodes from both repos.
   await clickTab(page, 'tools');
   await page.waitForSelector('#tab-tools #tools-list li button', { timeout: 20_000 });
   // Find the right tool. The list buttons have the tool name as text.
@@ -213,17 +225,21 @@ async function driveSequence(page) {
     const items = document.querySelectorAll('#tab-tools #tools-list li');
     for (const li of items) {
       const btn = li.querySelector('button');
-      if (btn && /get_cross_repo_blast_radius/.test(btn.textContent || '')) {
+      if (btn && /get_workspace_graph/.test(btn.textContent || '')) {
         btn.click();
         return;
       }
     }
-    throw new Error('get_cross_repo_blast_radius not in tools list');
+    throw new Error('get_workspace_graph not in tools list');
   });
   await page.waitForSelector('#tab-tools #tool-args', { timeout: 10_000 });
-  // Fill the args form. `name` attributes mirror the tool's inputSchema keys.
-  await page.fill('#tab-tools #tool-args input[name="symbol"]', 'verify_token');
-  await page.fill('#tab-tools #tool-args input[name="depth"]', '1..3');
+  // The `filter?` field (note the literal `?` in the schema key — see
+  // WORKSPACE_TOOL_DEFS in src/server/mcp/definitions.rs) is optional,
+  // so we leave it empty for the unfiltered org-wide graph that the
+  // recording's Tools tab is meant to display. The form-skip-empty
+  // path in app.js sends `arguments: {}` and the handler reads
+  // `args.get("filter")` (without the `?`), so the empty form is
+  // equivalent to "no filter".
   await page.click('#tab-tools #tool-call');
   await page.waitForFunction(() => {
     const el = document.getElementById('tool-result');
@@ -282,11 +298,14 @@ async function main() {
     await waitForReady(baseUrl, 120_000);
     console.log(`  federation ready`);
 
-    // Deterministic gate: confirm the cross-repo Calls edge the
-    // recording's Tools tab relies on actually exists. Catches a
-    // broken fixture (Task 1 → Task 8 bug) before we burn a
-    // recording session on it.
-    await probeFederationCrossRepoEdge(baseUrl, 30_000);
+    // Deterministic gate: confirm the cross-repo workspace-graph
+    // payload the recording's Tools tab relies on actually spans both
+    // repos. Catches a broken fixture (Task 1 → Task 8 bug) before we
+    // burn a recording session on it. Now keyed on `get_workspace_graph`
+    // after Option A in the Task 8 unblock — the federation cannot
+    // surface cross-repo `Calls` edges, so the prior `by_repo`
+    // assertion never fired.
+    await probeFederationCrossRepoGraph(baseUrl, 30_000);
     console.log(`  federation probe passed`);
 
     browser = await chromium.launch({
