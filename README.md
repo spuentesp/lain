@@ -500,15 +500,22 @@ see [`toolchains/README.md`](toolchains/README.md).
 
 **Answers look stale, or a symbol "doesn't exist" that clearly does?**
 
-Check `get_health`:
+`lain mcp` blocks on the first re-index before its stdio loop comes
+up, so the first tool call after `initialize` already sees a
+populated graph (or `LAIN_REINDEX_TIMEOUT` was exceeded — see below).
+The legacy "second call works, first doesn't" footgun is gone.
+
+If you still see stale or missing symbols, check `get_health`:
 
 - **`Build:`** tells you the version and git SHA of the process
   answering, and warns when a newer binary is on disk. An MCP stdio
   server is spawned once by its client and outlives every rebuild, so
   it can be older than your source tree — restart the client to pick up
   a new build.
-- **`Status:`** reads `Degraded ⚠` when the last re-index failed, which
-  means "not in this graph", not "does not exist".
+- **`Status:`** reads `Degraded ⚠` when the last re-index failed OR
+  timed out, which means "not in this graph", not "does not exist". A
+  timeout banner means `LAIN_REINDEX_TIMEOUT` (default 300s) was too
+  short for your working tree — raise it and restart.
 
 **Two agents not seeing each other?**
 
