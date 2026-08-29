@@ -895,4 +895,19 @@ async function init() {
   setInterval(renderStatusBar, 2000);
 }
 
-init();
+// Only boot in a browser. Under Node (the `node --test` unit tests in
+// tests/js/) there is no `document`, and the pure helpers below are the
+// only thing the tests touch.
+if (typeof document !== 'undefined') {
+  init();
+}
+
+// CommonJS export footer — present only so `node --test tests/js/` can import
+// the pure helpers directly instead of re-implementing them. Browsers ignore
+// this branch (`module` is undefined there).
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    collapseBursts,
+    filterConflictEvents,
+  };
+}
