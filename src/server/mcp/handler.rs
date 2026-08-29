@@ -1099,6 +1099,44 @@ pub struct LainMcpServer {
     reindex_timeout: Option<std::time::Duration>,
 }
 
+/// Block until the startup re-index returns, or its budget elapses.
+/// Shared by `run_stdio` and `run_http`; see `run_stdio` for the
+/// full rationale.
+///
+/// On timeout, leave the existing graph in place and record
+/// `RefreshOutcome::Timeout` on `last_outcome` so `get_health`
+/// reports degraded state instead of silently serving an empty
+/// graph. Returns immediately when no `LainServer` is attached
+/// (sidecar / read-only servers).
+pub(crate) async fn await_startup_reindex(
+    server: Option<std::sync::Arc<LainServer>>,
+    reindex_timeout: Option<std::time::Duration>,
+) {
+    let Some(server) = server else {
+        return;
+    };
+    let started = std::time::SystemTime::now();
+    let timeout = reindex_timeout.unwrap_or_else(
+        crate::server::refresh::parse_reindex_timeout,
+    );
+    let last_outcome = server.last_outcome.clone();
+    let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
+        Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
+        Ok(Err(e)) => {
+            eprintln!("startup re-index failed: {e}");
+            crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
+        }
+        Err(_) => {
+            eprintln!(
+                "startup re-index timed out after {}s; using existing graph",
+                timeout.as_secs()
+            );
+            crate::server::refresh::RefreshOutcome::timeout(started)
+        }
+    };
+    *last_outcome.lock() = outcome;
+}
+
 impl LainMcpServer {
     pub fn new(executor: ToolExecutor) -> Self {
         let now = std::time::SystemTime::now();
@@ -1301,58 +1339,30 @@ impl LainMcpServer {
     pub async fn run_stdio(self) -> SdkResult<()> {
         info!("Starting Lain MCP server on stdio");
 
-        // Re-index the underlying graph if it's stale (HEAD commit
-        // differs from the last_indexed commit). Runs in the background
-        // so the MCP server starts immediately — tools fired while
-        // indexing is in flight see the previous snapshot, but the
-        // graph is current by the time the user asks their second
-        // question. `build_core_memory` itself short-circuits when the
-        // graph is already current, so this is a no-op on a clean
-        // start. The user's two concrete failures (stale `graph.bin`,
-        // `explain_symbol` reporting a path that no longer exists)
-        // both trace to skipping this on startup.
+        // Block until the first re-index returns (or its budget
+        // elapses) before letting the stdio loop come up. Synchronous
+        // agent loops fire `find_anchors` immediately after
+        // `initialize` and must see a populated graph — a `tokio::spawn`
+        // here used to race the re-index against the stdio loop, so the
+        // first call always read an empty graph and the agent had to
+        // retry ~0.5s later.
         //
-        // The re-index is wrapped in a timeout budget (default 300s;
-        // override via `LAIN_REINDEX_TIMEOUT` env or the
-        // `--reindex-timeout` flag). Past that we give up and let the
-        // server keep running with the existing graph. A genuine hang
-        // (e.g. an LSP server that won't start) is bounded rather than
-        // blocking the spawn task forever.
+        // `build_core_memory` short-circuits when the graph is already
+        // current, so this is a no-op on a warm start. On a cold start
+        // it reads `HEAD`, parses the working tree, and writes
+        // `.lain/graph.bin`; the timeout budget (default 300s,
+        // override via `LAIN_REINDEX_TIMEOUT` env or `--reindex-timeout`
+        // flag) bounds the wait. Past that we proceed with whatever
+        // the worker has written so far and record
+        // `RefreshResult::Timeout` on `last_outcome` so `get_health`
+        // reports degraded state instead of silently serving an empty
+        // graph.
         //
-        // The outcome is written to `server.last_outcome` so
-        // `get_health` can surface failures — the previous code
-        // logged only to `tracing::warn` and stderr, neither of
-        // which a stdio MCP client surfaces to the model.
-        if let Some(server) = self.server.clone() {
-            let last_outcome = server.last_outcome.clone();
-            let reindex_timeout = self.reindex_timeout;
-            tokio::spawn(async move {
-                let started = std::time::SystemTime::now();
-                let timeout = reindex_timeout.unwrap_or_else(
-                    crate::server::refresh::parse_reindex_timeout
-                );
-                let outcome = match tokio::time::timeout(
-                    timeout,
-                    server.build_core_memory(),
-                )
-                .await
-                {
-                    Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
-                    Ok(Err(e)) => {
-                        eprintln!("startup re-index failed: {e}");
-                        crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
-                    }
-                    Err(_) => {
-                        eprintln!(
-                            "startup re-index timed out after {}s; using existing graph",
-                            timeout.as_secs()
-                        );
-                        crate::server::refresh::RefreshOutcome::timeout(started)
-                    }
-                };
-                *last_outcome.lock() = outcome;
-            });
-        }
+        // The outcome is written to `server.last_outcome` so `get_health`
+        // can surface failures — the previous code logged only to
+        // `tracing::warn` and stderr, neither of which a stdio MCP
+        // client surfaces to the model.
+        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
 
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
@@ -1385,28 +1395,9 @@ impl LainMcpServer {
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
-        // Re-index on startup. See `run_stdio` for the rationale.
-        if let Some(server) = self.server.clone() {
-            let last_outcome = server.last_outcome.clone();
-            let reindex_timeout = self.reindex_timeout;
-            tokio::spawn(async move {
-                let started = std::time::SystemTime::now();
-                let timeout = reindex_timeout.unwrap_or_else(
-                    crate::server::refresh::parse_reindex_timeout
-                );
-                let outcome = match tokio::time::timeout(
-                    timeout,
-                    server.build_core_memory(),
-                )
-                .await
-                {
-                    Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
-                    Ok(Err(e)) => crate::server::refresh::RefreshOutcome::failed(started, e.to_string()),
-                    Err(_) => crate::server::refresh::RefreshOutcome::timeout(started),
-                };
-                *last_outcome.lock() = outcome;
-            });
-        }
+        // Same awaited re-index as `run_stdio`; the HTTP path serves
+        // the same contract. See `run_stdio` for the rationale.
+        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
