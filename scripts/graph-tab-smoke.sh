@@ -20,13 +20,23 @@ echo "==> building fixture"
 "$ROOT/scripts/demo-fixture.sh" "$TMP/demo"
 
 # `lain server --config` reads `data_dir` + `repos[].source: workspace_dir`.
-# (The brief showed `path:` and a sidecar `workspaces.yaml`; --workspace
-# alone is enough for this smoke, so we keep the proven single-repo shape.)
+# `--workspace solo` + a sidecar `workspaces.yaml` are required so the
+# workspace-aware MCP tools (`list_workspaces`, `get_active_workspace`,
+# `get_workspace`, `get_workspace_graph`) are registered on the server.
+# Without them, check 4 fails with `Unknown tool: get_workspace_graph`.
+# `workspaces.yaml` is loaded from `<config_path parent>/workspaces.yaml`,
+# so it sits next to `$TMP/repos.yaml`.
 cat > "$TMP/repos.yaml" <<EOF
 data_dir: $TMP/data
 repos:
   - id: demo
     source: { type: workspace_dir, path: $TMP/demo }
+EOF
+
+cat > "$TMP/workspaces.yaml" <<EOF
+workspaces:
+  - name: solo
+    members: [demo]
 EOF
 
 echo "==> building lain"
@@ -35,6 +45,7 @@ cargo build --manifest-path "$ROOT/Cargo.toml" 2>&1 | tail -3
 echo "==> starting server on :$PORT"
 "$ROOT/target/debug/lain" server \
   --config "$TMP/repos.yaml" \
+  --workspace solo \
   --transport http \
   --port "$PORT" >"$TMP/server.log" 2>&1 &
 SRV_PID=$!
@@ -69,7 +80,10 @@ RESP="$(curl -sf -X POST "http://127.0.0.1:$PORT/mcp" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_workspace_graph","arguments":{}},"id":1}')" \
   || fail "get_workspace_graph call failed"
-grep -q '"nodes"' <<<"$RESP" || fail "no nodes key in response: $RESP"
-grep -q '"edges"' <<<"$RESP" || fail "no edges key in response: $RESP"
+# The tool's payload is JSON-encoded inside `result.content[0].text`, so the
+# inner quotes are escaped (`\"nodes\"`). Match the bare key name — present
+# whether escaped or unescaped — rather than `"nodes"` literally.
+grep -q 'nodes' <<<"$RESP" || fail "no nodes key in response: $RESP"
+grep -q 'edges' <<<"$RESP" || fail "no edges key in response: $RESP"
 
 echo "PASS: graph tab smoke test"
