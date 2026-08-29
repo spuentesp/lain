@@ -202,7 +202,7 @@ pub struct ClaimFilesArgs {
     pub files: Vec<ClaimFilesEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct ClaimFilesEntry {
     pub path: String,
     pub symbols: Option<Vec<String>>,
@@ -210,8 +210,52 @@ pub struct ClaimFilesEntry {
     /// Last plan revision the calling agent saw (Task 1.4, PR 1).
     /// `None` preserves the prior behavior for callers that don't
     /// track revisions yet.
-    #[serde(default)]
     pub plan_revision: Option<crate::server::revision_log::RevisionId>,
+}
+
+/// Accept both `"src/a.rs"` and `{"path": "src/a.rs"}`.
+///
+/// Mirrors `ReleaseFilesEntry` (above). A claim entry carries
+/// `intent` and `ttl_seconds`; the string form has nothing to set on
+/// those, so the bare path is the obvious spelling and an agent
+/// writes it without thinking. It used to be rejected with `invalid
+/// type: string "src/a.rs", expected struct ClaimFilesEntry` — a
+/// Rust type name the caller cannot act on, for input that was never
+/// ambiguous.
+impl<'de> serde::Deserialize<'de> for ClaimFilesEntry {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct AsObject {
+            path: String,
+            symbols: Option<Vec<String>>,
+            intent: Option<String>,
+            #[serde(default)]
+            plan_revision: Option<crate::server::revision_log::RevisionId>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Path(String),
+            Object(AsObject),
+        }
+        Ok(match Either::deserialize(d)? {
+            Either::Path(path) => ClaimFilesEntry {
+                path,
+                symbols: None,
+                intent: None,
+                plan_revision: None,
+            },
+            Either::Object(o) => ClaimFilesEntry {
+                path: o.path,
+                symbols: o.symbols,
+                intent: o.intent,
+                plan_revision: o.plan_revision,
+            },
+        })
+    }
 }
 
 // ─── get_world_state (P0 gap fix) ─────────────────────────────────────
@@ -245,7 +289,15 @@ pub fn run_get_world_state(
 }
 
 pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String> {
-    let a: ClaimFilesArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    // Say what the tool accepts. The bare serde message names internal
+    // Rust types, which tells an agent nothing it can fix.
+    let a: ClaimFilesArgs = serde_json::from_value(args).map_err(|e| {
+        format!(
+            "claim_files: {e}. `files` is a list of paths — either \
+             [\"src/a.rs\"] or [{{\"path\": \"src/a.rs\"}}] — plus \
+             `agent_id` and `session_token`."
+        )
+    })?;
     // Conflict detection is the whole point of this tool, and it can
     // only see peers if the registry is refreshed from the shared state
     // file first — and only stay correct if the grant is written back

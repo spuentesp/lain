@@ -1743,3 +1743,47 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
         "an unresolvable holder must be null, not a fabricated name: {c}"
     );
 }
+
+/// `claim_files` mirrors `release_files`: it accepts `files: ["src/a.rs"]`
+/// (string form) as well as `files: [{"path": "src/a.rs", ...}]` (object
+/// form). The bare serde error `invalid type: string ..., expected struct
+/// ClaimFilesEntry` names a Rust type the agent cannot act on — and worse,
+/// is for input that was never ambiguous. Pin the contract: a string-form
+/// array round-trips through the dispatcher, grants the claim, and returns
+/// the same `{granted, conflicts, advisories}` shape an object-form call
+/// does.
+#[tokio::test]
+async fn claim_files_accepts_string_form_files() {
+    use lain::server::mcp::presence_tools::run_claim_files;
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+
+    let alice = run_register_agent_for_test(&server, "alice");
+
+    // String-form: the agent sent `["src/a.rs"]`, not `[{...}]`. Before
+    // the fix, the dispatcher returns an opaque `invalid type: string
+    // "src/a.rs", expected struct ClaimFilesEntry` and the call is dead.
+    let v = run_claim_files(&server, serde_json::json!({
+        "agent_id": alice.0, "session_token": alice.1,
+        "files": ["src/a.rs"],
+    })).expect("string-form files must be accepted");
+
+    // Response shape matches the object form: the same top-level keys
+    // the rest of the toolchain inspects.
+    assert!(v.get("granted").is_some(), "response must have `granted`: {v}");
+    assert!(v.get("conflicts").is_some(), "response must have `conflicts`: {v}");
+    let granted = v["granted"].as_array().expect("granted must be an array");
+    assert_eq!(granted.len(), 1, "the single string entry must grant");
+    assert_eq!(granted[0]["path"].as_str(), Some("src/a.rs"));
+    assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
+
+    // The claim actually landed: `my_claims` sees `src/a.rs`.
+    let claims = server.occupancy.list_for_agent(&AgentId(alice.0.clone()));
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].path.to_string_lossy(), "src/a.rs");
+}
