@@ -2,7 +2,18 @@
 
 LAIN builds a map of how all the code in your project connects — what calls what, what depends on what, which files tend to change together. Then it lets your AI coding assistant ask questions about that map. So instead of the AI just looking at one file and guessing, it can ask "if I change this function, what else breaks?" and get a real answer. It plugs into any AI agent that supports MCP and runs in the background while you work.
 
-<img width="1511" height="767" alt="Screenshot 2026-04-29 at 9 18 15 PM" src="https://github.com/user-attachments/assets/3bfbfe83-6813-416a-8dfc-c1c17959a00d" />
+## See it run
+
+![LAIN Command Center demo](docs/screenshots/spa-demo.gif)
+
+[Download MP4](docs/screenshots/spa-demo.mp4) · [Download WebM](docs/screenshots/spa-demo.webm)
+
+- Federation overview, repo health, and blast radius — answered in well under a second.
+- Edit `repos.yaml` from the Repos tab; the server hot-reloads without dropping a request.
+- Try any MCP tool straight from the Tools tab; *Copy as cURL* hands the agent a shareable snippet.
+
+> [!NOTE]
+> The hero GIF is large (~4 MB) so it autoplays inline on GitHub. For sharper playback, the [MP4](docs/screenshots/spa-demo.mp4) and [WebM](docs/screenshots/spa-demo.webm) siblings sit alongside it in `docs/screenshots/`.
 
 ## How it fits together
 
@@ -38,26 +49,18 @@ repo (`lain mcp`) or many repos (`lain server --config repos.yaml`).
 | **[`docs/hooks.md`](docs/hooks.md)** | Pre-edit hooks |
 | **[`docs/INDEX.md`](docs/INDEX.md)** | Docs index |
 
-## TL;DR
+## TL;DR — install in 30 seconds
 
 ```bash
-# Install (interactive — will add `lain` to PATH)
+# Install (interactive — adds `lain` to PATH)
 curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
 
-# Or non-interactive
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --yes
-
-# Configure your project
-mkdir -p ~/projects/biller && cd ~/projects/biller
-lain repos add auth-svc    https://github.com/acme/auth-svc.git
-lain repos add billing-svc https://github.com/acme/billing-svc.git
-lain workspaces create biller-core --members auth-svc,billing-svc
-
-# Run the server
-lain server --config ./repos.yaml --transport http --port 9999
-# Open http://localhost:9999 — that's the Command Center.
+# Reload your shell, then verify
+source ~/.zshrc   # or ~/.bashrc
+lain --version
 ```
+
+See [QUICKSTART.md](docs/QUICKSTART.md) for the full install matrix (Homebrew, build-from-source, non-interactive flags, ONNX model).
 
 ## What is Lain?
 
@@ -70,13 +73,12 @@ humans who want to inspect the federation, edit the config, run
 queries, and exercise the MCP tool surface directly.
 
 The value over LSP-only or RAG-based approaches is cross-file
-structural reasoning: blast radius for proposed changes, transitive
+structural reasoning: agents can ask about blast radius, transitive
 dependency traces, anchor identification, co-change correlation, and
-contextual build failure decoration so agents can reason about callers
+contextual build failure decoration, so they reason about callers
 rather than just the failing line. Written in Rust, persists across
-sessions, stays fresh during editing via a file watcher that updates a
-volatile overlay layered on top of the static graph, and hot-reloads
-its `repos.yaml` / `workspaces.yaml` config without a restart.
+sessions, and hot-reloads its `repos.yaml` / `workspaces.yaml` config
+without a restart.
 
 ---
 
@@ -110,165 +112,17 @@ This table is checked against `lain --help` by
 
 ---
 
-## Installation
-
-### Quick install (recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
-```
-
-The installer downloads the `lain` binary to `~/.local/lain`. After that,
-configure your agent's MCP config to launch `lain server --config
-./repos.yaml --transport stdio` — see [Wire your agent](#wire-your-agent).
-
-**Non-interactive install (with options):**
-
-```bash
-# Skip all prompts
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --yes
-
-# Download ONNX model for semantic search (all-MiniLM-L6-v2, ~120MB)
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --download-model --yes
-```
-
-When you pipe `install.sh` from a non-TTY (CI, container init, package
-post-install), the script auto-detects the missing TTY, prints a
-banner, and runs as if you had passed `--yes`. **It will NOT modify
-your `~/.bashrc` or `~/.zshrc`** — instead it prints the exact
-`export PATH=…` line for you to append manually. Add this to your shell
-profile after the install completes:
-
-```bash
-echo 'export PATH="$HOME/.local/lain:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-To feed answers via a heredoc instead of skipping prompts, pass
-`--interactive` together with a here-document:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | \
-  bash /dev/stdin --interactive <<'EOF'
-auto
-y
-n
-EOF
-```
-
-After installation:
-
-```bash
-# Reload your shell (the installer adds to ~/.zshrc or ~/.bashrc)
-source ~/.zshrc   # or ~/.bashrc
-
-# Verify
-lain --version
-
-# Show the available commands
-lain --help
-```
-
-### Homebrew
-
-```bash
-brew tap spuentesp/lain https://github.com/spuentesp/lain
-brew install lain
-
-# Run the server for your project
-lain server --config ./repos.yaml
-```
-
-### Build from Source
-
-```bash
-git clone https://github.com/spuentesp/lain.git
-cd lain
-cargo build --release    # requires Rust 1.75+
-
-# Binary at ./target/release/lain
-```
-
----
-
 ## Quick Start
 
-### 1. Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/main/install.sh | bash
-```
-
-### 2. Configure your project
-
-A project is a directory containing `repos.yaml` (and optionally
-`workspaces.yaml`).
-
-```bash
-mkdir -p ~/projects/biller && cd ~/projects/biller
-lain repos add auth-svc    https://github.com/acme/auth-svc.git
-lain repos add billing-svc https://github.com/acme/billing-svc.git
-lain workspaces create biller-core --members auth-svc,billing-svc
-```
-
-### 3. Run the server
-
-```bash
-lain server --config ./repos.yaml --transport http --port 9999
-# Open http://localhost:9999 in your browser for the Command Center.
-```
-
-### 4. Wire your agent
-
-Add the following to your agent's MCP config (URL/format depends on the
-agent). **The single-repo form is the recommended default** — it
-walks up from the working directory for `.git`, no `repos.yaml` needed:
-
-```json
-{
-  "mcpServers": {
-    "lain": {
-      "command": "lain",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-If you want the federation tool surface (`list_repos`, `search_org`,
-`get_cross_repo_blast_radius`) too, point at a `repos.yaml` instead:
-
-```json
-{
-  "mcpServers": {
-    "lain": {
-      "command": "lain",
-      "args": ["server", "--config", "./repos.yaml", "--transport", "stdio"]
-    }
-  }
-}
-```
-
-That's it. The next time your agent starts, it sees the workspace
-(single-repo form) or the federation, the active workspace, and the
-full MCP tool surface.
-
-> **Kimi users:** Kimi's plugin security model pins the MCP subprocess
-> cwd to the plugin root, so a naive `lain mcp` invocation would walk
-> up from the plugin directory instead of your project. As of 0.6.1,
-> `lain mcp` reads `/proc/$PPID/cwd` on Linux (the parent agent's
-> cwd) before falling back to its own cwd, so the same
-> `{"command":"lain","args":["mcp"]}` config works under Kimi with no
-> wrapper. If you're pinned to 0.6.0, ship
-> `src/cli/kimi_plugin_wrapper.sh` from the source tree and point the
-> plugin manifest at it — the wrapper does the same `/proc/$PPID/cwd`
-> lookup outside the binary. macOS is unsupported in either path.
+1. **Install** — see [QUICKSTART.md § Install](docs/QUICKSTART.md#install).
+2. **Configure** — see [QUICKSTART.md § Federation (multi-repo)](docs/QUICKSTART.md#federation-multi-repo).
+3. **Wire your agent** — see [QUICKSTART.md § Single-repo (recommended default)](docs/QUICKSTART.md#single-repo-recommended-default).
 
 ---
 
 ## Command Center
+
+For a narrated tour of every tab, see [command-center.md § Tour](docs/command-center.md#tour).
 
 When `lain server` runs with `--transport http`, it serves the Command
 Center dashboard at `GET /`. It's a self-contained vanilla-JS SPA that
@@ -320,23 +174,6 @@ See [`docs/hot-reload.md`](docs/hot-reload.md) for the full picture
 
 ---
 
-## Multi-project
-
-A **project** is a directory containing `repos.yaml` (and optionally
-`workspaces.yaml`). Each project has its own server: change to the
-project directory and run `lain server --config ./repos.yaml`, or
-keep multiple servers running on different ports. The Command Center
-shows recently-used projects in the sidebar with a *Copy restart cmd*
-button that copies the right `lain server --config <path> --workspace
-<name>` line to the clipboard.
-
-Workspaces are scoped to a single project. Pick one with
-`lain workspaces use <name>`; the active name is written to
-`~/.config/lain/active_workspace` and is honored at server start via
-`--workspace auto`.
-
----
-
 ## Federation mode
 
 For org-wide structural questions — "who else uses this function?",
@@ -345,8 +182,8 @@ For org-wide structural questions — "who else uses this function?",
 `get_repo_info`, `get_federation_health`, `search_org`,
 `get_cross_repo_blast_radius`,
 `get_cross_repo_blast_radius_for_repo`) that answer questions
-spanning repos. See [`docs/FEDERATION.md`](docs/FEDERATION.md) for
-the full guide and [`docs/REPOS_YAML.md`](docs/REPOS_YAML.md) for the
+spanning repos. See [`docs/FEDERATION.md`](docs/FEDERATION.md) for the
+full guide and [`docs/REPOS_YAML.md`](docs/REPOS_YAML.md) for the
 config schema.
 
 ---
@@ -413,6 +250,13 @@ A project is a directory containing `repos.yaml` (and optionally
 - **`lain workspaces current`** — print the active workspace.
 - **`lain workspaces forget <name>`** — remove a workspace.
 
+## Where to go next
+
+- Operate `lain` for a team → [USER_MANUAL.md](docs/USER_MANUAL.md)
+- Federation operating guide → [FEDERATION.md](docs/FEDERATION.md)
+- Full MCP tool reference → [quickstart-tools.md](docs/quickstart-tools.md)
+- Command Center narrated tour → [command-center.md](docs/command-center.md)
+
 ---
 
 ## Requirements
@@ -478,6 +322,8 @@ transport and exercise tools via `curl` against `/mcp`).
 ---
 
 ## Troubleshooting
+
+For first-time setup, see [QUICKSTART.md § First aid](docs/QUICKSTART.md#first-aid) before reading this section.
 
 **Hand-edit not picked up?**
 
@@ -549,6 +395,19 @@ They must share one workspace. Presence is exchanged through the state
 file under `~/.local/lain/state/`, so agents on the same repo see each
 other's claims even when each console spawned its own stdio server.
 `list_active_agents` and `list_occupancy` are the quickest check.
+
+---
+
+## Regenerating the demo video
+
+The hero recording above is checked in. Re-record it after any SPA change:
+
+```bash
+make record-demo
+```
+
+Or: `npm run record-demo --prefix tests/js` (runs only the Playwright driver;
+you still need `scripts/record-spa-demo.sh` for the ffmpeg encoding pass).
 
 ---
 
