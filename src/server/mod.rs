@@ -71,6 +71,8 @@ mod git_tests;
 #[cfg(test)]
 mod graph_tests;
 #[cfg(test)]
+mod graph_proptests;
+#[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]
 mod schema_tests;
