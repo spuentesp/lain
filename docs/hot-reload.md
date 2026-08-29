@@ -91,7 +91,7 @@ absent from the federation is fetched (for `local_clone` /
 - `request_reload` MCP tool returns `{"accepted": true, "queued_at_unix": ...}`
   after queueing a signal.
 - The Command Center status bar polls `get_reload_status` every
-  second; when the server is mid-rebuild it shows `reload:
+  2 s; when the server is mid-rebuild it shows `reload:
   rebuilding`, otherwise `reload: idle` (or `reload: failed
   <message>` on the last error).
 - `tracing` logs emit `FileWatcher (config): reload requested for

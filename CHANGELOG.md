@@ -7,6 +7,28 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- **Docs sweep — close 13 drift rows from the audit.** `docs/quickstart-tools.md`
+  drops the non-existent `export_graph_json` heading (was 270) and adds
+  a *Tools documented elsewhere* section linking to the 28 tools that
+  live in `FEDERATION.md` / `multiplayer.md` / `hot-reload.md` /
+  `command-center.md`; the canonical surface is 67 tools, so this page
+  now covers 39 of them, not all of them. `docs/TECHNICAL.md` swaps a
+  `curl … export_graph_json` example for `describe_schema`, and notes
+  that `lain schema dump` is the wire-format authority. `docs/ARCHITECTURE.md`
+  swaps the "1500 lines" guesstimate for "~1230 lines" (`app.js` is
+  1234). `docs/multiplayer.md` corrects the multiplayer tool count from
+  "8 new MCP tools" to 14 (8 inline + the 5 listed in their sections)
+  and disambiguates the `world_state` envelope field from the
+  `get_world_state` MCP tool. `docs/USER_MANUAL.md` and `docs/quickstart-tools.md`
+  clarify that `semantic_search` is *filtered from `tools/list`* when no
+  NLP model is loaded (66 of 67 advertised), not advertised with an
+  "unavailable" answer. `README.md` flips the mermaid agent label from
+  Cursor to Agy/Codex (Cursor has no full hook script in `hooks/`) and
+  rewords the `lain ask` row. `docs/hot-reload.md` polls every 2 s (was
+  every second). `docs/wish-list.md` refreshes the `61 / 63 / 64` tool
+  counts to match the canonical 67. `index.html`/`theme.css`/etc. were
+  not touched; no code changes shipped.
+
 - **D-H3 tool-arg consistency.** The `get_repo_info` MCP tool's required
   argument is renamed from `id` to `repo_id`. The old name was confusing
   alongside sibling tools that use `agent_id` / `session_token`, and

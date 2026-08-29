@@ -123,8 +123,10 @@ Files that co-change with this one.
 
 ## Search
 
-### semantic_search
+### semantic_search (conditional)
 Find code by meaning, not just names. Uses local ONNX embeddings with hybrid scoring (cosine similarity + stemmed token-overlap) and shows body excerpts in the response.
+
+**Conditional**: this tool is filtered from `tools/list` entirely when no NLP model is loaded (it reappears the moment one is set via `--embedding-model`). The binary prefers dropping the tool over advertising one that always says "unavailable" — a tool guaranteed to fail is worse than one not offered.
 
 Best results with the **BGE** model family (`bge-small-en-v1.5` recommended); set `query_prefix` in `.lain/tuning.toml` for asymmetric retrieval — it is applied to queries only, never to the indexed corpus, and covers every tool that embeds a query (`semantic_search`, `find_dead_code --like`, and `semantic_filter` in `query_graph`).
 
@@ -266,12 +268,6 @@ Full co-change and anchor recalculation.
 { "name": "run_enrichment", "arguments": {} }
 ```
 
-### export_graph_json
-Dump graph for auditing.
-```json
-{ "name": "export_graph_json", "arguments": {} }
-```
-
 ### get_agent_strategy
 Strategy guide for AI agents.
 ```json
@@ -343,7 +339,7 @@ A few tools are easy to over-trust. What they actually mean:
 | `find_anchors` | Orchestration hubs — called by many, calling many, with a real body. Each row names the node's type and path | "Most important." A leaf that calls nothing scores 0 by design. Results are deduped by name keeping the best-scoring definition, so read the path to see which one it means. |
 | `explain_symbol` / `get_anchor_score` / `get_call_sites` / `get_blast_radius` by **name** | One node that has that name, chosen deterministically (by path), with a `⚠` line naming the other definitions and their ids when the name is not unique | "The only node with that name." The warning tells you the answer is about one of several; pass a node **id** (from `query_graph`, or from the warning itself) to pick a different one. Ids round-trip between all these tools. |
 | `get_coupling_radar` | Files that change together in git history | A static dependency. It is temporal correlation. |
-| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` or `get_call_sites` for those. Needs `--embedding-model`; without it the tool says `NLP Model: Not loaded` rather than returning a wrong answer. |
+| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` or `get_call_sites` for those. **Conditional**: filtered from `tools/list` when no model is loaded (no model → no advertised tool, not a "not loaded" answer); passes the filter when `--embedding-model` is set. |
 | `get_cross_repo_blast_radius` | Callers across the federation (**incoming** `Calls`) | What the symbol depends on — that is `trace_dependency`. `depth` is a string range (`"1..3"`), not a number. |
 
 When the graph is behind HEAD, `get_health` says so and "not found"
@@ -359,3 +355,32 @@ to: pass `repo_id`, or a `symbol` that resolves to exactly one repo.
 With a single repo there is nothing to choose and it binds there
 automatically. Relative paths resolve against that repo's checkout, so
 `src/lib.rs` means *that* repo's `src/lib.rs`.
+
+---
+
+## Tools documented elsewhere
+
+This page covers 39 of the 67 tools in the canonical surface
+(`tests/cli_surface.rs`-pinned). The remaining 28 are documented where
+they are central to the workflow they belong to:
+
+- **Federation** ([`FEDERATION.md`](FEDERATION.md)): `list_repos`,
+  `get_repo_info`, `get_federation_health`, `search_org`,
+  `get_cross_repo_blast_radius`, `get_cross_repo_blast_radius_for_repo`.
+- **Workspaces** ([`FEDERATION.md`](FEDERATION.md) §Workspaces):
+  `list_workspaces`, `get_active_workspace`, `get_workspace`.
+- **Presence** ([`multiplayer.md`](multiplayer.md)): `register_agent`,
+  `heartbeat`, `list_active_agents`, `who_am_i`, `list_subagents`,
+  `my_claims`.
+- **Reload** ([`hot-reload.md`](hot-reload.md)): `request_reload`,
+  `get_reload_status`.
+- **Command Center** ([`command-center.md`](command-center.md)):
+  `get_server_status`, `get_workspace_graph`, `list_recent_projects`.
+- **Audit / world state / overlap** ([`multiplayer.md`](multiplayer.md),
+  [`hot-reload.md`](hot-reload.md), [`command-center.md`](command-center.md)):
+  `get_audit_log`, `get_world_state`, `get_recent_activity`,
+  `detect_overlap`, `register_job_webhook`, `get_job_status`,
+  `get_master_map`, `get_cross_runtime_callers`, `debug_sleep`.
+
+When in doubt, `lain schema dump` (or `docs/tool-schema.json`) is
+the canonical authority — all five docs above reference it.

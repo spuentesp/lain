@@ -48,8 +48,9 @@ Command Center consumes.
 ## Operator quickstart
 
 Multiplayer is always on. Start `lain server` like you already do — the
-extra surface is 8 MCP tools and an SSE feed that the existing Command
-Center picks up automatically:
+extra surface is 14 MCP tools (8 listed inline below, plus 5 more
+listed in their respective sections) and an SSE feed that the existing
+Command Center picks up automatically:
 
 ```bash
 # Start lain with the multiplayer features enabled (always-on in v0.5+)
@@ -60,7 +61,13 @@ What's new on the wire:
 
 | Surface | Purpose |
 |---|---|
-| 8 new MCP tools | `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `claim_files`, `release_files`, `list_occupancy`, `my_claims` |
+| 14 MCP tools (the multiplayer surface) | Presence: `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `list_subagents`, `my_claims`. Coordination: `claim_files`, `release_files`, `list_occupancy`. Diagnostics: `detect_overlap`, `get_audit_log`, `get_world_state`, `get_recent_activity`. (8 are listed inline below; the remaining 5 are documented in their respective sections.) |
+| `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `claim_files`, `release_files`, `list_occupancy`, `my_claims` | The eight call-shape tools introduced with the layer. |
+| `list_subagents` | Enumerate child sessions of a parent (passes parent session token). See [Subagents](#subagents). |
+| `detect_overlap` | Symbol-level conflict scan between two git refs. See [Commit-time overlap detection](#commit-time-overlap-detection). |
+| `get_audit_log` | Read the audit log. See [`docs/audit.md`](audit.md). |
+| `get_world_state` | On-demand snapshot of the world-state envelope (changed symbols since a given `plan_revision`). See [world_state.changed_symbols](#world_statechanged_symbols). |
+| `get_recent_activity` | Recent activity feed (server-agnostic, polled). |
 | `GET /events` | Server-Sent Events stream. Fires whenever an agent joins, claims, releases, or a conflict is detected. The Command Center subscribes here for its live panels. |
 | Command Center panels | `GET /` now shows the **Agents online** and **Rooms** (file occupancy) panels, updated live. |
 | Existing tools | `query_graph`, `get_repo_info`, `explain_symbol`, and `get_cross_repo_blast_radius` now include attribution hints (active editors) and surfaces occupancy where it's relevant. |
@@ -375,14 +382,17 @@ was dead.)
 Tools that don't return JSON (streaming-only) are unchanged.
 
 Claim-aware tools (`claim_files` is the only one today) additionally
-accept `plan_revision: u64` on request and may return `world_state` on
-response.
+accept `plan_revision: u64` on request and may return the `world_state`
+envelope (a tool response field) — a *per-call* snapshot of what
+moved since that revision. For an on-demand snapshot at any time, call
+the `get_world_state` MCP tool documented under
+[Commit-time overlap detection](#commit-time-overlap-detection).
 
 ## world_state.changed_symbols
 
-`world_state` is the agent's signal that the world may have moved since
-it queried. Each entry is `{ name, change_kind, at_revision }` where
-`change_kind` is one of:
+`world_state` (the envelope field) is the agent's signal that the world
+may have moved since it queried. Each entry is `{ name, change_kind,
+at_revision }` where `change_kind` is one of:
 - `Edited` — changed via overlay diff.
 - `Retracted` — it was in the graph and is not any more. Something you
   were working on disappeared under you.

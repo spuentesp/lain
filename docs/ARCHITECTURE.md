@@ -282,7 +282,8 @@ flowchart TB
     CC -->|GET /health| H
 ```
 
-Vanilla JS, ~1500 lines, no build step. The aesthetic is "80s
+Vanilla JS, ~1230 lines of JS (about 1.2k — `app.js` alone is 1234
+lines), no build step. The aesthetic is "80s
 console" (phosphor bloom, hairline borders, letterspaced uppercase
 labels). Every colour lives in `theme.css` as a custom property;
 both themes share one rule set.
@@ -296,7 +297,7 @@ changes. This is the test that the input schema is honest.
 ### Why bincode for the graph
 
 Petgraph's natural format. Fast, compact, lossless. Not
-human-readable — `export_graph_json` exists for that.
+human-readable — run `lain schema dump` for the canonical tool-surface JSON, or call `describe_schema` for the node/edge schema.
 
 ### Why not SQLite
 

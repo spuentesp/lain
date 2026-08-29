@@ -423,7 +423,7 @@ Two fields exist so an agent can tell whether to trust the answer:
 | `~/.local/lain/run/<stem>.sock` | hot-reload socket |
 | `~/.config/lain/recent_projects.json` | recent project list |
 
-Inspect: `curl -X POST http://localhost:9999/mcp ... '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"export_graph_json","arguments":{}},"id":99}'`
+Inspect: `curl -X POST http://localhost:9999/mcp ... '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"describe_schema","arguments":{}},"id":99}'` (for the canonical node/edge schema) or `lain schema dump` (for the wire-format tool surface)
 
 ## Directory layout
 
@@ -463,6 +463,15 @@ src/
 ├── cli/                             # subcommands + dispatch
 └── config/                          # config types
 ```
+
+> Directory listing is incomplete: `mod.rs` files in `federation/`,
+> `ingest/`, `mcp/`, `query/`, `sensors/`, `refresh/` are elided,
+> `audit_tools.rs` / `command_center_assets.rs` under `mcp/` are
+> grouped into the SPA line, and several audit / debug helpers
+> (`audit.rs`, `state_lock.rs`, `glob_match.rs`, `sentinel.rs`,
+> `time.rs`) live as siblings at the top of `src/server/`. Run
+> `find src/server -maxdepth 2 -type f -name '*.rs' | sort` for the
+> canonical file list.
 
 ## License
 

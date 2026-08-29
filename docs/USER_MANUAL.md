@@ -104,7 +104,7 @@ Tools that are easy to over-trust — what they actually mean:
 | `find_anchors` | Orchestration hubs (called by many, calling many, with a body) | "Most important." Leaf nodes score 0 by design. Deduped by name — read the path. |
 | `explain_symbol` / `get_call_sites` / `get_blast_radius` by **name** | One node that has that name, with a `⚠` line naming others if not unique | "The only node with that name." Pass a node **id** to pick a different one. |
 | `get_coupling_radar` | Files that change together in git history | A static dependency. Temporal correlation, not lexical. |
-| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` for those. Returns "unavailable" if no model — never a wrong answer. |
+| `semantic_search` | Nearest neighbours by embedding | Exact matches. Use `query_graph` for those. **Conditional**: filtered from `tools/list` entirely when no NLP model is loaded (no model → no advertised tool), reappears the moment `--embedding-model` is set. The binary prefers dropping the tool over advertising one that always says "unavailable". |
 | `get_cross_repo_blast_radius` | Callers across the federation (**incoming** `Calls`) | What the symbol depends on — that's `trace_dependency`. `depth` is a string range (`"1..3"`). |
 
 When the graph is behind HEAD, `get_health` says so and "not

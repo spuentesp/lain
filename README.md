@@ -8,7 +8,7 @@ LAIN builds a map of how all the code in your project connects — what calls wh
 
 ```mermaid
 flowchart LR
-    A["AI Agent<br/>(Claude Code / Kimi / Cursor)"] -->|MCP<br/>JSON-RPC| L["lain"]
+    A["AI Agent<br/>(Claude Code / Kimi / Agy / Codex)"] -->|MCP<br/>JSON-RPC| L["lain"]
     L -->|reads| FS[".lain/<br/>graph.bin"]
     L -->|runs| ENG["LSP / NLP / git<br/>engines"]
     L -->|answers| T["MCP tools<br/>(get_blast_radius,<br/>explain_symbol, …)"]
@@ -93,7 +93,7 @@ After install, `lain` exposes these subcommands:
 | `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
 | `lain oneshot` | One-shot MCP query: boots a transient `lain mcp` server, sends a single `tools/call`, prints the result as a table, and exits. For "just grep the symbols without keeping a server alive". |
 | `lain init` | Scaffold a `repos.yaml` for the current directory. Walks up for `.git`, then writes a minimal config pointing at the discovered workspace. |
-| `lain ask` | Single-user LLM-assisted query (uses `semantic_search` + `explain_symbol` heuristics). |
+| `lain ask` | Single-user LLM-assisted query (uses `semantic_search` when an embedding model is loaded; falls back to lexical heuristics via `explain_symbol`). |
 | `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
 | `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs (reaping session files older than 30 days), presence registry, and — when `LAIN_URL`/`LAIN_SERVER_URL` is set — both server reachability **and the live MCP surface**, calling `tools/list` and failing if it errors or advertises zero tools. Exits 0 clean, 1 on a hard failure. |
 | `lain schema` | Emit the canonical tool-surface schema dump (`dump [--out PATH]` defaults to `./docs/tool-schema.json`). Pair with `make schema && git diff --exit-code docs/tool-schema.json` in CI to fail on schema drift. |
@@ -458,8 +458,9 @@ the query prefix in `.lain/tuning.toml`:
 query_prefix = "Represent this sentence for searching relevant passages: "
 ```
 
-Without the model, `semantic_search` returns "unavailable" but all
-other features work.
+Without the model, `semantic_search` is filtered from `tools/list`
+entirely. Other features still work. The binary drops the tool rather
+than advertise one that always says "unavailable".
 
 ---
 
