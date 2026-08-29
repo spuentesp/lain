@@ -1,0 +1,3 @@
+# Playwright SPA e2e screenshots — generated locally, not committed.
+*.png
+!README.md

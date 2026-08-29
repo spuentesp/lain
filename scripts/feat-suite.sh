@@ -230,6 +230,39 @@ else
     fail "doctor missing \`all checks passed\`: $(cat "$WORK/doctor.out")"
 fi
 
+# ─── 5. Command Center SPA e2e ───────────────────────────────────
+# Spawns `lain server` against a fresh Rust fixture, drives the system
+# Chromium binary through every advertised tab, captures screenshots, and
+# verifies the SSE feed endpoint. Skipped if Chromium is not installed at
+# /usr/bin/chromium — the feat suite should still run cleanly on hosts
+# without a browser (CI runners, headless containers).
+note "5. Command Center SPA e2e"
+
+CHROMIUM_BIN="${CHROMIUM_BIN:-/usr/bin/chromium}"
+if [ ! -x "$CHROMIUM_BIN" ]; then
+    echo "  -- skip: chromium not found at $CHROMIUM_BIN"
+elif [ ! -d "$(dirname "$0")/../tests/js/node_modules/playwright" ]; then
+    echo "  -- skip: tests/js/node_modules/playwright not installed"
+    echo "     run: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --prefix tests/js --save-dev playwright"
+else
+    SPA_WORK="$(mktemp -d -t lain-feat-spa.XXXXXX)"
+    SPA_LOG="$SPA_WORK/spa.log"
+    if PLAYWRIGHT_BROWSERS_PATH=0 LAIN_BIN="$LAIN" \
+            node "$(dirname "$0")/../tests/js/spa_e2e.test.js" \
+            >"$SPA_LOG" 2>&1; then
+        SPA_PASS="$(grep -cE '^  PASS ' "$SPA_LOG" || true)"
+        SPA_FAIL="$(grep -cE '^  FAIL ' "$SPA_LOG" || true)"
+        pass "SPA e2e ran cleanly (${SPA_PASS} pass, ${SPA_FAIL} fail)"
+    else
+        SPA_RC=$?
+        fail "SPA e2e exited ${SPA_RC} (see $SPA_LOG)"
+        # Surface the per-tab roll-up so the failure is actionable.
+        grep -E '^  (overview|repos|query|tools|graph|sse|chrome)' "$SPA_LOG" \
+            | head -20 || true
+    fi
+    rm -rf "$SPA_WORK"
+fi
+
 # ─── Wrap-up ─────────────────────────────────────────────────────
 echo
 if [ "$FAIL" -eq 0 ]; then

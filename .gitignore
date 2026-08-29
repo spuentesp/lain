@@ -38,3 +38,9 @@ memory.json
 .lain/memory.json
 .lain/
 mcp-publisher
+
+# Node test deps (installed via `npm install --prefix tests/js`)
+tests/js/node_modules/
+
+# Playwright SPA e2e screenshots — generated locally, not committed.
+tests/js/screenshots/*.png

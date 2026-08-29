@@ -1,3 +1,10 @@
 {
-  "main": "./graph_tab.test.js"
+  "main": "./graph_tab.test.js",
+  "scripts": {
+    "test:e2e": "node ./spa_e2e.test.js",
+    "test": "node --test ./graph_tab.test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
 }
