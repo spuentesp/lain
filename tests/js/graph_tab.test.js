@@ -137,3 +137,51 @@ test('classifyWorkspacesResult: an unparseable body yields an empty list', () =>
   assert.strictEqual(out.ok, true);
   assert.deepStrictEqual(out.list, []);
 });
+
+// ── normalizeGraphPayload (D-M8) ────────────────────────────────────────────
+
+test('normalizeGraphPayload: a well-formed payload survives intact', () => {
+  const out = app.normalizeGraphPayload({
+    nodes: [
+      { id: 'r::a', name: 'a', path: 'src/a.rs', repo_id: 'r', kind: 'Function' },
+      { id: 'r::b', name: 'b', path: 'src/b.rs', repo_id: 'r', kind: 'Function' },
+    ],
+    edges: [{ source: 'r::a', target: 'r::b', edge_type: 'Calls', cross_repo: false }],
+    truncated: false,
+  });
+  assert.strictEqual(out.nodes.length, 2);
+  assert.strictEqual(out.edges.length, 1);
+  assert.strictEqual(out.truncated, false);
+});
+
+test('normalizeGraphPayload: drops edges with a dangling endpoint', () => {
+  const out = app.normalizeGraphPayload({
+    nodes: [{ id: 'r::a', name: 'a', path: '', repo_id: 'r', kind: 'Function' }],
+    edges: [
+      { source: 'r::a', target: 'r::gone', edge_type: 'Calls' },
+      { source: 'r::missing', target: 'r::a', edge_type: 'Calls' },
+    ],
+  });
+  assert.strictEqual(out.edges.length, 0, 'd3.forceLink throws on unknown node ids');
+});
+
+test('normalizeGraphPayload: drops nodes without an id', () => {
+  const out = app.normalizeGraphPayload({
+    nodes: [{ name: 'nameless' }, { id: 'r::a', name: 'a' }],
+    edges: [],
+  });
+  assert.strictEqual(out.nodes.length, 1);
+  assert.strictEqual(out.nodes[0].id, 'r::a');
+});
+
+test('normalizeGraphPayload: null / garbage yields an empty graph', () => {
+  assert.deepStrictEqual(app.normalizeGraphPayload(null),
+    { nodes: [], edges: [], truncated: false });
+  assert.deepStrictEqual(app.normalizeGraphPayload({ nodes: 'x', edges: 7 }),
+    { nodes: [], edges: [], truncated: false });
+});
+
+test('normalizeGraphPayload: preserves the truncation flag', () => {
+  const out = app.normalizeGraphPayload({ nodes: [], edges: [], truncated: true });
+  assert.strictEqual(out.truncated, true);
+});
