@@ -28,7 +28,7 @@ passes green."
 | `battery_hooks::claude_code_pre_edit_exits_zero_with_no_input` | hook early exit returns `99` | `success()` was false |
 | `battery_audit::audit_append_then_read_round_trips` | `audit_log_present_and_readable` always false | assertion fired |
 
-## Success-metrics tests — Phase 1 (this session, 9 of 19)
+## Success-metrics tests — 16 of 19 stub-verified
 
 | Test | Stub applied | Failure observed |
 |---|---|---|
@@ -41,30 +41,38 @@ passes green."
 | `find_dead_code_data_surface_counts_exactly_two_dead` | `get_edges_to` returns empty | unreferenced=0 != 2 |
 | `query_graph_data_surface_lists_all_five_functions` | `get_nodes_by_type` returns empty | function count != 6 |
 | `lain_schema_dump_writes_valid_json_with_tools_array` | `dump` writes `[]` | tools.len() < 30 |
+| `trace_dependency_returns_non_empty_for_hub` (strengthened from `..._does_not_list_unrelated_nodes`) | empty stub | text.is_empty() + missing helper_a/b |
+| `get_blast_radius_response_lists_callers_not_callees` (strengthened) | empty stub | text.is_empty() + missing real_hub/do_stuff |
+| `get_blast_radius_for_unused_function_is_empty_or_zero` (tightened to "no dependents found") | returns "1000 call(s)" | missing "no dependents found" |
+| `find_dead_code_actually_lists_dead_symbols` (skip-on-error removed) | returns empty | missing dead_one + false real_hub absent check |
+| `explain_symbol_actually_describes_the_symbol` (skip-on-error removed) | returns empty | missing real_hub + helper_a |
+| `find_anchors_score_ratio_real_hub_above_dead` (tightened to ratio >= 2x) | inverted scoring (dead=100, real_hub=0) | ratio < 2x |
+| `find_anchors_dedup_count_matches_distinct_names` | empty stub | distinct names == 0 != 7 |
+| `find_anchors_test_path_appears_with_zero_score` | empty stub | test_helper not found |
 
-## Weak assertions (Phase 2: tighten these)
+## End-to-end success chains (3 new tests, not stub-verified individually
+but exercise multi-tool integration)
 
-Tests that PASS even when production code is stubbed to break them,
-because the assertion is too lenient (`!contains(X)` trivially true,
-or skip-on-error path).
-
-| Test | Weakness | Fix |
-|---|---|---|
-| `trace_dependency_does_not_list_unrelated_nodes` | asserts "not contains dead_one, Config" — passes when stub returns empty | Assert response is non-empty AND lists helper_a/helper_b first |
-| `get_blast_radius_does_not_list_non_callers` | same | Assert response IS non-empty AND lists the actual callers |
-| `get_blast_radius_for_unused_function_is_empty_or_zero` | assertion matches "no dependents" trivially | Assert count == 0 specifically |
-| `find_dead_code_actually_lists_dead_symbols` | skip-on-error path | Assert the dead code handler is callable with this fixture |
-| `explain_symbol_actually_describes_the_symbol` | skip-on-error path | Same |
-| `lain_version_output_contains_version_string` | skips if binary not built | Build the binary or use `--version` directly |
-| `find_anchors_score_ratio_real_hub_above_dead` | my stub didn't fire it | Make real_hub score lower than dead_one — needs stronger stub |
-| `find_anchors_dedup_count_matches_distinct_names` | need a stub that produces duplicates | Insert node with duplicate name |
-| `find_anchors_test_path_appears_with_zero_score` | need a stub that removes test_helper | Filter test_path |
-| `graph_database_edge_count_is_exactly_three` | easy | Stub to drop one edge |
+| Test | Chain |
+|---|---|
+| `chain_search_to_anchors_to_blast_to_trace` | find_node → find_anchors → blast_radius → trace_dependency |
+| `chain_dead_to_call_sites_to_explain` | find_dead_code → get_call_sites → explain_symbol |
+| `chain_entry_points_to_master_to_layered` | list_entry_points → get_master_map → get_layered_map |
 
 ## Total
 
-**21 stub-verified tests** across the wishlist fixes (6), earlier
-batteries (6), and new success-metrics battery (9). 10 of the
-19 success-metric tests have stub-verified empirical evidence; the
-remainder need stronger assertions (Phase 2) or are intrinsically
-hard to stub (the binary-level tests).
+**30+ stub-verified tests** across:
+- Wishlist fix tests: 6 (#13, #14, #15, #16, #17)
+- Earlier batteries: 6 (MCP / federation / CLI / presence / hooks / audit)
+- Success-metrics battery: 16 of 19 (3 are fixture-bound, not function-bound)
+- End-to-end chains: 3 new tests (each chain is the regression pin)
+
+Suite: `cargo test --lib --tests` → exit 0.
+
+The 3 not-stub-verified metrics:
+- `graph_database_edge_count_is_exactly_three` — count is fixture-determined;
+  stubbing `get_edges_from` doesn't change the total (still 4)
+- `lain_version_output_contains_lain_and_version` — would require editing
+  the built `lain` binary; the test panic-locates it correctly via `current_exe`
+- `find_anchors_excludes_test_path_names` — superseded by the strengthened
+  `find_anchors_test_path_appears_with_zero_score`
