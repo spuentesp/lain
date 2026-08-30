@@ -288,6 +288,7 @@ impl RepoIndex {
                 &overlay,
                 resolver_ref,
                 Some(source_repo),
+                false,
             )
             .await
         };
@@ -315,6 +316,77 @@ impl RepoIndex {
         if let Err(e) = &result {
             tracing::warn!(
                 "[federation] index failed for {:?}: {}",
+                self.source.local_path(),
+                e
+            );
+            self.set_health(RepoHealth::Degraded);
+            return Err(result.unwrap_err());
+        }
+
+        *self.last_indexed.write() = SystemTime::now();
+        self.set_health(RepoHealth::Ready);
+        Ok(())
+    }
+
+    /// Like [`Self::index`], but bypasses the commit-hash short-circuit
+    /// so the worktree is re-scanned even when no `git commit` has
+    /// landed yet.
+    ///
+    /// The file watcher (`start_watcher`) calls this on every `notify`
+    /// event: a user edit followed by no commit is the common case for
+    /// a long-lived editor session, and the previous commit-hash gate
+    /// meant the per-repo DB stayed at the pre-edit state until the
+    /// user eventually committed. The boot loop, by contrast, runs on a
+    /// known-good commit cadence and should keep the optimization
+    /// (`index()` with `force=false`).
+    pub async fn index_forced(self: &Arc<Self>) -> Result<(), LainError> {
+        let path = self.source.local_path().to_path_buf();
+        let db = &self.db;
+        let lsp = self.lsp.clone();
+        let git = Arc::clone(&self.git);
+
+        let git_guard = git.lock().await;
+
+        let pipeline = async {
+            let overlay = self.server_overlay.lock().clone();
+            let resolver = self.cross_repo_resolver.lock().clone();
+            let resolver_ref: Option<&dyn crate::federation::cross_repo::CrossRepoResolver> =
+                resolver.as_deref();
+            let source_repo = self.source.id();
+            index_one_repo(
+                &path,
+                &db,
+                &lsp,
+                &*git_guard,
+                &overlay,
+                resolver_ref,
+                Some(source_repo),
+                true,
+            )
+            .await
+        };
+        let result = match tokio::time::timeout(INDEX_TIMEOUT, pipeline).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::warn!(
+                    "[federation] index_forced timed out after {:?} for {:?}; transitioning to Degraded",
+                    INDEX_TIMEOUT,
+                    self.source.local_path()
+                );
+                drop(git_guard);
+                self.set_health(RepoHealth::Degraded);
+                return Err(LainError::Other(format!(
+                    "RepoIndex::index_forced exceeded {:?} budget",
+                    INDEX_TIMEOUT
+                )));
+            }
+        };
+
+        drop(git_guard);
+
+        if let Err(e) = &result {
+            tracing::warn!(
+                "[federation] index_forced failed for {:?}: {}",
                 self.source.local_path(),
                 e
             );
@@ -391,7 +463,14 @@ impl RepoIndex {
         tokio::spawn(async move {
             while let Some(res) = rx.recv().await {
                 if res.is_ok() {
-                    if let Err(e) = me_for_task.index().await {
+                    // `index_forced` (not `index`) — the watcher fires
+                    // on a kernel `notify` event, which is independent
+                    // evidence the worktree changed. The commit-hash
+                    // short-circuit in `index()` would skip the
+                    // re-scan for any edit the user hadn't committed
+                    // yet, leaving the per-repo DB stuck at the
+                    // previous commit (wishlist #17).
+                    if let Err(e) = me_for_task.index_forced().await {
                         tracing::debug!(
                             "[federation] watcher-triggered index failed for {:?}: {}",
                             me_for_task.source.local_path(),

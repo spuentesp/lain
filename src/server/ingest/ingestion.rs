@@ -565,21 +565,45 @@ pub async fn index_one_repo(
     overlay: &VolatileOverlay,
     resolver: Option<&dyn crate::federation::cross_repo::CrossRepoResolver>,
     source_repo: Option<&crate::federation::repo_id::RepoId>,
+    force: bool,
 ) -> Result<(), LainError> {
     let scan_start = std::time::Instant::now();
     let (latest_commit, latest_time) = git.get_latest_commit_info()?;
     let last_commit = db.get_last_commit()?;
 
-    if let Some(ref last) = last_commit {
-        if last == &latest_commit {
-            info!("[federation] {:?} already up to date at {}", path, last);
-            return Ok(());
+    // The commit-hash short-circuit exists to skip an expensive full
+    // re-scan when nothing has changed on disk. The file-watcher path
+    // fires on every `notify` event though, including edits the user
+    // made *without* committing yet — and skipping the re-scan in that
+    // case was the bug behind wishlist #17 (the new symbol was on disk
+    // but the per-repo DB stayed at the previous commit). `force=true`
+    // tells the indexer the caller has independent evidence a change
+    // happened (a kernel inotify event, an explicit reindex request);
+    // `false` keeps the optimization for the CLI boot loop and any
+    // other caller that runs on a known-good commit cadence.
+    if !force {
+        if let Some(ref last) = last_commit {
+            if last == &latest_commit {
+                info!("[federation] {:?} already up to date at {}", path, last);
+                return Ok(());
+            }
         }
     }
 
     info!("[federation] Building core topology for {:?} at commit {}", path, latest_commit);
 
-    let files = if let Some(ref last) = last_commit {
+    // `force=true` means the caller has independent evidence the
+    // worktree changed (a kernel `notify` event, an explicit reindex
+    // request) but the commit hash hasn't advanced yet — the user
+    // hasn't committed. A `get_changed_files_since(last)` against
+    // the unchanged commit tree returns the empty diff, and the
+    // uncommitted edit silently goes missing. Walk every tracked
+    // file in that case so the worktree state is the source of
+    // truth.
+    let files = if force {
+        info!("[federation] Forced full re-scan of worktree {:?}", path);
+        git.get_all_tracked_files()?
+    } else if let Some(ref last) = last_commit {
         info!("[federation] Incremental update since {} for {:?}", last, path);
         git.get_changed_files_since(last)?
     } else {
