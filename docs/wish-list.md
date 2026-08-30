@@ -751,6 +751,39 @@ explicitly between edit and reindex. A follow-up test should skip
 the commit and verify that `repo.index()` still picks up the
 new symbol (this will fail until the fix lands).
 
+**Closed 2026-08-30.**
+
+The fix is two parts in `index_one_repo` and a new public method
+on `RepoIndex`:
+
+- `index_one_repo(..., force: bool)` gains a `force` parameter.
+  When `force=true`, both gates the old code had are bypassed: the
+  commit-hash early-return and the incremental diff against the
+  previous commit. The indexer calls `get_all_tracked_files()`
+  instead so the worktree is the source of truth (the user edited
+  on disk; the commit tree is unchanged). `force=false` keeps the
+  existing optimization for the CLI boot loop.
+- `RepoIndex::index_forced()` is the entry point the watcher uses.
+  `RepoIndex::index()` keeps `force=false` so every existing caller
+  (boot loop, integration tests) is unchanged in behavior.
+- The watcher receiver task in `RepoIndex::start_watcher` now calls
+  `me.index_forced()` instead of `me.index()`. The kernel inotify
+  event is independent evidence a worktree change happened — the
+  watcher doesn't need to wait for a commit.
+
+Proving test:
+`tests/use_cases/watcher_reindex.rs::index_forced_picks_up_uncommitted_edits`.
+It edits a file, deliberately does not commit, calls
+`index_forced()`, and asserts the new symbol appears in the
+per-repo DB. It also asserts that a *plain* `index()` with an
+unchanged commit hash still short-circuits (no node growth), so
+the optimization the boot loop depends on is preserved (a fix
+that silently removes the optimization is worse than the bug it
+solves).
+
+Fails on the pre-fix code (the short-circuit kicks in before any
+worktree scan), passes after. Commit: `d5a60b3`.
+
 ## 18. `get_code_snippet` error message doesn't name the missing path
 
 **Symptom:** when the path doesn't exist, the tool returned a
