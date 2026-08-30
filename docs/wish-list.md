@@ -886,3 +886,56 @@ The audit should also check that assertion messages name the
 expected and actual values (so a future reader can see what was
 checked) and that the test is robust to non-deterministic ordering
 (e.g. `HashMap` iteration) when the underlying contract allows it.
+
+**Closed 2026-08-30.**
+
+The audit walks every test in `tests/use_cases/`,
+`tests/federation_e2e.rs`, and `tests/federation_integration.rs`.
+For each test it identifies the contract pinned by the
+assertions, judges whether a regression in the underlying
+behavior would fire the assertions, and flags any test whose
+checks look trivially satisfiable. Documented in
+`docs/audit_2026_08_30.md`.
+
+Findings:
+
+- All 8 use-case tests have at least one assertion that would
+  fire on a plausible regression. None pass for the wrong
+  reason.
+- `find_anchors_ranks_real_hub_above_stdlib_named_helpers` was
+  strengthened in PR 3 #14 (commit `a057d65`) from
+  "real_hub IS in the top" to a position-1 deterministic check.
+  The fixture also gained `Calls` edges from `real_hub` to
+  `parse`/`default`/`as_str` so `real_hub` is a real
+  orchestration hub (the leaf rule would otherwise still zero
+  it).
+- `index_forced_picks_up_uncommitted_edits` (PR 2 #17, commit
+  `d5a60b3`) and `cross_repo_peers_match_by_name_when_signature_missing`
+  (PR 1 #16, commit `238a575`) were added with stub-verified
+  contracts: each pins a non-trivial assertion that fails if
+  the underlying behavior regresses.
+- `resolve_node_finds_indexed_function_by_name` (PR 2 #15,
+  commit `b8e4f01`) had a wrong-reason bug surfaced by the
+  audit: the literal name `"target"` was being canonicalized
+  to the real `target/` directory in the process CWD, so
+  every name lookup in the resolver was skipped. The test now
+  `chdir`s to a tempdir first, so `"target"` is unambiguously
+  a name and the assertion actually tests the resolver's name
+  path. Without the audit, the test would have shipped in a
+  state that passed for the wrong reason — exactly the
+  failure mode this wishlist item was about.
+
+Three follow-ups filed in the audit doc but not blocking:
+
+- `workspace_graph_peers`: tighten to assert the
+  `CrossRepoSameSymbol` edge once the projection-side
+  wiring for peer edges lands (the matcher fix is in; the
+  projection-side wiring is forward-looking).
+- `get_call_sites`: add a name-based variant that asserts the
+  same contract as the existing id-based call, so the
+  freshly-fixed `resolve_node` path is regression-pinned too.
+- `get_code_snippet_paths`: add a unit-level variant against
+  `read_file_range` directly (skips the MCP round-trip;
+  isolates the path-resolution logic from the boot cost).
+
+Commit: `11235d5`.
