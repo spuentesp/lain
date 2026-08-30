@@ -1056,6 +1056,21 @@ impl GraphDatabase {
             }
             let raw = match node.node_type {
                 NodeType::Function | NodeType::Method => {
+                    // Unfiltered Calls count — used only to decide
+                    // whether the baseline applies. The baseline
+                    // is for functions with *no* callers at all
+                    // (a wishlist-#14 small-fixture artifact, where
+                    // every function scores 0 and the sort is
+                    // unstable). A function whose only callers are
+                    // tests still scores 0 — the test-caller filter
+                    // is a stronger "test code doesn't count as
+                    // production signal" statement, not a dead-code
+                    // signal, and we must not relax it by handing
+                    // the function a baseline weight.
+                    let calls_in_unfiltered = graph
+                        .edges_directed(*idx, Direction::Incoming)
+                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                        .count() as f32;
                     let calls_in = graph
                         .edges_directed(*idx, Direction::Incoming)
                         .filter(|e| e.weight().edge_type == EdgeType::Calls)
@@ -1071,10 +1086,29 @@ impl GraphDatabase {
                         _ => 1.0,
                     };
                     let size_factor = (body_lines / 8.0).min(1.0);
-                    // log2(1 + calls_out): a leaf that calls nothing is
-                    // not an orchestration hub and scores 0 — no matter
-                    // how many callers it has (the `as_str` problem).
-                    calls_in * (1.0 + calls_out).log2() * size_factor
+                    if calls_in_unfiltered == 0.0 {
+                        // Baseline weight for functions with no
+                        // callers. Without this, every raw in a small
+                        // fixture (or a fixture where the LSP path
+                        // didn't pick up calls) is 0, the max_raw is
+                        // 0, and every normalized score is 0 — the
+                        // sort is unstable at zero and top anchors
+                        // come back in arbitrary order. With 0.5x,
+                        // dead functions stay visible (so the user
+                        // can see what was indexed) but any function
+                        // with at least one caller outranks them:
+                        // calls_in >= 1 and calls_out >= 1 gives
+                        // raw >= 1 * 1 * size_factor = size_factor,
+                        // which exceeds 0.5 * size_factor. Pinned by
+                        // `anchor_hub_tests::dead_function_baseline_weight`.
+                        size_factor * 0.5
+                    } else {
+                        // log2(1 + calls_out): a leaf that calls
+                        // nothing is not an orchestration hub and
+                        // scores 0 — no matter how many callers it
+                        // has (the `as_str` problem).
+                        calls_in * (1.0 + calls_out).log2() * size_factor
+                    }
                 }
                 _ => 0.0,
             };
@@ -1803,5 +1837,54 @@ mod anchor_hub_tests {
         let anchors = g.find_anchors(10).unwrap();
         let parses = anchors.iter().filter(|n| n.name == "parse").count();
         assert_eq!(parses, 1, "function+method `parse` must dedup to one entry");
+    }
+
+    /// A function with `calls_in = 0` gets a baseline weight of
+    /// `size_factor * 0.5`. Without this, every raw in a fixture
+    /// where the LSP path didn't pick up calls is 0; `max_raw` is
+    /// 0; every normalized score is 0; the sort is unstable at
+    /// zero. Wishlist #14: `find_anchors` returned 0.000 for every
+    /// function in small fixtures, the order came back arbitrary.
+    ///
+    /// The half-strength baseline keeps dead functions visible (so
+    /// the user can see what was indexed) while ensuring any
+    /// function with at least one caller outranks them:
+    /// `calls_in >= 1 ∧ calls_out >= 1 ⇒ raw >= size_factor`,
+    /// which strictly exceeds `0.5 * size_factor`.
+    #[test]
+    fn dead_function_baseline_weight() {
+        let g = db("lain_test_anchor_baseline");
+        // Big dead function — 16 lines, so size_factor = min(16/8, 1) = 1.0.
+        let big_dead = func("big_dead", "src/util.rs", (1, 16));
+        // Live hub — same size_factor (1.0), 1 caller, 1 callee.
+        // raw = 1 * log2(2) * 1.0 ≈ 1.0 > 0.5 * 1.0 = 0.5 (big_dead).
+        let hub = func("hub", "src/core.rs", (1, 16));
+        let hub_caller = func("hub_caller", "src/a.rs", (1, 10));
+        let hub_callee = func("hub_callee", "src/b.rs", (1, 10));
+        let bid = big_dead.id.clone();
+        let hid = hub.id.clone();
+        let hid2 = hub.id.clone();
+        let hid3 = hub.id.clone();
+        let cid = hub_caller.id.clone();
+        let lid = hub_callee.id.clone();
+        g.insert_nodes_batch(&[big_dead, hub, hub_caller, hub_callee]).unwrap();
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, cid, hid2)).unwrap();
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, hid3, lid)).unwrap();
+
+        g.calculate_anchor_scores().unwrap();
+
+        let dead_score = g.get_node(&bid).unwrap().unwrap().anchor_score.unwrap();
+        let hub_score = g.get_node(&hid).unwrap().unwrap().anchor_score.unwrap();
+        assert!(
+            dead_score > 0.0,
+            "dead function must have a non-zero baseline ({dead_score}); \
+             without it, every raw is 0 in a small fixture and the sort \
+             is unstable at zero"
+        );
+        assert!(
+            hub_score > dead_score,
+            "live hub ({hub_score}) must outrank dead function \
+             ({dead_score}) of identical size_factor"
+        );
     }
 }

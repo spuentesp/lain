@@ -114,10 +114,23 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
         db.insert_edge(&GraphEdge::new(EdgeType::Calls, caller.id, real_hub_id.clone()))
             .unwrap();
     }
+    // real_hub also CALLS the stdlib-named helpers. Without
+    // calls_out > 0, `calculate_anchor_scores` treats real_hub as a
+    // leaf utility and zeros its raw — the wishlist #14 "leaf
+    // rule" — and the test would observe callers (calls_in=0,
+    // baseline 0.5x) outranking real_hub (calls_in=5, leaf=0).
+    // Giving real_hub outgoing calls makes it an orchestration hub
+    // in the scorer's sense.
+    for stdlib_name in ["parse", "default", "as_str"] {
+        let callee = find(stdlib_name, "src/lib.rs").expect(stdlib_name);
+        db.insert_edge(&GraphEdge::new(EdgeType::Calls, real_hub_id.clone(), callee.id))
+            .unwrap();
+    }
     // Compute anchor scores. Without this the test sees every
     // function at score None / 0 and order is purely by insertion
     // order. With the Calls edges in the petgraph, real_hub gets
-    // calls_in=5 and lands at the top.
+    // calls_in=5, calls_out=3 → raw = 5 * log2(4) * size_factor,
+    // and lands at the top deterministically.
     db.calculate_anchor_scores().unwrap();
 
     // Build a minimal overlay (the function takes one even when
@@ -131,19 +144,19 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
     // The bug we want to catch: `parse` / `default` / `as_str`
     // getting elevated by fabricated callers and outranking the
     // real hub. Pin the contract:
-    //   1. `real_hub` IS in the top (the test exists to prove the
-    //      hub is surfaced).
-    //   2. Not every top entry is a stdlib helper (the pre-fix bug
-    //      had stdlib helpers at the top because of fabricated
-    //      callers — if all top entries are stdlib helpers, the
-    //      bug is back).
+    //   1. `real_hub` IS at position 1 (the test exists to prove
+    //      the hub is the top anchor).
+    //   2. The stdlib helpers do NOT outrank the hub — if they do,
+    //      either the ambiguous-name fan-out is back, or the
+    //      anchor-scoring pipeline regressed to scoring leaves
+    //      above real hubs.
     //
-    // Note: anchor scores in this small fixture are 0.000 across
-    // the board (a separate scoring pipeline limitation, see
-    // `calculate_anchor_scores` in `src/server/graph.rs`), so
-    // ordering is effectively insertion order / HashMap iteration
-    // order. A position-1 check is therefore non-deterministic;
-    // checking "not all top entries are stdlib" is robust to that.
+    // The position-1 assertion is now deterministic (post-wishlist
+    // #14 fix): real_hub has calls_in=5, calls_out=3 → raw =
+    // 5 * log2(4) * 0.375 ≈ 3.75; parse/default/as_str are leaves
+    // (calls_in=1 from real_hub, calls_out=0) so the leaf rule
+    // zeros them; the callers (calls_in=0) get the 0.5x baseline.
+    // real_hub strictly outranks all of them.
     let top_lines: Vec<&str> = text
         .lines()
         .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
@@ -156,6 +169,13 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
         .iter()
         .map(|l| l.split_whitespace().nth(1).unwrap_or("").to_string())
         .collect();
+    assert_eq!(
+        top_names.first().map(String::as_str),
+        Some("real_hub"),
+        "real_hub must be at position 1 in find_anchors top \
+         (deterministic after wishlist #14 fix); top names: \
+         {top_names:?}"
+    );
     assert!(
         top_names.iter().any(|n| n == "real_hub"),
         "find_anchors must include `real_hub` in the top anchors; \
