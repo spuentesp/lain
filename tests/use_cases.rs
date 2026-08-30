@@ -9,6 +9,9 @@
 //! that broke, and the failure message names the use case, not
 //! just the test function.
 
+#[path = "use_cases/cross_repo_peers_match.rs"]
+mod cross_repo_peers_match;
+
 #[path = "use_cases/find_dead_code.rs"]
 mod find_dead_code;
 

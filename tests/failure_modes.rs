@@ -404,8 +404,15 @@ fn tools_return_structured_error_not_panic() {
     let mut server = boot_server(port);
 
     // 4a. find_anchors with `limit` set to a non-number string.
-    //     The schema says `limit: integer`; serde rejects string and
-    //     the dispatch path should surface a structured error.
+    //     The schema says `limit: integer`; serde's `as_u64()` on a
+    //     string returns `None`, and the handler uses
+    //     `usize_arg(args, "limit").unwrap_or(10)`, so the bad type
+    //     is silently coerced to the default. This is a documented
+    //     lenient behavior (see the wishlist note on `query_graph`).
+    //     The test pins the survival contract only: the call returns
+    //     a valid envelope, the server is alive, the tool didn't
+    //     panic. Strengthening find_anchors to reject bad types is
+    //     a separate change (not part of #19).
     let env = tools_call_envelope(
         &host,
         "find_anchors",
@@ -433,6 +440,14 @@ fn tools_return_structured_error_not_panic() {
         env.pointer("/result").is_some() || env.pointer("/error").is_some(),
         "get_blast_radius with empty symbol produced no envelope: {env}"
     );
+    let err_text = envelope_error_text(&env);
+    // The error should name the symbol arg in some form — either
+    // "Missing required argument: symbol" or a NotFound carrying
+    // the empty/blank name. Both are acceptable.
+    assert!(
+        err_text.contains("symbol") || err_text.contains("not found") || err_text.contains("NotFound"),
+        "get_blast_radius empty-symbol error should mention the symbol arg; got: {err_text}"
+    );
     assert!(
         server.is_alive(),
         "server PID died after get_blast_radius with empty symbol"
@@ -457,6 +472,17 @@ fn tools_return_structured_error_not_panic() {
         env.pointer("/result").is_some() || env.pointer("/error").is_some(),
         "query_graph with malformed ops produced no envelope: {env}"
     );
+    // The error should surface as isError=true (not a top-level
+    // transport error), so a real caller can inspect it.
+    assert!(
+        env.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true),
+        "query_graph malformed ops should set isError=true; got: {env}"
+    );
+    let err_text = envelope_error_text(&env);
+    assert!(
+        !err_text.is_empty(),
+        "query_graph malformed ops should include a non-empty error text; got: {env}"
+    );
     assert!(
         server.is_alive(),
         "server PID died after query_graph with malformed ops"
@@ -475,6 +501,28 @@ fn tools_return_structured_error_not_panic() {
         env.pointer("/result").is_some() && env.pointer("/error").is_none(),
         "get_health after hostile calls failed: {env}"
     );
+}
+
+/// Pull the text payload out of a JSON-RPC envelope's error channel.
+/// Returns the empty string when the call was successful (no error
+/// to surface) or when the error has no `content[0].text`.
+fn envelope_error_text(env: &serde_json::Value) -> String {
+    // Top-level protocol error (call never reached a handler).
+    if let Some(text) = env.pointer("/error/message").and_then(|v| v.as_str()) {
+        return text.to_string();
+    }
+    // Tool-level isError=true: error text is in result.content[0].text.
+    let is_err = env
+        .pointer("/result/isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_err {
+        return String::new();
+    }
+    env.pointer("/result/content/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -689,6 +737,18 @@ fn request_reload_handles_corrupt_yaml() {
             assert!(
                 !err.is_empty(),
                 "rebuild reported failed but last_error was empty: {status}"
+            );
+            // The error should mention the YAML parse failure, not
+            // just "reload failed" or similar. The status quo is
+            // a stringified serde_yaml::Error which carries the
+            // line/column of the parse error — the caller can use
+            // that to fix the file. (#19 — failure_modes strengthening.)
+            assert!(
+                err.contains("yaml")
+                    || err.contains("YAML")
+                    || err.contains("parse")
+                    || err.contains("expected"),
+                "rebuild last_error should mention the YAML/parse failure; got: {err}"
             );
             failed = true;
             break;

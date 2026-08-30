@@ -49,8 +49,21 @@ pub fn find_cross_repo_matches(
     let new_repo = GlobalId::parse(&new_node.id)
         .ok()
         .map(|global_id| global_id.repo_id().to_string());
-    let new_sig = new_node.signature.as_deref().unwrap_or("");
-    let new_tokens = signature_tokens(new_sig);
+    // Fall back to a name-only signal when the signature is empty:
+    // rust-analyzer's documentSymbol doesn't always populate `detail`
+    // (the signature field), so a function's name is the strongest
+    // signal we have. Two functions with the same name in different
+    // repos produce a single-token match, giving similarity 1.0 (above
+    // the 0.5 threshold).
+    let new_tokens = if let Some(sig) = new_node.signature.as_deref() {
+        if !sig.is_empty() {
+            signature_tokens(sig)
+        } else {
+            vec![new_node.name.to_lowercase()]
+        }
+    } else {
+        vec![new_node.name.to_lowercase()]
+    };
     let mut scored: Vec<(String, f32)> = candidates
         .iter()
         .filter_map(|candidate| {
@@ -62,8 +75,15 @@ pub fn find_cross_repo_matches(
                 return None;
             }
 
-            let candidate_sig = candidate.signature.as_deref().unwrap_or("");
-            let candidate_tokens = signature_tokens(candidate_sig);
+            let candidate_tokens = if let Some(sig) = candidate.signature.as_deref() {
+                if !sig.is_empty() {
+                    signature_tokens(sig)
+                } else {
+                    vec![candidate.name.to_lowercase()]
+                }
+            } else {
+                vec![candidate.name.to_lowercase()]
+            };
             let similarity = signature_similarity(&new_tokens, &candidate_tokens);
             if similarity >= threshold {
                 Some((candidate.id.clone(), similarity))

@@ -103,8 +103,14 @@ fn get_code_snippet_resolves_relative_and_absolute_paths_and_rejects_missing() {
         is_err,
         "get_code_snippet(nonexistent path) must set isError=true; got: {env}"
     );
-    // The error text currently surfaces the OS error verbatim
-    // (`No such file or directory (os error 2)`). A nicer future
-    // error would name the missing path. The test currently pins
-    // only the boolean — the message is a follow-up.
+    // The error must name the missing path so the agent can
+    // correlate the failure with the input it sent. (Wishlist #18.)
+    let text = env
+        .pointer("/result/content/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        text.contains("does_not_exist.rs"),
+        "get_code_snippet error must name the missing path; got: {text}"
+    );
 }
