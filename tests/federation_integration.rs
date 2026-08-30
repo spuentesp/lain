@@ -1469,3 +1469,99 @@ async fn agent_a_plan_revision_beyond_current_gets_note() {
         "world_state.plan must echo the caller's plan_revision even on BeyondCurrent; resp={resp}"
     );
 }
+
+// ─── resolve_node by-name lookup (#15) ────────────────────────────────
+//
+// The wishlist audit found that `get_call_sites` (and other per-repo
+// tools) failed to resolve a known symbol by name when called
+// through the booted-server path. Investigation showed the per-repo
+// DB did not always contain a node with the expected name — the LSP
+// path was racy (rust-analyzer doesn't always populate the `detail`
+// field, which feeds the symbol's `name`). The resolver code path
+// itself is correct when the data is right; the bug is upstream
+// (LSP not populating names reliably).
+//
+// This test pins the contract at the resolver level: build the
+// per-repo DB directly (no LSP), insert a function with a known
+// name, and verify `resolve_node` finds it by name. The test
+// bypasses the LSP race that surfaced the original flake.
+#[tokio::test]
+async fn resolve_node_finds_indexed_function_by_name() {
+    use lain::graph::GraphDatabase;
+    use lain::overlay::VolatileOverlay;
+    use lain::schema::{GraphNode, NodeType};
+    use lain::server::tools::utils::resolve_node;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+
+    // Insert a function with the local-format id (3 colon parts:
+    // Kind:path:name). This is what the scanner populates; the
+    // resolver accepts it via the GraphName lookup.
+    let mut n = GraphNode::new(NodeType::Function, "target".into(), "src/lib.rs".into());
+    n.line_start = Some(1);
+    n.line_end = Some(5);
+    db.upsert_node(n).unwrap();
+
+    let overlay = VolatileOverlay::new();
+
+    // `resolve_node` treats `handle` as a path when it points at something
+    // on disk; running the test from /home/sebastian/lain would make the
+    // literal name "target" resolve to the real target/ directory and skip
+    // name matching. chdir to the tempdir so the handle is unambiguously
+    // a name, then restore cwd before returning.
+    let prev_cwd = std::env::current_dir().ok();
+    std::env::set_current_dir(dir.path()).expect("chdir to tempdir");
+
+    let result = resolve_node(&db, &overlay, "target");
+
+    if let Some(p) = prev_cwd.as_ref() {
+        let _ = std::env::set_current_dir(p);
+    }
+
+    assert!(
+        result.is_ok(),
+        "resolve_node by name failed for an indexed function: {:?}",
+        result.err()
+    );
+    let node = result.unwrap();
+    assert_eq!(node.name, "target");
+    assert_eq!(node.path, "src/lib.rs");
+}
+
+// ─── resolve_node_ambiguous surfaces the alternative definitions ─────
+//
+// When a name has multiple definitions, `resolve_node_ambiguous`
+// returns the chosen node plus a list of the other definitions so
+// the tool can surface the ambiguity to the caller. This test pins
+// the contract: with two same-name nodes, both must be present in
+// the result.
+#[tokio::test]
+async fn resolve_node_ambiguous_returns_other_definitions() {
+    use lain::graph::GraphDatabase;
+    use lain::overlay::VolatileOverlay;
+    use lain::schema::{GraphNode, NodeType};
+    use lain::server::tools::utils::resolve_node_ambiguous;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+
+    db.upsert_node({
+        let mut n = GraphNode::new(NodeType::Function, "parse".into(), "src/lib.rs".into());
+        n.line_start = Some(1); n.line_end = Some(3);
+        n
+    }).unwrap();
+    db.upsert_node({
+        let mut n = GraphNode::new(NodeType::Function, "parse".into(), "src/types.rs".into());
+        n.line_start = Some(1); n.line_end = Some(3);
+        n
+    }).unwrap();
+
+    let overlay = VolatileOverlay::new();
+    let (chosen, others) = resolve_node_ambiguous(&db, &overlay, "parse")
+        .expect("resolve_node_ambiguous should succeed for indexed name");
+    assert_eq!(chosen.name, "parse");
+    assert_eq!(others.len(), 1, "expected exactly one alternative, got 0 (or more)");
+    assert_eq!(others[0].name, "parse");
+    assert_ne!(others[0].path, chosen.path, "alternative should be a different path");
+}
