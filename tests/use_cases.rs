@@ -44,3 +44,6 @@ mod battery_hooks;
 
 #[path = "use_cases/battery_presence.rs"]
 mod battery_presence;
+
+#[path = "use_cases/battery_audit.rs"]
+mod battery_audit;

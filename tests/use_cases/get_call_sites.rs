@@ -127,3 +127,42 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
          range; got:\n{text}"
     );
 }
+
+// ─── Negative path: get_call_sites on unknown symbol returns error ─
+//
+// Pin the error shape: asking for call sites of a symbol that
+// isn't indexed must produce a NotFound error envelope, not
+// silently return "0 callers". The by-id path is tested by the
+// headline test above; this adds the "unknown symbol" negative
+// path at the per-repo DB layer (deterministic, no LSP race).
+#[test]
+fn get_call_sites_for_unknown_symbol_returns_not_found() {
+    use lain::server::tools::handlers::context::get_call_sites;
+    let project = tempfile::tempdir().unwrap();
+    let db_path = project.path().join("graph.bin");
+    let db = lain::graph::GraphDatabase::new(&db_path).unwrap();
+    let overlay = lain::overlay::VolatileOverlay::new();
+    let result = get_call_sites(project.path(), &db, &overlay, "definitely_not_indexed_xyz");
+    assert!(result.is_err(), "unknown symbol must produce an error");
+}
+
+// ─── Negative path: get_call_sites with no callers returns Ok(empty) ─
+//
+// A symbol that IS indexed but has no callers must succeed with
+// an empty list, not fail. Pin the boundary contract.
+#[test]
+fn get_call_sites_for_unreferenced_symbol_returns_empty() {
+    use lain::schema::{EdgeType, GraphNode, NodeType};
+    use lain::server::tools::handlers::context::get_call_sites;
+    let project = tempfile::tempdir().unwrap();
+    let db_path = project.path().join("graph.bin");
+    let db = lain::graph::GraphDatabase::new(&db_path).unwrap();
+    let overlay = lain::overlay::VolatileOverlay::new();
+    let mut n = GraphNode::new(NodeType::Function, "lonely_target".into(), "src/lib.rs".into());
+    n.line_start = Some(1); n.line_end = Some(3);
+    db.upsert_node(n).unwrap();
+    let result = get_call_sites(project.path(), &db, &overlay, "lonely_target");
+    assert!(result.is_ok(), "unreferenced symbol must succeed");
+    let text = result.unwrap();
+    assert!(!text.is_empty(), "response must be non-empty (e.g. 'no call sites')");
+}

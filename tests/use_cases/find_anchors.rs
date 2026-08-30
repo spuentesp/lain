@@ -193,3 +193,42 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
          {top_names:?}"
     );
 }
+
+// ─── Negative path: find_anchors on empty graph returns empty list ──
+//
+// Pins the boundary contract: an empty per-repo DB must NOT panic
+// and must return an empty anchor list (no rows to rank). A
+// regression that crashes on empty input would fire this.
+#[test]
+fn find_anchors_on_empty_graph_returns_empty_list() {
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_index::RepoIndex;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::server::tools::handlers::metrics::find_anchors;
+
+    let project = tempfile::tempdir().unwrap();
+    let repo_dir = project.path().join("repo");
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    std::fs::write(
+        repo_dir.join("Cargo.toml"),
+        "[package]\nname = \"empty-anchors\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ).unwrap();
+    // Empty lib.rs — no functions to index.
+    std::fs::write(repo_dir.join("src/lib.rs"), "").unwrap();
+    git_init_committed(&repo_dir);
+
+    let source: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("repo").unwrap(), repo_dir.clone()).unwrap(),
+    );
+    let per_repo = RepoIndex::new(source, project.path()).unwrap();
+    let db = per_repo.db().clone();
+
+    let overlay = lain::overlay::VolatileOverlay::new();
+    let text = find_anchors(&db, &overlay, 10)
+        .expect("find_anchors on empty graph must succeed");
+    let _ = per_repo;
+    assert!(
+        text.is_empty() || text.contains("No anchors"),
+        "find_anchors on empty graph must return empty list; got:\n{text}"
+    );
+}
