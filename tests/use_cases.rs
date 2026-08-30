@@ -50,3 +50,6 @@ mod battery_audit;
 
 #[path = "use_cases/battery_success_metrics.rs"]
 mod battery_success_metrics;
+
+#[path = "use_cases/battery_e2e_chains.rs"]
+mod battery_e2e_chains;
