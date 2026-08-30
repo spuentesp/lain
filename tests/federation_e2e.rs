@@ -26,84 +26,15 @@
 //! is recommended (passing `--nocapture`) to keep the server logs
 //! legible if anything regresses.
 
+mod common;
+
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Find a free TCP port by binding + releasing. The OS reuses it on
-/// the next bind unless a race occurs; if the race does occur, the
-/// server's bind will fail and the test will panic with that error.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-/// Minimal HTTP request helper — issues one request, reads the full
-/// response (connection: close), and returns `(status_code, body)`.
-fn http_request(host: &str, raw: &str) -> (u16, String) {
-    let mut stream = TcpStream::connect(host).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    stream.write_all(raw.as_bytes()).expect("write");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read");
-    let status_line = response.lines().next().unwrap_or("");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let body_start = response.find("\r\n\r\n").map(|i| i + 4).unwrap_or(response.len());
-    (status, response[body_start..].to_string())
-}
-
-/// Issue a JSON-RPC request to the live MCP `/mcp` endpoint.
-fn jsonrpc(host: &str, body: &str) -> serde_json::Value {
-    let req = format!(
-        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
-         Content-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
-        host = host,
-        len = body.len(),
-    );
-    let (status, body) = http_request(host, &req);
-    assert!(
-        status == 200,
-        "JSON-RPC call returned HTTP {status}: {body}"
-    );
-    serde_json::from_str(&body).unwrap_or_else(|e| panic!("rpc not JSON: {e}\n{body}"))
-}
-
-/// Issue `tools/call <name> <args>` and return the raw text payload.
-fn tools_call_text(host: &str, name: &str, arguments: serde_json::Value) -> String {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    })
-    .to_string();
-    let resp = jsonrpc(host, &body);
-    let text = resp
-        .pointer("/result/content/0/text")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("missing result.content[0].text: {resp}"))
-        .to_string();
-    if resp.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true) {
-        panic!("tool {name} returned isError=true: {text}");
-    }
-    text
-}
-
-/// RAII guard that kills the spawned server on drop, regardless of
-/// how the test exits. Prevents orphan `lain server` processes when
-/// the test panics.
-struct ServerGuard(Child);
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+use common::{free_port, jsonrpc, tools_call_text, ServerGuard};
 
 /// Initialize a real git repo at `path` with a committable local
 /// identity and commit the working tree. `GitSensor::new` opens the
@@ -329,6 +260,11 @@ fn boot_federation(fixture: &FederationFixture, port: u16) -> ServerGuard {
         std::env::temp_dir().join(format!("federation-e2e-stderr-{port}.log"));
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
 
+    // We can't use `common::boot_server` directly here because the
+    // federation e2e needs the extra `XDG_STATE_HOME` / `XDG_CONFIG_HOME`
+    // / `LAIN_JOB_STORE` env vars that other tests don't. Compose
+    // around the shared `ServerGuard` (which handles the drop) and
+    // the shared wait-for-health pattern.
     let child = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",
@@ -340,9 +276,10 @@ fn boot_federation(fixture: &FederationFixture, port: u16) -> ServerGuard {
         ])
         .env("XDG_STATE_HOME", state.path())
         .env("XDG_CONFIG_HOME", xdg_config.path())
+        .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
         .env_remove("LAIN_EMBEDDING_MODEL")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
         .spawn()
         .unwrap_or_else(|e| {
             panic!(
@@ -412,6 +349,8 @@ fn boot_federation(fixture: &FederationFixture, port: u16) -> ServerGuard {
             }
         }
     }
+    // Suppress unused-variable warnings for helpers retained for the
+    // shared harness (other test files import `boot_server` directly).
     guard
 }
 
@@ -588,17 +527,18 @@ fn search_org_finds_symbols_across_repos() {
 
 /// `get_cross_repo_blast_radius` walks the federated backend
 /// looking for the seed and traversing its incoming `Calls` edges.
-/// In the federation the cross-crate `Calls` edge between repo B's
-/// `caller_fn` and repo A's `target_fn` may not propagate to the
-/// backend (per-repo projection rewrites endpoints through the
-/// per-repo local-to-global map, and an edge whose target is in
-/// another repo is dropped). The blast radius tool's documented
-/// contract is "well-formed response scoped to the seed" — this
-/// test pins that contract: the call must succeed, the response
-/// must list the seed repo, and `total_count` must be a number.
-/// Whether the cross-repo caller surfaces depends on how the
-/// projection logic handles cross-crate edges, which is a separate
-/// concern (covered by `federation_integration.rs` unit tests).
+///
+/// Wishlist #13 (cross-repo `Calls` ingestion) is now closed: the
+/// per-repo indexer consults the federation's `CrossRepoResolver`
+/// when the local `GraphDatabase` misses, writes the resolved
+/// target as a global id, and the federation's `project_repo`
+/// drains and emits the cross-repo edge to the federated backend.
+/// The blast radius tool's contract against this fixture is now
+/// `total_count >= 1` (repo B's `caller_fn` shows up as a
+/// caller of repo A's `target_fn`). When future work changes
+/// the cross-repo call graph shape, the hard `assert!` below is
+/// the regression pin: a silent change to `0` would re-open the
+/// ingestion gap.
 #[test]
 fn get_cross_repo_blast_radius_traverses_boundaries() {
     let fixture = FederationFixture::build();
@@ -644,14 +584,21 @@ fn get_cross_repo_blast_radius_traverses_boundaries() {
         .get("truncated")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    // We don't pin `total` (cross-repo edge propagation is
-    // environment-dependent — see the doc comment above). We do
-    // pin the structural contracts the docs promise.
-    let _ = total;
+    // Regression pin: cross-repo `Calls` edges now materialize end-to-end
+    // (wishlist #13), so `total_count` is at least 1 against the
+    // verified fixture (repo B's `caller_fn` is a caller of repo A's
+    // `target_fn`). A regression to `0` means the ingestion pipeline
+    // has stopped emitting cross-repo edges, which is the original bug
+    // — fail loudly so it can't land silently.
+    assert!(
+        total >= 1,
+        "cross-repo blast radius returned no callers — the federation \
+         ingestion gap from wishlist #13 may have regressed: {v}"
+    );
     let _ = truncated;
-    // If projection DID carry the cross-repo edge from repo b's
-    // `caller_fn` to repo a's `target_fn`, repo b must appear in
-    // `by_repo`. Soft-assert: log it but don't fail if it's absent.
+    // Shape pin: well-formed `by_repo` object. With the fix in place,
+    // repo b is the expected non-seed owner; if it ever stops showing
+    // up alongside a non-zero `total`, that's a separate shape bug.
     let by_repo = v.get("by_repo").and_then(|x| x.as_object()).cloned().unwrap_or_default();
     let by_repo_keys: Vec<&str> = by_repo.keys().map(|s| s.as_str()).collect();
     eprintln!(

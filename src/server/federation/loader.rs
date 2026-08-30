@@ -47,6 +47,12 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
             let repo_id = src.id().clone();
             fed_clone.add_repo(src, &data_dir).await?;
             fed_clone.project_repo(&repo_id).await?;
+            // Wire the federation as this repo's cross-repo resolver
+            // (wishlist #13) so a subsequent `repo.index()` can
+            // materialize cross-repo `Calls` edges.
+            if let Some(repo) = fed_clone.get_repo(&repo_id) {
+                repo.set_cross_repo_resolver(fed_clone.clone());
+            }
             Ok::<(), LainError>(())
         }));
     }

@@ -37,6 +37,20 @@ impl GlobalId {
         }
         Ok(Self(s.to_string()))
     }
+
+    /// Parse out the node-type component of a global id, e.g.
+    /// `Function` from `"auth-svc:Function:src/auth.rs:verify_token"`.
+    /// `None` if the id is malformed (which `parse` would already have
+    /// rejected, but the helper is independent so callers don't have
+    /// to re-validate).
+    pub fn node_kind_str(&self) -> Option<&str> {
+        // Format: `repo:Kind:path:name`. With `NodeType`'s `Debug`
+        // impl producing no colons (variants are bare identifiers),
+        // the second `:` is the boundary between `Kind` and `path`.
+        let after_repo = self.0.split_once(':')?.1;
+        let (kind, _rest) = after_repo.split_once(':')?;
+        Some(kind)
+    }
 }
 
 impl std::fmt::Display for GlobalId {

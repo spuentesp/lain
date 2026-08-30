@@ -175,6 +175,256 @@ async fn repo_index_index_completes_within_timeout() {
     drop(tmp);
 }
 
+// ---------------------------------------------------------------------------
+// Wishlist #13 proving test: a real Cargo workspace fixture, real LSP
+// (`rust-analyzer`), real `repo.index()`, real `fed.project_repo` — and the
+// cross-repo `Calls` edge from `b::charge_invoice` to `a::verify_token`
+// must materialize in the federated backend with the global target id.
+//
+// The unit tests in `src/server/federation/federated_index_tests.rs` cover
+// the resolver + projection in isolation. The e2e tests in
+// `tests/federation_e2e.rs` cover the full server boot + MCP round-trip.
+// This test sits in between: it drives the actual ingest pipeline
+// (`RepoIndex::index` → tree-sitter + rust-analyzer → resolve phase →
+// per-repo DB) against a workspace fixture, then asserts on the
+// federation backend that the cross-repo `Calls` edge survived the round
+// trip. A regression in the resolve phase, the `pending_external_edges`
+// stash, or the `project_repo` drain surfaces here as "no cross-repo
+// edge in the backend."
+//
+// Requires `rust-analyzer` on `PATH` (the e2e suite has the same
+// requirement). On a machine without it, `LspMultiplexer` records the
+// failure and the resolve phase never sees a cross-crate reference, so
+// the assertion below fails with a clear message rather than hanging.
+// ---------------------------------------------------------------------------
+
+/// Run `git <args>` in `dir` with a local committable identity so a
+/// fixture repo can be created with one initial commit. Mirrors the
+/// helper inside `tests/federation_e2e.rs`.
+fn git_init_committed_with_local_id(dir: &std::path::Path) {
+    let status = Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(dir)
+        .status()
+        .expect("git init");
+    assert!(status.success(), "git init failed in {}", dir.display());
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git failed to start");
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}: {status}",
+            dir.display()
+        );
+    };
+    run(&[
+        "-c", "user.email=cross-repo-proving@lain",
+        "-c", "user.name=cross-repo-proving",
+        "add",
+        "-A",
+    ]);
+    run(&[
+        "-c", "user.email=cross-repo-proving@lain",
+        "-c", "user.name=cross-repo-proving",
+        "commit",
+        "-q",
+        "-m",
+        "initial",
+    ]);
+}
+
+#[tokio::test]
+async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
+    use lain::schema::EdgeType;
+
+    // Bail loudly if rust-analyzer is not on PATH — the test depends
+    // on LSP hydration to materialize cross-repo `Calls` edges, and
+    // silently skipping would make a green test meaningless.
+    which::which("rust-analyzer")
+        .expect("rust-analyzer must be on PATH for this test");
+
+    // The whole `Tmp` must outlive every await below — `RepoIndex::index`
+    // (and the LSP it spawns) keep file handles into the fixture
+    // directories. `std::mem::forget` is the e2e pattern; replicate it.
+    let tmp_holder = tempfile::tempdir().expect("tempdir");
+    let root = tmp_holder.path().to_path_buf();
+    std::mem::forget(tmp_holder);
+
+    // Parent Cargo workspace so rust-analyzer (launched per-repo) can
+    // resolve `fed_a::verify_token` from inside `fed_b`'s crate. The
+    // parent itself is NOT a git repo — rust-analyzer only needs it as
+    // a workspace anchor.
+    let crates_dir = root.join("crates");
+    std::fs::create_dir_all(&crates_dir).unwrap();
+    std::fs::write(
+        crates_dir.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+
+    // Repo `a`: defines `verify_token`.
+    let a_dir = crates_dir.join("a");
+    std::fs::create_dir_all(a_dir.join("src")).unwrap();
+    std::fs::write(
+        a_dir.join("Cargo.toml"),
+        "[package]\nname = \"fed_a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        a_dir.join("src/lib.rs"),
+        "/// The cross-repo target — billing-svc calls this from another crate.\n\
+         pub fn verify_token(_token: &str) -> bool { true }\n",
+    )
+    .unwrap();
+    git_init_committed_with_local_id(&a_dir);
+
+    // Repo `b`: depends on `a` via Cargo path-dep; the body is a real
+    // cross-crate call, which is what makes rust-analyzer emit a
+    // reference at `auth-svc/src/lib.rs:1`-style path that the local
+    // per-repo DB cannot resolve.
+    let b_dir = crates_dir.join("b");
+    std::fs::create_dir_all(b_dir.join("src")).unwrap();
+    std::fs::write(
+        b_dir.join("Cargo.toml"),
+        "[package]\nname = \"fed_b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [dependencies]\nfed_a = { path = \"../a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        b_dir.join("src/lib.rs"),
+        "/// Cross-repo caller. Pre-fix this left no `Calls` edge in\n\
+         /// billing-svc's per-repo DB; post-fix the resolve phase\n\
+         /// consults the federation's `CrossRepoResolver` and\n\
+         /// materializes the edge to `a::verify_token`.\n\
+         pub fn charge_invoice(token: &str) -> bool {\n    \
+         fed_a::verify_token(token)\n\
+         }\n",
+    )
+    .unwrap();
+    git_init_committed_with_local_id(&b_dir);
+
+    // Federation via `load_federation` — this is the production
+    // loader. It already wires `Arc<FederatedIndex>` as each new
+    // `RepoIndex`'s cross-repo resolver (wishlist #13 wiring), so
+    // the resolve phase below sees a non-`None` resolver.
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let cfg_path = root.join("repos.yaml");
+    let repos_yaml = format!(
+        "data_dir: {}\nrepos:\n  - id: a\n    source: {{ type: workspace_dir, path: {} }}\n  - id: b\n    source: {{ type: workspace_dir, path: {} }}\n",
+        data_dir.display(),
+        a_dir.display(),
+        b_dir.display(),
+    );
+    std::fs::write(&cfg_path, repos_yaml).unwrap();
+
+    let fed = load_federation(&cfg_path)
+        .await
+        .expect("load_federation");
+    let repo_a = fed
+        .get_repo(&RepoId::new("a").unwrap())
+        .expect("repo a registered");
+    let repo_b = fed
+        .get_repo(&RepoId::new("b").unwrap())
+        .expect("repo b registered");
+
+    // Run the actual ingest pipeline. This is the slow part — it
+    // spawns rust-analyzer per repo, scans source, and runs the resolve
+    // phase. 90s per repo is generous; the e2e suite's
+    // `boot_federation` waits up to 60s for federation health.
+    //
+    // Deliberately no `project_repo` interleave between the two
+    // `index()` calls. The CLI server does interleave (see
+    // `src/cli/server.rs`); the production fix in
+    // `index_one_repo` calls `resolver.refresh()` after nodes are
+    // inserted, so `symbol_to_repos` is up-to-date for the resolve
+    // phase regardless of caller ordering.
+    let index_budget = std::time::Duration::from_secs(90);
+    tokio::time::timeout(index_budget, repo_a.index())
+        .await
+        .expect("repo a index timed out after 90s — check rust-analyzer availability")
+        .expect("repo a index failed");
+    tokio::time::timeout(index_budget, repo_b.index())
+        .await
+        .expect("repo b index timed out after 90s — check rust-analyzer availability")
+        .expect("repo b index failed");
+    assert_eq!(repo_a.health(), RepoHealth::Ready);
+    assert_eq!(repo_b.health(), RepoHealth::Ready);
+
+    // Sanity: each repo's per-repo DB has its own definition. This
+    // rules out "rust-analyzer never started" before we make the
+    // cross-repo assertion.
+    let a_nodes = repo_a.nodes();
+    let a_names: Vec<&str> = a_nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(
+        a_names.contains(&"verify_token"),
+        "repo a should define `verify_token`; got {a_names:?}"
+    );
+    let b_nodes = repo_b.nodes();
+    let b_names: Vec<&str> = b_nodes.iter().map(|n| n.name.as_str()).collect();
+    assert!(
+        b_names.contains(&"charge_invoice"),
+        "repo b should define `charge_invoice`; got {b_names:?}"
+    );
+
+    // Run the federation's projection pass for each repo. This is
+    // what drains `b`'s `pending_external_edges` stash (the cross-repo
+    // `Calls` edge the resolve phase wrote when the local DB missed
+    // `verify_token` and the federation resolver returned the global
+    // id for it) and emits the edge to the federated backend.
+    fed.project_repo(&RepoId::new("a").unwrap())
+        .await
+        .expect("project_repo a");
+    fed.project_repo(&RepoId::new("b").unwrap())
+        .await
+        .expect("project_repo b");
+
+    // THE PROOF. The cross-repo `Calls` edge must survive the round
+    // trip: caller rewritten to global form by `project_repo`, target
+    // passed through unchanged because it was already global.
+    let expected_target = GlobalId::new(
+        &RepoId::new("a").unwrap(),
+        NodeType::Function,
+        "src/lib.rs",
+        "verify_token",
+    );
+    let expected_target_str = expected_target.as_str().to_string();
+
+    let backend_edges = fed.backend().all_edges().expect("all_edges");
+    let cross_edge = backend_edges.iter().any(|e| {
+        // Caller side: rewritten from b's local
+        // `Function:src/lib.rs:charge_invoice` to global
+        // `b:Function:src/lib.rs:charge_invoice`.
+        e.source_id.starts_with("b:")
+            && e.source_id.ends_with(":charge_invoice")
+            // Target side: preserved verbatim as the global id the
+            // resolver returned. (The whole point of the fix.)
+            && e.target_id == expected_target_str
+            && e.edge_type == EdgeType::Calls
+    });
+    assert!(
+        cross_edge,
+        "cross-repo Calls edge from b::charge_invoice to a::verify_token \
+         must materialize in the federated backend (wishlist #13). \
+         Saw {} total edges; expected target was '{}'. \
+         Edges: {:?}",
+        backend_edges.len(),
+        expected_target_str,
+        backend_edges
+    );
+
+    // Hold the federation alive through the assertion so nothing
+    // reaps the backend before we read it. `load_federation` returns
+    // an `Arc<FederatedIndex>`; the local handles below just keep the
+    // ownership chain live until the test future resolves.
+    drop(repo_a);
+    drop(repo_b);
+    drop(fed);
+}
+
 #[tokio::test]
 async fn repo_index_start_watcher_does_not_panic() {
     // Smoke test that the watcher can be installed. We don't assert on

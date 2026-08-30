@@ -26,72 +26,12 @@
 //! against here.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Find a free TCP port by binding + releasing. The OS reuses it on
-/// the next bind unless a race occurs; on a CI runner with no other
-/// listeners this is reliable. If the race does occur, the server's
-/// bind will fail and the test will panic with that error.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-/// Minimal HTTP request helper — issues one request, reads the full
-/// response (connection: close), and returns `(status_code, body)`.
-fn http_request(host: &str, raw: &str) -> (u16, String) {
-    let mut stream = TcpStream::connect(host).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    stream.write_all(raw.as_bytes()).expect("write");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read");
-    let status_line = response.lines().next().unwrap_or("");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let body_start = response.find("\r\n\r\n").map(|i| i + 4).unwrap_or(response.len());
-    (status, response[body_start..].to_string())
-}
-
-/// Issue a JSON-RPC request to the live MCP `/mcp` endpoint and return
-/// the full parsed response envelope. We assert HTTP 200 here (the
-/// MCP transport always returns 200 with a JSON body, even for tool
-/// errors) but do *not* assert success — callers inspect
-/// `result.isError` and `error.code` themselves.
-fn jsonrpc(host: &str, body: &str) -> serde_json::Value {
-    let req = format!(
-        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
-         Content-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
-        host = host,
-        len = body.len(),
-    );
-    let (status, body) = http_request(host, &req);
-    assert!(
-        status == 200,
-        "JSON-RPC call returned HTTP {status}: {body}"
-    );
-    serde_json::from_str(&body).unwrap_or_else(|e| panic!("rpc not JSON: {e}\n{body}"))
-}
-
-/// Issue `tools/call <name> <args>` and return the full JSON-RPC
-/// response envelope. This is the negative-path equivalent of
-/// `tools_call_text` from `feat_suite.rs`: we do not panic when the
-/// server signals `isError=true`, and we surface any top-level
-/// `error: { code, message }` so callers can assert on protocol
-/// failures too.
-fn tools_call_envelope(host: &str, name: &str, arguments: serde_json::Value) -> serde_json::Value {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    })
-    .to_string();
-    jsonrpc(host, &body)
-}
+mod common;
+use common::{free_port, http_request, jsonrpc, tools_call_envelope, wait_for_health, ServerGuard};
 
 /// Pull the text payload out of a `tools/call` result envelope. Returns
 /// `None` when the call hit a JSON-RPC-level error (no `result`).
@@ -110,16 +50,6 @@ fn tool_error_message(env: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// RAII guard that kills the spawned server on drop, regardless of
-/// how the test exits. Prevents orphan `lain server` processes when
-/// the test panics.
-struct ServerGuard(Child);
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 /// Initialize a git repo at `path`, configure a local identity,
 /// and commit everything in the working tree. Mirrors `feat_suite.rs`.
@@ -235,54 +165,7 @@ fn boot_server(port: u16) -> ServerGuard {
     let guard = ServerGuard(child);
 
     let host = format!("127.0.0.1:{port}");
-    let start = Instant::now();
-    loop {
-        if start.elapsed() > Duration::from_secs(30) {
-            let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-            panic!(
-                "server did not become healthy within 30s on {host}; last stderr:\n{log}"
-            );
-        }
-        let attempt = (|| -> std::io::Result<(u16, String)> {
-            let mut stream = TcpStream::connect(&host)?;
-            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-            stream.write_all(
-                format!(
-                    "GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
-            )?;
-            let mut response = String::new();
-            stream.read_to_string(&mut response)?;
-            let status_line = response.lines().next().unwrap_or("");
-            let status: u16 = status_line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            let body_start = response
-                .find("\r\n\r\n")
-                .map(|i| i + 4)
-                .unwrap_or(response.len());
-            Ok((status, response[body_start..].to_string()))
-        })();
-        match attempt {
-            Ok((200, _)) => break,
-            Ok((status, body)) => {
-                if start.elapsed() > Duration::from_secs(5) {
-                    panic!("server returned HTTP {status} from /health: {body}");
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-                panic!("health probe error: {e}; stderr:\n{log}");
-            }
-        }
-    }
+    wait_for_health(&host, Duration::from_secs(30));
     guard
 }
 

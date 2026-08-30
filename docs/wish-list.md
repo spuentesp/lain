@@ -433,3 +433,355 @@ share the name, which one they answered about, and the ids of the rest.
 Nobody is refused an answer over it — erroring would break every call
 that is perfectly clear — but nobody is silently handed the wrong node
 either.
+
+## 13. Federation cross-repo `Calls` edges are never ingested — `get_cross_repo_blast_radius` cannot return cross-repo callers
+
+**Status:** closed (2026-08-29) — see closure notes below for the
+fix and the proving test landscape. The verifier found seven
+additional bugs along the way; those are tracked as items #14–#20
+below.
+
+**Verified against a real two-repo federation fixture** (auth-svc
+defining `verify_token`, billing-svc with `charge_invoice` calling
+`auth_svc::verify_token(token)` across a Cargo path-dep), the federation
+behaves like this:
+
+- `get_workspace_graph` returns 5 nodes, 0 edges. Both repos'
+  definitions are visible across the federation, but no `Calls` edge
+  connects them.
+- `get_cross_repo_blast_radius(verify_token)` →
+  `{"by_repo":{}, "total_count":0}` — empty, despite the call existing
+  in source.
+- `get_blast_radius(verify_token)` (single-repo) → also empty, even
+  though the caller is in another repo (and the single-repo tool has no
+  business seeing it from there anyway, so that part is correct).
+- `search_org("verify_token")` → finds the definition in auth-svc, no
+  callers listed.
+
+The first implementer's diagnosis pointed at
+`FederatedIndex::project_repo` for only projecting intra-repo edges.
+That is a real gap, but the deeper issue is that the federation's
+indexer never creates the cross-repo `Calls` edge in the first place:
+even within billing-svc's per-repo graph, the
+`charge_invoice → verify_token_bridge` and
+`verify_token_bridge → auth_svc::verify_token` hops that would carry
+the call across the boundary are missing.
+
+This gap is acknowledged in the test that pins it:
+`tests/federation_e2e.rs::get_cross_repo_blast_radius_traverses_boundaries`
+soft-asserts the result is well-formed but does not require cross-repo
+callers to surface, and its doc comment notes that "cross-crate `Calls`
+edge propagation is environment-dependent." That phrasing understates
+the situation — it does not happen in *any* environment with the
+current code, and the soft assertion means a regression in either
+direction is invisible.
+
+Net effect: the federation's headline cross-repo tool answers
+correctly within a repo but cannot answer the cross-repo question it is
+named for. The demo recording team already pivoted around this in
+commits `0992a9d` ("make federation fixture a real cross-repo
+workspace"), `f77ab38` ("deterministic federation cross-repo probe in
+recorder"), and `bc82e09` ("swap Tools-tab call to
+`get_workspace_graph` for federation fixture") — the recording shows
+`get_workspace_graph` (which works, because it never claims cross-repo
+edges) rather than `get_cross_repo_blast_radius` (which doesn't).
+The brief assumed the recording would show a cross-repo blast-radius
+query returning cross-repo callers; against the current federation
+that is literally impossible.
+
+**Wish:** cross-repo `Calls` edges are ingested end-to-end so the
+headline tool answers the question it is named for. Concretely:
+
+1. The per-repo indexer resolves cross-crate references (via
+   rust-analyzer with the parent Cargo workspace as the anchor) and
+   writes a `Calls` edge to the target repo's symbol — not just a
+   local bridge.
+2. `FederatedIndex::project_repo` preserves cross-repo edges when
+   projecting per-repo nodes into the federated petgraph (or the
+   federated backend learns to reconstruct them from the local-to-
+   global map).
+3. `get_cross_repo_blast_radius(verify_token)` against the verified
+   fixture returns something like
+   `{"by_repo":{"billing-svc":["billing-svc:Function:src/billing.rs:charge_invoice"]}, "total_count":1, "truncated":false}`.
+4. `get_workspace_graph` reports the cross-repo edge with
+   `cross_repo: true`.
+5. The soft-assert test is converted to a hard assertion, and the
+   regression pin flips from `total == 0` to `total >= 1` as part of
+   the same change.
+
+In the meantime, `docs/FEDERATION.md` calls out the limitation
+honestly so users do not assume the headline example output
+(`billing-svc: caller_c` under `by_repo`) is reachable against the
+current code.
+
+**Closed 2026-08-29.**
+
+The ingestion gap is fixed end-to-end:
+
+1. **`CrossRepoResolver` trait** (`src/server/federation/cross_repo.rs`).
+   Federation-aware lookup the resolve phase calls when a reference
+   misses the calling repo's `GraphDatabase`. `FederatedIndex`
+   implements it; the strategy is path-prefix for LSP refs (find the
+   owning repo by absolute path, then `get_node_at_location` at that
+   path:line in the other repo's DB) and `symbol_to_repos` for
+   tree-sitter refs (single non-source owner narrows to a global id;
+   2+ non-source owners return `None` — same-file preference). Both
+   branches produce a canonical `GlobalId`. The trait also carries a
+   `refresh()` hook (`FederatedIndex` calls
+   `rebuild_symbol_index`); see (4) below for why.
+2. **`GraphDatabase::insert_edges_batch`** (`src/server/graph.rs`)
+   no longer drops edges whose target is missing locally. It stashes
+   them in `pending_external_edges` instead — the petgraph can't
+   store an edge to a node it doesn't own, but the federation layer
+   *can* resolve that target against the rest of the federation, so
+   the edge is held for `project_repo` to drain via
+   `take_pending_external_edges`. Edges whose source is also missing
+   remain true orphans and are still counted in the dropped return,
+   so `insert_edges_reporting`'s warning still fires for genuinely
+   broken cases.
+3. **`FederatedIndex::project_repo`** drains the stash: rewrites
+   `source_id` through `local_to_global` and passes the global
+   `target_id` through unchanged. It also upserts a placeholder node
+   for each unique target first (idempotent on global id) so the
+   backend's "both endpoints must exist" invariant holds even when
+   the target's owning repo hasn't been projected yet — the real
+   projection overwrites the placeholder when it runs. The
+   `rebuild_symbol_index` call at the end is gated on a non-empty
+   per-repo DB so the federation loader's parallel `add_repo +
+   project_repo` over empty DBs can no longer wipe `symbol_to_repos`
+   to empty.
+4. **`index_one_repo` refreshes the resolver** before the resolve
+   phase runs. Without this, the federation loader's parallel
+   `add_repo + project_repo` sequence runs over empty per-repo DBs,
+   `symbol_to_repos` ends up empty, and the resolve phase's
+   cross-repo lookup silently returns `None` — dropping the very
+   edge the fix was meant to produce. `index_one_repo` now calls
+   `resolver.refresh()` after the per-repo node insert, so
+   `symbol_to_repos` is up-to-date for the resolve phase regardless
+   of caller ordering (the CLI's manual `index() → project_repo()`
+   interleave is no longer load-bearing).
+5. **Loader wiring.** `load_federation` and
+   `load_federation_with_workspace` install `Arc<FederatedIndex>` as
+   each new `RepoIndex`'s cross-repo resolver right after `add_repo`,
+   so the resolve phase inside `RepoIndex::index` sees a non-`None`
+   resolver from the start.
+6. **Tests.**
+   - `tests/federation_e2e.rs::get_cross_repo_blast_radius_traverses_boundaries`
+     flipped from `assert_eq!(total, 0)` to `assert!(total >= 1)`.
+   - `src/server/federation/federated_index_tests.rs` gained four
+     unit tests covering the resolve path (path+line lookup),
+     source-repo skip, multi-other-repo ambiguity (correctly returns
+     `None`), and projection pass-through.
+   - `tests/federation_integration.rs::cross_repo_calls_edges_materialize_via_real_lsp_pipeline`
+     is the **proving test** the customer asked for. It builds a
+     real Cargo workspace (parent `crates/` with `[workspace]
+     members = ["a", "b"]`, repo `a` defines `verify_token`, repo
+     `b` declares a path-dep and calls `fed_a::verify_token`),
+     boots `load_federation`, runs real `RepoIndex::index()` against
+     both repos (which spawns rust-analyzer, scans via
+     tree-sitter, runs the resolve phase), then asserts the
+     federated backend has the cross-repo `Calls` edge from
+     `b:Function:src/lib.rs:charge_invoice` to
+     `a:Function:src/lib.rs:verify_token`. No interleave, no
+     fakery — exactly the headline behavior this wishlist described.
+
+Verified against the e2e fixture (`a` defines `target_fn`; `b` calls
+`a::target_fn` via Cargo path-dep):
+
+```
+[federation_e2e] blast radius by_repo=["b"] total_count=1 truncated=false
+```
+
+And against the integration fixture (identical shape, `verify_token` /
+`charge_invoice`):
+
+```
+test cross_repo_calls_edges_materialize_via_real_lsp_pipeline ... ok
+```
+
+The headline cross-repo caller shape from this very wishlist item
+now materializes; `docs/FEDERATION.md`'s Known-limitations note and
+the `billing-svc: caller_c` example output are both accurate again
+and the demo recording can use `get_cross_repo_blast_radius` directly
+(no more pivot to `get_workspace_graph` for the cross-repo probe).
+
+---
+
+## Items surfaced during the #13 close-out (2026-08-29)
+
+The use-case proving test work that closed #13 also exposed seven
+real bugs in adjacent code paths. Each is filed below as its own
+item so a follow-up pass can address them in priority order. All
+were found by `tests/use_cases/*.rs` (a new directory of one-file-per-
+use-case proving tests — see `docs/use_cases_inventory.md` for the
+full inventory and the verification procedure for each new test).
+
+## 14. `find_anchors` returns 0.000 for every function in small fixtures
+
+**Symptom:** for any fixture where every function has `calls_in = 0`
+(small files, or fixtures where the LSP path didn't pick up the
+calls), the anchor score collapses to 0. The sort is unstable at
+zero, so the top anchors come back in arbitrary order. The
+`tests/use_cases/find_anchors.rs` proving test currently works
+around this by switching to an in-process graph build, but the
+underlying scoring pipeline is broken.
+
+**Root cause (suspected):** score formula
+`calls_in * log2(1 + calls_out) * size_factor` collapses for small
+files where every function has `calls_in = 0` and `size_factor = 1`.
+The `calculate_anchor_scores` body has the right intent (two-pass
+percentile normalization) but the pre-normalization raw scores are
+all 0 in small fixtures, so the normalized distribution is
+indistinguishable.
+
+**Suggested fix:** either include tree-sitter- or LSP-detected
+"structural importance" signals (e.g., `is_test_symbol`,
+`is_false_positive_name` overrides) in the raw score, or change the
+scoring so `size_factor` alone (or a fan-out-only variant) is the
+score when calls_in is 0.
+
+**Proving test to add:** none until the fix lands; the
+`tests/use_cases/find_anchors.rs` test currently runs only against
+an in-process graph build (deterministic); an LSP-driven regression
+test would catch the underlying issue.
+
+## 15. `resolve_node` returns NotFound for symbols that exist (by-name lookup broken)
+
+**Symptom:** `get_call_sites(target)` returned `"Node not found for
+handle: target"` even though the per-repo DB had a function named
+`target` and the federated `search_org` found it. The tool only
+worked when called with the node's UUID (`d4037d74-...`).
+
+**Root cause (suspected):** not yet investigated. `resolve_node`
+walks the graph via overlay → graph → overlay by name → graph by
+name. The per-repo graph's `find_node_by_name` filter
+(`n.name == name`) should match — perhaps the per-repo DB lookup
+binds to a different graph than `list_repos` reports, or perhaps
+`find_node_by_name` doesn't handle the case where the node has
+been projected (id rewritten) but `n.name` was never re-populated
+from the projection.
+
+**Suggested fix:** add a diagnostic inside `resolve_node` to print
+which step missed and which DB it queried. The test
+`tests/use_cases/get_call_sites.rs` works around the issue by
+querying the federated search to find the node id, then calling
+the tool with the id.
+
+**Proving test to add:** a test that calls `get_call_sites` with a
+known symbol name (no id lookup) against a single-repo fixture
+where the symbol is defined and indexed. The test should pass.
+
+## 16. `find_cross_repo_matches` requires a populated `signature` field
+
+**Symptom:** two functions with the same name across repos
+(e.g. `shared_helper` in both `a` and `b`) don't get a
+`CrossRepoSameSymbol` peer edge. The matcher returns an empty list.
+
+**Root cause:** the matcher tokenizes `node.signature` and computes
+cosine similarity. When rust-analyzer's `documentSymbol` doesn't
+populate the `detail` field (which happens for some symbols — the
+exact criteria aren't clear), the signature is empty, the token
+list is empty, similarity is 0.0, no peer edge fires.
+
+**Suggested fix:** fall back to a name-only signal when the signature
+is empty. The simplest version: when the signature is empty, treat
+it as a single-token signature equal to `node.name` and compare
+against the other node's name. This would make the matcher robust
+to the LSP detail-population gap.
+
+**Proving test to add:** the existing
+`tests/use_cases/workspace_graph_peers.rs` pins the
+"both function nodes surface" contract (which works today). A
+follow-up test should additionally assert the `CrossRepoSameSymbol`
+edge between the two nodes — this would fail until the matcher
+fallback lands.
+
+## 17. `repo.index()` short-circuits on unchanged commit hash
+
+**Symptom:** a file edit followed by `repo.index()` re-ran, but the
+per-repo DB still had only the pre-edit nodes. The new symbol
+wasn't there.
+
+**Root cause:** `index_one_repo` returns early if the latest
+commit hasn't changed. File edits without a follow-up `git commit`
+leave the commit hash unchanged, so the reindex is a no-op. The
+file-watcher in production sees the change and signals a reindex
+*event*, but the reindex path also checks the commit hash first.
+
+**Suggested fix:** the watcher should either commit on the user's
+behalf (configurable) or `repo.index()` should re-walk the worktree
+(not the commit tree) when invoked from the watcher. A simpler
+heuristic: if the worktree's files differ from the last-indexed
+state, force a re-scan.
+
+**Proving test to add:** the existing
+`tests/use_cases/watcher_reindex.rs` test commits the change
+explicitly between edit and reindex. A follow-up test should skip
+the commit and verify that `repo.index()` still picks up the
+new symbol (this will fail until the fix lands).
+
+## 18. `get_code_snippet` error message doesn't name the missing path
+
+**Symptom:** when the path doesn't exist, the tool returned a
+generic `"Error: IO error: No such file or directory (os error 2)"`.
+The user couldn't tell which path they were looking at.
+
+**Root cause:** `read_file_range` propagates the raw
+`std::io::Error` without wrapping the path into a descriptive
+LainError. The `LainError::Io` variant only carries the
+`io::Error`, not the path.
+
+**Suggested fix:** wrap the `std::fs::read_to_string` error into
+`LainError::NotFound` with the path included in the message, e.g.
+`format!("Path not found: {path}")`.
+
+**Proving test to add:** extend
+`tests/use_cases/get_code_snippet_paths.rs` to assert the error
+message contains the missing path. The test currently asserts
+only `isError=true` and explicitly notes this is a follow-up.
+
+## 19. `failure_modes.rs` checks survival, not wire shape
+
+**Symptom:** the survival tests verify the server doesn't panic
+or hang on malformed input. They don't verify the server returns
+the right error shape.
+
+**Root cause:** the `tools_call_envelope` helper returns the full
+JSON-RPC envelope, but the survival tests only assert
+`is_alive() == true` after the malformed input.
+
+**Suggested fix:** for each survival test, also assert the
+JSON-RPC envelope shape (status code, error code, message
+naming the input that was malformed).
+
+**Proving test to add:** the existing
+`tests/failure_modes.rs::server_handles_concurrent_overloaded_clients`
+is a good template — add wire-shape assertions alongside the
+survival check.
+
+## 20. Several proving tests were previously passing for the wrong reason
+
+**Symptom:** during the use-case test verification (stub-and-revert
+pass), `tests/use_cases/find_anchors.rs` was found to be passing
+trivially — its first-name extraction used `split("**")`, but the
+tool's actual output format does not have `**` markers, so
+`first_name` was always `""` and the `!contains("")` assertion was
+trivially true. The test was passing without actually testing
+anything.
+
+**Root cause:** the test was written without verifying it would
+fail when the underlying behavior was broken. This is the
+`use_cases_inventory.md` lesson "a passing test is necessary but
+not sufficient."
+
+**Suggested fix:** a periodic audit of every proving test in
+`tests/use_cases/` to confirm each test would fail when the
+underlying behavior is broken. The audit procedure is
+documented in `docs/use_cases_inventory.md` (see "stub-and-revert
+is the only way to know a test proves something").
+
+**Proving test to add:** none directly — the audit is the work.
+The audit should also check that assertion messages name the
+expected and actual values (so a future reader can see what was
+checked) and that the test is robust to non-deterministic ordering
+(e.g. `HashMap` iteration) when the underlying contract allows it.

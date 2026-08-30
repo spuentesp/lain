@@ -20,87 +20,15 @@
 //! `ServerGuard` cleans up the child on drop regardless of how the
 //! test exits.
 
+mod common;
+
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-/// Find a free TCP port by binding + releasing. The OS reuses it on
-/// the next bind unless a race occurs; if it does, the server's bind
-/// will fail and the test will panic with that error.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-/// Minimal HTTP request helper — issues one request, reads the full
-/// response (connection: close), and returns `(status_code, body)`.
-fn http_request(host: &str, raw: &str) -> (u16, String) {
-    let mut stream = TcpStream::connect(host).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    stream.write_all(raw.as_bytes()).expect("write");
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-    let status_line = response.lines().next().unwrap_or("");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let body_start = response.find("\r\n\r\n").map(|i| i + 4).unwrap_or(response.len());
-    (status, response[body_start..].to_string())
-}
-
-/// Issue a JSON-RPC request to the live MCP `/mcp` endpoint and return
-/// the parsed response envelope.
-fn jsonrpc(host: &str, body: &str) -> serde_json::Value {
-    let req = format!(
-        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
-         Content-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
-        host = host,
-        len = body.len(),
-    );
-    let (status, body) = http_request(host, &req);
-    assert!(
-        status == 200,
-        "JSON-RPC call returned HTTP {status}: {body}"
-    );
-    serde_json::from_str(&body).unwrap_or_else(|e| panic!("rpc not JSON: {e}\n{body}"))
-}
-
-/// Issue `tools/call <name> <args>` and return the full JSON-RPC
-/// response envelope. We do *not* panic on `isError=true` — these
-/// tests are explicitly checking the error path.
-fn tools_call_envelope(host: &str, name: &str, arguments: serde_json::Value) -> serde_json::Value {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    })
-    .to_string();
-    jsonrpc(host, &body)
-}
-
-/// RAII guard that kills the spawned server on drop, regardless of
-/// how the test exits. Prevents orphan `lain server` processes when
-/// the test panics.
-struct ServerGuard(Child);
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl ServerGuard {
-    /// True if `try_wait` says the child is still running. A return
-    /// value of `false` means the process exited — either it crashed
-    /// (the failure mode we're testing for) or `Drop` already ran.
-    fn is_alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
-    }
-}
+use common::{free_port, http_request, jsonrpc, tools_call_envelope, ServerGuard};
 
 /// Initialize a git repo at `path`. The indexer skips non-git
 /// directories, so without `.git/` `find_anchors` would have nothing

@@ -71,6 +71,16 @@ pub struct GraphDatabase {
     /// used by sidecar processes that subscribe to an owner's overlay
     /// stream and never mutate the static graph on disk.
     read_only: bool,
+    /// Edges the resolve phase wrote whose target id is not local
+    /// (wishlist #13 — cross-repo `Calls`). The petgraph cannot store
+    /// an edge to a node that isn't in `index_map`, so instead of
+    /// silently dropping them — which hid the federation's headline
+    /// bug for months — they live here until the federation's
+    /// `project_repo` drains them with [`Self::take_pending_external_edges`]
+    /// and emits them to the federated backend. The `Arc<Mutex<…>>`
+    /// matches the other shared fields so `GraphDatabase::clone` is
+    /// still cheap and points at the same accumulator.
+    pending_external_edges: Arc<parking_lot::Mutex<Vec<GraphEdge>>>,
 }
 
 /// How current the graph is for one file.
@@ -131,6 +141,7 @@ impl GraphDatabase {
             last_commit: Arc::new(RwLock::new(None)),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
+            pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
         };
 
         if memory_path.exists() {
@@ -574,22 +585,59 @@ impl GraphDatabase {
     ///
     /// Callers should log a non-zero return. An indexing pass that
     /// drops edges produced a graph that does not describe the code.
+    ///
+    /// Cross-repo edges (wishlist #13): an edge whose source IS in the
+    /// local index but whose target is not (the resolve phase consulted
+    /// the federation's `CrossRepoResolver` and got back a global id)
+    /// cannot be added to the local petgraph. Stash it in
+    /// [`Self::pending_external_edges`] so the federation's `project_repo`
+    /// can drain it via [`Self::take_pending_external_edges`] and emit
+    /// it to the federated backend, where the target's global id is
+    /// already valid. An edge whose source is also missing is a true
+    /// orphan (no caller to attach to) and is counted in the dropped
+    /// return — same behavior as before this change, kept so the
+    /// `label` warning still reports the genuinely broken case.
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
+        let mut external = self.pending_external_edges.lock();
 
         let mut dropped = 0usize;
         for edge in new_edges {
-            if let (Some(s), Some(t)) = (
-                self.index_map.get(&edge.source_id).map(|r| *r.value()),
-                self.index_map.get(&edge.target_id).map(|r| *r.value())
-            ) {
-                graph.add_edge(s, t, edge.clone());
-            } else {
-                dropped += 1;
+            let source_local = self.index_map.get(&edge.source_id).is_some();
+            let target_local = self.index_map.get(&edge.target_id).is_some();
+            match (source_local, target_local) {
+                (true, true) => {
+                    let s = self.index_map.get(&edge.source_id).map(|r| *r.value()).unwrap();
+                    let t = self.index_map.get(&edge.target_id).map(|r| *r.value()).unwrap();
+                    graph.add_edge(s, t, edge.clone());
+                }
+                (true, false) => {
+                    // Caller exists locally, callee lives in another
+                    // repo. Hold the edge for the federation's
+                    // `project_repo` to drain.
+                    external.push(edge.clone());
+                }
+                (false, _) => {
+                    // Truly orphan — neither endpoint is local.
+                    // `insert_edges_reporting` warns about these.
+                    dropped += 1;
+                }
             }
         }
         Ok(dropped)
+    }
+
+    /// Drain every edge the resolve phase stashed because its target
+    /// lives outside the local repo (wishlist #13). The federation's
+    /// `project_repo` calls this after the regular intra-repo edge
+    /// pass: each drained edge has `source_id` rewritten through the
+    /// per-repo `local_to_global` map and `target_id` passed through
+    /// unchanged because it is already in global form
+    /// (`repo_id:Kind:path:name`). Returns the drained vec; calling it
+    /// twice in a row returns an empty vec the second time.
+    pub fn take_pending_external_edges(&self) -> Vec<GraphEdge> {
+        std::mem::take(&mut *self.pending_external_edges.lock())
     }
 
     /// Insert an edge idempotently: same `(source, target, edge_type)`

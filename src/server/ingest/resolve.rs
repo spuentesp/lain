@@ -12,6 +12,8 @@
 //! functions in this module are pure: `&self` only on the `db` they
 //! mutate through the public `insert_edges_batch`/`upsert_edge` API.
 
+use crate::federation::cross_repo::CrossRepoResolver;
+use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase};
 use crate::schema::{is_type_level_target, EdgeType, GraphEdge};
 use crate::lsp::ReferenceLocation;
@@ -75,14 +77,27 @@ pub fn resolve_call_edges(
     db: &GraphDatabase,
     workspace: &Path,
     refs: &[(String, ReferenceLocation)],
+    resolver: Option<&dyn CrossRepoResolver>,
+    source_repo: Option<&RepoId>,
 ) -> Vec<GraphEdge> {
     let mut edges = Vec::with_capacity(refs.len());
     for (source_id, ref_loc) in refs {
         let path_str = graph_path(workspace, &ref_loc.path);
+        let mut resolved_target: Option<String> = None;
         if let Some(target) = db.get_node_at_location(&path_str, ref_loc.line) {
             if target.id != *source_id {
-                edges.push(GraphEdge::new(EdgeType::Calls, source_id.clone(), target.id));
+                resolved_target = Some(target.id);
             }
+        } else if let (Some(resolver), Some(src)) = (resolver, source_repo) {
+            if let Some(gid) = resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line)) {
+                let gid_str = gid.as_str().to_string();
+                if gid_str != *source_id {
+                    resolved_target = Some(gid_str);
+                }
+            }
+        }
+        if let Some(target_id) = resolved_target {
+            edges.push(GraphEdge::new(EdgeType::Calls, source_id.clone(), target_id));
         }
     }
     edges
@@ -144,7 +159,12 @@ fn may_link_across(from: &str, to: &str) -> bool {
 ///
 /// `refs` already carries the source file path + line for each entry;
 /// no workspace path is needed here.
-pub fn resolve_static_edges(db: &GraphDatabase, refs: &[StaticFileRef]) -> Vec<GraphEdge> {
+pub fn resolve_static_edges(
+    db: &GraphDatabase,
+    refs: &[StaticFileRef],
+    resolver: Option<&dyn CrossRepoResolver>,
+    source_repo: Option<&RepoId>,
+) -> Vec<GraphEdge> {
     // (id, type, path). The path is what lets an ambiguous name be
     // resolved to the definition in the calling file.
     let mut name_index: HashMap<String, Vec<(String, crate::schema::NodeType, String)>> =
@@ -163,6 +183,26 @@ pub fn resolve_static_edges(db: &GraphDatabase, refs: &[StaticFileRef]) -> Vec<G
             continue;
         };
         let Some(candidates) = name_index.get(sr.target_name.as_str()) else {
+            if let (Some(resolver), Some(src)) = (resolver, source_repo) {
+                if let Some(gid) = resolver.resolve_cross_repo(
+                    src,
+                    Some(&sr.target_name),
+                    None,
+                    None,
+                ) {
+                    let gid_str = gid.as_str().to_string();
+                    if gid_str != source_node.id {
+                        let key = (source_node.id.clone(), gid_str.clone());
+                        if seen.insert(key) {
+                            edges.push(GraphEdge::new(
+                                sr.edge_type.clone(),
+                                source_node.id.clone(),
+                                gid_str,
+                            ));
+                        }
+                    }
+                }
+            }
             continue;
         };
         // A name that several definitions share cannot be resolved by
@@ -353,7 +393,7 @@ mod ambiguous_name_tests {
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
         }];
-        let edges = resolve_static_edges(&db, &refs);
+        let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
             edges.is_empty(),
             "a name with three candidates and none in the calling file is \
@@ -384,7 +424,7 @@ mod ambiguous_name_tests {
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
         }];
-        let edges = resolve_static_edges(&db, &refs);
+        let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the local definition");
         assert_eq!(edges[0].target_id, local_id);
     }
@@ -411,7 +451,7 @@ mod ambiguous_name_tests {
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
         }];
-        let edges = resolve_static_edges(&db, &refs);
+        let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
             edges.is_empty(),
             "a .py caller must not link to a .rs definition; got {} edge(s)",
@@ -440,7 +480,7 @@ mod ambiguous_name_tests {
             target_name: "renderWidget".to_string(),
             edge_type: EdgeType::Calls,
         }];
-        let edges = resolve_static_edges(&db, &refs);
+        let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, ".ts -> .tsx is the same language family");
         assert_eq!(edges[0].target_id, target_id);
     }
@@ -468,7 +508,7 @@ mod ambiguous_name_tests {
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
         }];
-        let edges = resolve_static_edges(&db, &refs);
+        let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the Python definition");
         assert_eq!(edges[0].target_id, py_id);
     }
@@ -570,7 +610,7 @@ mod ambiguous_name_tests {
             target_name: "sweep_orphans".to_string(),
             edge_type: EdgeType::Calls,
         }];
-        let edges = resolve_static_edges(&db, &refs);
+        let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "a unique name must still resolve");
         assert_eq!(edges[0].target_id, target_id);
     }

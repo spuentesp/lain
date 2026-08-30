@@ -28,11 +28,15 @@
 //! measure median of N rounds so a single cold-cache spike does not
 //! fail the suite.
 
+mod common;
+
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use common::{free_port, ServerGuard};
 
 /// Bound applied on top of every documented budget. 2× absorbs a
 /// 2-core CI runner with the debug binary; bump it for noisier fleets.
@@ -51,21 +55,6 @@ fn relaxed(budget: Duration) -> Duration {
     // silently make every assertion trivially pass.
     let capped = nanos.min(60 * 1_000_000_000_u128); // 60 s
     Duration::from_nanos(capped as u64)
-}
-
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-/// RAII guard that kills the spawned server on drop, regardless of how
-/// the test exits. Mirrors `tests/feat_suite.rs::ServerGuard`.
-struct ServerGuard(Child);
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 /// Build the fixture the perf suite runs against. It is the

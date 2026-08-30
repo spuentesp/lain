@@ -200,13 +200,13 @@ impl LainServer {
         // 3. Resolve Phase: Link external references to internal nodes (CALLS/USES)
         info!("Resolving topology: Linking {} external references...", all_external_refs.len());
         let call_edges =
-            super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs);
+            super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs, None, None);
         info!("Ingesting {} call edges", call_edges.len());
         insert_edges_reporting(&self.graph, &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
         info!("Resolving {} tree-sitter static references...", all_static_refs.len());
-        let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs);
+        let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs, None, None);
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
         insert_edges_reporting(&self.graph, &static_edges, "static")?;
 
@@ -563,6 +563,8 @@ pub async fn index_one_repo(
     lsp: &LspPool,
     git: &GitSensor,
     overlay: &VolatileOverlay,
+    resolver: Option<&dyn crate::federation::cross_repo::CrossRepoResolver>,
+    source_repo: Option<&crate::federation::repo_id::RepoId>,
 ) -> Result<(), LainError> {
     let scan_start = std::time::Instant::now();
     let (latest_commit, latest_time) = git.get_latest_commit_info()?;
@@ -711,12 +713,23 @@ pub async fn index_one_repo(
     );
 
     // Resolve phase: link external references to internal nodes (CALLS)
-    let call_edges = super::resolve::resolve_call_edges(db, path, &all_external_refs);
+    let call_edges = super::resolve::resolve_call_edges(
+        db,
+        path,
+        &all_external_refs,
+        resolver,
+        source_repo,
+    );
     info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
     insert_edges_reporting(db, &call_edges, "call")?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
-    let static_edges = super::resolve::resolve_static_edges(db, &all_static_refs);
+    let static_edges = super::resolve::resolve_static_edges(
+        db,
+        &all_static_refs,
+        resolver,
+        source_repo,
+    );
     info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
     insert_edges_reporting(db, &static_edges, "static")?;
 
@@ -728,6 +741,13 @@ pub async fn index_one_repo(
     );
     info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
     db.insert_edges_batch(&pattern_edges)?;
+
+    // Refresh the federation's symbol index so the just-populated
+    // per-repo DB is visible to subsequent cross-repo lookups in
+    // this same `index_one_repo` call.
+    if let Some(resolver) = resolver {
+        resolver.refresh();
+    }
 
     // Protocol sensors — same rationale as the single-workspace pipeline;
     // runs after symbol nodes exist so route->handler links resolve.

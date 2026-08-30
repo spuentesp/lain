@@ -114,6 +114,11 @@ pub struct RepoIndex {
     /// surface the aggregate without grepping logs. Reset to 0 at
     /// the start of each `sync_overlay` call.
     last_overlay_lsp_failures: std::sync::atomic::AtomicU32,
+    /// Federation-aware cross-repo resolver. `None` for repos that
+    /// don't need it (tests, single-repo mode). The federation
+    /// loader sets this right after `add_repo` so a subsequent
+    /// `index()` can use it to materialize cross-repo `Calls` edges.
+    cross_repo_resolver: parking_lot::Mutex<Option<Arc<dyn crate::federation::cross_repo::CrossRepoResolver>>>,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -150,6 +155,7 @@ impl RepoIndex {
             watcher: parking_lot::Mutex::new(None),
             overlay_updated: Arc::new(tokio::sync::Notify::new()),
             last_overlay_lsp_failures: std::sync::atomic::AtomicU32::new(0),
+            cross_repo_resolver: parking_lot::Mutex::new(None),
         })
     }
 
@@ -208,6 +214,17 @@ impl RepoIndex {
         *self.health.write() = health;
     }
 
+    /// Install the federation's cross-repo symbol resolver. Called by
+    /// the federation loader after `add_repo` so the resolve phase
+    /// in a subsequent `index()` can use it to materialize cross-repo
+    /// `Calls` edges.
+    pub fn set_cross_repo_resolver(
+        &self,
+        resolver: Arc<dyn crate::federation::cross_repo::CrossRepoResolver>,
+    ) {
+        *self.cross_repo_resolver.lock() = Some(resolver);
+    }
+
     pub fn last_indexed(&self) -> SystemTime {
         *self.last_indexed.read()
     }
@@ -259,7 +276,20 @@ impl RepoIndex {
 
         let pipeline = async {
             let overlay = self.server_overlay.lock().clone();
-            index_one_repo(&path, &db, &lsp, &*git_guard, &overlay).await
+            let resolver = self.cross_repo_resolver.lock().clone();
+            let resolver_ref: Option<&dyn crate::federation::cross_repo::CrossRepoResolver> =
+                resolver.as_deref();
+            let source_repo = self.source.id();
+            index_one_repo(
+                &path,
+                &db,
+                &lsp,
+                &*git_guard,
+                &overlay,
+                resolver_ref,
+                Some(source_repo),
+            )
+            .await
         };
         let result = match tokio::time::timeout(INDEX_TIMEOUT, pipeline).await {
             Ok(r) => r,
