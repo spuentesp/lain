@@ -15,6 +15,7 @@
 | Multi-agent presence | [multiplayer.md](multiplayer.md) |
 | Pre-edit hooks | [hooks.md](hooks.md) |
 | CI pipeline notes | [CI.md](CI.md) |
+| Use-case proving tests & inventory | [use_cases_inventory.md](use_cases_inventory.md) |
 
 ```mermaid
 flowchart LR
