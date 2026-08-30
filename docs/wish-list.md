@@ -645,6 +645,43 @@ score when calls_in is 0.
 an in-process graph build (deterministic); an LSP-driven regression
 test would catch the underlying issue.
 
+**Closed 2026-08-30.**
+
+The fix adds a baseline weight of `size_factor * 0.5` for functions
+with **no callers at all** (unfiltered `calls_in == 0`). Without
+this, every raw in a small fixture is 0; `max_raw` is 0; every
+normalized score is 0; the sort is unstable at zero. With 0.5x,
+dead functions stay visible (so the user sees what was indexed)
+but any function with at least one caller strictly outranks them:
+`calls_in >= 1 ∧ calls_out >= 1 ⇒ raw >= size_factor`, which
+exceeds `0.5 * size_factor`.
+
+The baseline gate uses *unfiltered* `calls_in` (just the Calls
+count, no test-path filter). The test-caller filter is a stronger
+statement — "test code doesn't count as a production signal" —
+and must NOT be relaxed by handing the function a baseline weight.
+That's the regression `calls_from_test_code_do_not_count` would
+catch if the gate used filtered `calls_in`: a function called only
+from tests would silently get the 0.5x baseline and stop scoring 0,
+which is the entire point of that test.
+
+Proving tests:
+
+- `anchor_hub_tests::dead_function_baseline_weight` pins the
+  contract directly: a 16-line dead function (`size_factor = 1.0`)
+  scores > 0; a same-sized hub with 1 caller and 1 callee
+  (`raw = log2(2) ≈ 1.0`) strictly outranks it.
+- `tests/use_cases/find_anchors.rs::find_anchors_ranks_real_hub_above_stdlib_named_helpers`
+  strengthened to assert `real_hub` is at POSITION 1 (deterministic
+  after this fix; was non-deterministic before). The fixture also
+  gains `Calls` edges from `real_hub` to `parse`/`default`/`as_str`
+  so `real_hub` is a real orchestration hub (`calls_in=5,
+  calls_out=3`) — without those outgoing edges the leaf rule would
+  still zero `real_hub`'s raw and the position-1 assertion could
+  not hold.
+
+Commit: `a057d65`.
+
 ## 15. `resolve_node` returns NotFound for symbols that exist (by-name lookup broken)
 
 **Symptom:** `get_call_sites(target)` returned `"Node not found for
