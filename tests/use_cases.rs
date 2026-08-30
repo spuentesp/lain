@@ -47,3 +47,6 @@ mod battery_presence;
 
 #[path = "use_cases/battery_audit.rs"]
 mod battery_audit;
+
+#[path = "use_cases/battery_success_metrics.rs"]
+mod battery_success_metrics;
