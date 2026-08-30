@@ -29,3 +29,18 @@ mod watcher_reindex;
 
 #[path = "use_cases/workspace_graph_peers.rs"]
 mod workspace_graph_peers;
+
+#[path = "use_cases/battery_mcp_tools.rs"]
+mod battery_mcp_tools;
+
+#[path = "use_cases/battery_federation.rs"]
+mod battery_federation;
+
+#[path = "use_cases/battery_cli.rs"]
+mod battery_cli;
+
+#[path = "use_cases/battery_hooks.rs"]
+mod battery_hooks;
+
+#[path = "use_cases/battery_presence.rs"]
+mod battery_presence;
