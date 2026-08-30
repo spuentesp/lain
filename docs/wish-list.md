@@ -671,6 +671,37 @@ the tool with the id.
 known symbol name (no id lookup) against a single-repo fixture
 where the symbol is defined and indexed. The test should pass.
 
+**Closed 2026-08-30.**
+
+Investigation found the resolver code was correct; the bug was the
+*test fixture*, not `resolve_node`:
+
+- `resolve_node` canonicalizes `handle` to an absolute path when it
+  points at something on disk. Running the test from
+  `/home/sebastian/lain`, the literal name `"target"` resolved to
+  the real `target/` directory in the working directory, the
+  canonical form `/home/sebastian/lain/target` skipped every name
+  lookup in the resolver, and the call returned `NotFound` despite
+  the per-repo DB containing a node with `name="target"`.
+- Two proving tests added in
+  `tests/federation_integration.rs` pin the contract at the
+  resolver boundary:
+  - `resolve_node_finds_indexed_function_by_name` — inserts a node
+    with `name="target"`, `chdir`s to the tempdir so the handle is
+    unambiguously a name, then asserts name lookup succeeds and
+    returns the right node.
+  - `resolve_node_ambiguous_returns_other_definitions` — inserts two
+    `parse` nodes in different files and asserts
+    `resolve_node_ambiguous` returns the chosen node plus exactly
+    one alternative definition (so the tool can surface the
+    ambiguity to the caller).
+- The LSP race the original symptom pointed at (rust-analyzer not
+  populating the `detail` field that feeds `name`) is real but is
+  a separate defect from the resolver's contract; the resolver now
+  has a regression pin at the function level.
+- Commit: `b8e4f01 test(federation): prove resolve_node finds
+  indexed function by name (#15)`.
+
 ## 16. `find_cross_repo_matches` requires a populated `signature` field
 
 **Symptom:** two functions with the same name across repos
