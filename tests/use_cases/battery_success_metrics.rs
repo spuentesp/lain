@@ -120,9 +120,12 @@ fn find_anchors_score_ratio_real_hub_above_dead() {
     let (_dir, db) = build_fixture();
     let real_hub = db.find_node_by_name("real_hub").unwrap().anchor_score.unwrap_or(0.0);
     let dead = db.find_node_by_name("dead_one").unwrap().anchor_score.unwrap_or(0.0);
-    // Success metric: real_hub > dead (real hub strictly outranks dead).
-    assert!(real_hub > dead,
-            "real_hub score ({real_hub}) must exceed dead score ({dead})");
+    // Success metric: real_hub strictly outranks dead_one.
+    // real_hub: calls_in=1, calls_out=2, size_factor=1.0 → formula gives ~1.585
+    // dead_one: calls_in=0 → baseline 0.5
+    // Ratio must be > 2x so a regression that swaps the two fires.
+    assert!(real_hub >= 2.0 * dead && dead > 0.0,
+            "real_hub ({real_hub}) must be at least 2x dead ({dead}); ratio regression pin");
 }
 
 // ═══ get_blast_radius success metrics ══════════════════════════════
@@ -141,16 +144,23 @@ async fn get_blast_radius_actually_lists_known_callers() {
 }
 
 #[tokio::test]
-async fn get_blast_radius_does_not_list_non_callers() {
+async fn get_blast_radius_response_lists_callers_not_callees() {
     use lain::server::tools::handlers::impact::get_blast_radius;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
     let text = get_blast_radius(&db, &overlay, "helper_a", false, None).await.unwrap();
-    // Success metric: response does NOT name non-callers.
-    assert!(!text.contains("dead_one"),
-            "blast_radius(helper_a) must NOT list dead_one; got:\n{text}");
-    assert!(!text.contains("Config"),
-            "blast_radius(helper_a) must NOT list Config; got:\n{text}");
+    // Success metric: response is non-empty AND names the callers
+    // AND does NOT name callees or non-callers. An empty stub
+    // fails the first two; a stub that lists everything fails
+    // the third.
+    assert!(!text.is_empty(),
+            "blast_radius(helper_a) must be non-empty");
+    assert!(text.contains("real_hub"),
+            "blast_radius(helper_a) must list real_hub (caller); got:\n{text}");
+    assert!(text.contains("do_stuff"),
+            "blast_radius(helper_a) must list do_stuff (caller); got:\n{text}");
+    assert!(!text.contains("helper_b"),
+            "blast_radius(helper_a) must NOT list helper_b (not a caller); got:\n{text}");
 }
 
 #[tokio::test]
@@ -160,13 +170,12 @@ async fn get_blast_radius_for_unused_function_is_empty_or_zero() {
     let overlay = VolatileOverlay::new();
     let text = get_blast_radius(&db, &overlay, "caller_zero", false, None).await.unwrap();
     // Success metric: 0 callers — surface as "0" or "no callers".
-    // The success metric: 0 dependents. The response uses either
-    // "no dependents found" or surfaces 0 callers. Accept either.
-    let has_zero = text.contains("no dependents") || text.contains("no caller")
-                   || text.contains("No caller") || text.contains("(no dependents")
-                   || text.contains("0 call") || text.is_empty();
-    assert!(has_zero,
-            "blast_radius(caller_zero) must surface 0 callers; got:\n{text}");
+    // Success metric: the response uses the documented "(no
+    // dependents found)" wording for unused symbols. Pin the exact
+    // phrase so a stub returning "1000 call(s)" (which trivially
+    // contains "0 call(s)") doesn't pass.
+    assert!(text.contains("no dependents found"),
+            "blast_radius(caller_zero) must say `no dependents found`; got:\n{text}");
 }
 
 // ═══ trace_dependency success metrics ════════════════════════════
@@ -185,15 +194,21 @@ fn trace_dependency_actually_lists_known_callees() {
 }
 
 #[test]
-fn trace_dependency_does_not_list_unrelated_nodes() {
+fn trace_dependency_returns_non_empty_for_hub() {
     use lain::server::tools::handlers::navigation::trace_dependency;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
     let text = trace_dependency(&db, &overlay, "real_hub").unwrap();
+    // Success metric: response is non-empty AND lists the known
+    // callees (so an empty stub fails this on two fronts).
+    assert!(!text.is_empty(),
+            "trace_dependency(real_hub) must return non-empty response");
+    assert!(text.contains("helper_a"),
+            "trace_dependency(real_hub) must list helper_a; got:\n{text}");
+    assert!(text.contains("helper_b"),
+            "trace_dependency(real_hub) must list helper_b; got:\n{text}");
     assert!(!text.contains("dead_one"),
             "trace_dependency(real_hub) must NOT list dead_one; got:\n{text}");
-    assert!(!text.contains("Config"),
-            "trace_dependency(real_hub) must NOT list Config; got:\n{text}");
 }
 
 // ═══ find_dead_code success metrics ══════════════════════════════
@@ -203,24 +218,16 @@ fn find_dead_code_actually_lists_dead_symbols() {
     use lain::server::tools::handlers::metrics::find_dead_code;
     let (dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    // Use the NlpEmbedder-less path (find_dead_code is workspace-bound).
     let result = find_dead_code(dir.path(), &db, &overlay, None,
                                 &lain::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
                                 &std::sync::Arc::new(parking_lot::Mutex::new(Default::default())));
-    // Whether Ok or Err, the fixture's `dead_one` should be findable.
-    let text = match result {
-        Ok(s) => s,
-        Err(e) => {
-            // Skip with a note rather than fail on embedder availability.
-            eprintln!("find_dead_code err: {e}");
-            return;
-        }
-    };
-    // Success metric: response lists the truly dead symbol.
-    // (We don't assert exact text — different surfaces have different
-    // formats — but the name MUST appear somewhere.)
+    let text = result.expect("find_dead_code must succeed on a known fixture");
+    // Success metric: response names the truly dead symbols.
     assert!(text.contains("dead_one") || text.to_lowercase().contains("dead"),
-            "find_dead_code must report dead_one or 'dead'; got:\n{text}");
+            "find_dead_code must report dead_one; got:\n{text}");
+    // Success metric: does NOT report live functions.
+    assert!(!text.contains("real_hub"),
+            "find_dead_code must NOT report real_hub (it has callers); got:\n{text}");
 }
 
 // ═══ find_dead_code via the data surface (deterministic) �═════════
@@ -283,19 +290,16 @@ fn explain_symbol_actually_describes_the_symbol() {
     let (dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
     let occupancy = lain::server::presence::OccupancyMap::default();
-    let result = explain_symbol(dir.path(), &db, &overlay, &occupancy, "real_hub");
-    let text = match result {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("explain_symbol err: {e}");
-            return;
-        }
-    };
-    // Success metric: response names the symbol AND lists its callees.
+    let text = explain_symbol(dir.path(), &db, &overlay, &occupancy, "real_hub")
+        .expect("explain_symbol must succeed on a known symbol");
+    // Success metric: response names the symbol AND lists its callees
+    // AND does NOT name unrelated nodes.
     assert!(text.contains("real_hub"),
             "explain_symbol(real_hub) must mention `real_hub`; got:\n{text}");
-    assert!(text.contains("helper_a") || text.contains("helper_b"),
-            "explain_symbol(real_hub) must list at least one callee; got:\n{text}");
+    assert!(text.contains("helper_a"),
+            "explain_symbol(real_hub) must list helper_a (callee); got:\n{text}");
+    assert!(!text.contains("Config"),
+            "explain_symbol(real_hub) must NOT list Config; got:\n{text}");
 }
 
 // ═══ get_call_sites success metrics ═══════════════════════════════
@@ -374,21 +378,25 @@ fn graph_database_anchor_score_normalized_to_100() {
 // ═══ CLI success metrics ═══════════════════════════════════════════
 
 #[test]
-fn lain_version_output_contains_version_string() {
-    let target = std::path::PathBuf::from(
-        std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".into())
-    ).join("debug/lain");
-    if !target.exists() { return; }
-    let out = std::process::Command::new(&target)
+fn lain_version_output_contains_lain_and_version() {
+    // Run the just-built lain binary directly. cargo test runs in
+    // target/debug/ so the binary is alongside the test binary.
+    let exe = std::env::current_exe().expect("current_exe");
+    // exe is target/debug/deps/<testname>-<hash>; lain is in target/debug/lain.
+    let lain = exe.parent().unwrap().parent().unwrap().join("lain");
+    if !lain.exists() {
+        panic!("lain binary not found at {:?}; build with `cargo build --bin lain` first", lain);
+    }
+    let out = std::process::Command::new(&lain)
         .arg("--version")
         .output()
         .expect("spawn lain --version");
+    assert!(out.status.success(), "lain --version must exit 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Success metric: version output contains a semver-ish pattern.
+    // Success metric: contains "lain" AND at least one digit.
     assert!(stdout.contains("lain"),
             "--version must contain `lain`; got: {stdout}");
-    let has_version = stdout.chars().any(|c| c.is_ascii_digit());
-    assert!(has_version,
+    assert!(stdout.chars().any(|c| c.is_ascii_digit()),
             "--version must contain at least one digit (semver); got: {stdout}");
 }
 
