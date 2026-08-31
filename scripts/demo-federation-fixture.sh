@@ -33,8 +33,7 @@ mkdir -p "$ROOT"
 SCRIPT_MTIME="$(stat -c %Y "$0" 2>/dev/null || stat -f %m "$0")"
 
 for entry in "${REPOS[@]}"; do
-  set -- $entry     # id url
-  id="$1"; url="$2"
+  read -r id url <<<"$entry"     # id url
   target="$ROOT/$id"
   stamp="$ROOT/$id.stamp"
 
@@ -72,10 +71,9 @@ REPOS_YAML="$ROOT/repos.yaml"
   echo "data_dir: $ROOT/.lain-data"
   echo "repos:"
   for entry in "${REPOS[@]}"; do
-    set -- $entry      # id url
-    id="$1"; url="$2"
+    read -r id url <<<"$entry"      # id url
     ref="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
-        | awk '/^ref:/{sub("refs\/heads\/",""); print $2; exit}')"
+        | awk '/^ref:/{sub("refs/heads/",""); print $2; exit}')"
     [ -n "$ref" ] || ref="master"
     echo "  - id: $id"
     echo "    source:"
