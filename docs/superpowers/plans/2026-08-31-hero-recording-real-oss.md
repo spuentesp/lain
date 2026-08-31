@@ -137,7 +137,8 @@ git commit -m "test(recording): smoke test asserts new bytes+tokio fixture"
 ## Task 2: Rewrite `scripts/demo-federation-fixture.sh` to shallow-clone real OSS repos
 
 **Files:**
-- Modify: `scripts/demo-federation-fixture.sh`
+- Modify: `scripts/demo-federation-fixture.sh` (replaced entirely)
+- Move: `scripts/demo-federation-fixture.sh` → `scripts/legacy/demo-federation-fixture.sh` (stashing the old synthetic fixture so `--fixture synthetic` keeps working in Task 3)
 
 **Interfaces:**
 - Consumes: a target directory path (CLI arg `$1`).
@@ -147,6 +148,17 @@ git commit -m "test(recording): smoke test asserts new bytes+tokio fixture"
   - `<dir>/workspaces.yaml` — one workspace `tokio-stack` with both repos as members.
   - `<dir>/{bytes,tokio}.stamp` — stamp file touched after a successful clone (used as the idempotence guard).
 - Exits non-zero on any failure (no synthetic fallback).
+
+- [ ] **Step 0: Stash the previous synthetic fixture as `scripts/legacy/demo-federation-fixture.sh`**
+
+The previous synthetic fixture must remain reachable at a stable path so `--fixture synthetic` works after Task 3. Move it under `scripts/legacy/` BEFORE replacing the file at `scripts/demo-federation-fixture.sh`:
+
+```bash
+mkdir -p scripts/legacy
+git mv scripts/demo-federation-fixture.sh scripts/legacy/demo-federation-fixture.sh
+```
+
+(This step + Task 2 step 1 = a single atomic commit. Combining in one commit makes the diff reviewable: the old file moves to legacy *and* the new real-OSS fixture takes its place.)
 
 - [ ] **Step 1: Replace the body of `scripts/demo-federation-fixture.sh`**
 
