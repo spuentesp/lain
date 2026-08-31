@@ -927,16 +927,232 @@ function applyFilters(graph, state) {
   return { visibleNodes: visibleNodesFiltered, visibleEdges, hiddenNodeIds, hiddenEdgeIds };
 }
 
+// ── Graph tab: filter bar, minimap, legend helpers (Task 5, 2026-08-31) ──
+//
+// paintLegend / buildFilterBar / applyFiltersToDom / paintMinimap / wireZoom
+// are split out of drawGraphSvg so each step of the upgrade is testable in
+// isolation. paintLegend paints a static grid keyed on (repo × kind);
+// buildFilterBar builds the chip rows and wires their click handlers;
+// applyFiltersToDom toggles `.is-hidden` on the existing nodes / links
+// without rebuilding them; paintMinimap paints dots + the viewport frame;
+// wireZoom attaches a d3.zoom behaviour to the SVG and applies the
+// transform to the viewport <g>.
+
+// Repo × kind → cell. Each cell gets a `<span>` whose class drives the
+// per-repo CSS variable (currentColor → fill on the inner <path>). `palette`
+// already contains `graph-repo-*` class strings; do not double-prefix.
+function paintLegend(graph, palette, container) {
+  if (!container) return;
+  container.innerHTML = '';
+  // Stable set of repos + kinds for the grid axes.
+  const repos = Array.from(new Set(graph.nodes.map(n => n.repo_id).filter(Boolean))).sort();
+  const kinds = ['Function', 'Method', 'Class'];
+
+  for (const repo of repos) {
+    for (const kind of kinds) {
+      const hasData = graph.nodes.some(n => n.repo_id === repo && n.kind === kind);
+      const cell = document.createElement('div');
+      cell.className = 'graph-legend-cell' + (hasData ? '' : ' is-empty');
+      const repoCls = palette.get(repo) || 'graph-repo-fallback';
+      cell.innerHTML = `
+        <span class="${repoCls}">
+          <svg viewBox="-10 -10 20 20" aria-hidden="true">
+            <path d="${d3.symbol().size(64).type(d3[nodeShape(kind)])()}"/>
+          </svg>
+        </span>
+        <span class="graph-legend-name">${escapeHtml(repo)} · ${escapeHtml(kind)}</span>
+      `;
+      container.appendChild(cell);
+    }
+  }
+}
+
+// Three rows of chips (repos, kinds, view toggles) + a reset-zoom button.
+// Each row's container is pre-stamped by Task 3's HTML; we only inject the
+// chips and their click handlers.
+function buildFilterBar(graph, palette, state, container, onChange) {
+  if (!container) return;
+  container.innerHTML = '';
+  const repos = Array.from(new Set(graph.nodes.map(n => n.repo_id).filter(Boolean))).sort();
+  const kinds = ['Function', 'Method', 'Class'];
+  const make = (row, label, content, after) => {
+    row.innerHTML = `
+      <span class="graph-filter-label muted">${escapeHtml(label)}</span>
+      ${content}
+      ${after ? `<span class="graph-filter-after">${after}</span>` : ''}
+    `;
+  };
+  const wrap = (label, items) => items.map(({key, text, on}) => `
+    <button class="graph-chip ${on ? 'is-on' : ''}" data-filter="${escapeHtml(key)}">
+      ${text}
+    </button>`).join('');
+  const reprows = container.querySelector('[data-filter-row="repos"]');
+  make(reprows, 'repos', wrap('repos', repos.map(r => {
+    const swatchCls = palette.get(r) || 'graph-repo-fallback';
+    return {
+      key: `repo:${r}`,
+      text: `<span class="graph-chip-swatch ${swatchCls}"></span>${escapeHtml(r)}`,
+      on: state.repos.has(r),
+    };
+  })));
+
+  const kindrows = container.querySelector('[data-filter-row="kinds"]');
+  make(kindrows, 'kind', wrap('kinds', kinds.map(k => ({
+    key: `kind:${k}`,
+    text: `${escapeHtml(k)} <span class="muted">(circle|diamond|square)</span>`,
+    on: state.kinds.has(k),
+  }))));
+
+  const togglerow = container.querySelector('[data-filter-row="toggles"]');
+  make(togglerow, 'view', wrap('toggles', [
+    { key: 'cross-repo-only', text: 'cross-repo only', on: state.crossRepoOnly },
+    { key: 'labels',          text: 'labels always',   on: state.labelsAlwaysOn },
+  ]) + `<button class="graph-chip" data-zoom-reset>reset zoom</button>`);
+
+  container.querySelectorAll('[data-filter]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const k = btn.dataset.filter;
+      if (k.startsWith('repo:')) {
+        const repo = k.slice(5);
+        if (state.repos.has(repo)) state.repos.delete(repo);
+        else state.repos.add(repo);
+      } else if (k.startsWith('kind:')) {
+        const kind = k.slice(5);
+        if (state.kinds.has(kind)) state.kinds.delete(kind);
+        else state.kinds.add(kind);
+      } else if (k === 'cross-repo-only') {
+        state.crossRepoOnly = !state.crossRepoOnly;
+      } else if (k === 'labels') {
+        state.labelsAlwaysOn = !state.labelsAlwaysOn;
+      }
+      btn.classList.toggle('is-on');
+      onChange();
+    });
+  });
+
+  const reset = container.querySelector('[data-zoom-reset]');
+  if (reset) reset.addEventListener('click', () => onChange({ resetZoom: true }));
+}
+
+// Mark nodes + links hidden according to `state`. Single pass per
+// element type, single `.is-hidden` toggle per line. The link key is the
+// canonical (min,max) edge id used by drawGraphSvg at line-join time, so
+// the Set membership test is O(1).
+function applyFiltersToDom(svgEl, graph, state) {
+  const computed = applyFilters(graph, state);
+  const hiddenNodes = computed.hiddenNodeIds;
+  const visibleEdgeKeys = new Set(computed.visibleEdges.map(e =>
+    e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`
+  ));
+  svgEl.querySelectorAll('.graph-node').forEach(p => {
+    p.classList.toggle('is-hidden', hiddenNodes.has(p.dataset.nodeId));
+  });
+  svgEl.querySelectorAll('.graph-link').forEach(line => {
+    line.classList.toggle('is-hidden', !visibleEdgeKeys.has(line.dataset.edgeKey));
+  });
+  // Labels follow the same threshold as drawGraphSvg's initial render.
+  const labelHide = !state.labelsAlwaysOn && graph.nodes.length > 150;
+  svgEl.querySelectorAll('.graph-label').forEach(text => {
+    text.style.display = labelHide ? 'none' : null;
+  });
+}
+
+// Paint the minimap: one dot per visible node, plus a rectangle marking the
+// viewport's position in the graph. The transform math assumes the SVG
+// viewport <g> receives `translate(tx, ty) scale(s)` from d3.zoom.
+function paintMinimap(graph, minimapEl, viewportTransform, filterState) {
+  if (!minimapEl) return;
+  const w = minimapEl.clientWidth || 150;
+  const h = minimapEl.clientHeight || 100;
+  minimapEl.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  minimapEl.innerHTML = '';
+  if (!graph.nodes.length) return;
+  const bounds = graph.nodes.reduce((acc, n) => ({
+    xmin: Math.min(acc.xmin, n.x ?? acc.xmin), xmax: Math.max(acc.xmax, n.x ?? acc.xmax),
+    ymin: Math.min(acc.ymin, n.y ?? acc.ymin), ymax: Math.max(acc.ymax, n.y ?? acc.ymax),
+  }), { xmin: Infinity, xmax: -Infinity, ymin: Infinity, ymax: -Infinity });
+  const dx = bounds.xmax - bounds.xmin || 1;
+  const dy = bounds.ymax - bounds.ymin || 1;
+  const sx = (w - 6) / dx, sy = (h - 6) / dy, s = Math.min(sx, sy);
+  const tx = (w - s * (bounds.xmin + bounds.xmax)) / 2;
+  const ty = (h - s * (bounds.ymin + bounds.ymax)) / 2;
+  const computed = applyFilters(graph, filterState);
+  const visible = new Set(computed.visibleNodes.map(n => n.id));
+  for (const n of graph.nodes) {
+    if (!visible.has(n.id)) continue;
+    if (typeof n.x !== 'number' || typeof n.y !== 'number') continue;
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('cx', String(n.x * s + tx));
+    dot.setAttribute('cy', String(n.y * s + ty));
+    dot.setAttribute('r', '1');
+    dot.setAttribute('fill', 'rgba(255,255,255,0.6)');
+    minimapEl.appendChild(dot);
+  }
+  // Frame: convert from graph coordinates (the area visible at the current
+  // zoom) to minimap coordinates (graph * s + t). The `-x/scale` term gives
+  // the graph-coord top-left of the visible window; multiplying by s and
+  // adding the minimap's translation puts it in minimap-coord space.
+  if (viewportTransform && viewportTransform.scale) {
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('class', 'graph-minimap-frame');
+    const cw = Number(minimapEl.dataset.canvasW) || 0;
+    const ch = Number(minimapEl.dataset.canvasH) || 0;
+    const k = viewportTransform.scale;
+    const vw = cw / k;
+    const vh = ch / k;
+    const vx = (-viewportTransform.x) / k * s + tx;
+    const vy = (-viewportTransform.y) / k * s + ty;
+    rect.setAttribute('x', String(vx));
+    rect.setAttribute('y', String(vy));
+    rect.setAttribute('width', String(vw * s));
+    rect.setAttribute('height', String(vh * s));
+    minimapEl.appendChild(rect);
+  }
+}
+
+// Attach d3.zoom to the SVG (not its parent chain — wheel events must land
+// on the SVG) and route the transform to `svgViewport` (a d3 selection of
+// the <g class="graph-viewport">). `callback` fires after every zoom/pan
+// event so the caller can repaint the minimap frame.
+function wireZoom(svgEl, svgViewport, zoomState, callback) {
+  if (!svgEl || !svgViewport || typeof d3.zoom !== 'function') return;
+  const viewportSel = (typeof svgViewport.node === 'function') ? svgViewport : d3.select(svgViewport);
+  const z = d3.zoom().scaleExtent([0.2, 8]).on('zoom', (event) => {
+    const t = event.transform;
+    viewportSel.attr('transform', `translate(${t.x},${t.y}) scale(${t.k})`);
+    zoomState.transform = { x: t.x, y: t.y, k: t.k, scale: t.k };
+    if (callback) callback();
+  });
+  d3.select(svgEl).call(z);
+  zoomState.api = z;
+}
+
 // Paint a force-directed graph into `svgEl`. Same simulation idiom as
-// src/ui/blast-radius.html; colours come from styles.css classes so the
-// drawing follows the phosphor/paper theme without any JS colour literals.
+// src/ui/blast-radius.html; colours and shapes come from styles.css classes
+// so the drawing follows the phosphor/paper theme without any JS literals.
+// Two-axis visual encoding: shape (per kind via D3 symbols) × colour (per
+// repo via CSS variables set by `.graph-repo-*`). Hover-focus dims non-
+// neighbours; filters toggle `.is-hidden` without rebuilding the DOM.
 function drawGraphSvg(svgEl, graph) {
   if (!svgEl || typeof d3 === 'undefined') return;
   svgEl.innerHTML = '';
   const width = svgEl.clientWidth || 800;
   const height = svgEl.clientHeight || 500;
+  svgEl.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svgEl.setAttribute('preserveAspectRatio', 'xMidYMid meet');
 
-  const svg = d3.select(svgEl).attr('viewBox', [0, 0, width, height]);
+  const palette = computeRepoPalette(graph);
+  const state = {
+    repos: new Set(graph.nodes.map(n => n.repo_id).filter(Boolean)),
+    kinds: new Set(['Function', 'Method', 'Class']),
+    crossRepoOnly: false,
+    labelsAlwaysOn: false,
+  };
+
+  const container = svgEl.closest('.graph-canvas-wrap') || svgEl.parentElement;
+  const viewport = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  viewport.classList.add('graph-viewport');
+  svgEl.appendChild(viewport);
 
   // forceLink mutates the edge objects (replacing ids with node refs), so
   // hand it copies — renderGraphTab may redraw from the same payload.
@@ -948,18 +1164,26 @@ function drawGraphSvg(svgEl, graph) {
     .force('charge', d3.forceManyBody().strength(-160))
     .force('center', d3.forceCenter(width / 2, height / 2));
 
-  const link = svg.append('g')
+  // Edges as <line>.
+  const link = viewport.append('g')
     .selectAll('line')
     .data(links)
     .join('line')
-    .attr('class', d => 'graph-link' + (d.cross_repo ? ' cross-repo' : ''));
+    .attr('class', d => 'graph-link' + (d.cross_repo ? ' cross-repo' : ''))
+    .attr('data-edge-key', d => d.source < d.target ? `${d.source}|${d.target}` : `${d.target}|${d.source}`);
 
-  const node = svg.append('g')
-    .selectAll('circle')
+  // Nodes as <path> via D3 symbols. Two visual axes: shape per kind, colour per repo.
+  const node = viewport.append('g')
+    .selectAll('path')
     .data(nodes)
-    .join('circle')
-    .attr('class', 'graph-node')
-    .attr('r', 5)
+    .join('path')
+    .attr('class', d => {
+      const cls = ['graph-node', `graph-node--kind-${d.kind}`];
+      cls.push(repoColour(d.repo_id, palette));
+      return cls.join(' ');
+    })
+    .attr('data-node-id', d => d.id)
+    .attr('d', d => d3.symbol().size(64).type(d3[nodeShape(d.kind)])())
     .call(d3.drag()
       .on('start', (event, d) => {
         if (!event.active) simulation.alphaTarget(0.3).restart();
@@ -971,26 +1195,115 @@ function drawGraphSvg(svgEl, graph) {
         d.fx = null; d.fy = null;
       }));
 
-  node.append('title').text(d => `${d.name}\n${d.repo_id} · ${d.kind}\n${d.path}`);
+  // Precompute neighbours for hover focus.
+  const neighboursById = new Map();
+  for (const e of graph.edges) {
+    if (!neighboursById.has(e.source)) neighboursById.set(e.source, new Set());
+    if (!neighboursById.has(e.target)) neighboursById.set(e.target, new Set());
+    neighboursById.get(e.source).add(e.target);
+    neighboursById.get(e.target).add(e.source);
+  }
 
-  // Labels get noisy fast; only draw them on a small graph.
-  const label = nodes.length <= 150
-    ? svg.append('g')
-        .selectAll('text')
-        .data(nodes)
-        .join('text')
-        .attr('class', 'graph-label')
-        .attr('dx', 8)
-        .attr('dy', 3)
-        .text(d => d.name)
-    : null;
+  // Tooltip — styled <g class="graph-tooltip"> following the cursor. Updated by
+  // mouseover / mousemove and cleared by mouseout.
+  const tooltipGroup = viewport.append('g').attr('class', 'graph-tooltip').style('display', 'none');
+  const tooltipBg = tooltipGroup.append('rect').attr('class', 'graph-tooltip-bg');
+  const tooltipText = tooltipGroup.append('text').attr('class', 'graph-tooltip');
+  const updateTooltip = (d, evt) => {
+    if (!d) { tooltipGroup.style('display', 'none'); return; }
+    const deg = neighboursById.get(d.id)?.size ?? 0;
+    const text = `${d.name}\n${d.repo_id} · ${d.kind}\n${d.path}\ndegree: ${deg}`;
+    tooltipText.selectAll('tspan').remove();
+    text.split('\n').forEach((line, i) => {
+      tooltipText.append('tspan').attr('x', 8).attr('dy', i === 0 ? 12 : 14).text(line);
+    });
+    const lines = text.split('\n');
+    const longest = lines.reduce((a, b) => b.length > a.length ? b : a, '');
+    tooltipBg.attr('width', String(8 + longest.length * 6.5)).attr('height', String(2 + lines.length * 14));
+    tooltipGroup.attr('transform', `translate(${evt.offsetX + 12}, ${evt.offsetY + 12})`).style('display', null);
+  };
+
+  // Hover focus handlers.
+  node
+    .on('mouseover', (event, d) => {
+      node.classed('is-dim', n => n.id !== d.id && !(neighboursById.get(d.id)?.has(n.id)));
+      node.classed('is-focus', n => n.id === d.id);
+      node.classed('is-neighbour', n => neighboursById.get(d.id)?.has(n.id));
+      link.classed('is-dim', e => {
+        const sId = (typeof e.source === 'object') ? e.source.id : e.source;
+        const tId = (typeof e.target === 'object') ? e.target.id : e.target;
+        return sId !== d.id && tId !== d.id;
+      });
+      updateTooltip(d, event);
+    })
+    .on('mousemove', (event, d) => updateTooltip(d, event))
+    .on('mouseout', () => {
+      node.classed('is-focus', false).classed('is-neighbour', false).classed('is-dim', false);
+      link.classed('is-dim', false);
+      tooltipGroup.style('display', 'none');
+    });
+
+  // Labels — rendered only when the count is small or the toggle is on.
+  const labelGroup = viewport.append('g').attr('class', 'graph-labels');
+  const updateLabels = () => {
+    const show = state.labelsAlwaysOn || nodes.length <= 150;
+    labelGroup.selectAll('text').remove();
+    if (!show) return;
+    labelGroup.selectAll('text')
+      .data(nodes)
+      .join('text')
+      .attr('class', 'graph-label')
+      .attr('dx', 8).attr('dy', 3)
+      .text(d => d.name);
+  };
+  updateLabels();
 
   simulation.on('tick', () => {
     link
       .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
       .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-    node.attr('cx', d => d.x).attr('cy', d => d.y);
-    if (label) label.attr('x', d => d.x).attr('y', d => d.y);
+    node
+      .attr('transform', d => `translate(${d.x},${d.y})`);
+    labelGroup.selectAll('text')
+      .attr('x', d => d.x)
+      .attr('y', d => d.y);
+  });
+
+  // Zoom + filter wiring — using the filter bar from the HTML in Task 3.
+  const filterBar = container.parentElement.querySelector('[data-filter-bar]');
+  const minimapEl = container.parentElement.querySelector('#graph-minimap');
+  const legendEl = container.parentElement.querySelector('[data-graph-legend]');
+  const zoomState = { transform: { x: 0, y: 0, k: 1, scale: 1 } };
+  minimapEl.dataset.canvasW = String(width);
+  minimapEl.dataset.canvasH = String(height);
+
+  // Wire zoom BEFORE buildFilterBar so onFilterChange can use zoomState.api
+  // on the very first chip click (synchronous handlers are fine, but the
+  // ordering documents intent).
+  wireZoom(svgEl, viewport, zoomState, () => paintMinimap(graph, minimapEl, zoomState.transform, state));
+
+  const onFilterChange = (extra) => {
+    if (extra && extra.resetZoom && zoomState.api) {
+      d3.select(svgEl).transition().duration(250).call(zoomState.api.transform, d3.zoomIdentity);
+    }
+    applyFiltersToDom(svgEl, graph, state);
+    updateLabels();
+    paintMinimap(graph, minimapEl, zoomState.transform, state);
+  };
+  buildFilterBar(graph, palette, state, filterBar, onFilterChange);
+  paintLegend(graph, palette, legendEl);
+  paintMinimap(graph, minimapEl, zoomState.transform, state);
+  applyFiltersToDom(svgEl, graph, state);
+
+  // Click on minimap → pan the main canvas to that point.
+  minimapEl.addEventListener('click', (event) => {
+    if (!zoomState.api) return;
+    const rect = minimapEl.getBoundingClientRect();
+    const vb = minimapEl.getAttribute('viewBox').split(' ').map(Number);
+    const x = (event.clientX - rect.left) / rect.width * vb[2];
+    const y = (event.clientY - rect.top) / rect.height * vb[3];
+    const transform = d3.zoomIdentity.translate(width / 2 - x * zoomState.transform.scale, height / 2 - y * zoomState.transform.scale);
+    d3.select(svgEl).transition().duration(250).call(zoomState.api.transform, transform);
   });
 }
 
