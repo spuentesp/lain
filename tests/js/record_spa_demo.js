@@ -329,18 +329,19 @@ async function driveSequence(page) {
   }, { timeout: 30_000 });
   await new Promise(r => setTimeout(r, 6000));
 
-  // 5. Graph — let the D3 layout settle.
+  // 5. Graph — let the D3 layout settle. Upgraded for the new
+  // shape-per-kind rendering: nodes are <path class="graph-node"> now,
+  // not <circle>.
   await clickTab(page, 'graph');
   try {
     await page.waitForFunction(() => {
       const svg = document.getElementById('graph-canvas');
-      return svg && svg.querySelectorAll('circle').length > 0;
+      return svg && svg.querySelectorAll('path.graph-node').length > 0;
     }, { timeout: 15_000 });
   } catch (_) {
-    // Graph may not have data for this workspace — the empty-state
-    // text is acceptable; recording still finishes.
+    // Graph may not have data — the empty-state text is acceptable.
   }
-  await new Promise(r => setTimeout(r, 8000));
+  await new Promise(r => setTimeout(r, 10000));   // +2 s for filters + minimap
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
