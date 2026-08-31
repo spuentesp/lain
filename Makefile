@@ -5,10 +5,13 @@
 # fails the build if `git diff --exit-code docs/tool-schema.json`
 # reports any change.
 
-.PHONY: schema record-demo
+.PHONY: schema record-demo record-demo-small
 
 schema:
 	cargo run --quiet -- schema dump --out docs/tool-schema.json
 
 record-demo:
-	./scripts/record-spa-demo.sh
+	./scripts/record-spa-demo.sh            # default: --fixture real (bytes + tokio)
+
+record-demo-small:
+	./scripts/record-spa-demo.sh --fixture synthetic   # offline, original fixture
