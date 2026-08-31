@@ -11,6 +11,8 @@
 #   ./scripts/record-spa-demo.sh --port 9934       # custom port
 #   ./scripts/record-spa-demo.sh --json out.json   # machine-readable summary
 #   ./scripts/record-spa-demo.sh --keep-work       # preserve the temp workdir
+#   ./scripts/record-spa-demo.sh --fixture real    # clone bytes+tokio (default)
+#   ./scripts/record-spa-demo.sh --no-clone        # skip fixture build (debug)
 #
 # Does NOT mutate the SPA. The recording only uses it.
 #
@@ -26,6 +28,8 @@ QUICK=0
 ALLOW_STALE=0
 KEEP_WORK=0
 JSON_OUT=""
+FIXTURE="real"
+NO_CLONE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,8 +38,11 @@ while [ $# -gt 0 ]; do
     --keep-work)   KEEP_WORK=1 ;;
     --json)        JSON_OUT="${2:?--json needs a path}"; shift ;;
     --port)        PORT="${2:?--port needs a value}"; shift ;;
+    --fixture)     FIXTURE="${2:?--fixture needs a name}"; shift ;;
+    --no-clone)    NO_CLONE=1 ;;
+    --workdir)     WORK="${2:?--workdir needs a path}"; shift ;;
     -h|--help)
-      sed -n '2,16p' "$0"
+      sed -n '2,18p' "$0"
       exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -73,6 +80,17 @@ trap 'cleanup_and_die' INT TERM
 
 mkdir -p "$WORK" "$ARTIFACTS"
 
+# Resolve which fixture script to use. The `real` fixture does two
+# `git clone`s against GitHub; the `synthetic` fixture is the original
+# `auth-svc` + `billing-svc` two-crate pair, kept under scripts/legacy/
+# for offline runs.
+case "$FIXTURE" in
+  real)      FIXTURE_SCRIPT="$REPO_ROOT/scripts/demo-federation-fixture.sh" ;;
+  synthetic) FIXTURE_SCRIPT="$REPO_ROOT/scripts/legacy/demo-federation-fixture.sh" ;;
+  *) die "--fixture must be 'real' or 'synthetic' (got: $FIXTURE)" ;;
+esac
+[ -x "$FIXTURE_SCRIPT" ] || die "fixture script $FIXTURE_SCRIPT is missing or not executable"
+
 # ── 1. build ────────────────────────────────────────────────────────────
 if [ "$QUICK" = 0 ]; then
   say "building lain (cargo build --release)"
@@ -90,7 +108,25 @@ if [ "$ALLOW_STALE" = 0 ]; then
   fi
 fi
 
-# ── 3. record WebM ──────────────────────────────────────────────────────
+# ── 3. fixture (clone or pre-existing) ──────────────────────────────────
+if [ "$NO_CLONE" = 0 ]; then
+  say "building fixture (--fixture $FIXTURE)"
+  CLONE_T0=$(date +%s%N)
+  WORKDIR="$WORK"
+  mkdir -p "$WORKDIR"
+  bash "$FIXTURE_SCRIPT" "$WORKDIR" \
+    || die "fixture script failed; rerun with --keep-work to inspect $WORKDIR"
+  CLONE_T1=$(date +%s%N)
+  CLONE_MS=$(( (CLONE_T1 - CLONE_T0) / 1000000 ))
+  if [ "$CLONE_MS" -gt 90000 ]; then
+    die "fixture build took ${CLONE_MS}ms (>90s cap); rerun with --keep-work to inspect"
+  fi
+  ok "fixture built in ${CLONE_MS}ms → $WORKDIR"
+else
+  say "skipping fixture (--no-clone); using existing $WORK"
+fi
+
+# ── 4. record WebM ──────────────────────────────────────────────────────
 RAW_WEBM="$WORK/raw.webm"
 say "recording SPA demo (port $PORT, workdir $WORK)"
 LAIN_BIN="$LAIN" \
@@ -102,7 +138,7 @@ RECORD_KEEP_DIR="$KEEP_WORK" \
 [ -s "$RAW_WEBM" ] || die "recording produced empty WebM at $RAW_WEBM"
 ok "recorded $(du -h "$RAW_WEBM" | cut -f1) WebM"
 
-# ── 4. encode MP4 (H.264 baseline, faststart) ───────────────────────────
+# ── 5. encode MP4 (H.264 baseline, faststart) ───────────────────────────
 MP4="$ARTIFACTS/spa-demo.mp4"
 say "encoding MP4"
 ffmpeg -y -hide_banner -loglevel error \
@@ -118,7 +154,7 @@ if [ "$mp4_mb" -gt 4 ]; then
 fi
 ok "wrote ${mp4_mb}MB MP4 → $MP4"
 
-# ── 5. encode GIF (palettegen + paletteuse) ─────────────────────────────
+# ── 6. encode GIF (palettegen + paletteuse) ─────────────────────────────
 GIF="$ARTIFACTS/spa-demo.gif"
 encode_gif() {
   local fps="$1"
@@ -144,7 +180,7 @@ if [ "$gif_mb" -gt 12 ]; then
 fi
 ok "wrote ${gif_mb}MB GIF → $GIF"
 
-# ── 6. extract poster PNG (frame at 2s in, when the SPA is visible) ────
+# ── 7. extract poster PNG (frame at 2s in, when the SPA is visible) ────
 POSTER="$ARTIFACTS/spa-demo-poster.png"
 say "extracting poster PNG"
 ffmpeg -y -hide_banner -loglevel error \
@@ -156,14 +192,14 @@ poster_kb=$(( $(stat -c%s "$POSTER") / 1024 ))
 [ "$poster_kb" -le 200 ] || warn "poster is ${poster_kb}KB (>200KB target)"
 ok "wrote ${poster_kb}KB poster → $POSTER"
 
-# ── 7. archive the raw WebM for future re-encoding without re-recording
+# ── 8. archive the raw WebM for future re-encoding without re-recording
 cp "$RAW_WEBM" "$ARTIFACTS/spa-demo.webm"
 webm_bytes=$(stat -c%s "$ARTIFACTS/spa-demo.webm")
 webm_mb=$(( webm_bytes / 1024 / 1024 ))
 [ "$webm_mb" -le 5 ] || warn "WebM is ${webm_mb}MB (>5MB target); consider lowering recording bitrate"
 ok "archived ${webm_mb}MB WebM → $ARTIFACTS/spa-demo.webm"
 
-# ── 8. optional JSON summary ────────────────────────────────────────────
+# ── 9. optional JSON summary ────────────────────────────────────────────
 if [ -n "$JSON_OUT" ]; then
   cat > "$JSON_OUT" <<EOF
 {
@@ -177,7 +213,7 @@ EOF
   ok "wrote JSON summary → $JSON_OUT"
 fi
 
-# ── 9. cleanup ──────────────────────────────────────────────────────────
+# ── 10. cleanup ─────────────────────────────────────────────────────────
 if [ "$KEEP_WORK" = 0 ]; then
   rm -rf "$WORK"
 else
