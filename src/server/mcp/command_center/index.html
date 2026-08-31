@@ -68,8 +68,23 @@
           </label>
           <span id="graph-meta" class="muted"></span>
         </div>
+        <div class="graph-filter-bar" data-filter-bar>
+          <div class="graph-filter-row" data-filter-row="repos">
+            <span class="graph-filter-label muted">repos</span>
+          </div>
+          <div class="graph-filter-row" data-filter-row="kinds">
+            <span class="graph-filter-label muted">kind</span>
+          </div>
+          <div class="graph-filter-row" data-filter-row="toggles">
+            <span class="graph-filter-label muted">view</span>
+          </div>
+        </div>
         <div id="graph-empty" class="muted"></div>
-        <svg id="graph-canvas" role="img" aria-label="workspace call graph"></svg>
+        <div class="graph-canvas-wrap">
+          <svg id="graph-canvas" role="img" aria-label="workspace call graph"></svg>
+          <svg id="graph-minimap" role="img" aria-label="graph minimap"></svg>
+        </div>
+        <div class="graph-legend" data-graph-legend aria-hidden="true"></div>
       </section>
       <section id="tab-repos" class="tab"></section>
       <section id="tab-query" class="tab"></section>
