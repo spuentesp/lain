@@ -62,18 +62,28 @@ for entry in "${REPOS[@]}"; do
 done
 
 # ── repos.yaml + workspaces.yaml ────────────────────────────────────────────
-cat > "$ROOT/repos.yaml" <<EOF
-data_dir: $ROOT/.lain-data
-repos:
-  - id: bytes
-    source:
-      type: shallow_clone
-      url: https://github.com/tokio-rs/bytes.git
-  - id: tokio
-    source:
-      type: shallow_clone
-      url: https://github.com/tokio-rs/tokio.git
-EOF
+# Autodetect each remote's default branch so we don't bake `main` into repos
+# that ship on `master` (the historical Rust async ecosystem default). If the
+# `git ls-remote` call fails for any reason, fall back to `master` — matches
+# the two repos in this fixture and is a safer default than `main` for this
+# family of repos.
+REPOS_YAML="$ROOT/repos.yaml"
+{
+  echo "data_dir: $ROOT/.lain-data"
+  echo "repos:"
+  for entry in "${REPOS[@]}"; do
+    set -- $entry      # id url
+    id="$1"; url="$2"
+    ref="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
+        | awk '/^ref:/{sub("refs\/heads\/",""); print $2; exit}')"
+    [ -n "$ref" ] || ref="master"
+    echo "  - id: $id"
+    echo "    source:"
+    echo "      type: shallow_clone"
+    echo "      url: $url"
+    echo "      ref: $ref"
+  done
+} > "$REPOS_YAML"
 
 cat > "$ROOT/workspaces.yaml" <<'EOF'
 workspaces:
