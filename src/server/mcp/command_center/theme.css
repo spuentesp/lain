@@ -32,6 +32,17 @@
   --warn: #ffd93d;
   --err: #ff6b6b;
 
+  /* Per-repo palette — six stable hues for the Graph tab so individual
+   * repositories stay visually distinct regardless of which repos happen
+   * to be loaded. Consumed by styles.css (.graph-repo-a..e + fallback)
+   * and by app.js's computeRepoPalette. Keep both theme blocks in sync. */
+  --repo-a: #5fdfdf;          /* teal */
+  --repo-b: #f0b860;          /* warm amber */
+  --repo-c: #e07ee0;          /* magenta */
+  --repo-d: #a0d060;          /* olive */
+  --repo-e: #80b8ff;          /* sky blue */
+  --repo-fallback: var(--accent);
+
   --sev-none-bg: #12201e;
   --sev-none-fg: #4a8a82;
   --sev-low-bg: #06282b;
@@ -72,6 +83,16 @@
     --warn: #785f1b;
     --err: #a03027;
 
+    /* Per-repo palette — see dark-theme block for rationale. The hues
+     * darken and desaturate here so they sit comfortably on warm paper
+     * without colliding with --fg, --accent, or the severity ramp. */
+    --repo-a: #0f7c7c;
+    --repo-b: #a06400;
+    --repo-c: #a020a0;
+    --repo-d: #407030;
+    --repo-e: #1860c0;
+    --repo-fallback: var(--accent);
+
     --sev-none-bg: #dcd6c4;
     --sev-none-fg: #4f6662;
     --sev-low-bg: #cfe3df;
@@ -100,6 +121,16 @@
   --ok: #0f5f55;
   --warn: #785f1b;
   --err: #a03027;
+
+  /* Per-repo palette — see dark-theme block for rationale. The hues
+   * darken and desaturate here so they sit comfortably on warm paper
+   * without colliding with --fg, --accent, or the severity ramp. */
+  --repo-a: #0f7c7c;
+  --repo-b: #a06400;
+  --repo-c: #a020a0;
+  --repo-d: #407030;
+  --repo-e: #1860c0;
+  --repo-fallback: var(--accent);
 
   --sev-none-bg: #dcd6c4;
   --sev-none-fg: #4f6662;
