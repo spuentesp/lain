@@ -726,14 +726,14 @@ table.repo-table th {
 
 .graph-link {
   stroke: var(--border-strong);
-  stroke-opacity: 0.6;
+  stroke-opacity: 0.75;
   stroke-width: 1;
 }
 
 .graph-link.cross-repo {
   stroke: var(--warn);
   stroke-opacity: 0.9;
-  stroke-width: 1.5;
+  stroke-width: 2;
 }
 
 .graph-node {
@@ -862,13 +862,13 @@ table.repo-table th {
 
 .graph-link {
   stroke: var(--border-strong);
-  stroke-opacity: 0.6;
+  stroke-opacity: 0.75;
   stroke-width: 1;
 }
 .graph-link.cross-repo {
   stroke: var(--warn);
   stroke-opacity: 0.9;
-  stroke-width: 1.5;
+  stroke-width: 2;
 }
 
 .graph-tooltip {
@@ -908,6 +908,43 @@ table.repo-table th {
   font-size: 0.7rem;
   color: var(--fg-muted);
 }
+
+/* ── Graph v2: search input, depth slider, back-to-anchors (2026-08-31) ─ */
+
+[data-filter-row="search"] input[type="search"] {
+  flex: 1;
+  min-width: 12rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.78rem;
+}
+[data-filter-row="search"] input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+[data-filter-row="focal"] {
+  border-top: 1px dashed var(--border);
+  padding-top: 0.3rem;
+  margin-top: 0.2rem;
+}
+[data-filter-row="focal"][hidden] { display: none; }
+[data-filter-row="focal"][data-active="1"] { display: flex; }
+
+[data-graph-depth"] {
+  flex: 1;
+  max-width: 160px;
+  accent-color: var(--accent);
+}
+
+[data-graph-back"] {
+  font-family: inherit;
+}
+
 .graph-legend-cell {
   display: flex;
   align-items: center;
