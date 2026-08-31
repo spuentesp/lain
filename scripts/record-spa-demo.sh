@@ -13,6 +13,7 @@
 #   ./scripts/record-spa-demo.sh --keep-work       # preserve the temp workdir
 #   ./scripts/record-spa-demo.sh --fixture real    # clone bytes+tokio (default)
 #   ./scripts/record-spa-demo.sh --no-clone        # skip fixture build (debug)
+#   ./scripts/record-spa-demo.sh --workdir <dir>   # override the temp workdir
 #
 # Does NOT mutate the SPA. The recording only uses it.
 #
@@ -42,7 +43,7 @@ while [ $# -gt 0 ]; do
     --no-clone)    NO_CLONE=1 ;;
     --workdir)     WORK="${2:?--workdir needs a path}"; shift ;;
     -h|--help)
-      sed -n '2,18p' "$0"
+      sed -n '2,19p' "$0"
       exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
@@ -83,13 +84,16 @@ mkdir -p "$WORK" "$ARTIFACTS"
 # Resolve which fixture script to use. The `real` fixture does two
 # `git clone`s against GitHub; the `synthetic` fixture is the original
 # `auth-svc` + `billing-svc` two-crate pair, kept under scripts/legacy/
-# for offline runs.
-case "$FIXTURE" in
-  real)      FIXTURE_SCRIPT="$REPO_ROOT/scripts/demo-federation-fixture.sh" ;;
-  synthetic) FIXTURE_SCRIPT="$REPO_ROOT/scripts/legacy/demo-federation-fixture.sh" ;;
-  *) die "--fixture must be 'real' or 'synthetic' (got: $FIXTURE)" ;;
-esac
-[ -x "$FIXTURE_SCRIPT" ] || die "fixture script $FIXTURE_SCRIPT is missing or not executable"
+# for offline runs. Under `--no-clone` we skip the fixture step entirely,
+# so neither the resolution nor the executable check is needed.
+if [ "$NO_CLONE" = 0 ]; then
+  case "$FIXTURE" in
+    real)      FIXTURE_SCRIPT="$REPO_ROOT/scripts/demo-federation-fixture.sh" ;;
+    synthetic) FIXTURE_SCRIPT="$REPO_ROOT/scripts/legacy/demo-federation-fixture.sh" ;;
+    *) die "--fixture must be 'real' or 'synthetic' (got: $FIXTURE)" ;;
+  esac
+  [ -x "$FIXTURE_SCRIPT" ] || die "fixture script $FIXTURE_SCRIPT is missing or not executable"
+fi
 
 # ── 1. build ────────────────────────────────────────────────────────────
 if [ "$QUICK" = 0 ]; then
@@ -111,17 +115,14 @@ fi
 # ── 3. fixture (clone or pre-existing) ──────────────────────────────────
 if [ "$NO_CLONE" = 0 ]; then
   say "building fixture (--fixture $FIXTURE)"
-  CLONE_T0=$(date +%s%N)
-  WORKDIR="$WORK"
-  mkdir -p "$WORKDIR"
-  bash "$FIXTURE_SCRIPT" "$WORKDIR" \
-    || die "fixture script failed; rerun with --keep-work to inspect $WORKDIR"
-  CLONE_T1=$(date +%s%N)
-  CLONE_MS=$(( (CLONE_T1 - CLONE_T0) / 1000000 ))
-  if [ "$CLONE_MS" -gt 90000 ]; then
-    die "fixture build took ${CLONE_MS}ms (>90s cap); rerun with --keep-work to inspect"
+  # `timeout` returns 124 on kill and the fixture script's own exit code
+  # otherwise; capture it directly because `if ! …; then rc=$?` would mask
+  # the real status behind the inverted exit.
+  timeout 90 bash "$FIXTURE_SCRIPT" "$WORK"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    die "fixture script failed or exceeded 90s (exit=$rc); rerun with --keep-work to inspect $WORK"
   fi
-  ok "fixture built in ${CLONE_MS}ms → $WORKDIR"
 else
   say "skipping fixture (--no-clone); using existing $WORK"
 fi
