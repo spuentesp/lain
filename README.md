@@ -386,8 +386,11 @@ If you still see stale or missing symbols, check `get_health`:
   a new build.
 - **`Status:`** reads `Degraded ⚠` when the last re-index failed OR
   timed out, which means "not in this graph", not "does not exist". A
-  timeout banner means `LAIN_REINDEX_TIMEOUT` (default 300s) was too
-  short for your working tree — raise it and restart.
+  timeout banner means `LAIN_REINDEX_TIMEOUT` (default 300s for the
+  outer startup budget, 60s for the per-repo pipeline under it) was
+  too short for your working tree — raise it past **both** defaults
+  (`LAIN_REINDEX_TIMEOUT=600` covers a `tokio`-sized repo on a cold
+  cache) and restart.
 
 **Two agents not seeing each other?**
 
