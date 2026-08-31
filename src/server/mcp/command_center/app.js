@@ -932,6 +932,91 @@ function applyFilters(graph, state) {
   return { visibleNodes: visibleNodesFiltered, visibleEdges, hiddenNodeIds, hiddenEdgeIds };
 }
 
+// ── Graph tab v2: anchors-first helpers (Task 1, 2026-08-31) ───────────────
+//
+// computeAnchorVisibleSet narrows the workspace graph down to the union of
+// each anchor's immediate neighbourhood, capped at maxNeighboursPerAnchor.
+// applyDepth is a deliberate passthrough that exists so callers can read
+// the depth slider and forward it to get_blast_radius without an extra
+// refactor; reserved for future depth>1 client-side focal expansion.
+
+function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
+  const neighbourhoodDepth = opts.neighbourhoodDepth ?? 1;
+  const maxNeighboursPerAnchor = opts.maxNeighboursPerAnchor ?? 20;
+  if (!Array.isArray(anchors) || anchors.length === 0) {
+    return { nodes: [], edges: [], hiddenNodeIds: new Set() };
+  }
+  if (!workspaceGraph || !Array.isArray(workspaceGraph.edges)) {
+    return { nodes: [], edges: [], hiddenNodeIds: new Set() };
+  }
+
+  // Build adjacency lookup once: id -> Set<id> for edge neighbours.
+  const adj = new Map();
+  for (const e of workspaceGraph.edges) {
+    if (!adj.has(e.source)) adj.set(e.source, new Set());
+    if (!adj.has(e.target)) adj.set(e.target, new Set());
+    adj.get(e.source).add(e.target);
+    adj.get(e.target).add(e.source);
+  }
+
+  // Anchor lookup by node name (find_anchors returns names; the
+  // workspace graph uses global ids — match by name within the same repo).
+  const nodesByName = new Map();
+  for (const n of workspaceGraph.nodes) {
+    if (n.name && n.repo_id) {
+      const key = `${n.repo_id}::${n.name}`;
+      if (!nodesByName.has(key)) nodesByName.set(key, []);
+      nodesByName.get(key).push(n);
+    }
+  }
+
+  // Walk neighbourhood per anchor; cap the immediate-neighbour
+  // contribution to `maxNeighboursPerAnchor` by neighbour degree.
+  const visibleIds = new Set();
+  for (const a of anchors) {
+    if (!a || !a.name || !a.repo_id) continue;
+    const candidates = nodesByName.get(`${a.repo_id}::${a.name}`) || [];
+    if (candidates.length === 0) continue;
+    for (const c of candidates) visibleIds.add(c.id);
+
+    if (neighbourhoodDepth >= 1) {
+      const neighbourBag = [];
+      for (const c of candidates) {
+        const neigh = adj.get(c.id);
+        if (!neigh) continue;
+        for (const nid of neigh) {
+          neighbourBag.push({ id: nid, degree: (adj.get(nid) || new Set()).size });
+        }
+      }
+      neighbourBag.sort((a, b) => b.degree - a.degree);
+      for (const n of neighbourBag.slice(0, maxNeighboursPerAnchor)) {
+        visibleIds.add(n.id);
+      }
+    }
+  }
+
+  const nodeById = new Map((workspaceGraph.nodes || []).map(n => [n.id, n]));
+  const visibleNodes = [];
+  const hiddenNodeIds = new Set();
+  for (const n of workspaceGraph.nodes) {
+    if (visibleIds.has(n.id)) visibleNodes.push(n);
+    else hiddenNodeIds.add(n.id);
+  }
+  const visibleEdges = [];
+  for (const e of workspaceGraph.edges) {
+    if (visibleIds.has(e.source) && visibleIds.has(e.target)) visibleEdges.push(e);
+  }
+  return { nodes: visibleNodes, edges: visibleEdges, hiddenNodeIds };
+}
+
+function applyDepth(neighbourhood, anchor, depth) {
+  // Pure passthrough — currently no narrowing; explicitly accepts `depth`
+  // so callers can read the depth slider state and pass it through to
+  // get_blast_radius. Reserved for future use (e.g., depth>1 client-side
+  // expansion of focal views); returns the same neighbourhood for now.
+  return neighbourhood;
+}
+
 // ── Graph tab: filter bar, minimap, legend helpers (Task 5, 2026-08-31) ──
 //
 // paintLegend / buildFilterBar / applyFiltersToDom / paintMinimap / wireZoom
@@ -1647,5 +1732,8 @@ if (typeof module !== 'undefined' && module.exports) {
     repoColour,
     nodeShape,
     nodeRadius,
+    // SPA graph v2: anchors-first (2026-08-31):
+    computeAnchorVisibleSet,
+    applyDepth,
   };
 }

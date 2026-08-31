@@ -318,3 +318,57 @@ test('applyFilters: edge drops when either endpoint hidden', () => {
   assert.equal(out.visibleEdges.length, 0);
   assert.equal(out.visibleNodes.length, 1);
 });
+
+// ── computeAnchorVisibleSet / applyDepth (v2, 2026-08-31) ──────────────────
+
+test('computeAnchorVisibleSet: anchor with no incident edges is itself visible', () => {
+  const anchors = [{ name: 'orphan', repo_id: 'r1' }];
+  const workspaceGraph = {
+    nodes: [{ id: 'a', name: 'orphan', repo_id: 'r1', kind: 'Function' },
+            { id: 'b', name: 'others', repo_id: 'r1', kind: 'Function' }],
+    edges: [{ source: 'b', target: 'b2', cross_repo: false }],
+  };
+  const out = app.computeAnchorVisibleSet(anchors, workspaceGraph);
+  assert.equal(out.nodes.length, 1);
+  assert.equal(out.nodes[0].id, 'a');
+  assert.equal(out.edges.length, 0);
+});
+
+test('computeAnchorVisibleSet: two anchors sharing a neighbour dedup the neighbour', () => {
+  const anchors = [{ name: 'a', repo_id: 'r1' }, { name: 'b', repo_id: 'r1' }];
+  const workspaceGraph = {
+    nodes: [{ id: 'na', name: 'a', repo_id: 'r1' },
+            { id: 'nb', name: 'b', repo_id: 'r1' },
+            { id: 'shared', name: 'shared', repo_id: 'r1' }],
+    edges: [
+      { source: 'na',    target: 'shared', cross_repo: false },
+      { source: 'nb',    target: 'shared', cross_repo: false },
+      { source: 'other', target: 'shared', cross_repo: false },
+    ],
+  };
+  const out = app.computeAnchorVisibleSet(anchors, workspaceGraph);
+  // Anchors na + nb, plus their shared neighbour (counted ONCE), not 'other'.
+  assert.equal(out.nodes.length, 3);
+  const ids = new Set(out.nodes.map(n => n.id));
+  assert.ok(ids.has('na'));
+  assert.ok(ids.has('nb'));
+  assert.ok(ids.has('shared'));
+  assert.ok(!ids.has('other'));
+});
+
+test('computeAnchorVisibleSet: neighbourhood cap limits per-anchor contribution', () => {
+  const anchors = [{ name: 'hub', repo_id: 'r1' }];
+  const nodes = [{ id: 'hub', name: 'hub', repo_id: 'r1', kind: 'Function' }];
+  const edges = [];
+  for (let i = 0; i < 30; i++) {
+    nodes.push({ id: `n${i}`, name: `n${i}`, repo_id: 'r1', kind: 'Function' });
+    edges.push({ source: 'hub', target: `n${i}`, cross_repo: false });
+  }
+  const out = app.computeAnchorVisibleSet(anchors, { nodes, edges }, { maxNeighboursPerAnchor: 5 });
+  // 1 anchor + capped 5 neighbours = 6 visible.
+  assert.equal(out.nodes.length, 6);
+  const visibleIds = new Set(out.nodes.map(n => n.id));
+  assert.ok(visibleIds.has('hub'));
+  const neighbours = out.nodes.filter(n => n.id !== 'hub');
+  assert.equal(neighbours.length, 5);
+});
