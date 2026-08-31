@@ -409,6 +409,8 @@ make record-demo
 Or: `npm run record-demo --prefix tests/js` (runs only the Playwright driver;
 you still need `scripts/record-spa-demo.sh` for the ffmpeg encoding pass).
 
+For the offline (synthetic) fixture, run `make record-demo-small`.
+
 ---
 
 ## License
