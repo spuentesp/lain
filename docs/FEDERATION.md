@@ -21,13 +21,13 @@ flowchart LR
         RES["resolve_symbol()<br/>symbol_to_repos index<br/>+ backend fallback"]
     end
 
-    subgraph R1["RepoIndex auth-svc"]
+    subgraph R1["RepoIndex bytes"]
         LSP1["LSP pool"]
         PG1["per-repo petgraph"]
         FW1["file watcher"]
     end
 
-    subgraph R2["RepoIndex billing-svc"]
+    subgraph R2["RepoIndex tokio"]
         LSP2["LSP pool"]
         PG2["per-repo petgraph"]
         FW2["file watcher"]
@@ -88,13 +88,13 @@ sequenceDiagram
     participant Bus as ReloadBus
     participant Srv as lain server
 
-    Op->>CLI: lain repos add auth-svc <url>
+    Op->>CLI: lain repos add bytes <url>
     CLI->>YAML: atomic write (temp + rename)
     CLI->>Sock: write "reload\n"
     Sock->>Bus: request_reload()
     Bus->>Srv: rebuild task
     Srv->>Srv: diff new vs live<br/>add/remove operations
-    Srv-->>Op: list_repos() now shows auth-svc
+    Srv-->>Op: list_repos() now shows bytes
 ```
 
 The flow covers the most common operator action: a CLI write that
@@ -108,9 +108,9 @@ At minimum, list the repos you want indexed:
 ```yaml
 data_dir: /var/lib/lain
 repos:
-  - id: auth-svc
-    source: { type: workspace_dir, path: /srv/auth-svc }
-  - id: billing-svc
+  - id: bytes
+    source: { type: workspace_dir, path: /srv/bytes }
+  - id: tokio
     source: { type: local_clone, url: https://example.com/billing.git }
   - id: web
     source: { type: shallow_clone, url: https://example.com/web.git }
@@ -190,8 +190,8 @@ refresh/index timestamps, and node/edge counts.
 ```json
 [
   {
-    "id": "auth-svc",
-    "path": "/srv/auth-svc",
+    "id": "bytes",
+    "path": "/srv/bytes",
     "health": "ready",
     "last_refreshed_unix": 1730000000,
     "last_indexed_unix": 1730000000,
@@ -273,8 +273,8 @@ on `name` or `path`. Results are deduplicated by `global_id`, sorted by
 ```json
 [
   {
-    "global_id": "auth-svc:Function:src/auth.rs:verify_token",
-    "repo_id": "auth-svc",
+    "global_id": "bytes:Function:src/auth.rs:verify_token",
+    "repo_id": "bytes",
     "name": "verify_token",
     "path": "src/auth.rs",
     "kind": "function"
@@ -304,12 +304,12 @@ was the accurate half.)
 ```json
 {
   "by_repo": {
-    "auth-svc": [
-      "auth-svc:Function:src/auth.rs:caller_a",
-      "auth-svc:Function:src/auth.rs:caller_b"
+    "bytes": [
+      "bytes:Function:src/auth.rs:caller_a",
+      "bytes:Function:src/auth.rs:caller_b"
     ],
-    "billing-svc": [
-      "billing-svc:Function:src/checkout.rs:caller_c"
+    "tokio": [
+      "tokio:Function:src/checkout.rs:caller_c"
     ]
   },
   "total_count": 3,
@@ -401,7 +401,7 @@ Examples (in `args`):
 
 | `args` | Resolution |
 |---|---|
-| `{ "repo_id": "auth-svc" }` | Step 1 → `auth-svc` |
+| `{ "repo_id": "bytes" }` | Step 1 → `bytes` |
 | `{ "symbol": "verify_token" }`, unique owner | Step 2 → owning repo |
 | `{ "symbol": "verify_token" }`, multiple owners | Step 2 → `AmbiguousSymbol` |
 | `{ "symbol": "nope" }`, no owners | Step 2 → `NotFound` |
@@ -507,7 +507,7 @@ include a JSON payload of shape:
 ```json
 {
   "error": "ambiguous_symbol",
-  "candidates": ["auth-svc", "billing-svc"],
+  "candidates": ["bytes", "tokio"],
   "message": "Multiple repos match this symbol; specify repo_id or disambiguate."
 }
 ```
@@ -622,15 +622,15 @@ workspace config lives in `workspaces.yaml` next to `repos.yaml`.
 ```mermaid
 flowchart LR
     subgraph Y["repos.yaml"]
-        R1[auth-svc]
-        R2[billing-svc]
+        R1[bytes]
+        R2[tokio]
         R3[db-client]
         R4[web]
     end
 
     subgraph W["workspaces.yaml"]
-        WS1["backend-team<br/>members: [auth-svc, billing-svc, db-client]"]
-        WS2["payments-ws<br/>members: [billing-svc, db-client]"]
+        WS1["backend-team<br/>members: [bytes, tokio, db-client]"]
+        WS2["payments-ws<br/>members: [tokio, db-client]"]
     end
 
     R1 --> WS1
@@ -656,7 +656,7 @@ flowchart LR
    ```yaml
    workspaces:
      - name: backend-team
-       members: [auth-svc, billing-svc, db-client]
+       members: [bytes, tokio, db-client]
    ```
 2. Pick one: `lain workspaces use backend-team` (writes
    `~/.config/lain/active_workspace`).
