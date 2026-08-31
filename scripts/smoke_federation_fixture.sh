@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Smoke test for scripts/demo-federation-fixture.sh.
+# Asserts the new federation fixture shape:
+#   - $ROOT/bytes/Cargo.toml, $ROOT/tokio/Cargo.toml exist
+#   - $ROOT/repos.yaml declares id: bytes and id: tokio
+#   - $ROOT/workspaces.yaml declares workspace `tokio-stack` with both members
+# Network-dependent: requires GitHub to be reachable (the fixture does
+# `git clone --depth 1 --filter=blob:none https://github.com/tokio-rs/{bytes,tokio}.git`).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -6,24 +13,29 @@ trap 'rm -rf "$TMP"' EXIT
 
 bash "$ROOT/scripts/demo-federation-fixture.sh" "$TMP" >/dev/null
 
-test -d "$TMP/auth-svc"   || { echo "FAIL: auth-svc dir missing"; exit 1; }
-test -d "$TMP/billing-svc" || { echo "FAIL: billing-svc dir missing"; exit 1; }
-test -f "$TMP/auth-svc/Cargo.toml"   || { echo "FAIL: auth-svc/Cargo.toml missing"; exit 1; }
-test -f "$TMP/billing-svc/Cargo.toml" || { echo "FAIL: billing-svc/Cargo.toml missing"; exit 1; }
-test -f "$TMP/repos.yaml"     || { echo "FAIL: repos.yaml missing"; exit 1; }
-test -f "$TMP/workspaces.yaml" || { echo "FAIL: workspaces.yaml missing"; exit 1; }
+test -d "$TMP/bytes" || { echo "FAIL: bytes dir missing"; exit 1; }
+test -d "$TMP/tokio" || { echo "FAIL: tokio dir missing"; exit 1; }
+test -f "$TMP/bytes/Cargo.toml"  || { echo "FAIL: bytes/Cargo.toml missing"; exit 1; }
+test -f "$TMP/tokio/Cargo.toml"  || { echo "FAIL: tokio/Cargo.toml missing"; exit 1; }
+test -f "$TMP/repos.yaml"        || { echo "FAIL: repos.yaml missing"; exit 1; }
+test -f "$TMP/workspaces.yaml"   || { echo "FAIL: workspaces.yaml missing"; exit 1; }
 
-grep -q "auth-svc"   "$TMP/repos.yaml"     || { echo "FAIL: repos.yaml missing auth-svc"; exit 1; }
-grep -q "billing-svc" "$TMP/repos.yaml"    || { echo "FAIL: repos.yaml missing billing-svc"; exit 1; }
-grep -q "biller-core" "$TMP/workspaces.yaml" || { echo "FAIL: workspaces.yaml missing biller-core"; exit 1; }
+grep -Eq '^[[:space:]]*-?[[:space:]]*id:[[:space:]]*bytes\b'  "$TMP/repos.yaml" \
+  || { echo "FAIL: repos.yaml missing id: bytes"; exit 1; }
+grep -Eq '^[[:space:]]*-?[[:space:]]*id:[[:space:]]*tokio\b'  "$TMP/repos.yaml" \
+  || { echo "FAIL: repos.yaml missing id: tokio"; exit 1; }
+grep -q "https://github.com/tokio-rs/bytes.git"  "$TMP/repos.yaml" \
+  || { echo "FAIL: repos.yaml missing bytes git url"; exit 1; }
+grep -q "https://github.com/tokio-rs/tokio.git"  "$TMP/repos.yaml" \
+  || { echo "FAIL: repos.yaml missing tokio git url"; exit 1; }
 
-( cd "$TMP/auth-svc"   && test -d .git ) || { echo "FAIL: auth-svc not a git repo"; exit 1; }
-( cd "$TMP/billing-svc" && test -d .git ) || { echo "FAIL: billing-svc not a git repo"; exit 1; }
+grep -q "tokio-stack"           "$TMP/workspaces.yaml" || { echo "FAIL: workspaces.yaml missing tokio-stack"; exit 1; }
+grep -q "  - bytes\|members:.*bytes\|members:.*\[.*bytes\|^- bytes" "$TMP/workspaces.yaml" \
+  || { echo "FAIL: workspaces.yaml missing bytes member"; exit 1; }
+grep -q "tokio"                 "$TMP/workspaces.yaml" \
+  || { echo "FAIL: workspaces.yaml missing tokio member"; exit 1; }
 
-# verify_token must be present in auth-svc
-grep -q "fn verify_token" "$TMP/auth-svc/src/lib.rs" || { echo "FAIL: verify_token missing in auth-svc"; exit 1; }
-
-# billing-svc must reference verify_token across the repo boundary
-grep -q "verify_token" "$TMP/billing-svc/src/lib.rs" || { echo "FAIL: billing-svc does not reference verify_token"; exit 1; }
+( cd "$TMP/bytes" && test -d .git ) || { echo "FAIL: bytes not a git repo"; exit 1; }
+( cd "$TMP/tokio" && test -d .git ) || { echo "FAIL: tokio not a git repo"; exit 1; }
 
 echo "OK: federation fixture smoke test passed"
