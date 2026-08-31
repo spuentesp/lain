@@ -423,7 +423,7 @@ async function main() {
     if (serverProc._logPath) {
       console.log(`  server log: ${serverProc._logPath}`);
     }
-    if (!process.env.RECORD_KEEP_DIR && !args.workdir) {
+    if (!process.env.LAIN_RECORD_KEEP_DIR && !args.workdir) {
       try { fs.rmSync(workdir, { recursive: true, force: true }); } catch (_) {}
     } else {
       console.log(`  workdir preserved: ${workdir}`);

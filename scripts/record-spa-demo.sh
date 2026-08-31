@@ -139,7 +139,7 @@ fi
 RAW_WEBM="$WORK/raw.webm"
 say "recording SPA demo (port $PORT, workdir $WORK)"
 LAIN_BIN="$LAIN" \
-RECORD_KEEP_DIR="$KEEP_WORK" \
+LAIN_RECORD_KEEP_DIR="$KEEP_WORK" \
   node "$REPO_ROOT/tests/js/record_spa_demo.js" \
     --out "$RAW_WEBM" --port "$PORT" --workdir "$WORK" --workspace "$WORKSPACE_NAME" \
     || die "recording failed; inspect $WORK/server.log or rerun with --keep-work"
