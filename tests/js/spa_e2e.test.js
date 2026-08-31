@@ -102,6 +102,23 @@ function buildFixture(workdir) {
     cwd: workdir,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+
+  // The Graph tab's `renderGraphTab` only enters the drawing path when
+  // `list_workspaces` returns a workspace whose members match the loaded
+  // repos. `lain init` writes `repos.yaml` but not `workspaces.yaml`, so
+  // the server would register no workspace tools and the tab would land
+  // in the "No workspace indexed yet" empty state. The Task 6 wait
+  // (`path.graph-node > 0`) explicitly requires an actual graph, so
+  // promote the fixture to a single-member workspace and let the SPA
+  // auto-select it (`pickWorkspaceForGraph` returns `mode: 'auto'` when
+  // there is exactly one workspace).
+  const repoId = path.basename(workdir);
+  fs.writeFileSync(
+    path.join(workdir, 'workspaces.yaml'),
+    `workspaces:\n` +
+    `  - name: e2e-workspace\n` +
+    `    members: [${repoId}]\n`,
+  );
 }
 
 async function waitFor(url, predicate, timeoutMs, label) {
@@ -328,16 +345,13 @@ async function assertGraph(page) {
   const tab = 'graph';
   await clickTab(page, tab);
   assertTrue(tab, 'tab-graph visible', await assertTabVisible(page, tab));
-  // Wait for the renderer to settle: either the SVG has child elements
-  // (real graph drawn), OR the `#graph-empty` cell has populated text.
-  // `renderGraphTab` is async and may take a moment after the click.
+  // Wait for the renderer to settle. After the SPA graph upgrade (Tasks
+  // 1-5) nodes are <path class="graph-node"> rather than <circle>; the
+  // presence of at least one path.graph-node is the proof that
+  // drawGraphSvg has produced a real graph.
   await page.waitForFunction(() => {
     const svg = document.getElementById('graph-canvas');
-    const empty = document.getElementById('graph-empty');
-    if (!svg || !empty) return false;
-    if (svg.childElementCount > 0) return true;
-    const t = (empty.textContent || '').trim();
-    return t.length > 0;
+    return svg && svg.querySelectorAll('path.graph-node').length > 0;
   }, { timeout: 15_000 });
   const settled = await page.evaluate(() => {
     const svg = document.getElementById('graph-canvas');
@@ -353,6 +367,64 @@ async function assertGraph(page) {
   assertTrue(tab, 'graph workspace picker rendered',
     !!(await page.$('#tab-graph #graph-workspace')));
   assertTrue(tab, 'tab content rendered', await tabHasContent(page, tab));
+
+  // Filter-bar assertions: chip rows are stamped by Task 3's HTML and
+  // populated by buildFilterBar (Task 5). The data-* attribute selectors
+  // are the contract — no positional queries.
+  const filterBar = await page.evaluate(() => {
+    const bar = document.querySelector('[data-filter-bar]');
+    if (!bar) return null;
+    return {
+      repoChips: bar.querySelectorAll('[data-filter-row="repos"] .graph-chip').length,
+      kindChips: bar.querySelectorAll('[data-filter-row="kinds"] .graph-chip').length,
+      toggleChips: bar.querySelectorAll('[data-filter-row="toggles"] .graph-chip').length,
+    };
+  });
+  assertTrue(tab, 'filter bar present', !!filterBar);
+  assertTrue(tab, 'at least one repo chip',
+    !!filterBar && filterBar.repoChips > 0,
+    filterBar ? `repoChips=${filterBar.repoChips}` : 'filter bar missing');
+  assertTrue(tab, 'three kind chips (Function/Method/Class)',
+    !!filterBar && filterBar.kindChips === 3,
+    filterBar ? `kindChips=${filterBar.kindChips}` : 'filter bar missing');
+  assertTrue(tab, 'at least two toggle chips (cross-repo-only, labels)',
+    !!filterBar && filterBar.toggleChips >= 2,
+    filterBar ? `toggleChips=${filterBar.toggleChips}` : 'filter bar missing');
+
+  // Toggle the first repo chip and verify the matching nodes get
+  // .is-hidden. Clicking again restores the chip's on-state, so the
+  // fixture's nodes return to visible.
+  const droppedCount = await page.evaluate(() => {
+    const firstRepoChip = document.querySelector('[data-filter-row="repos"] .graph-chip');
+    const before = document.querySelectorAll('.graph-node.is-hidden').length;
+    firstRepoChip.click();
+    const after = document.querySelectorAll('.graph-node.is-hidden').length;
+    firstRepoChip.click();           // toggle back on
+    return { before, after };
+  });
+  assertTrue(tab, 'clicking repo chip hides matching nodes',
+    droppedCount.after > droppedCount.before,
+    `before=${droppedCount.before} after=${droppedCount.after}`);
+
+  // Legend has at least one cell per repo × kind.
+  const legendCells = await page.evaluate(() => {
+    return document.querySelectorAll('[data-graph-legend] .graph-legend-cell').length;
+  });
+  assertTrue(tab, 'legend has at least one cell per (repo, kind) pair',
+    legendCells >= 3, `legendCells=${legendCells}`);
+
+  // Wheel zoom produces a transform on the inner .graph-viewport <g>.
+  await page.evaluate(() => {
+    const svg = document.getElementById('graph-canvas');
+    svg.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true }));
+  });
+  await new Promise(r => setTimeout(r, 200));
+  const zoomed = await page.evaluate(() => {
+    const v = document.querySelector('.graph-viewport');
+    return v && v.getAttribute('transform');
+  });
+  assertTrue(tab, 'wheel event triggers scale transform on .graph-viewport',
+    zoomed && /scale\(/.test(zoomed), `transform=${JSON.stringify(zoomed)}`);
 }
 
 async function assertSse(baseUrl) {
