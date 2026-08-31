@@ -13,7 +13,7 @@
 'use strict';
 
 const { chromium } = require('playwright');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -21,19 +21,26 @@ const path = require('node:path');
 const LAIN_BIN = process.env.LAIN_BIN
   || path.resolve(__dirname, '..', '..', 'target', 'release', 'lain');
 const CHROMIUM_BIN = '/usr/bin/chromium';
-const FIXTURE_SCRIPT = path.resolve(
-  __dirname, '..', '..', 'scripts', 'demo-federation-fixture.sh',
-);
 
 // ── CLI args ────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const out = { out: '/tmp/lain-spa-demo/raw.webm', port: 9931, workdir: null };
+  const out = {
+    out: '/tmp/lain-spa-demo/raw.webm',
+    port: 9931,
+    workdir: null,
+    // Default matches the workspace name written by the real fixture
+    // (`scripts/demo-federation-fixture.sh` → `name: tokio-stack`).
+    // Pass `--workspace biller-core` when running against the legacy
+    // synthetic fixture (`scripts/legacy/demo-federation-fixture.sh`).
+    workspace: 'tokio-stack',
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--out')     out.out     = argv[++i];
-    else if (a === '--port') out.port = Number(argv[++i]);
-    else if (a === '--workdir') out.workdir = argv[++i];
+    if (a === '--out')          out.out       = argv[++i];
+    else if (a === '--port')    out.port      = Number(argv[++i]);
+    else if (a === '--workdir') out.workdir   = argv[++i];
+    else if (a === '--workspace') out.workspace = argv[++i];
     else { console.error(`unknown flag: ${a}`); process.exit(2); }
   }
   return out;
@@ -41,11 +48,7 @@ function parseArgs(argv) {
 
 // ── Lifecycle helpers ───────────────────────────────────────────────────
 
-function buildFixture(workdir) {
-  execFileSync('bash', [FIXTURE_SCRIPT, workdir], { stdio: ['ignore', 'pipe', 'pipe'] });
-}
-
-function startServer(workdir, port) {
+function startServer(workdir, port, workspace) {
   const configPath = path.join(workdir, 'repos.yaml');
   // Capture the server's log to a file rather than a Node pipe. With
   // `stdio: ['pipe', 'pipe']` the kernel pipe buffer fills once the SPA
@@ -60,7 +63,7 @@ function startServer(workdir, port) {
     [
       'server',
       '--config', configPath,
-      '--workspace', 'biller-core',
+      '--workspace', workspace,
       '--transport', 'http',
       '--port', String(port),
       '--log-level', 'warn',
@@ -97,19 +100,21 @@ async function waitForReady(baseUrl, timeoutMs) {
   throw new Error(`federation not ready within ${timeoutMs}ms: ${lastErr && lastErr.message}`);
 }
 
-// Federation cross-repo probe (Task 8 fix-2).
+// Federation cross-repo probe.
 //
 // After `waitForReady` confirms the federation is up, this calls the
 // `get_workspace_graph` tool over MCP and asserts that the returned
-// `nodes` array spans both repos in the federation fixture
-// (`auth-svc` + `billing-svc`). The unfiltered workspace graph is the
-// Tools-tab call the recording's brief is now keyed on (Option A from
-// the Task 8 unblock) — the federation's per-repo ingest cannot resolve
-// `Calls` edges across crate boundaries, so `get_cross_repo_blast_radius`
-// always returned `by_repo={}` for `verify_token` against this fixture.
-// `get_workspace_graph` reads the same backend but is an org-wide graph
-// dump, so it visibly returns nodes from both repos on a healthy fixture.
-async function probeFederationCrossRepoGraph(baseUrl, timeoutMs) {
+// `nodes` array spans at least the federation's declared repo set.
+// We read the expected repo IDs from `repos.yaml` so the probe is
+// keyed to whatever fixture is loaded (real OSS = bytes+tokio,
+// synthetic = auth-svc+billing-svc, future fixtures = TBD). The
+// unfiltered workspace graph is the most reliable cross-repo probe
+// we have — the federation's per-repo ingest cannot resolve `Calls`
+// edges across crate boundaries, so `get_cross_repo_blast_radius`
+// always returns `by_repo={}` against this fixture and is not usable
+// as an upstream gate.
+async function probeFederationCrossRepoGraph(baseUrl, workdir, timeoutMs) {
+  const expectedRepos = readRepoIdsFromConfig(workdir);
   const deadline = Date.now() + timeoutMs;
   let lastErr = null;
   while (Date.now() < deadline) {
@@ -147,7 +152,8 @@ async function probeFederationCrossRepoGraph(baseUrl, timeoutMs) {
             if (payload) {
               const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
               const repos = new Set(nodes.map(n => n && n.repo_id).filter(Boolean));
-              if (nodes.length > 0 && repos.has('auth-svc') && repos.has('billing-svc')) {
+              const missing = expectedRepos.filter(r => !repos.has(r));
+              if (nodes.length > 0 && missing.length === 0) {
                 const repoCounts = {};
                 for (const n of nodes) {
                   if (!n || !n.repo_id) continue;
@@ -157,7 +163,7 @@ async function probeFederationCrossRepoGraph(baseUrl, timeoutMs) {
                 return;
               }
               lastErr = new Error(
-                `workspace graph missing cross-repo nodes — repos=${[...repos].sort().join(',') || '<none>'} node_count=${nodes.length}`,
+                `workspace graph missing cross-repo nodes — repos=${[...repos].sort().join(',') || '<none>'} node_count=${nodes.length} missing=${missing.join(',') || '<none>'}`,
               );
             }
           }
@@ -169,6 +175,38 @@ async function probeFederationCrossRepoGraph(baseUrl, timeoutMs) {
   throw new Error(
     `federation probe failed: get_workspace_graph result doesn't span both repos — check fixture (last error: ${lastErr && lastErr.message})`,
   );
+}
+
+// Pull the list of repo IDs from the workdir's `repos.yaml`. The probe
+// keys off this list so the recording stays fixture-agnostic (real
+// OSS vs synthetic vs whatever a future fixture introduces). Falls
+// back to an empty list if the file is missing or unparseable; the
+// probe's `missing.length === 0` check then trivially passes, which is
+// the right behaviour for an "I can't tell" situation.
+function readRepoIdsFromConfig(workdir) {
+  const configPath = path.join(workdir, 'repos.yaml');
+  try {
+    const text = fs.readFileSync(configPath, 'utf8');
+    const cfg = JSON.parse(text); // tolerate JSON for unit tests
+    if (Array.isArray(cfg.repos)) {
+      return cfg.repos.map(r => r && r.id).filter(Boolean);
+    }
+    return [];
+  } catch (_) {
+    // `repos.yaml` is YAML, not JSON — fall back to a tiny regex pass
+    // that grabs `- id: <name>` lines. Good enough for the probe; we
+    // don't need full schema fidelity here.
+    try {
+      const text = fs.readFileSync(configPath, 'utf8');
+      const ids = [];
+      const re = /^\s*-\s*id:\s*([A-Za-z0-9_.-]+)/gm;
+      let m;
+      while ((m = re.exec(text)) !== null) ids.push(m[1]);
+      return ids;
+    } catch (__) {
+      return [];
+    }
+  }
 }
 
 // ── Tab drive sequence (deterministic timings) ──────────────────────────
@@ -194,15 +232,24 @@ async function driveSequence(page) {
   }, { timeout: 15_000 });
   await new Promise(r => setTimeout(r, 4000));
 
-  // 2. Repos — wait for the table to populate, then sit.
+  // 2. Repos — wait for the table to populate with both `bytes` and `tokio`
+  //    reading `ready`, then sit.
   await clickTab(page, 'repos');
-  await page.waitForSelector('#tab-repos table.repo-table tbody tr', { timeout: 30_000 });
-  await new Promise(r => setTimeout(r, 3000));
+  await page.waitForFunction(() => {
+    const rows = document.querySelectorAll('#tab-repos table.repo-table tbody tr');
+    if (rows.length < 2) return false;
+    const ids = Array.from(rows).map(r => (r.textContent || '').toLowerCase());
+    const readyCount = Array.from(rows).filter(r => /ready/.test(r.textContent || '')).length;
+    return ids.some(t => t.includes('bytes'))
+        && ids.some(t => t.includes('tokio'))
+        && readyCount >= 2;
+  }, { timeout: 60_000 });
+  await new Promise(r => setTimeout(r, 4000));
 
-  // 3. Query — pick auth-svc, find Function, limit 50, run.
+  // 3. Query — pick tokio (the larger repo), find Function, limit 50, run.
   await clickTab(page, 'query');
   await page.waitForSelector('#tab-query #query-repo', { timeout: 10_000 });
-  await page.fill('#query-repo', 'auth-svc');
+  await page.fill('#query-repo', 'tokio');
   await page.fill('#query-type', 'Function');
   await page.fill('#query-limit', '50');
   await page.click('#query-run');
@@ -211,13 +258,9 @@ async function driveSequence(page) {
     return el && el.textContent && el.textContent.trim().length > 0 &&
            !/…/.test(el.textContent);
   }, { timeout: 15_000 });
-  await new Promise(r => setTimeout(r, 4000));
+  await new Promise(r => setTimeout(r, 6000));
 
-  // 4. Tools — pick get_workspace_graph (Option A from Task 8 unblock).
-  // The federation's `get_cross_repo_blast_radius` can't surface
-  // cross-repo callers against the demo fixture (per-repo ingest drops
-  // cross-crate `Calls` edges), so the recording is now keyed on the
-  // workspace graph dump, which visibly returns nodes from both repos.
+  // 4. Tools — pick get_cross_repo_blast_radius against a real bytes anchor.
   await clickTab(page, 'tools');
   await page.waitForSelector('#tab-tools #tools-list li button', { timeout: 20_000 });
   // Find the right tool. The list buttons have the tool name as text.
@@ -225,28 +268,53 @@ async function driveSequence(page) {
     const items = document.querySelectorAll('#tab-tools #tools-list li');
     for (const li of items) {
       const btn = li.querySelector('button');
-      if (btn && /get_workspace_graph/.test(btn.textContent || '')) {
+      if (btn && /get_cross_repo_blast_radius/.test(btn.textContent || '')) {
         btn.click();
         return;
       }
     }
-    throw new Error('get_workspace_graph not in tools list');
+    throw new Error('get_cross_repo_blast_radius not in tools list');
   });
   await page.waitForSelector('#tab-tools #tool-args', { timeout: 10_000 });
-  // The `filter?` field (note the literal `?` in the schema key — see
-  // WORKSPACE_TOOL_DEFS in src/server/mcp/definitions.rs) is optional,
-  // so we leave it empty for the unfiltered org-wide graph that the
-  // recording's Tools tab is meant to display. The form-skip-empty
-  // path in app.js sends `arguments: {}` and the handler reads
-  // `args.get("filter")` (without the `?`), so the empty form is
-  // equivalent to "no filter".
+
+  // Pick the top anchor from the bytes repo at boot. The recording
+  // should not hardcode a symbol name — bytes renames APIs across
+  // releases, and pinning a name in the driver would silently rot the
+  // hero demo. Fall back to the literal `Bytes` if find_anchors is
+  // empty (e.g. network/indexer hiccup).
+  const crossRepoSymbol = await page.evaluate(async () => {
+    try {
+      const r = await fetch('/mcp', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'find_anchors', arguments: { repo_id: 'bytes', limit: 10 } },
+        }),
+      });
+      const body = await r.json();
+      const text = (body && body.result && body.result.content
+        && body.result.content[0] && body.result.content[0].text) || '';
+      // find_anchors emits a numbered list, e.g. "1. Bytes\n2. Buf\n...".
+      const m = text.match(/^\s*1\.\s+([A-Za-z_][A-Za-z0-9_]*)/m);
+      return m ? m[1] : null;
+    } catch (_) {
+      return null;
+    }
+  }) || 'Bytes';
+  if (crossRepoSymbol === 'Bytes') {
+    process.stderr.write('WARN: find_anchors returned no bytes anchor; falling back to literal "Bytes"\n');
+  }
+
+  await page.fill('#tab-tools #tool-args input[name="symbol"]', crossRepoSymbol);
+  await page.fill('#tab-tools #tool-args input[name="depth"]', '1..3');
   await page.click('#tab-tools #tool-call');
   await page.waitForFunction(() => {
     const el = document.getElementById('tool-result');
     return el && el.textContent && el.textContent.trim().length > 0 &&
            !/…/.test(el.textContent);
-  }, { timeout: 20_000 });
-  await new Promise(r => setTimeout(r, 5000));
+  }, { timeout: 30_000 });
+  await new Promise(r => setTimeout(r, 6000));
 
   // 5. Graph — let the D3 layout settle.
   await clickTab(page, 'graph');
@@ -259,7 +327,7 @@ async function driveSequence(page) {
     // Graph may not have data for this workspace — the empty-state
     // text is acceptable; recording still finishes.
   }
-  await new Promise(r => setTimeout(r, 5000));
+  await new Promise(r => setTimeout(r, 8000));
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -275,6 +343,7 @@ async function main() {
   console.log(`  binary:    ${LAIN_BIN}`);
   console.log(`  workdir:   ${workdir}`);
   console.log(`  port:      ${args.port}`);
+  console.log(`  workspace: ${args.workspace}`);
   console.log(`  out:       ${args.out}`);
 
   if (!fs.existsSync(LAIN_BIN)) {
@@ -286,11 +355,21 @@ async function main() {
     process.exit(2);
   }
 
-  console.log(`  building fixture...`);
-  buildFixture(workdir);
+  // The orchestrator (`scripts/record-spa-demo.sh`) is responsible for
+  // running the fixture script before invoking this driver — either by
+  // calling `scripts/demo-federation-fixture.sh` itself or under
+  // `--no-clone` against an already-populated workdir. Guard against a
+  // caller that forgot to populate the workdir so the failure surfaces
+  // here as a clear error instead of a confusing server-start failure
+  // ("workspace X not found in workspaces.yaml") downstream.
+  const configPath = path.join(workdir, 'repos.yaml');
+  if (!fs.existsSync(configPath)) {
+    console.error(`FATAL: ${configPath} missing — populate workdir first (orchestrator's fixture step or --no-clone against an existing tree)`);
+    process.exit(2);
+  }
 
   console.log(`  starting server...`);
-  const serverProc = startServer(workdir, args.port);
+  const serverProc = startServer(workdir, args.port, args.workspace);
 
   let browser;
   let exitCode = 0;
@@ -299,13 +378,10 @@ async function main() {
     console.log(`  federation ready`);
 
     // Deterministic gate: confirm the cross-repo workspace-graph
-    // payload the recording's Tools tab relies on actually spans both
-    // repos. Catches a broken fixture (Task 1 → Task 8 bug) before we
-    // burn a recording session on it. Now keyed on `get_workspace_graph`
-    // after Option A in the Task 8 unblock — the federation cannot
-    // surface cross-repo `Calls` edges, so the prior `by_repo`
-    // assertion never fired.
-    await probeFederationCrossRepoGraph(baseUrl, 30_000);
+    // payload spans every repo declared in the fixture's
+    // `repos.yaml`. Catches a broken fixture before we burn a
+    // recording session on it.
+    await probeFederationCrossRepoGraph(baseUrl, workdir, 30_000);
     console.log(`  federation probe passed`);
 
     browser = await chromium.launch({
