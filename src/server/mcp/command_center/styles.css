@@ -749,3 +749,181 @@ table.repo-table th {
   font-size: 0.6rem;
   pointer-events: none;
 }
+
+/* ── Graph tab: filter bar, chips, focus, minimap (2026-08-31) ─ */
+
+.graph-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px dashed var(--border);
+}
+
+.graph-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.graph-filter-label {
+  min-width: 3.5rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.graph-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.78rem;
+  user-select: none;
+}
+
+.graph-chip:hover { border-color: var(--accent); }
+.graph-chip.is-on {
+  background: var(--surface-alt);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.graph-chip.is-on::before {
+  content: '✓';
+  font-weight: bold;
+}
+
+.graph-chip-swatch {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  border: 1px solid var(--bg);
+}
+
+.graph-canvas-wrap {
+  position: relative;
+  width: 100%;
+  min-height: 320px;
+}
+
+.graph-canvas-wrap > svg {
+  display: block;
+  width: 100%;
+  height: 60vh;
+  min-height: 320px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.graph-canvas-wrap > svg:empty { display: none; }
+
+/* Each node is a <path>. Repo = colour, kind = shape (border-radius is for
+   focus rings; the D3 symbols handle their own geometry). */
+.graph-node {
+  stroke: var(--bg);
+  stroke-width: 1;
+  cursor: grab;
+  fill: currentColor;                          /* kind sets the structural
+                                                    stroke; per-repo --repo-*
+                                                    sets currentColor via
+                                                    graph-repo-* on parent */
+}
+
+/* Per-repo colours — set currentColor on the path. */
+.graph-repo-a { color: var(--repo-a); }
+.graph-repo-b { color: var(--repo-b); }
+.graph-repo-c { color: var(--repo-c); }
+.graph-repo-d { color: var(--repo-d); }
+.graph-repo-e { color: var(--repo-e); }
+.graph-repo-fallback { color: var(--repo-fallback); }
+
+/* Focus / neighbour / dim states (hover and filter-driven). */
+.graph-node.is-focus    { stroke: var(--fg); stroke-width: 2; }
+.graph-node.is-neighbour { opacity: 0.85; }
+.graph-node.is-dim      { opacity: 0.15; }
+.graph-link.is-dim      { stroke-opacity: 0.05; }
+.graph-node.is-hidden   { display: none; }
+.graph-link.is-hidden   { display: none; }
+
+.graph-label {
+  fill: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  pointer-events: none;
+}
+
+.graph-link {
+  stroke: var(--border-strong);
+  stroke-opacity: 0.6;
+  stroke-width: 1;
+}
+.graph-link.cross-repo {
+  stroke: var(--warn);
+  stroke-opacity: 0.9;
+  stroke-width: 1.5;
+}
+
+.graph-tooltip {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  fill: var(--fg);
+  pointer-events: none;
+}
+.graph-tooltip-bg {
+  fill: var(--surface-alt);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.graph-minimap {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  width: 150px;
+  height: 100px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  cursor: crosshair;
+}
+.graph-minimap-frame {
+  fill: rgba(255, 255, 255, 0.18);
+  stroke: var(--accent);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.graph-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.25rem 1rem;
+  margin-top: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--fg-muted);
+}
+.graph-legend-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.graph-legend-cell.is-empty {
+  opacity: 0.4;
+}
+.graph-legend-cell svg {
+  width: 12px;
+  height: 12px;
+}
+.graph-legend-cell svg path {
+  fill: currentColor;
+}
+.graph-legend-cell .graph-legend-name {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
