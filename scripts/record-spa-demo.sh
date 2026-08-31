@@ -84,14 +84,22 @@ mkdir -p "$WORK" "$ARTIFACTS"
 # Resolve which fixture script to use. The `real` fixture does two
 # `git clone`s against GitHub; the `synthetic` fixture is the original
 # `auth-svc` + `billing-svc` two-crate pair, kept under scripts/legacy/
-# for offline runs. Under `--no-clone` we skip the fixture step entirely,
-# so neither the resolution nor the executable check is needed.
+# for offline runs. Each fixture also writes a `workspaces.yaml` with a
+# single workspace whose name the driver needs explicitly — the JS
+# driver's own default is the real fixture's name (`tokio-stack`), so
+# under `--fixture synthetic` we MUST pass `--workspace biller-core`,
+# or the driver errors with `workspace "tokio-stack" not found`.
+# `--no-clone` skips the fixture step entirely but still needs the
+# workspace name baked in (the pre-populated workdir carries whichever
+# fixture's `workspaces.yaml` the caller passed in via `--fixture`).
+case "$FIXTURE" in
+  real)      FIXTURE_SCRIPT="$REPO_ROOT/scripts/demo-federation-fixture.sh"
+             WORKSPACE_NAME=tokio-stack ;;
+  synthetic) FIXTURE_SCRIPT="$REPO_ROOT/scripts/legacy/demo-federation-fixture.sh"
+             WORKSPACE_NAME=biller-core ;;
+  *)         die "--fixture must be 'real' or 'synthetic' (got: $FIXTURE)" ;;
+esac
 if [ "$NO_CLONE" = 0 ]; then
-  case "$FIXTURE" in
-    real)      FIXTURE_SCRIPT="$REPO_ROOT/scripts/demo-federation-fixture.sh" ;;
-    synthetic) FIXTURE_SCRIPT="$REPO_ROOT/scripts/legacy/demo-federation-fixture.sh" ;;
-    *) die "--fixture must be 'real' or 'synthetic' (got: $FIXTURE)" ;;
-  esac
   [ -x "$FIXTURE_SCRIPT" ] || die "fixture script $FIXTURE_SCRIPT is missing or not executable"
 fi
 
@@ -133,7 +141,7 @@ say "recording SPA demo (port $PORT, workdir $WORK)"
 LAIN_BIN="$LAIN" \
 RECORD_KEEP_DIR="$KEEP_WORK" \
   node "$REPO_ROOT/tests/js/record_spa_demo.js" \
-    --out "$RAW_WEBM" --port "$PORT" --workdir "$WORK" \
+    --out "$RAW_WEBM" --port "$PORT" --workdir "$WORK" --workspace "$WORKSPACE_NAME" \
     || die "recording failed; inspect $WORK/server.log or rerun with --keep-work"
 
 [ -s "$RAW_WEBM" ] || die "recording produced empty WebM at $RAW_WEBM"
@@ -192,7 +200,7 @@ ok "wrote ${gif_mb}MB GIF → $GIF"
 POSTER="$ARTIFACTS/spa-demo-poster.png"
 say "extracting poster PNG"
 ffmpeg -y -hide_banner -loglevel error \
-  -ss 2 -i "$RAW_WEBM" -frames:v 1 -vf "scale=1280:-1" \
+  -ss 2 -i "$RAW_WEBM" -frames:v 1 -vf "scale=1024:-1" \
   "$POSTER" \
   || die "ffmpeg poster extract failed"
 [ -s "$POSTER" ] || die "poster not produced"

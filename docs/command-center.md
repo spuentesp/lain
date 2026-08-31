@@ -41,10 +41,10 @@ every state mutation is a tool call.
 
 A walkthrough that matches what you see in the demo above:
 
-1. **Server boot** — the terminal at the top of the clip runs `lain repos add …`, `lain workspaces create biller-core --members auth-svc,billing-svc`, then `lain server --config ./repos.yaml --transport http --port 9931`. Watch the federation reach `ready`.
+1. **Server boot** — the terminal at the top of the clip runs `lain repos add …`, `lain workspaces create tokio-stack --members bytes,tokio`, then `lain server --config ./repos.yaml --transport http --port 9931`. Watch the federation reach `ready`.
 2. **Overview tab** — `get_health` + `get_federation_health` in one view. Federation totals: `total_repos`, `ready`, `indexing`, `degraded`, `total_nodes`, `total_edges`.
-3. **Repos tab** — the per-repo table (id, path, health, node count, edge count). Both `auth-svc` and `billing-svc` show `ready`.
-4. **Query tab** — `find` op against `auth-svc`, type `Function`, limit 50. The JSON result dumps below the form.
+3. **Repos tab** — the per-repo table (id, path, health, node count, edge count). Both `bytes` and `tokio` show `ready`.
+4. **Query tab** — `find` op against `bytes`, type `Function`, limit 50. The JSON result dumps below the form.
 5. **Tools tab** — `find_anchors` against the `bytes` repo, take the top result, then `get_cross_repo_blast_radius` on that symbol with depth `1..3`. The result pane shows real cross-repo call chains into `tokio` (e.g. `bytes::Buf` callers across tokio's I/O codec and runtime).
 6. **Graph tab** — D3 force-directed layout settles on the same workspace-graph nodes the Tools tab just returned. Hover a node to see its name, repo, kind, and path. (Cross-repo edges don't render yet — the federation's per-repo projection drops them; see `tests/federation_e2e.rs::get_cross_repo_blast_radius_traverses_boundaries` for the gap.)
 
