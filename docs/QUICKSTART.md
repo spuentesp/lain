@@ -66,10 +66,10 @@ Expected: a JSON `result.content[0].text` listing the callers of `validate_token
 ## Federation (multi-repo)
 
 ```bash
-mkdir -p ~/projects/biller && cd ~/projects/biller
-lain repos add auth-svc    https://github.com/acme/auth-svc.git
-lain repos add billing-svc https://github.com/acme/billing-svc.git
-lain workspaces create biller-core --members auth-svc,billing-svc
+mkdir -p ~/projects/tokio-stack && cd ~/projects/tokio-stack
+lain repos add bytes    https://github.com/tokio-rs/bytes.git
+lain repos add tokio https://github.com/tokio-rs/tokio.git
+lain workspaces create tokio-stack --members bytes,tokio
 lain server --config ./repos.yaml --transport http --port 9999
 # Open http://localhost:9999 — Command Center
 ```
@@ -84,12 +84,16 @@ Add to your agent's MCP config:
 **First query**
 
 ```bash
-# The same workspace-graph query the video shows:
+# Pick the top anchor of the bytes repo and trace it across tokio.
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_workspace_graph","arguments":{}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"find_anchors","arguments":{"repo_id":"bytes","limit":10}},"id":1}'
+
+# Then, with the top result as the symbol:
+curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius","arguments":{"symbol":"<top-anchor>","depth":"1..3"}},"id":1}'
 ```
 
-Expected: the response's `nodes[]` array contains entries from both `auth-svc` and `billing-svc`.
+Expected: the first call returns a numbered list of `bytes` anchors; replace `<top-anchor>` with the first item and the second response's `result.content[0].text` lists that symbol's callers across both `bytes` and `tokio`.
 
 ### Smoke test the federation
 
