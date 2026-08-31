@@ -260,28 +260,14 @@ async function driveSequence(page) {
   }, { timeout: 15_000 });
   await new Promise(r => setTimeout(r, 6000));
 
-  // 4. Tools — pick get_cross_repo_blast_radius against a real bytes anchor.
-  await clickTab(page, 'tools');
-  await page.waitForSelector('#tab-tools #tools-list li button', { timeout: 20_000 });
-  // Find the right tool. The list buttons have the tool name as text.
-  await page.evaluate(() => {
-    const items = document.querySelectorAll('#tab-tools #tools-list li');
-    for (const li of items) {
-      const btn = li.querySelector('button');
-      if (btn && /get_cross_repo_blast_radius/.test(btn.textContent || '')) {
-        btn.click();
-        return;
-      }
-    }
-    throw new Error('get_cross_repo_blast_radius not in tools list');
-  });
-  await page.waitForSelector('#tab-tools #tool-args', { timeout: 10_000 });
-
-  // Pick the top anchor from the bytes repo at boot. The recording
-  // should not hardcode a symbol name — bytes renames APIs across
-  // releases, and pinning a name in the driver would silently rot the
-  // hero demo. Fall back to the literal `Bytes` if find_anchors is
-  // empty (e.g. network/indexer hiccup).
+  // 4. Tools — pick the top anchor from the bytes repo at boot, then
+  // call the unambiguous cross-repo tool against it. The anchor lookup
+  // is repo-scoped (we asked find_anchors for `bytes`), so use
+  // `get_cross_repo_blast_radius_for_repo` to bypass federation-wide
+  // symbol resolution — that would otherwise error with
+  // AmbiguousSymbol when the name lives in both `bytes` and `tokio`
+  // (e.g. `Buf`). Fall back to the unscoped tool with literal `Bytes`
+  // if find_anchors returned nothing.
   const crossRepoSymbol = await page.evaluate(async () => {
     try {
       const r = await fetch('/mcp', {
@@ -305,7 +291,34 @@ async function driveSequence(page) {
   if (crossRepoSymbol === 'Bytes') {
     process.stderr.write('WARN: find_anchors returned no bytes anchor; falling back to literal "Bytes"\n');
   }
+  const usesForRepo = crossRepoSymbol !== 'Bytes';
+  const toolName = usesForRepo
+    ? 'get_cross_repo_blast_radius_for_repo'
+    : 'get_cross_repo_blast_radius';
 
+  await clickTab(page, 'tools');
+  await page.waitForSelector('#tab-tools #tools-list li button', { timeout: 20_000 });
+  // Find the right tool. The list buttons render the tool name as
+  // text, so match exactly — `get_cross_repo_blast_radius_for_repo`
+  // shares a prefix with the unscoped variant and a substring regex
+  // would either click the wrong button or hit whichever is rendered
+  // first.
+  await page.evaluate((name) => {
+    const items = document.querySelectorAll('#tab-tools #tools-list li');
+    for (const li of items) {
+      const btn = li.querySelector('button');
+      if (btn && btn.textContent && btn.textContent.trim() === name) {
+        btn.click();
+        return;
+      }
+    }
+    throw new Error(`${name} not in tools list`);
+  }, toolName);
+  await page.waitForSelector('#tab-tools #tool-args', { timeout: 10_000 });
+
+  if (usesForRepo) {
+    await page.fill('#tab-tools #tool-args input[name="repo_id"]', 'bytes');
+  }
   await page.fill('#tab-tools #tool-args input[name="symbol"]', crossRepoSymbol);
   await page.fill('#tab-tools #tool-args input[name="depth"]', '1..3');
   await page.click('#tab-tools #tool-call');
