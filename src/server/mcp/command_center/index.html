@@ -69,6 +69,15 @@
           <span id="graph-meta" class="muted"></span>
         </div>
         <div class="graph-filter-bar" data-filter-bar>
+          <div class="graph-filter-row" data-filter-row="search">
+            <span class="graph-filter-label muted">search</span>
+            <input type="search" data-graph-search placeholder="focus on symbol…" aria-label="focus on symbol">
+          </div>
+          <div class="graph-filter-row" data-filter-row="focal" data-active="0" hidden>
+            <span class="graph-filter-label muted">focal</span>
+            <input type="range" min="1" max="3" value="1" data-graph-depth aria-label="blast radius depth">
+            <button class="graph-chip" data-graph-back>← anchors</button>
+          </div>
           <div class="graph-filter-row" data-filter-row="repos">
             <span class="graph-filter-label muted">repos</span>
           </div>
