@@ -64,6 +64,10 @@ function findFreePort() {
   });
 }
 
+// Duplicates the spirit of `scripts/legacy/demo-federation-fixture.sh`
+// (Rust crate + git init + `lain init`) but with a single-crate
+// fixture for the SPA boot path. Task 4 left this out of scope; if the
+// synthetic fixture script changes shape, update here.
 function buildFixture(workdir) {
   // Minimal Cargo crate. `lain init` only needs a `.git` to walk up, but
   // giving it real Rust source means the indexer has something to chew on
