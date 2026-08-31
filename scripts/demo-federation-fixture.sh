@@ -1,120 +1,84 @@
 #!/usr/bin/env bash
-# Builds the 2-repo federation fixture the SPA demo recording uses.
+# Builds the federation fixture the SPA demo recording runs against.
 #
-# Two Rust crates joined by a single real cross-repo Calls edge:
-#   auth-svc::verify_token   — the only definition
-#   billing-svc              — the only external caller
+# Two well-known Rust open-source repos joined by a real production
+# dependency (`tokio` depends on `bytes`):
+#   - https://github.com/tokio-rs/bytes  (id: bytes)
+#   - https://github.com/tokio-rs/tokio  (id: tokio)
 #
-# The fixture is a real Cargo workspace: a parent `Cargo.toml` declares
-# both members and `billing-svc/Cargo.toml` has a path-dep on `auth-svc`,
-# so the source of `billing-svc/src/lib.rs` contains a genuine
-# `auth_svc::verify_token(...)` call. Tree-sitter / ingest see that call
-# as a normal Rust function invocation and emit a cross-repo Calls edge,
-# which is what `get_cross_repo_blast_radius("verify_token")` reports in
-# the recording. A bare `verify_token_bridge` helper inside billing-svc
-# would only produce an intra-repo edge and the blast radius would be
-# empty across repos — that was the bug Task 8 caught.
+# A `--filter=blob:none --depth=1` clone keeps the working tree populated
+# for the indexer (tree-sitter walks files on disk) without dragging down
+# the full history. A stamp file per repo makes re-runs free.
 #
-# Also writes:
-#   <ROOT>/Cargo.toml        — workspace root declaring both members
-#   <ROOT>/repos.yaml        — two entries, both workspace_dir
-#   <ROOT>/workspaces.yaml   — one workspace `biller-core` with both members
+# Writes:
+#   $ROOT/repos.yaml        — two `shallow_clone` entries
+#   $ROOT/workspaces.yaml   — one workspace `tokio-stack` with both members
+#
+# Exits non-zero on any failure. NO synthetic fallback — the recording is
+# only useful against real data.
+#
+# Usage:  scripts/demo-federation-fixture.sh <dir>
 set -eu
+
 ROOT="${1:?usage: demo-federation-fixture.sh <dir>}"
-rm -rf "$ROOT"
-mkdir -p "$ROOT/auth-svc/src"   "$ROOT/billing-svc/src"
 
-# ── workspace root ──────────────────────────────────────────────────────
-# Parent Cargo.toml so rust-analyzer / cargo treat auth-svc and
-# billing-svc as one workspace. Without this, the path-dep below
-# wouldn't be discoverable as a cross-workspace reference and the
-# indexer would never emit a Calls edge between the two repos.
-cat > "$ROOT/Cargo.toml" <<'EOF'
-[workspace]
-members = ["auth-svc", "billing-svc"]
-resolver = "2"
-EOF
+REPOS=(
+  "bytes https://github.com/tokio-rs/bytes.git"
+  "tokio https://github.com/tokio-rs/tokio.git"
+)
 
-# ── auth-svc ────────────────────────────────────────────────────────────
-cat > "$ROOT/auth-svc/Cargo.toml" <<'EOF'
-[package]
-name = "auth_svc"
-version = "0.1.0"
-edition = "2021"
-EOF
+mkdir -p "$ROOT"
 
-cat > "$ROOT/auth-svc/src/lib.rs" <<'EOF'
-/// Validate an incoming bearer token. This is the symbol the recording
-/// queries with `get_cross_repo_blast_radius`; its only external caller
-/// lives in `billing-svc/src/lib.rs`, so the cross-repo edge is real.
-pub fn verify_token(token: &str) -> bool {
-    !token.is_empty() && token.len() >= 8
-}
+# ── clone step (idempotent: skip when the stamp file is newer than this script) ──
+SCRIPT_MTIME="$(stat -c %Y "$0" 2>/dev/null || stat -f %m "$0")"
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+for entry in "${REPOS[@]}"; do
+  set -- $entry     # id url
+  id="$1"; url="$2"
+  target="$ROOT/$id"
+  stamp="$ROOT/$id.stamp"
 
-    #[test]
-    fn rejects_empty() {
-        assert!(!verify_token(""));
-    }
+  if [ -d "$target/.git" ] && [ -f "$stamp" ]; then
+    stamp_mtime="$(stat -c %Y "$stamp" 2>/dev/null || stat -f %m "$stamp")"
+    if [ "$stamp_mtime" -ge "$SCRIPT_MTIME" ]; then
+      printf '  fixture: %s already cloned at %s — skipping\n' "$id" "$target"
+      continue
+    fi
+  fi
 
-    #[test]
-    fn rejects_short() {
-        assert!(!verify_token("abc"));
-    }
+  printf '  fixture: cloning %s (%s) …\n' "$id" "$url"
+  rm -rf "$target"
+  if ! git clone --depth 1 --filter=blob:none "$url" "$target"; then
+    printf '  FAIL: git clone %s failed — is GitHub reachable?\n' "$url" >&2
+    exit 1
+  fi
 
-    #[test]
-    fn accepts_long_enough() {
-        assert!(verify_token("abcdefgh"));
-    }
-}
-EOF
-
-# ── billing-svc ─────────────────────────────────────────────────────────
-cat > "$ROOT/billing-svc/Cargo.toml" <<'EOF'
-[package]
-name = "billing_svc"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-auth_svc = { path = "../auth-svc" }
-EOF
-
-cat > "$ROOT/billing-svc/src/lib.rs" <<'EOF'
-// Crosses the repo boundary: the only external caller of
-// `auth_svc::verify_token`. The recording's blast-radius query uses
-// this dependency to produce a multi-repo answer.
-pub fn charge_invoice(invoice_id: &str, token: &str) -> Result<u64, String> {
-    if !auth_svc::verify_token(token) {
-        return Err("unauthorized".into());
-    }
-    Ok(invoice_id.len() as u64)
-}
-EOF
-
-# ── git history (indexer + co-change want commits) ──────────────────────
-for crate in auth-svc billing-svc; do
-  cd "$ROOT/$crate"
-  git init -q
-  git -c user.email=demo@lain -c user.name=demo add -A
-  git -c user.email=demo@lain -c user.name=demo commit -qm "initial $crate"
+  # Belt-and-braces: a `--filter=blob:none` clone populates enough of the
+  # working tree for lain's tree-sitter pass; if the indexer logs
+  # "no source files found" we can swap to a non-filtered clone. We do
+  # not preemptively `checkout HEAD -- .` because that defeats the
+  # filter for every file in the tree.
+  touch "$stamp"
 done
 
-# ── repos.yaml + workspaces.yaml ────────────────────────────────────────
+# ── repos.yaml + workspaces.yaml ────────────────────────────────────────────
 cat > "$ROOT/repos.yaml" <<EOF
 data_dir: $ROOT/.lain-data
 repos:
-  - id: auth-svc
-    source: { type: workspace_dir, path: $ROOT/auth-svc }
-  - id: billing-svc
-    source: { type: workspace_dir, path: $ROOT/billing-svc }
+  - id: bytes
+    source:
+      type: shallow_clone
+      url: https://github.com/tokio-rs/bytes.git
+  - id: tokio
+    source:
+      type: shallow_clone
+      url: https://github.com/tokio-rs/tokio.git
 EOF
 
 cat > "$ROOT/workspaces.yaml" <<'EOF'
 workspaces:
-  - name: biller-core
-    members: [auth-svc, billing-svc]
+  - name: tokio-stack
+    members: [bytes, tokio]
 EOF
+
+printf '  fixture: %s ready\n' "$ROOT"
