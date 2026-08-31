@@ -852,6 +852,81 @@ function normalizeGraphPayload(payload) {
   return { nodes, edges, truncated: !!(payload && payload.truncated) };
 }
 
+// Pure helpers — DOM-free so node --test can import them. Used by
+// drawGraphSvg and tested in tests/js/graph_tab.test.js.
+
+const REPO_PALETTE = ['graph-repo-a', 'graph-repo-b', 'graph-repo-c', 'graph-repo-d', 'graph-repo-e'];
+
+function computeRepoPalette(graph) {
+  // Stable mapping repo_id → palette index. Repos are sorted
+  // alphabetically so the same repo gets the same colour across re-renders.
+  const ids = Array.from(new Set(
+    (graph.nodes || []).map(n => n.repo_id).filter(Boolean)
+  )).sort();
+  const out = new Map();
+  ids.forEach((id, i) => out.set(id, REPO_PALETTE[i] || 'graph-repo-fallback'));
+  return out;
+}
+
+function repoColour(repoId, palette) {
+  if (!repoId) return 'graph-repo-fallback';
+  return palette.get(repoId) || 'graph-repo-fallback';
+}
+
+function nodeShape(kind) {
+  if (kind === 'Method') return 'diamond';
+  if (kind === 'Class')  return 'square';
+  return 'circle';
+}
+
+function nodeRadius(role) {
+  return role === 'focus' ? 7 : role === 'neighbour' ? 6 : 5;
+}
+
+function applyFilters(graph, state) {
+  const visibleNodes = [];
+  const hiddenNodeIds = new Set();
+  const acceptedRepos = state.repos;
+  const acceptedKinds = state.kinds;
+  for (const n of graph.nodes) {
+    const repoOk = acceptedRepos.has(n.repo_id);
+    const kindOk = acceptedKinds.has(n.kind);
+    if (!repoOk || !kindOk) {
+      hiddenNodeIds.add(n.id);
+    } else {
+      visibleNodes.push(n);
+    }
+  }
+  if (state.crossRepoOnly) {
+    const touchingCross = new Set();
+    for (const e of graph.edges) {
+      if (e.cross_repo) {
+        touchingCross.add(e.source);
+        touchingCross.add(e.target);
+      }
+    }
+    for (const n of graph.nodes) {
+      if (!touchingCross.has(n.id)) hiddenNodeIds.add(n.id);
+    }
+  }
+  const visibleEdges = [];
+  const hiddenEdgeIds = new Set();
+  for (const e of graph.edges) {
+    const sHidden = hiddenNodeIds.has(e.source);
+    const tHidden = hiddenNodeIds.has(e.target);
+    if (sHidden || tHidden) {
+      hiddenEdgeIds.add(e);
+    } else {
+      visibleEdges.push(e);
+    }
+  }
+  // The crossRepoOnly pass above only adds to hiddenNodeIds; drop those from
+  // visibleNodes here so the two lists stay in sync (applyFilters callers
+  // treat visibleNodes as the post-filter set).
+  const visibleNodesFiltered = visibleNodes.filter(n => !hiddenNodeIds.has(n.id));
+  return { visibleNodes: visibleNodesFiltered, visibleEdges, hiddenNodeIds, hiddenEdgeIds };
+}
+
 // Paint a force-directed graph into `svgEl`. Same simulation idiom as
 // src/ui/blast-radius.html; colours come from styles.css classes so the
 // drawing follows the phosphor/paper theme without any JS colour literals.
@@ -1230,5 +1305,11 @@ if (typeof module !== 'undefined' && module.exports) {
     pickWorkspaceForGraph,
     classifyWorkspacesResult,
     normalizeGraphPayload,
+    // SPA graph upgrade (2026-08-31):
+    computeRepoPalette,
+    applyFilters,
+    repoColour,
+    nodeShape,
+    nodeRadius,
   };
 }

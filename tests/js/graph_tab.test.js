@@ -185,3 +185,133 @@ test('normalizeGraphPayload: preserves the truncation flag', () => {
   const out = app.normalizeGraphPayload({ nodes: [], edges: [], truncated: true });
   assert.strictEqual(out.truncated, true);
 });
+
+// ── SPA graph upgrade (2026-08-31): pure helpers for filters / palette / shape ──
+
+test('computeRepoPalette: stable alphabetical mapping (a..e + fallback)', () => {
+  const graph = { nodes: [
+    { id: '1', repo_id: 'tokio' },
+    { id: '2', repo_id: 'bytes' },
+    { id: '3', repo_id: 'quux' },
+    { id: '4', repo_id: 'alpha' },
+    { id: '5', repo_id: 'flux' },
+    { id: '6', repo_id: 'zeta' },
+    { id: '7', repo_id: 'repod' },
+  ]};
+  const palette = app.computeRepoPalette(graph);
+  assert.equal(palette.get('alpha'),  'graph-repo-a');
+  assert.equal(palette.get('bytes'),  'graph-repo-b');
+  assert.equal(palette.get('flux'),   'graph-repo-c');
+  assert.equal(palette.get('quux'),   'graph-repo-d');
+  assert.equal(palette.get('repod'),  'graph-repo-e');
+  assert.equal(palette.get('tokio'),  'graph-repo-fallback');
+  assert.equal(palette.get('zeta'),   'graph-repo-fallback');
+});
+
+test('repoColour: returns fallback for unknown / empty repo_id', () => {
+  const palette = new Map([['bytes', 'graph-repo-a']]);
+  assert.equal(app.repoColour('bytes', palette),   'graph-repo-a');
+  assert.equal(app.repoColour('unknown', palette), 'graph-repo-fallback');
+  assert.equal(app.repoColour('', palette),        'graph-repo-fallback');
+  assert.equal(app.repoColour(null, palette),      'graph-repo-fallback');
+});
+
+test('nodeShape: round-trips Function/Method/Class + unknown fallback', () => {
+  assert.equal(app.nodeShape('Function'), 'circle');
+  assert.equal(app.nodeShape('Method'),   'diamond');
+  assert.equal(app.nodeShape('Class'),    'square');
+  assert.equal(app.nodeShape(''),         'circle');
+  assert.equal(app.nodeShape('Trait'),    'circle');     // defensive
+  assert.equal(app.nodeShape(undefined),  'circle');
+});
+
+test('nodeRadius: 5/6/7 by role', () => {
+  assert.equal(app.nodeRadius('default'),   5);
+  assert.equal(app.nodeRadius('neighbour'), 6);
+  assert.equal(app.nodeRadius('focus'),     7);
+  assert.equal(app.nodeRadius(undefined),   5);
+});
+
+test('applyFilters: drops node when repo unselected', () => {
+  const graph = {
+    nodes: [
+      { id: 'a', repo_id: 'r1', kind: 'Function' },
+      { id: 'b', repo_id: 'r2', kind: 'Function' },
+    ],
+    edges: [{ source: 'a', target: 'b', cross_repo: false }],
+  };
+  const state = {
+    repos: new Set(['r1']),
+    kinds: new Set(['Function', 'Method', 'Class']),
+    crossRepoOnly: false,
+  };
+  const out = app.applyFilters(graph, state);
+  assert.equal(out.visibleNodes.length, 1);
+  assert.equal(out.visibleNodes[0].id, 'a');
+  assert.ok(out.hiddenNodeIds.has('b'));
+  assert.equal(out.visibleEdges.length, 0);
+});
+
+test('applyFilters: drops node when kind unselected', () => {
+  const graph = {
+    nodes: [
+      { id: 'a', repo_id: 'r1', kind: 'Function' },
+      { id: 'b', repo_id: 'r1', kind: 'Method' },
+    ],
+    edges: [],
+  };
+  const state = {
+    repos: new Set(['r1']),
+    kinds: new Set(['Function']),
+    crossRepoOnly: false,
+  };
+  const out = app.applyFilters(graph, state);
+  assert.equal(out.visibleNodes.length, 1);
+  assert.equal(out.visibleNodes[0].id, 'a');
+  assert.ok(out.hiddenNodeIds.has('b'));
+});
+
+test('applyFilters: crossRepoOnly drops nodes that have no cross-repo edge', () => {
+  const graph = {
+    nodes: [
+      { id: 'a', repo_id: 'r1', kind: 'Function' },
+      { id: 'b', repo_id: 'r1', kind: 'Function' },
+      { id: 'c', repo_id: 'r2', kind: 'Function' },
+    ],
+    edges: [
+      { source: 'a', target: 'b', cross_repo: false },
+      { source: 'a', target: 'c', cross_repo: true  },
+    ],
+  };
+  const state = {
+    repos: new Set(['r1', 'r2']),
+    kinds: new Set(['Function', 'Method', 'Class']),
+    crossRepoOnly: true,
+  };
+  const out = app.applyFilters(graph, state);
+  // a touches the cross-repo edge; b does not; c does.
+  assert.equal(out.visibleNodes.length, 2);
+  assert.ok(!out.hiddenNodeIds.has('a'));
+  assert.ok(out.hiddenNodeIds.has('b'));
+  assert.ok(!out.hiddenNodeIds.has('c'));
+});
+
+test('applyFilters: edge drops when either endpoint hidden', () => {
+  const graph = {
+    nodes: [
+      { id: 'a', repo_id: 'r1', kind: 'Function' },
+      { id: 'b', repo_id: 'r2', kind: 'Function' },
+    ],
+    edges: [
+      { source: 'a', target: 'b', cross_repo: true },
+    ],
+  };
+  const state = {
+    repos: new Set(['r1']),       // r2 hidden by repo filter
+    kinds: new Set(['Function', 'Method', 'Class']),
+    crossRepoOnly: false,
+  };
+  const out = app.applyFilters(graph, state);
+  assert.equal(out.visibleEdges.length, 0);
+  assert.equal(out.visibleNodes.length, 1);
+});
