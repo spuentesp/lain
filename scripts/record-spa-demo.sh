@@ -156,28 +156,35 @@ fi
 ok "wrote ${mp4_mb}MB MP4 → $MP4"
 
 # ── 6. encode GIF (palettegen + paletteuse) ─────────────────────────────
+# Retry ladder: best-quality fps=20 first, then 12, 8, 6 (last also drops
+# width to 800). The 12 MB hard cap is the only thing that aborts the run;
+# the 8 MB target just keeps escalating to find the best fit.
 GIF="$ARTIFACTS/spa-demo.gif"
-encode_gif() {
-  local fps="$1"
-  say "encoding GIF (fps=$fps, palettegen)"
+encode_gif() {      # encode_gif <fps> [scale]
+  local fps="$1" scale="${2:-960}"  # default width=960; "-1" preserves aspect
+  say "encoding GIF (fps=$fps, width=${scale}, palettegen)"
   ffmpeg -y -hide_banner -loglevel error \
     -i "$RAW_WEBM" \
-    -vf "fps=$fps,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5" \
+    -vf "fps=$fps,scale=${scale}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5" \
     "$GIF" \
-    || die "ffmpeg GIF encode failed at fps=$fps"
+    || die "ffmpeg GIF encode failed at fps=$fps width=$scale"
 }
 
+# Try fps=20 (best), then 12, 8, 6 — only escalate when over budget.
 encode_gif 20
-gif_bytes=$(stat -c%s "$GIF")
-gif_mb=$(( gif_bytes / 1024 / 1024 ))
-if [ "$gif_mb" -gt 8 ]; then
-  warn "GIF is ${gif_mb}MB (>8MB target), retrying at fps=12"
-  encode_gif 12
-  gif_bytes=$(stat -c%s "$GIF")
-  gif_mb=$(( gif_bytes / 1024 / 1024 ))
+gif_bytes=$(stat -c%s "$GIF"); gif_mb=$(( gif_bytes / 1024 / 1024 ))
+if [ "$gif_mb" -gt 8 ]; then warn "GIF is ${gif_mb}MB (>8MB target)"; encode_gif 12
+  gif_bytes=$(stat -c%s "$GIF"); gif_mb=$(( gif_bytes / 1024 / 1024 ))
 fi
+if [ "$gif_mb" -gt 8 ]; then warn "still ${gif_mb}MB, trying fps=8"; encode_gif 8
+  gif_bytes=$(stat -c%s "$GIF"); gif_mb=$(( gif_bytes / 1024 / 1024 ))
+fi
+if [ "$gif_mb" -gt 8 ]; then warn "still ${gif_mb}MB, dropping to fps=6 + width=800"; encode_gif 6 800
+  gif_bytes=$(stat -c%s "$GIF"); gif_mb=$(( gif_bytes / 1024 / 1024 ))
+fi
+# Hard cap remains 12 MB.
 if [ "$gif_mb" -gt 12 ]; then
-  die "GIF is ${gif_mb}MB (>12MB hard cap); reduce content or use a smaller viewport"
+  die "GIF is ${gif_mb}MB (>12MB hard cap) even at fps=6/width=800 — pick a smaller viewport or shorter recording"
 fi
 ok "wrote ${gif_mb}MB GIF → $GIF"
 
