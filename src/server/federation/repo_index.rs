@@ -22,6 +22,30 @@ use tokio::sync::Mutex as AsyncMutex;
 /// polling — the federation stays up.
 pub const INDEX_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Resolved per-repo pipeline timeout. Honors `LAIN_REINDEX_TIMEOUT`
+/// (the same knob [`crate::server::refresh::parse_reindex_timeout`]
+/// reads for the outer startup budget) so operators have one knob to
+/// turn when cold-cache federation indexing overruns the historical
+/// 60s default — e.g. `tokio-rs/tokio` on a cold cache. Falls back to
+/// [`Self::INDEX_TIMEOUT`] (60s) when the env var is unset or
+/// unparseable. Cached per-process via `OnceLock` so the env var is
+/// read exactly once at first call.
+pub fn index_timeout() -> Duration {
+    static OVERRIDE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| match std::env::var("LAIN_REINDEX_TIMEOUT") {
+        Ok(s) => match s.parse::<u64>() {
+            Ok(secs) => Duration::from_secs(secs),
+            Err(_) => {
+                eprintln!(
+                    "LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; using default 60s for per-repo pipeline"
+                );
+                INDEX_TIMEOUT
+            }
+        },
+        Err(_) => INDEX_TIMEOUT,
+    })
+}
+
 /// Run `f` on a fresh OS thread and wait up to `budget` for it to
 /// signal completion. If `f` finishes within `budget`, the thread is
 /// joined and the function returns `true`. If `budget` elapses first,
@@ -247,7 +271,7 @@ impl RepoIndex {
     /// two concurrent writes to the same per-repo graph. The guard is
     /// `Send` and is held across `.await` points inside `index_one_repo`.
     ///
-    /// The whole pipeline is wrapped in [`Self::INDEX_TIMEOUT`]. The inner
+    /// The whole pipeline is wrapped in [`Self::index_timeout`]. The inner
     /// stages already have their own budgets (`LSP_STARTUP_TIMEOUT`,
     /// `LSP_REQUEST_TIMEOUT`, the `scan_timeout_secs` ingest cap), but a
     /// top-level bound keeps a misbehaving stage — a stuck child process,
@@ -292,19 +316,20 @@ impl RepoIndex {
             )
             .await
         };
-        let result = match tokio::time::timeout(INDEX_TIMEOUT, pipeline).await {
+        let result = match tokio::time::timeout(index_timeout(), pipeline).await {
             Ok(r) => r,
             Err(_) => {
+                let budget = index_timeout();
                 tracing::warn!(
                     "[federation] index timed out after {:?} for {:?}; transitioning to Degraded",
-                    INDEX_TIMEOUT,
+                    budget,
                     self.source.local_path()
                 );
                 drop(git_guard);
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(format!(
                     "RepoIndex::index exceeded {:?} budget",
-                    INDEX_TIMEOUT
+                    budget
                 )));
             }
         };
@@ -365,19 +390,20 @@ impl RepoIndex {
             )
             .await
         };
-        let result = match tokio::time::timeout(INDEX_TIMEOUT, pipeline).await {
+        let result = match tokio::time::timeout(index_timeout(), pipeline).await {
             Ok(r) => r,
             Err(_) => {
+                let budget = index_timeout();
                 tracing::warn!(
                     "[federation] index_forced timed out after {:?} for {:?}; transitioning to Degraded",
-                    INDEX_TIMEOUT,
+                    budget,
                     self.source.local_path()
                 );
                 drop(git_guard);
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(format!(
                     "RepoIndex::index_forced exceeded {:?} budget",
-                    INDEX_TIMEOUT
+                    budget
                 )));
             }
         };
@@ -422,7 +448,8 @@ impl RepoIndex {
     /// dropped (the closure uses `tx.try_send` and ignores `Full`).
     ///
     /// The mpsc channel is **bounded at 1024 events**. `index()` is
-    /// itself bounded at `INDEX_TIMEOUT = 60s`; a stuck LSP child process
+    /// itself bounded at [`Self::index_timeout`] (60s by default,
+    /// overridable via `LAIN_REINDEX_TIMEOUT`); a stuck LSP child process
     /// or a slow-to-warm LSP could let a `git checkout` storm (hundreds
     /// of files in seconds) **block the receiver task** while it
     /// processes one event at a time. An unbounded queue would let the
