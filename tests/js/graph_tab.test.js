@@ -217,12 +217,15 @@ test('repoColour: returns fallback for unknown / empty repo_id', () => {
 });
 
 test('nodeShape: round-trips Function/Method/Class + unknown fallback', () => {
-  assert.equal(app.nodeShape('Function'), 'circle');
-  assert.equal(app.nodeShape('Method'),   'diamond');
-  assert.equal(app.nodeShape('Class'),    'square');
-  assert.equal(app.nodeShape(''),         'circle');
-  assert.equal(app.nodeShape('Trait'),    'circle');     // defensive
-  assert.equal(app.nodeShape(undefined),  'circle');
+  // Helper returns the d3-symbol namespace key, so callers can do
+  // `d3[nodeShape(kind)]` directly. The shape-by-kind mapping is
+  // documented here as the helper's contract.
+  assert.equal(app.nodeShape('Function'), 'symbolCircle');
+  assert.equal(app.nodeShape('Method'),   'symbolDiamond');
+  assert.equal(app.nodeShape('Class'),    'symbolSquare');
+  assert.equal(app.nodeShape(''),         'symbolCircle');
+  assert.equal(app.nodeShape('Trait'),    'symbolCircle');  // defensive
+  assert.equal(app.nodeShape(undefined),  'symbolCircle');
 });
 
 test('nodeRadius: 5/6/7 by role', () => {

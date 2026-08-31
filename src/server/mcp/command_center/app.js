@@ -874,9 +874,14 @@ function repoColour(repoId, palette) {
 }
 
 function nodeShape(kind) {
-  if (kind === 'Method') return 'diamond';
-  if (kind === 'Class')  return 'square';
-  return 'circle';
+  // Returns the d3-symbol namespace key (`d3.symbolCircle`,
+  // `d3.symbolDiamond`, `d3.symbolSquare`) — callers do
+  // `d3[nodeShape(kind)]`. Returning the raw shape name (e.g. `'circle'`)
+  // would resolve to `d3.circle`, which is undefined and breaks the symbol
+  // path generation in drawGraphSvg / paintLegend.
+  if (kind === 'Method') return 'symbolDiamond';
+  if (kind === 'Class')  return 'symbolSquare';
+  return 'symbolCircle';
 }
 
 function nodeRadius(role) {
@@ -968,19 +973,32 @@ function paintLegend(graph, palette, container) {
 }
 
 // Three rows of chips (repos, kinds, view toggles) + a reset-zoom button.
-// Each row's container is pre-stamped by Task 3's HTML; we only inject the
-// chips and their click handlers.
+// Each row's container is pre-stamped by Task 3's HTML — including a
+// `<span class="graph-filter-label">` placeholder — so we MUST NOT wipe the
+// container with `innerHTML = ''` (it would destroy the row + its label,
+// and the subsequent `querySelector('[data-filter-row=...]')` would then
+// resolve to null). The `make` helper preserves an existing label and only
+// appends new chips to the row.
 function buildFilterBar(graph, palette, state, container, onChange) {
   if (!container) return;
-  container.innerHTML = '';
   const repos = Array.from(new Set(graph.nodes.map(n => n.repo_id).filter(Boolean))).sort();
   const kinds = ['Function', 'Method', 'Class'];
   const make = (row, label, content, after) => {
-    row.innerHTML = `
-      <span class="graph-filter-label muted">${escapeHtml(label)}</span>
-      ${content}
-      ${after ? `<span class="graph-filter-after">${after}</span>` : ''}
-    `;
+    if (!row) return;
+    let labelEl = row.querySelector('.graph-filter-label');
+    if (!labelEl) {
+      labelEl = document.createElement('span');
+      labelEl.className = 'graph-filter-label muted';
+      labelEl.textContent = label;
+      row.prepend(labelEl);
+    }
+    row.insertAdjacentHTML('beforeend', content);
+    if (after) {
+      const afterEl = document.createElement('span');
+      afterEl.className = 'graph-filter-after';
+      afterEl.textContent = after;
+      row.appendChild(afterEl);
+    }
   };
   const wrap = (label, items) => items.map(({key, text, on}) => `
     <button class="graph-chip ${on ? 'is-on' : ''}" data-filter="${escapeHtml(key)}">
@@ -1150,9 +1168,14 @@ function drawGraphSvg(svgEl, graph) {
   };
 
   const container = svgEl.closest('.graph-canvas-wrap') || svgEl.parentElement;
-  const viewport = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-  viewport.classList.add('graph-viewport');
-  svgEl.appendChild(viewport);
+  // Wrap in a d3 selection so subsequent `.append('g').attr(...)` chains
+  // return d3 selections (the raw-DOM `append()` returns undefined). The
+  // four downstream `viewport.append('g')` calls (edges, nodes, tooltip,
+  // labels) rely on this. `wireZoom` already accepts either a d3 selection
+  // or a raw element.
+  const viewport = d3.select(document.createElementNS('http://www.w3.org/2000/svg', 'g'));
+  viewport.classed('graph-viewport', true);
+  svgEl.appendChild(viewport.node());
 
   // forceLink mutates the edge objects (replacing ids with node refs), so
   // hand it copies — renderGraphTab may redraw from the same payload.
