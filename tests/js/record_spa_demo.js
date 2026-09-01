@@ -388,7 +388,12 @@ async function main() {
   let browser;
   let exitCode = 0;
   try {
-    await waitForReady(baseUrl, 120_000);
+    // Bumped from 120_000 → 600_000 (Task 7 fix round 1): cold-cache
+    // federation reindex of bytes+tokio routinely takes longer than 2
+    // minutes (tokio alone spawned proc-macro servers for ~80 s on the
+    // last failed run before the recorder gave up). The cap exists only
+    // on the recording path; production server startup is unaffected.
+    await waitForReady(baseUrl, 600_000);
     console.log(`  federation ready`);
 
     // Deterministic gate: confirm the cross-repo workspace-graph
