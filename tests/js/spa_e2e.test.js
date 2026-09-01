@@ -484,6 +484,35 @@ async function assertGraph(page) {
   assertTrue(tab, 'back button hides focal row',
     !!v2BackToAnchor.focalHidden,
     `v2BackToAnchor=${JSON.stringify(v2BackToAnchor)}`);
+
+  // Item 13/14 follow-on: focal mode renders nodes for the queried symbol
+  // (after Item 13's tool swap to get_cross_repo_blast_radius_for_repo).
+  // Re-enter focal mode via the search input so this assertion is
+  // checking the focal render, not the anchor view that back() left us in.
+  // Use a symbol from the e2e fixture (orchestrate/entrypoint/helper_a/helper_b)
+  // so the focal tool actually has a node to return — the test uses a
+  // single-member workspace, unlike the recording's 2-repo fixture.
+  await page.evaluate(() => {
+    const input = document.querySelector('[data-graph-search]');
+    if (input) {
+      input.value = 'orchestrate';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await new Promise(r => setTimeout(r, 1500));
+  const v2FocalRendered = await page.evaluate(() => {
+    const nodes = document.querySelectorAll('.graph-node');
+    const meta = document.getElementById('graph-meta');
+    const empty = document.getElementById('graph-empty');
+    return {
+      nodeCount: nodes.length,
+      metaText: meta ? meta.textContent : '',
+      emptyText: empty ? empty.textContent : '',
+    };
+  });
+  assertTrue(tab, 'focal mode rendered nodes for the queried symbol',
+    v2FocalRendered.nodeCount > 0,
+    `nodeCount=${v2FocalRendered.nodeCount}, metaText=${JSON.stringify(v2FocalRendered.metaText)}, emptyText=${JSON.stringify(v2FocalRendered.emptyText)}`);
 }
 
 async function assertSse(baseUrl) {
