@@ -48,10 +48,22 @@ fn full_body(data: Bytes) -> OverlayHttpBody {
 // GET /federation-dashboard.html simply fall through to the next branch.
 
 use crate::server::mcp::command_center_assets::{
-    APP_JS, BLAST_RADIUS_HTML, CALL_CHAIN_HTML, COUPLING_HTML, INDEX_HTML, SPA_ASSETS,
-    THEME_CSS,
-    STYLES_CSS,
+    self, APP_JS, BLAST_RADIUS_HTML, CALL_CHAIN_HTML, COUPLING_HTML, INDEX_HTML, SPA_ASSETS,
+    STYLES_CSS, THEME_CSS,
 };
+
+/// Convert the `Cow<'static, [u8]>` returned by `serve_bytes` /
+/// `serve_str` into a `Bytes` for the HTTP body. The Borrowed variant
+/// maps to `Bytes::from_static` (zero-copy); the Owned variant moves
+/// the `Vec<u8>` directly into `Bytes` (also zero-copy, since `Bytes`
+/// takes ownership of the buffer).
+fn cow_to_bytes(cow: std::borrow::Cow<'static, [u8]>) -> Bytes {
+    use std::borrow::Cow;
+    match cow {
+        Cow::Borrowed(b) => Bytes::from_static(b),
+        Cow::Owned(v) => Bytes::from(v),
+    }
+}
 use crate::server::mcp::definitions::{
     defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
     WORKSPACE_TOOL_DEFS,
@@ -2545,28 +2557,28 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/html; charset=utf-8")
-            .body(full_body(Bytes::from_static(INDEX_HTML)))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("index.html", INDEX_HTML))))
             .unwrap());
     }
     if method == Method::GET && path == "/app.js" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/javascript; charset=utf-8")
-            .body(full_body(Bytes::from_static(APP_JS)))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("app.js", APP_JS))))
             .unwrap());
     }
     if method == Method::GET && path == "/theme.css" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/css; charset=utf-8")
-            .body(full_body(Bytes::from_static(THEME_CSS)))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("theme.css", THEME_CSS))))
             .unwrap());
     }
     if method == Method::GET && path == "/styles.css" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/css; charset=utf-8")
-            .body(full_body(Bytes::from_static(STYLES_CSS)))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("styles.css", STYLES_CSS))))
             .unwrap());
     }
     if method == Method::GET && path.starts_with("/assets/") {
@@ -2575,10 +2587,13 @@ async fn handle_request(
         // SPA_ASSETS table lives in `mcp::command_center_assets`.
         for (route, body) in SPA_ASSETS {
             if path == *route {
+                let name = route.trim_start_matches("/assets/");
                 return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Type", "text/javascript; charset=utf-8")
-                    .body(full_body(Bytes::from_static(body.as_bytes())))
+                    .body(full_body(cow_to_bytes(
+                        command_center_assets::serve_str(name, body),
+                    )))
                     .unwrap());
             }
         }

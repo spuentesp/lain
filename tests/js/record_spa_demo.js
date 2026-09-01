@@ -34,6 +34,14 @@ function parseArgs(argv) {
     // Pass `--workspace biller-core` when running against the legacy
     // synthetic fixture (`scripts/legacy/demo-federation-fixture.sh`).
     workspace: 'tokio-stack',
+    // Bumped from 120_000 → 600_000 (Task 7 fix round 1): cold-cache
+    // federation reindex of bytes+tokio routinely takes longer than 2
+    // minutes (tokio alone spawned proc-macro servers for ~80 s on the
+    // last failed run before the recorder gave up). The cap exists only
+    // on the recording path; production server startup is unaffected.
+    // Override with `--ready-timeout-ms <ms>` for cold-cache CI hosts
+    // where 600 s still isn't enough.
+    ready_timeout_ms: 600_000,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -41,6 +49,7 @@ function parseArgs(argv) {
     else if (a === '--port')    out.port      = Number(argv[++i]);
     else if (a === '--workdir') out.workdir   = argv[++i];
     else if (a === '--workspace') out.workspace = argv[++i];
+    else if (a === '--ready-timeout-ms') out.ready_timeout_ms = Number(argv[++i]);
     else { console.error(`unknown flag: ${a}`); process.exit(2); }
   }
   return out;
@@ -431,7 +440,7 @@ async function main() {
     // minutes (tokio alone spawned proc-macro servers for ~80 s on the
     // last failed run before the recorder gave up). The cap exists only
     // on the recording path; production server startup is unaffected.
-    await waitForReady(baseUrl, 600_000);
+    await waitForReady(baseUrl, args.ready_timeout_ms);
     console.log(`  federation ready`);
 
     // Deterministic gate: confirm the cross-repo workspace-graph
