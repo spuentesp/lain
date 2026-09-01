@@ -10,7 +10,23 @@
 //! so the resolver stage is exercised end to end.
 
 use lain::toolchains::{resolve_program, ToolchainProfile};
-use std::path::Path;
+use std::path::{Component, Path};
+
+/// Compare two path strings component-by-component. The server-side
+/// resolver returns paths via `PathBuf::to_string_lossy()`, and the
+/// shell scripts / glob code that produce them don't always agree with
+/// the test's `Path::join` calls about which separator to use between
+/// which pair of components — on Windows the manager script's
+/// `echo "$sel/$2"` and the test's `tmp.path().join("selected/bin/widget")`
+/// produce the same path components but with different separator
+/// spellings in the joined suffix. Compare via `Path::components()`
+/// (which already normalises the platform's separators) instead of as
+/// raw strings.
+fn path_components_eq(left: &str, right: &str) -> bool {
+    let l: Vec<Component<'_>> = Path::new(left).components().collect();
+    let r: Vec<Component<'_>> = Path::new(right).components().collect();
+    l == r
+}
 
 /// A manager that answers `which <program>` for exactly one program,
 /// the way `mise which` / `rustup which` do.
@@ -73,10 +89,18 @@ fn resolver_stage_end_to_end_with_a_real_manager() {
     //    version, and it guessed the oldest node on the probe machine.
     std::env::set_var("PATH", format!("{}:/usr/bin:/bin", mgr_bin.display()));
     let p = profile(tmp.path(), Some(&resolver));
-    assert_eq!(
-        resolve_program("widget", Some(&p)),
-        tmp.path().join("selected/bin/widget").to_string_lossy(),
-        "the manager's answer must win"
+    // Component-wise comparison: the manager script writes its answer
+    // via `echo "$sel/$2"`, which on Windows produces a path whose
+    // trailing separators disagree with what `Path::join` produces
+    // here (the `selected/bin/widget` literal uses forward slashes,
+    // `Path::join` adds a native separator between `tmp.path()` and
+    // the suffix). Same components either way; raw strings differ.
+    let got = resolve_program("widget", Some(&p));
+    let want_path = tmp.path().join("selected/bin/widget");
+    let want = want_path.to_string_lossy();
+    assert!(
+        path_components_eq(&got, &want),
+        "the manager's answer must win: got={got:?} want={want:?}"
     );
 
     // 2. A manager that declines leaves the program unresolved rather
