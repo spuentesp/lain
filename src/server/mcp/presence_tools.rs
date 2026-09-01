@@ -17,6 +17,7 @@ use crate::server::schema::NodeType;
 use crate::server::audit::{append_edit_event, AuditEvent};
 use crate::server::path_util::posix_string;
 use serde::Deserialize;
+use std::path::PathBuf;
 use serde_json::{json, Value};
 
 /// Resolve a session token to its session, refreshing the heartbeat as
@@ -390,7 +391,13 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             let audit = AuditEvent {
                 ts_unix,
                 agent_id: session.id.clone(),
-                path: g.path.clone(),
+                // Store the path in the canonical forward-slash form so
+                // the on-disk JSONL is platform-independent. Any
+                // `path_glob` filter that uses `/` (see audit_tools.rs)
+                // will match regardless of host OS, and downstream
+                // consumers (federation replication, future log
+                // shipping) see a stable wire form.
+                path: PathBuf::from(posix_string(&g.path)),
                 claim_set,
                 racers: result.conflicts.clone(),
                 plan_revision,

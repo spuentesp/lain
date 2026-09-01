@@ -420,4 +420,38 @@ mod tests {
         assert!((all[0].ts_unix - 100.0).abs() < 0.001);
         assert!((all[1].ts_unix - 200.0).abs() < 0.001);
     }
+
+    #[test]
+    fn audit_event_path_serializes_with_forward_slash_separators() {
+        // The audit JSONL is consumed by tools whose `path_glob`
+        // filters use `/`. The on-disk serialization of `path`
+        // must therefore use `/` regardless of host OS. The input
+        // here is already in canonical form (the audit write site
+        // in `presence_tools.rs` runs it through `posix_string`),
+        // so this test guards the round-trip rather than the
+        // platform branch — a future regression that lets a
+        // Windows-native PathBuf slip through will surface here
+        // because the helper will refuse to normalize a path
+        // whose `to_string_lossy` form is already in win form
+        // (see the `path_util::tests` unix-side assertion for
+        // the inverse direction).
+        let event = AuditEvent {
+            ts_unix: 0.0,
+            agent_id: AgentId("test".into()),
+            path: PathBuf::from("src/a.rs"),
+            claim_set: vec![],
+            racers: vec![],
+            plan_revision: None,
+            landed_revision: 0,
+        };
+        let line = serde_json::to_string(&event).expect("serialize");
+        assert!(
+            line.contains("\"src/a.rs\""),
+            "expected forward-slash form, got: {line}"
+        );
+        assert!(
+            !line.contains("\\\\"),
+            "unexpected backslash escape in path serialization: {line}"
+        );
+    }
 }
