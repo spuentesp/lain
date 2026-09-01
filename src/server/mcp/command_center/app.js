@@ -1738,20 +1738,35 @@ async function renderGraphTab(opts = {}) {
   }
 
   // ── Anchor mode (default) ─────────────────────────────────────────────
-  // Fetch find_anchors, then the workspace graph (used for the 1-hop
-  // neighbourhood expansion), then compute the visible set.
+  // Fetch the workspace graph first (it both scopes find_anchors to a
+  // repo_id and is used for the 1-hop neighbourhood expansion), then
+  // fetch find_anchors, then compute the visible set.
   empty.textContent = 'Loading anchors…';
   svg.innerHTML = '';
+
+  let workspaceGraph;
+  try {
+    const wgResult = await mcpCall('get_workspace_graph', {});
+    workspaceGraph = normalizeGraphPayload(parseJson(wgResult));
+    graphState.workspaceGraph = workspaceGraph;
+  } catch (e) {
+    // Degrade: render anchors only (no 1-hop expansion) and let the
+    // find_anchors call below fail the scope guard — its error surfaces
+    // in the operator-visible message.
+    workspaceGraph = { nodes: [], edges: [], truncated: false };
+  }
 
   let anchorsResult;
   try {
     // Item 14: find_anchors requires repo_id (the federation's scope guard
     // rejects unscoped calls). Pick the first distinct repo_id from the
-    // already-fetched workspace graph.
+    // just-fetched workspace graph (closure-local `workspaceGraph`,
+    // populated above — NOT `graphState.workspaceGraph`, which is only
+    // written by this same fetch and so would be stale on a cold first
+    // render).
     const anchorRepoId = (() => {
-      const wg = graphState.workspaceGraph;
-      if (!wg || !Array.isArray(wg.nodes)) return null;
-      for (const n of wg.nodes) {
+      if (!workspaceGraph || !Array.isArray(workspaceGraph.nodes)) return null;
+      for (const n of workspaceGraph.nodes) {
         if (n && n.repo_id) return n.repo_id;
       }
       return null;
@@ -1788,16 +1803,6 @@ async function renderGraphTab(opts = {}) {
     // Still wire controls so the user can type a symbol to focalise.
     wireGraphControls(graphState, () => renderGraphTab());
     return;
-  }
-
-  let workspaceGraph;
-  try {
-    const wgResult = await mcpCall('get_workspace_graph', {});
-    workspaceGraph = normalizeGraphPayload(parseJson(wgResult));
-    graphState.workspaceGraph = workspaceGraph;
-  } catch (e) {
-    // Degrade: render anchors only (no 1-hop expansion).
-    workspaceGraph = { nodes: [], edges: [], truncated: false };
   }
   const visible = computeAnchorVisibleSet(anchors, workspaceGraph, { neighbourhoodDepth: 1, maxNeighboursPerAnchor: 20 });
   if (meta) {
