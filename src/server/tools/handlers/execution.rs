@@ -390,12 +390,18 @@ mod spawn_tests {
             .and_then(|(_, v)| v)
             .map(|v| v.to_string_lossy().to_string())
             .expect("PATH must be set on the child");
+        // The PATH separator is platform-dependent: `:` on Unix, `;` on
+        // Windows (see `std::env::join_paths`). The toolchain dir must
+        // come first regardless of which separator is in use, so pick
+        // the platform's separator explicitly.
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let prefix = format!("/opt/toolchain/bin{sep}");
         assert!(
-            path.starts_with("/opt/toolchain/bin:"),
+            path.starts_with(&prefix),
             "the toolchain's own directory must come first so siblings resolve: {path}"
         );
         assert!(
-            path.len() > "/opt/toolchain/bin:".len(),
+            path.len() > prefix.len(),
             "the existing PATH must be preserved, not replaced: {path}"
         );
     }

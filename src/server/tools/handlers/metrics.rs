@@ -299,6 +299,11 @@ fn names_referenced_anywhere(
     }
     // Where each name is defined, so the definition itself does not
     // count as a reference to itself.
+    //
+    // Candidate paths come from the graph, which records them through
+    // `graph_path` (see `crate::server::graph::graph_path`): always
+    // forward-slash separators regardless of platform, so the
+    // comparison against `rel` below stays portable.
     let mut own_file: HashMap<&str, &str> = HashMap::new();
     for c in candidates {
         own_file.insert(c.name.as_str(), c.path.as_str());
@@ -313,11 +318,15 @@ fn names_referenced_anywhere(
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        let rel = path
-            .strip_prefix(workspace)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .into_owned();
+        // Use `graph_path` rather than `strip_prefix(...).to_string_lossy()`
+        // so the relative path uses forward-slash separators on every
+        // platform. Without this, Windows builds emit `src\foo.rs` here
+        // while the graph stored `src/foo.rs`, and the "is this the
+        // defining file?" check below silently answers `false` — so the
+        // single occurrence of a name in its own definition counted as
+        // a cross-file reference and every dead code report came back
+        // empty.
+        let rel = crate::server::graph::graph_path(workspace, path);
         for c in candidates {
             let name = c.name.as_str();
             if name.is_empty() || referenced.contains(name) {
