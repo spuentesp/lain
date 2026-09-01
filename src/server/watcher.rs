@@ -1068,8 +1068,10 @@ mod tests {
         // Modify the file.
         std::fs::write(&repos, "repos:\n  - id: r1\n").unwrap();
 
-        // The bus should see the reload request within 2s.
-        let result = tokio::time::timeout(Duration::from_secs(2), async {
+        // The bus should see the reload request within 5s. (2s is
+        // tight on macOS CI runners where `notify` events can land
+        // well after the write returns.)
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if sub.try_recv().is_ok() {
                     return true;
@@ -1078,7 +1080,7 @@ mod tests {
             }
         })
         .await;
-        assert!(result.unwrap_or(false), "expected reload request within 2s");
+        assert!(result.unwrap_or(false), "expected reload request within 5s");
     }
 
     /// Step 6: `spawn_config_watcher` also reacts to `workspaces.yaml`
@@ -1100,7 +1102,8 @@ mod tests {
 
         std::fs::write(&ws, "workspaces:\n  - name: w1\n    members: [r1]\n").unwrap();
 
-        let result = tokio::time::timeout(Duration::from_secs(2), async {
+        // 5s budget — see the `repos.yaml` test above for why.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if sub.try_recv().is_ok() {
                     return true;
@@ -1109,7 +1112,7 @@ mod tests {
             }
         })
         .await;
-        assert!(result.unwrap_or(false), "expected reload request within 2s");
+        assert!(result.unwrap_or(false), "expected reload request within 5s");
     }
 
     /// Step 5: a directory created after startup must trigger the
