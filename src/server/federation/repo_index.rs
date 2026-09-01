@@ -511,8 +511,23 @@ impl RepoIndex {
                             e
                         );
                     }
-                    me_for_task.overlay_updated.notify_one();
+                } else if let Err(e) = &res {
+                    // Notify backend error (e.g. ENOSPC under inotify
+                    // watch-handle pressure on busy CI runners). Don't
+                    // run the pipelines on a backend error, but DO
+                    // still fire the wake-signal so any caller awaiting
+                    // the receiver advances instead of timing out.
+                    tracing::warn!(
+                        error = %e,
+                        "[federation] watcher received notify error; firing wake signal anyway"
+                    );
                 }
+
+                // Fire the wake-signal unconditionally so tests gating
+                // on the receiver (and any future caller wiring
+                // signal-driven refreshes) see a notify() per kernel
+                // event, success or backend error.
+                me_for_task.overlay_updated.notify_one();
             }
         });
 
