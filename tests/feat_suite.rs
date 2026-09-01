@@ -62,6 +62,22 @@ fn git_init(path: &std::path::Path) {
     assert!(commit.success(), "git commit failed");
 }
 
+/// Compare a server-returned path string against an expected list of
+/// path components. The server returns paths via
+/// `PathBuf::to_string_lossy()`, which uses the platform's native
+/// separator — `\` on Windows, `/` on Unix. The wire protocol
+/// contract is "the same components the caller named", not a
+/// specific separator spelling, so we compare component-by-component
+/// instead of as raw strings. Splitting on either separator handles
+/// both platforms in one branch.
+fn path_components_eq(path: &str, expected: &[&str]) -> bool {
+    let actual: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    actual == expected
+}
+
 fn boot_server(port: u16) -> ServerGuard {
     // Project dir: one minimal repo so the federation is non-empty
     // (federation tools refuse to dispatch when `list_repos()` is
@@ -344,8 +360,17 @@ fn feat_suite_end_to_end() {
         .get("granted")
         .and_then(|v| v.as_array())
         .unwrap_or_else(|| panic!("claim_files(string) missing granted: {claim_str}"));
+    // The `path` field is `PathBuf::to_string_lossy()` of the
+    // server-canonicalized path, so it uses the platform's native
+    // separator (backslash on Windows, forward-slash on Unix).
+    // Compare via path components so the assertion is portable.
     assert!(
-        granted_str.iter().any(|g| g.get("path").and_then(|p| p.as_str()) == Some("src/a.rs")),
+        granted_str.iter().any(|g| {
+            g.get("path")
+                .and_then(|p| p.as_str())
+                .map(|p| path_components_eq(p, &["src", "a.rs"]))
+                .unwrap_or(false)
+        }),
         "claim_files did not grant string-form src/a.rs: {claim_str}"
     );
 
@@ -363,7 +388,12 @@ fn feat_suite_end_to_end() {
         .and_then(|v| v.as_array())
         .unwrap_or_else(|| panic!("claim_files(object) missing granted: {claim_obj}"));
     assert!(
-        granted_obj.iter().any(|g| g.get("path").and_then(|p| p.as_str()) == Some("src/b.rs")),
+        granted_obj.iter().any(|g| {
+            g.get("path")
+                .and_then(|p| p.as_str())
+                .map(|p| path_components_eq(p, &["src", "b.rs"]))
+                .unwrap_or(false)
+        }),
         "claim_files did not grant object-form src/b.rs: {claim_obj}"
     );
 
@@ -384,8 +414,16 @@ fn feat_suite_end_to_end() {
         .filter_map(|c| c.get("path").and_then(|v| v.as_str()))
         .map(|s| s.to_string())
         .collect();
+    // Component-wise comparison so the test works on Windows too:
+    // see `path_components_eq` above.
+    let has_a = my_paths
+        .iter()
+        .any(|p| path_components_eq(p, &["src", "a.rs"]));
+    let has_b = my_paths
+        .iter()
+        .any(|p| path_components_eq(p, &["src", "b.rs"]));
     assert!(
-        my_paths.contains("src/a.rs") && my_paths.contains("src/b.rs"),
+        has_a && has_b,
         "my_claims missing one or both files; got: {my_paths:?}"
     );
 
