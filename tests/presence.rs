@@ -1273,13 +1273,6 @@ async fn get_world_state_tool_returns_retracted_and_beyond_current() {
 // tools/list, path_glob filter, group_by=path (default), per-group
 // count + sample_event shape.
 // -------------------------------------------------------------------------
-/// CI gating: on Windows the path-grouping lookup returns 0 events
-/// while the same assertion sees 4 on Linux. Likely a path-format
-/// mismatch (backslashes vs forward slashes) when the audit log
-/// stores paths and the query filters on the canonical form. Skip
-/// on Windows until the underlying path-format handling is fixed;
-/// the test remains exercised on Linux + macOS.
-#[cfg_attr(target_os = "windows", ignore)]
 #[tokio::test]
 async fn get_recent_activity_tool_groups_by_path() {
     use lain::server::LainServer;
@@ -1760,12 +1753,6 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
 /// the same `{granted, conflicts, advisories}` shape an object-form call
 /// does.
 ///
-/// CI gating: the server returns `granted[0].path` as `Some("src\\a.rs")`
-/// on Windows (backslash) while the contract here expects the canonical
-/// forward-slash form `Some("src/a.rs")`. Same class of bug as the prior
-/// `feat_suite` Windows path-format issue, in a different test file.
-/// Skip on Windows until the underlying path-format handling is fixed.
-#[cfg_attr(target_os = "windows", ignore)]
 #[tokio::test]
 async fn claim_files_accepts_string_form_files() {
     use lain::server::mcp::presence_tools::run_claim_files;

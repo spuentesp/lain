@@ -3,6 +3,48 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Windows path-format normalization.** All MCP tool responses that
+  surface a file path (`claim_files`, `release_files`, `list_occupancy`,
+  `my_claims`, `list_my_claims`, `detect_overlap`) now serialize paths
+  in forward-slash form on every platform. Previously Windows clients
+  received `"src\\a.rs"` where the wire contract required
+  `"src/a.rs"`, breaking the contract and the `multi_agent_concurrency`
+  integration tests. A new `crate::server::path_util::posix_string`
+  helper is the canonical cross-platform path string renderer,
+  mirroring the existing `graph_path` pattern.
+- **Audit log JSONL is now platform-independent.** `AuditEvent.path`
+  is written in forward-slash form regardless of host OS, so the
+  `get_recent_activity` `path_glob` filter (built with `/`) matches on
+  Windows as it does on Linux. The same fix applies to the
+  `group_by: "path"` branch of `group_key` in `audit_tools.rs`. No
+  in-process reader other than `read_audit_log` consumes the JSONL
+  today, so the wire-format change is internal.
+- **Removed two `#[cfg_attr(target_os = "windows", ignore)]` gates**
+  on `claim_files_accepts_string_form_files` and
+  `get_recent_activity_tool_groups_by_path` in `tests/presence.rs`.
+  Both tests now run on Windows after the underlying fixes.
+- **`tests/multi_agent_concurrency.rs`** replaces eleven raw
+  `Some("src/...")` literal assertions with a local
+  `path_components_eq` helper, matching the existing helper in
+  `tests/feat_suite.rs`. These tests now run unmodified on every
+  platform.
+- **Workspace discovery no longer hijacks on dev/test runs.** When
+  the parent process is `cargo test` / `cargo run`, its cwd is the
+  project containing the `lain` binary itself, so the
+  parent-process-cwd walk-up used to land on the source tree and
+  `lain mcp` was asked to re-index the entire project being tested
+  — the `oneshot_discovers_workspace_from_cwd` regression test
+  timed out at 60 s. `find_git_workspace_root_resolved` now skips
+  the parent-cwd candidate when the running binary lives inside
+  the git root it resolved to, falling through to the process's
+  own cwd. Real agent harnesses (Kimi, Claude Code, a plain
+  shell) put the binary in a plugin dir or on `$PATH`, so the
+  filter never fires for them.
+
 ## [0.6.2] — 2026-08-28
 
 ### Fixed

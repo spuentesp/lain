@@ -52,6 +52,11 @@ pub mod audit;
 // that is already a project dependency.
 pub mod glob_match;
 
+// Cross-platform path string formatting. `posix_string` is the
+// canonical helper for converting a `Path` into the forward-slash
+// form the MCP wire protocol and the audit log JSONL both expect.
+pub mod path_util;
+
 // Re-export the LainServer orchestrator + transport at `crate::server::*`
 // so existing callers (`lain::server::LainServer`, `lain::server::Transport`,
 // `crate::server::LainServer`, `crate::server::Transport`) keep working

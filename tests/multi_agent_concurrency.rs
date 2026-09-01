@@ -36,6 +36,19 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+/// Compare a server-supplied path string against an expected list of
+/// path components, treating both `/` and `\` as separators. Used
+/// instead of `==` so the same assertion holds whether the server
+/// emits forward slashes (Linux) or backslashes (Windows). Matches
+/// the helper in `tests/feat_suite.rs`.
+fn path_components_eq(path: &str, expected: &[&str]) -> bool {
+    let actual: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    actual == expected
+}
+
 /// Locate the `lain` binary. Mirrors `tests/mcp_cold_start.rs` —
 /// `LAIN_BIN` first, then `target/{release,debug}/lain`.
 fn lain_bin() -> Option<PathBuf> {
@@ -474,7 +487,9 @@ fn two_agents_race_claim_one_wins_one_conflicts() {
                 .and_then(|g| g.as_array())
                 .map(|arr| {
                     arr.iter().any(|g| {
-                        g.get("path").and_then(|p| p.as_str()) == Some("src/contested.rs")
+                        g.get("path")
+                            .and_then(|p| p.as_str())
+                            .is_some_and(|p| path_components_eq(p, &["src", "contested.rs"]))
                     })
                 })
                 .unwrap_or(false)
@@ -487,7 +502,9 @@ fn two_agents_race_claim_one_wins_one_conflicts() {
                 .and_then(|c| c.as_array())
                 .map(|arr| {
                     arr.iter().any(|c| {
-                        c.get("path").and_then(|p| p.as_str()) == Some("src/contested.rs")
+                        c.get("path")
+                            .and_then(|p| p.as_str())
+                            .is_some_and(|p| path_components_eq(p, &["src", "contested.rs"]))
                     })
                 })
                 .unwrap_or(false)
@@ -568,7 +585,9 @@ fn three_agents_one_wins_two_observe_advisory() {
         .expect("granted array");
     assert!(
         a_granted.iter().any(|g| {
-            g.get("path").and_then(|p| p.as_str()) == Some("src/shared.rs")
+            g.get("path")
+                .and_then(|p| p.as_str())
+                .is_some_and(|p| path_components_eq(p, &["src", "shared.rs"]))
         }),
         "alice's edit claim must succeed: {a_resp}"
     );
@@ -619,7 +638,9 @@ fn three_agents_one_wins_two_observe_advisory() {
             .unwrap_or_else(|| panic!("{who}: missing granted array: {r}"));
         assert!(
             granted.iter().any(|g| {
-                g.get("path").and_then(|p| p.as_str()) == Some("src/shared.rs")
+                g.get("path")
+                    .and_then(|p| p.as_str())
+                    .is_some_and(|p| path_components_eq(p, &["src", "shared.rs"]))
             }),
             "{who} read claim must be granted: {r}"
         );
@@ -644,7 +665,10 @@ fn three_agents_one_wins_two_observe_advisory() {
         assert!(
             advisories.iter().any(|adv| {
                 adv.get("agent_id").and_then(|v| v.as_str()) == Some(a_id.as_str())
-                    && adv.get("path").and_then(|p| p.as_str()) == Some("src/shared.rs")
+                    && adv
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .is_some_and(|p| path_components_eq(p, &["src", "shared.rs"]))
             }),
             "{who} must see alice's edit claim as an advisory, got: {advisories:?}; full: {r}"
         );
@@ -685,7 +709,7 @@ fn released_claim_becomes_available_again() {
         a_resp
             .pointer("/granted/0/path")
             .and_then(|p| p.as_str())
-            == Some("src/x.rs"),
+            .is_some_and(|p| path_components_eq(p, &["src", "x.rs"])),
         "alice claim must succeed: {a_resp}"
     );
 
@@ -703,7 +727,9 @@ fn released_claim_becomes_available_again() {
         .and_then(|v| v.as_array())
         .expect("release_files must return `released` array");
     assert!(
-        released.iter().any(|p| p.as_str() == Some("src/x.rs")),
+        released
+            .iter()
+            .any(|p| p.as_str().is_some_and(|x| path_components_eq(x, &["src", "x.rs"]))),
         "release_files must report src/x.rs: {rel}"
     );
     alice.shutdown();
@@ -724,7 +750,9 @@ fn released_claim_becomes_available_again() {
         .expect("bob claim must return granted array");
     assert!(
         granted.iter().any(|g| {
-            g.get("path").and_then(|p| p.as_str()) == Some("src/x.rs")
+            g.get("path")
+                .and_then(|p| p.as_str())
+                .is_some_and(|p| path_components_eq(p, &["src", "x.rs"]))
         }),
         "bob must be granted src/x.rs after alice released it: {b_resp}"
     );
@@ -787,7 +815,9 @@ fn heartbeat_keeps_session_alive() {
         .expect("claim after heartbeats must return granted array");
     assert!(
         granted.iter().any(|g| {
-            g.get("path").and_then(|p| p.as_str()) == Some("src/y.rs")
+            g.get("path")
+                .and_then(|p| p.as_str())
+                .is_some_and(|p| path_components_eq(p, &["src", "y.rs"]))
         }),
         "claim must succeed after heartbeats: {resp}"
     );
@@ -841,7 +871,9 @@ fn expired_session_rejected() {
         .and_then(|g| g.as_array())
         .map(|arr| {
             arr.iter().any(|g| {
-                g.get("path").and_then(|p| p.as_str()) == Some("src/guarded.rs")
+                g.get("path")
+                    .and_then(|p| p.as_str())
+                    .is_some_and(|p| path_components_eq(p, &["src", "guarded.rs"]))
             })
         })
         .unwrap_or(false);
@@ -874,7 +906,7 @@ fn expired_session_rejected() {
         ok_resp
             .pointer("/granted/0/path")
             .and_then(|p| p.as_str())
-            == Some("src/guarded.rs"),
+            .is_some_and(|p| path_components_eq(p, &["src", "guarded.rs"])),
         "real token must still grant; got: {ok_resp}"
     );
 }

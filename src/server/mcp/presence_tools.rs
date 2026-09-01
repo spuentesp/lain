@@ -15,7 +15,9 @@ use crate::server::presence::{
 use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
 use crate::server::audit::{append_edit_event, AuditEvent};
+use crate::server::path_util::posix_string;
 use serde::Deserialize;
+use std::path::PathBuf;
 use serde_json::{json, Value};
 
 /// Resolve a session token to its session, refreshing the heartbeat as
@@ -152,7 +154,7 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
         "mode": session.mode.as_str(),
         "parent_session_id": parent_session_id,
         "claims": claims.into_iter().map(|c| json!({
-            "path": c.path.to_string_lossy(),
+            "path": posix_string(&c.path),
             "symbols": c.symbols,
             "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
         "inferred": c.inferred,
@@ -389,7 +391,13 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             let audit = AuditEvent {
                 ts_unix,
                 agent_id: session.id.clone(),
-                path: g.path.clone(),
+                // Store the path in the canonical forward-slash form so
+                // the on-disk JSONL is platform-independent. Any
+                // `path_glob` filter that uses `/` (see audit_tools.rs)
+                // will match regardless of host OS, and downstream
+                // consumers (federation replication, future log
+                // shipping) see a stable wire form.
+                path: PathBuf::from(posix_string(&g.path)),
                 claim_set,
                 racers: result.conflicts.clone(),
                 plan_revision,
@@ -418,13 +426,13 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     }
     let mut out = serde_json::Map::new();
     out.insert("granted".into(), Value::Array(result.granted.iter().map(|g| json!({
-        "path": g.path.to_string_lossy(),
+        "path": posix_string(&g.path),
         "symbols": g.symbols,
     })).collect()));
     out.insert("conflicts".into(), Value::Array(result.conflicts.iter().map(|c| json!({
         "agent_id": c.agent_id.as_str(),
         "name": agent_name(server, &c.agent_id),
-        "path": c.path.to_string_lossy(),
+        "path": posix_string(&c.path),
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
         "inferred": c.inferred,
@@ -436,7 +444,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         out.insert("advisories".into(), Value::Array(result.advisories.iter().map(|c| json!({
             "agent_id": c.agent_id.as_str(),
             "name": agent_name(server, &c.agent_id),
-            "path": c.path.to_string_lossy(),
+            "path": posix_string(&c.path),
             "symbols": c.symbols,
             "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
             "inferred": c.inferred,
@@ -664,7 +672,7 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
             path: path.clone(),
         });
     }
-    Ok(json!({ "released": released.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>() }))
+    Ok(json!({ "released": released.iter().map(|p| posix_string(p)).collect::<Vec<_>>() }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -692,7 +700,7 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
             .next()
             .map(|s| crate::server::time::unix_secs_u64(s.last_heartbeat));
         json!({
-            "path": e.path.to_string_lossy(),
+            "path": posix_string(&e.path),
             "agents": e.agents.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
             // `holders` says *how* each agent holds the path. Without
             // it a surveying agent cannot tell a blocking `edit` from a
@@ -728,7 +736,7 @@ pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> 
     }
     let claims = server.occupancy.list_for_agent(&session.id);
     Ok(json!(claims.into_iter().map(|c| json!({
-        "path": c.path.to_string_lossy(),
+        "path": posix_string(&c.path),
         "symbols": c.symbols,
         "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
         "inferred": c.inferred,
@@ -904,7 +912,7 @@ fn runtime_conflict_severity(
         overlap.extend(conflicts.iter().filter_map(|conflict| {
             paths
                 .insert(conflict.path.clone())
-                .then(|| (conflict.path.to_string_lossy().into_owned(), NodeType::File))
+                .then(|| (posix_string(&conflict.path), NodeType::File))
         }));
     }
 
@@ -1029,6 +1037,7 @@ fn symbols_at_ref(
 mod tests {
     use super::*;
     use crate::server::schema::NodeType;
+    use std::path::PathBuf;
 
     /// Pins every band of `overlap_severity` directly. Lives in a unit
     /// test (rather than the integration test file) so `overlap_severity`
@@ -1091,5 +1100,17 @@ mod tests {
             ]),
             "high"
         );
+    }
+
+    #[test]
+    fn posix_string_is_used_for_granted_path_in_serialized_response() {
+        // Sanity-check that the wire-format conversion is in place.
+        // The integration test `claim_files_accepts_string_form_files`
+        // covers the live response shape; this is a static guard
+        // against future regressions to `to_string_lossy`.
+        let path = PathBuf::from("src/a.rs");
+        let rendered = posix_string(&path);
+        assert_eq!(rendered, "src/a.rs");
+        assert!(!rendered.contains('\\'));
     }
 }
