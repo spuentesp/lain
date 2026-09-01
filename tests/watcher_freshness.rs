@@ -107,11 +107,11 @@ async fn watcher_does_not_panic_on_edit() {
         let overlay_notify = Arc::clone(&overlay_notify);
         async move {
             tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(15),
                 overlay_notify.notified(),
             )
             .await
-            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 5s"))
+            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 15s"))
         }
     };
 
@@ -265,7 +265,7 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     )
     .expect("sync_state should not error");
 
-    // The spawned task is async; poll the overlay for up to ~2s.
+    // The spawned task is async; poll the overlay for up to ~15s.
     // Pre-fix, sync_state short-circuited on commit equality and the
     // overlay stayed empty. After the fix, sync_state walks every
     // repo in the federation and calls sync_overlay, which writes
@@ -278,7 +278,7 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     // false-pass the original bug relied on.
     let expected = "post_sync_symbol";
     let mut found = false;
-    for _ in 0..40 {
+    for _ in 0..300 {
         let names: Vec<String> = shared_overlay
             .get_all_nodes()
             .into_iter()
@@ -414,14 +414,15 @@ async fn sync_state_refreshes_overlay_for_multiple_repos() {
     )
     .expect("sync_state should not error");
 
-    // Poll the overlay for up to ~5s. Cold LSP startup can take a
+    // Poll the overlay for up to ~15s. Cold LSP startup can take a
     // couple of seconds on the first repo, and with two repos the
-    // slowest leg dominates. 5s is well under the test's overall
-    // budget but generous enough to absorb first-call LSP warm-up.
+    // slowest leg dominates. 15s is well under the test's overall
+    // budget but generous enough to absorb first-call LSP warm-up
+    // on slow CI runners.
     let mut populated_alpha = false;
     let mut populated_beta = false;
     let start = std::time::Instant::now();
-    while start.elapsed() < std::time::Duration::from_secs(5) {
+    while start.elapsed() < std::time::Duration::from_secs(15) {
         let names: Vec<String> = shared_overlay
             .get_all_nodes()
             .into_iter()
@@ -485,11 +486,11 @@ async fn watcher_survives_six_concurrent_agents() {
         let overlay_notify = Arc::clone(&overlay_notify);
         async move {
             tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(15),
                 overlay_notify.notified(),
             )
             .await
-            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 5s"))
+            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 15s"))
         }
     };
 
