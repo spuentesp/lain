@@ -341,7 +341,7 @@ async function driveSequence(page) {
   } catch (_) {
     // Graph may not have data — the empty-state text is acceptable.
   }
-  await new Promise(r => setTimeout(r, 10000));   // +2 s for filters + minimap
+  await new Promise(r => setTimeout(r, 6000));   // +0 s vs v1's 10s; small graph
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
