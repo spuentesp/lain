@@ -935,13 +935,13 @@ table.repo-table th {
 [data-filter-row="focal"][hidden] { display: none; }
 [data-filter-row="focal"][data-active="1"] { display: flex; }
 
-[data-graph-depth"] {
+[data-graph-depth] {
   flex: 1;
   max-width: 160px;
   accent-color: var(--accent);
 }
 
-[data-graph-back"] {
+[data-graph-back] {
   font-family: inherit;
 }
 
