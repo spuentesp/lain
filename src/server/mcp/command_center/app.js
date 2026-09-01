@@ -1007,7 +1007,6 @@ function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
     }
   }
 
-  const nodeById = new Map((workspaceGraph.nodes || []).map(n => [n.id, n]));
   const visibleNodes = [];
   const hiddenNodeIds = new Set();
   for (const n of workspaceGraph.nodes) {
