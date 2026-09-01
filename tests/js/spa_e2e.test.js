@@ -502,17 +502,49 @@ async function assertGraph(page) {
   await new Promise(r => setTimeout(r, 1500));
   const v2FocalRendered = await page.evaluate(() => {
     const nodes = document.querySelectorAll('.graph-node');
+    const edges = document.querySelectorAll('.graph-link');
+    const visibleEdges = Array.from(edges).filter(e => {
+      const s = getComputedStyle(e);
+      return s.display !== 'none' && s.visibility !== 'hidden' &&
+             !e.classList.contains('is-hidden') && !e.classList.contains('is-dim');
+    });
     const meta = document.getElementById('graph-meta');
     const empty = document.getElementById('graph-empty');
+    const edgeState = Array.from(edges).map(e => ({
+      x1: e.getAttribute('x1'),
+      y1: e.getAttribute('y1'),
+      x2: e.getAttribute('x2'),
+      y2: e.getAttribute('y2'),
+      key: e.getAttribute('data-edge-key'),
+      cls: e.getAttribute('class'),
+      display: getComputedStyle(e).display,
+    }));
+    // Pull node ids + repos for cross-check with the filter state.
+    const nodeState = Array.from(nodes).map(n => ({
+      id: n.getAttribute('data-node-id'),
+      cls: n.getAttribute('class'),
+      hidden: n.classList.contains('is-hidden'),
+    }));
     return {
       nodeCount: nodes.length,
+      edgeCount: visibleEdges.length,
+      rawEdgeCount: edges.length,
       metaText: meta ? meta.textContent : '',
       emptyText: empty ? empty.textContent : '',
+      edgeState,
+      nodeState,
     };
   });
   assertTrue(tab, 'focal mode rendered nodes for the queried symbol',
     v2FocalRendered.nodeCount > 0,
     `nodeCount=${v2FocalRendered.nodeCount}, metaText=${JSON.stringify(v2FocalRendered.metaText)}, emptyText=${JSON.stringify(v2FocalRendered.emptyText)}`);
+  // Re-assertion (Item 13/14 follow-up): the focal-mode parser must
+  // also turn string global ids into visible edges, not just nodes.
+  // Without this, the canvas shows real neighbour nodes but a
+  // disconnected star.
+  assertTrue(tab, 'focal mode rendered edges from string global ids',
+    v2FocalRendered.edgeCount > 0,
+    `edgeCount=${v2FocalRendered.edgeCount}, rawEdgeCount=${v2FocalRendered.rawEdgeCount}, nodeCount=${v2FocalRendered.nodeCount}, edgeState=${JSON.stringify(v2FocalRendered.edgeState)}, metaText=${JSON.stringify(v2FocalRendered.metaText)}`);
 }
 
 async function assertSse(baseUrl) {

@@ -1020,13 +1020,31 @@ function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
   return { nodes: visibleNodes, edges: visibleEdges, hiddenNodeIds };
 }
 
+// Parse a global id string produced by the federation's `GlobalId::parse`
+// (src/server/mcp/federation_tools/federation.rs:241). Format:
+//   <repo_id>:<kind>:<path>:<name>
+// `path` may contain colons (Windows-style or special characters), so we
+// capture everything between the first and last 3 colons; the trailing
+// `$` anchors the final segment as the symbol `name`. Returns `null` for
+// any non-string or shape that doesn't match (defensive — the call site
+// already filters falsy results before pushing nodes).
+function parseGlobalId(id) {
+  if (typeof id !== 'string') return null;
+  const m = id.match(/^([^:]+):([^:]+):(.+):([^:]+)$/);
+  if (!m) return null;
+  return { repo_id: m[1], kind: m[2], path: m[3], name: m[4] };
+}
+
 // Build a visible-set from a `get_cross_repo_blast_radius_for_repo` JSON
 // payload. Pure helper used by renderGraphTab's focal branch.
 //
-// payload shape:
-//   { by_repo: { [repoId]: [{ name, repo_id, kind, path }, ...] },
+// payload shape (live server):
+//   { by_repo: { [repoId]: ["repo:Kind:path:name", ...] },
 //     total_count: number,
 //     truncated: boolean }
+// The server hands us string global ids; we accept the legacy object
+// shape (`{ name, repo_id, kind, path }`) too so callers (and tests)
+// that pre-shape the payload locally keep working.
 // focalSymbol — the symbol the user clicked or typed; used as the
 // visual centre of the focal graph (highlighted via .is-focus).
 function applyFocalGraph(payload, focalSymbol) {
@@ -1042,14 +1060,16 @@ function applyFocalGraph(payload, focalSymbol) {
   let focalRepo = null;
   for (const repoId of Object.keys(byRepo)) {
     const items = byRepo[repoId] || [];
-    for (const n of items) {
+    for (const raw of items) {
+      const n = (typeof raw === 'string') ? parseGlobalId(raw) : raw;
       if (n && n.name === focalSymbol) { focalRepo = repoId; break; }
     }
     if (focalRepo) break;
   }
   for (const repoId of Object.keys(byRepo)) {
     const items = byRepo[repoId] || [];
-    for (const n of items) {
+    for (const raw of items) {
+      const n = (typeof raw === 'string') ? parseGlobalId(raw) : raw;
       if (!n || !n.name) continue;
       nodes.push({
         id: `${repoId}::${n.name}`,
@@ -1066,6 +1086,16 @@ function applyFocalGraph(payload, focalSymbol) {
         focalPushed = true;
         continue;
       }
+      // Connect every entry to the focal symbol as a star. Intra-repo
+      // when the focal lives in this repo (source/target share `repoId`).
+      // Cross-repo otherwise — covers both the case where the focal
+      // lives in a different repo, and the case where the live
+      // `get_cross_repo_blast_radius_for_repo` payload doesn't include
+      // the focal at all (focalRepo stays `null`, the synthesised
+      // fallback renders the focal with `repo_id = 'unknown'`, and the
+      // edge source is `unknown::${focalSymbol}`). Without this branch
+      // the live payload would render real neighbour nodes but zero
+      // edges, leaving the focal view as a disconnected star.
       if (focalRepo === repoId) {
         edges.push({
           source: `${repoId}::${focalSymbol}`,
@@ -1073,14 +1103,9 @@ function applyFocalGraph(payload, focalSymbol) {
           edge_type: 'Calls',
           cross_repo: false,
         });
-      }
-      // And connect across repos when the focal lives in a different
-      // repo (focal symbol might not appear in *every* repo, only in the
-      // one it was defined in — but the caller's neighbours cross the
-      // boundary via the focal).
-      if (focalRepo && focalRepo !== repoId) {
+      } else {
         edges.push({
-          source: `${focalRepo}::${focalSymbol}`,
+          source: `${focalRepo || 'unknown'}::${focalSymbol}`,
           target: `${repoId}::${n.name}`,
           edge_type: 'Calls',
           cross_repo: true,
@@ -1356,8 +1381,17 @@ function drawGraphSvg(svgEl, graph) {
 
   // forceLink mutates the edge objects (replacing ids with node refs), so
   // hand it copies — renderGraphTab may redraw from the same payload.
+  // We also capture the canonical (min,max) edge key from the original
+  // string ids BEFORE forceLink runs: once the simulation is created,
+  // d.source/d.target are node objects, and any later `d.source < d.target`
+  // comparison would coerce them to "[object Object]". applyFiltersToDom
+  // uses the same key format to look up which edges stay visible.
   const nodes = graph.nodes.map(n => Object.assign({}, n));
-  const links = graph.edges.map(e => Object.assign({}, e));
+  const links = graph.edges.map(e => {
+    const src = e.source, tgt = e.target;
+    const key = src < tgt ? `${src}|${tgt}` : `${tgt}|${src}`;
+    return Object.assign({}, e, { __key: key });
+  });
 
   const simulation = d3.forceSimulation(nodes)
     .force('link', d3.forceLink(links).id(d => d.id).distance(60))
@@ -1370,7 +1404,7 @@ function drawGraphSvg(svgEl, graph) {
     .data(links)
     .join('line')
     .attr('class', d => 'graph-link' + (d.cross_repo ? ' cross-repo' : ''))
-    .attr('data-edge-key', d => d.source < d.target ? `${d.source}|${d.target}` : `${d.target}|${d.source}`);
+    .attr('data-edge-key', d => d.__key);
 
   // Nodes as <path> via D3 symbols. Two visual axes: shape per kind, colour per repo.
   const node = viewport.append('g')
@@ -2071,6 +2105,7 @@ if (typeof module !== 'undefined' && module.exports) {
     nodeRadius,
     // SPA graph v2: anchors-first (2026-08-31):
     computeAnchorVisibleSet,
+    parseGlobalId,
     applyFocalGraph,
     applyDepth,
   };

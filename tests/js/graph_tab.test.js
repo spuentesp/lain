@@ -448,6 +448,80 @@ test('applyFocalGraph: synthesises focal node when focal not in by_repo', () => 
   assert.equal(out.truncated, false);
 });
 
+test('parseGlobalId: parses the federation "<repo>:<Kind>:<path>:<name>" shape', () => {
+  // Live shape from get_cross_repo_blast_radius_for_repo (see
+  // src/server/mcp/federation_tools/federation.rs:241).
+  const out = app.parseGlobalId('bytes:Function:src/bytes.rs:from');
+  assert.deepStrictEqual(out, {
+    repo_id: 'bytes',
+    kind: 'Function',
+    path: 'src/bytes.rs',
+    name: 'from',
+  });
+});
+
+test('parseGlobalId: tolerates colons in the path segment', () => {
+  // Windows-style absolute paths and other edge cases carry colons
+  // inside the path; the regex must not split on them.
+  const out = app.parseGlobalId('repo:Class:C:\\path\\to\\file.rs:Foo');
+  assert.equal(out.repo_id, 'repo');
+  assert.equal(out.kind,    'Class');
+  assert.equal(out.path,    'C:\\path\\to\\file.rs');
+  assert.equal(out.name,    'Foo');
+});
+
+test('parseGlobalId: rejects non-strings and malformed shapes', () => {
+  assert.equal(app.parseGlobalId(null),       null);
+  assert.equal(app.parseGlobalId(undefined),  null);
+  assert.equal(app.parseGlobalId(42),         null);
+  assert.equal(app.parseGlobalId({ name: 'x' }), null);
+  // Not enough colons.
+  assert.equal(app.parseGlobalId('bytes:Function:from'), null);
+  // Trailing junk without a name segment.
+  assert.equal(app.parseGlobalId('bytes:Function:src/bytes.rs:'), null);
+});
+
+test('applyFocalGraph: parses string global ids from the server payload', () => {
+  // Real-world payload from get_cross_repo_blast_radius_for_repo:
+  // by_repo values are global id strings ("repo:Kind:path:name"), not
+  // {name, repo_id, kind, path} objects. applyFocalGraph must handle
+  // both shapes.
+  const payload = {
+    by_repo: {
+      bytes: [
+        'bytes:Function:src/bytes.rs:data_mut',
+        'bytes:Method:src/bytes.rs:drop',
+      ],
+    },
+    total_count: 2,
+    truncated: false,
+  };
+  const out = app.applyFocalGraph(payload, 'data_mut');
+  // 2 nodes: bytes::data_mut (centre) + bytes::drop.
+  assert.equal(out.nodes.length, 2);
+  const ids = new Set(out.nodes.map(n => n.id));
+  assert.ok(ids.has('bytes::data_mut'));
+  assert.ok(ids.has('bytes::drop'));
+  // 1 intra-repo edge: bytes::data_mut → bytes::drop.
+  assert.equal(out.edges.length, 1);
+  assert.equal(out.edges[0].cross_repo, false);
+});
+
+test('applyFocalGraph: cross-repo string ids surface cross_repo: true', () => {
+  const payload = {
+    by_repo: {
+      bytes: ['bytes:Function:src/bytes.rs:data_mut'],
+      tokio: ['tokio:Function:src/lib.rs:run'],
+    },
+  };
+  const out = app.applyFocalGraph(payload, 'data_mut');
+  // 2 nodes: bytes::data_mut (centre) + tokio::run.
+  assert.equal(out.nodes.length, 2);
+  // 1 cross-repo edge: bytes::data_mut → tokio::run.
+  assert.equal(out.edges.length, 1);
+  assert.equal(out.edges[0].cross_repo, true);
+});
+
 test('computeAnchorVisibleSet: explicit repo_id matches only that repo (no cross-repo bleed)', () => {
   const anchors = [{ name: 'Hub', repo_id: 'r1' }];
   const workspaceGraph = {

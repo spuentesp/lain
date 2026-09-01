@@ -333,6 +333,20 @@ async function driveSequence(page) {
   // shape-per-kind rendering: nodes are <path class="graph-node"> now,
   // not <circle>.
   await clickTab(page, 'graph');
+  // Wait for the Graph tab's filter bar to be wired (otherwise
+  // page.fill fires input before wireGraphControls attaches — recorder
+  // race the prior implementer flagged).
+  await page.waitForFunction(
+    () => !!document.querySelector('[data-graph-search]'),
+    { timeout: 5_000 },
+  );
+  try {
+    await page.waitForFunction(() => {
+      const svg = document.getElementById('graph-canvas');
+      return svg && svg.querySelectorAll('path.graph-node').length > 0;
+    }, { timeout: 15_000 });
+  } catch (_) { /* empty-state acceptable */ }
+  await new Promise(r => setTimeout(r, 6000));
   // Final-review fix wave: focalise the Graph tab so the recorded
   // hero frame shows the focal view, not the empty-state copy. The
   // search input is the user-facing pattern the spec calls out
