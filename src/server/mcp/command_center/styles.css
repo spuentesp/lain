@@ -853,17 +853,6 @@ table.repo-table th {
 .graph-node.is-hidden   { display: none; }
 .graph-link.is-hidden   { display: none; }
 
-.graph-link {
-  stroke: var(--border-strong);
-  stroke-opacity: 0.75;
-  stroke-width: 1;
-}
-.graph-link.cross-repo {
-  stroke: var(--warn);
-  stroke-opacity: 0.9;
-  stroke-width: 2;
-}
-
 .graph-tooltip {
   font-family: var(--font-mono);
   font-size: 0.7rem;
