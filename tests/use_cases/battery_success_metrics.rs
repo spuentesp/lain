@@ -383,7 +383,11 @@ fn lain_version_output_contains_lain_and_version() {
     // target/debug/ so the binary is alongside the test binary.
     let exe = std::env::current_exe().expect("current_exe");
     // exe is target/debug/deps/<testname>-<hash>; lain is in target/debug/lain.
-    let lain = exe.parent().unwrap().parent().unwrap().join("lain");
+    let mut lain = exe.parent().unwrap().parent().unwrap().join("lain");
+    #[cfg(target_os = "windows")]
+    {
+        lain.set_extension("exe");
+    }
     if !lain.exists() {
         panic!("lain binary not found at {:?}; build with `cargo build --bin lain` first", lain);
     }
