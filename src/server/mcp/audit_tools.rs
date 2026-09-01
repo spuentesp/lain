@@ -21,6 +21,7 @@
 use crate::server::audit::{read_audit_log, AuditEvent};
 use crate::server::glob_match;
 use crate::server::ingest::LainServer;
+use crate::server::path_util::posix_string;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -189,8 +190,12 @@ fn group_key(ev: &AuditEvent, group_by: &str) -> String {
         }
         // Default (incl. unknown values) is path. We treat unknown
         // values as path rather than erroring so a future caller
-        // passing a typo still gets useful data.
-        _ => ev.path.to_string_lossy().to_string(),
+        // passing a typo still gets useful data. The path is
+        // rendered through `posix_string` so group keys are
+        // forward-slash form on every platform (matches the
+        // on-disk JSONL contract set by the audit write site in
+        // `presence_tools.rs`).
+        _ => posix_string(&ev.path),
     }
 }
 
@@ -265,5 +270,26 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].agent_id.0, "new");
         assert_eq!(filtered[0].path, PathBuf::from("/b/new.rs"));
+    }
+
+    #[test]
+    fn group_key_path_branch_uses_forward_slashes() {
+        // After Task 3, every `AuditEvent.path` written by the
+        // claim flow already uses `/`. This guards the read-side
+        // group_key against future regressions to `to_string_lossy`
+        // and against any path field that did not go through the
+        // audit write site (e.g. direct construction in tests).
+        let event = AuditEvent {
+            ts_unix: 0.0,
+            agent_id: AgentId("a".into()),
+            path: PathBuf::from("src/a.rs"),
+            claim_set: vec![],
+            racers: vec![],
+            plan_revision: None,
+            landed_revision: 0,
+        };
+        let key = group_key(&event, "path");
+        assert_eq!(key, "src/a.rs");
+        assert!(!key.contains('\\'));
     }
 }
