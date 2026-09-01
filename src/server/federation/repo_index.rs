@@ -3,7 +3,7 @@ use crate::federation::health::RepoHealth;
 use crate::federation::repo_source::RepoSource;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
-use crate::lsp::LspPool;
+use crate::lsp::{HierarchicalSymbol, LspPool};
 use crate::schema::{GraphEdge, GraphNode};
 use crate::server::ingest::ingestion::index_one_repo;
 use crate::server::overlay::VolatileOverlay;
@@ -659,28 +659,66 @@ impl RepoIndex {
         overlay: &Arc<crate::server::overlay::VolatileOverlay>,
         lsp_failures: &std::sync::atomic::AtomicU32,
     ) -> Result<(), LainError> {
-        let symbols = {
+        // 1. Try the LSP path first. A successful but empty response (cold
+        // LSP that hasn't analyzed the file yet) falls through to
+        // tree-sitter; only a true `Err` counts as an LSP failure for the
+        // per-cycle aggregate.
+        //
+        // Mirrors the LSP->tree-sitter fallback at
+        // `src/server/ingest/scan.rs:113-157` so the federation overlay
+        // behaves the same way the main ingestion path already does on CI
+        // (where rust-analyzer either times out cold-starting or returns
+        // no symbols). Without this fallback the federation overlay stays
+        // empty whenever LSP can't deliver symbols, which is the
+        // root cause of the watcher_freshness CI failures.
+        let lsp_symbols: Option<Vec<HierarchicalSymbol>> = {
             let lsp = self.lsp.next();
             let mut lsp = lsp.lock().await;
             match lsp
                 .get_document_symbols_hierarchical(path, self.source.local_path())
                 .await
             {
-                Ok(s) => s,
+                Ok(syms) if !syms.is_empty() => Some(syms),
+                Ok(_) => None, // cold LSP returned 0 symbols — fall through silently
                 Err(e) => {
-                    // Promoted from debug! so operators have signal when
-                    // overlay coverage is incomplete. The aggregate count
-                    // is logged at the end of `sync_overlay`.
                     lsp_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(
-                        "[federation] no LSP symbols for {:?}: {} (overlay entry skipped)",
+                        "[federation] no LSP symbols for {:?}: {}; falling back to tree-sitter",
                         path,
                         e
                     );
-                    return Ok(());
+                    None
                 }
             }
         };
+
+        // 2. Tree-sitter fallback for the empty-LSP / LSP-error cases.
+        // Same shape as `add_tree_sitter_definitions` in `scan.rs:341` —
+        // read the file once, mint a `GraphNode` per `SymbolDef`, and let
+        // the caller `insert_node` into the overlay.
+        let symbols = match lsp_symbols {
+            Some(s) => s,
+            None => {
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    return Ok(());
+                };
+                let graph_key =
+                    crate::graph::graph_path(self.source.local_path(), path);
+                crate::treesitter::extract_definitions(path, &content)
+                    .into_iter()
+                    .map(|d| HierarchicalSymbol {
+                        node: GraphNode::new(
+                            d.kind,
+                            d.name.clone(),
+                            graph_key.clone(),
+                        )
+                        .with_location(d.line_start, d.line_end),
+                        children: vec![],
+                    })
+                    .collect()
+            }
+        };
+
         for symbol in symbols {
             overlay.insert_node(symbol.node.clone());
         }
