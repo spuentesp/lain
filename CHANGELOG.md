@@ -44,6 +44,21 @@ All notable changes to LAIN are documented here. Versions follow
   own cwd. Real agent harnesses (Kimi, Claude Code, a plain
   shell) put the binary in a plugin dir or on `$PATH`, so the
   filter never fires for them.
+- **Recorder `--ready-timeout-ms` flag.** The SPA recorder
+  (`tests/js/record_spa_demo.js`) previously hard-coded a 600_000
+  ms cap on its `waitForReady` poll. Cold-cache CI hosts occasionally
+  exceeded that; the only escape was editing the source. The flag
+  is now a CLI arg (default unchanged at 600_000). A regression
+  test (`tests/js/recorder_cli.test.js`) pins the parser shape.
+- **Dev SPA override via `LAIN_DEV_SPA_DIR`.** The Command Center
+  SPA was `include_bytes!`'d at compile time, so every JS/CSS edit
+  required `cargo build`. Setting `LAIN_DEV_SPA_DIR=<path>` now
+  flips the assets module to read each file from disk on demand
+  (one env-var lookup + one `is_dir` check per request). Edit
+  `app.js` / `styles.css` / `index.html`, save, refresh the
+  browser — no rebuild. Production builds leave the env var unset
+  and the contract tests still pass. Workflow script:
+  `scripts/dev-spa.sh`.
 
 ### Investigated (no change)
 
