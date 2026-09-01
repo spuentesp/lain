@@ -1567,6 +1567,8 @@ const graphState = {
   depth: 1,
   searchQuery: '',
   workspaceGraph: null,    // cached normalised payload (anchor mode's fallback)
+  lastGoodFocal: null,     // last successful {nodes, edges, truncated}; error UX
+                           // preserves this on transient failures (V2 polish #2)
 };
 
 // Toggle the focal-mode row of the filter bar. When in 'focal' mode we
@@ -1587,6 +1589,119 @@ function setFocalRowVisible(visible) {
 
 // Wire the v2 graph controls: search input (debounced), depth slider, and
 // back-to-anchors button. Each control mutates `state` and signals via
+// `onChange({ ... })` so `renderGraphTab` knows to repaint. Search-input
+// debouncing prevents one tool call per keystroke during typing.
+
+// Search disambiguation (V2 polish, item #1): the spec called for a
+// find_anchors substring match with a multi-candidate disambiguation
+// list when the typed name matches more than one anchor across the
+// federation. The pre-fix code jumped straight to focal mode on the
+// first match (or on any typed string with no match), so a user
+// typing "Bytes" against a federation with Bytes in two repos got
+// the first repo's Bytes with no chance to pick. This pure helper
+// is the decision surface: wireGraphControls calls it and either
+// (a) renders a disambiguation list (kind === 'multiple'), (b)
+// proceeds straight to focal (kind === 'single'), or (c) shows an
+// empty-state hint (kind === 'none').
+//
+// `workspaceGraph` is the cached normalised payload (may be null).
+// `anchors` is the find_anchors text-parsed list (may be null/empty).
+// Match logic: case-insensitive substring against node names (scoped
+// to repo_id when present). Dedupes by (repo_id, name). Caps the
+// 'multiple' list at 10 candidates so the disambiguation panel
+// stays scannable.
+function disambiguateFocalSearch(query, workspaceGraph, anchors) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return { kind: 'none' };
+  const seen = new Map(); // key: `${repo_id || ''}::${name.toLowerCase()}` -> candidate
+  const addCandidate = (name, repo_id, path, kind) => {
+    if (!name) return;
+    const repoKey = repo_id || '';
+    const key = `${repoKey}::${name.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.set(key, { name, repo_id: repo_id || null, path: path || null, kind: kind || null });
+  };
+  if (workspaceGraph && Array.isArray(workspaceGraph.nodes)) {
+    for (const n of workspaceGraph.nodes) {
+      if (!n || !n.name) continue;
+      if (String(n.name).toLowerCase().includes(q)) {
+        addCandidate(n.name, n.repo_id, n.path, n.kind);
+      }
+    }
+  }
+  if (Array.isArray(anchors)) {
+    for (const a of anchors) {
+      if (!a || !a.name) continue;
+      if (String(a.name).toLowerCase().includes(q)) {
+        addCandidate(a.name, a.repo_id, a.path, a.kind);
+      }
+    }
+  }
+  if (seen.size === 0) return { kind: 'none' };
+  if (seen.size === 1) {
+    const [only] = seen.values();
+    return { kind: 'single', repo_id: only.repo_id, name: only.name };
+  }
+  // Multiple matches: cap at 10 so the disambiguation panel stays scannable.
+  const candidates = Array.from(seen.values()).slice(0, 10);
+  return { kind: 'multiple', candidates };
+}
+
+// V2 polish (item #2) pure half: pick the render strategy for a
+// focal-mode error. The pre-fix code called `renderGraphTabEmpty`
+// on every error, which clears the canvas via
+// `svg.innerHTML = ''`. The spec calls for preserving the
+// previous visible set when one exists (the user has seen a focal
+// graph this session) and only showing the error inline as a
+// banner. When no previous focal graph exists, the empty-state
+// fallback is the right behaviour — same as today.
+//
+// `state.lastGoodFocal` is set after every successful focal fetch
+// (write site: in the focal-mode success branch at lines ~1748,
+// just before `wireGraphControls`). The DOM helper
+// `renderFocalPreservedWithBanner` reads this field and re-draws.
+function pickFocalErrorRender(state, errorMessage) {
+  if (state && state.lastGoodFocal) {
+    return {
+      mode: 'preserve-and-banner',
+      banner: errorMessage || 'focal refresh failed — showing last good graph',
+    };
+  }
+  return { mode: 'empty', message: errorMessage || 'graph unavailable' };
+}
+
+// V2 polish (item #2) DOM half: re-render `lastGoodFocal` and
+// overlay an error banner in the empty-state div (no `svg.innerHTML
+// = ''`). Used when `pickFocalErrorRender` returns
+// 'preserve-and-banner'. Reads `graphState.lastGoodFocal` and the
+// closure-level `graphState.focalSymbol` for the banner copy.
+function renderFocalPreservedWithBanner(banner) {
+  const empty = document.getElementById('graph-empty');
+  const meta = document.getElementById('graph-meta');
+  const svg = document.getElementById('graph-canvas');
+  if (!svg) return;
+  // Do NOT clear the canvas here — that is the whole point of the
+  // preserve-and-banner mode. The d3 selection on the canvas is
+  // still live from the previous successful focal fetch. We accept
+  // the cost of NOT calling drawGraphSvg(lastGood) here: a future
+  // optimisation could route through drawGraphSvg(lastGood)
+  // directly, but for V2 polish #2 the simple "do nothing to the
+  // canvas, paint the banner" path is correct and obviously safe.
+  const lastGood = graphState.lastGoodFocal;
+  if (!lastGood) {
+    // Defensive: pickFocalErrorRender said preserve, but the
+    // snapshot is gone. Fall back to the empty-state path.
+    return renderGraphTabEmpty({ mode: 'error', message: banner }, null);
+  }
+  empty.className = 'graph-focal-error';
+  empty.textContent = `Refresh failed: ${banner}. Showing last good graph.`;
+  if (meta) meta.textContent = '';
+  // Intentionally do NOT call renderGraphTab here — doing so would
+  // re-fetch and might succeed (clearing the banner) or fail again
+  // (re-showing it). The user is in control: hit "back" to leave
+  // focal mode, or interact with the canvas to keep browsing the
+  // last good graph.
+}
 // `onChange({...})` so the caller can decide whether to refetch.
 //
 // Search behaviour: a non-empty query is treated as "focalise this
@@ -1610,24 +1725,30 @@ function wireGraphControls(state, onChange) {
       debounce = setTimeout(() => {
         const q = (search.value || '').trim();
         if (!q) return;
-        // Match typed name against the cached workspace graph to set
-        // focalRepoId; fall back to the first distinct repo_id if no
-        // match (or if the graph is uncached — focalRepoId stays null and
-        // the focal branch's fallback takes over).
-        let typedRepoId = null;
-        const wg = state.workspaceGraph;
-        if (wg && wg.nodes) {
-          for (const n of wg.nodes) {
-            if (n && n.name === q) { typedRepoId = n.repo_id || null; break; }
-          }
-          if (!typedRepoId) {
-            for (const n of wg.nodes) {
-              if (n && n.repo_id) { typedRepoId = n.repo_id; break; }
-            }
-          }
+        // V2 polish (item #1): substring-match the typed query against
+        // the cached workspace graph + the find_anchors list. When
+        // more than one (repo_id, name) pair matches, render a
+        // disambiguation panel in the empty-state div so the user
+        // picks — the canvas stays untouched. When exactly one
+        // matches, jump to focal as before. When none match, show
+        // an empty-state hint with the query echoed back.
+        const fileAnchors = (state && state.fileAnchors) || null;
+        const decision = disambiguateFocalSearch(q, state.workspaceGraph, fileAnchors);
+        if (decision.kind === 'multiple') {
+          // Render the disambiguation panel without touching the canvas
+          // (the previous visible set, if any, stays put).
+          renderFocalDisambiguation(q, decision.candidates);
+          state.searchQuery = q;
+          return;
         }
-        state.focalSymbol = q;
-        state.focalRepoId  = typedRepoId;
+        if (decision.kind === 'none') {
+          renderFocalSearchEmpty(q);
+          state.searchQuery = q;
+          return;
+        }
+        // decision.kind === 'single'
+        state.focalSymbol = decision.name;
+        state.focalRepoId  = decision.repo_id;
         state.searchQuery = q;
         state.mode = 'focal';
         onChange({ restoreFromSearch: q });
@@ -1650,6 +1771,54 @@ function wireGraphControls(state, onChange) {
       onChange({ restoreFromFocal: true });
     });
   }
+}
+
+// V2 polish (item #1) DOM half: render the multi-candidate picker
+// for a typed search. Lives in the empty-state div so the canvas
+// (the previously visible focal graph, if any) stays put. Each
+// candidate is a button; clicking it drives the same focal-mode
+// transition that a single-match search would.
+function renderFocalDisambiguation(query, candidates) {
+  const empty = document.getElementById('graph-empty');
+  const svg = document.getElementById('graph-canvas');
+  if (svg) {
+    // Defensive: never clear the canvas on a disambiguation path —
+    // the spec calls for the previous visible set to stay visible.
+  }
+  if (!empty) return;
+  empty.className = 'graph-disambiguation';
+  const buttons = candidates.map(c => {
+    const repo = c.repo_id ? `<span class="muted">${escapeHtml(c.repo_id)}</span>` : '';
+    return `<li><button data-focal-candidate="${escapeHtml(c.repo_id || '')}::${escapeHtml(c.name)}">` +
+      `<code>${escapeHtml(c.name)}</code> ${repo}</button></li>`;
+  }).join('');
+  empty.innerHTML =
+    `<div class="graph-disambiguation-title">${candidates.length} matches for ` +
+    `<code>${escapeHtml(query)}</code> — pick one:</div>` +
+    `<ul class="graph-disambiguation-list">${buttons}</ul>`;
+  empty.querySelectorAll('[data-focal-candidate]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const [repo_id, name] = btn.getAttribute('data-focal-candidate').split('::');
+      const focalRepoId = repo_id || null;
+      graphState.focalSymbol = name;
+      graphState.focalRepoId = focalRepoId;
+      graphState.searchQuery = name;
+      graphState.mode = 'focal';
+      renderGraphTab({ mode: 'focal' });
+    });
+  });
+}
+
+// V2 polish (item #1) DOM half: render a "no matches" hint that
+// echoes the typed query. Leaves the canvas untouched so a previous
+// focal view (if any) stays visible — same contract as the
+// disambiguation panel above.
+function renderFocalSearchEmpty(query) {
+  const empty = document.getElementById('graph-empty');
+  if (!empty) return;
+  empty.className = 'muted';
+  empty.textContent =
+    `No symbol matches "${query}". Try a substring of the function, struct, or class name.`;
 }
 
 // Entry point for the tab dispatch (resolved as window.renderGraphTab in
@@ -1732,17 +1901,34 @@ async function renderGraphTab(opts = {}) {
         depth: `${focalDepth}..${focalDepth}`,   // "1..1", "2..2", "3..3"
       });
     } catch (e) {
-      renderGraphTabEmpty({ mode: 'error', message: `get_cross_repo_blast_radius_for_repo failed: ${e.message}` }, list);
+      const msg = `get_cross_repo_blast_radius_for_repo failed: ${e.message}`;
+      const decision = pickFocalErrorRender(graphState, msg);
+      if (decision.mode === 'preserve-and-banner') {
+        renderFocalPreservedWithBanner(decision.banner);
+        return;
+      }
+      renderGraphTabEmpty({ mode: 'error', message: decision.message }, list);
       return;
     }
     if (result && result.isError) {
       const msg = unwrapText(result) || 'error';
-      renderGraphTabEmpty({ mode: 'error', message: msg }, list);
+      const decision = pickFocalErrorRender(graphState, msg);
+      if (decision.mode === 'preserve-and-banner') {
+        renderFocalPreservedWithBanner(decision.banner);
+        return;
+      }
+      renderGraphTabEmpty({ mode: 'error', message: decision.message }, list);
       return;
     }
     const focalJson = parseJson(result);
     if (!focalJson || !focalJson.by_repo) {
-      renderGraphTabEmpty({ mode: 'error', message: `focal payload unparseable for ${focalSymbol}` }, list);
+      const msg = `focal payload unparseable for ${focalSymbol}`;
+      const decision = pickFocalErrorRender(graphState, msg);
+      if (decision.mode === 'preserve-and-banner') {
+        renderFocalPreservedWithBanner(decision.banner);
+        return;
+      }
+      renderGraphTabEmpty({ mode: 'error', message: decision.message }, list);
       return;
     }
     const visible = applyFocalGraph(focalJson, focalSymbol);
@@ -1751,6 +1937,10 @@ async function renderGraphTab(opts = {}) {
       edges: visible.edges,
       truncated: visible.truncated,
     };
+    // V2 polish (item #2): snapshot the good graph so a transient
+    // error on the next refresh can preserve it instead of
+    // clearing the canvas via renderGraphTabEmpty.
+    graphState.lastGoodFocal = graph;
     if (graph.nodes.length === 0) {
       empty.textContent = `No graph data for ${focalSymbol}.`;
       if (meta) meta.textContent = '';
@@ -2108,5 +2298,8 @@ if (typeof module !== 'undefined' && module.exports) {
     parseGlobalId,
     applyFocalGraph,
     applyDepth,
+    // V2 polish (2026-09-01):
+    disambiguateFocalSearch,
+    pickFocalErrorRender,
   };
 }
