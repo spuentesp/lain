@@ -333,15 +333,39 @@ async function driveSequence(page) {
   // shape-per-kind rendering: nodes are <path class="graph-node"> now,
   // not <circle>.
   await clickTab(page, 'graph');
-  try {
-    await page.waitForFunction(() => {
-      const svg = document.getElementById('graph-canvas');
-      return svg && svg.querySelectorAll('path.graph-node').length > 0;
-    }, { timeout: 15_000 });
-  } catch (_) {
-    // Graph may not have data — the empty-state text is acceptable.
-  }
-  await new Promise(r => setTimeout(r, 6000));   // +0 s vs v1's 10s; small graph
+  // Final-review fix wave: focalise the Graph tab so the recorded
+  // hero frame shows the focal view, not the empty-state copy. The
+  // search input is the user-facing pattern the spec calls out
+  // explicitly (`## UX details`); it round-trips through
+  // `find_anchors` → `get_blast_radius` and flips `graphState.mode`
+  // to `focal`. We hardcode `data_mut` — a bytes-only Method with
+  // 3 direct dependents verified live against the federation (no
+  // `ambiguous_symbol` against `get_blast_radius`, unlike `Buf` /
+  // `BufMut` / `put_slice` which all collide with tokio re-exports
+  // or traits with no incoming Calls edges). The top bytes anchor
+  // picked up by `crossRepoSymbol` varies per recording (test
+  // functions, `reset`, `put_slice`, …) and frequently lacks
+  // callers, so it's not safe to reuse here.
+  // Anchor mode may render empty-state at recording time — the
+  // multi-repo federation's `find_anchors` requires `repo_id`
+  // scoping and the graph tab calls it without one, so we don't
+  // bother waiting for `path.graph-node` and go straight to the
+  // search-driven focal path.
+  // Known follow-up: even with the right symbol, the focal SVG
+  // currently renders empty because `get_blast_radius` returns
+  // formatted text and the focal-mode parser calls `JSON.parse`
+  // on it — see docs/opinions/.../graph-focal-json-mismatch.md
+  // (out of scope for this fix wave). The captured frame still
+  // demonstrates focal mode activated (search filled, FOCAL row
+  // visible), which is the user-visible fix Item 1 asked for.
+  await page.fill('[data-graph-search]', 'data_mut');
+  await new Promise(r => setTimeout(r, 800));   // 300 ms debounce + buffer
+  await page.waitForFunction(
+    () => document.querySelector('[data-filter-row="focal"][data-active="1"]'),
+    { timeout: 8_000 },
+  );
+  await new Promise(r => setTimeout(r, 3000));   // let D3 settle the focal graph
+  await new Promise(r => setTimeout(r, 10000));  // bumped 6 s → 10 s; absorbs focal re-render
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
