@@ -37,6 +37,15 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      # 17 tests in `tests/use_cases/battery_*` invoke the `lain` binary at
+      # `target/debug/lain` and panic with a helpful message if it is
+      # missing. Building it here (rather than relying on `cargo test`
+      # to incidentally produce it) keeps the panic-fallback dead and
+      # the Windows matrix cell green.
+      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+        shell: bash
+        run: cargo build --bin lain
+
       - name: Run tests
         shell: bash
         run: cargo test --workspace
