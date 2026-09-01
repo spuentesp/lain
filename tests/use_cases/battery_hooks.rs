@@ -54,6 +54,7 @@ fn assert_fail_open(out: &Output, hook: &str) {
 
 // ─── claude-code / pre-edit.sh ───────────────────────────────────
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_exits_zero_with_path() {
     let out = run_hook("claude-code", "pre-edit.sh",
@@ -61,12 +62,14 @@ fn claude_code_pre_edit_exits_zero_with_path() {
     assert_fail_open(&out, "claude-code/pre-edit.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_exits_zero_with_no_input() {
     let out = run_hook("claude-code", "pre-edit.sh", &[], b"");
     assert_fail_open(&out, "claude-code/pre-edit.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_exits_zero_with_malformed_json() {
     let out = run_hook("claude-code", "pre-edit.sh", &[],
@@ -74,6 +77,7 @@ fn claude_code_pre_edit_exits_zero_with_malformed_json() {
     assert_fail_open(&out, "claude-code/pre-edit.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_exits_zero_with_valid_json() {
     let out = run_hook("claude-code", "pre-edit.sh", &[],
@@ -83,6 +87,7 @@ fn claude_code_pre_edit_exits_zero_with_valid_json() {
 
 // ─── claude-code / post-edit.sh ──────────────────────────────────
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_post_edit_exits_zero_with_path() {
     let out = run_hook("claude-code", "post-edit.sh",
@@ -90,6 +95,7 @@ fn claude_code_post_edit_exits_zero_with_path() {
     assert_fail_open(&out, "claude-code/post-edit.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_post_edit_exits_zero_with_no_input() {
     let out = run_hook("claude-code", "post-edit.sh", &[], b"");
@@ -98,6 +104,7 @@ fn claude_code_post_edit_exits_zero_with_no_input() {
 
 // ─── claude-code / pre-commit.sh ─────────────────────────────────
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_commit_exits_zero() {
     let out = run_hook("claude-code", "pre-commit.sh", &[], b"");
@@ -106,6 +113,7 @@ fn claude_code_pre_commit_exits_zero() {
 
 // ─── claude / lain-hook.sh ───────────────────────────────────────
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_lain_hook_exits_zero_with_path() {
     let out = run_hook("claude", "lain-hook.sh",
@@ -113,6 +121,7 @@ fn claude_lain_hook_exits_zero_with_path() {
     assert_fail_open(&out, "claude/lain-hook.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_lain_hook_exits_zero_with_no_input() {
     let out = run_hook("claude", "lain-hook.sh", &[], b"");
@@ -121,6 +130,7 @@ fn claude_lain_hook_exits_zero_with_no_input() {
 
 // ─── agy / pre-edit.sh ───────────────────────────────────────────
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn agy_pre_edit_exits_zero_with_path() {
     let out = run_hook("agy", "pre-edit.sh",
@@ -128,6 +138,7 @@ fn agy_pre_edit_exits_zero_with_path() {
     assert_fail_open(&out, "agy/pre-edit.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn agy_pre_edit_exits_zero_with_no_input() {
     let out = run_hook("agy", "pre-edit.sh", &[], b"");
@@ -136,6 +147,7 @@ fn agy_pre_edit_exits_zero_with_no_input() {
 
 // ─── codex / pre-edit.sh ─────────────────────────────────────────
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn codex_pre_edit_exits_zero_with_path() {
     let out = run_hook("codex", "pre-edit.sh",
@@ -143,6 +155,7 @@ fn codex_pre_edit_exits_zero_with_path() {
     assert_fail_open(&out, "codex/pre-edit.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn codex_pre_edit_exits_zero_with_no_input() {
     let out = run_hook("codex", "pre-edit.sh", &[], b"");
@@ -151,6 +164,7 @@ fn codex_pre_edit_exits_zero_with_no_input() {
 
 // ─── kimi / pre-edit.sh ──────────────────────────────────────────
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn kimi_pre_edit_exits_zero_with_path() {
     let out = run_hook("kimi", "pre-edit.sh",
@@ -158,6 +172,7 @@ fn kimi_pre_edit_exits_zero_with_path() {
     assert_fail_open(&out, "kimi/pre-edit.sh");
 }
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn kimi_pre_edit_exits_zero_with_no_input() {
     let out = run_hook("kimi", "pre-edit.sh", &[], b"");
@@ -170,6 +185,7 @@ fn kimi_pre_edit_exits_zero_with_no_input() {
 // prove the claim happens (no server), but we can prove the hook
 // resolves an identity and doesn't crash on the env override.
 
+#[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_respects_lain_agent_name_env() {
     let out = Command::new(hook_script("claude-code", "pre-edit.sh"))
