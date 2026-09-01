@@ -1567,6 +1567,8 @@ const graphState = {
   depth: 1,
   searchQuery: '',
   workspaceGraph: null,    // cached normalised payload (anchor mode's fallback)
+  lastGoodFocal: null,     // last successful {nodes, edges, truncated}; error UX
+                           // preserves this on transient failures (V2 polish #2)
 };
 
 // Toggle the focal-mode row of the filter bar. When in 'focal' mode we
@@ -1643,6 +1645,62 @@ function disambiguateFocalSearch(query, workspaceGraph, anchors) {
   // Multiple matches: cap at 10 so the disambiguation panel stays scannable.
   const candidates = Array.from(seen.values()).slice(0, 10);
   return { kind: 'multiple', candidates };
+}
+
+// V2 polish (item #2) pure half: pick the render strategy for a
+// focal-mode error. The pre-fix code called `renderGraphTabEmpty`
+// on every error, which clears the canvas via
+// `svg.innerHTML = ''`. The spec calls for preserving the
+// previous visible set when one exists (the user has seen a focal
+// graph this session) and only showing the error inline as a
+// banner. When no previous focal graph exists, the empty-state
+// fallback is the right behaviour — same as today.
+//
+// `state.lastGoodFocal` is set after every successful focal fetch
+// (write site: in the focal-mode success branch at lines ~1748,
+// just before `wireGraphControls`). The DOM helper
+// `renderFocalPreservedWithBanner` reads this field and re-draws.
+function pickFocalErrorRender(state, errorMessage) {
+  if (state && state.lastGoodFocal) {
+    return {
+      mode: 'preserve-and-banner',
+      banner: errorMessage || 'focal refresh failed — showing last good graph',
+    };
+  }
+  return { mode: 'empty', message: errorMessage || 'graph unavailable' };
+}
+
+// V2 polish (item #2) DOM half: re-render `lastGoodFocal` and
+// overlay an error banner in the empty-state div (no `svg.innerHTML
+// = ''`). Used when `pickFocalErrorRender` returns
+// 'preserve-and-banner'. Reads `graphState.lastGoodFocal` and the
+// closure-level `graphState.focalSymbol` for the banner copy.
+function renderFocalPreservedWithBanner(banner) {
+  const empty = document.getElementById('graph-empty');
+  const meta = document.getElementById('graph-meta');
+  const svg = document.getElementById('graph-canvas');
+  if (!svg) return;
+  // Do NOT clear the canvas here — that is the whole point of the
+  // preserve-and-banner mode. The d3 selection on the canvas is
+  // still live from the previous successful focal fetch. We accept
+  // the cost of NOT calling drawGraphSvg(lastGood) here: a future
+  // optimisation could route through drawGraphSvg(lastGood)
+  // directly, but for V2 polish #2 the simple "do nothing to the
+  // canvas, paint the banner" path is correct and obviously safe.
+  const lastGood = graphState.lastGoodFocal;
+  if (!lastGood) {
+    // Defensive: pickFocalErrorRender said preserve, but the
+    // snapshot is gone. Fall back to the empty-state path.
+    return renderGraphTabEmpty({ mode: 'error', message: banner }, null);
+  }
+  empty.className = 'graph-focal-error';
+  empty.textContent = `Refresh failed: ${banner}. Showing last good graph.`;
+  if (meta) meta.textContent = '';
+  // Intentionally do NOT call renderGraphTab here — doing so would
+  // re-fetch and might succeed (clearing the banner) or fail again
+  // (re-showing it). The user is in control: hit "back" to leave
+  // focal mode, or interact with the canvas to keep browsing the
+  // last good graph.
 }
 // `onChange({...})` so the caller can decide whether to refetch.
 //
@@ -1843,17 +1901,34 @@ async function renderGraphTab(opts = {}) {
         depth: `${focalDepth}..${focalDepth}`,   // "1..1", "2..2", "3..3"
       });
     } catch (e) {
-      renderGraphTabEmpty({ mode: 'error', message: `get_cross_repo_blast_radius_for_repo failed: ${e.message}` }, list);
+      const msg = `get_cross_repo_blast_radius_for_repo failed: ${e.message}`;
+      const decision = pickFocalErrorRender(graphState, msg);
+      if (decision.mode === 'preserve-and-banner') {
+        renderFocalPreservedWithBanner(decision.banner);
+        return;
+      }
+      renderGraphTabEmpty({ mode: 'error', message: decision.message }, list);
       return;
     }
     if (result && result.isError) {
       const msg = unwrapText(result) || 'error';
-      renderGraphTabEmpty({ mode: 'error', message: msg }, list);
+      const decision = pickFocalErrorRender(graphState, msg);
+      if (decision.mode === 'preserve-and-banner') {
+        renderFocalPreservedWithBanner(decision.banner);
+        return;
+      }
+      renderGraphTabEmpty({ mode: 'error', message: decision.message }, list);
       return;
     }
     const focalJson = parseJson(result);
     if (!focalJson || !focalJson.by_repo) {
-      renderGraphTabEmpty({ mode: 'error', message: `focal payload unparseable for ${focalSymbol}` }, list);
+      const msg = `focal payload unparseable for ${focalSymbol}`;
+      const decision = pickFocalErrorRender(graphState, msg);
+      if (decision.mode === 'preserve-and-banner') {
+        renderFocalPreservedWithBanner(decision.banner);
+        return;
+      }
+      renderGraphTabEmpty({ mode: 'error', message: decision.message }, list);
       return;
     }
     const visible = applyFocalGraph(focalJson, focalSymbol);
@@ -1862,6 +1937,10 @@ async function renderGraphTab(opts = {}) {
       edges: visible.edges,
       truncated: visible.truncated,
     };
+    // V2 polish (item #2): snapshot the good graph so a transient
+    // error on the next refresh can preserve it instead of
+    // clearing the canvas via renderGraphTabEmpty.
+    graphState.lastGoodFocal = graph;
     if (graph.nodes.length === 0) {
       empty.textContent = `No graph data for ${focalSymbol}.`;
       if (meta) meta.textContent = '';
@@ -2221,5 +2300,6 @@ if (typeof module !== 'undefined' && module.exports) {
     applyDepth,
     // V2 polish (2026-09-01):
     disambiguateFocalSearch,
+    pickFocalErrorRender,
   };
 }

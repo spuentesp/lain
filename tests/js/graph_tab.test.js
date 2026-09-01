@@ -612,3 +612,39 @@ test('disambiguateFocalSearch: caps multiple list at 10 candidates', () => {
   assert.strictEqual(out.kind, 'multiple');
   assert.strictEqual(out.candidates.length, 10);
 });
+
+// ── pickFocalErrorRender (V2 polish, item #2) ────────────────────────────────
+
+test('pickFocalErrorRender: no previous focal → empty', () => {
+  const out = app.pickFocalErrorRender(
+    { mode: 'focal', lastGoodFocal: null },
+    'rpc failed',
+  );
+  assert.deepStrictEqual(out, { mode: 'empty', message: 'rpc failed' });
+});
+
+test('pickFocalErrorRender: lastGoodFocal present → preserve-and-banner', () => {
+  const out = app.pickFocalErrorRender(
+    {
+      mode: 'focal',
+      lastGoodFocal: { nodes: [{ id: 'a' }], edges: [] },
+    },
+    'rpc failed',
+  );
+  assert.deepStrictEqual(out, {
+    mode: 'preserve-and-banner',
+    banner: 'rpc failed',
+  });
+});
+
+test('pickFocalErrorRender: empty error message → default banner', () => {
+  const out = app.pickFocalErrorRender(
+    { mode: 'focal', lastGoodFocal: { nodes: [], edges: [] } },
+    '',
+  );
+  // We only promise the mode here; the message format is the
+  // caller's choice but a non-empty default is what makes the
+  // banner useful.
+  assert.strictEqual(out.mode, 'preserve-and-banner');
+  assert.ok(out.banner && typeof out.banner === 'string' && out.banner.length > 0);
+});
