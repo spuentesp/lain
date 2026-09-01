@@ -13,6 +13,7 @@
 
 use super::command_center_assets::{
     APP_JS, BLAST_RADIUS_HTML, CALL_CHAIN_HTML, COUPLING_HTML, INDEX_HTML, STYLES_CSS, THEME_CSS,
+    dev_spa_dir, serve_bytes, serve_str,
 };
 
 /// Strip `/* … */` comments so documentation prose can mention colours
@@ -310,4 +311,103 @@ fn graph_picker_is_wired_once_from_init() {
         !js[render_at..render_end].contains("addEventListener"),
         "renderGraphTab() must not attach listeners — it re-runs on every tab click"
     );
+}
+
+// ── dev SPA override (V2 polish, parked-bug #7) ────────────────────────
+//
+// `LAIN_DEV_SPA_DIR=<path>` flips the assets module to read each
+// file from disk instead of returning the embedded bytes. These
+// tests pin the contract: env unset → embedded; env set + file
+// present → disk; env set + file absent → embedded (graceful
+// fallback, never 500).
+
+use std::borrow::Cow;
+
+/// Helper: clear any inherited `LAIN_DEV_SPA_DIR` so tests run in a
+/// known state. The dev-mode read is opt-in via env var. We snapshot
+/// and restore around each call to keep tests independent.
+fn with_cleared_dev_spa_dir<F: FnOnce() -> R, R>(f: F) -> R {
+    let prev = std::env::var_os("LAIN_DEV_SPA_DIR");
+    std::env::remove_var("LAIN_DEV_SPA_DIR");
+    let out = f();
+    match prev {
+        Some(v) => std::env::set_var("LAIN_DEV_SPA_DIR", v),
+        None => std::env::remove_var("LAIN_DEV_SPA_DIR"),
+    }
+    out
+}
+
+/// Helper: set `LAIN_DEV_SPA_DIR` for the duration of `f`, then
+/// restore the prior value. Mirrors `with_cleared_dev_spa_dir` but
+/// for the on-disk case.
+fn with_dev_spa_dir<F: FnOnce() -> R, R>(dir: &std::path::Path, f: F) -> R {
+    let prev = std::env::var_os("LAIN_DEV_SPA_DIR");
+    std::env::set_var("LAIN_DEV_SPA_DIR", dir);
+    let out = f();
+    match prev {
+        Some(v) => std::env::set_var("LAIN_DEV_SPA_DIR", v),
+        None => std::env::remove_var("LAIN_DEV_SPA_DIR"),
+    }
+    out
+}
+
+#[test]
+fn dev_spa_dir_returns_none_when_env_unset() {
+    let result = with_cleared_dev_spa_dir(dev_spa_dir);
+    assert!(result.is_none(), "dev_spa_dir should be None when env var is unset");
+}
+
+#[test]
+fn dev_spa_dir_returns_none_when_path_does_not_exist() {
+    std::env::set_var("LAIN_DEV_SPA_DIR", "/nonexistent/path/that/should/not/exist");
+    assert!(dev_spa_dir().is_none(),
+        "dev_spa_dir should be None when the path is not a directory");
+    std::env::remove_var("LAIN_DEV_SPA_DIR");
+}
+
+#[test]
+fn serve_bytes_returns_embedded_when_env_unset() {
+    let bytes: &'static [u8] = b"<html>embedded</html>";
+    let result = with_cleared_dev_spa_dir(|| {
+        let cow = serve_bytes("index.html", bytes);
+        assert!(matches!(cow, Cow::Borrowed(_)),
+            "without dev override, serve_bytes must return the embedded slice");
+        cow
+    });
+    assert_eq!(&*result, bytes);
+}
+
+#[test]
+fn serve_bytes_reads_from_disk_when_env_set_and_file_exists() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let on_disk = tmp.path().join("index.html");
+    std::fs::write(&on_disk, b"<html>from disk</html>").expect("write");
+    let bytes: &'static [u8] = b"<html>embedded</html>";
+    let cow = with_dev_spa_dir(tmp.path(), || serve_bytes("index.html", bytes));
+    assert!(matches!(cow, Cow::Owned(_)),
+        "with dev override, serve_bytes must return Owned bytes from disk");
+    assert_eq!(&*cow, b"<html>from disk</html>");
+}
+
+#[test]
+fn serve_bytes_falls_back_to_embedded_when_file_missing_on_disk() {
+    // Dev override set but the specific file is absent — fall
+    // through to the embedded slice rather than 500. This is
+    // the contract: dev override is opt-in per file, not all-or-
+    // nothing.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bytes: &'static [u8] = b"<html>embedded</html>";
+    let cow = with_dev_spa_dir(tmp.path(), || serve_bytes("nonexistent.html", bytes));
+    assert!(matches!(cow, Cow::Borrowed(_)),
+        "missing file on disk must fall back to embedded, not error");
+    assert_eq!(&*cow, bytes);
+}
+
+#[test]
+fn serve_str_reads_from_disk_when_env_set() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let on_disk = tmp.path().join("d3.v7.min.js");
+    std::fs::write(&on_disk, b"// from disk").expect("write");
+    let cow = with_dev_spa_dir(tmp.path(), || serve_str("d3.v7.min.js", "// embedded"));
+    assert_eq!(&*cow, b"// from disk");
 }

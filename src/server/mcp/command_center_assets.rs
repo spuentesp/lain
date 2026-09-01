@@ -45,3 +45,56 @@ pub const COUPLING_HTML: &str = include_str!("../../ui/coupling.html");
 
 /// The call-chain detail view.
 pub const CALL_CHAIN_HTML: &str = include_str!("../../ui/call-chain.html");
+
+// ── dev-mode SPA override (parked-bug #7) ──────────────────────────────
+//
+// `LAIN_DEV_SPA_DIR=<path>` flips the assets module to read each
+// file from disk instead of returning the embedded bytes. Used by
+// the JS/CSS dev loop: edit `src/server/mcp/command_center/app.js`,
+// refresh the browser, no `cargo build` needed. Production builds
+// leave the env var unset; the `dev_spa_dir()` call below is a
+// single env-var lookup + is_dir syscall per request — cheap
+// enough to not bother caching.
+
+use std::borrow::Cow;
+use std::path::PathBuf;
+
+/// Return Some(PathBuf) iff `LAIN_DEV_SPA_DIR` is set AND points at an
+/// existing directory. The check is per-call so flipping the env var
+/// at runtime takes effect on the next request.
+pub fn dev_spa_dir() -> Option<PathBuf> {
+    let raw = std::env::var_os("LAIN_DEV_SPA_DIR")?;
+    let p = PathBuf::from(raw);
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Return the embedded `&'static [u8]` for `name`, unless
+/// `LAIN_DEV_SPA_DIR` is set AND `<dir>/<name>` is a readable file —
+/// in which case the file's bytes are returned. `name` is relative to
+/// the SPA root (e.g. "index.html", "app.js", "styles.css").
+pub fn serve_bytes(name: &str, embedded: &'static [u8]) -> Cow<'static, [u8]> {
+    if let Some(dir) = dev_spa_dir() {
+        let path = dir.join(name);
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Cow::Owned(bytes);
+        }
+    }
+    Cow::Borrowed(embedded)
+}
+
+/// String variant for entries whose embedded form is `&'static str`
+/// (the `SPA_ASSETS` table — `d3.v7.min.js` etc.). Same semantics as
+/// `serve_bytes`; takes `&'static str` to match the table's type.
+pub fn serve_str(name: &str, embedded: &'static str) -> Cow<'static, [u8]> {
+    if let Some(dir) = dev_spa_dir() {
+        let path = dir.join(name);
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Cow::Owned(bytes);
+        }
+    }
+    Cow::Borrowed(embedded.as_bytes())
+}
