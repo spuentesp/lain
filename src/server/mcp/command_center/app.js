@@ -1349,6 +1349,15 @@ function drawGraphSvg(svgEl, graph) {
       node.classed('is-focus', false).classed('is-neighbour', false).classed('is-dim', false);
       link.classed('is-dim', false);
       tooltipGroup.style('display', 'none');
+    })
+    .on('click', (event, d) => {
+      // Focalise on node click. Mutate graphState and re-enter
+      // renderGraphTab, which now dispatches on mode='focal' and calls
+      // get_blast_radius for the 1-hop neighbourhood. The handler runs
+      // in the same scope as the file-level graphState + renderGraphTab.
+      graphState.focalSymbol = d.name;
+      graphState.mode = 'focal';
+      renderGraphTab();
     });
 
   // Labels — rendered only when the count is small or the toggle is on.
@@ -1415,10 +1424,96 @@ function drawGraphSvg(svgEl, graph) {
   });
 }
 
+// ── Graph tab v2: anchor-first orchestration state + control wiring ────────
+//
+// graphState is a single closure-level object shared by `renderGraphTab`,
+// `drawGraphSvg`'s click handler, and the search/depth/back controls. It
+// owns the three render modes (anchor | focal | search-driven) and the
+// current focal symbol + depth. Read by `setFocalRowVisible` and
+// `wireGraphControls`, written by click / search / depth / back.
+const graphState = {
+  mode: 'anchor',          // 'anchor' | 'focal'
+  focalSymbol: null,
+  depth: 1,
+  searchQuery: '',
+  workspaceGraph: null,    // cached normalised payload (anchor mode's fallback)
+};
+
+// Toggle the focal-mode row of the filter bar. When in 'focal' mode we
+// surface the depth slider + back button; in 'anchor' mode we hide the
+// row so the chip layout is unaffected. Toggled from `renderGraphTab`
+// before the first `drawGraphSvg` call.
+function setFocalRowVisible(visible) {
+  const row = document.querySelector('[data-filter-row="focal"]');
+  if (!row) return;
+  if (visible) {
+    row.removeAttribute('hidden');
+    row.setAttribute('data-active', '1');
+  } else {
+    row.setAttribute('hidden', '');
+    row.setAttribute('data-active', '0');
+  }
+}
+
+// Wire the v2 graph controls: search input (debounced), depth slider, and
+// back-to-anchors button. Each control mutates `state` and signals via
+// `onChange({...})` so the caller can decide whether to refetch.
+//
+// Search behaviour: a non-empty query is treated as "focalise this
+// symbol"; we re-render in focal mode using the typed name. The driver's
+// regex match resolves it server-side; the typed name is a hint, not a
+// strict identifier. Empty queries are a no-op (don't reset mode).
+//
+// Depth behaviour: only refetches in focal mode. In anchor mode the
+// depth slider value is recorded but ignored (anchor mode's neighbourhood
+// is fixed at 1 hop, see computeAnchorVisibleSet).
+//
+// Back behaviour: clears focalSymbol and flips mode to 'anchor'; the
+// caller re-runs `renderGraphTab` which falls through to the anchor
+// branch.
+function wireGraphControls(state, onChange) {
+  const search = document.querySelector('[data-graph-search]');
+  if (search) {
+    let debounce = null;
+    search.addEventListener('input', () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        const q = (search.value || '').trim();
+        if (!q) return;
+        state.focalSymbol = q;
+        state.searchQuery = q;
+        state.mode = 'focal';
+        onChange({ restoreFromSearch: q });
+      }, 300);
+    });
+  }
+  const depth = document.querySelector('[data-graph-depth]');
+  if (depth) {
+    depth.addEventListener('input', () => {
+      state.depth = Number(depth.value);
+      if (state.mode === 'focal') onChange({ depthChanged: true });
+    });
+  }
+  const back = document.querySelector('[data-graph-back]');
+  if (back) {
+    back.addEventListener('click', () => {
+      state.mode = 'anchor';
+      state.focalSymbol = null;
+      state.searchQuery = '';
+      onChange({ restoreFromFocal: true });
+    });
+  }
+}
+
 // Entry point for the tab dispatch (resolved as window.renderGraphTab in
 // init()). Idempotent: safe to call on every tab click and on every picker
 // change.
-async function renderGraphTab() {
+//
+// `opts` is the v2 hook for callers to override the rendered mode without
+// mutating `graphState` first (e.g. tests or future "open in focal" deep
+// links). The closure-level `graphState` remains the source of truth for
+// click / search / depth / back interactions.
+async function renderGraphTab(opts = {}) {
   const empty = document.getElementById('graph-empty');
   const meta = document.getElementById('graph-meta');
   const svg = document.getElementById('graph-canvas');
@@ -1442,46 +1537,126 @@ async function renderGraphTab() {
 
   populateGraphPicker(list, target);
   empty.className = 'muted';
-  empty.textContent = 'Loading graph…';
-  svg.innerHTML = '';
 
-  let result;
-  try {
-    result = await mcpCall('get_workspace_graph', {});
-  } catch (e) {
-    renderGraphTabEmpty(
-      { mode: 'error', message: `get_workspace_graph failed: ${e.message}` }, list);
-    return;
-  }
-  if (result && result.isError) {
-    const msg = unwrapText(result) || 'error';
-    // The server is up but holds no matching workspace — same actionable
-    // hint as a non-active pick.
-    if (/no workspace matches|requires federation mode/i.test(msg)) {
-      renderGraphTabEmpty({ mode: 'not-loaded', workspace: target }, list);
+  // v2: mode-aware fetch. An opts.mode override beats graphState.mode; the
+  // click handler in drawGraphSvg flips graphState.mode to 'focal' and
+  // re-enters here without opts. setFocalRowVisible runs before the first
+  // draw so the depth slider and back button reflect the active mode on
+  // the very first paint.
+  const mode = (opts && opts.mode) || graphState.mode || 'anchor';
+  graphState.mode = mode;
+  setFocalRowVisible(mode === 'focal');
+
+  // ── Focal mode ────────────────────────────────────────────────────────
+  // Triggered by a node click (graphState.focalSymbol set in
+  // drawGraphSvg's click handler) or by a search query (set in
+  // wireGraphControls). Calls get_blast_radius directly and renders the
+  // resulting neighbourhood.
+  if (mode === 'focal') {
+    const focalSymbol = graphState.focalSymbol;
+    const focalDepth = graphState.depth || 1;
+    if (!focalSymbol) {
+      // Defensive: if we somehow entered focal mode with no symbol,
+      // fall back to anchor mode rather than rendering an empty graph.
+      graphState.mode = 'anchor';
+      return renderGraphTab();
+    }
+    empty.textContent = `Loading ${focalSymbol}'s ${focalDepth}-hop neighbourhood…`;
+    svg.innerHTML = '';
+    let result;
+    try {
+      result = await mcpCall('get_blast_radius', { symbol: focalSymbol, depth: String(focalDepth) });
+    } catch (e) {
+      renderGraphTabEmpty({ mode: 'error', message: `get_blast_radius failed: ${e.message}` }, list);
       return;
     }
-    renderGraphTabEmpty({ mode: 'error', message: msg }, list);
+    if (result && result.isError) {
+      const msg = unwrapText(result) || 'error';
+      renderGraphTabEmpty({ mode: 'error', message: msg }, list);
+      return;
+    }
+    const focalPayload = parseJson(result);
+    // normalize via the existing helper if it matches the {nodes, edges, truncated} shape
+    const graph = (focalPayload && Array.isArray(focalPayload.nodes))
+      ? normalizeGraphPayload(focalPayload) : { nodes: [], edges: [], truncated: false };
+    if (graph.nodes.length === 0) {
+      empty.textContent = `No graph data for ${focalSymbol}.`;
+      if (meta) meta.textContent = '';
+      // Even on an empty result, wire the controls so the user can hit
+      // back without re-clicking the (now-empty) canvas.
+      wireGraphControls(graphState, () => renderGraphTab());
+      return;
+    }
+    if (meta) {
+      const cross = graph.edges.filter(e => e.cross_repo).length;
+      meta.textContent =
+        `focal: ${focalSymbol} · ${graph.nodes.length} nodes · ${graph.edges.length} edges · ` +
+        `${cross} cross-repo${graph.truncated ? ' · truncated' : ''}`;
+    }
+    empty.textContent = '';
+    drawGraphSvg(svg, graph);
+    wireGraphControls(graphState, () => renderGraphTab());
     return;
   }
 
-  const graph = normalizeGraphPayload(parseJson(result));
-  if (graph.nodes.length === 0) {
-    empty.className = 'muted';
-    empty.textContent =
-      `Workspace ${target} has no Function/Method/Class nodes to draw yet.`;
+  // ── Anchor mode (default) ─────────────────────────────────────────────
+  // Fetch find_anchors, then the workspace graph (used for the 1-hop
+  // neighbourhood expansion), then compute the visible set.
+  empty.textContent = 'Loading anchors…';
+  svg.innerHTML = '';
+
+  let anchorsResult;
+  try {
+    anchorsResult = await mcpCall('find_anchors', { limit: 30 });
+  } catch (e) {
+    renderGraphTabEmpty({ mode: 'error', message: `find_anchors failed: ${e.message}` }, list);
+    return;
+  }
+  const anchorList = parseJson(anchorsResult);
+  // anchorList is typically a numbered list of strings (the format
+  // the driver regex matches). Be defensive: accept both string[] and {name}[].
+  let anchors;
+  if (Array.isArray(anchorList)) {
+    anchors = anchorList.map((a) => {
+      if (typeof a === 'string') return { name: a.trim(), repo_id: null };
+      if (a && a.name) return { name: a.name, repo_id: a.repo_id || null };
+      return null;
+    }).filter(Boolean);
+  } else {
+    anchors = [];
+  }
+  if (anchors.length === 0) {
+    empty.textContent = `Workspace ${target} has no anchors. Type a symbol to focalise.`;
     if (meta) meta.textContent = '';
+    // Still wire controls so the user can type a symbol to focalise.
+    wireGraphControls(graphState, () => renderGraphTab());
     return;
   }
 
-  empty.textContent = '';
-  if (meta) {
-    const cross = graph.edges.filter(e => e.cross_repo).length;
-    meta.textContent =
-      `${graph.nodes.length} nodes · ${graph.edges.length} edges · ` +
-      `${cross} cross-repo${graph.truncated ? ' · truncated' : ''}`;
+  let workspaceGraph;
+  try {
+    const wgResult = await mcpCall('get_workspace_graph', {});
+    workspaceGraph = normalizeGraphPayload(parseJson(wgResult));
+    graphState.workspaceGraph = workspaceGraph;
+  } catch (e) {
+    // Degrade: render anchors only (no 1-hop expansion).
+    workspaceGraph = { nodes: [], edges: [], truncated: false };
   }
-  drawGraphSvg(svg, graph);
+  const visible = computeAnchorVisibleSet(anchors, workspaceGraph, { neighbourhoodDepth: 1, maxNeighboursPerAnchor: 20 });
+  if (meta) {
+    const cross = visible.edges.filter(e => e.cross_repo).length;
+    meta.textContent =
+      `${anchors.length} anchors · ${visible.nodes.length} nodes · ${visible.edges.length} edges · ` +
+      `${cross} cross-repo${workspaceGraph.truncated ? ' · truncated' : ''}`;
+  }
+  if (visible.nodes.length === 0) {
+    empty.textContent = `Workspace ${target} anchors produced no in-graph nodes.`;
+    wireGraphControls(graphState, () => renderGraphTab());
+    return;
+  }
+  empty.textContent = '';
+  drawGraphSvg(svg, visible);
+  wireGraphControls(graphState, () => renderGraphTab());
 }
 
 // Attach the graph workspace picker's `change` listener exactly once. Called
