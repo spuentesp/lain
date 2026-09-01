@@ -485,12 +485,19 @@ async fn watcher_survives_six_concurrent_agents() {
     let wait_for_one_refresh = |label: String| {
         let overlay_notify = Arc::clone(&overlay_notify);
         async move {
+            // 30 s budget: under six concurrent writers the receiver
+            // processes events serially, so the slowest cycle dominates
+            // and cold LSP warm-up on the first event can stack on top.
+            // 15 s was tight even on Linux CI; 30 s gives headroom for
+            // slow runners without making a healthy run noticeably
+            // slower (a successful cycle finishes in well under a
+            // second).
             tokio::time::timeout(
-                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(30),
                 overlay_notify.notified(),
             )
             .await
-            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 15s"))
+            .unwrap_or_else(|_| panic!("{label}: receiver did not refresh overlay within 30s"))
         }
     };
 
