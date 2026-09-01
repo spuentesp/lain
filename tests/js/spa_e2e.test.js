@@ -425,6 +425,65 @@ async function assertGraph(page) {
   });
   assertTrue(tab, 'wheel event triggers scale transform on .graph-viewport',
     zoomed && /scale\(/.test(zoomed), `transform=${JSON.stringify(zoomed)}`);
+
+  // v2: anchor-first default — the rendered graph is bounded.
+  const v2AnchorNodeCount = await page.evaluate(() => {
+    return document.querySelectorAll('.graph-node').length;
+  });
+  assertTrue(tab, 'anchor view has nodes',
+    v2AnchorNodeCount > 0,
+    `v2AnchorNodeCount=${v2AnchorNodeCount}`);
+  assertTrue(tab, 'anchor view is bounded (<= 200 nodes)',
+    v2AnchorNodeCount <= 200,
+    `v2AnchorNodeCount=${v2AnchorNodeCount}`);
+
+  // v2: clicking a node replaces the visible set with the focal neighbourhood.
+  const v2ClickResetsCount = await page.evaluate(() => {
+    const before = document.querySelectorAll('.graph-node').length;
+    const target = document.querySelector('.graph-node');
+    if (!target) return { before, after: -1 };
+    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    return { before, after: -1, dispatched: true };
+  });
+  // Wait for the focal re-render to settle.
+  await new Promise(r => setTimeout(r, 1500));
+  const v2AfterClickCount = await page.evaluate(() => document.querySelectorAll('.graph-node').length);
+  assertTrue(tab, 'clicking a node replaced the visible set',
+    v2AfterClickCount !== v2ClickResetsCount.before,
+    `before=${v2ClickResetsCount.before} after=${v2AfterClickCount}`);
+
+  // v2: search input focalises on typed symbol.
+  await page.evaluate(() => {
+    const input = document.querySelector('[data-graph-search]');
+    if (!input) return false;
+    input.value = 'Buf';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  });
+  await new Promise(r => setTimeout(r, 1500));
+  const v2SearchActive = await page.evaluate(() => {
+    const focal = document.querySelector('[data-filter-row="focal"]');
+    return focal && focal.getAttribute('data-active') === '1';
+  });
+  assertTrue(tab, 'search input activates focal mode',
+    !!v2SearchActive,
+    `v2SearchActive=${v2SearchActive}`);
+
+  // v2: "back to anchors" returns to anchor view.
+  await page.evaluate(() => {
+    const back = document.querySelector('[data-graph-back]');
+    if (back) back.click();
+  });
+  await new Promise(r => setTimeout(r, 1500));
+  const v2BackToAnchor = await page.evaluate(() => {
+    const focal = document.querySelector('[data-filter-row="focal"]');
+    const focalHidden = focal && focal.hasAttribute('hidden');
+    const nodeCount = document.querySelectorAll('.graph-node').length;
+    return { focalHidden, nodeCount };
+  });
+  assertTrue(tab, 'back button hides focal row',
+    !!v2BackToAnchor.focalHidden,
+    `v2BackToAnchor=${JSON.stringify(v2BackToAnchor)}`);
 }
 
 async function assertSse(baseUrl) {
