@@ -536,3 +536,79 @@ test('computeAnchorVisibleSet: explicit repo_id matches only that repo (no cross
   assert.ok(ids.has('r1-h'));
   assert.ok(!ids.has('r2-x'), 'r2 node must NOT bleed into a r1-scoped anchor view');
 });
+
+// ── disambiguateFocalSearch (V2 polish, item #1) ────────────────────────────
+
+test('disambiguateFocalSearch: empty query → none', () => {
+  assert.deepStrictEqual(
+    app.disambiguateFocalSearch('', null, null),
+    { kind: 'none' },
+  );
+  assert.deepStrictEqual(
+    app.disambiguateFocalSearch('   ', null, null),
+    { kind: 'none' },
+  );
+});
+
+test('disambiguateFocalSearch: no workspace graph and no anchors → none', () => {
+  assert.deepStrictEqual(
+    app.disambiguateFocalSearch('hello', null, null),
+    { kind: 'none' },
+  );
+});
+
+test('disambiguateFocalSearch: single match in workspace graph → single', () => {
+  const wg = { nodes: [
+    { id: 'r1::a', name: 'foo_bar', repo_id: 'r1' },
+    { id: 'r1::b', name: 'baz',     repo_id: 'r1' },
+  ]};
+  const out = app.disambiguateFocalSearch('foo', wg, null);
+  assert.deepStrictEqual(out, { kind: 'single', repo_id: 'r1', name: 'foo_bar' });
+});
+
+test('disambiguateFocalSearch: single match (case-insensitive substring)', () => {
+  const wg = { nodes: [
+    { id: 'r1::a', name: 'MyStruct', repo_id: 'r1' },
+  ]};
+  const out = app.disambiguateFocalSearch('myst', wg, null);
+  assert.deepStrictEqual(out, { kind: 'single', repo_id: 'r1', name: 'MyStruct' });
+});
+
+test('disambiguateFocalSearch: multiple matches across repos → multiple', () => {
+  const wg = { nodes: [
+    { id: 'r1::a', name: 'Bytes', repo_id: 'r1' },
+    { id: 'r2::a', name: 'Bytes', repo_id: 'r2' },
+    { id: 'r1::b', name: 'Buf',   repo_id: 'r1' },
+  ]};
+  const out = app.disambiguateFocalSearch('Bytes', wg, null);
+  assert.strictEqual(out.kind, 'multiple');
+  assert.strictEqual(out.candidates.length, 2);
+  const repos = out.candidates.map(c => c.repo_id).sort();
+  assert.deepStrictEqual(repos, ['r1', 'r2']);
+  for (const c of out.candidates) {
+    assert.strictEqual(c.name, 'Bytes');
+  }
+});
+
+test('disambiguateFocalSearch: dedupes same (repo_id, name) across workspace graph and anchors', () => {
+  const wg = { nodes: [{ id: 'r1::a', name: 'Bytes', repo_id: 'r1' }] };
+  const anchors = [
+    { name: 'Bytes', repo_id: 'r1' },  // duplicate of wg entry
+    { name: 'Bytes', repo_id: 'r2' },  // new
+  ];
+  const out = app.disambiguateFocalSearch('Bytes', wg, anchors);
+  assert.strictEqual(out.kind, 'multiple');
+  assert.strictEqual(out.candidates.length, 2,
+    `expected dedup to 2 unique (repo_id, name) pairs, got ${out.candidates.length}`);
+});
+
+test('disambiguateFocalSearch: caps multiple list at 10 candidates', () => {
+  const wg = { nodes: [] };
+  const anchors = Array.from({ length: 25 }, (_, i) => ({
+    name: `helper_${i}`,
+    repo_id: `r${i % 5}`,
+  }));
+  const out = app.disambiguateFocalSearch('helper', wg, anchors);
+  assert.strictEqual(out.kind, 'multiple');
+  assert.strictEqual(out.candidates.length, 10);
+});
