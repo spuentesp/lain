@@ -160,6 +160,7 @@ mod tests {
     /// End-to-end: spawn a listener task via the production
     /// `spawn_signal_listener_at`, signal reload, verify the bus
     /// receives the request.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn signal_listener_forwards_to_bus() {
         use tokio::io::AsyncWriteExt;
