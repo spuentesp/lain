@@ -40,7 +40,12 @@ bincode = "1.3"
 
 # NLP & Machine Learning
 ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
-tokenizers = "0.21"
+# Disable tokenizers' default `esaxx_fast` feature, which pulls in
+# `esaxx-rs`'s `cc`-built C++ as a static `/MT` archive. That collides
+# at link time on Windows with `ort-sys`'s prebuilt `/MD` C++ runtime
+# (fatal LNK1169 / LNK2038 mismatch on `RuntimeLibrary`). The pure-Rust
+# suffix-array fallback that ships in the same crate is used instead.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # LSP bridge for multi-language support
 lsp-bridge = "0.2"
