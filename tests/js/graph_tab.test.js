@@ -372,3 +372,36 @@ test('computeAnchorVisibleSet: neighbourhood cap limits per-anchor contribution'
   const neighbours = out.nodes.filter(n => n.id !== 'hub');
   assert.equal(neighbours.length, 5);
 });
+
+test('computeAnchorVisibleSet: anchors with repo_id=null match by name only across repos', () => {
+  // Anchor has no repo_id; should match nodes named "Bytes" in any repo.
+  const anchors = [{ name: 'Bytes', repo_id: null }];
+  const workspaceGraph = {
+    nodes: [
+      { id: 'a', name: 'Bytes', repo_id: 'r1' },
+      { id: 'b', name: 'Bytes', repo_id: 'r2' },
+      { id: 'c', name: 'Other', repo_id: 'r1' },
+    ],
+    edges: [],
+  };
+  const out = app.computeAnchorVisibleSet(anchors, workspaceGraph);
+  const ids = new Set(out.nodes.map(n => n.id));
+  assert.ok(ids.has('a'));
+  assert.ok(ids.has('b'));
+  assert.ok(!ids.has('c'));
+});
+
+test('computeAnchorVisibleSet: anchor with explicit repo_id matches only that repo', () => {
+  const anchors = [{ name: 'Bytes', repo_id: 'r1' }];
+  const workspaceGraph = {
+    nodes: [
+      { id: 'a', name: 'Bytes', repo_id: 'r1' },
+      { id: 'b', name: 'Bytes', repo_id: 'r2' },
+    ],
+    edges: [],
+  };
+  const out = app.computeAnchorVisibleSet(anchors, workspaceGraph);
+  const ids = new Set(out.nodes.map(n => n.id));
+  assert.ok(ids.has('a'));
+  assert.ok(!ids.has('b'));
+});

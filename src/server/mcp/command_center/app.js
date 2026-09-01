@@ -959,14 +959,24 @@ function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
     adj.get(e.target).add(e.source);
   }
 
-  // Anchor lookup by node name (find_anchors returns names; the
-  // workspace graph uses global ids — match by name within the same repo).
+  // Build two indexes for candidate lookup:
+  //   - nodesByRepoAndName: keyed on `${repo_id}::${name}` — used when
+  //     the anchor carries an explicit `repo_id` (e.g., a future
+  //     JSON-shaped anchor from find_anchors).
+  //   - nodesByName: keyed on `name` only — used when the anchor carries
+  //     `repo_id: null` (the text-format `find_anchors` parser produces
+  //     these); every node named `<that>` is a candidate across repos.
+  const nodesByRepoAndName = new Map();
   const nodesByName = new Map();
-  for (const n of workspaceGraph.nodes) {
+  for (const n of workspaceGraph.nodes || []) {
     if (n.name && n.repo_id) {
       const key = `${n.repo_id}::${n.name}`;
-      if (!nodesByName.has(key)) nodesByName.set(key, []);
-      nodesByName.get(key).push(n);
+      if (!nodesByRepoAndName.has(key)) nodesByRepoAndName.set(key, []);
+      nodesByRepoAndName.get(key).push(n);
+    }
+    if (n.name) {
+      if (!nodesByName.has(n.name)) nodesByName.set(n.name, []);
+      nodesByName.get(n.name).push(n);
     }
   }
 
@@ -974,8 +984,10 @@ function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
   // contribution to `maxNeighboursPerAnchor` by neighbour degree.
   const visibleIds = new Set();
   for (const a of anchors) {
-    if (!a || !a.name || !a.repo_id) continue;
-    const candidates = nodesByName.get(`${a.repo_id}::${a.name}`) || [];
+    if (!a || !a.name) continue;
+    const candidates = a.repo_id
+      ? nodesByRepoAndName.get(`${a.repo_id}::${a.name}`) || []
+      : nodesByName.get(a.name) || [];
     if (candidates.length === 0) continue;
     for (const c of candidates) visibleIds.add(c.id);
 
