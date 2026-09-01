@@ -405,3 +405,60 @@ test('computeAnchorVisibleSet: anchor with explicit repo_id matches only that re
   assert.ok(ids.has('a'));
   assert.ok(!ids.has('b'));
 });
+
+test('applyFocalGraph: builds visible set from by_repo JSON with cross-repo edges', () => {
+  const payload = {
+    by_repo: {
+      bytes: [
+        { name: 'data_mut', repo_id: 'bytes', kind: 'Function', path: 'src/foo.rs' },
+        { name: 'Bytes',    repo_id: 'bytes', kind: 'Class',    path: 'src/bar.rs' },
+      ],
+      tokio: [
+        { name: 'tokio',    repo_id: 'tokio', kind: 'Function', path: 'src/lib.rs' },
+      ],
+    },
+    total_count: 3,
+    truncated: false,
+  };
+  const out = app.applyFocalGraph(payload, 'data_mut');
+  // 3 visible nodes: data_mut (centre), Bytes, tokio.
+  assert.equal(out.nodes.length, 3);
+  const ids = new Set(out.nodes.map(n => n.id));
+  assert.ok(ids.has('bytes::data_mut'));
+  assert.ok(ids.has('bytes::Bytes'));
+  assert.ok(ids.has('tokio::tokio'));
+  // 2 edges: bytes::Bytes ↔ data_mut (intra), tokio::tokio ↔ data_mut (cross).
+  assert.equal(out.edges.length, 2);
+  const crossCount = out.edges.filter(e => e.cross_repo).length;
+  assert.equal(crossCount, 1);
+});
+
+test('applyFocalGraph: synthesises focal node when focal not in by_repo', () => {
+  const payload = {
+    by_repo: {
+      bytes: [{ name: 'Bytes', repo_id: 'bytes', kind: 'Class', path: 'src/bytes.rs' }],
+    },
+  };
+  const out = app.applyFocalGraph(payload, 'Unknown');
+  // 2 nodes: the unknown focal (synthesised) + the Bytes class.
+  assert.equal(out.nodes.length, 2);
+  const synth = out.nodes.find(n => n.name === 'Unknown');
+  assert.ok(synth, 'synthesised focal node present');
+  // truncated flag reflects payload.
+  assert.equal(out.truncated, false);
+});
+
+test('computeAnchorVisibleSet: explicit repo_id matches only that repo (no cross-repo bleed)', () => {
+  const anchors = [{ name: 'Hub', repo_id: 'r1' }];
+  const workspaceGraph = {
+    nodes: [
+      { id: 'r1-h', name: 'Hub',    repo_id: 'r1' },
+      { id: 'r2-x', name: 'HubExt', repo_id: 'r2' },
+    ],
+    edges: [],
+  };
+  const out = app.computeAnchorVisibleSet(anchors, workspaceGraph);
+  const ids = new Set(out.nodes.map(n => n.id));
+  assert.ok(ids.has('r1-h'));
+  assert.ok(!ids.has('r2-x'), 'r2 node must NOT bleed into a r1-scoped anchor view');
+});

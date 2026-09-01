@@ -1020,6 +1020,87 @@ function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
   return { nodes: visibleNodes, edges: visibleEdges, hiddenNodeIds };
 }
 
+// Build a visible-set from a `get_cross_repo_blast_radius_for_repo` JSON
+// payload. Pure helper used by renderGraphTab's focal branch.
+//
+// payload shape:
+//   { by_repo: { [repoId]: [{ name, repo_id, kind, path }, ...] },
+//     total_count: number,
+//     truncated: boolean }
+// focalSymbol — the symbol the user clicked or typed; used as the
+// visual centre of the focal graph (highlighted via .is-focus).
+function applyFocalGraph(payload, focalSymbol) {
+  const byRepo = (payload && payload.by_repo) || {};
+  const nodes = [];
+  const edges = [];
+  let focalPushed = false;
+  // Look up the focal symbol's repo by matching the symbol name against
+  // byRepo[*]; if found, the focal goes once into that repo's bucket and
+  // we mark it as the centre. If the symbol isn't in any bucket (rare —
+  // happens when the user-typed name is not a known dependency), we
+  // synthesise a minimal focal node so the canvas isn't empty.
+  let focalRepo = null;
+  for (const repoId of Object.keys(byRepo)) {
+    const items = byRepo[repoId] || [];
+    for (const n of items) {
+      if (n && n.name === focalSymbol) { focalRepo = repoId; break; }
+    }
+    if (focalRepo) break;
+  }
+  for (const repoId of Object.keys(byRepo)) {
+    const items = byRepo[repoId] || [];
+    for (const n of items) {
+      if (!n || !n.name) continue;
+      nodes.push({
+        id: `${repoId}::${n.name}`,
+        name: n.name,
+        path: n.path || '',
+        repo_id: repoId,
+        kind: n.kind || 'Function',
+      });
+      // Connect every entry to the focal symbol as a star. Only emit the
+      // intra-repo edge when the focal symbol actually lives in this
+      // repo — otherwise `${repoId}::${focalSymbol}` would be a dangling
+      // source pointing at a node that was never pushed.
+      if (n.name === focalSymbol) {
+        focalPushed = true;
+        continue;
+      }
+      if (focalRepo === repoId) {
+        edges.push({
+          source: `${repoId}::${focalSymbol}`,
+          target: `${repoId}::${n.name}`,
+          edge_type: 'Calls',
+          cross_repo: false,
+        });
+      }
+      // And connect across repos when the focal lives in a different
+      // repo (focal symbol might not appear in *every* repo, only in the
+      // one it was defined in — but the caller's neighbours cross the
+      // boundary via the focal).
+      if (focalRepo && focalRepo !== repoId) {
+        edges.push({
+          source: `${focalRepo}::${focalSymbol}`,
+          target: `${repoId}::${n.name}`,
+          edge_type: 'Calls',
+          cross_repo: true,
+        });
+      }
+    }
+  }
+  if (!focalPushed) {
+    // Fallback: synthesise a focal node so the canvas isn't blank.
+    nodes.push({
+      id: `${focalRepo || 'unknown'}::${focalSymbol}`,
+      name: focalSymbol,
+      path: '',
+      repo_id: focalRepo || 'unknown',
+      kind: 'Function',
+    });
+  }
+  return { nodes, edges, truncated: !!(payload && payload.truncated) };
+}
+
 function applyDepth(neighbourhood, anchor, depth) {
   // Pure passthrough — currently no narrowing; explicitly accepts `depth`
   // so callers can read the depth slider state and pass it through to
@@ -1925,6 +2006,7 @@ if (typeof module !== 'undefined' && module.exports) {
     nodeRadius,
     // SPA graph v2: anchors-first (2026-08-31):
     computeAnchorVisibleSet,
+    applyFocalGraph,
     applyDepth,
   };
 }
