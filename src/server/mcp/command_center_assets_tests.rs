@@ -300,7 +300,7 @@ fn graph_picker_is_wired_once_from_init() {
     );
 
     let render_at = js
-        .find("async function renderGraphTab()")
+        .find("async function renderGraphTab(")
         .expect("app.js has no renderGraphTab()");
     let render_end = js[render_at..]
         .find("\nfunction wireGraphPicker")
