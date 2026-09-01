@@ -1445,10 +1445,13 @@ function drawGraphSvg(svgEl, graph) {
     .on('click', (event, d) => {
       // Focalise on node click. Mutate graphState and re-enter
       // renderGraphTab, which now dispatches on mode='focal' and calls
-      // get_blast_radius for the 1-hop neighbourhood. The handler runs
-      // in the same scope as the file-level graphState + renderGraphTab.
+      // get_cross_repo_blast_radius_for_repo for the N-hop neighbourhood.
+      // The handler runs in the same scope as the file-level graphState
+      // + renderGraphTab. Capture d.repo_id so the focal branch can scope
+      // the cross-repo blast-radius query to the right repository.
       graphState.focalSymbol = d.name;
-      graphState.mode = 'focal';
+      graphState.focalRepoId  = d.repo_id;
+      graphState.mode        = 'focal';
       renderGraphTab();
     });
 
@@ -1526,6 +1529,7 @@ function drawGraphSvg(svgEl, graph) {
 const graphState = {
   mode: 'anchor',          // 'anchor' | 'focal'
   focalSymbol: null,
+  focalRepoId: null,       // captured by click/search handlers; read by the focal branch
   depth: 1,
   searchQuery: '',
   workspaceGraph: null,    // cached normalised payload (anchor mode's fallback)
@@ -1572,7 +1576,24 @@ function wireGraphControls(state, onChange) {
       debounce = setTimeout(() => {
         const q = (search.value || '').trim();
         if (!q) return;
+        // Match typed name against the cached workspace graph to set
+        // focalRepoId; fall back to the first distinct repo_id if no
+        // match (or if the graph is uncached — focalRepoId stays null and
+        // the focal branch's fallback takes over).
+        let typedRepoId = null;
+        const wg = state.workspaceGraph;
+        if (wg && wg.nodes) {
+          for (const n of wg.nodes) {
+            if (n && n.name === q) { typedRepoId = n.repo_id || null; break; }
+          }
+          if (!typedRepoId) {
+            for (const n of wg.nodes) {
+              if (n && n.repo_id) { typedRepoId = n.repo_id; break; }
+            }
+          }
+        }
         state.focalSymbol = q;
+        state.focalRepoId  = typedRepoId;
         state.searchQuery = q;
         state.mode = 'focal';
         onChange({ restoreFromSearch: q });
@@ -1642,8 +1663,8 @@ async function renderGraphTab(opts = {}) {
   // ── Focal mode ────────────────────────────────────────────────────────
   // Triggered by a node click (graphState.focalSymbol set in
   // drawGraphSvg's click handler) or by a search query (set in
-  // wireGraphControls). Calls get_blast_radius directly and renders the
-  // resulting neighbourhood.
+  // wireGraphControls). Calls get_cross_repo_blast_radius_for_repo
+  // directly and renders the resulting neighbourhood.
   if (mode === 'focal') {
     const focalSymbol = graphState.focalSymbol;
     const focalDepth = graphState.depth || 1;
@@ -1653,13 +1674,31 @@ async function renderGraphTab(opts = {}) {
       graphState.mode = 'anchor';
       return renderGraphTab();
     }
+    // Item 13: get_blast_radius returns text and ignores depth; switch to
+    // get_cross_repo_blast_radius_for_repo (JSON, accepts depth range).
+    let focalRepoId = graphState.focalRepoId;
+    if (!focalRepoId) {
+      // Fallback for the search-input path where the typed name's repo
+      // wasn't captured: take the first distinct repo_id from the cached
+      // workspace graph.
+      const wg = graphState.workspaceGraph;
+      if (wg && wg.nodes) {
+        for (const n of wg.nodes) {
+          if (n && n.repo_id) { focalRepoId = n.repo_id; break; }
+        }
+      }
+    }
     empty.textContent = `Loading ${focalSymbol}'s ${focalDepth}-hop neighbourhood…`;
     svg.innerHTML = '';
     let result;
     try {
-      result = await mcpCall('get_blast_radius', { symbol: focalSymbol, depth: String(focalDepth) });
+      result = await mcpCall('get_cross_repo_blast_radius_for_repo', {
+        repo_id: focalRepoId,
+        symbol: focalSymbol,
+        depth: `${focalDepth}..${focalDepth}`,   // "1..1", "2..2", "3..3"
+      });
     } catch (e) {
-      renderGraphTabEmpty({ mode: 'error', message: `get_blast_radius failed: ${e.message}` }, list);
+      renderGraphTabEmpty({ mode: 'error', message: `get_cross_repo_blast_radius_for_repo failed: ${e.message}` }, list);
       return;
     }
     if (result && result.isError) {
@@ -1667,10 +1706,17 @@ async function renderGraphTab(opts = {}) {
       renderGraphTabEmpty({ mode: 'error', message: msg }, list);
       return;
     }
-    const focalPayload = parseJson(result);
-    // normalize via the existing helper if it matches the {nodes, edges, truncated} shape
-    const graph = (focalPayload && Array.isArray(focalPayload.nodes))
-      ? normalizeGraphPayload(focalPayload) : { nodes: [], edges: [], truncated: false };
+    const focalJson = parseJson(result);
+    if (!focalJson || !focalJson.by_repo) {
+      renderGraphTabEmpty({ mode: 'error', message: `focal payload unparseable for ${focalSymbol}` }, list);
+      return;
+    }
+    const visible = applyFocalGraph(focalJson, focalSymbol);
+    const graph = {
+      nodes: visible.nodes,
+      edges: visible.edges,
+      truncated: visible.truncated,
+    };
     if (graph.nodes.length === 0) {
       empty.textContent = `No graph data for ${focalSymbol}.`;
       if (meta) meta.textContent = '';
@@ -1699,7 +1745,21 @@ async function renderGraphTab(opts = {}) {
 
   let anchorsResult;
   try {
-    anchorsResult = await mcpCall('find_anchors', { limit: 30 });
+    // Item 14: find_anchors requires repo_id (the federation's scope guard
+    // rejects unscoped calls). Pick the first distinct repo_id from the
+    // already-fetched workspace graph.
+    const anchorRepoId = (() => {
+      const wg = graphState.workspaceGraph;
+      if (!wg || !Array.isArray(wg.nodes)) return null;
+      for (const n of wg.nodes) {
+        if (n && n.repo_id) return n.repo_id;
+      }
+      return null;
+    })();
+    anchorsResult = await mcpCall('find_anchors', {
+      repo_id: anchorRepoId,
+      limit: 30,
+    });
   } catch (e) {
     renderGraphTabEmpty({ mode: 'error', message: `find_anchors failed: ${e.message}` }, list);
     return;
