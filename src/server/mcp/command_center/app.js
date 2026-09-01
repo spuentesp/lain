@@ -1612,18 +1612,23 @@ async function renderGraphTab(opts = {}) {
     renderGraphTabEmpty({ mode: 'error', message: `find_anchors failed: ${e.message}` }, list);
     return;
   }
-  const anchorList = parseJson(anchorsResult);
-  // anchorList is typically a numbered list of strings (the format
-  // the driver regex matches). Be defensive: accept both string[] and {name}[].
-  let anchors;
-  if (Array.isArray(anchorList)) {
-    anchors = anchorList.map((a) => {
-      if (typeof a === 'string') return { name: a.trim(), repo_id: null };
-      if (a && a.name) return { name: a.name, repo_id: a.repo_id || null };
-      return null;
-    }).filter(Boolean);
+  // `find_anchors` returns a numbered text list like "1. Bytes\n2. Buf\n...".
+  // Defensively unwrap either JSON or text — older builds may have
+  // returned one or the other. The regex mirrors the recorder driver's
+  // pattern at record_spa_demo.js:284-307.
+  let anchorText = '';
+  if (anchorsResult && typeof anchorsResult === 'object' &&
+      Array.isArray(anchorsResult.content) && anchorsResult.content[0] &&
+      typeof anchorsResult.content[0].text === 'string') {
+    anchorText = anchorsResult.content[0].text;
   } else {
-    anchors = [];
+    anchorText = unwrapText(anchorsResult) || '';
+  }
+  const anchors = [];
+  const re = /^\s*\d+\.\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
+  let _m;
+  while ((_m = re.exec(anchorText)) !== null) {
+    if (_m[1]) anchors.push({ name: _m[1].trim(), repo_id: null });
   }
   if (anchors.length === 0) {
     empty.textContent = `Workspace ${target} has no anchors. Type a symbol to focalise.`;
