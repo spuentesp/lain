@@ -45,6 +45,17 @@ All notable changes to LAIN are documented here. Versions follow
   shell) put the binary in a plugin dir or on `$PATH`, so the
   filter never fires for them.
 
+### Investigated (no change)
+
+- **CI `cargo build --bin lain` step is correctly unconditional.**
+  The parked-bug inventory note flagged this step as a candidate
+  for an `if: matrix.os == 'windows-latest'` guard. It cannot —
+  the step exists because `tests/use_cases/battery_*` (specifically
+  `battery_cli.rs` and `battery_success_metrics.rs`) invoke the
+  binary as a subprocess, and those tests run on all three OS
+  matrices (Linux, macOS, Windows), not just Windows. No code
+  change; the workflow is left as-is.
+
 ## [0.6.2] — 2026-08-28
 
 ### Fixed
