@@ -32,6 +32,18 @@ All notable changes to LAIN are documented here. Versions follow
   `path_components_eq` helper, matching the existing helper in
   `tests/feat_suite.rs`. These tests now run unmodified on every
   platform.
+- **Workspace discovery no longer hijacks on dev/test runs.** When
+  the parent process is `cargo test` / `cargo run`, its cwd is the
+  project containing the `lain` binary itself, so the
+  parent-process-cwd walk-up used to land on the source tree and
+  `lain mcp` was asked to re-index the entire project being tested
+  — the `oneshot_discovers_workspace_from_cwd` regression test
+  timed out at 60 s. `find_git_workspace_root_resolved` now skips
+  the parent-cwd candidate when the running binary lives inside
+  the git root it resolved to, falling through to the process's
+  own cwd. Real agent harnesses (Kimi, Claude Code, a plain
+  shell) put the binary in a plugin dir or on `$PATH`, so the
+  filter never fires for them.
 
 ## [0.6.2] — 2026-08-28
 
