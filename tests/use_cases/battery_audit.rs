@@ -18,7 +18,7 @@ fn fresh_audit_event() -> AuditEvent {
     AuditEvent {
         ts_unix: 0.0,
         agent_id: AgentId("test-agent-uuid-xyz".into()),
-        path: Path::new("src/lib.rs").to_path_buf(),
+        path: "src/lib.rs".to_string(),
         claim_set: vec![],
         racers: vec![],
         plan_revision: None,

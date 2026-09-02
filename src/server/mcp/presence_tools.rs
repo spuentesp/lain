@@ -397,7 +397,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
                 // will match regardless of host OS, and downstream
                 // consumers (federation replication, future log
                 // shipping) see a stable wire form.
-                path: PathBuf::from(posix_string(&g.path)),
+                path: posix_string(&g.path),
                 claim_set,
                 racers: result.conflicts.clone(),
                 plan_revision,

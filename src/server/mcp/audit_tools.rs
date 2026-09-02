@@ -54,13 +54,13 @@ pub fn run_get_audit_log_with_dir(state_dir: &Path, args: Value) -> Result<Value
     let a: GetAuditLogArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let mut events = read_audit_log(state_dir, a.since_unix).map_err(|e| e.to_string())?;
     if let Some(pattern) = a.path_glob {
-        // Belt-and-braces: convert each path to its posix form
-        // before the glob match. The audit log already stores
-        // forward-slash paths (see AuditEvent's serde adapter), and
-        // Path::to_str on Windows still uses the platform separator
-        // via Display — so a path like `\tmp\foo` would mismatch a
-        // pattern `/tmp/foo*`. `posix_string` is a no-op on Linux.
-        events.retain(|e| glob_match::simple(&pattern, &posix_string(&e.path)));
+        // Belt-and-braces: AuditEvent.path is already a forward-slash
+        // String (the write site calls posix_string), so passing it
+        // through glob_match directly is correct. The conversion was
+        // needed when the field was a PathBuf because Display-based
+        // serialization on Windows turned `/` into `\`; with the
+        // String type the wire format is whatever the writer put in.
+        events.retain(|e| glob_match::simple(&pattern, &e.path));
     }
     serde_json::to_value(events).map_err(|e| e.to_string())
 }
@@ -76,7 +76,7 @@ pub(crate) fn read_filtered(
 ) -> Vec<AuditEvent> {
     let mut events = read_audit_log(state_dir, since_unix).expect("read_audit_log");
     if let Some(pattern) = path_glob {
-        events.retain(|e| glob_match::simple(pattern, &posix_string(&e.path)));
+        events.retain(|e| glob_match::simple(pattern, &e.path));
     }
     events
 }
@@ -126,7 +126,7 @@ pub fn run_get_recent_activity_with_dir(
 
     let mut events = read_audit_log(state_dir, a.since_unix).map_err(|e| e.to_string())?;
     if let Some(pattern) = a.path_glob.as_deref() {
-        events.retain(|e| glob_match::simple(pattern, &posix_string(&e.path)));
+        events.retain(|e| glob_match::simple(pattern, &e.path));
     }
 
     let total_events = events.len();
@@ -201,7 +201,7 @@ fn group_key(ev: &AuditEvent, group_by: &str) -> String {
         // forward-slash form on every platform (matches the
         // on-disk JSONL contract set by the audit write site in
         // `presence_tools.rs`).
-        _ => posix_string(&ev.path),
+        _ => ev.path.clone(),
     }
 }
 
@@ -216,7 +216,7 @@ mod tests {
         AuditEvent {
             ts_unix: ts,
             agent_id: AgentId(agent.to_string()),
-            path: PathBuf::from(path),
+            path: path.to_string(),
             claim_set: vec![],
             racers: vec![],
             plan_revision: None,
@@ -288,7 +288,7 @@ mod tests {
         let event = AuditEvent {
             ts_unix: 0.0,
             agent_id: AgentId("a".into()),
-            path: PathBuf::from("src/a.rs"),
+            path: "src/a.rs".to_string(),
             claim_set: vec![],
             racers: vec![],
             plan_revision: None,

@@ -149,7 +149,7 @@ mod tests {
         let event = AuditEvent {
             ts_unix: 1.7e9,
             agent_id: AgentId("a-edit".into()),
-            path: PathBuf::from("/src/lib.rs"),
+            path: "/src/lib.rs".to_string(),
             claim_set: vec![],
             racers: vec![],
             plan_revision: Some(7),
@@ -179,7 +179,7 @@ mod tests {
             event: AuditEvent {
                 ts_unix: 0.0,
                 agent_id: AgentId("z".into()),
-                path: PathBuf::from("/x"),
+                path: "/x".to_string(),
                 claim_set: vec![],
                 racers: vec![],
                 plan_revision: None,
