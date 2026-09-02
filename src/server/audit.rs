@@ -32,7 +32,30 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::server::overlay::stream::RevisionId;
+use crate::server::path_util::posix_string;
 use crate::server::presence::{AgentId, Claim, ConflictEntry};
+
+/// Serialize a `PathBuf` as a forward-slash string on every
+/// platform. `serde_json`'s default impl for `PathBuf` calls
+/// `Display`, which uses the platform-native separator
+/// (backslash on Windows) regardless of the underlying OsStr's
+/// contents — so a `PathBuf::from("src/a.rs")` would still
+/// serialize as `"src\\a.rs"` on Windows. The audit-log wire
+/// contract (and the `path_glob` filter built from it) requires
+/// forward slashes, so we round-trip through `posix_string`.
+fn serialize_path_as_posix<S: serde::Serializer>(path: &Path, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&posix_string(path))
+}
+
+/// Inverse of `serialize_path_as_posix`. The wire format is a
+/// forward-slash string; `PathBuf::from(&str)` on Windows stores
+/// the OsStr verbatim, preserving the forward slashes (Windows's
+/// `PathBuf` accepts both `/` and `\` as input separators but
+/// does not rewrite them).
+fn deserialize_path_from_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
+    let s: String = serde::Deserialize::deserialize(d)?;
+    Ok(PathBuf::from(s))
+}
 
 /// Filename of the live audit log under the state directory.
 pub const AUDIT_LOG_FILENAME: &str = "audit.jsonl";
@@ -85,6 +108,12 @@ pub struct AuditEvent {
     pub agent_id: AgentId,
     /// The file path the write targeted, relative to the workspace
     /// root (or absolute if the writer couldn't normalize it).
+    /// Serialized as a forward-slash string on every platform via
+    /// the `serialize_path_as_posix` adapter below — see the
+    /// comment on that fn for why `serde_json`'s default
+    /// `Display`-based PathBuf serialization breaks the wire
+    /// contract on Windows.
+    #[serde(serialize_with = "serialize_path_as_posix", deserialize_with = "deserialize_path_from_string")]
     pub path: PathBuf,
     /// The claim set the writer had at the moment of the write —
     /// i.e. the post-resolution claims the writer believed itself
