@@ -182,11 +182,18 @@ async fn lain_server_reload_bus_returns_same_handle() {
 /// reader saw `count == 1` for the entire run — this test would
 /// fail immediately at the writer's first swap.
 ///
-/// CI gating: the reader occasionally collapses to a single distinct
-/// count on macOS (a real concurrency/timing issue specific to that
-/// platform). The test is reliable on Linux + Windows where the
-/// snapshot bug would manifest as it does here; skip on macOS until
-/// the underlying race is root-caused.
+/// CI gating: on macOS the reader can collapse to a single distinct
+/// count because the writer does 100 synchronous `set_workspace`
+/// calls with no `.await` between them. On Linux + Windows the
+/// scheduler interleaves the writer and reader naturally; on macOS's
+/// kqueue-based scheduler the writer can monopolize its worker
+/// thread for the entire burst, leaving the reader to wake up only
+/// after the writer finishes. The `tokio::task::yield_now().await`
+/// insert in the writer loop closes this starvation window on every
+/// platform. Skip on macOS remains until a real macOS runner
+/// confirms the `yield_now` mitigation removes the flake — the
+/// speculation is "starvation under synchronous bursts", not a
+/// snapshot bug.
 #[cfg_attr(target_os = "macos", ignore)]
 #[tokio::test(flavor = "multi_thread")]
 async fn set_workspace_stress_visible_to_shared_lock() {
@@ -272,6 +279,15 @@ async fn set_workspace_stress_visible_to_shared_lock() {
                     .collect(),
             });
             writer_server.set_workspace(ws);
+            // Yield between writes so the reader task (also on the
+            // multi_thread runtime) gets scheduled. Without this,
+            // the 100-call synchronous burst can monopolize the
+            // worker's time-slice on macOS's kqueue-based scheduler,
+            // leaving the reader to observe only the final state and
+            // collapsing `observed.len()` to 1. Cheap on Linux
+            // (negligible yield cost); closes the starvation window
+            // on macOS without changing the assertion surface.
+            tokio::task::yield_now().await;
         }
     });
 
