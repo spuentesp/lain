@@ -40,7 +40,6 @@ pub fn simple(pattern: &str, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn exact_path_matches() {
@@ -74,14 +73,5 @@ mod tests {
         // path component. The tool surfaces this as "filter
         // excludes everything" rather than crashing.
         assert!(!simple("a**b", "/a/foo/b"));
-    }
-
-    // Touch PathBuf so the import isn't flagged as unused by any
-    // future refactor that drops the explicit `Path::new` call
-    // sites — the helper historically took `&Path` and a future
-    // reader should know the shape came from a PathBuf round-trip.
-    #[allow(dead_code)]
-    fn _pathbuf_round_trip_pin() {
-        let _ = PathBuf::from("/a.rs");
     }
 }
