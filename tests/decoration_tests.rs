@@ -180,7 +180,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
         use std::path::PathBuf;
 
         let e = ParsedError {
-            path: "src/main.rs".to_string(),
+            path: PathBuf::from("src/main.rs"),
             line: 42,
             column: Some(10),
             severity: Severity::Error,
@@ -198,7 +198,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
         use std::path::PathBuf;
 
         let e = ParsedError {
-            path: "src/lib.rs".to_string(),
+            path: PathBuf::from("src/lib.rs"),
             line: 100,
             column: Some(20),
             severity: Severity::Warning,
@@ -221,7 +221,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
         use std::path::PathBuf;
 
         let e = ParsedError {
-            path: "src/main.rs".to_string(),
+            path: PathBuf::from("src/main.rs"),
             line: 1,
             column: None,
             severity: Severity::Error,

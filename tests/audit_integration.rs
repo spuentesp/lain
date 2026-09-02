@@ -100,7 +100,7 @@ async fn granted_claim_appends_audit_event() {
 
     let ev = &events[0];
     assert_eq!(ev.agent_id.as_str(), agent_id);
-    assert_eq!(ev.path.to_string_lossy(), "auth.rs");
+    assert_eq!(ev.path, "auth.rs");
     assert!(ev.plan_revision.is_none(), "legacy caller must not set plan_revision");
     // landed_revision is deliberately left unasserted: it is whatever the
     // overlay reports at audit time — the floor value 0 for a fresh server,
@@ -238,7 +238,7 @@ async fn multi_file_grant_emits_one_audit_line_per_path() {
         2,
         "one audit line per granted file; got {events:?}"
     );
-    let mut paths: Vec<String> = events.iter().map(|e| e.path.to_string_lossy().into_owned()).collect();
+    let mut paths: Vec<String> = events.iter().map(|e| e.path.clone()).collect();
     paths.sort();
     assert_eq!(paths, vec!["auth.rs".to_string(), "db.rs".to_string()]);
     for ev in &events {
