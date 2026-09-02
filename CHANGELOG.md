@@ -59,6 +59,18 @@ All notable changes to LAIN are documented here. Versions follow
   browser — no rebuild. Production builds leave the env var unset
   and the contract tests still pass. Workflow script:
   `scripts/dev-spa.sh`.
+- **Hot-reload writer starvation on macOS — speculative `yield_now`
+  mitigation.** `set_workspace_stress_visible_to_shared_lock`
+  in `tests/hot_reload.rs` was gated on macOS because the reader
+  occasionally collapsed to a single distinct count. The writer
+  task did 100 synchronous `set_workspace` calls with no
+  `.await` between them; on macOS's kqueue-based scheduler the
+  writer monopolized a worker thread for the burst and the reader
+  woke up only after the writer finished. Inserting
+  `tokio::task::yield_now().await` between writes closes the
+  starvation window on every platform. The test still passes on
+  Linux (behavior-neutral change); the macOS gate stays until a
+  real macOS runner confirms the mitigation removes the flake.
 
 ### Investigated (no change)
 
@@ -70,6 +82,18 @@ All notable changes to LAIN are documented here. Versions follow
   binary as a subprocess, and those tests run on all three OS
   matrices (Linux, macOS, Windows), not just Windows. No code
   change; the workflow is left as-is.
+- **macOS FSEvents config-watcher latency — documented as resolved by gate.**
+  `config_watcher_triggers_reload_on_repos_yaml_modify` and
+  `config_watcher_triggers_reload_on_workspaces_yaml_modify` were
+  gated with `#[cfg_attr(target_os = "macos", ignore)]` because
+  FSEvents coalescing latency is unbounded within any reasonable
+  CI budget. The project's CI saga documented the iteration:
+  5 s → 15 s → 30 s → gate (commits `0a341b5` → `6adc721` →
+  `e29c4dc` → `7af23fd`). The only durable Linux-untested
+  alternative — switching to `notify::PollWatcher` on macOS — is
+  out of scope for this plan because it requires macOS hardware
+  to verify. The gates stay; the rationale is documented for the
+  next reader.
 
 ## [0.6.2] — 2026-08-28
 
