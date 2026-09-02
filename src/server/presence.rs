@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 
+use crate::server::path_util::posix_string;
 use crate::server::revision_log::RevisionId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -756,17 +757,27 @@ fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
             .find(|candidate| candidate.exists());
         match anchored.or_else(|| roots.first().map(|root| lexical_normalize(&root.join(path)))) {
             Some(p) => p,
-            None => return lexical_normalize(path),
+            None => return PathBuf::from(posix_string(path)),
         }
     };
 
-    match roots.first() {
+    let relative = match roots.first() {
         Some(primary) => match absolute.strip_prefix(primary) {
             Ok(rel) => rel.to_path_buf(),
             Err(_) => absolute,
         },
         None => absolute,
-    }
+    };
+    // The MCP wire contract and the audit JSONL both require forward
+    // slashes on every platform. `lexical_normalize` and
+    // `PathBuf::strip_prefix` produce platform-native separators
+    // (backslashes on Windows); `posix_string` converts to forward
+    // slashes so `to_string_lossy()` on the stored PathBuf returns
+    // the canonical form. Same conversion is applied at the response
+    // and audit-write sites (see `presence_tools.rs` /
+    // `audit_tools.rs`); this fix covers the *stored* PathBuf so the
+    // three sites are consistent.
+    PathBuf::from(posix_string(&relative))
 }
 
 #[derive(Clone)]
