@@ -54,7 +54,13 @@ pub fn run_get_audit_log_with_dir(state_dir: &Path, args: Value) -> Result<Value
     let a: GetAuditLogArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let mut events = read_audit_log(state_dir, a.since_unix).map_err(|e| e.to_string())?;
     if let Some(pattern) = a.path_glob {
-        events.retain(|e| glob_match::simple(&pattern, &e.path));
+        // Belt-and-braces: convert each path to its posix form
+        // before the glob match. The audit log already stores
+        // forward-slash paths (see AuditEvent's serde adapter), and
+        // Path::to_str on Windows still uses the platform separator
+        // via Display — so a path like `\tmp\foo` would mismatch a
+        // pattern `/tmp/foo*`. `posix_string` is a no-op on Linux.
+        events.retain(|e| glob_match::simple(&pattern, &posix_string(&e.path)));
     }
     serde_json::to_value(events).map_err(|e| e.to_string())
 }
@@ -70,7 +76,7 @@ pub(crate) fn read_filtered(
 ) -> Vec<AuditEvent> {
     let mut events = read_audit_log(state_dir, since_unix).expect("read_audit_log");
     if let Some(pattern) = path_glob {
-        events.retain(|e| glob_match::simple(pattern, &e.path));
+        events.retain(|e| glob_match::simple(pattern, &posix_string(&e.path)));
     }
     events
 }
@@ -120,7 +126,7 @@ pub fn run_get_recent_activity_with_dir(
 
     let mut events = read_audit_log(state_dir, a.since_unix).map_err(|e| e.to_string())?;
     if let Some(pattern) = a.path_glob.as_deref() {
-        events.retain(|e| glob_match::simple(pattern, &e.path));
+        events.retain(|e| glob_match::simple(pattern, &posix_string(&e.path)));
     }
 
     let total_events = events.len();
