@@ -89,16 +89,12 @@ parse_args() {
   done
 }
 
-# Only parse args when executed or piped (not sourced)
-# BASH_SOURCE[0] is empty when piped via `curl | bash`
-if [[ -z "${BASH_SOURCE[0]}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  parse_args "$@"
-  apply_noninteractive_defaults
-fi
-
 # Auto-enable non-interactive mode when stdin is not a TTY (e.g. when
 # install.sh is run via `curl … | bash` from CI or a container init).
 # The user can opt back into interactive prompts with --interactive.
+# Defined here, before the call site further down, so `set -e` doesn't
+# kill the script with "command not found" when the bottom-of-file
+# body tries to invoke it.
 apply_noninteractive_defaults() {
   # Only override if the user hasn't explicitly chosen a mode.
   if [ -n "$OPT_INTERACTIVE" ] || [ -n "$OPT_YES" ]; then
@@ -112,6 +108,13 @@ apply_noninteractive_defaults() {
   echo "[install.sh] Pass --interactive to answer prompts (e.g. via heredoc)."
   return 0
 }
+
+# Only parse args when executed or piped (not sourced)
+# BASH_SOURCE[0] is empty when piped via `curl | bash`
+if [[ -z "${BASH_SOURCE[0]}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  parse_args "$@"
+  apply_noninteractive_defaults
+fi
 
 # Decide whether to append the `export PATH=...` line to the user's
 # shell RC. Never silently mutates ~/.bashrc / ~/.zshrc when stdin is
