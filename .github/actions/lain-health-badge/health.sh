@@ -2,14 +2,52 @@
 # lain-health-badge helper: boot a lain HTTP server, call get_health and
 # architectural_observations, format the result, emit GitHub Actions
 # outputs (level, summary, body).
+#
+# Always emits outputs, even on the failure path, so the action's
+# downstream steps (commit status, sticky comment) can post a
+# meaningful state instead of empty strings.
 
-set -euo pipefail
+set -uo pipefail
 
 MIN_FAN_OUT="${INPUT_MIN_FAN_OUT:-15}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 
+emit_outputs() {
+  local level="$1"
+  local summary="$2"
+  local body="$3"
+  {
+    echo "level=$level"
+    echo "summary=$summary"
+    echo "body<<EOF_BODY"
+    echo "$body"
+    echo "EOF_BODY"
+  } >> "$GITHUB_OUTPUT"
+}
+
+if ! command -v lain >/dev/null 2>&1; then
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed before computing metrics._"
+    echo
+    echo "**Error:** \`lain\` is not on PATH. The install step may not have added \`\$HOME/.local/lain\` to PATH; check the \`Install lain\` step log."
+  } > "$BODY"
+  emit_outputs "error" "lain binary not on PATH" "$(cat "$BODY")"
+  exit 1
+fi
+
 if ! command -v jq >/dev/null 2>&1; then
-  echo "::error::lain-health-badge requires 'jq' on PATH" >&2
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed before computing metrics._"
+    echo
+    echo "**Error:** \`jq\` is not on PATH. The action requires \`jq\` on the runner; it is preinstalled on \`ubuntu-latest\`."
+  } > "$BODY"
+  emit_outputs "error" "jq not on PATH" "$(cat "$BODY")"
   exit 1
 fi
 
@@ -20,9 +58,14 @@ lain server --transport http --port 9999 --workspace "$WORKSPACE" \
 LAIN_PID=$!
 trap 'kill "$LAIN_PID" 2>/dev/null || true' EXIT
 
-# Wait for the server to be ready (poll tools/list).
+# Wait for the server to be ready (poll tools/list). The server is
+# up as soon as the HTTP endpoint answers; the cold re-index may
+# still be running in the background, but tools/list works during
+# the re-index, so a quick ready signal is the right thing to wait
+# on. Budget is generous because cold-start indexing of a real
+# codebase can take a few minutes.
 READY=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 240); do
   if curl -fsS -X POST http://127.0.0.1:9999/mcp \
        -H 'Content-Type: application/json' \
        -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' >/dev/null 2>&1; then
@@ -33,10 +76,23 @@ for _ in $(seq 1 60); do
 done
 
 if [ "$READY" != "1" ]; then
-  echo "::error::lain server did not become ready on port 9999 in 60s" >&2
-  echo "::group::lain server log"
-  cat /tmp/lain-server.log || true
-  echo "::endgroup::"
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed: lain server did not become ready._"
+    echo
+    echo "**Error:** the HTTP MCP endpoint at \`http://127.0.0.1:9999/mcp\` did not answer \`tools/list\` within 240s. Most likely cause: the cold-start re-index exceeded the budget."
+    echo
+    echo "**Server log tail:**"
+    echo
+    echo '```'
+    tail -40 /tmp/lain-server.log 2>/dev/null || echo "(no log)"
+    echo '```'
+    echo
+    echo "**Remediation:** raise \`reindex-timeout\` on the action, or pre-warm the index in a separate job that runs first."
+  } > "$BODY"
+  emit_outputs "error" "lain server did not become ready in 240s" "$(cat "$BODY")"
   exit 1
 fi
 
@@ -83,11 +139,4 @@ BODY=$(mktemp)
   echo '```'
 } > "$BODY"
 
-# Emit GitHub Actions outputs.
-{
-  echo "level=$LEVEL"
-  echo "summary=$SUMMARY"
-  echo "body<<EOF_BODY"
-  cat "$BODY"
-  echo "EOF_BODY"
-} >> "$GITHUB_OUTPUT"
+emit_outputs "$LEVEL" "$SUMMARY" "$(cat "$BODY")"
