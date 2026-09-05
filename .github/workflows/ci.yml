@@ -128,15 +128,16 @@ jobs:
       - name: Extract pinned version from action.yml
         id: pinned
         run: |
-          PINNED=$(grep -A 2 'lain-version:' .github/actions/lain-health-badge/action.yml \
-            | grep 'default:' | head -1 \
-            | sed -E "s/.*default: *'v([^']+)'.*/\1/")
+          # Print from the `lain-version:` line to the first `default:`
+          # line, then extract the vX.Y.Z token. Robust to YAML layout.
+          PINNED=$(sed -n '/lain-version:/,/default:/p' .github/actions/lain-health-badge/action.yml \
+            | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+" | head -1)
           if [ -z "$PINNED" ]; then
             echo "::error::could not parse lain-version default from action.yml"
             exit 1
           fi
-          echo "version=v${PINNED}" >> "$GITHUB_OUTPUT"
-          echo "Pinned default: v${PINNED}"
+          echo "version=${PINNED}" >> "$GITHUB_OUTPUT"
+          echo "Pinned default: ${PINNED}"
       - name: Fetch latest release
         id: latest
         env:
