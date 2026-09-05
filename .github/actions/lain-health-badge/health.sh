@@ -51,6 +51,19 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v nc >/dev/null 2>&1; then
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed before computing metrics._"
+    echo
+    echo "**Error:** \`nc\` is not on PATH. The action uses \`nc -z\` for the readiness check. Preinstalled on \`ubuntu-latest\`; if you are on a custom runner, install \`netcat\`."
+  } > "$BODY"
+  emit_outputs "error" "nc not on PATH" "$(cat "$BODY")"
+  exit 1
+fi
+
 # Boot the server in the background, against the consumer's workspace.
 lain server --transport http --port 9999 --workspace "$WORKSPACE" \
   --log-level warn \
@@ -58,17 +71,14 @@ lain server --transport http --port 9999 --workspace "$WORKSPACE" \
 LAIN_PID=$!
 trap 'kill "$LAIN_PID" 2>/dev/null || true' EXIT
 
-# Wait for the server to be ready (poll tools/list). The server is
-# up as soon as the HTTP endpoint answers; the cold re-index may
-# still be running in the background, but tools/list works during
-# the re-index, so a quick ready signal is the right thing to wait
-# on. Budget is generous because cold-start indexing of a real
-# codebase can take a few minutes.
+# Wait for the server to be ready. The HTTP listener opens before
+# the cold-start re-index completes, so a port-check is the right
+# readiness signal — it confirms the server is up without waiting
+# for the re-index to finish. The actual tool calls below will
+# block until the re-index is done, with their own long timeout.
 READY=0
-for _ in $(seq 1 240); do
-  if curl -fsS -X POST http://127.0.0.1:9999/mcp \
-       -H 'Content-Type: application/json' \
-       -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' >/dev/null 2>&1; then
+for _ in $(seq 1 30); do
+  if nc -z 127.0.0.1 9999 >/dev/null 2>&1; then
     READY=1
     break
   fi
@@ -80,30 +90,29 @@ if [ "$READY" != "1" ]; then
   {
     echo "## Architecture health"
     echo
-    echo "_Action failed: lain server did not become ready._"
+    echo "_Action failed: lain server did not start._"
     echo
-    echo "**Error:** the HTTP MCP endpoint at \`http://127.0.0.1:9999/mcp\` did not answer \`tools/list\` within 240s. Most likely cause: the cold-start re-index exceeded the budget."
+    echo "**Error:** no process listening on \`127.0.0.1:9999\` after 30s. The server crashed during startup."
     echo
     echo "**Server log tail:**"
     echo
     echo '```'
     tail -40 /tmp/lain-server.log 2>/dev/null || echo "(no log)"
     echo '```'
-    echo
-    echo "**Remediation:** raise \`reindex-timeout\` on the action, or pre-warm the index in a separate job that runs first."
   } > "$BODY"
-  emit_outputs "error" "lain server did not become ready in 240s" "$(cat "$BODY")"
+  emit_outputs "error" "lain server did not start in 30s" "$(cat "$BODY")"
   exit 1
 fi
 
-# Tool 1: get_health (no args).
-HEALTH=$(curl -fsS -X POST http://127.0.0.1:9999/mcp \
+# Tool 1: get_health (no args). The call itself blocks until the
+# cold re-index is done; --max-time bounds the wait at 900s.
+HEALTH=$(curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_health","arguments":{}},"id":2}' \
   | jq -r '.result.content[0].text // "error: empty result"')
 
 # Tool 2: architectural_observations (with threshold).
-ARCH=$(curl -fsS -X POST http://127.0.0.1:9999/mcp \
+ARCH=$(curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
   -H 'Content-Type: application/json' \
   -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"architectural_observations\",\"arguments\":{\"min_fan_out\":${MIN_FAN_OUT}}},\"id\":3}" \
   | jq -r '.result.content[0].text // "error: empty result"')
