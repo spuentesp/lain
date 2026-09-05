@@ -3,6 +3,7 @@
 | Want | Read |
 |------|------|
 | Get running in five minutes | [QUICKSTART.md](QUICKSTART.md) |
+| Pick a deployment mode and ship a recipe | [COOKBOOK.md](COOKBOOK.md) |
 | Operate / troubleshoot | [USER_MANUAL.md](USER_MANUAL.md) |
 | Understand design choices | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Read the source | [TECHNICAL.md](TECHNICAL.md) |

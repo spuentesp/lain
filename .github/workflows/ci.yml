@@ -95,3 +95,18 @@ jobs:
       # and the README would keep advertising it.
       - name: Ground-truth capability checks
         run: bash scripts/demo.sh --quick
+
+  health-badge:
+    name: Lain architecture health badge
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      # Self-reference: use the action at HEAD, the same commit the
+      # workflow is shipping in. Consumers pin to a tag (see the
+      # action's README); the same repo cannot pin to a tag that
+      # does not exist yet on the first release run.
+      - uses: ./.github/actions/lain-health-badge
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          min-fan-out: '15'

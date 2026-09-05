@@ -1,0 +1,75 @@
+name: 'Lain Architecture Health Badge'
+description: 'Runs lain on the workspace and posts a markdown architecture-health summary as a sticky PR comment plus a pass/fail commit status.'
+
+inputs:
+  github-token:
+    description: 'Token for posting the status check and the sticky comment.'
+    required: true
+  min-fan-out:
+    description: 'High-fan-out threshold passed to architectural_observations.'
+    required: false
+    default: '15'
+  fail-on-warn:
+    description: 'Reserved. v0.1 only emits pass/fail; this input is accepted for forward compatibility.'
+    required: false
+    default: 'false'
+  comment-header:
+    description: 'Sticky-comment header key. Use the same value to update an existing comment instead of posting a new one.'
+    required: false
+    default: 'lain-health'
+  lain-version:
+    description: 'Lain release tag to install. Pinned to the same tag lain ships to consumers.'
+    required: false
+    default: 'v0.7.2'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Restore lain index cache
+      uses: actions/cache@v4
+      with:
+        path: .lain
+        key: lain-index-${{ github.sha }}
+        restore-keys: |
+          lain-index-main-
+
+    - name: Install lain
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/${{ inputs.lain-version }}/install.sh \
+          | bash -s -- -y
+        echo "$HOME/.local/lain/bin" >> "$GITHUB_PATH"
+
+    - name: Compute architecture health
+      id: health
+      shell: bash
+      run: bash "${{ github.action_path }}/health.sh"
+
+    - name: Post commit status
+      if: always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          await github.rest.repos.createCommitStatus({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: context.sha,
+            state: '${{ steps.health.outputs.level }}',
+            description: '${{ steps.health.outputs.summary }}',
+            context: 'lain/health-badge'
+          });
+
+    - name: Post sticky PR comment
+      if: github.event_name == 'pull_request'
+      uses: marocchino/sticky-pull-request-comment@v2
+      with:
+        header: ${{ inputs.comment-header }}
+        message: ${{ steps.health.outputs.body }}
+
+branding:
+  icon: 'shield'
+  color: 'blue'
