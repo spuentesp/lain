@@ -1,6 +1,12 @@
 name: 'Lain Architecture Health Badge'
 description: 'Runs lain on the workspace and posts a markdown architecture-health summary as a sticky PR comment plus a pass/fail commit status.'
 
+# The action writes commit statuses and PR comments. The default
+# GITHUB_TOKEN is read-only; grant the scopes the steps need.
+permissions:
+  statuses: write
+  pull-requests: write
+
 inputs:
   github-token:
     description: 'Token for posting the status check and the sticky comment.'
@@ -21,6 +27,10 @@ inputs:
     description: 'Lain release tag to install. Pinned to the same tag lain ships to consumers.'
     required: false
     default: 'v0.7.2'
+  reindex-timeout:
+    description: 'Seconds to wait for the cold-start re-index. Lain defaults to 300s; the action bumps to 600s because the first run on a repo pays the full cost.'
+    required: false
+    default: '600'
 
 runs:
   using: 'composite'
@@ -38,15 +48,20 @@ runs:
 
     - name: Install lain
       shell: bash
+      env:
+        LAIN_REINDEX_TIMEOUT: ${{ inputs.reindex-timeout }}
       run: |
         set -euo pipefail
         curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/${{ inputs.lain-version }}/install.sh \
           | bash -s -- -y
-        echo "$HOME/.local/lain/bin" >> "$GITHUB_PATH"
+        # install.sh puts the binary at $HOME/.local/lain/lain (no bin/).
+        echo "$HOME/.local/lain" >> "$GITHUB_PATH"
 
     - name: Compute architecture health
       id: health
       shell: bash
+      env:
+        LAIN_REINDEX_TIMEOUT: ${{ inputs.reindex-timeout }}
       run: bash "${{ github.action_path }}/health.sh"
 
     - name: Post commit status
@@ -54,17 +69,19 @@ runs:
       uses: actions/github-script@v7
       with:
         script: |
+          const level = '${{ steps.health.outputs.level }}' || 'error';
+          const summary = ('${{ steps.health.outputs.summary }}' || 'lain-health-badge failed').slice(0, 140);
           await github.rest.repos.createCommitStatus({
             owner: context.repo.owner,
             repo: context.repo.repo,
             sha: context.sha,
-            state: '${{ steps.health.outputs.level }}',
-            description: '${{ steps.health.outputs.summary }}',
+            state: level,
+            description: summary,
             context: 'lain/health-badge'
           });
 
     - name: Post sticky PR comment
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && steps.health.outputs.body != ''
       uses: marocchino/sticky-pull-request-comment@v2
       with:
         header: ${{ inputs.comment-header }}
@@ -73,3 +90,4 @@ runs:
 branding:
   icon: 'shield'
   color: 'blue'
+

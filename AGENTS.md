@@ -42,6 +42,13 @@ completes, fresh installs no longer hit the silent-exit bug.
 newer). Fresh installs work end-to-end via `curl … | bash` or
 direct invocation — no more manual install dance.
 
+## CI badge
+
+The repo runs its own `lain-health-badge` action on every pull
+request — see `.github/actions/lain-health-badge/`. The action
+is the artifact of `8931bd1`; this note is the documentation of
+that fact for future agents landing changes.
+
 ## If upstream `Cargo.toml` on `main` is regressed to `0.6.1`
 
 That would re-introduce the original packaging bug. The fix on

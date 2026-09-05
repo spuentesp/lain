@@ -2,30 +2,112 @@
 # lain-health-badge helper: boot a lain HTTP server, call get_health and
 # architectural_observations, format the result, emit GitHub Actions
 # outputs (level, summary, body).
+#
+# Always emits outputs, even on the failure path, so the action's
+# downstream steps (commit status, sticky comment) can post a
+# meaningful state instead of empty strings.
 
-set -euo pipefail
+set -uo pipefail
 
 MIN_FAN_OUT="${INPUT_MIN_FAN_OUT:-15}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 
+emit_outputs() {
+  local level="$1"
+  local summary="$2"
+  local body="$3"
+  {
+    echo "level=$level"
+    echo "summary=$summary"
+    echo "body<<EOF_BODY"
+    echo "$body"
+    echo "EOF_BODY"
+  } >> "$GITHUB_OUTPUT"
+}
+
+if ! command -v lain >/dev/null 2>&1; then
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed before computing metrics._"
+    echo
+    echo "**Error:** \`lain\` is not on PATH. The install step may not have added \`\$HOME/.local/lain\` to PATH; check the \`Install lain\` step log."
+  } > "$BODY"
+  emit_outputs "error" "lain binary not on PATH" "$(cat "$BODY")"
+  exit 1
+fi
+
 if ! command -v jq >/dev/null 2>&1; then
-  echo "::error::lain-health-badge requires 'jq' on PATH" >&2
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed before computing metrics._"
+    echo
+    echo "**Error:** \`jq\` is not on PATH. The action requires \`jq\` on the runner; it is preinstalled on \`ubuntu-latest\`."
+  } > "$BODY"
+  emit_outputs "error" "jq not on PATH" "$(cat "$BODY")"
+  exit 1
+fi
+
+if ! command -v nc >/dev/null 2>&1; then
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed before computing metrics._"
+    echo
+    echo "**Error:** \`nc\` is not on PATH. The action uses \`nc -z\` for the readiness check. Preinstalled on \`ubuntu-latest\`; if you are on a custom runner, install \`netcat\`."
+  } > "$BODY"
+  emit_outputs "error" "nc not on PATH" "$(cat "$BODY")"
+  exit 1
+fi
+
+# Generate a per-workspace `repos.yaml`. `lain init --print` walks
+# up for `.git` (the action's checkout provides one) and emits a
+# minimal config pointing the only repo at the workspace. We use
+# this rather than any `~/.config/lain/repos.yaml` the install
+# script may have created, because the latter references the
+# install-time cwd and breaks in a fresh container.
+INIT_CONFIG=$(mktemp --suffix=.yaml)
+if ! lain init --print > "$INIT_CONFIG" 2>>/tmp/lain-server.log; then
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed: could not scaffold repos.yaml._"
+    echo
+    echo "**Error:** \`lain init --print\` failed. The action's checkout does not look like a git repository, or \`lain\` cannot walk up to one."
+    echo
+    echo "**Server log tail:**"
+    echo
+    echo '```'
+    tail -40 /tmp/lain-server.log 2>/dev/null || echo "(no log)"
+    echo '```'
+  } > "$BODY"
+  emit_outputs "error" "lain init --print failed" "$(cat "$BODY")"
   exit 1
 fi
 
 # Boot the server in the background, against the consumer's workspace.
-lain server --transport http --port 9999 --workspace "$WORKSPACE" \
+# No `--workspace` flag: the default resolves via `--config` and avoids
+# the trap of treating the cwd as a workspace-name lookup. The HTTP
+# listener opens once the cold-start re-index completes.
+lain server --config "$INIT_CONFIG" --transport http --port 9999 \
   --log-level warn \
   > /tmp/lain-server.log 2>&1 &
 LAIN_PID=$!
 trap 'kill "$LAIN_PID" 2>/dev/null || true' EXIT
 
-# Wait for the server to be ready (poll tools/list).
+# Wait for the server to be ready. The HTTP listener opens before
+# the cold-start re-index completes, so a port-check is the right
+# readiness signal — it confirms the server is up without waiting
+# for the re-index to finish. The actual tool calls below will
+# block until the re-index is done, with their own long timeout.
 READY=0
 for _ in $(seq 1 60); do
-  if curl -fsS -X POST http://127.0.0.1:9999/mcp \
-       -H 'Content-Type: application/json' \
-       -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' >/dev/null 2>&1; then
+  if nc -z 127.0.0.1 9999 >/dev/null 2>&1; then
     READY=1
     break
   fi
@@ -33,21 +115,33 @@ for _ in $(seq 1 60); do
 done
 
 if [ "$READY" != "1" ]; then
-  echo "::error::lain server did not become ready on port 9999 in 60s" >&2
-  echo "::group::lain server log"
-  cat /tmp/lain-server.log || true
-  echo "::endgroup::"
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed: lain server did not start._"
+    echo
+    echo "**Error:** no process listening on \`127.0.0.1:9999\` after 60s. The server crashed during startup, or the cold-start re-index exceeded the budget."
+    echo
+    echo "**Server log tail:**"
+    echo
+    echo '```'
+    tail -60 /tmp/lain-server.log 2>/dev/null || echo "(no log)"
+    echo '```'
+  } > "$BODY"
+  emit_outputs "error" "lain server did not start in 60s" "$(cat "$BODY")"
   exit 1
 fi
 
-# Tool 1: get_health (no args).
-HEALTH=$(curl -fsS -X POST http://127.0.0.1:9999/mcp \
+# Tool 1: get_health (no args). The call itself blocks until the
+# cold re-index is done; --max-time bounds the wait at 900s.
+HEALTH=$(curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_health","arguments":{}},"id":2}' \
   | jq -r '.result.content[0].text // "error: empty result"')
 
 # Tool 2: architectural_observations (with threshold).
-ARCH=$(curl -fsS -X POST http://127.0.0.1:9999/mcp \
+ARCH=$(curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
   -H 'Content-Type: application/json' \
   -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"architectural_observations\",\"arguments\":{\"min_fan_out\":${MIN_FAN_OUT}}},\"id\":3}" \
   | jq -r '.result.content[0].text // "error: empty result"')
@@ -83,11 +177,4 @@ BODY=$(mktemp)
   echo '```'
 } > "$BODY"
 
-# Emit GitHub Actions outputs.
-{
-  echo "level=$LEVEL"
-  echo "summary=$SUMMARY"
-  echo "body<<EOF_BODY"
-  cat "$BODY"
-  echo "EOF_BODY"
-} >> "$GITHUB_OUTPUT"
+emit_outputs "$LEVEL" "$SUMMARY" "$(cat "$BODY")"
