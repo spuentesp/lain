@@ -115,3 +115,48 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           min-fan-out: '15'
+
+  version-drift:
+    name: lain-version default tracks latest release
+    runs-on: ubuntu-latest
+    # The drift check runs on main, where release tags are pushed.
+    # On PRs the comparison would fail the moment a new tag is cut,
+    # before the bump PR can land. Run only on push to main.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract pinned version from action.yml
+        id: pinned
+        run: |
+          PINNED=$(grep -A 2 'lain-version:' .github/actions/lain-health-badge/action.yml \
+            | grep 'default:' | head -1 \
+            | sed -E "s/.*default: *'v([^']+)'.*/\1/")
+          if [ -z "$PINNED" ]; then
+            echo "::error::could not parse lain-version default from action.yml"
+            exit 1
+          fi
+          echo "version=v${PINNED}" >> "$GITHUB_OUTPUT"
+          echo "Pinned default: v${PINNED}"
+      - name: Fetch latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release view --json tagName --jq .tagName)
+          if [ -z "$TAG" ]; then
+            echo "::error::no releases found on this repo"
+            exit 1
+          fi
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Latest release: ${TAG}"
+      - name: Check
+        env:
+          PINNED: ${{ steps.pinned.outputs.version }}
+          LATEST: ${{ steps.latest.outputs.version }}
+        run: |
+          if [ "$PINNED" != "$LATEST" ]; then
+            echo "::error::action.yml pins $PINNED but latest release is $LATEST"
+            echo "::error::bump the 'lain-version' default in .github/actions/lain-health-badge/action.yml"
+            exit 1
+          fi
+          echo "OK: pinned ($PINNED) == latest ($LATEST)"

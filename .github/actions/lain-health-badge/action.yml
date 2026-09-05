@@ -24,7 +24,7 @@ inputs:
     required: false
     default: 'lain-health'
   lain-version:
-    description: 'Lain release tag to install. Pinned to the same tag lain ships to consumers.'
+    description: 'Lain release tag to install. The default must track the latest release; the version-drift job in ci.yml fails the build if it does not. Bump on every release.'
     required: false
     default: 'v0.7.2'
   reindex-timeout:
