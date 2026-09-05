@@ -64,8 +64,37 @@ if ! command -v nc >/dev/null 2>&1; then
   exit 1
 fi
 
+# Generate a per-workspace `repos.yaml`. `lain init --print` walks
+# up for `.git` (the action's checkout provides one) and emits a
+# minimal config pointing the only repo at the workspace. We use
+# this rather than any `~/.config/lain/repos.yaml` the install
+# script may have created, because the latter references the
+# install-time cwd and breaks in a fresh container.
+INIT_CONFIG=$(mktemp --suffix=.yaml)
+if ! lain init --print > "$INIT_CONFIG" 2>>/tmp/lain-server.log; then
+  BODY=$(mktemp)
+  {
+    echo "## Architecture health"
+    echo
+    echo "_Action failed: could not scaffold repos.yaml._"
+    echo
+    echo "**Error:** \`lain init --print\` failed. The action's checkout does not look like a git repository, or \`lain\` cannot walk up to one."
+    echo
+    echo "**Server log tail:**"
+    echo
+    echo '```'
+    tail -40 /tmp/lain-server.log 2>/dev/null || echo "(no log)"
+    echo '```'
+  } > "$BODY"
+  emit_outputs "error" "lain init --print failed" "$(cat "$BODY")"
+  exit 1
+fi
+
 # Boot the server in the background, against the consumer's workspace.
-lain server --transport http --port 9999 --workspace "$WORKSPACE" \
+# No `--workspace` flag: the default resolves via `--config` and avoids
+# the trap of treating the cwd as a workspace-name lookup. The HTTP
+# listener opens once the cold-start re-index completes.
+lain server --config "$INIT_CONFIG" --transport http --port 9999 \
   --log-level warn \
   > /tmp/lain-server.log 2>&1 &
 LAIN_PID=$!
@@ -77,7 +106,7 @@ trap 'kill "$LAIN_PID" 2>/dev/null || true' EXIT
 # for the re-index to finish. The actual tool calls below will
 # block until the re-index is done, with their own long timeout.
 READY=0
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
   if nc -z 127.0.0.1 9999 >/dev/null 2>&1; then
     READY=1
     break
@@ -92,15 +121,15 @@ if [ "$READY" != "1" ]; then
     echo
     echo "_Action failed: lain server did not start._"
     echo
-    echo "**Error:** no process listening on \`127.0.0.1:9999\` after 30s. The server crashed during startup."
+    echo "**Error:** no process listening on \`127.0.0.1:9999\` after 60s. The server crashed during startup, or the cold-start re-index exceeded the budget."
     echo
     echo "**Server log tail:**"
     echo
     echo '```'
-    tail -40 /tmp/lain-server.log 2>/dev/null || echo "(no log)"
+    tail -60 /tmp/lain-server.log 2>/dev/null || echo "(no log)"
     echo '```'
   } > "$BODY"
-  emit_outputs "error" "lain server did not start in 30s" "$(cat "$BODY")"
+  emit_outputs "error" "lain server did not start in 60s" "$(cat "$BODY")"
   exit 1
 fi
 
