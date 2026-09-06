@@ -31,6 +31,10 @@ inputs:
     description: 'Seconds to wait for the cold-start re-index. Lain defaults to 300s; the action bumps to 600s because the first run on a repo pays the full cost.'
     required: false
     default: '600'
+  lsp-languages:
+    description: 'Languages to install LSPs for before computing health. "auto" (default) detects from project files (Cargo.toml, pyproject.toml, go.mod, tsconfig.json, package.json, etc.). Pass a comma-separated list to force specific languages (e.g. "python,rust"). Pass "" to skip LSP installation entirely.'
+    required: false
+    default: 'auto'
 
 runs:
   using: 'composite'

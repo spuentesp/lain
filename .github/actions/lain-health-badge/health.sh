@@ -133,6 +133,37 @@ if [ "$READY" != "1" ]; then
   exit 1
 fi
 
+# Install LSPs for any requested languages, after the server is
+# listening. The install_language_server tool downloads the LSP
+# binary and triggers a re-index that uses it. Default: 'auto'
+# detects from project files at the workspace root. Pass an
+# explicit comma-separated list to force, or '' to skip.
+LSP_LANGUAGES="${INPUT_LSP_LANGUAGES:-auto}"
+if [ "$LSP_LANGUAGES" = "auto" ]; then
+  LSP_LANGUAGES=""
+  [ -f "$WORKSPACE/Cargo.toml" ] && LSP_LANGUAGES="$LSP_LANGUAGES rust"
+  if [ -f "$WORKSPACE/pyproject.toml" ] || [ -f "$WORKSPACE/setup.py" ] || [ -f "$WORKSPACE/setup.cfg" ] || [ -f "$WORKSPACE/requirements.txt" ] || [ -f "$WORKSPACE/Pipfile" ]; then
+    LSP_LANGUAGES="$LSP_LANGUAGES python"
+  fi
+  [ -f "$WORKSPACE/go.mod" ] && LSP_LANGUAGES="$LSP_LANGUAGES go"
+  if [ -f "$WORKSPACE/tsconfig.json" ] || [ -f "$WORKSPACE/package.json" ]; then
+    LSP_LANGUAGES="$LSP_LANGUAGES typescript"
+  fi
+  [ -f "$WORKSPACE/Gemfile" ] && LSP_LANGUAGES="$LSP_LANGUAGES ruby"
+  LSP_LANGUAGES="$(echo "$LSP_LANGUAGES" | xargs)"
+fi
+if [ -n "$LSP_LANGUAGES" ]; then
+  echo "::group::Installing LSPs: $LSP_LANGUAGES"
+  for lang in $LSP_LANGUAGES; do
+    echo "Installing LSP for: $lang"
+    curl -fsS --max-time 600 -X POST http://127.0.0.1:9999/mcp \
+      -H 'Content-Type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"install_language_server\",\"arguments\":{\"language\":\"$lang\"}},\"id\":99}}" \
+      | jq -r '.result.content[0].text // "(no result)"' || echo "(install_language_server for $lang failed; continuing)"
+  done
+  echo "::endgroup::"
+fi
+
 # Tool 1: get_health (no args). The call itself blocks until the
 # cold re-index is done; --max-time bounds the wait at 900s.
 HEALTH=$(curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
