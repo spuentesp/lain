@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Pre-flight checks before creating a release
 # This script MUST pass before creating a tag
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Post-flight checks after CI completes
 # This script MUST pass before updating Homebrew formula
 
