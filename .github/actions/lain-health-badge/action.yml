@@ -26,7 +26,7 @@ inputs:
   lain-version:
     description: 'Lain release tag to install. The default must track the latest release; the version-drift job in ci.yml fails the build if it does not. Bump on every release.'
     required: false
-    default: 'v0.7.2'
+    default: 'v0.7.3'
   reindex-timeout:
     description: 'Seconds to wait for the cold-start re-index. Lain defaults to 300s; the action bumps to 600s because the first run on a repo pays the full cost.'
     required: false
