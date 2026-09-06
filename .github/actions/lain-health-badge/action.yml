@@ -15,10 +15,6 @@ inputs:
     description: 'High-fan-out threshold passed to architectural_observations.'
     required: false
     default: '15'
-  fail-on-warn:
-    description: 'Reserved. v0.1 only emits pass/fail; this input is accepted for forward compatibility.'
-    required: false
-    default: 'false'
   comment-header:
     description: 'Sticky-comment header key. Use the same value to update an existing comment instead of posting a new one.'
     required: false

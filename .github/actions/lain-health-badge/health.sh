@@ -9,6 +9,11 @@
 
 set -uo pipefail
 
+# Note: deliberately no `-e`. The script must capture failures and
+# emit GitHub Actions outputs (level, summary, body) on the failure
+# path; `-e` would abort before the emit step runs. Each fallible
+# call is checked explicitly below.
+
 MIN_FAN_OUT="${INPUT_MIN_FAN_OUT:-15}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 

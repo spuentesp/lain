@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: spuentesp/lain/.github/actions/lain-health-badge@v0.7.2
+      - uses: spuentesp/lain/.github/actions/lain-health-badge@v0.7.3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -54,7 +54,7 @@ That's the whole integration. Override `min-fan-out` if the default doesn't
 match your codebase:
 
 ```yaml
-      - uses: spuentesp/lain/.github/actions/lain-health-badge@v0.7.2
+      - uses: spuentesp/lain/.github/actions/lain-health-badge@v0.7.3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           min-fan-out: '25'

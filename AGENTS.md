@@ -46,8 +46,9 @@ direct invocation — no more manual install dance.
 
 The repo runs its own `lain-health-badge` action on every pull
 request — see `.github/actions/lain-health-badge/`. The action
-is the artifact of `8931bd1`; this note is the documentation of
-that fact for future agents landing changes.
+ships as part of the v0.7.3 release and is referenced from
+`spuentesp/monitor_dm_system` PR #117 as a consumer demo; this
+note is the orientation for future agents landing changes.
 
 ## If upstream `Cargo.toml` on `main` is regressed to `0.6.1`
 
