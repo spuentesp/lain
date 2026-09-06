@@ -160,19 +160,19 @@ if [ -n "$LSP_LANGUAGES" ]; then
     HTTP_CODE=$(curl -sS --max-time 600 -o "$RESP" -w "%{http_code}" -X POST http://127.0.0.1:9999/mcp \
       -H 'Content-Type: application/json' \
       -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"install_language_server\",\"arguments\":{\"language\":\"$lang\"}},\"id\":99}}")
-    if [ "$HTTP_CODE" != "200" ]; then
-      echo "::warning::install_language_server for $lang returned HTTP $HTTP_CODE"
-      cat "$RESP"
+    RESP_LEN=$(wc -c < "$RESP")
+    echo "  HTTP $HTTP_CODE, body ${RESP_LEN} bytes"
+    if [ "$RESP_LEN" -lt 5000 ] && [ "$RESP_LEN" -gt 0 ]; then
+      # Small body — show it for diagnostics.
+      head -c 500 "$RESP"
       echo
-    else
-      MSG=$(jq -r '.result.content[0].text // .error.message // .message // "(no result content)"' < "$RESP")
-      if [ "$MSG" = "(no result content)" ] || [ "$MSG" = "null" ] || [ -z "$MSG" ]; then
-        echo "::warning::install_language_server for $lang returned no usable text; raw response:"
-        cat "$RESP"
-        echo
-      else
-        echo "  $MSG"
-      fi
+    fi
+    # Extract via jq but tolerate trailing junk by extracting the
+    # JSON object's text field, falling back to error.message.
+    MSG=$(jq -r 'try (.result.content[0].text // .error.message // .message) catch "(parse error: " + .message + ")"' < "$RESP" 2>/dev/null \
+      || head -c 200 "$RESP")
+    if [ -n "$MSG" ] && [ "$MSG" != "null" ]; then
+      echo "  → $MSG"
     fi
     rm -f "$RESP"
   done
