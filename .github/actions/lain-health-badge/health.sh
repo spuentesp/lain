@@ -222,4 +222,70 @@ BODY=$(mktemp)
   echo '```'
 } > "$BODY"
 
+# Per-PR impact: when the action runs on a pull_request event, list
+# the files changed in the PR and, for each, the blast radius of
+# the top functions defined there. This is the "real value" the
+# badge gives reviewers: a one-line answer to "what does this PR
+# affect and how widely?".
+PR_IMPACT=""
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_EVENT_PULL_REQUEST_NUMBER:-}" ]; then
+  echo "::group::Per-PR impact"
+  CHANGED_FILES=$(curl -fsS \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${GITHUB_EVENT_PULL_REQUEST_NUMBER}/files?per_page=50" \
+    | jq -r '.[] | .filename' 2>/dev/null | head -20)
+  if [ -n "$CHANGED_FILES" ] && [ -d "$WORKSPACE" ]; then
+    # Sanitize filename for section headers; sort to keep the
+    # output stable across runs.
+    PR_LINES=""
+    TOTAL_SYMBOLS=0
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      abs="$WORKSPACE/$f"
+      [ -f "$abs" ] || continue
+      SYMS=$(case "$f" in
+        *.py)
+          grep -oE "^(def|class|async def) [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $2}' | sort -u | head -3 ;;
+        *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
+          {
+            grep -oE "^(export )?(async )?function [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $NF}'
+            grep -oE "^(export )?(const|let|var) [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $3}'
+          } | sort -u | head -3 ;;
+        *.rs)
+          grep -oE "^(pub )?(async )?fn [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $NF}' | sort -u | head -3 ;;
+        *) echo "" ;;
+      esac)
+      [ -z "$SYMS" ] && continue
+      PR_LINES="$PR_LINES\n\n### \`$f\`"
+      while IFS= read -r sym; do
+        [ -z "$sym" ] && continue
+        TOTAL_SYMBOLS=$((TOTAL_SYMBOLS + 1))
+        BR_BODY=$(jq -n --arg sym "$sym" '{jsonrpc:"2.0",method:"tools/call",params:{name:"get_blast_radius",arguments:{symbol:$sym}},id:99}')
+        BR_TEXT=$(curl -fsS --max-time 30 -X POST http://127.0.0.1:9999/mcp \
+          -H 'Content-Type: application/json' \
+          -d "$BR_BODY" 2>/dev/null \
+          | jq -r 'try (.result.content[0].text // .error.message) catch "(parse error)"' 2>/dev/null \
+          | head -8)
+        # Pull the first numeric "N callers" or "called by N" stat if
+        # present; otherwise just embed the first few lines so the
+        # reviewer has a usable summary.
+        if [ -n "$BR_TEXT" ]; then
+          PR_LINES="$PR_LINES\n\n#### \`$sym\`\n"
+          PR_LINES="$PR_LINES\n\`\`\`\n${BR_TEXT}\n\`\`\`"
+        fi
+      done <<< "$SYMS"
+    done <<< "$CHANGED_FILES"
+    if [ -n "$PR_LINES" ]; then
+      PR_IMPACT=$(printf "## PR impact\n\n_Blast radius for ${TOTAL_SYMBOLS} symbol(s) across $(echo "$CHANGED_FILES" | wc -l) changed file(s) (top 3 symbols per file)._\n%b" "$PR_LINES")
+    fi
+  fi
+  echo "::endgroup::"
+fi
+
+# Append the PR-impact section if any.
+if [ -n "$PR_IMPACT" ]; then
+  printf "\n\n%s" "$PR_IMPACT" >> "$BODY"
+fi
+
 emit_outputs "$LEVEL" "$SUMMARY" "$(cat "$BODY")"
