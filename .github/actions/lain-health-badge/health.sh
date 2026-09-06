@@ -156,10 +156,25 @@ if [ -n "$LSP_LANGUAGES" ]; then
   echo "::group::Installing LSPs: $LSP_LANGUAGES"
   for lang in $LSP_LANGUAGES; do
     echo "Installing LSP for: $lang"
-    curl -fsS --max-time 600 -X POST http://127.0.0.1:9999/mcp \
+    RESP=$(mktemp)
+    HTTP_CODE=$(curl -sS --max-time 600 -o "$RESP" -w "%{http_code}" -X POST http://127.0.0.1:9999/mcp \
       -H 'Content-Type: application/json' \
-      -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"install_language_server\",\"arguments\":{\"language\":\"$lang\"}},\"id\":99}}" \
-      | jq -r '.result.content[0].text // "(no result)"' || echo "(install_language_server for $lang failed; continuing)"
+      -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"install_language_server\",\"arguments\":{\"language\":\"$lang\"}},\"id\":99}}")
+    if [ "$HTTP_CODE" != "200" ]; then
+      echo "::warning::install_language_server for $lang returned HTTP $HTTP_CODE"
+      cat "$RESP"
+      echo
+    else
+      MSG=$(jq -r '.result.content[0].text // .error.message // .message // "(no result content)"' < "$RESP")
+      if [ "$MSG" = "(no result content)" ] || [ "$MSG" = "null" ] || [ -z "$MSG" ]; then
+        echo "::warning::install_language_server for $lang returned no usable text; raw response:"
+        cat "$RESP"
+        echo
+      else
+        echo "  $MSG"
+      fi
+    fi
+    rm -f "$RESP"
   done
   echo "::endgroup::"
 fi
