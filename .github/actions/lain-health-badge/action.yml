@@ -45,8 +45,14 @@ runs:
     - name: Restore lain index cache
       uses: actions/cache@v4
       with:
+        # Key includes a hash of the action's source so that any
+        # change to the action (e.g. adding LSP support, fixing a
+        # bug in health.sh) invalidates the index. Without this,
+        # a stale index from a previous run with the old action
+        # would be restored and the new behavior wouldn't take
+        # effect until the workspace source changed.
         path: .lain
-        key: lain-index-${{ github.sha }}
+        key: lain-index-${{ github.sha }}-${{ hashFiles('.github/actions/lain-health-badge/**') }}
         restore-keys: |
           lain-index-main-
 
