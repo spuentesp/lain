@@ -228,12 +228,16 @@ BODY=$(mktemp)
 # badge gives reviewers: a one-line answer to "what does this PR
 # affect and how widely?".
 PR_IMPACT=""
-if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_EVENT_PULL_REQUEST_NUMBER:-}" ]; then
-  echo "::group::Per-PR impact"
+PR_NUMBER=""
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH}" ]; then
+  PR_NUMBER=$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null)
+fi
+if [ -n "$PR_NUMBER" ]; then
+  echo "::group::Per-PR impact (PR #${PR_NUMBER})"
   CHANGED_FILES=$(curl -fsS \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${GITHUB_EVENT_PULL_REQUEST_NUMBER}/files?per_page=50" \
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=50" \
     | jq -r '.[] | .filename' 2>/dev/null | head -20)
   if [ -n "$CHANGED_FILES" ] && [ -d "$WORKSPACE" ]; then
     # Sanitize filename for section headers; sort to keep the
