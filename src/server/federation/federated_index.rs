@@ -596,32 +596,35 @@ impl FederatedIndex {
                     // already-projected node corrupts its metadata.
                     let target_already_present = self.backend.has_node(gid.as_str())?;
                     if !target_already_present {
-                        if let Some(kind_str) = gid.node_kind_str() {
-                            let kind = parse_node_type(kind_str);
-                            // The path and name are everything after the
-                            // second `:` in the global id.
-                            let after_repo = gid.as_str().split_once(':').map(|(_, r)| r).unwrap_or("");
-                            let (_kind, rest) = match after_repo.split_once(':') {
-                                Some(parts) => parts,
-                                None => continue,
-                            };
-                            let (path, name) = match rest.rsplit_once(':') {
-                                Some(parts) => parts,
-                                None => continue,
-                            };
-                            tracing::warn!(
-                                "[federation] {:?}: cross-repo target {} not yet projected; upserting placeholder (owning repo's projection will overwrite when it runs)",
-                                id.as_str(),
-                                gid.as_str(),
-                            );
-                            let _ = self.backend.upsert_node_global(
-                                gid.as_str(),
-                                kind,
-                                path,
-                                name,
-                            );
-                            placeholder_ids.insert(gid.as_str().to_string());
-                        }
+                        // Use the structured accessors instead of `split(':')`
+                        // tricks: a 5-segment id has three `:` separators
+                        // between `repo:Kind:path:name:line_start`, and
+                        // `rsplit_once(':')` on the `path:name:line_start`
+                        // tail used to split at the `name:line_start`
+                        // boundary, leaving `path` with the name glued on
+                        // and the line number mistaken for the name. The
+                        // `has_node` gate above makes this rare in practice
+                        // (the owning repo's real projection usually lands
+                        // first and overwrites the placeholder), but the
+                        // contract is the contract.
+                        let (Some(kind_str), Some(path), Some(name)) =
+                            (gid.node_kind_str(), gid.path(), gid.name())
+                        else {
+                            continue;
+                        };
+                        let kind = parse_node_type(kind_str);
+                        tracing::warn!(
+                            "[federation] {:?}: cross-repo target {} not yet projected; upserting placeholder (owning repo's projection will overwrite when it runs)",
+                            id.as_str(),
+                            gid.as_str(),
+                        );
+                        let _ = self.backend.upsert_node_global(
+                            gid.as_str(),
+                            kind,
+                            path,
+                            name,
+                        );
+                        placeholder_ids.insert(gid.as_str().to_string());
                     }
                 }
             }

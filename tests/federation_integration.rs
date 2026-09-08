@@ -2152,37 +2152,6 @@ async fn federation_keeps_same_named_methods_at_different_lines_distinct() {
 
 /// End-to-end counterpart to
 /// `petgraph_backend_rejects_pre_bump_version_header`: a federated_graph.bin
-/// written with the legacy `LNF2` + version-1 header must be rejected at
-/// the federation level with a clear `FederationSchemaMismatch` error
-/// that carries the found and required versions. The `LNF2` magic +
-/// 4-byte version header is the on-disk envelope since the v2 bump; a
-/// headerless payload, an unknown magic, or a version mismatch all
-/// surface through the same error variant.
-#[test]
-fn federation_schema_version_mismatch_errors_with_clear_message() {
-    use lain::error::LainError;
-    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, PetgraphBackend};
-
-    let dir = tempfile::tempdir().unwrap();
-    let bin_path = dir.path().join("federated_graph.bin");
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"LNF2");
-    bytes.extend_from_slice(&1u32.to_le_bytes());
-    bytes.extend_from_slice(&[0u8; 16]);
-    std::fs::write(&bin_path, &bytes).unwrap();
-
-    let err = match PetgraphBackend::new(dir.path()) {
-        Ok(_) => panic!("expected FederationSchemaMismatch"),
-        Err(e) => e,
-    };
-    match err {
-        LainError::FederationSchemaMismatch { found, required } => {
-            assert_eq!(found, 1);
-            assert_eq!(required, FEDERATION_GRAPH_VERSION);
-        }
-        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
-    }
-}
 
 /// End-to-end coverage for the signature-synthesis gate introduced in
 /// Task 3: two repos each declare a Rust function `verify_token` whose
