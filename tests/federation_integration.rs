@@ -1980,3 +1980,185 @@ async fn loader_path_resolves_cross_repo_edges() {
     assert_eq!(provider_node.name, "verify_token", "name must not be corrupted by placeholder upsert");
     assert_eq!(provider_node.node_type, NodeType::Function);
 }
+
+// ─── Task 6 / Codex probe regressions ───────────────────────────────────────
+//
+// Three integration tests that pin the post-fix behaviour end-to-end. Each
+// corresponds to a Codex probe originally in `tests/review_probe.rs` whose
+// regression test now lives in the proper test file.
+
+/// Regression test for Codex's `federation_collapses_same_named_methods`
+/// probe: two `fn new` methods at distinct line ranges must remain
+/// distinct nodes in the federated backend (the fix re-keys every
+/// per-repo node to its global id `repo:Kind:path:name:line_start`
+/// before projection, so collisions on `(name, path)` no longer collapse).
+#[tokio::test]
+async fn federation_keeps_same_named_methods_at_different_lines_distinct() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    let repo_path = tmp.path().join("one");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    git2::Repository::init(&repo_path).unwrap();
+    let id = RepoId::new("one").unwrap();
+    let source = WorkspaceDirSource::new(id.clone(), repo_path).unwrap();
+    fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+
+    let repo = fed.get_repo(&id).unwrap();
+    let db = repo.db();
+    let a = GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into())
+        .with_location(2, 4);
+    let b = GraphNode::new(NodeType::Method, "new".into(), "src/lib.rs".into())
+        .with_location(12, 14);
+    assert_ne!(a.id, b.id, "precondition: distinct line ranges → distinct local ids");
+    db.insert_nodes_batch(&[a.clone(), b.clone()]).unwrap();
+    fed.project_nodes(&id).await.unwrap();
+    fed.project_edges(&id).await.unwrap();
+
+    assert_eq!(
+        backend.node_count(),
+        2,
+        "two distinct same-named methods must not collapse to one"
+    );
+}
+
+/// End-to-end counterpart to
+/// `petgraph_backend_rejects_pre_bump_version_header`: a federated_graph.bin
+/// written with the legacy `LNF2` + version-1 header must be rejected at
+/// the federation level with a clear `FederationSchemaMismatch` error
+/// that carries the found and required versions. The `LNF2` magic +
+/// 4-byte version header is the on-disk envelope since the v2 bump; a
+/// headerless payload, an unknown magic, or a version mismatch all
+/// surface through the same error variant.
+#[test]
+fn federation_schema_version_mismatch_errors_with_clear_message() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, PetgraphBackend};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"LNF2");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 1);
+            assert_eq!(required, FEDERATION_GRAPH_VERSION);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
+}
+
+/// End-to-end coverage for the signature-synthesis gate introduced in
+/// Task 3: two repos each declare a Rust function `verify_token` whose
+/// LSP signature field is empty. Setting the synthesized signature
+/// (what the ingest path's `derive_signature` does in production) must
+/// let `find_cross_repo_matches` pair the two definitions with
+/// `MatchConfidence::Signature` — the pre-fix behaviour was that
+/// empty signatures prevented the cross-repo match entirely.
+#[tokio::test]
+async fn cross_repo_matches_with_synthesized_signatures_finds_real_overlap() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::matching::{MatchConfidence, find_cross_repo_matches};
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        (
+            "alpha",
+            "pub fn verify_token(t: &str) -> bool {\n    !t.is_empty()\n}\n",
+        ),
+        (
+            "bravo",
+            "pub fn verify_token(s: &str) -> bool {\n    !s.is_empty()\n}\n",
+        ),
+    ] {
+        let path = tmp.path().join(name).join("src").join("lib.rs");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let repo_root = tmp.path().join(name);
+        git2::Repository::init(&repo_root).unwrap();
+    }
+
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    for name in ["alpha", "bravo"] {
+        let id = RepoId::new(name).unwrap();
+        let source = WorkspaceDirSource::new(id.clone(), tmp.path().join(name)).unwrap();
+        fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+    }
+
+    let alpha_id = RepoId::new("alpha").unwrap();
+    let bravo_id = RepoId::new("bravo").unwrap();
+
+    // Inject nodes with empty signatures (LSP did not populate detail).
+    for id in [&alpha_id, &bravo_id] {
+        let repo = fed.get_repo(id).unwrap();
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            "verify_token".into(),
+            "src/lib.rs".into(),
+        )
+        .with_location(1, 3);
+        n.signature = None;
+        repo.db().insert_node(&n).unwrap();
+    }
+
+    fed.project_nodes(&alpha_id).await.unwrap();
+    fed.project_nodes(&bravo_id).await.unwrap();
+
+    // Use the federated backend's projected nodes — these carry global
+    // ids (e.g. `alpha:Function:src/lib.rs:verify_token:1`), which is
+    // what `find_cross_repo_matches` parses to determine repo
+    // membership and filter same-repo candidates.
+    let projected = backend.find_nodes_by_name("verify_token").unwrap();
+    let new_node = projected
+        .iter()
+        .find(|n| n.id.starts_with("alpha:"))
+        .expect("alpha's verify_token must be in the federated backend")
+        .clone();
+    let candidates: Vec<GraphNode> = projected
+        .iter()
+        .filter(|n| n.id.starts_with("bravo:"))
+        .cloned()
+        .collect();
+
+    // Simulate signature synthesis by setting the field before matching.
+    // (In production the ingest path sets this via derive_signature.)
+    let mut new_node_with_sig = new_node.clone();
+    new_node_with_sig.signature = Some("pub fn verify_token(t: &str) -> bool".into());
+    let mut candidates_with_sig = candidates.clone();
+    for c in &mut candidates_with_sig {
+        c.signature = Some("pub fn verify_token(s: &str) -> bool".into());
+    }
+
+    let matches = find_cross_repo_matches(&new_node_with_sig, &candidates_with_sig, 5, 0.5, false);
+    assert_eq!(
+        matches.len(),
+        1,
+        "synthesized signatures should match, got {matches:?}"
+    );
+    assert_eq!(matches[0].2, MatchConfidence::Signature);
+}
