@@ -138,7 +138,7 @@ impl PetgraphBackend {
                 let payload = &bytes[FEDERATION_GRAPH_HEADER_LEN..];
                 GraphDatabase::validate_persisted_payload(payload).map_err(|error| {
                     tracing::warn!(
-                        "Rejecting corrupt federation graph payload at {}: {error}. Remove it and re-run to rebuild.",
+                        "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
                         bin_path.display()
                     );
                     LainError::FederationPayloadCorrupt {
