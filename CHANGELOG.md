@@ -3,6 +3,26 @@
 All notable changes to LAIN are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased — 2026-09-07
+
+- Federation graph schema bumped to v2 (`FEDERATION_GRAPH_VERSION`).
+  Existing federated graphs are unreadable until `lain reindex` is run.
+- `resolve_node` no longer canonicalizes bare-name handles that happen
+  to match a directory in cwd (closes Codex review finding #1).
+- `GlobalId` includes `line_start`, so two same-named methods at
+  different lines in the same file stay distinct in the federated
+  graph (closes Codex review finding #2).
+- Cross-repo `find_cross_repo_matches` now requires non-empty
+  signatures on both sides; an `allow_name_only` flag is available
+  for callers that explicitly opt in. The ingestion pipeline
+  synthesizes signatures from source when the LSP returns empty
+  `detail` (closes Codex review finding #3).
+- Federation projection now runs in two passes (nodes, then edges);
+  cold-start no longer misses cross-repo callers in the first pass
+  (closes Codex review finding #4).
+- `lain reindex` CLI subcommand added as the recovery path for
+  federation schema bumps (closes Codex review finding #5).
+
 ## [Unreleased]
 
 ### Added
