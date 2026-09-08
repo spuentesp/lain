@@ -651,8 +651,8 @@ impl FederatedIndex {
             std::collections::HashMap::new();
         let mut cross_repo_edges: Vec<GraphEdge> = Vec::new();
         for new_node in &batch_nodes {
-            let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5);
-            for (target_gid, sim) in matches {
+            let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5, false);
+            for (target_gid, sim, _confidence) in matches {
                 // The matched node's owning repo may not have run its own
                 // `project_repo` yet (callers project repos one at a time,
                 // in whatever order they choose — this test fixture calls
