@@ -56,6 +56,7 @@ pub trait GraphBackend: Send + Sync {
     /// graph had correctly dropped it.
     fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError>;
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError>;
+    fn has_node(&self, global_id: &str) -> Result<bool, LainError>;
     fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError>;
     /// Return every node currently in the backend. Used by
     /// `mcp::federation_tools::search_org` as a fallback for nodes inserted
@@ -261,6 +262,10 @@ impl GraphBackend for PetgraphBackend {
 
     fn get_node(&self, global_id: &str) -> Result<Option<GraphNode>, LainError> {
         self.db.get_node_by_id(global_id)
+    }
+
+    fn has_node(&self, global_id: &str) -> Result<bool, LainError> {
+        Ok(self.db.get_node_by_id(global_id)?.is_some())
     }
 
     fn find_nodes_by_name(&self, name: &str) -> Result<Vec<GraphNode>, LainError> {

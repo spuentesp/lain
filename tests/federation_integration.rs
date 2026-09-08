@@ -1843,3 +1843,140 @@ async fn cold_start_projects_edges_in_one_pass() {
     }).count();
     assert_eq!(cross, 1, "the consumer's Calls edge must resolve to the provider's node");
 }
+
+// ─── loader_path_resolves_cross_repo_edges (Task 4 fix review / Finding B) ───
+//
+// Loader-path regression for the placeholder-corruption bug. The previous
+// test (`cold_start_projects_edges_in_one_pass`) orchestrates Phase 1/2 by
+// calling `project_nodes` / `project_edges` directly on a manually-built
+// `FederatedIndex`. That makes it pass right after the API split, even if
+// the loader's orchestration regresses to parallel `project_repo` spawns.
+//
+// This test goes through `load_federation_with_workspace` so a regression
+// inside the loader (the actual production entry point) is caught. After
+// the loader returns, we populate per-repo DBs with a cross-repo `Calls`
+// edge and project via the same `project_repo` wrapper the loader uses
+// internally — `project_repo` is what the per-repo index loop calls
+// post-load, so this mirrors the production flow exactly.
+//
+// The critical assertion is the second one: `backend.all_nodes()` for the
+// provider's `verify_token` has correct `path` and `name` (NOT the
+// placeholder's `<path>:<name>:<line>` concatenation). The fix's `has_node`
+// gate on the placeholder upsert is what makes this pass under any
+// ordering — without the gate, a parallel-spawn regression that ran
+// consumer's `project_edges` before provider's `project_nodes` would
+// upsert the placeholder last and the real node would lose to it on the
+// hydration tiebreaker (both have `is_hydrated: true`).
+#[tokio::test]
+async fn loader_path_resolves_cross_repo_edges() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::loader::load_federation_with_workspace;
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::workspace::{WorkspacesFile, WorkspaceSpec};
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Build a two-repo workspace: consumer + provider. The repos must
+    // be real git repos so `RepoIndex::new` -> `GitSensor::new` succeeds.
+    let consumer_path = tmp.path().join("consumer");
+    let provider_path = tmp.path().join("provider");
+    std::fs::create_dir_all(&consumer_path).unwrap();
+    std::fs::create_dir_all(&provider_path).unwrap();
+    git2::Repository::init(&consumer_path).unwrap();
+    git2::Repository::init(&provider_path).unwrap();
+
+    // Write repos.yaml + workspaces.yaml for the loader.
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let repos_yaml = tmp.path().join("repos.yaml");
+    let repos_body = format!(
+        "data_dir: {}\nrepos:\n  - id: consumer\n    source: {{ type: workspace_dir, path: {} }}\n  - id: provider\n    source: {{ type: workspace_dir, path: {} }}\n",
+        data_dir.display(),
+        consumer_path.display(),
+        provider_path.display(),
+    );
+    std::fs::write(&repos_yaml, repos_body).unwrap();
+
+    let workspaces_yaml = tmp.path().join("workspaces.yaml");
+    let ws = WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "two-repo".into(),
+            description: None,
+            source: None,
+            members: vec!["consumer".into(), "provider".into()],
+        }],
+    };
+    std::fs::write(&workspaces_yaml, serde_yaml::to_string(&ws).unwrap()).unwrap();
+
+    // Loader-path: this is the production entry point. A regression
+    // that re-introduced parallel `project_repo` spawns inside the
+    // loader's Phase 0 task would compile and run fine here, but would
+    // race the per-repo projections below.
+    let fed: Arc<FederatedIndex> = load_federation_with_workspace(
+        &repos_yaml,
+        &workspaces_yaml,
+        "two-repo",
+    )
+    .await
+    .expect("load_federation_with_workspace");
+
+    let consumer_id = RepoId::new("consumer").unwrap();
+    let provider_id = RepoId::new("provider").unwrap();
+
+    // Populate the per-repo DBs with a node + a cross-repo Calls edge.
+    // `insert_edges_batch` stashes the foreign-target edge in the
+    // consumer's `pending_external_edges`, exactly as `repo.index()`
+    // does in production after the resolve phase rewrites the target
+    // to the global id.
+    let provider_fn = GraphNode::new(NodeType::Function, "verify_token".into(), "src/lib.rs".into())
+        .with_location(1, 3);
+    let consumer_caller = GraphNode::new(NodeType::Function, "charge".into(), "src/lib.rs".into())
+        .with_location(1, 5);
+
+    fed.get_repo(&provider_id).unwrap().db().insert_node(&provider_fn).unwrap();
+    fed.get_repo(&consumer_id).unwrap().db().insert_node(&consumer_caller).unwrap();
+
+    let provider_global_id = fed
+        .global_id(&provider_id, NodeType::Function, "src/lib.rs", "verify_token", Some(1))
+        .as_str()
+        .to_string();
+    fed.get_repo(&consumer_id).unwrap().db().insert_edges_batch(&[GraphEdge::new(
+        EdgeType::Calls,
+        consumer_caller.id.clone(),
+        provider_global_id.clone(),
+    )]).unwrap();
+
+    // Project the consumer first — deliberately in the wrong order
+    // for the bug to manifest if the placeholder branch isn't gated.
+    // `project_repo` is the wrapper the per-repo index loop calls;
+    // the loader's own Phase 1/2 follows the same contract.
+    fed.project_repo(&consumer_id).await.expect("project_repo consumer");
+    fed.project_repo(&provider_id).await.expect("project_repo provider");
+
+    // Assert the cross-repo edge landed in the federated backend.
+    let backend = fed.backend();
+    let edges = backend.all_edges().unwrap();
+    let cross = edges.iter().filter(|e| {
+        e.edge_type == EdgeType::Calls && e.target_id == provider_global_id
+    }).count();
+    assert_eq!(cross, 1, "cross-repo Calls edge must resolve to the provider's global id");
+
+    // Assert the provider's node is intact: path and name are NOT
+    // the placeholder's corrupted concatenation. The fix's `has_node`
+    // gate on the placeholder upsert is what makes this hold under
+    // any projection order — without it, the placeholder upserts
+    // first and the real projection lands second; on the reverse
+    // order (consumer-first) the placeholder upserts second and the
+    // hydration tiebreaker (both `is_hydrated: true`) keeps the
+    // corrupted placeholder.
+    let provider_node = backend
+        .get_node(&provider_global_id)
+        .expect("get_node")
+        .expect("provider node must exist after projection");
+    assert_eq!(provider_node.path, "src/lib.rs", "path must not be corrupted by placeholder upsert");
+    assert_eq!(provider_node.name, "verify_token", "name must not be corrupted by placeholder upsert");
+    assert_eq!(provider_node.node_type, NodeType::Function);
+}
