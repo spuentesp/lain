@@ -192,6 +192,104 @@ fn the_documented_command_table_matches_the_binary() {
     );
 }
 
+/// Smoke test for `lain reindex`. Builds a 1-repo fixture, plants a
+/// pre-v2 (no-envelope) `federated_graph.bin` to simulate the
+/// upgrade-from-0.7.0 path the operator runs after bumping the
+/// federation schema, then runs the binary and asserts the backup
+/// holds the original bytes and the rebuilt file carries the v2
+/// header. Pattern modeled on `tests/doctor_smoke.rs::lain()`.
+#[test]
+fn lain_reindex_backs_up_graph_and_rebuilds() {
+    use std::process::Command;
+
+    let project = tempfile::tempdir().expect("tempdir");
+    let repo_dir = project.path().join("repo");
+    std::fs::create_dir_all(repo_dir.join("src")).expect("mkdir repo/src");
+    std::fs::write(
+        repo_dir.join("Cargo.toml"),
+        "[package]\nname = \"reindex-smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::write(
+        repo_dir.join("src/lib.rs"),
+        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { alpha() + 1 }\n",
+    )
+    .expect("write lib.rs");
+
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo_dir)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed: {status}");
+    };
+    git(&["init", "-q", "--initial-branch=main"]);
+    git(&["config", "user.email", "smoke@lain"]);
+    git(&["config", "user.name", "smoke"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
+
+    let data_dir = project.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir data");
+    let repos_yaml = project.path().join("repos.yaml");
+    std::fs::write(
+        &repos_yaml,
+        format!(
+            "data_dir: {}\nrepos:\n  - id: smoke\n    source:\n      type: workspace_dir\n      path: {}\n",
+            data_dir.display(),
+            repo_dir.display()
+        ),
+    )
+    .expect("write repos.yaml");
+
+    // Plant a pre-v2 (no LNF2 envelope) federated_graph.bin so the
+    // recovery path actually exercises the backup step. The bytes
+    // are otherwise opaque — the loader would refuse to read them
+    // with `FederationSchemaMismatch`, which is exactly what `lain
+    // reindex` exists to recover from.
+    let fake_v1 = b"\x07\x00\x00\x00\x00\x00\x00\x00not-a-real-payload-just-bytes";
+    std::fs::write(data_dir.join("federated_graph.bin"), fake_v1).expect("plant v1 bin");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_lain"))
+        .args([
+            "reindex",
+            "--config",
+            repos_yaml.to_str().unwrap(),
+            "--verbose",
+        ])
+        .output()
+        .expect("run lain reindex");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "lain reindex failed (status {:?}):\nstdout: {stdout}\nstderr: {stderr}",
+        out.status.code()
+    );
+
+    // The v1 bytes must survive verbatim in the backup.
+    let backup = std::fs::read(data_dir.join("federated_graph.bin.bak")).expect("read bak");
+    assert_eq!(
+        backup, fake_v1,
+        "backup must preserve the original v1 payload byte-for-byte"
+    );
+
+    // The new file must carry the v2 envelope (`LNF2` magic + u32
+    // version=2 in little-endian).
+    let fresh = std::fs::read(data_dir.join("federated_graph.bin")).expect("read bin");
+    assert!(
+        fresh.starts_with(b"LNF2"),
+        "new graph.bin missing LNF2 magic, got {:02x?}",
+        &fresh[..fresh.len().min(8)]
+    );
+    let version = u32::from_le_bytes([fresh[4], fresh[5], fresh[6], fresh[7]]);
+    assert_eq!(
+        version, 2,
+        "new graph.bin must carry version=2, got {version}"
+    );
+}
+
 /// The prose around the table must not contradict it — the old copy
 /// claimed a subcommand count that matched neither the table nor the
 /// binary.

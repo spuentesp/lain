@@ -238,6 +238,21 @@ fn main() -> Result<()> {
             });
             std::process::exit(code);
         }
+        Some(Commands::Reindex {
+            config,
+            workspace,
+            verbose,
+        }) => {
+            // `reindex` rebuilds the federation backend, which fans
+            // out into parallel per-repo indexing tasks inside the
+            // loader — same shape as `server`, so reuse the multi-thread
+            // runtime.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("build tokio runtime for reindex subcommand")?;
+            rt.block_on(lain::cli::run_reindex(config, workspace, verbose))
+        }
         None => {
             // No subcommand: print help.
             let mut cmd = Args::command();

@@ -10,6 +10,7 @@ pub mod mcp_stdio;
 pub mod oneshot;
 pub mod query;
 pub mod readiness;
+pub mod reindex;
 pub mod repos;
 pub mod schema;
 pub mod server;
@@ -21,6 +22,7 @@ pub mod workspaces;
 pub use crate::resolve_repos_config;
 pub use ask::run_ask;
 pub use query::run_query;
+pub use reindex::run_reindex;
 pub use server::run_server;
 
 use clap::{Parser, Subcommand};
@@ -300,6 +302,22 @@ pub enum Commands {
         /// install none. Every language is indexed without them.
         #[arg(long, value_name = "none|detected|LANG,...")]
         lsp: Option<String>,
+    },
+    /// Re-index the workspace from scratch. Backs up any existing
+    /// `<data_dir>/federated_graph.bin` to `federated_graph.bin.bak`
+    /// and rebuilds every repo's per-repo graph plus the federation
+    /// backend. Required after a federation schema version bump.
+    /// Idempotent.
+    Reindex {
+        #[arg(long, default_value = "./repos.yaml")]
+        config: PathBuf,
+        /// Workspace name. When omitted, re-indexes all workspaces
+        /// configured in `repos.yaml`.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Print each step as it runs.
+        #[arg(long, short)]
+        verbose: bool,
     },
 }
 
