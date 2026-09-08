@@ -7,6 +7,12 @@
 //!
 //! Idempotent — running it twice produces the same graph and the same
 //! backup file (overwritten with a fresh copy from the first run).
+//!
+//! Failure-tolerance: an `index_forced` failure aborts the whole run
+//! (a half-rebuilt graph is harder to debug than "reindex failed: ..."),
+//! but a `project_repo` failure after a successful `index_forced` is
+//! logged and skipped — the per-repo graph is already fresh and the
+//! next `lain reindex` (or `lain server` startup) re-projects for free.
 
 use crate::cli::resolve_repos_config;
 use anyhow::{Context, Result};
