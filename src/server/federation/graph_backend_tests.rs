@@ -167,3 +167,61 @@ fn petgraph_backend_persists_and_reloads() {
         .unwrap()
         .is_some());
 }
+
+#[test]
+fn petgraph_backend_rejects_pre_bump_version_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"LNF2");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 1);
+            assert_eq!(required, 2);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn petgraph_backend_rejects_headerless_legacy_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 32]);
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, LainError::FederationSchemaMismatch { .. }),
+        "expected FederationSchemaMismatch, got {err:?}"
+    );
+}
+
+#[test]
+fn petgraph_backend_rejects_short_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    std::fs::write(&bin_path, &[0u8; 4]).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, LainError::FederationSchemaMismatch { .. }),
+        "expected FederationSchemaMismatch, got {err:?}"
+    );
+}

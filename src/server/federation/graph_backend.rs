@@ -91,6 +91,8 @@ pub trait GraphBackend: Send + Sync {
 pub struct PetgraphBackend {
     db: GraphDatabase,
     index: DashMap<String, GlobalId>,
+    bin_path: PathBuf,
+    payload_path: PathBuf,
 }
 
 impl PetgraphBackend {
@@ -147,7 +149,26 @@ impl PetgraphBackend {
                 index.insert(node.id, global_id);
             }
         }
-        Ok(Self { db, index })
+        Ok(Self {
+            db,
+            index,
+            bin_path,
+            payload_path,
+        })
+    }
+
+    /// Save the federated graph to disk, prepending the schema envelope
+    /// (magic + version) before the bincode payload so the canonical
+    /// file is always self-describing on the next load.
+    fn save(&self) -> Result<(), LainError> {
+        self.db.save_to_disk_sync()?;
+        let payload = std::fs::read(&self.payload_path)?;
+        let mut with_header = Vec::with_capacity(FEDERATION_GRAPH_HEADER_LEN + payload.len());
+        with_header.extend_from_slice(FEDERATION_GRAPH_MAGIC);
+        with_header.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+        with_header.extend_from_slice(&payload);
+        std::fs::write(&self.bin_path, &with_header)?;
+        Ok(())
     }
 
     pub fn upsert_node_global(
