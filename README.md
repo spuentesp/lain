@@ -118,7 +118,8 @@ localhost only; set `LAIN_BIND_ADDR=0.0.0.0` (with `LAIN_API_KEYS=key1,…`)
 to expose it on the network. Federation adds
 organization-wide search and cross-repository blast-radius queries. The
 [federation guide](docs/FEDERATION.md) covers configuration, source types, and
-failure states.
+failure states. After a federation schema upgrade, run `lain reindex` to
+rebuild the on-disk graph from the sources.
 
 ## Check the graph
 
