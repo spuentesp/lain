@@ -563,27 +563,22 @@ impl FederatedIndex {
         // form so the local petgraph could not store them). Each drained
         // edge has `source_id` rewritten through `local_to_global` and
         // `target_id` passed through unchanged because it is already
-        // global. With cold-start Phase 1/2 orchestration every owning
-        // repo's nodes are already projected by the time `project_edges`
-        // runs, so the placeholder branch below is unnecessary there.
-        // It still fires when the CLI server re-projects one repo at a
-        // time after `index()` (e.g. after a watcher event) and the
-        // target's owning repo hasn't been re-projected yet — defensive
-        // coverage that keeps the edge alive until the real projection
-        // overwrites the placeholder. The warn lets operators see when
-        // this defensive path fires.
+        // global.
         let external = repo.db().take_pending_external_edges();
         if !external.is_empty() {
             let mut external_batch: Vec<crate::schema::GraphEdge> =
                 Vec::with_capacity(external.len());
             let mut placeholder_ids = std::collections::HashSet::new();
             for edge in &external {
-                // Ensure the target node exists in the backend. The
-                // global id is `repo:Kind:path:name`; reconstruct the
-                // `NodeType` from the `Debug` form (variants are bare
-                // identifiers, no colons — confirmed in
-                // `src/server/schema.rs:9-29`).
+                // Skip placeholder upsert when the target is already
+                // projected: Phase 1/2 orchestration guarantees every
+                // owning repo's nodes are present before Phase 2. The
+                // placeholder path also fires during runtime re-projection
+                // after `index()` when the owning repo hasn't been
+                // re-projected yet.
                 if let Ok(gid) = GlobalId::parse(&edge.target_id) {
+                    // Targets whose owning repo is not part of this
+                    // federation never get a placeholder.
                     if !self
                         .repos
                         .read()
@@ -592,27 +587,41 @@ impl FederatedIndex {
                     {
                         continue;
                     }
-                    if let Some(kind_str) = gid.node_kind_str() {
-                        // Parse the kind string into `NodeType`; the
-                        // placeholder gets overwritten when the real
-                        // repo's projection runs, so a wrong-but-present
-                        // placeholder is fine until then.
-                        let kind = parse_node_type(kind_str);
-                        // The path and name are everything after the
-                        // second `:` in the global id.
-                        let after_repo = gid.as_str().split_once(':').map(|(_, r)| r).unwrap_or("");
-                        let (_kind, rest) = match after_repo.split_once(':') {
-                            Some(parts) => parts,
-                            None => continue,
-                        };
-                        let (path, name) = match rest.rsplit_once(':') {
-                            Some(parts) => parts,
-                            None => continue,
-                        };
-                        let _ = self
-                            .backend
-                            .upsert_node_global(gid.as_str(), kind, path, name);
-                        placeholder_ids.insert(gid.as_str().to_string());
+                    // Skip placeholder upsert when the target is already
+                    // projected: Phase 1/2 orchestration guarantees every
+                    // owning repo's nodes are present before Phase 2. The
+                    // placeholder path also fires during runtime re-projection
+                    // after `index()` when the owning repo hasn't been
+                    // re-projected yet. A placeholder written over an
+                    // already-projected node corrupts its metadata.
+                    let target_already_present = self.backend.has_node(gid.as_str())?;
+                    if !target_already_present {
+                        if let Some(kind_str) = gid.node_kind_str() {
+                            let kind = parse_node_type(kind_str);
+                            // The path and name are everything after the
+                            // second `:` in the global id.
+                            let after_repo = gid.as_str().split_once(':').map(|(_, r)| r).unwrap_or("");
+                            let (_kind, rest) = match after_repo.split_once(':') {
+                                Some(parts) => parts,
+                                None => continue,
+                            };
+                            let (path, name) = match rest.rsplit_once(':') {
+                                Some(parts) => parts,
+                                None => continue,
+                            };
+                            tracing::warn!(
+                                "[federation] {:?}: cross-repo target {} not yet projected; upserting placeholder (owning repo's projection will overwrite when it runs)",
+                                id.as_str(),
+                                gid.as_str(),
+                            );
+                            let _ = self.backend.upsert_node_global(
+                                gid.as_str(),
+                                kind,
+                                path,
+                                name,
+                            );
+                            placeholder_ids.insert(gid.as_str().to_string());
+                        }
                     }
                 }
             }
