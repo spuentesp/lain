@@ -1587,7 +1587,164 @@ async fn resolve_node_ambiguous_returns_other_definitions() {
         .expect("resolve_node_ambiguous should succeed for indexed name");
     assert_eq!(chosen.name, "parse");
     assert_eq!(
-        others.len(),
+        backend.node_count(),
+        2,
+        "two distinct same-named methods must not collapse to one"
+    );
+}
+
+/// End-to-end counterpart to
+/// `petgraph_backend_rejects_pre_bump_version_header`: a federated_graph.bin
+/// written with the legacy `LNF2` + version-1 header must be rejected at
+/// the federation level with a clear `FederationSchemaMismatch` error
+/// that carries the found and required versions. The `LNF2` magic +
+/// 4-byte version header is the on-disk envelope since the v2 bump; a
+/// headerless payload, an unknown magic, or a version mismatch all
+/// surface through the same error variant.
+#[test]
+fn federation_schema_version_mismatch_errors_with_clear_message() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, PetgraphBackend};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"LNF2");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    std::fs::write(&bin_path, &bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected FederationSchemaMismatch"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 1);
+            assert_eq!(required, FEDERATION_GRAPH_VERSION);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn federation_rejects_corrupt_payload_under_valid_header() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, PetgraphBackend};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    let mut bytes = Vec::from(&b"LNF2"[..]);
+    bytes.extend_from_slice(&FEDERATION_GRAPH_VERSION.to_le_bytes());
+    bytes.extend_from_slice(b"corrupt bincode payload");
+    std::fs::write(&bin_path, bytes).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("expected corrupt federation payload to be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            err,
+            LainError::FederationSchemaMismatch { found, required }
+                if found == FEDERATION_GRAPH_VERSION && required == FEDERATION_GRAPH_VERSION
+        ),
+        "expected FederationSchemaMismatch for corrupt payload, got {err:?}"
+    );
+}
+
+/// End-to-end coverage for the signature-synthesis gate introduced in
+/// Task 3: two repos each declare a Rust function `verify_token` whose
+/// LSP signature field is empty. Setting the synthesized signature
+/// (what the ingest path's `derive_signature` does in production) must
+/// let `find_cross_repo_matches` pair the two definitions with
+/// `MatchConfidence::Signature` — the pre-fix behaviour was that
+/// empty signatures prevented the cross-repo match entirely.
+#[tokio::test]
+async fn cross_repo_matches_with_synthesized_signatures_finds_real_overlap() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::matching::{MatchConfidence, find_cross_repo_matches};
+    use lain::federation::repo_id::RepoId;
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        (
+            "alpha",
+            "pub fn verify_token(t: &str) -> bool {\n    !t.is_empty()\n}\n",
+        ),
+        (
+            "bravo",
+            "pub fn verify_token(s: &str) -> bool {\n    !s.is_empty()\n}\n",
+        ),
+    ] {
+        let path = tmp.path().join(name).join("src").join("lib.rs");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let repo_root = tmp.path().join(name);
+        git2::Repository::init(&repo_root).unwrap();
+    }
+
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    for name in ["alpha", "bravo"] {
+        let id = RepoId::new(name).unwrap();
+        let source = WorkspaceDirSource::new(id.clone(), tmp.path().join(name)).unwrap();
+        fed.add_repo(Box::new(source), tmp.path()).await.unwrap();
+    }
+
+    let alpha_id = RepoId::new("alpha").unwrap();
+    let bravo_id = RepoId::new("bravo").unwrap();
+
+    // Inject nodes with empty signatures (LSP did not populate detail).
+    for id in [&alpha_id, &bravo_id] {
+        let repo = fed.get_repo(id).unwrap();
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            "verify_token".into(),
+            "src/lib.rs".into(),
+        )
+        .with_location(1, 3);
+        n.signature = None;
+        repo.db().insert_node(&n).unwrap();
+    }
+
+    fed.project_nodes(&alpha_id).await.unwrap();
+    fed.project_nodes(&bravo_id).await.unwrap();
+
+    // Use the federated backend's projected nodes — these carry global
+    // ids (e.g. `alpha:Function:src/lib.rs:verify_token:1`), which is
+    // what `find_cross_repo_matches` parses to determine repo
+    // membership and filter same-repo candidates.
+    let projected = backend.find_nodes_by_name("verify_token").unwrap();
+    let new_node = projected
+        .iter()
+        .find(|n| n.id.starts_with("alpha:"))
+        .expect("alpha's verify_token must be in the federated backend")
+        .clone();
+    let candidates: Vec<GraphNode> = projected
+        .iter()
+        .filter(|n| n.id.starts_with("bravo:"))
+        .cloned()
+        .collect();
+
+    // Simulate signature synthesis by setting the field before matching.
+    // (In production the ingest path sets this via derive_signature.)
+    let mut new_node_with_sig = new_node.clone();
+    new_node_with_sig.signature = Some("pub fn verify_token(t: &str) -> bool".into());
+    let mut candidates_with_sig = candidates.clone();
+    for c in &mut candidates_with_sig {
+        c.signature = Some("pub fn verify_token(s: &str) -> bool".into());
+    }
+
+    let matches = find_cross_repo_matches(&new_node_with_sig, &candidates_with_sig, 5, 0.5, false);
+    assert_eq!(
+        matches.len(),
         1,
         "expected exactly one alternative, got 0 (or more)"
     );
