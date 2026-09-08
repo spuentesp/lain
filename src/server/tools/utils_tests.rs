@@ -507,3 +507,40 @@ mod file_content_cache_tests {
         }
     }
 }
+    assert!(score > 0.0, "expected non-zero recall after stemming, got {}", score);
+}
+
+#[test]
+fn is_explicit_path_table() {
+    assert!(is_explicit_path("/abs/path"));
+    assert!(is_explicit_path("./relative"));
+    assert!(is_explicit_path("../up"));
+    assert!(is_explicit_path("~/home"));
+    assert!(is_explicit_path("src/cli/hooks.rs"));
+    assert!(is_explicit_path("C:\\Users\\foo"));
+    assert!(is_explicit_path("C:/Users/foo"));
+    assert!(is_explicit_path("\\\\server\\share\\foo"));
+
+    assert!(!is_explicit_path("target"));
+    assert!(!is_explicit_path("foo"));
+    assert!(!is_explicit_path(""));
+}
+
+#[test]
+fn resolve_node_handles_bare_name_that_collides_with_cwd() {
+    // Reproduces Codex's probe `existing_directory_masks_symbol_name`.
+    // The fixture must start with `target` as both an indexed node and a
+    // directory in the same dir as the graph (the test's tmp dir).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("target")).unwrap();
+    let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+    let overlay = VolatileOverlay::new();
+    let n = GraphNode::new(NodeType::Function, "target".into(), "src/lib.rs".into());
+    graph.insert_node(&n).unwrap();
+
+    // Pre-fix behavior: the `target` bare name canonicalized to an
+    // absolute path under tmp dir, Steps 1-4 missed, lookup failed.
+    // Post-fix: bare name lookup succeeds regardless of cwd contents.
+    let resolved = resolve_node(&graph, &overlay, "target").unwrap();
+    assert_eq!(resolved.id, n.id);
+}
