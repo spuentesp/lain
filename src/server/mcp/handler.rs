@@ -2806,7 +2806,7 @@ mod tests {
     /// normally otherwise, so hiding it would remove a working tool.
     #[test]
     fn only_fully_inert_tools_are_filtered_from_tools_list() {
-        let stub = crate::server::nlp::NlpEmbedder::new_with_threads(0).expect("stub embedder");
+        let stub = crate::server::nlp::NlpEmbedder::new_stub();
         assert!(stub.is_stub(), "fixture must be a stub embedder");
 
         let inert = inert_tool_names(&stub);
