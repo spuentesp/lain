@@ -3,7 +3,7 @@ use crate::schema::{GraphNode, NodeType};
 
 fn node(repo: &str, name: &str, sig: &str) -> GraphNode {
     let mut n = GraphNode::new(NodeType::Function, name.into(), "src/lib.rs".into());
-    n.id = format!("{repo}:Function:src/lib.rs:{name}");
+    n.id = format!("{repo}:Function:src/lib.rs:{name}:0");
     n.signature = Some(sig.into());
     n
 }
@@ -49,9 +49,9 @@ fn find_cross_repo_matches_above_threshold() {
     ];
     let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.5);
     let matched_ids: Vec<&str> = matches.iter().map(|(id, _)| id.as_str()).collect();
-    assert!(matched_ids.contains(&"repo2:Function:src/lib.rs:verify_token"));
-    assert!(!matched_ids.contains(&"repo3:Function:src/lib.rs:validate"));
-    assert!(!matched_ids.contains(&"repo4:Function:src/lib.rs:verify_token"));
+    assert!(matched_ids.contains(&"repo2:Function:src/lib.rs:verify_token:0"));
+    assert!(!matched_ids.contains(&"repo3:Function:src/lib.rs:validate:0"));
+    assert!(!matched_ids.contains(&"repo4:Function:src/lib.rs:verify_token:0"));
 }
 
 #[test]

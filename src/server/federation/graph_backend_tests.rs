@@ -151,7 +151,7 @@ fn petgraph_backend_persists_and_reloads() {
     let tmp = tempfile::tempdir().unwrap();
     let b = PetgraphBackend::new(tmp.path()).unwrap();
     b.upsert_node_global(
-        "repo1:Function:src/lib.rs:f",
+        "repo1:Function:src/lib.rs:f:0",
         NodeType::Function,
         "src/lib.rs",
         "f",
@@ -163,7 +163,7 @@ fn petgraph_backend_persists_and_reloads() {
     let b2 = PetgraphBackend::new(tmp.path()).unwrap();
     assert_eq!(b2.node_count(), 1);
     assert!(b2
-        .get_node("repo1:Function:src/lib.rs:f")
+        .get_node("repo1:Function:src/lib.rs:f:0")
         .unwrap()
         .is_some());
 }

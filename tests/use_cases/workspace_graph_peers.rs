@@ -180,10 +180,10 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
         // `edge_type` is a schema `EdgeType` enum after 3.3 — match the
         // variant directly rather than comparing against a Debug string.
         let et = &e.edge_type;
-        let pair_ab = src.contains("a:Function:src/lib.rs:shared_helper")
-            && tgt.contains("b:Function:src/lib.rs:shared_helper");
-        let pair_ba = src.contains("b:Function:src/lib.rs:shared_helper")
-            && tgt.contains("a:Function:src/lib.rs:shared_helper");
+        let pair_ab = src.contains("a:Function:src/lib.rs:shared_helper:0")
+            && tgt.contains("b:Function:src/lib.rs:shared_helper:0");
+        let pair_ba = src.contains("b:Function:src/lib.rs:shared_helper:0")
+            && tgt.contains("a:Function:src/lib.rs:shared_helper:0");
         (pair_ab || pair_ba) && *et == EdgeType::CrossRepoSameSymbol
     });
 
@@ -191,10 +191,10 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     // surfaces the function nodes from both repos.
     let both_functions_present = nodes
         .iter()
-        .any(|n| n.id == "a:Function:src/lib.rs:shared_helper" && n.name == "shared_helper")
+        .any(|n| n.id == "a:Function:src/lib.rs:shared_helper:0" && n.name == "shared_helper")
         && nodes
             .iter()
-            .any(|n| n.id == "b:Function:src/lib.rs:shared_helper" && n.name == "shared_helper");
+            .any(|n| n.id == "b:Function:src/lib.rs:shared_helper:0" && n.name == "shared_helper");
     assert!(
         both_functions_present,
         "workspace graph must surface both `shared_helper` function \

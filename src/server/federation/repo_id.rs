@@ -25,8 +25,21 @@ impl std::fmt::Display for RepoId {
 pub struct GlobalId(String);
 
 impl GlobalId {
-    pub fn new(repo: &RepoId, kind: NodeType, path: &str, name: &str) -> Self {
-        Self(format!("{}:{:?}:{}:{}", repo.as_str(), kind, path, name))
+    pub fn new(
+        repo: &RepoId,
+        kind: NodeType,
+        path: &str,
+        name: &str,
+        line_start: Option<u32>,
+    ) -> Self {
+        Self(format!(
+            "{}:{:?}:{}:{}:{}",
+            repo.as_str(),
+            kind,
+            path,
+            name,
+            line_start.unwrap_or(0),
+        ))
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -36,7 +49,10 @@ impl GlobalId {
     }
     pub fn parse(s: &str) -> Result<Self, crate::error::LainError> {
         let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() < 4 {
+        // Bumped from 4 to 5 segments: format is now
+        // `repo:Kind:path:name:line_start`. Legacy 4-segment ids are
+        // pre-bump and rejected here so downstream code never sees them.
+        if parts.len() < 5 {
             return Err(crate::error::LainError::InvalidGlobalId(s.to_string()));
         }
         // Validate the `Kind` segment is a real NodeType. Without this
@@ -84,14 +100,15 @@ impl GlobalId {
     }
 
     /// Parse out the node-type component of a global id, e.g.
-    /// `Function` from `"auth-svc:Function:src/auth.rs:verify_token"`.
+    /// `Function` from `"auth-svc:Function:src/auth.rs:verify_token:0"`.
     /// `None` if the id is malformed (which `parse` would already have
     /// rejected, but the helper is independent so callers don't have
     /// to re-validate).
     pub fn node_kind_str(&self) -> Option<&str> {
-        // Format: `repo:Kind:path:name`. With `NodeType`'s `Debug`
-        // impl producing no colons (variants are bare identifiers),
-        // the second `:` is the boundary between `Kind` and `path`.
+        // Format: `repo:Kind:path:name:line_start`. With `NodeType`'s
+        // `Debug` impl producing no colons (variants are bare
+        // identifiers), the second `:` is the boundary between `Kind`
+        // and `path`.
         let after_repo = self.0.split_once(':')?.1;
         let (kind, _rest) = after_repo.split_once(':')?;
         Some(kind)
@@ -107,6 +124,7 @@ impl std::fmt::Display for GlobalId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::LainError;
 
     #[test]
     fn repo_id_rejects_empty() {
@@ -133,14 +151,14 @@ mod tests {
     #[test]
     fn global_id_format_is_stable() {
         let repo = RepoId::new("auth-svc").unwrap();
-        let id = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", "verify_token");
-        assert_eq!(id.as_str(), "auth-svc:Function:src/auth.rs:verify_token");
+        let id = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", "verify_token", None);
+        assert_eq!(id.as_str(), "auth-svc:Function:src/auth.rs:verify_token:0");
     }
 
     #[test]
     fn global_id_roundtrip() {
         let repo = RepoId::new("billing-svc").unwrap();
-        let id = GlobalId::new(&repo, NodeType::Method, "src/invoice.py", "calc_total");
+        let id = GlobalId::new(&repo, NodeType::Method, "src/invoice.py", "calc_total", Some(42));
         let parsed = GlobalId::parse(id.as_str()).unwrap();
         assert_eq!(parsed, id);
         assert_eq!(parsed.repo_id(), "billing-svc");
@@ -157,7 +175,7 @@ mod tests {
     #[test]
     fn global_id_parse_rejects_unknown_kind() {
         // `Foo` is not a `NodeType` variant — round-3 #9 path.
-        let err = GlobalId::parse("auth-svc:Foo:src/main.rs:hello").unwrap_err();
+        let err = GlobalId::parse("auth-svc:Foo:src/main.rs:hello:0").unwrap_err();
         assert!(
             matches!(err, crate::error::LainError::InvalidGlobalId(_)),
             "expected InvalidGlobalId, got {err:?}"
@@ -199,8 +217,40 @@ mod tests {
             "Synthetic",
         ];
         for k in kinds {
-            let s = format!("{repo}:{k}:{path}:{name}");
+            let s = format!("{repo}:{k}:{path}:{name}:0");
             GlobalId::parse(&s).unwrap_or_else(|e| panic!("kind {k} should parse: {e}"));
         }
+    }
+    #[test]
+    fn global_id_new_with_line_start_round_trips() {
+        let repo = RepoId::new("bytes").unwrap();
+        let cases = [
+            (None, 0u32),
+            (Some(0), 0),
+            (Some(1), 1),
+            (Some(12345), 12345),
+        ];
+        for (input, expected_line) in cases {
+            let gid = GlobalId::new(
+                &repo,
+                NodeType::Function,
+                "src/lib.rs",
+                "foo",
+                input,
+            );
+            let parsed = GlobalId::parse(gid.as_str()).unwrap();
+            // Round-trip preserves the string form; line_start is the
+            // last `:`-delimited segment.
+            let last = parsed.as_str().rsplit(':').next().unwrap();
+            assert_eq!(last.parse::<u32>().unwrap(), expected_line);
+        }
+    }
+
+    #[test]
+    fn global_id_parse_rejects_pre_bump_format() {
+        // Pre-bump format: 4 segments (no line_start).
+        let legacy = "bytes:Function:src/lib.rs:foo";
+        let err = GlobalId::parse(legacy).unwrap_err();
+        assert!(matches!(err, LainError::InvalidGlobalId(_)));
     }
 }

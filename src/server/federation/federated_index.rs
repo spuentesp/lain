@@ -2,7 +2,7 @@
 //! nodes/edges into a global petgraph via `GraphBackend`, and provides
 //! cross-repo symbol resolution.
 //!
-//! The global ID format is `repo_id:Kind:path:name` (see `GlobalId::new`), and
+//! The global ID format is `repo_id:Kind:path:name:line_start` (see `GlobalId::new`), and
 //! every per-repo node is re-keyed to that format before being upserted into the
 //! backend. Cross-repo edges (`CrossRepoSameSymbol`) are added by running
 //! `find_cross_repo_matches` against signatures.
@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// rewrite passes (this repo's own nodes, and — for cross-repo matching —
 /// every other repo's nodes) so the rewrite rule can't drift between them.
 fn global_id_str(repo: &RepoId, node: &GraphNode) -> String {
-    GlobalId::new(repo, node.node_type.clone(), &node.path, &node.name)
+    GlobalId::new(repo, node.node_type.clone(), &node.path, &node.name, node.line_start)
         .as_str()
         .to_string()
 }
@@ -418,8 +418,8 @@ impl FederatedIndex {
             .collect()
     }
 
-    pub fn global_id(&self, repo: &RepoId, kind: NodeType, path: &str, name: &str) -> GlobalId {
-        GlobalId::new(repo, kind, path, name)
+    pub fn global_id(&self, repo: &RepoId, kind: NodeType, path: &str, name: &str, line_start: Option<u32>) -> GlobalId {
+        GlobalId::new(repo, kind, path, name, line_start)
     }
 
     pub fn backend(&self) -> Arc<dyn GraphBackend> {
@@ -1030,6 +1030,7 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                         node.node_type.clone(),
                         &node.path,
                         &node.name,
+                        node.line_start,
                     ));
                 }
             }
@@ -1057,6 +1058,7 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                                 node.node_type.clone(),
                                 &node.path,
                                 &node.name,
+                                node.line_start,
                             ));
                         }
                     }
