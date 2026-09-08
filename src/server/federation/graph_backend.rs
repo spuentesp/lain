@@ -77,7 +77,51 @@ pub struct PetgraphBackend {
 
 impl PetgraphBackend {
     pub fn new(data_dir: &Path) -> Result<Self, LainError> {
-        let db = GraphDatabase::new(&data_dir.join("federated_graph.bin"))?;
+        let bin_path = data_dir.join("federated_graph.bin");
+        let payload_path = payload_path_for(&bin_path);
+
+        if bin_path.exists() {
+            let bytes = std::fs::read(&bin_path)?;
+            if bytes.is_empty() {
+            } else if bytes.len() < FEDERATION_GRAPH_HEADER_LEN {
+                return Err(LainError::FederationSchemaMismatch {
+                    found: 0,
+                    required: FEDERATION_GRAPH_VERSION,
+                });
+            } else if &bytes[..FEDERATION_GRAPH_MAGIC.len()] != FEDERATION_GRAPH_MAGIC {
+                return Err(LainError::FederationSchemaMismatch {
+                    found: 0,
+                    required: FEDERATION_GRAPH_VERSION,
+                });
+            } else {
+                let found = u32::from_le_bytes([
+                    bytes[FEDERATION_GRAPH_MAGIC.len()],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 1],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 2],
+                    bytes[FEDERATION_GRAPH_MAGIC.len() + 3],
+                ]);
+                if found != FEDERATION_GRAPH_VERSION {
+                    return Err(LainError::FederationSchemaMismatch {
+                        found,
+                        required: FEDERATION_GRAPH_VERSION,
+                    });
+                }
+                let payload = &bytes[FEDERATION_GRAPH_HEADER_LEN..];
+                GraphDatabase::validate_persisted_payload(payload).map_err(|error| {
+                    tracing::warn!(
+                        "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
+                        bin_path.display()
+                    );
+                    LainError::FederationSchemaMismatch {
+                        found: FEDERATION_GRAPH_VERSION,
+                        required: FEDERATION_GRAPH_VERSION,
+                    }
+                })?;
+                std::fs::write(&payload_path, payload)?;
+            }
+        }
+
+        let db = GraphDatabase::new(&payload_path)?;
         let index = DashMap::new();
         for node in db.get_all_nodes() {
             if let Ok(global_id) = GlobalId::parse(&node.id) {
