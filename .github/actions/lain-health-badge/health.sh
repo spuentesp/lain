@@ -250,12 +250,19 @@ if [ -n "$PR_NUMBER" ]; then
     # contains an added or modified function definition. Workflow
     # YAML, lockfiles, generated code, etc. are skipped because
     # they don't have meaningful blast-radius signals.
-    while IFS=$'\t' read -r filename patch; do
+    #
+    # The patch is multi-line, so we base64-encode it to make one
+    # TSV line per file. Without that, bash's `read` would split
+    # on the first newline of the patch and we'd silently lose
+    # everything after.
+    while IFS=$'\t' read -r filename patch_b64; do
       [ -z "$filename" ] && continue
+      [ -z "$patch_b64" ] && continue
+      patch=$(printf '%s' "$patch_b64" | base64 -d 2>/dev/null)
       [ -z "$patch" ] && continue
-      # Strip the +/- prefixes from the patch and find added/modified
-      # function definitions. The leading '+' identifies an addition
-      # to the file; ' +' is a context line with a leading space.
+      # Find added function/class definitions. `^\+[^+]` matches
+      # an added line that's not a `+++` file header. The regex
+      # captures the function keyword and the name.
       ADDED_FNS=$(printf '%s\n' "$patch" \
         | grep -E '^\+[^+]' \
         | grep -oE '(function|def|async def|class|fn) [a-zA-Z_][a-zA-Z0-9_]*' \
@@ -278,7 +285,7 @@ if [ -n "$PR_NUMBER" ]; then
           PR_LINES="$PR_LINES\n\`\`\`\n${BR_TEXT}\n\`\`\`"
         fi
       done <<< "$ADDED_FNS"
-    done < <(echo "$FILES_JSON" | jq -r '.[] | select(.patch != null) | [.filename, .patch] | @tsv')
+    done < <(echo "$FILES_JSON" | jq -r '.[] | select(.patch != null) | [.filename, (.patch | @base64)] | @tsv')
     if [ -n "$PR_LINES" ]; then
       PR_IMPACT=$(printf "## PR impact\n\n_Blast radius for ${TOTAL_SYMBOLS} new symbol(s) across ${TOTAL_FILES} file(s)._\n%b" "$PR_LINES")
     fi
