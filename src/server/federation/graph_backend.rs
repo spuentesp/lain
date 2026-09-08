@@ -254,7 +254,7 @@ impl GraphBackend for PetgraphBackend {
             self.index.remove(id);
         }
         if removed > 0 {
-            self.db.save_to_disk_sync()?;
+            self.save()?;
         }
         Ok(removed)
     }

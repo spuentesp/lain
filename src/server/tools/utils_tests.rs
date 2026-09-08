@@ -507,8 +507,6 @@ mod file_content_cache_tests {
         }
     }
 }
-    assert!(score > 0.0, "expected non-zero recall after stemming, got {}", score);
-}
 
 #[test]
 fn is_explicit_path_table() {

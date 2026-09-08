@@ -391,6 +391,7 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
         NodeType::Function,
         "src/lib.rs",
         "verify_token",
+        None,
     );
     let expected_target_str = expected_target.as_str().to_string();
 
@@ -400,7 +401,8 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
         // `Function:src/lib.rs:charge_invoice` to global
         // `b:Function:src/lib.rs:charge_invoice`.
         e.source_id.starts_with("b:")
-            && e.source_id.ends_with(":charge_invoice")
+            && (e.source_id.ends_with(":charge_invoice")
+                || e.source_id.ends_with(":charge_invoice:0"))
             // Target side: preserved verbatim as the global id the
             // resolver returned. (The whole point of the fix.)
             && e.target_id == expected_target_str
@@ -1275,7 +1277,7 @@ fn build_pr1_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<d
 /// (Task 1.6) sees the symbol as present in the static graph.
 fn seed_static_graph(backend: &dyn GraphBackend, repo_id: &str, name: &str) {
     let repo = RepoId::new(repo_id).expect("RepoId::new");
-    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", name);
+    let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", name, None);
     backend
         .upsert_node_global(gid.as_str(), NodeType::Function, "src/auth.rs", name)
         .expect("upsert_node_global");
