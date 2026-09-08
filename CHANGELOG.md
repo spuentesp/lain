@@ -115,6 +115,14 @@ All notable changes to LAIN are documented here. Versions follow
 - `scripts/acceptance/run.py` checks the README's claims end to end
   against pinned open-source repositories — who-calls answers in every
   listed language, the single-repo flow, and the multi-repo flow.
+- **HTTP transport now binds loopback (`127.0.0.1`) by default;
+  binding to a public interface requires explicit `--bind <addr>`
+  plus `LAIN_API_KEYS` configured.** Operators relying on network
+  reachability must opt in. `lain server --transport http` refuses
+  to come up on a non-loopback address when `LAIN_API_KEYS` is unset;
+  a non-loopback bind with `LAIN_API_KEYS` populated requires the
+  bearer token. Three regression tests in `tests/failure_modes.rs`
+  pin the contract at the public binary boundary.
 
 - `lain mcp` minted node ids under a random per-process namespace: ids
   changed on every restart, and co-change edges (derived under the test

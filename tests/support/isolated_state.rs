@@ -42,7 +42,14 @@ pub fn with_federation(
     embedding_model: Option<&Path>,
 ) -> Result<LainServer, LainError> {
     isolate();
-    LainServer::with_federation(federation, transport, port, repos_yaml, embedding_model)
+    LainServer::with_federation(
+        federation,
+        transport,
+        port,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        repos_yaml,
+        embedding_model,
+    )
 }
 
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {

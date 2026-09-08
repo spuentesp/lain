@@ -409,34 +409,6 @@ fn gate_for_dispatch(
     )
 }
 
-/// Address the HTTP transport listens on: loopback unless `LAIN_BIND_ADDR`
-/// says otherwise.
-///
-/// It listened on `0.0.0.0` with authentication off unless `LAIN_API_KEYS`
-/// was set, so anyone on the network could call every tool — including
-/// reading the repository's source and claiming files. Exposing it is now a
-/// deliberate choice, and doing so without keys is logged as a warning.
-fn http_bind_host() -> String {
-    let host = http_bind_host_quiet();
-    let loopback = is_loopback_host(&host);
-    let keys = std::env::var("LAIN_API_KEYS").is_ok_and(|k| !k.trim().is_empty());
-    if !loopback && !keys {
-        tracing::warn!(
-            "HTTP transport exposed on {host} with no LAIN_API_KEYS: anyone who can reach \
-             this port can call every tool"
-        );
-    }
-    host
-}
-
-fn http_bind_host_quiet() -> String {
-    std::env::var("LAIN_BIND_ADDR")
-        .ok()
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "127.0.0.1".to_string())
-}
-
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost")
@@ -1374,7 +1346,16 @@ impl LainMcpServer {
                         let service = service_fn(move |req| {
                             let executor = executor.clone();
                             let status = status.clone();
-                            handle_request(req, executor, None, None, status, None, None)
+                            handle_request(
+                                req,
+                                executor,
+                                None,
+                                None,
+                                status,
+                                None,
+                                None,
+                                addr.ip().is_loopback(),
+                            )
                         });
                         if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
                             tracing::debug!("Connection error: {}", e);
@@ -1510,15 +1491,15 @@ impl LainMcpServer {
         result
     }
 
-    /// Run with HTTP transport (for MCP clients and browser diagnostics)
-    // The `let x = x;` rebindings inside the accept loop are intentional:
-    // they re-bind the outer locals (read from `self` above) so the inner
-    // `tokio::spawn`'s `move` closure can capture them by ownership without
-    // pulling `self` across threads (which has non-`Send` fields).
+    /// Run with HTTP transport (for MCP clients and browser diagnostics).
+    ///
+    /// `addr` is the exact socket address to bind on. `LainServer::serve`
+    /// is responsible for refusing non-loopback binds when no API keys are
+    /// configured; this method binds to whatever address it is handed and
+    /// trusts that the caller has already validated it.
     #[allow(clippy::redundant_locals)]
-    pub async fn run_http(self, port: u16) -> SdkResult<()> {
-        let bind_host = http_bind_host();
-        info!("Binding Lain MCP HTTP listener on {}:{}", bind_host, port);
+    pub async fn run_http(self, addr: std::net::SocketAddr) -> SdkResult<()> {
+        info!("Starting Lain MCP HTTP server on {addr}");
 
         // Bind the HTTP listener *before* spawning the background
         // re-index. The original order spawned the startup task first
@@ -1532,8 +1513,7 @@ impl LainMcpServer {
         // `warming_up` response from `dispatch_tool_call` (see the
         // comment in `run_stdio`) instead of a connection refused, and
         // operators can poll `/health` to observe the stuck state.
-        let listener = TcpListener::bind(format!("{}:{}", bind_host, port)).await?;
-        info!("Lain MCP HTTP server listening on {}:{}", bind_host, port);
+        let listener = TcpListener::bind(addr).await?;
 
         // Same backgrounded re-index as `run_stdio`; see there for
         // the full rationale. HTTP has no equivalent to stdio's
@@ -1569,7 +1549,7 @@ impl LainMcpServer {
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
-        self.executor.set_diagnostics_port(port);
+        self.executor.set_diagnostics_port(addr.port());
         let executor = Arc::new(self.executor);
         let federation = self.federation;
         let workspaces = self.workspaces;
@@ -1580,6 +1560,7 @@ impl LainMcpServer {
         let status_last_error = self.status_last_error;
         let reload_bus = self.reload_bus;
         let server = self.server;
+        let loopback_bound = addr.ip().is_loopback();
 
         loop {
             match listener.accept().await {
@@ -1594,6 +1575,7 @@ impl LainMcpServer {
                     let status_last_error = status_last_error.clone();
                     let reload_bus = reload_bus.clone();
                     let server = server.clone();
+                    let loopback_bound = loopback_bound;
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let service = service_fn(move |req| {
@@ -1623,6 +1605,7 @@ impl LainMcpServer {
                                 handler_status,
                                 reload_bus.clone(),
                                 server.clone(),
+                                loopback_bound,
                             )
                         });
                         if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
@@ -1829,6 +1812,7 @@ fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
     blob
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
@@ -1843,6 +1827,9 @@ async fn handle_request(
     // carry the presence layer. Presence-tool dispatches inside the
     // JSON-RPC branch see this as `None` and return a descriptive error.
     server: Option<Arc<LainServer>>,
+    // Whether the HTTP listener is bound to a loopback address. Used by
+    // the browser-guard to decide whether to block cross-origin requests.
+    loopback_bound: bool,
 ) -> Result<Response<OverlayHttpBody>, hyper::Error> {
     let jsonrpc_response = |value: serde_json::Value| -> Response<OverlayHttpBody> {
         let body = serde_json::to_string(&value).unwrap_or_default();
@@ -1898,11 +1885,7 @@ async fn handle_request(
     // can POST to a loopback port (a `text/plain` body needs no CORS
     // preflight) or reach it through DNS rebinding, and every tool —
     // including file reads and webhooks — would answer it.
-    if let Err((code, why)) = browser_guard(
-        &method,
-        req.headers(),
-        is_loopback_host(&http_bind_host_quiet()),
-    ) {
+    if let Err((code, why)) = browser_guard(&method, req.headers(), loopback_bound) {
         let body_bytes = serde_json::to_vec(&serde_json::json!({
             "jsonrpc": "2.0",
             "error": {"code": -32003, "message": why},

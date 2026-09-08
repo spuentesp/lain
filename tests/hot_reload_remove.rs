@@ -3,6 +3,7 @@
 //! federation tool surface within seconds — without a restart.
 
 use lain::server::reload::ReloadState;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +40,7 @@ async fn remove_repo_from_workspace_makes_it_invisible_to_list_repos() {
         Arc::clone(&fed),
         lain::server::Transport::Http,
         9999,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         Some(repos_yaml.clone()),
         None, // no embedding model in tests
     )

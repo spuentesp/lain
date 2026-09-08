@@ -294,6 +294,7 @@ impl ReloadSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn reload_bus_broadcasts() {
@@ -375,6 +376,7 @@ mod tests {
                 fed,
                 Transport::Http,
                 9999,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
                 Some(repos_yaml.to_path_buf()),
                 None,
             )
@@ -548,6 +550,7 @@ mod tests {
                 fed,
                 Transport::Http,
                 9999,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
                 Arc::new(crate::server::federation::workspace::WorkspacesFile {
                     default: None,
                     workspaces: vec![],
@@ -620,6 +623,7 @@ mod tests {
                 fed,
                 Transport::Http,
                 9999,
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
                 Arc::new(crate::server::federation::workspace::WorkspacesFile {
                     default: None,
                     workspaces: vec![],
