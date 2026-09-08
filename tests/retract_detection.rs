@@ -18,6 +18,7 @@ use lain::federation::repo_id::{GlobalId, RepoId};
 use lain::schema::NodeType;
 use lain::server::mcp::presence_tools::{run_claim_files, run_register_agent};
 use lain::server::LainServer;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 /// Convenience: assert `claim_files` succeeds and return the parsed JSON.
@@ -50,9 +51,15 @@ fn claim(
 fn build_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<dyn GraphBackend>) {
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp).expect("backend"));
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
-    let server =
-        isolated_state::with_federation(fed, lain::server::Transport::Stdio, 0, None, None)
-            .expect("with_federation");
+    let server = LainServer::with_federation(
+        fed,
+        lain::server::Transport::Stdio,
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        None,
+        None,
+    )
+    .expect("with_federation");
     (Arc::new(server), backend)
 }
 

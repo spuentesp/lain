@@ -14,6 +14,7 @@ use crate::server::{
 };
 use crate::state::ActiveWorkspace;
 use anyhow::{anyhow, Result};
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -23,17 +24,22 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 ///
 /// `config_path` is the path to a `repos.yaml` federation config (see
 /// `src/federation/config.rs` for the schema). `transport` is one of
-/// `"http"` or `"stdio"`. `port` is the TCP port for HTTP. `log_level`
-/// is a tracing `EnvFilter` directive (e.g. `"info"`, `"debug"`).
-/// `workspace_arg` selects the active workspace: "auto" resolves via
-/// `~/.config/lain/active_workspace`, "" loads every repo in
-/// `repos.yaml` (today's behavior), and any other value names a workspace
-/// from `workspaces.yaml` next to `repos.yaml`. `no_process_attribution`
-/// forces the no-op [`AttributionBackend`] regardless of platform.
+/// `"http"` or `"stdio"`. `port` is the TCP port for HTTP. `bind` is
+/// the address the HTTP listener accepts on — defaults to loopback;
+/// non-loopback requires `LAIN_API_KEYS` (enforced inside `LainServer::serve`).
+/// `log_level` is a tracing `EnvFilter` directive (e.g. `"info"`,
+/// `"debug"`). `workspace_arg` selects the active workspace: "auto"
+/// resolves via `~/.config/lain/active_workspace`, "" loads every repo
+/// in `repos.yaml` (today's behavior), and any other value names a
+/// workspace from `workspaces.yaml` next to `repos.yaml`.
+/// `no_process_attribution` forces the no-op [`AttributionBackend`]
+/// regardless of platform.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     config_path: &Path,
     transport: &str,
     port: u16,
+    bind: IpAddr,
     log_level: &str,
     workspace_arg: &str,
     no_process_attribution: bool,
@@ -96,6 +102,7 @@ pub async fn run_server(
             fed,
             transport_enum,
             port,
+            bind,
             workspaces,
             repos_yaml.clone(),
             attribution,
@@ -106,6 +113,7 @@ pub async fn run_server(
             fed,
             transport_enum,
             port,
+            bind,
             repos_yaml.clone(),
             attribution,
             embedding_model,

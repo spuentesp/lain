@@ -35,6 +35,7 @@
 //! `LainServer::with_federation*` constructed inside `run_server`.
 
 use anyhow::{anyhow, Context, Result};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 /// Resolve the workspace list for `lain mcp`.
@@ -277,9 +278,17 @@ async fn run_mcp_federation(workspaces: &[PathBuf], embedding_model: Option<&Pat
     // and the stdio MCP server. We just need to feed it the config
     // and let it do its job. `workspace_arg = ""` means "all repos"
     // (no workspace filter).
-    let result =
-        crate::cli::server::run_server(&tmp_path, "stdio", 0, "info", "", false, embedding_model)
-            .await;
+    let result = crate::cli::server::run_server(
+        &tmp_path,
+        "stdio",
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "info",
+        "",
+        false,
+        embedding_model,
+    )
+    .await;
 
     // Cleanup. Best-effort — a leftover tempfile in /tmp is annoying
     // but not a correctness issue. A process killed by a signal never gets

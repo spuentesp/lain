@@ -24,6 +24,7 @@ pub use query::run_query;
 pub use server::run_server;
 
 use clap::{Parser, Subcommand};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 /// Top-level `lain` CLI surface — kept subcommands only.
@@ -70,6 +71,15 @@ pub enum Commands {
         transport: String,
         #[arg(long, default_value = "9999")]
         port: u16,
+        /// Address to bind the HTTP listener on. Defaults to
+        /// `127.0.0.1` so the server is reachable only from the local
+        /// host (the `LAIN_BIND_ADDR` environment variable overrides
+        /// the default). Pass `0.0.0.0` (or another non-loopback
+        /// address) to expose it on the network — that requires
+        /// `LAIN_API_KEYS` to be set; otherwise the server refuses to
+        /// start.
+        #[arg(long, env = "LAIN_BIND_ADDR", default_value = "127.0.0.1")]
+        bind: IpAddr,
         #[arg(long, default_value = "info")]
         log_level: String,
         /// Active workspace. One of: "auto", "", or a workspace name.

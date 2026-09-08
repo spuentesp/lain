@@ -117,6 +117,9 @@ fn boot_server_fixture(port: u16) -> ServerFixture {
     }
 }
 
+/// Thin wrapper around [`boot_server_with`] that passes no extra
+/// args / env. Existing tests that don't vary `--bind` or `LAIN_API_KEYS`
+/// use this directly.
 fn boot_server(
     port: u16,
 ) -> (
@@ -125,6 +128,35 @@ fn boot_server(
     tempfile::TempDir,
     tempfile::TempDir,
 ) {
+    boot_server_with(port, &[], &[])
+        .map(|(guard, _stderr_path, project, state, xdg_config)| {
+            (guard, project, state, xdg_config)
+        })
+        .expect("boot_server_with")
+}
+
+/// Like [`boot_server`] but appends the given CLI args and sets the
+/// given extra environment variables on the spawned child. Each entry
+/// in `extra_env` is `(name, value)`. Returns `(ServerGuard, stderr_path,
+/// project, state, xdg_config)` so callers that need to inspect startup
+/// logs (the auth/bind regression tests below) can read them; the path
+/// points at the file the spawned child is still writing to, so it is
+/// safe to read after the child exits.
+#[allow(clippy::type_complexity)]
+fn boot_server_with(
+    port: u16,
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> Result<
+    (
+        ServerGuard,
+        std::path::PathBuf,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let project = tempfile::tempdir().unwrap();
     let repo_dir = project.path().join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
@@ -177,19 +209,20 @@ fn boot_server(
     let stderr_path = std::env::temp_dir().join(format!("failure-modes-stderr-{port}.log"));
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_lain"))
-        .args([
-            "server",
-            "--transport",
-            "http",
-            "--port",
-            &port.to_string(),
-            "--workspace",
-            "auto",
-            "--config",
-            repos_yaml_path.to_str().unwrap(),
-        ])
-        .env("XDG_STATE_HOME", state.path())
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lain"));
+    cmd.args([
+        "server",
+        "--transport",
+        "http",
+        "--port",
+        &port.to_string(),
+        "--workspace",
+        "auto",
+        "--config",
+        repos_yaml_path.to_str().unwrap(),
+    ]);
+    cmd.args(extra_args);
+    cmd.env("XDG_STATE_HOME", state.path())
         .env("XDG_CONFIG_HOME", xdg_config.path())
         .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
         // Boot in Full profile so the flagship-tool assertions in
@@ -201,7 +234,14 @@ fn boot_server(
         // surface); the Semantic profile would also drop the flagship
         // tools, masking the original intent.
         .env("LAIN_TOOL_PROFILE", "full")
-        .env_remove("LAIN_EMBEDDING_MODEL")
+        .env_remove("LAIN_EMBEDDING_MODEL");
+    // Strip LAIN_API_KEYS from the base env so callers can set it
+    // via extra_env without it being pre-set.
+    cmd.env_remove("LAIN_API_KEYS");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
         .spawn()
@@ -266,7 +306,7 @@ fn boot_server(
             }
         }
     }
-    (guard, project, state, xdg_config)
+    Ok((guard, stderr_path, project, state, xdg_config))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -963,5 +1003,252 @@ fn server_logs_dropped_messages_gracefully() {
     assert!(
         !tools.is_empty(),
         "tools/list empty after garbage flood: {tools_list}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// F02 — Secure HTTP defaults: loopback-only, public bind needs auth.
+//
+// These three tests cover the contract documented in
+// `docs/agent-fix-tracker-2026-09-08.md` for F02. Before the fix
+// `run_http` at `src/server/mcp/handler.rs:1427` unconditionally bound
+// `0.0.0.0`, and `AuthState::dev_mode()` + `check_bearer` meant HTTP
+// was unauthenticated by default. The three tests below exercise the
+// repaired boundary: the loopback default, the refusal to expose a
+// non-loopback listener without API keys, and the accepted path when
+// keys are present.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Default `lain server --transport http` (no `--bind`) must listen on
+/// loopback only. The startup log line that announces the bind address
+/// — `Starting Lain MCP HTTP server on <addr>` — is the strongest
+/// behavioral check we can make without inspecting kernel sockets: if
+/// the default ever regresses back to `0.0.0.0`, the log line will
+/// show it and the assertion catches it.
+#[test]
+fn http_default_is_loopback() {
+    let port = free_port();
+    let (_server, stderr_path, ..) = boot_server_with(port, &[], &[]).expect("boot_server_with");
+
+    // The startup log line lives in the stderr file the helper
+    // captured. Tracing is async so allow a short window for the
+    // writer to flush.
+    let start = Instant::now();
+    let log = loop {
+        let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        if log.contains("Starting Lain MCP HTTP server on ") {
+            break log;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            panic!(
+                "did not see 'Starting Lain MCP HTTP server on' in stderr within 10s; \
+                 got:\n{log}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let line = log
+        .lines()
+        .find(|l| l.contains("Starting Lain MCP HTTP server on "))
+        .expect("log line present");
+    assert!(
+        line.contains(&format!("127.0.0.1:{port}")),
+        "default listener must bind 127.0.0.1:{port}; log line was: {line:?}",
+    );
+    assert!(
+        !line.contains("0.0.0.0"),
+        "default listener must NOT bind 0.0.0.0; log line was: {line:?}",
+    );
+}
+
+/// `lain server --transport http --bind 0.0.0.0` with no `LAIN_API_KEYS`
+/// must refuse to start and print an actionable error pointing the
+/// operator at the env var and the loopback default. Without the fix,
+/// the server bound `0.0.0.0` and answered every request — anyone on
+/// the network could drive the agent.
+#[test]
+fn http_public_bind_without_auth_refuses_to_start() {
+    let port = free_port();
+    let stderr_path = std::env::temp_dir().join(format!("failure-modes-f02-{port}-stderr.log"));
+    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+
+    // Bypass `boot_server_with` (which polls /health and would never
+    // see a healthy server here). Spawn, then wait for the child to
+    // exit and verify it exited non-zero.
+    let project = tempfile::tempdir().unwrap();
+    let repo_dir = project.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    std::fs::write(
+        repo_dir.join("Cargo.toml"),
+        "[package]\nname = \"failure-modes-f02\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_dir.join("src/lib.rs"),
+        "pub fn placeholder() -> u32 { 0 }\n",
+    )
+    .unwrap();
+    git_init(&repo_dir);
+    let repo_id = "repo";
+    let data_dir = project.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let repos_yaml_path = project.path().join("repos.yaml");
+    std::fs::write(
+        &repos_yaml_path,
+        format!(
+            "data_dir: {}\nrepos:\n  - id: {}\n    source:\n      type: workspace_dir\n      path: {}\n",
+            data_dir.display(),
+            repo_id,
+            repo_dir.display(),
+        ),
+    )
+    .unwrap();
+
+    let state = tempfile::tempdir().unwrap();
+    let xdg_config = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lain"))
+        .args([
+            "server",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--bind",
+            "0.0.0.0",
+            "--workspace",
+            "auto",
+            "--config",
+            repos_yaml_path.to_str().unwrap(),
+        ])
+        .env("XDG_STATE_HOME", state.path())
+        .env("XDG_CONFIG_HOME", xdg_config.path())
+        .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
+        .env_remove("LAIN_API_KEYS")
+        .env_remove("LAIN_EMBEDDING_MODEL")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn lain server");
+
+    // The validation fires inside `LainServer::serve()` after the
+    // federation loads. Wait up to 60s for the child to exit.
+    let start = Instant::now();
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() > Duration::from_secs(60) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => panic!("try_wait: {e}"),
+        }
+    };
+
+    let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    let status = exit_status.expect("server should have exited within 60s");
+    assert!(
+        !status.success(),
+        "server must exit non-zero when --bind 0.0.0.0 has no LAIN_API_KEYS; \
+         status={status:?}; stderr:\n{log}"
+    );
+    assert!(
+        log.contains("Refusing to bind"),
+        "stderr must include the actionable 'Refusing to bind' message; got:\n{log}"
+    );
+    assert!(
+        log.contains("LAIN_API_KEYS"),
+        "stderr must mention LAIN_API_KEYS so the operator knows what to set; got:\n{log}"
+    );
+    assert!(
+        log.contains("--bind 127.0.0.1"),
+        "stderr must point at the loopback escape hatch; got:\n{log}"
+    );
+}
+
+/// `lain server --transport http --bind 0.0.0.0` with `LAIN_API_KEYS`
+/// configured must start successfully, accept `/health` (unauthenticated
+/// by design), require bearer auth on `/mcp`, and accept a valid bearer.
+#[test]
+fn http_public_bind_with_auth_requires_bearer() {
+    let port = free_port();
+    let api_key = "f02-test-key";
+    let (_server, _stderr_path, ..) =
+        boot_server_with(port, &["--bind", "0.0.0.0"], &[("LAIN_API_KEYS", api_key)])
+            .expect("boot_server_with");
+    let host = format!("127.0.0.1:{port}");
+
+    // /health is unauthenticated by design — 200, no header needed.
+    let (status, _body) = http_request(
+        &host,
+        &format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+    );
+    assert_eq!(
+        status, 200,
+        "/health must remain open to unauthenticated probes"
+    );
+
+    // /mcp without Authorization → 401 with a clear message.
+    let mcp_body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+    })
+    .to_string();
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
+        host = host,
+        len = mcp_body.len(),
+        body = mcp_body,
+    );
+    let (status, resp_body) = http_request(&host, &req);
+    assert_eq!(
+        status, 401,
+        "/mcp without bearer must return 401; got {status} body={resp_body}"
+    );
+    assert!(
+        resp_body.contains("missing Authorization: Bearer"),
+        "401 body must explain the missing-bearer contract; got: {resp_body}"
+    );
+
+    // /mcp with a valid bearer → 200 with a real tools/list response.
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+         Authorization: Bearer {api_key}\r\n\
+         Content-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
+        len = mcp_body.len(),
+        body = mcp_body,
+    );
+    let (status, resp_body) = http_request(&host, &req);
+    assert_eq!(
+        status, 200,
+        "/mcp with valid bearer must succeed; got {status} body={resp_body}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&resp_body).expect("mcp body is JSON");
+    let tools = parsed
+        .pointer("/result/tools")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("/mcp response missing result.tools: {resp_body}"));
+    assert!(
+        !tools.is_empty(),
+        "authenticated /mcp must return the tool surface; got: {resp_body}"
+    );
+
+    // /mcp with a wrong bearer → 401 too.
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+         Authorization: Bearer wrong-key\r\n\
+         Content-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
+        len = mcp_body.len(),
+        body = mcp_body,
+    );
+    let (status, resp_body) = http_request(&host, &req);
+    assert_eq!(
+        status, 401,
+        "/mcp with wrong bearer must return 401; got {status} body={resp_body}"
     );
 }

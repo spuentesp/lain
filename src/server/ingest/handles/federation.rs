@@ -10,10 +10,11 @@ use crate::server::federation::repo_id::RepoId;
 use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::ingest::config::Transport;
 use parking_lot::RwLock;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Federation index, workspaces lock, transport, port, and the
+/// Federation index, workspaces lock, transport, port, bind address, and the
 /// `repos.yaml` path the server was launched with. `None` on every
 /// field for single-workspace servers constructed via `LainServer::new`.
 pub struct FederationHandle {
@@ -21,6 +22,7 @@ pub struct FederationHandle {
     pub(crate) federation_workspaces: Option<Arc<RwLock<WorkspacesFile>>>,
     pub(crate) federation_transport: Option<Transport>,
     pub(crate) federation_port: Option<u16>,
+    pub(crate) federation_bind: Option<IpAddr>,
     pub(crate) repos_yaml: Option<PathBuf>,
 }
 
@@ -30,6 +32,7 @@ impl FederationHandle {
         federation_workspaces: Option<Arc<RwLock<WorkspacesFile>>>,
         federation_transport: Option<Transport>,
         federation_port: Option<u16>,
+        federation_bind: Option<IpAddr>,
         repos_yaml: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -37,6 +40,7 @@ impl FederationHandle {
             federation_workspaces,
             federation_transport,
             federation_port,
+            federation_bind,
             repos_yaml,
         }
     }
@@ -71,6 +75,13 @@ impl FederationHandle {
     /// single-workspace servers.
     pub fn port(&self) -> Option<u16> {
         self.federation_port
+    }
+
+    /// The address the HTTP listener binds on. Defaults to loopback
+    /// (`127.0.0.1`) when `federation_bind` is `None`.
+    pub fn bind(&self) -> IpAddr {
+        self.federation_bind
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
     }
 
     /// Path to the `repos.yaml` this server was launched with, if any.
@@ -271,7 +282,7 @@ mod tests {
 
     #[test]
     fn single_workspace_construction_leaves_everything_none_or_zero() {
-        let handle = FederationHandle::new(None, None, None, None, None);
+        let handle = FederationHandle::new(None, None, None, None, None, None);
         assert!(handle.federation().is_none());
         assert_eq!(handle.transport(), None);
         assert_eq!(handle.port(), None);
@@ -288,7 +299,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let handle = FederationHandle::new(None, None, None, None, None);
+        let handle = FederationHandle::new(None, None, None, None, None, None);
         let tmp = tempfile::tempdir().unwrap();
         let repo = RepoConfig {
             id: "test".to_string(),
@@ -302,7 +313,7 @@ mod tests {
 
     #[test]
     fn remove_repo_errors_on_single_workspace() {
-        let handle = FederationHandle::new(None, None, None, None, None);
+        let handle = FederationHandle::new(None, None, None, None, None, None);
         let res = handle.remove_repo("any");
         assert!(res.is_err());
     }

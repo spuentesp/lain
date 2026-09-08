@@ -33,6 +33,7 @@ use crate::server::presence::{
 };
 use crate::server::reload::ReloadBus;
 use parking_lot::RwLock;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -269,6 +270,22 @@ impl LainServer {
             )
         })?;
         let port = self.port().unwrap_or(9999);
+        let bind = self.federation.bind();
+        // P0: a non-loopback HTTP listener without configured API keys
+        // would expose the unauthenticated server to anyone on the
+        // network. Refuse here with an actionable message before any
+        // bind happens — the listener never comes up in that case.
+        if matches!(transport, super::config::Transport::Http)
+            && !bind.is_loopback()
+            && self.auth_handle_inner().auth().api_keys.is_none()
+        {
+            return Err(crate::server::error::LainError::Other(format!(
+                "Refusing to bind HTTP on {bind}:{port} without authentication. \
+                 Either set LAIN_API_KEYS to a non-empty comma-separated list, or \
+                 bind to loopback with --bind 127.0.0.1 (the default)."
+            )));
+        }
+        let addr = SocketAddr::new(bind, port);
 
         let workspaces = self.federation.workspaces_handle();
         let mcp = match workspaces {
@@ -293,7 +310,7 @@ impl LainServer {
         .with_server(server_arc);
         match transport {
             super::config::Transport::Http => mcp
-                .run_http(port)
+                .run_http(addr)
                 .await
                 .map_err(|e| crate::server::error::LainError::Mcp(format!("HTTP transport: {e}"))),
             super::config::Transport::Stdio => mcp

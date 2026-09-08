@@ -13,6 +13,7 @@ use lain::federation::health::RepoHealth;
 use lain::federation::repo_id::RepoId;
 use lain::federation::repo_index::RepoIndex;
 use lain::federation::repo_source::WorkspaceDirSource;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -681,6 +682,7 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         Arc::clone(&ws_a),
         None,
         None, // no embedding model in tests
@@ -838,6 +840,7 @@ async fn detect_overlap_reports_shared_symbols() {
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         workspaces,
         None,
         None, // no embedding model in tests
@@ -935,6 +938,7 @@ async fn detect_overlap_rejects_unknown_workspace() {
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         workspaces,
         None,
         None, // no embedding model in tests
@@ -1004,6 +1008,7 @@ async fn detect_overlap_two_shared_functions_is_high() {
         Arc::clone(&fed),
         Transport::Stdio,
         0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
         workspaces,
         None,
         None, // no embedding model in tests
@@ -1127,8 +1132,15 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     // indexed repo graph. Clone the Arc so we can still read
     // `fed.get_repo(...).db()` below to compare against the
     // executor's view.
-    let server = isolated_state::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
-        .expect("with_federation");
+    let server = LainServer::with_federation(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        None,
+        None,
+    )
+    .expect("with_federation");
 
     // The per-repo tool's view of the world. `find_anchors` calls
     // `graph.find_anchors(limit)` which is the very first read of
@@ -1191,8 +1203,15 @@ async fn multi_repo_federation_falls_back_to_placeholder() {
     let fed = isolated_state::load_federation(&cfg_path).await.unwrap();
     assert_eq!(fed.list_repos().len(), 2);
 
-    let server = isolated_state::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
-        .expect("with_federation");
+    let server = LainServer::with_federation(
+        Arc::clone(&fed),
+        Transport::Stdio,
+        0,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        None,
+        None,
+    )
+    .expect("with_federation");
 
     // The placeholder path: the executor's graph is fresh and
     // empty (0 nodes), not bound to either repo. This is the

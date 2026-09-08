@@ -29,6 +29,7 @@ use crate::server::reload::ReloadBus;
 use crate::server::tools::{ToolExecutor, ToolExecutorConfig};
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use parking_lot::{Mutex, RwLock};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -41,6 +42,7 @@ struct FederationServerConfig {
     federation: Arc<FederatedIndex>,
     transport: Transport,
     port: u16,
+    bind: IpAddr,
     repos_yaml: Option<PathBuf>,
     attribution: Arc<dyn AttributionBackend>,
     embedding_model: Option<PathBuf>,
@@ -302,6 +304,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         federation,
         transport,
         port,
+        bind,
         repos_yaml,
         attribution,
         embedding_model,
@@ -493,6 +496,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         workspaces_lock,
         Some(transport),
         Some(port),
+        Some(bind),
         repos_yaml,
     ));
 
@@ -709,7 +713,7 @@ impl LainServer {
         ));
 
         let federation_handle = Arc::new(super::handles::FederationHandle::new(
-            None, None, None, None, None,
+            None, None, None, None, None, None,
         ));
 
         let audit_handle = Arc::new(super::handles::AuditState::new(events_log.clone()));
@@ -777,6 +781,7 @@ impl LainServer {
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         repos_yaml: Option<PathBuf>,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
@@ -784,6 +789,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             repos_yaml,
             default_attribution_backend(),
             embedding_model,
@@ -802,6 +808,7 @@ impl LainServer {
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         repos_yaml: Option<PathBuf>,
         attribution: Arc<dyn AttributionBackend>,
         embedding_model: Option<&Path>,
@@ -810,6 +817,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             repos_yaml,
             attribution,
             embedding_model: embedding_model.map(Path::to_path_buf),
@@ -832,6 +840,7 @@ impl LainServer {
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         workspaces: Arc<WorkspacesFile>,
         repos_yaml: Option<PathBuf>,
         embedding_model: Option<&Path>,
@@ -840,6 +849,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             workspaces,
             repos_yaml,
             default_attribution_backend(),
@@ -850,10 +860,12 @@ impl LainServer {
     /// Same as [`Self::with_federation_and_workspaces`] but lets the
     /// caller supply an explicit [`AttributionBackend`]. See
     /// [`Self::with_federation_with_attribution`] for `embedding_model`.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_federation_and_workspaces_with_attribution(
         federation: Arc<FederatedIndex>,
         transport: Transport,
         port: u16,
+        bind: IpAddr,
         workspaces: Arc<WorkspacesFile>,
         repos_yaml: Option<PathBuf>,
         attribution: Arc<dyn AttributionBackend>,
@@ -863,6 +875,7 @@ impl LainServer {
             federation,
             transport,
             port,
+            bind,
             repos_yaml,
             attribution,
             embedding_model: embedding_model.map(Path::to_path_buf),
