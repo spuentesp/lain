@@ -87,6 +87,21 @@ pub(crate) fn read_lines_cached(resolved: &Path) -> Option<Vec<String>> {
     Some(lines)
 }
 
+/// A handle "looks like a path" when it has an explicit separator or
+/// root marker. Bare names like `target` return false even when they
+/// also happen to name a directory in the server's cwd.
+pub fn is_explicit_path(handle: &str) -> bool {
+    handle.starts_with('/')
+        || handle.starts_with("./")
+        || handle.starts_with("../")
+        || handle.starts_with("~/")
+        || handle.contains('/')
+        || handle.contains('\\')
+        || (handle.len() >= 3
+            && handle.as_bytes()[1] == b':'
+            && (handle.as_bytes()[2] == b'\\' || handle.as_bytes()[2] == b'/'))
+}
+
 /// Helper to resolve a handle (name, path, or ID) to a node
 pub fn resolve_node(
     graph: &GraphDatabase,
@@ -108,13 +123,13 @@ pub fn resolve_node(
         ));
     }
 
-    // Preserve the original spelling for IDs and names. A symbol name can
-    // also be an existing directory (for example `target`), so resolving
-    // paths first can hide a valid symbol.
-    let canonical_handle = if Path::new(handle).exists() {
+    // Canonical form is computed only for the path-lookup step and only
+    // when the handle is an explicit path. Steps 1-4 (id / name lookup)
+    // use the raw handle so a bare name never collides with cwd.
+    let canonical_handle = if is_explicit_path(handle) && Path::new(handle).exists() {
         dunce::canonicalize(handle)
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(handle.to_string())
+            .unwrap_or_else(|_| handle.to_string())
     } else {
         handle.to_string()
     };
@@ -157,10 +172,7 @@ pub fn resolve_node(
         return Ok(n);
     }
 
-    // An empty graph means this "not found" is not about the symbol at
-    // all — nothing would resolve, so the committed-code explanation
-    // below would be a confident, specific, wrong answer. Say what is
-    // actually true instead.
+    // Existing empty-graph + not-found error messages stay unchanged.
     if graph.node_count() == 0 && overlay.stats().node_count == 0 {
         return Err(LainError::NotFound(format!(
             "Node not found for handle: {handle} — but the graph being \
@@ -171,10 +183,6 @@ pub fn resolve_node(
              graph rather than the staging placeholder."
         )));
     }
-
-    // The graph indexes committed state, so a symbol written but not yet
-    // committed is genuinely absent rather than misplaced. Saying so turns a
-    // dead end into a next step; the bare message reads as "does not exist".
     Err(LainError::NotFound(format!(
         "Node not found for handle: {handle} — the graph indexes committed code, \
          so a symbol added since the last commit will not appear until it is \
@@ -207,7 +215,10 @@ pub fn resolve_node_federation_fallback(
     federation: &FederatedIndex,
     handle: &str,
 ) -> Option<GraphNode> {
-    let canonical_handle = if Path::new(handle).exists() {
+    // Canonical form is computed only for the path-lookup step and only
+    // when the handle is an explicit path. Steps 1-4 (id / name lookup)
+    // use the raw handle so a bare name never collides with cwd.
+    let canonical_handle = if is_explicit_path(handle) && Path::new(handle).exists() {
         dunce::canonicalize(handle)
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| handle.to_string())
