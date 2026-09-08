@@ -234,34 +234,36 @@ if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_TOKEN:-}" ] &
 fi
 if [ -n "$PR_NUMBER" ]; then
   echo "::group::Per-PR impact (PR #${PR_NUMBER})"
-  CHANGED_FILES=$(curl -fsS \
+  # Pull the per-file metadata + diff patch in one API call. The
+  # patch is what tells us *which* symbols were actually changed
+  # in this PR — extracting top-level functions of the file would
+  # include symbols the PR never touched.
+  FILES_JSON=$(curl -fsS \
     -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=50" \
-    | jq -r '.[] | .filename' 2>/dev/null | head -20)
-  if [ -n "$CHANGED_FILES" ] && [ -d "$WORKSPACE" ]; then
-    # Sanitize filename for section headers; sort to keep the
-    # output stable across runs.
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=50")
+  if [ -n "$FILES_JSON" ] && [ -d "$WORKSPACE" ]; then
     PR_LINES=""
     TOTAL_SYMBOLS=0
-    while IFS= read -r f; do
-      [ -z "$f" ] && continue
-      abs="$WORKSPACE/$f"
-      [ -f "$abs" ] || continue
-      SYMS=$(case "$f" in
-        *.py)
-          grep -oE "^(def|class|async def) [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $2}' | sort -u | head -3 ;;
-        *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
-          {
-            grep -oE "^(export )?(async )?function [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $NF}'
-            grep -oE "^(export )?(const|let|var) [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $3}'
-          } | sort -u | head -3 ;;
-        *.rs)
-          grep -oE "^(pub )?(async )?fn [a-zA-Z_][a-zA-Z0-9_]*" "$abs" 2>/dev/null | awk '{print $NF}' | sort -u | head -3 ;;
-        *) echo "" ;;
-      esac)
-      [ -z "$SYMS" ] && continue
-      PR_LINES="$PR_LINES\n\n### \`$f\`"
+    TOTAL_FILES=0
+    # For each file, only consider it a code file if the patch
+    # contains an added or modified function definition. Workflow
+    # YAML, lockfiles, generated code, etc. are skipped because
+    # they don't have meaningful blast-radius signals.
+    while IFS=$'\t' read -r filename patch; do
+      [ -z "$filename" ] && continue
+      [ -z "$patch" ] && continue
+      # Strip the +/- prefixes from the patch and find added/modified
+      # function definitions. The leading '+' identifies an addition
+      # to the file; ' +' is a context line with a leading space.
+      ADDED_FNS=$(printf '%s\n' "$patch" \
+        | grep -E '^\+[^+]' \
+        | grep -oE '(function|def|async def|class|fn) [a-zA-Z_][a-zA-Z0-9_]*' \
+        | awk '{print $2}' \
+        | sort -u)
+      [ -z "$ADDED_FNS" ] && continue
+      TOTAL_FILES=$((TOTAL_FILES + 1))
+      PR_LINES="$PR_LINES\n\n### \`$filename\`"
       while IFS= read -r sym; do
         [ -z "$sym" ] && continue
         TOTAL_SYMBOLS=$((TOTAL_SYMBOLS + 1))
@@ -270,18 +272,15 @@ if [ -n "$PR_NUMBER" ]; then
           -H 'Content-Type: application/json' \
           -d "$BR_BODY" 2>/dev/null \
           | jq -r 'try (.result.content[0].text // .error.message) catch "(parse error)"' 2>/dev/null \
-          | head -8)
-        # Pull the first numeric "N callers" or "called by N" stat if
-        # present; otherwise just embed the first few lines so the
-        # reviewer has a usable summary.
+          | head -10)
         if [ -n "$BR_TEXT" ]; then
-          PR_LINES="$PR_LINES\n\n#### \`$sym\`\n"
+          PR_LINES="$PR_LINES\n\n#### \`$sym\` (new)\n"
           PR_LINES="$PR_LINES\n\`\`\`\n${BR_TEXT}\n\`\`\`"
         fi
-      done <<< "$SYMS"
-    done <<< "$CHANGED_FILES"
+      done <<< "$ADDED_FNS"
+    done < <(echo "$FILES_JSON" | jq -r '.[] | select(.patch != null) | [.filename, .patch] | @tsv')
     if [ -n "$PR_LINES" ]; then
-      PR_IMPACT=$(printf "## PR impact\n\n_Blast radius for ${TOTAL_SYMBOLS} symbol(s) across $(echo "$CHANGED_FILES" | wc -l) changed file(s) (top 3 symbols per file)._\n%b" "$PR_LINES")
+      PR_IMPACT=$(printf "## PR impact\n\n_Blast radius for ${TOTAL_SYMBOLS} new symbol(s) across ${TOTAL_FILES} file(s)._\n%b" "$PR_LINES")
     fi
   fi
   echo "::endgroup::"
