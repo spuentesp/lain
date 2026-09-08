@@ -213,8 +213,11 @@ pub async fn load_federation_with_workspace(
         handles.push(tokio::spawn(async move {
             let _permit = permit;
             source.fetch().await?;
-            let _repo_id = source.id().clone();
+            let repo_id = source.id().clone();
             fed_clone.add_repo(source, &data_dir).await?;
+            if let Some(repo) = fed_clone.get_repo(&repo_id) {
+                repo.set_cross_repo_resolver(fed_clone.clone());
+            }
             Ok::<(), LainError>(())
         }));
     }
