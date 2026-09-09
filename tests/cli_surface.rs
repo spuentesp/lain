@@ -200,7 +200,7 @@ fn the_documented_command_table_matches_the_binary() {
 /// header. Pattern modeled on `tests/doctor_smoke.rs::lain()`.
 #[test]
 fn lain_reindex_backs_up_graph_and_rebuilds() {
-    use lain::federation::graph_backend::FEDERATION_GRAPH_VERSION;
+    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, GraphBackend, PetgraphBackend};
     use std::process::Command;
 
     let project = tempfile::tempdir().expect("tempdir");
@@ -251,8 +251,26 @@ fn lain_reindex_backs_up_graph_and_rebuilds() {
     // reindex` exists to recover from.
     let fake_v1 = b"\x07\x00\x00\x00\x00\x00\x00\x00not-a-real-payload-just-bytes";
     std::fs::write(data_dir.join("federated_graph.bin"), fake_v1).expect("plant v1 bin");
+    // Also plant a sidecar with garbage bytes. If `lain reindex` failed to
+    // clear the sidecar, the next startup would hydrate from this stale
+    // sidecar and miss the rebuild — the assertion below would still
+    // pass against the canonical file but the underlying state would be
+    // wrong. The fix in `src/cli/reindex.rs` removes the sidecar as part
+    // of the backup step.
+    std::fs::write(
+        data_dir.join("federated_graph.bin.payload"),
+        b"\xde\xad\xbe\xefsidecar-from-previous-run",
+    )
+    .expect("plant stale sidecar");
 
+    // `LAIN_TEST_NO_LSP=1` tells `LspMultiplexer::new` to pre-populate
+    // its `unavailable` set so `ensure_server` short-circuits without
+    // attempting to spawn rust-analyzer / gopls / etc. The scanner's
+    // `unwrap_or_default()` then returns an empty ref-set so the test
+    // outcome doesn't depend on whether the host has rust-analyzer on
+    // PATH.
     let out = Command::new(env!("CARGO_BIN_EXE_lain"))
+        .env("LAIN_TEST_NO_LSP", "1")
         .args([
             "reindex",
             "--config",
@@ -276,9 +294,30 @@ fn lain_reindex_backs_up_graph_and_rebuilds() {
         "backup must preserve the original v1 payload byte-for-byte"
     );
 
+    // The stale sidecar planted above must not survive the backup step
+    // in its planted form. `lain reindex` removes it as part of its
+    // pre-flight, and the rebuild re-creates a fresh sidecar from the
+    // re-projection; either way the planted garbage cannot be present.
+    let planted_sidecar = b"\xde\xad\xbe\xefsidecar-from-previous-run";
+    let sidecar_path = data_dir.join("federated_graph.bin.payload");
+    if sidecar_path.exists() {
+        let sidecar_bytes = std::fs::read(&sidecar_path).expect("read sidecar");
+        assert_ne!(
+            sidecar_bytes, planted_sidecar,
+            "reindex must replace the stale sidecar with a fresh payload; \
+             otherwise the next startup hydrates from the previous run's \
+             payload instead of from source"
+        );
+    }
+
     // The new file must carry the current federation envelope (`LNF2` magic
     // plus the version encoded by `FEDERATION_GRAPH_VERSION`).
     let fresh = std::fs::read(data_dir.join("federated_graph.bin")).expect("read bin");
+    assert!(
+        fresh.len() >= 8,
+        "new graph.bin too short for an envelope: len={}",
+        fresh.len()
+    );
     assert!(
         fresh.starts_with(b"LNF2"),
         "new graph.bin missing LNF2 magic, got {:02x?}",
@@ -291,6 +330,32 @@ fn lain_reindex_backs_up_graph_and_rebuilds() {
         "new graph.bin must carry version={}, got {version}",
         FEDERATION_GRAPH_VERSION
     );
+
+    // Reopen the rebuilt graph through the real loader and assert the
+    // fixture's content actually landed. A header-only assertion can
+    // pass against an empty rebuilt graph; this exercises the rebuilt
+    // payload end-to-end.
+    let backend = PetgraphBackend::new(&data_dir).expect("reopen rebuilt backend");
+    let names: Vec<String> = backend
+        .list_nodes()
+        .expect("list nodes")
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    assert!(
+        backend.node_count() > 0,
+        "rebuilt graph has zero nodes; reindex did not actually rebuild. \
+         nodes: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "alpha"),
+        "expected fixture function `alpha` in rebuilt graph, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "beta"),
+        "expected fixture function `beta` in rebuilt graph, got {names:?}"
+    );
+    let _ = FEDERATION_GRAPH_VERSION;
 }
 
 /// The prose around the table must not contradict it — the old copy
