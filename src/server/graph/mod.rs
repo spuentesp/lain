@@ -14,7 +14,7 @@ use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
-use petgraph::visit::{EdgeRef, IntoNodeReferences};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences};
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -612,6 +612,51 @@ impl GraphDatabase {
             };
             if now_empty {
                 self.name_index.remove(&name);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Remove edges matching any of the given `(source_id, target_id, edge_type)`
+    /// triples. Endpoints are left intact — only the edges themselves go.
+    ///
+    /// Companion to [`Self::remove_nodes_by_ids`] for callers that need to
+    /// retract edges whose endpoints are still live. The federation's
+    /// `project_edges` uses it to reconcile: when a per-repo DB drops a
+    /// `Calls` edge but the caller and callee are still indexed, the
+    /// federated edge would otherwise persist until the node itself went
+    /// away. Returning the number actually removed (vs. requested) lets
+    /// callers tell "no-op" apart from "the stale edge was already gone".
+    pub fn remove_edges(&self, edges: &[GraphEdge]) -> Result<usize, LainError> {
+        self.check_writable()?;
+
+        let targets: std::collections::HashSet<(String, String, EdgeType)> = edges
+            .iter()
+            .map(|e| (e.source_id.clone(), e.target_id.clone(), e.edge_type.clone()))
+            .collect();
+
+        let mut removed = 0usize;
+        {
+            let mut graph = self.graph.write();
+            // Collect first, mutate after: `remove_edge` invalidates the
+            // edge-index iterator (`edges_directed` / `edges_connecting`)
+            // the moment a removal lands.
+            let mut to_remove: Vec<petgraph::stable_graph::EdgeIndex> = Vec::new();
+            for edge in graph.edge_references() {
+                let w = edge.weight();
+                if targets.contains(&(
+                    w.source_id.clone(),
+                    w.target_id.clone(),
+                    w.edge_type.clone(),
+                ))
+                {
+                    to_remove.push(edge.id());
+                }
+            }
+            for eid in to_remove {
+                if graph.remove_edge(eid).is_some() {
+                    removed += 1;
+                }
             }
         }
         Ok(removed)
