@@ -2428,3 +2428,179 @@ async fn reconciliation_removes_obsolete_calls_between_live_nodes() {
         backend.all_edges().unwrap()
     );
 }
+
+// ---------------------------------------------------------------------------
+// F10 REWORK (Codex re-check 2026-09-08 H2) — cross-repo `Calls` edges
+// must survive repeated `project_edges` calls even when the resolve-phase
+// external-edge stash is empty.
+//
+// Repro: project_edges reconciles repo-owned edges against the new batch.
+// Cross-repo outgoing `Calls` edges come from the one-shot
+// `take_pending_external_edges()` drain; on the next projection the stash
+// is empty, so without the rework the reconciliation diff treats the
+// still-live cross-repo edge as stale and removes it.
+//
+// The fix excludes cross-repo outgoing `Calls` edges from the stale
+// filter. They survive until either the foreign target node is removed
+// (petgraph's `remove_node` takes incident edges with it) or the entire
+// source repo is removed.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cross_repo_calls_survive_repeated_projection() {
+    use lain::federation::federated_index::FederatedIndex;
+    use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
+    use lain::federation::repo_source::WorkspaceDirSource;
+    use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let svc_root = tmp.path().join("svc");
+    std::fs::create_dir_all(svc_root.join("src")).unwrap();
+    std::fs::write(
+        svc_root.join("src/lib.rs"),
+        "pub fn caller() { callee(); }\n",
+    )
+    .unwrap();
+    git2::Repository::init(&svc_root).unwrap();
+
+    let lib_root = tmp.path().join("lib");
+    std::fs::create_dir_all(lib_root.join("src")).unwrap();
+    std::fs::write(
+        lib_root.join("src/lib.rs"),
+        "pub fn callee() {}\n",
+    )
+    .unwrap();
+    git2::Repository::init(&lib_root).unwrap();
+
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend.clone()));
+
+    let svc_id = RepoId::new("svc").unwrap();
+    let lib_id = RepoId::new("lib").unwrap();
+    let svc_source = WorkspaceDirSource::new(svc_id.clone(), svc_root).unwrap();
+    let lib_source = WorkspaceDirSource::new(lib_id.clone(), lib_root).unwrap();
+    fed.add_repo(Box::new(svc_source), tmp.path()).await.unwrap();
+    fed.add_repo(Box::new(lib_source), tmp.path()).await.unwrap();
+
+    let svc_repo = fed.get_repo(&svc_id).expect("svc registered");
+    let lib_repo = fed.get_repo(&lib_id).expect("lib registered");
+
+    let caller_local = GraphNode::new(
+        NodeType::Function,
+        "caller".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 1);
+    let callee_local = GraphNode::new(
+        NodeType::Function,
+        "callee".into(),
+        "src/lib.rs".into(),
+    )
+    .with_location(1, 1);
+    svc_repo.db().insert_node(&caller_local).unwrap();
+    lib_repo.db().insert_node(&callee_local).unwrap();
+
+    let callee_global = format!(
+        "lib:Function:src/lib.rs:callee:{}",
+        callee_local.line_start.unwrap_or(0)
+    );
+    let cross_edge = GraphEdge::new(
+        EdgeType::Calls,
+        caller_local.id.clone(),
+        callee_global.clone(),
+    );
+    // `insert_edges_batch` routes to `pending_external_edges` when the
+    // target is not in the local index — exactly the path the resolve
+    // phase takes for genuine cross-repo calls.
+    let dropped =
+        svc_repo.db().insert_edges_batch(&[cross_edge.clone()]).unwrap();
+    assert_eq!(dropped, 0, "cross-repo edge must reach the external stash");
+
+    // First projection: drains the stash, materializes the cross-repo
+    // `Calls` edge in the federated backend.
+    fed.project_nodes(&svc_id).await.unwrap();
+    fed.project_nodes(&lib_id).await.unwrap();
+    fed.project_edges(&svc_id).await.unwrap();
+    fed.project_edges(&lib_id).await.unwrap();
+
+    let caller_global = format!(
+        "svc:Function:src/lib.rs:caller:{}",
+        caller_local.line_start.unwrap_or(0)
+    );
+    let after_first: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == caller_global
+                && e.target_id == callee_global
+        })
+        .collect();
+    assert_eq!(
+        after_first.len(),
+        1,
+        "first projection must materialize the cross-repo Calls edge; \
+         backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // Defect scenario: second projection WITHOUT any new cross-repo
+    // edges in the stash (simulating a no-op reproject or a reindex
+    // where the resolve phase didn't re-detect the call). Pre-fix the
+    // reconciliation diff treated the cross-repo edge as stale and
+    // deleted it.
+    fed.project_edges(&svc_id).await.unwrap();
+
+    let after_second: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == caller_global
+                && e.target_id == callee_global
+        })
+        .collect();
+    assert_eq!(
+        after_second.len(),
+        1,
+        "F10 REWORK: cross-repo Calls edge must survive repeated \
+         projection; backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+
+    // Both endpoints survive — the rework retracts only the edge, not
+    // the nodes, mirroring the intra-repo F10 contract.
+    assert!(
+        backend.has_node(&caller_global).unwrap(),
+        "caller node must survive"
+    );
+    assert!(
+        backend.has_node(&callee_global).unwrap(),
+        "callee node must survive"
+    );
+
+    // A third back-to-back reproject is still a no-op for the cross-repo
+    // edge (idempotency check).
+    fed.project_edges(&svc_id).await.unwrap();
+    let after_third: Vec<GraphEdge> = backend
+        .all_edges()
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == caller_global
+                && e.target_id == callee_global
+        })
+        .collect();
+    assert_eq!(
+        after_third.len(),
+        1,
+        "third projection must still report the cross-repo Calls edge; \
+         backend edges: {:?}",
+        backend.all_edges().unwrap()
+    );
+}
