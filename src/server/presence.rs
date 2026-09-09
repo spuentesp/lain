@@ -1920,6 +1920,87 @@ pub enum PresenceEvent {
     },
 }
 
+/// Public, wire-safe view of an `AgentSession`. Mirrors every
+/// non-credential field; `session_token` is excluded because any
+/// subscriber that reads an `AgentJoined` frame can replay the token
+/// and impersonate the holder through `heartbeat` / `claim_files` /
+/// `release_files`. Constructed once at the SSE framing boundary via
+/// `From<AgentSession>`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentJoinedPublic {
+    pub id: AgentId,
+    pub name: String,
+    pub kind: AgentKind,
+    pub mode: AgentMode,
+    pub pid: Option<u32>,
+    pub parent_session_id: Option<AgentId>,
+    pub started_at: SystemTime,
+    pub last_heartbeat: SystemTime,
+}
+
+impl From<AgentSession> for AgentJoinedPublic {
+    fn from(s: AgentSession) -> Self {
+        Self {
+            id: s.id,
+            name: s.name,
+            kind: s.kind,
+            mode: s.mode,
+            pid: s.pid,
+            parent_session_id: s.parent_session_id,
+            started_at: s.started_at,
+            last_heartbeat: s.last_heartbeat,
+        }
+    }
+}
+
+/// Public, wire-safe view of a `PresenceEvent`. The `AgentJoined`
+/// variant wraps `AgentJoinedPublic` (no `session_token`); all other
+/// variants are pass-throughs. Constructed once at the SSE framing
+/// boundary via `From<PresenceEvent>` and consumed by
+/// `sse::frame_for`'s `serde_json::to_string` call. `Deserialize`
+/// is required because `EventsLog::replay_after` reads the same
+/// shape back from `events.jsonl`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum PresenceEventPublic {
+    AgentJoined(AgentJoinedPublic),
+    AgentLeft(AgentId),
+    HeartbeatExpired(AgentId),
+    ClaimGranted { agent_id: AgentId, path: PathBuf },
+    ClaimReleased { agent_id: AgentId, path: PathBuf },
+    ClaimRevoked { agent_id: AgentId, path: PathBuf, reason: String },
+    ConflictDetected {
+        agent_id: AgentId,
+        conflicts: Vec<ConflictEntry>,
+        severity: String,
+    },
+    EditLanded {
+        event: crate::server::audit::AuditEvent,
+    },
+}
+
+impl From<PresenceEvent> for PresenceEventPublic {
+    fn from(e: PresenceEvent) -> Self {
+        match e {
+            PresenceEvent::AgentJoined(s) => Self::AgentJoined(AgentJoinedPublic::from(s)),
+            PresenceEvent::AgentLeft(a) => Self::AgentLeft(a),
+            PresenceEvent::HeartbeatExpired(a) => Self::HeartbeatExpired(a),
+            PresenceEvent::ClaimGranted { agent_id, path } => {
+                Self::ClaimGranted { agent_id, path }
+            }
+            PresenceEvent::ClaimReleased { agent_id, path } => {
+                Self::ClaimReleased { agent_id, path }
+            }
+            PresenceEvent::ClaimRevoked { agent_id, path, reason } => {
+                Self::ClaimRevoked { agent_id, path, reason }
+            }
+            PresenceEvent::ConflictDetected { agent_id, conflicts, severity } => {
+                Self::ConflictDetected { agent_id, conflicts, severity }
+            }
+            PresenceEvent::EditLanded { event } => Self::EditLanded { event },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Persistence: PresenceRegistry + OccupancyMap <-> JSON
 // ---------------------------------------------------------------------------

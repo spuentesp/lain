@@ -43,28 +43,43 @@ pub struct SseFrame {
     pub id: u64,
 }
 
-/// SSE event-name mapping for a `PresenceEvent`. Shared between the
-/// live path and the replay backlog so both emit identical frames.
-fn event_name(event: &PresenceEvent) -> &'static str {
+/// SSE event-name mapping for a `PresenceEventPublic`. Shared between
+/// the live path (which converts via `PresenceEventPublic::from`) and
+/// the replay backlog (which reads the public DTO straight off disk)
+/// so both emit identical frames.
+fn event_name(event: &PresenceEventPublic) -> &'static str {
     match event {
-        PresenceEvent::AgentJoined(_) => "agent_joined",
-        PresenceEvent::AgentLeft(_) => "agent_left",
-        PresenceEvent::HeartbeatExpired(_) => "heartbeat_expired",
-        PresenceEvent::ClaimGranted { .. } => "claim_granted",
-        PresenceEvent::ClaimReleased { .. } => "claim_released",
-        PresenceEvent::ClaimRevoked { .. } => "claim_revoked",
-        PresenceEvent::ConflictDetected { .. } => "conflict_detected",
-        PresenceEvent::EditLanded { .. } => "edit_landed",
+        PresenceEventPublic::AgentJoined(_) => "agent_joined",
+        PresenceEventPublic::AgentLeft(_) => "agent_left",
+        PresenceEventPublic::HeartbeatExpired(_) => "heartbeat_expired",
+        PresenceEventPublic::ClaimGranted { .. } => "claim_granted",
+        PresenceEventPublic::ClaimReleased { .. } => "claim_released",
+        PresenceEventPublic::ClaimRevoked { .. } => "claim_revoked",
+        PresenceEventPublic::ConflictDetected { .. } => "conflict_detected",
+        PresenceEventPublic::EditLanded { .. } => "edit_landed",
     }
 }
 
-fn frame_for(id: u64, event: &PresenceEvent) -> SseFrame {
-    let data = serde_json::to_string(event).unwrap_or_else(|_| "{}".into());
+fn frame_for(id: u64, event: PresenceEventPublic) -> SseFrame {
+    let event_name = event_name(&event);
+    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
     SseFrame {
         event: event_name(event),
         data,
         id,
     }
+}
+
+/// Build one `SseFrame` from a `PresenceEvent`. Public so
+/// `tests/review_ledger_2026_09_07::joined_event_contains_bearer_credential`
+/// can exercise the same wire path that live SSE subscribers see,
+/// rather than asserting on a hand-rolled serializer that might
+/// diverge from production. The internal type is converted to
+/// `PresenceEventPublic` here so the wire shape is identical
+/// regardless of which path (live broadcast or durable replay)
+/// produced the frame.
+pub fn build_frame(id: u64, event: PresenceEvent) -> SseFrame {
+    frame_for(id, PresenceEventPublic::from(event))
 }
 
 /// Owning stream of `SseFrame`s produced from a `broadcast::Receiver`,
@@ -90,7 +105,9 @@ impl SseStream {
         }
         loop {
             match self.rx.recv().await {
-                Ok((id, event)) => return Some(Ok(frame_for(id, &event))),
+                Ok((id, event)) => {
+                    return Some(Ok(frame_for(id, PresenceEventPublic::from(event))))
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
@@ -213,8 +230,10 @@ mod tests {
     }
 
     /// Helper: build one `SseFrame` from a `PresenceEvent` without
-    /// needing a live broadcast channel.
-    async fn build_frame_for(event: &PresenceEvent) -> SseFrame {
-        frame_for(1, event)
+    /// needing a live broadcast channel. Routes through the public
+    /// `build_frame` so the wire path is identical to what live
+    /// subscribers see.
+    async fn build_frame_for(event: PresenceEvent) -> SseFrame {
+        build_frame(1, event)
     }
 }
