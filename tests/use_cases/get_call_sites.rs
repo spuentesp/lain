@@ -14,7 +14,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-use common::{boot_single_repo, git_init_committed, tools_call_text};
+use common::{boot_single_repo_in_dir, git_init_committed, tools_call_text};
 
 #[test]
 fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
@@ -57,30 +57,24 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
     let repos_yaml_path = project.path().join("repos.yaml");
     std::fs::write(&repos_yaml_path, repos_yaml).unwrap();
 
-    // `boot_single_repo` spawns the `lain server` subprocess without
-    // setting its `current_dir`, so the child inherits this test
-    // process's cwd at spawn time. `resolve_node` (src/server/tools/
-    // utils.rs) canonicalizes any handle that `Path::new(handle).exists()`
-    // finds on disk *relative to that cwd* before trying a name lookup —
-    // the same mechanism wishlist #15 diagnosed for the literal name
-    // "target" colliding with a real `target/` build directory. Running
-    // this test suite from the crate root (the normal `cargo test`
-    // invocation) means the spawned server's cwd contains `target/`,
-    // so the by-name call below resolved to that directory and skipped
-    // every name-lookup branch — not a `find_node_by_name` regression,
-    // as an earlier version of this comment claimed. Chdir to the
-    // fixture's tempdir (which has no `target/` of its own) before
-    // spawning, then restore, so "target" is unambiguously a symbol name.
-    let prev_cwd = std::env::current_dir().ok();
-    std::env::set_current_dir(project.path()).expect("chdir to fixture tempdir");
-    let (host, _guard) = boot_single_repo(
+    // `resolve_node` (src/server/tools/utils.rs) canonicalizes any handle
+    // that `Path::new(handle).exists()` finds on disk *relative to the
+    // server process's cwd* before trying a name lookup — the same
+    // mechanism wishlist #15 diagnosed for the literal name "target"
+    // colliding with a real `target/` build directory when the server
+    // runs from the crate root, not a `find_node_by_name` regression as
+    // an earlier version of this comment claimed. `boot_single_repo_in_dir`
+    // spawns the server with its cwd set explicitly to this fixture's
+    // tempdir (which has no `target/` of its own), so "target" is
+    // unambiguously a symbol name — without touching this *test*
+    // process's own cwd, which is shared, process-wide state that other
+    // tests running concurrently in this binary also depend on.
+    let (host, _guard) = boot_single_repo_in_dir(
+        project.path(),
         &repo_dir,
         &repos_yaml_path,
         &["target", "caller"],
     );
-    if let Some(p) = prev_cwd.as_ref() {
-        let _ = std::env::set_current_dir(p);
-    }
 
     // Diagnostic: print the per-repo state so failures are
     // diagnosable. The federation e2e sees node_count > 0 here

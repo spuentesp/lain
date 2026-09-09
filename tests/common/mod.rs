@@ -199,10 +199,27 @@ impl ServerGuard {
 /// child up on drop. Caller is responsible for writing the
 /// `repos.yaml` (and any `workspaces.yaml`) before calling.
 pub fn boot_server(port: u16, repos_yaml_path: &Path) -> ServerGuard {
+    boot_server_impl(port, repos_yaml_path, None)
+}
+
+/// Same as [`boot_server`], but the spawned child's working directory is
+/// set explicitly via `Command::current_dir` rather than inherited from
+/// this test process. Some tools (`resolve_node`) canonicalize a bare
+/// symbol name that happens to also be a real path relative to the
+/// server's cwd (see `boot_single_repo_in_dir`'s doc comment) — spawning
+/// with an explicit cwd avoids that without ever touching this test
+/// process's own `std::env::set_current_dir`, which is process-wide state
+/// shared with every other test running concurrently in this binary.
+fn boot_server_in_dir(port: u16, repos_yaml_path: &Path, cwd: &Path) -> ServerGuard {
+    boot_server_impl(port, repos_yaml_path, Some(cwd))
+}
+
+fn boot_server_impl(port: u16, repos_yaml_path: &Path, cwd: Option<&Path>) -> ServerGuard {
     let stderr_path = std::env::temp_dir().join(format!("lain-test-stderr-{port}.log"));
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_lain"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lain"));
+    command
         .args([
             "server",
             "--transport", "http",
@@ -213,15 +230,17 @@ pub fn boot_server(port: u16, repos_yaml_path: &Path) -> ServerGuard {
         ])
         .env_remove("LAIN_EMBEDDING_MODEL")
         .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .unwrap_or_else(|e| {
-            panic!(
-                "spawn lain server failed: {e}; binary={}; stderr={}",
-                env!("CARGO_BIN_EXE_lain"),
-                stderr_path.display()
-            )
-        });
+        .stderr(Stdio::from(stderr_file));
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let child = command.spawn().unwrap_or_else(|e| {
+        panic!(
+            "spawn lain server failed: {e}; binary={}; stderr={}",
+            env!("CARGO_BIN_EXE_lain"),
+            stderr_path.display()
+        )
+    });
 
     ServerGuard(child)
 }
@@ -266,11 +285,67 @@ pub fn wait_for_health(host: &str, deadline: Duration) {
 /// Returns the `ServerGuard` and the host:port string for callers to
 /// pass to the request helpers.
 pub fn boot_and_wait(repos_yaml_path: &Path) -> (String, ServerGuard) {
+    boot_and_wait_impl(repos_yaml_path, None)
+}
+
+/// Same as [`boot_and_wait`], but the spawned server's cwd is set
+/// explicitly rather than inherited. See [`boot_single_repo_in_dir`].
+fn boot_and_wait_in_dir(repos_yaml_path: &Path, cwd: &Path) -> (String, ServerGuard) {
+    boot_and_wait_impl(repos_yaml_path, Some(cwd))
+}
+
+fn boot_and_wait_impl(repos_yaml_path: &Path, cwd: Option<&Path>) -> (String, ServerGuard) {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let guard = boot_server(port, repos_yaml_path);
+    let guard = match cwd {
+        Some(dir) => boot_server_in_dir(port, repos_yaml_path, dir),
+        None => boot_server(port, repos_yaml_path),
+    };
     wait_for_health(&host, Duration::from_secs(60));
     (host, guard)
+}
+
+/// Poll `list_repos` until the per-repo `node_count` is non-zero, then
+/// poll `search_org` for each symbol in `wait_for_symbol` until it's
+/// visible. Shared by [`boot_single_repo`] and [`boot_single_repo_in_dir`].
+fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
+    // The federation boot is fast, but the indexer may not have
+    // walked the files yet. Poll `list_repos` for non-zero count,
+    // then poll `search_org` for each symbol the caller named.
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > Duration::from_secs(30) {
+            panic!("per-repo index never populated within 30s on {host}");
+        }
+        let resp = tools_call_text(host, "list_repos", serde_json::json!({}));
+        if resp.contains("\"node_count\":0") || !resp.contains("node_count") {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        break;
+    }
+    if !wait_for_symbol.is_empty() {
+        // `search_org` only returns matches, so we issue one query per
+        // symbol and require each to be visible. A simpler "ping any
+        // symbol" loop would race the indexer.
+        let start = std::time::Instant::now();
+        for &name in wait_for_symbol {
+            loop {
+                if start.elapsed() > Duration::from_secs(30) {
+                    panic!("symbol `{name}` never appeared in search_org within 30s on {host}");
+                }
+                let resp = tools_call_text(
+                    host,
+                    "search_org",
+                    serde_json::json!({"query": name, "limit": 50}),
+                );
+                if resp.contains(name) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
 }
 
 /// Build a single-repo fixture in a tempdir, write a `repos.yaml`
@@ -295,46 +370,37 @@ pub fn boot_single_repo(
     wait_for_symbol: &[&str],
 ) -> (String, ServerGuard) {
     let (host, guard) = boot_and_wait(repos_yaml);
-    // The federation boot is fast, but the indexer may not have
-    // walked the files yet. Poll `list_repos` for non-zero count,
-    // then poll `search_org` for each symbol the caller named.
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > Duration::from_secs(30) {
-            panic!("per-repo index never populated within 30s on {host}");
-        }
-        let resp = tools_call_text(&host, "list_repos", serde_json::json!({}));
-        if resp.contains("\"node_count\":0") || !resp.contains("node_count") {
-            std::thread::sleep(Duration::from_millis(200));
-            continue;
-        }
-        break;
-    }
-    if !wait_for_symbol.is_empty() {
-        // `search_org` only returns matches, so we issue one query per
-        // symbol and require each to be visible. A simpler "ping any
-        // symbol" loop would race the indexer.
-        let start = std::time::Instant::now();
-        for &name in wait_for_symbol {
-            loop {
-                if start.elapsed() > Duration::from_secs(30) {
-                    panic!("symbol `{name}` never appeared in search_org within 30s on {host}");
-                }
-                let resp = tools_call_text(
-                    &host,
-                    "search_org",
-                    serde_json::json!({"query": name, "limit": 50}),
-                );
-                if resp.contains(name) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-        }
-    }
+    wait_for_repo_index(&host, wait_for_symbol);
     // Defensive: drop the `repos_root` warning by using it. The caller
     // already holds the tempdir handle; this just keeps the borrow
     // checker quiet if the caller passes a path-typed reference.
+    let _ = repos_root;
+    (host, guard)
+}
+
+/// Same as [`boot_single_repo`], but the spawned server's cwd is `cwd`
+/// instead of whatever this test process's cwd happens to be.
+///
+/// Some resolution paths (`resolve_node` in `src/server/tools/utils.rs`)
+/// canonicalize a bare handle when `Path::new(handle).exists()` is true
+/// relative to the server process's cwd, before trying a name lookup — a
+/// symbol literally named `target` collides with a `target/` build
+/// directory if the server happens to run from the crate root (see
+/// wishlist #15). Rather than `std::env::set_current_dir` the *test*
+/// process — process-wide state shared with every other test running
+/// concurrently in this binary, and not restored if this test panics
+/// mid-boot — pass the server's cwd straight to the child via
+/// `Command::current_dir`. `cwd` only needs to be a directory with no
+/// `target/` (or other handle-colliding path) of its own; it does not
+/// need to contain the repo being indexed.
+pub fn boot_single_repo_in_dir(
+    cwd: &Path,
+    repos_root: &Path,
+    repos_yaml: &Path,
+    wait_for_symbol: &[&str],
+) -> (String, ServerGuard) {
+    let (host, guard) = boot_and_wait_in_dir(repos_yaml, cwd);
+    wait_for_repo_index(&host, wait_for_symbol);
     let _ = repos_root;
     (host, guard)
 }
