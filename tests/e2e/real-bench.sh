@@ -209,13 +209,13 @@ try:
 except Exception:
     print("")' "$content_file" 2>/dev/null || true)
 if ! grep -q 'Total transitively affected nodes: ' <<< "$content_text"; then
-    echo "content check: blast_radius returned no dependents for claim_files — federation ingestion is broken" >&2
+    echo "content check: blast_radius returned no dependents for run_claim_files — federation ingestion is broken" >&2
     echo "$content_text" >&2
     exit 1
 fi
 total=$(grep -o 'Total transitively affected nodes: [0-9]*' <<< "$content_text" | tail -1 | grep -o '[0-9]*$')
 if [ "${total:-0}" -lt 1 ]; then
-    echo "content check: blast_radius listed 0 dependents for claim_files" >&2
+    echo "content check: blast_radius listed 0 dependents for run_claim_files" >&2
     exit 1
 fi
-echo "content check: blast_radius(claim_files) → ${total} dependents — OK"
+echo "content check: blast_radius(run_claim_files) → ${total} dependents — OK"
