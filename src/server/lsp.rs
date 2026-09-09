@@ -10,7 +10,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
+
+/// Sentinel server id used when the multiplexer is wired to an external
+/// JSON-RPC endpoint (via [`LspMultiplexer::with_server_url`]). The
+/// `ensure_server` fast-path returns this id and the request methods
+/// route to the [`JsonRpcClient`] instead of `lsp_bridge`.
+pub(crate) const REMOTE_SERVER_ID: &str = "remote";
 
 /// Configuration for a specific language server
 struct LspConfig {
@@ -423,6 +431,12 @@ pub struct LspMultiplexer {
     /// which languages got warm before scanning started.
     prewarm_state: HashMap<String, PrewarmOutcome>,
     workspace: PathBuf,
+    /// When `Some`, the multiplexer routes LSP requests through a JSON-RPC
+    /// client connected to a real server at this address instead of
+    /// spawning a child process via `lsp_bridge`. Set by
+    /// [`LspMultiplexer::with_server_url`] for the integration test
+    /// fixture and for any out-of-process LSP that exposes a TCP socket.
+    remote: Option<Arc<JsonRpcClient>>,
     #[cfg(test)]
     test_overrides: Option<TestOverrides>,
 }
@@ -591,6 +605,41 @@ impl LspMultiplexer {
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            remote: None,
+            #[cfg(test)]
+            test_overrides: None,
+        })
+    }
+
+    /// Build a multiplexer that speaks JSON-RPC to an existing LSP
+    /// server at `host:port` instead of spawning a child process. The
+    /// integration test fixture uses this to point the scanner at a
+    /// fake LSP server listening on a local TCP port; the wire path
+    /// (encode → transmit → decode → respond) is the same one a real
+    /// rust-analyzer would take.
+    pub async fn with_server_url(
+        workspace: &Path,
+        host: &str,
+        port: u16,
+        runtime: &crate::tuning::RuntimeConfig,
+    ) -> Result<Self, LainError> {
+        let client = JsonRpcClient::connect(host, port).await?;
+        let mut registry = HashMap::new();
+        for (ext, config) in LANGUAGE_MAP {
+            registry.insert(ext.to_string(), config);
+        }
+        Ok(Self {
+            bridge: LspBridge::new(),
+            poll_timeout: Duration::from_secs(runtime.lsp_symbol_poll_timeout_secs),
+            poll_interval: Duration::from_millis(runtime.lsp_symbol_poll_interval_ms),
+            registry,
+            started: HashSet::new(),
+            unavailable: HashSet::new(),
+            consecutive_failures: HashMap::new(),
+            restart_budget: HashMap::new(),
+            prewarm_state: HashMap::new(),
+            workspace: workspace.to_path_buf(),
+            remote: Some(Arc::new(client)),
             #[cfg(test)]
             test_overrides: None,
         })
@@ -603,6 +652,9 @@ impl LspMultiplexer {
     }
 
     pub async fn ensure_server(&mut self, path: &Path) -> Result<String, LainError> {
+        if self.remote.is_some() {
+            return Ok(REMOTE_SERVER_ID.to_string());
+        }
         let config = self
             .detect_config(path)
             .ok_or_else(|| LainError::Lsp(format!("No LSP for {:?}", path.extension())))?;
@@ -941,6 +993,34 @@ impl LspMultiplexer {
                 String::new()
             }
         };
+
+        if let Some(remote) = self.remote.as_ref() {
+            remote
+                .notify(
+                    "textDocument/didOpen",
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id_for(path),
+                            "version": 1,
+                            "text": content,
+                        }
+                    }),
+                )
+                .await?;
+
+            let response = remote
+                .request(
+                    "textDocument/documentSymbol",
+                    serde_json::json!({
+                        "textDocument": { "uri": uri }
+                    }),
+                )
+                .await?;
+            let symbols = parse_document_symbols(response);
+            return Ok(self.process_lsp_symbols(symbols, path, workspace, namespace));
+        }
+
         if let Err(e) = self.bridge.open_document(&server_id, &uri, &content).await {
             // open_document failure usually means the channel is
             // closed — i.e. the child died. Classify via the bridge
@@ -1084,6 +1164,30 @@ impl LspMultiplexer {
         let server_id = self.ensure_server(path).await?;
         let uri = format!("file://{}", path.display());
         let position = Position::new(line, col);
+
+        if let Some(remote) = self.remote.as_ref() {
+            let response = remote
+                .request(
+                    "textDocument/references",
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": line, "character": col },
+                        "context": { "includeDeclaration": false }
+                    }),
+                )
+                .await?;
+            let locations = parse_locations(response);
+            let mut results = Vec::new();
+            for loc in locations {
+                results.push(ReferenceLocation {
+                    path: PathBuf::from(loc.path),
+                    line: loc.line,
+                    col: loc.col,
+                    context: String::new(),
+                });
+            }
+            return Ok(results);
+        }
 
         let locations = match tokio::time::timeout(
             LSP_REQUEST_TIMEOUT,
@@ -1444,6 +1548,13 @@ impl LspMultiplexer {
     }
 
     pub async fn shutdown(&mut self) {
+        if let Some(remote) = self.remote.take() {
+            let _ = remote
+                .notify("shutdown", serde_json::Value::Null)
+                .await;
+            let _ = remote.notify("exit", serde_json::Value::Null).await;
+            return;
+        }
         // Bound the bridge shutdown with a short timeout. `LspServer::stop`
         // calls `tokio::process::Child::kill()` and awaits the LSP
         // `shutdown` request; both can hang if the language server child
@@ -1665,7 +1776,6 @@ pub fn detect_extensions_from_files(
 // ── LSP Pool for Parallel Language Server Communication ──────────────────────
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::Mutex as AsyncMutex;
 
 /// Pool of LspMultiplexer instances for parallel LSP communication
 #[derive(Clone)]
@@ -2565,5 +2675,544 @@ mod pool_tests {
         let a = pool.next();
         let b = clone.next();
         assert!(!Arc::ptr_eq(&a, &b), "a clone restarted the rotation");
+    }
+}
+// ── JSON-RPC client over TCP ──────────────────────────────────────────────────
+//
+// The integration test fixture and any out-of-process LSP transport use
+// this client to speak the LSP JSON-RPC protocol directly. The scanner's
+// `LspMultiplexer` can be wired to it via [`LspMultiplexer::with_server_url`],
+// which skips `lsp_bridge`'s spawn path and uses these methods instead.
+// This is what makes the wire path real: the scanner encodes, transmits,
+// and decodes frames the same way it would against rust-analyzer.
+
+struct JsonRpcPending {
+    inner: AsyncMutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>,
+}
+
+pub struct JsonRpcClient {
+    writer: Arc<AsyncMutex<tokio::io::BufWriter<tokio::net::tcp::OwnedWriteHalf>>>,
+    pending: Arc<JsonRpcPending>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl JsonRpcClient {
+    /// Connect to a JSON-RPC endpoint at `host:port`. Spawns a reader
+    /// task that owns the read half of the socket and dispatches
+    /// responses to the matching pending request.
+    pub async fn connect(host: &str, port: u16) -> Result<Self, LainError> {
+        let stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .map_err(|e| LainError::Lsp(format!("jsonrpc connect {host}:{port}: {e}")))?;
+        let (read, write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        let writer = Arc::new(AsyncMutex::new(tokio::io::BufWriter::new(write)));
+        let pending = Arc::new(JsonRpcPending {
+            inner: AsyncMutex::new(HashMap::new()),
+        });
+        let reader_pending = Arc::clone(&pending);
+        tokio::spawn(async move {
+            loop {
+                match read_frame(&mut reader).await {
+                    Ok(Some(text)) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(id) = value.get("id").and_then(|v| v.as_u64()) {
+                                let mut map = reader_pending.inner.lock().await;
+                                if let Some(tx) = map.remove(&id) {
+                                    let result = value
+                                        .get("result")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let _ = tx.send(result);
+                                }
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        warn!("jsonrpc reader: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            writer,
+            pending,
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        })
+    }
+
+    /// Send a JSON-RPC request and await the response. Bounded by
+    /// `LSP_REQUEST_TIMEOUT` so a stuck server cannot hang the scanner.
+    pub async fn request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, LainError> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.inner.lock().await.insert(id, tx);
+
+        let message = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        self.send(&message).await?;
+
+        match tokio::time::timeout(LSP_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(_)) => Err(LainError::Lsp(format!(
+                "jsonrpc {method}: response channel closed"
+            ))),
+            Err(_) => {
+                self.pending.inner.lock().await.remove(&id);
+                Err(LainError::Lsp(format!(
+                    "jsonrpc {method}: request timed out after {LSP_REQUEST_TIMEOUT:?}"
+                )))
+            }
+        }
+    }
+
+    /// Send a JSON-RPC notification (no id, no response).
+    pub async fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), LainError> {
+        let message = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        self.send(&message).await
+    }
+
+    async fn send(&self, message: &serde_json::Value) -> Result<(), LainError> {
+        let body = serde_json::to_string(message)
+            .map_err(|e| LainError::Lsp(format!("jsonrpc encode: {e}")))?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut writer = self.writer.lock().await;
+        writer
+            .write_all(header.as_bytes())
+            .await
+            .map_err(|e| LainError::Lsp(format!("jsonrpc write header: {e}")))?;
+        writer
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|e| LainError::Lsp(format!("jsonrpc write body: {e}")))?;
+        writer
+            .flush()
+            .await
+            .map_err(|e| LainError::Lsp(format!("jsonrpc flush: {e}")))?;
+        Ok(())
+    }
+}
+
+/// Read one LSP frame: a `Content-Length`-prefixed header block followed
+/// by exactly that many bytes of UTF-8 JSON. Returns `Ok(None)` on a
+/// clean close.
+async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<String>, LainError> {
+    let mut content_length: usize = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| LainError::Lsp(format!("jsonrpc read header: {e}")))?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("Content-Length:")
+            .or_else(|| trimmed.strip_prefix("content-length:"))
+        {
+            content_length = rest
+                .trim()
+                .parse()
+                .map_err(|e| LainError::Lsp(format!("jsonrpc bad Content-Length: {e}")))?;
+        }
+    }
+    if content_length == 0 {
+        return Err(LainError::Lsp(
+            "jsonrpc frame missing Content-Length".into(),
+        ));
+    }
+    let mut body = vec![0u8; content_length];
+    tokio::io::AsyncReadExt::read_exact(reader, &mut body)
+        .await
+        .map_err(|e| LainError::Lsp(format!("jsonrpc read body: {e}")))?;
+    String::from_utf8(body)
+        .map(Some)
+        .map_err(|e| LainError::Lsp(format!("jsonrpc utf-8: {e}")))
+}
+
+fn language_id_for(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => "rust",
+        Some("ts") => "typescript",
+        Some("tsx") => "typescript",
+        Some("js") => "javascript",
+        Some("jsx") => "javascript",
+        Some("mjs") | Some("cjs") => "javascript",
+        Some("py") => "python",
+        Some("go") => "go",
+        Some("rb") => "ruby",
+        Some("java") => "java",
+        Some("c") | Some("h") => "c",
+        Some("cpp") | Some("hpp") | Some("cc") | Some("cxx") => "cpp",
+        Some("cs") => "csharp",
+        Some("swift") => "swift",
+        Some("kt") | Some("kts") => "kotlin",
+        Some("scala") => "scala",
+        Some("vue") => "vue",
+        Some("svelte") => "svelte",
+        _ => "plaintext",
+    }
+}
+
+fn parse_document_symbols(value: serde_json::Value) -> Vec<DocumentSymbol> {
+    if value.is_null() {
+        return Vec::new();
+    }
+    serde_json::from_value::<Vec<DocumentSymbol>>(value.clone())
+        .or_else(|_| {
+            serde_json::from_value::<Vec<lsp_types::SymbolInformation>>(value).map(|infos| {
+                infos
+                    .into_iter()
+                    .map(|info| DocumentSymbol {
+                        name: info.name,
+                        detail: None,
+                        kind: info.kind,
+                        tags: info.tags,
+                        deprecated: info.deprecated,
+                        range: info.location.range,
+                        selection_range: info.location.range,
+                        children: None,
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+struct ParsedLocation {
+    path: String,
+    line: u32,
+    col: u32,
+}
+
+fn parse_locations(value: serde_json::Value) -> Vec<ParsedLocation> {
+    let arr = match value {
+        serde_json::Value::Null => return Vec::new(),
+        serde_json::Value::Array(a) => a,
+        other => vec![other],
+    };
+    let mut out = Vec::new();
+    for entry in arr {
+        let uri = entry
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                entry
+                    .get("targetUri")
+                    .or_else(|| entry.get("target_uri"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("");
+        let path = uri.replace("file://", "");
+        let range = entry
+            .get("range")
+            .or_else(|| entry.get("targetSelectionRange").or_else(|| entry.get("target_selection_range")));
+        let (line, col) = match range
+            .and_then(|r| r.get("start"))
+            .map(|s| {
+                (
+                    s.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    s.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                )
+            }) {
+            Some(v) => v,
+            None => (0, 0),
+        };
+        out.push(ParsedLocation { path, line, col });
+    }
+    out
+}
+
+// ── Fake LSP server (test-only) ──────────────────────────────────────────────
+//
+// Spawned by the JSON-RPC integration test in `tests/lsp_integration.rs`.
+// Listens on a real TCP port, reads `Content-Length`-prefixed JSON-RPC
+// frames, and returns canned responses so the full wire path
+// (encode → transmit → decode → respond) is exercised end-to-end
+// without depending on a host language server.
+
+pub mod test_support {
+    use super::read_frame;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex as AsyncMutex;
+
+    type CannedSymbols = HashMap<String, serde_json::Value>;
+    type CannedReferences = HashMap<(String, u32, u32), serde_json::Value>;
+
+    /// Records every JSON-RPC request the server has handled. Tests
+    /// use this to assert the scanner actually sent the requests the
+    /// contract requires (e.g. documentSymbol at the right URI).
+    #[derive(Default)]
+    pub struct ReceivedRequests {
+        pub initialize: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub did_open: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub did_close: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub document_symbol: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub references: std::sync::Mutex<Vec<serde_json::Value>>,
+        pub shutdown: std::sync::Mutex<u32>,
+        pub exit: std::sync::Mutex<u32>,
+    }
+
+    pub struct FakeLspServer {
+        listener: TcpListener,
+        addr: std::net::SocketAddr,
+        symbols: Arc<AsyncMutex<CannedSymbols>>,
+        references: Arc<AsyncMutex<CannedReferences>>,
+        received: Arc<ReceivedRequests>,
+    }
+
+    /// Handle returned by [`FakeLspServer::spawn`]. Drop or call
+    /// `shutdown` to stop the accept loop and close any open
+    /// connections.
+    pub struct FakeLspHandle {
+        task: tokio::task::JoinHandle<()>,
+        received: Arc<ReceivedRequests>,
+    }
+
+    impl FakeLspHandle {
+        pub fn received(&self) -> &ReceivedRequests {
+            &self.received
+        }
+
+        pub async fn shutdown(self) {
+            self.task.abort();
+            let _ = self.task.await;
+        }
+    }
+
+    impl FakeLspServer {
+        pub async fn bind() -> std::io::Result<Self> {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            Ok(Self {
+                listener,
+                addr,
+                symbols: Arc::new(AsyncMutex::new(HashMap::new())),
+                references: Arc::new(AsyncMutex::new(HashMap::new())),
+                received: Arc::new(ReceivedRequests::default()),
+            })
+        }
+
+        pub fn host(&self) -> String {
+            self.addr.ip().to_string()
+        }
+
+        pub fn port(&self) -> u16 {
+            self.addr.port()
+        }
+
+        pub fn received(&self) -> Arc<ReceivedRequests> {
+            Arc::clone(&self.received)
+        }
+
+        pub async fn set_document_symbols(&self, uri: &str, response: serde_json::Value) {
+            self.symbols.lock().await.insert(uri.to_string(), response);
+        }
+
+        pub async fn set_references(
+            &self,
+            uri: &str,
+            line: u32,
+            col: u32,
+            response: serde_json::Value,
+        ) {
+            self.references
+                .lock()
+                .await
+                .insert((uri.to_string(), line, col), response);
+        }
+
+        /// Run the accept loop in a background tokio task. Returns a
+        /// handle whose `received` reflects every request the scanner
+        /// sent over the wire.
+        pub fn spawn(self) -> FakeLspHandle {
+            let listener = self.listener;
+            let symbols = self.symbols;
+            let references = self.references;
+            let received = Arc::clone(&self.received);
+            let task = tokio::spawn(async move {
+                loop {
+                    let (socket, _) = match listener.accept().await {
+                        Ok(conn) => conn,
+                        Err(_) => break,
+                    };
+                    let symbols = Arc::clone(&symbols);
+                    let references = Arc::clone(&references);
+                    let received = Arc::clone(&received);
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_connection(socket, symbols, references, received).await {
+                            eprintln!("fake lsp connection: {e}");
+                        }
+                    });
+                }
+            });
+            FakeLspHandle { task, received: self.received }
+        }
+    }
+
+    async fn handle_connection(
+        socket: TcpStream,
+        symbols: Arc<AsyncMutex<CannedSymbols>>,
+        references: Arc<AsyncMutex<CannedReferences>>,
+        received: Arc<ReceivedRequests>,
+    ) -> std::io::Result<()> {
+        let (read, write) = socket.into_split();
+        let mut reader = BufReader::new(read);
+        let write = Arc::new(AsyncMutex::new(write));
+        loop {
+            let text = match read_frame_pub(&mut reader).await {
+                Ok(Some(s)) => s,
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    eprintln!("fake lsp frame: {e}");
+                    return Ok(());
+                }
+            };
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("fake lsp parse: {e}");
+                    return Ok(());
+                }
+            };
+            let method = value
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let id = value.get("id").cloned();
+            let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            match method.as_str() {
+                "initialize" => {
+                    received.initialize.lock().unwrap().push(value.clone());
+                    let result = serde_json::json!({
+                        "capabilities": {
+                            "documentSymbolProvider": true,
+                            "referencesProvider": true
+                        },
+                        "serverInfo": { "name": "fake-lsp" }
+                    });
+                    send_response(&write, id, result).await?;
+                }
+                "initialized" => {
+                    // notification, no response
+                }
+                "textDocument/didOpen" => {
+                    received.did_open.lock().unwrap().push(value.clone());
+                }
+                "textDocument/didClose" => {
+                    received.did_close.lock().unwrap().push(value.clone());
+                }
+                "textDocument/documentSymbol" => {
+                    received.document_symbol.lock().unwrap().push(value.clone());
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|td| td.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let canned = {
+                        let map = symbols.lock().await;
+                        map.get(&uri).cloned()
+                    };
+                    let result = canned.unwrap_or_else(|| serde_json::json!([]));
+                    send_response(&write, id, result).await?;
+                }
+                "textDocument/references" => {
+                    received.references.lock().unwrap().push(value.clone());
+                    let uri = params
+                        .get("textDocument")
+                        .and_then(|td| td.get("uri"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let line = params
+                        .get("position")
+                        .and_then(|p| p.get("line"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let col = params
+                        .get("position")
+                        .and_then(|p| p.get("character"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let canned = {
+                        let map = references.lock().await;
+                        map.get(&(uri, line, col)).cloned()
+                    };
+                    let result = canned.unwrap_or_else(|| serde_json::json!([]));
+                    send_response(&write, id, result).await?;
+                }
+                "shutdown" => {
+                    *received.shutdown.lock().unwrap() += 1;
+                    send_response(&write, id, serde_json::Value::Null).await?;
+                }
+                "exit" => {
+                    *received.exit.lock().unwrap() += 1;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn send_response(
+        write: &Arc<AsyncMutex<tokio::net::tcp::OwnedWriteHalf>>,
+        id: Option<serde_json::Value>,
+        result: serde_json::Value,
+    ) -> std::io::Result<()> {
+        let body = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        }))
+        .unwrap();
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut w = write.lock().await;
+        w.write_all(header.as_bytes()).await?;
+        w.write_all(body.as_bytes()).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn read_frame_pub<R: tokio::io::AsyncBufRead + Unpin>(
+        reader: &mut R,
+    ) -> std::io::Result<Option<String>> {
+        match read_frame(reader).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        }
     }
 }
