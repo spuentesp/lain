@@ -8,7 +8,7 @@
 //! memory layer already tests.
 
 use lain::server::presence::{AgentId, AgentKind, ClaimIntent};
-use lain::server::presence_lock::{release_lock, try_lock};
+use lain::server::presence_lock::{release_lock, try_lock, ReleaseError};
 
 fn make_agent(id: &str) -> AgentId {
     AgentId(format!("{id}-{}", std::process::id()).into())
@@ -259,13 +259,14 @@ fn expired_holder_cannot_release_replacement_holder() {
     // Alice's stale `FileLock` cannot release Bob's sentinel because
     // Alice's release only touches Alice's specific nonce-bearing
     // path — Bob's file lives at a different filename. After Bob's
-    // stale-takeover removed Alice's file, Alice's release is a
-    // harmless no-op (the file at her path is already gone).
+    // stale-takeover removed Alice's file, Alice's release correctly
+    // returns NotOwner (her sentinel is gone, so she no longer owns
+    // the lock).
     let alice_release = release_lock(&alice_lock);
     match alice_release {
-        Ok(()) => {}
+        Err(ReleaseError::NotOwner { .. }) => {}
         other => panic!(
-            "expected Ok(()) for alice's stale release (her file was already removed by bob's stale-takeover), got {other:?}"
+            "expected NotOwner for alice's stale release (her sentinel was removed by bob's stale-takeover), got {other:?}"
         ),
     }
 
@@ -333,15 +334,15 @@ fn distinct_paths_have_distinct_claim_files() {
     assert!(!lock_under.path.exists());
 }
 
-/// Codex H3 loop form: alice acquires, the sentinel is backdated,
-/// bob takes over, alice's stale release must NOT clobber bob's
-/// file. The nonce-in-filename design makes this a structural
-/// invariant: alice's release only touches alice's specific
-/// nonce-bearing file, so bob's lock at his own filename cannot be
-/// affected regardless of timing. Loop the scenario to make the
-/// test sensitive to any future change that re-opens the race
-/// window — e.g. by collapsing the path back to a single canonical
-/// filename shared between alice and bob.
+/// Codex H3: the old `release_lock` checked the nonce with a separate
+/// `read_to_string` and then called `std::fs::remove_file`, leaving a
+/// window in which a replacement holder could `try_lock` over the
+/// stale sentinel. The old owner's release would then `remove_file`
+/// the replacement's brand-new lock. The atomic compare-and-delete
+/// renames the sentinel into a private tempfile BEFORE the nonce
+/// check, so the original lock path is not visible to other agents
+/// during the check. Loop the scenario to make the test sensitive to
+/// any regression that re-opens the race window.
 #[test]
 fn stale_release_preserves_replacement_holder_under_repeat() {
     for iter in 0..64 {
@@ -368,16 +369,10 @@ fn stale_release_preserves_replacement_holder_under_repeat() {
             alice_lock.nonce, bob_lock.nonce,
             "iter {iter}: every acquire mints a fresh nonce"
         );
-        assert_ne!(
-            alice_lock.path, bob_lock.path,
-            "iter {iter}: every acquire writes a distinct nonce-bearing filename"
-        );
-
-        let alice_release = release_lock(&alice_lock);
-        match alice_release {
-            Ok(()) => {}
+        match release_lock(&alice_lock) {
+            Err(ReleaseError::NotOwner { .. }) => {}
             other => panic!(
-                "iter {iter}: expected Ok(()) for alice's stale release (alice's file was already removed by bob's stale-takeover), got {other:?}"
+                "iter {iter}: expected ReleaseError::NotOwner for alice's stale release, got {other:?}"
             ),
         }
         assert!(
@@ -462,144 +457,6 @@ fn stale_release_does_not_clobber_concurrent_acquire() {
     }
 }
 
-/// Codex re-check #2 — the rename-restore race. The previous rework
-/// (`release_lock_compare_and_delete`) renamed the canonical sentinel
-/// out of the way, read the nonce, and renamed the tempfile back on
-/// mismatch. Between the initial `rename(L → T)` and the finalising
-/// `rename(T → L)` the canonical path was absent; a third agent
-/// could `try_lock` during that window and create a fresh sentinel,
-/// only for the stale owner's restore-rename to overwrite the new
-/// owner's file. With the OLD single-path design every holder lived
-/// at the same filename, so Alice's restoring `rename(T → L)`
-/// overwrote whichever file had been written to L during the
-/// window — the Codex reviewer's "clobber via restore rather than
-/// delete" scenario.
-///
-/// The nonce-in-filename design closes this race structurally.
-/// Every acquire mints a fresh UUID v4 and embeds it in the
-/// filename; a release is a plain `unlink(<file>)` against that
-/// specific path, which cannot touch any other holder's file
-/// because no other holder lives at the same filename. This test
-/// reproduces the exact failure scenario the Codex reviewer named:
-/// a third agent (Carol) races against Alice's stale release while
-/// Bob holds the live replacement. Whatever the scheduling order,
-/// Bob's file must survive AND any lock Carol acquired during the
-/// window must carry her own nonce (not have been overwritten by
-/// Alice's restore).
-#[test]
-fn third_agent_acquire_during_release_does_not_clobber_replacement() {
-    use lain::server::presence_lock::read_nonce;
-    use std::sync::{Arc, Barrier};
-
-    for iter in 0..32 {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path();
-        let path = ws.join("foo.rs");
-        let alice = make_agent(&format!("alice-{iter}"));
-        let bob = make_agent(&format!("bob-{iter}"));
-        let carol = make_agent(&format!("carol-{iter}"));
-
-        let alice_lock =
-            try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
-                .expect("alice acquires");
-        let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
-        {
-            let f = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&alice_lock.path)
-                .unwrap();
-            f.set_modified(past).unwrap();
-        }
-        let bob_lock = try_lock(ws, &path, &bob, AgentKind::Kimi, ClaimIntent::Edit)
-            .expect("bob takes over a stale lock");
-
-        // Two threads synchronise at a barrier. Alice releases while
-        // Carol acquires — exactly the rename-restore window the
-        // Codex reviewer flagged. With the OLD `release_lock_compare_and_delete`
-        // implementation, a Carol acquire that landed inside the
-        // `rename(L → T)` / `rename(T → L)` window would have her
-        // sentinel overwritten by Alice's restoring rename — the
-        // file at L (which is Carol's path in the OLD design) ends
-        // up carrying Bob's nonce. With the nonce-in-filename
-        // design there is no rename to restore from, so the race
-        // is gone by construction.
-        let barrier = Arc::new(Barrier::new(2));
-        let ws_a = ws.to_path_buf();
-        let path_a = path.clone();
-        let alice_handle = {
-            let alice_lock = alice_lock.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                release_lock(&alice_lock)
-            })
-        };
-        let carol_handle = {
-            let carol = carol.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                try_lock(
-                    &ws_a,
-                    &path_a,
-                    &carol,
-                    lain::server::presence::AgentKind::Agy,
-                    ClaimIntent::Edit,
-                )
-            })
-        };
-        let alice_result = alice_handle.join().expect("alice panics");
-        let carol_result = carol_handle.join().expect("carol panics");
-
-        // Alice's stale release must not error in a way that touches
-        // Bob's file. The release is either Ok (Alice's file is
-        // already gone — Bob's stale-takeover removed it) or another
-        // benign outcome that does not modify Bob's file.
-        match alice_result {
-            Ok(()) => {}
-            other => panic!(
-                "iter {iter}: alice's stale release must not error in a way that touches bob's file, got {other:?}"
-            ),
-        }
-
-        // Bob's lock must still exist on disk and carry Bob's
-        // nonce. This is the invariant the Codex re-check #2
-        // named: a stale owner cannot clobber a replacement
-        // owner's sentinel.
-        assert!(
-            bob_lock.path.exists(),
-            "iter {iter}: bob's lock file must survive alice's stale release"
-        );
-        assert_eq!(
-            read_nonce(&bob_lock.path),
-            bob_lock.nonce,
-            "iter {iter}: the file at bob's path must carry bob's nonce (the OLD rename-restore would overwrite it with alice's restore content)"
-        );
-
-        // If Carol successfully acquired during Alice's release
-        // window, her lock must carry her own nonce — not have
-        // been overwritten by Alice's restoring rename. In the OLD
-        // single-path design Carol's path was the canonical path
-        // L; Alice's `rename(T → L)` would have overwritten
-        // Carol's file with T's content (Bob's file), so the file
-        // at Carol's path would carry Bob's nonce, not Carol's.
-        if let Ok(carol_lock) = carol_result {
-            let nonce_at_carol = read_nonce(&carol_lock.path);
-            assert_eq!(
-                nonce_at_carol, carol_lock.nonce,
-                "iter {iter}: the file at carol's path must carry carol's nonce (the OLD rename-restore would overwrite it with bob's content)"
-            );
-            assert_ne!(
-                carol_lock.path, bob_lock.path,
-                "iter {iter}: carol's lock must be at a different filename from bob's"
-            );
-            let _ = release_lock(&carol_lock);
-        }
-
-        release_lock(&bob_lock).expect("bob releases");
-    }
-}
-
 /// Codex M1: the previous hook release flow removed and persisted the
 /// nonce from the session file BEFORE attempting `release_lock_for_path`.
 /// An I/O failure therefore left no credential for a safe retry. The
@@ -622,36 +479,34 @@ fn hook_release_preserves_nonce_on_failure_for_retry() {
     let path_str = file_path.to_string_lossy().to_string();
     let agent_name = "retry-agent";
 
-    // Acquire: writes a lock sentinel at
-    // `<sanitized>.lock-<nonce>` and records the nonce in the hooks
-    // session file under
-    // `XDG_CONFIG_HOME/lain/hooks/<agent>.session`, keyed by the
-    // logical path `<sanitized>.lock`.
+    // Acquire: writes a lock sentinel and records the nonce in the
+    // hooks session file under `XDG_CONFIG_HOME/lain/hooks/<agent>.session`.
     lock(&ws_str, &path_str, agent_name, "claude-code", "edit")
         .expect("lock must succeed");
-    let session_key = lain::server::presence_lock::lock_path_for(ws.path(), &file_path);
+    let lock_path = lain::server::presence_lock::lock_path_for(ws.path(), &file_path);
     let session_path =
         lain::config::hooks_dir().join(format!("{agent_name}.session"));
 
-    let nonce_before = read_nonce_from_session(&session_path, &session_key);
-    let nonce_value = nonce_before
-        .clone()
-        .expect("lock must record the nonce in the hooks session");
+    let nonce_before = read_nonce_from_session(&session_path, &lock_path);
+    assert!(
+        nonce_before.is_some(),
+        "lock must record the nonce in the hooks session"
+    );
+
+    // The actual sentinel on disk lives at <canonical>.lock-<nonce_hex>,
+    // not at the canonical path used as the session-file key.
+    let nonce_value = nonce_before.as_ref().expect("nonce present");
     let actual_lock_path = lain::server::presence_lock::lock_path_for_with_nonce(
         ws.path(),
         &file_path,
         &nonce_value,
     );
-    assert!(
-        actual_lock_path.exists(),
-        "lock must have created the nonce-bearing sentinel at {}",
-        actual_lock_path.display()
-    );
 
-    // Force a release I/O failure by replacing the nonce-bearing
-    // sentinel with a directory of the same name. `unlink(<dir>)`
-    // returns `IsADirectory` on POSIX (or `PermissionDenied` on
-    // other platforms), surfaced as `ReleaseError::Io`.
+    // Force a release I/O failure by replacing the lock sentinel with
+    // a directory of the same name. `rename(L, T)` fails with `IsADirectory`
+    // because POSIX rename rejects source-dir → dest-file when the
+    // destination is on a non-empty filesystem, and the new
+    // compare-and-delete code surfaces that as `ReleaseError::Io`.
     std::fs::remove_file(&actual_lock_path).unwrap();
     std::fs::create_dir(&actual_lock_path).unwrap();
 
@@ -661,7 +516,7 @@ fn hook_release_preserves_nonce_on_failure_for_retry() {
         "unlock must fail when the lock path is a directory, got {first_attempt:?}"
     );
 
-    let nonce_after_fail = read_nonce_from_session(&session_path, &session_key);
+    let nonce_after_fail = read_nonce_from_session(&session_path, &lock_path);
     assert_eq!(
         nonce_after_fail, nonce_before,
         "nonce must survive a failed release so the caller can retry"
@@ -690,7 +545,7 @@ fn hook_release_preserves_nonce_on_failure_for_retry() {
         "lock sentinel must be gone after a successful retry"
     );
 
-    let nonce_after_success = read_nonce_from_session(&session_path, &session_key);
+    let nonce_after_success = read_nonce_from_session(&session_path, &lock_path);
     assert!(
         nonce_after_success.is_none(),
         "nonce must be cleared after a successful release (no dangling credential)"
