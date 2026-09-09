@@ -546,6 +546,23 @@ impl LspMultiplexer {
         for (ext, config) in LANGUAGE_MAP {
             registry.insert(ext.to_string(), config);
         }
+        // `LAIN_TEST_NO_LSP=1` is a test-only escape hatch that pre-populates
+        // `unavailable` with every registered binary. `ensure_server` short
+        // -circuits to `LainError::Lsp(... is missing)` instead of trying to
+        // spawn rust-analyzer / gopls / etc. Smoke tests that drive the
+        // scanner in-process (or via `Command::new(env!("CARGO_BIN_EXE_lain"))`)
+        // set this so the test outcome doesn't depend on whether the host
+        // happens to have rust-analyzer on PATH. Production never sets it.
+        let mut unavailable = HashSet::new();
+        if std::env::var("LAIN_TEST_NO_LSP")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            for config in registry.values() {
+                unavailable.insert(config.binary.to_string());
+            }
+        }
         Ok(Self {
             bridge: LspBridge::new(),
             poll_timeout: Duration::from_secs(runtime.lsp_symbol_poll_timeout_secs),

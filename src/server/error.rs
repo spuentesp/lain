@@ -79,6 +79,12 @@ pub enum LainError {
          (for a cross-repo blast radius: `get_cross_repo_blast_radius_for_repo`)."
     )]
     AmbiguousSymbol(Vec<crate::federation::repo_id::RepoId>),
+
+    #[error("federation graph was written by schema v{found}; this build expects schema v{required}. Remove it and re-run to rebuild.")]
+    FederationSchemaMismatch { found: u32, required: u32 },
+
+    #[error("federation graph payload is corrupt: {reason}. Remove it and re-run to rebuild.")]
+    FederationPayloadCorrupt { reason: String },
 }
 
 impl From<git2::Error> for LainError {

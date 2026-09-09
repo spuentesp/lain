@@ -190,6 +190,32 @@ fn the_documented_command_table_matches_the_binary() {
         missing.is_empty(),
         "the binary has commands the user manual never mentions: {missing:?}"
     );
+
+    // Reopen the rebuilt graph through the real loader and assert the
+    // fixture's content actually landed. A header-only assertion can
+    // pass against an empty rebuilt graph; this exercises the rebuilt
+    // payload end-to-end.
+    let backend = PetgraphBackend::new(&data_dir).expect("reopen rebuilt backend");
+    let names: Vec<String> = backend
+        .list_nodes()
+        .expect("list nodes")
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    assert!(
+        backend.node_count() > 0,
+        "rebuilt graph has zero nodes; reindex did not actually rebuild. \
+         nodes: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "alpha"),
+        "expected fixture function `alpha` in rebuilt graph, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "beta"),
+        "expected fixture function `beta` in rebuilt graph, got {names:?}"
+    );
+    let _ = FEDERATION_GRAPH_VERSION;
 }
 
 /// The prose around the table must not contradict it — the old copy
