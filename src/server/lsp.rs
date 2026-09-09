@@ -374,6 +374,8 @@ impl LanguageServer {
 #[derive(Clone)]
 pub struct HierarchicalSymbol {
     pub node: GraphNode,
+    pub selection_line: u32,
+    pub selection_col: u32,
     pub children: Vec<HierarchicalSymbol>,
 }
 
@@ -421,6 +423,14 @@ pub struct LspMultiplexer {
     /// which languages got warm before scanning started.
     prewarm_state: HashMap<String, PrewarmOutcome>,
     workspace: PathBuf,
+    #[cfg(test)]
+    test_overrides: Option<TestOverrides>,
+}
+
+#[cfg(test)]
+struct TestOverrides {
+    symbols: HashMap<PathBuf, Vec<HierarchicalSymbol>>,
+    references: HashMap<(PathBuf, u32, u32), Vec<ReferenceLocation>>,
 }
 
 /// Result of a single LSP prewarm attempt. Stored on
@@ -581,6 +591,8 @@ impl LspMultiplexer {
             restart_budget: HashMap::new(),
             prewarm_state: HashMap::new(),
             workspace: workspace.to_path_buf(),
+            #[cfg(test)]
+            test_overrides: None,
         })
     }
 
@@ -900,6 +912,12 @@ impl LspMultiplexer {
         workspace: &Path,
         namespace: &crate::schema::RepoNamespace,
     ) -> Result<Vec<HierarchicalSymbol>, LainError> {
+        #[cfg(test)]
+        if let Some(overrides) = &self.test_overrides {
+            if let Some(syms) = overrides.symbols.get(path) {
+                return Ok(syms.clone());
+            }
+        }
         let server_id = self.ensure_server(path).await?;
         let uri = format!("file://{}", path.display());
 
@@ -1038,7 +1056,12 @@ impl LspMultiplexer {
                 Vec::new()
             };
 
-            results.push(HierarchicalSymbol { node, children });
+            results.push(HierarchicalSymbol {
+                node,
+                selection_line: sym.selection_range.start.line,
+                selection_col: sym.selection_range.start.character,
+                children,
+            });
         }
         results
     }
@@ -1051,6 +1074,13 @@ impl LspMultiplexer {
         line: u32,
         col: u32,
     ) -> Result<Vec<ReferenceLocation>, LainError> {
+        #[cfg(test)]
+        if let Some(overrides) = &self.test_overrides {
+            let key = (path.to_path_buf(), line, col);
+            if let Some(refs) = overrides.references.get(&key) {
+                return Ok(refs.clone());
+            }
+        }
         let server_id = self.ensure_server(path).await?;
         let uri = format!("file://{}", path.display());
         let position = Position::new(line, col);
@@ -1376,6 +1406,41 @@ impl LspMultiplexer {
         // resets. This matches the upstream semantics: a healthy
         // round-trip says "the LSP is fine now" but doesn't rewrite
         // the recent history.
+    }
+
+    /// Inject canned `get_references` responses keyed by (path, line, col).
+    /// When set, `get_references` short-circuits to the matching canned
+    /// entry instead of asking the real LSP. Tests use this to exercise the
+    /// reference-to-call-edge path deterministically without a host language
+    /// server.
+    #[cfg(test)]
+    pub fn set_test_references(
+        &mut self,
+        refs: HashMap<(PathBuf, u32, u32), Vec<ReferenceLocation>>,
+    ) {
+        let mut overrides = self.test_overrides.take().unwrap_or(TestOverrides {
+            symbols: HashMap::new(),
+            references: HashMap::new(),
+        });
+        overrides.references = refs;
+        self.test_overrides = Some(overrides);
+    }
+
+    /// Inject canned `get_document_symbols_hierarchical` responses keyed
+    /// by path. Tests use this together with `set_test_references` to
+    /// drive the full symbol-fetch + reference-resolution path
+    /// deterministically.
+    #[cfg(test)]
+    pub fn set_test_document_symbols(
+        &mut self,
+        symbols: HashMap<PathBuf, Vec<HierarchicalSymbol>>,
+    ) {
+        let mut overrides = self.test_overrides.take().unwrap_or(TestOverrides {
+            symbols: HashMap::new(),
+            references: HashMap::new(),
+        });
+        overrides.symbols = symbols;
+        self.test_overrides = Some(overrides);
     }
 
     pub async fn shutdown(&mut self) {

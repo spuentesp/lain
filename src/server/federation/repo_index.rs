@@ -1245,6 +1245,8 @@ impl RepoIndex {
                             d.line_end,
                             &self.id_namespace,
                         ),
+                        selection_line: d.line_start,
+                        selection_col: 0,
                         children: vec![],
                     })
                     .collect()
