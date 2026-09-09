@@ -341,21 +341,59 @@ impl FederatedIndex {
 
         // Cross-repo matching: gather every other repo's nodes once, then for
         // each of this repo's nodes find similarity candidates above threshold.
+        //
+        // `find_cross_repo_matches` parses each candidate's `id` as a
+        // `GlobalId` (to read off its owning repo and exclude same-repo
+        // matches), so both sides of this call need ids already in
+        // `repo:Kind:path:name` form. `idx.nodes()` — like `repo.nodes()`
+        // above — returns the *local* per-repo nodes, whose ids are bare
+        // UUIDs with no colons at all. Handing those straight to the
+        // matcher meant `GlobalId::parse` failed for every candidate, so
+        // this loop silently produced zero matches regardless of the
+        // matcher's own logic: `CrossRepoSameSymbol` edges never
+        // materialized. `batch_nodes` (this repo's nodes, already rewritten
+        // above) and a same-rewrite over each other repo's nodes fixes it.
         let other_nodes: Vec<GraphNode> = self
             .repos
             .read()
             .iter()
             .filter(|(rid, _)| *rid != id)
-            .flat_map(|(_, idx)| idx.nodes())
+            .flat_map(|(rid, idx)| {
+                idx.nodes().into_iter().map(move |n| {
+                    let mut rewritten = n.clone();
+                    rewritten.id = GlobalId::new(rid, n.node_type.clone(), &n.path, &n.name)
+                        .as_str()
+                        .to_string();
+                    rewritten
+                })
+            })
             .collect();
-        for new_node in &nodes {
+        for new_node in &batch_nodes {
             let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5);
             for (target_gid, sim) in matches {
+                // The matched node's owning repo may not have run its own
+                // `project_repo` yet (callers project repos one at a time,
+                // in whatever order they choose — this test fixture calls
+                // `project_repo(a)` then `project_repo(b)`), so the target
+                // may exist in `other_nodes` (read from the in-memory
+                // per-repo index) without yet existing in `self.backend`.
+                // `upsert_edge` requires both endpoints to already be
+                // present. Same placeholder pattern as the pending
+                // cross-repo `Calls` edges drained above: upsert a
+                // placeholder for the target first (idempotent on global
+                // id); the target repo's own `project_repo` pass
+                // overwrites it with the real node when it runs.
+                if let Some(target_node) = other_nodes.iter().find(|n| n.id == target_gid) {
+                    self.backend.upsert_node_global(
+                        &target_gid,
+                        target_node.node_type.clone(),
+                        &target_node.path,
+                        &target_node.name,
+                    )?;
+                }
                 self.backend.upsert_edge(GraphEdge {
                     edge_type: EdgeType::CrossRepoSameSymbol,
-                    source_id: GlobalId::new(id, new_node.node_type.clone(), &new_node.path, &new_node.name)
-                        .as_str()
-                        .to_string(),
+                    source_id: new_node.id.clone(),
                     target_id: target_gid,
                     weight: Some(sim),
                 })?;

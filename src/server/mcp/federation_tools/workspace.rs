@@ -109,15 +109,18 @@ fn node_kind_str(s: &str) -> bool {
 }
 
 fn edge_kind_str(s: &str) -> bool {
-    matches!(s, "Calls" | "Imports")
+    matches!(s, "Calls" | "Imports" | "CrossRepoSameSymbol")
 }
 
 /// Per-workspace graph data for the dashboard's D3 force-directed view.
 ///
-/// Filters to `Function` / `Method` / `Class` nodes and `Calls` / `Imports`
-/// edges (per the spec's "filtered Functions + Calls + cross-repo" scope).
-/// Marks edges as `cross_repo: true` when source's repo_id differs from
-/// target's. Caps at 5000 nodes / 10000 edges.
+/// Filters to `Function` / `Method` / `Class` nodes and `Calls` /
+/// `Imports` / `CrossRepoSameSymbol` edges (per the spec's "filtered
+/// Functions + Calls + cross-repo" scope — `CrossRepoSameSymbol` is
+/// the cross-repo peer-symbol edge type and was missing from this
+/// allowlist, so it was silently dropped here even once the backend
+/// produced it). Marks edges as `cross_repo: true` when source's
+/// repo_id differs from target's. Caps at 5000 nodes / 10000 edges.
 pub fn get_workspace_graph(
     fed: &FederatedIndex,
     workspaces: &WorkspacesFile,

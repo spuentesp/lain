@@ -1,5 +1,5 @@
 use crate::federation::repo_id::GlobalId;
-use crate::schema::GraphNode;
+use crate::schema::{EdgeType, GraphNode};
 
 pub fn signature_tokens(sig: &str) -> Vec<String> {
     sig.split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -46,6 +46,33 @@ pub fn find_cross_repo_matches(
     top_k: usize,
     threshold: f32,
 ) -> Vec<(String, f32)> {
+    // `CrossRepoSameSymbol` is schema-restricted to Function/Method
+    // endpoints (schema.rs's `source_types`/`target_types`) — this is
+    // the matcher's "same *symbol*, not same *anything*" contract.
+    // That restriction was never enforced here, which stayed invisible
+    // while a separate bug (project_repo feeding this function
+    // un-rewritten local ids) meant every candidate was dropped before
+    // node type could matter. With that bug fixed, an unfiltered
+    // candidate list would pair up every same-named non-function node
+    // too — e.g. every repo's `Cargo.toml` `File` node matching every
+    // other repo's, which both defeats the edge's purpose and (upstream
+    // in `project_repo`) can target a node the backend schema never
+    // intended this edge type to reach.
+    if !EdgeType::CrossRepoSameSymbol
+        .source_types()
+        .contains(&new_node.node_type)
+    {
+        return Vec::new();
+    }
+    let candidates: Vec<&GraphNode> = candidates
+        .iter()
+        .filter(|c| {
+            EdgeType::CrossRepoSameSymbol
+                .target_types()
+                .contains(&c.node_type)
+        })
+        .collect();
+
     let new_repo = GlobalId::parse(&new_node.id)
         .ok()
         .map(|global_id| global_id.repo_id().to_string());
