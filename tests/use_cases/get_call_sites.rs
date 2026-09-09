@@ -57,11 +57,30 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
     let repos_yaml_path = project.path().join("repos.yaml");
     std::fs::write(&repos_yaml_path, repos_yaml).unwrap();
 
+    // `boot_single_repo` spawns the `lain server` subprocess without
+    // setting its `current_dir`, so the child inherits this test
+    // process's cwd at spawn time. `resolve_node` (src/server/tools/
+    // utils.rs) canonicalizes any handle that `Path::new(handle).exists()`
+    // finds on disk *relative to that cwd* before trying a name lookup —
+    // the same mechanism wishlist #15 diagnosed for the literal name
+    // "target" colliding with a real `target/` build directory. Running
+    // this test suite from the crate root (the normal `cargo test`
+    // invocation) means the spawned server's cwd contains `target/`,
+    // so the by-name call below resolved to that directory and skipped
+    // every name-lookup branch — not a `find_node_by_name` regression,
+    // as an earlier version of this comment claimed. Chdir to the
+    // fixture's tempdir (which has no `target/` of its own) before
+    // spawning, then restore, so "target" is unambiguously a symbol name.
+    let prev_cwd = std::env::current_dir().ok();
+    std::env::set_current_dir(project.path()).expect("chdir to fixture tempdir");
     let (host, _guard) = boot_single_repo(
         &repo_dir,
         &repos_yaml_path,
         &["target", "caller"],
     );
+    if let Some(p) = prev_cwd.as_ref() {
+        let _ = std::env::set_current_dir(p);
+    }
 
     // Diagnostic: print the per-repo state so failures are
     // diagnosable. The federation e2e sees node_count > 0 here
@@ -81,13 +100,7 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
     eprintln!("[get_call_sites] search_org(target): {search}");
 
     // Use the envelope helper (not the panic-on-error text helper) so
-    // we can probe multiple inputs in one go. The name-resolution
-    // path is currently broken (it returns "Node not found" even
-    // though the per-repo DB has the node — separate bug, see
-    // `find_node_by_name` regression in `GraphDatabase`); the
-    // id-resolution path works, so we use the node id to drive the
-    // assertion. A future fix to the name path can add a name-based
-    // variant of this test.
+    // we can probe both inputs and assert on each independently.
     use common::tools_call_envelope;
     let env_by_name = tools_call_envelope(
         &host,
@@ -125,6 +138,27 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
         "get_call_sites must report each of the six distinct call \
          lines (3, 4, 5, 6, 7, 8) rather than one enclosing-function \
          range; got:\n{text}"
+    );
+
+    // 3. The by-name path (audit_2026_08_30.md Follow-up B) resolves
+    //    to the same node as the by-id path now that the test spawns
+    //    the server from a cwd with no `target/` directory to collide
+    //    with the literal symbol name. Same two assertions, driven
+    //    through name resolution instead of a hardcoded id.
+    let text_by_name = env_by_name
+        .pointer("/result/content/0/text")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        text_by_name.contains("(6 call(s) across 1 function(s))"),
+        "get_call_sites by name must report the multi-call heading; got:\n{text_by_name}"
+    );
+    assert!(
+        text_by_name.contains("lines 3, 4, 5, 6, 7, 8"),
+        "get_call_sites by name must report each of the six distinct \
+         call lines (3, 4, 5, 6, 7, 8) rather than one enclosing-function \
+         range; got:\n{text_by_name}"
     );
 }
 
