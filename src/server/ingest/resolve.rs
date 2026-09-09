@@ -1480,4 +1480,67 @@ mod call_edge_direction_tests {
         assert!(sources.contains(beta_id.as_str()));
         assert!(edges.iter().all(|e| e.target_id == helper_id));
     }
+
+    /// Codex contract `adjacent_tree_sitter_ranges_attribute_call_to_correct_function`.
+    ///
+    /// Three single-row functions sit on consecutive rows: `outer` at
+    /// row 0, `inner` on rows 1-2, `after` at row 3. A static ref at
+    /// row 2 (inside `inner`) calls `outer`. The caller is `inner`
+    /// (the function containing the use site); the callee is
+    /// `outer`. The edge must be `inner -> outer`.
+    ///
+    /// Wave-2 had a mixed-coordinates bug: a ref at row N was matched
+    /// against the function whose range ended at row N-1 — i.e. the
+    /// *previous* function. With the line ranges stored zero-based (as
+    /// the parser emits), the resolver picks the function whose range
+    /// actually contains the call row.
+    #[test]
+    fn adjacent_tree_sitter_ranges_attribute_call_to_correct_function() {
+        let tmp = std::env::temp_dir().join("lain_call_adjacent_ranges");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let outer = fn_node("outer", "src/lib.rs", (0, 0));
+        let inner = fn_node("inner", "src/lib.rs", (1, 2));
+        let after = fn_node("after", "src/lib.rs", (3, 3));
+        let outer_id = outer.id.clone();
+        let inner_id = inner.id.clone();
+        let after_id = after.id.clone();
+        db.upsert_node(outer).unwrap();
+        db.upsert_node(inner).unwrap();
+        db.upsert_node(after).unwrap();
+
+        // A ref at row 2 (inside `inner`, the function on rows 1-2)
+        // calls `outer` (the function on row 0). The expected edge is
+        // inner -> outer.
+        let refs = vec![StaticFileRef {
+            file_path: "src/lib.rs".to_string(),
+            source_line: 2,
+            target_name: "outer".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs, None, None);
+        assert_eq!(
+            edges.len(),
+            1,
+            "exactly one edge; got {} ({:?})",
+            edges.len(),
+            edges.iter().map(|e| (&e.source_id, &e.target_id)).collect::<Vec<_>>()
+        );
+        let edge = &edges[0];
+        assert_ne!(
+            edge.source_id, after_id,
+            "a ref at row 2 must not attribute to `after` (row 3); \
+             source was {}",
+            edge.source_id
+        );
+        assert_eq!(
+            edge.source_id, inner_id,
+            "call on row 2 must attribute to `inner` (rows 1-2), not `after` (row 3)"
+        );
+        assert_eq!(
+            edge.target_id, outer_id,
+            "callee must be `outer`"
+        );
+    }
 }
