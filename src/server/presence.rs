@@ -971,6 +971,18 @@ impl OccupancyMap {
             .contains_key(&(agent_id.clone(), canonical))
     }
 
+    /// Returns the path of the filesystem lock for `agent_id`/`path`, if any.
+    /// Used by tests to verify the lock file landed on disk.
+    #[cfg(test)]
+    pub(crate) fn lock_lease_path(&self, agent_id: &AgentId, path: &Path) -> Option<std::path::PathBuf> {
+        let roots = self.claim_roots_snapshot();
+        let canonical = canonical_claim_path(&roots, path);
+        self.lock_leases
+            .lock()
+            .get(&(agent_id.clone(), canonical))
+            .cloned()
+    }
+
     /// Install a callback fired on every mutation that should be
     /// persisted. Same semantics as
     /// `PresenceRegistry::set_persist_callback`.
@@ -1776,15 +1788,6 @@ impl OccupancyMap {
                     self.lock_leases.lock().insert(key, lock.path);
                 }
                 Err(conflict) => {
-                    if conflict.agent_id() == session.id {
-                        let lp = crate::server::presence_lock::lock_path_for(&workspace, &req.path);
-                        if let crate::server::presence_lock::RefreshOutcome::Refreshed =
-                            crate::server::presence_lock::refresh_lock_if_owned(&lp, &session.id)
-                        {
-                            self.lock_leases.lock().insert(key, lp);
-                            continue;
-                        }
-                    }
                     tracing::warn!(
                         "filesystem lock for {:?} already held by {} (k={:?}); in-memory claim stands",
                         req.path,
@@ -3112,7 +3115,9 @@ mod audit_persistence_tests {
         occ.claim_with_session(&sess, vec![edit_req]);
         assert_eq!(occ.lock_leases_count(), 1);
         assert!(occ.has_lock_lease(&sess.id, Path::new("src/main.rs")));
-        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/main.rs"));
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/main.rs"));
+        assert!(lock_path.is_some(), "lock path must be recorded for Edit claim");
+        let lock_path = lock_path.unwrap();
         assert!(
             lock_path.exists(),
             "filesystem lock file must be written for Edit claim"
@@ -3129,10 +3134,9 @@ mod audit_persistence_tests {
         occ.claim_with_session(&sess, vec![read_req]);
         assert_eq!(occ.lock_leases_count(), 1);
         assert!(!occ.has_lock_lease(&sess.id, Path::new("src/lib.rs")));
-        let read_lock_path =
-            crate::server::presence_lock::lock_path_for(ws, Path::new("src/lib.rs"));
+        // Read claims don't create filesystem locks
         assert!(
-            !read_lock_path.exists(),
+            occ.lock_lease_path(&sess.id, Path::new("src/lib.rs")).is_none(),
             "filesystem lock must NOT be written for Read claim"
         );
 
@@ -3170,8 +3174,10 @@ mod audit_persistence_tests {
         };
         occ.claim_with_session(&sess, vec![req]);
         assert_eq!(occ.lock_leases_count(), 1);
-        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/temp.rs"));
-        assert!(lock_path.exists());
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/temp.rs"));
+        assert!(lock_path.is_some(), "lock path must be recorded");
+        let lock_path = lock_path.unwrap();
+        assert!(lock_path.exists(), "lock file must exist");
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         let expired = occ.expire_by_ttl();
@@ -3207,8 +3213,9 @@ mod audit_persistence_tests {
             plan_revision: None,
         };
         occ.claim_with_session(&sess, vec![req]);
-        let lock_path =
-            crate::server::presence_lock::lock_path_for(ws, Path::new("src/touched.rs"));
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/touched.rs"));
+        assert!(lock_path.is_some(), "lock path must be recorded");
+        let lock_path = lock_path.unwrap();
         assert!(lock_path.exists());
 
         // Backdate mtime
@@ -3263,7 +3270,9 @@ mod audit_persistence_tests {
         };
         occ.claim_with_session(&sess, vec![req]);
         assert_eq!(occ.lock_leases_count(), 1);
-        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/worker.rs"));
+        let lock_path = occ.lock_lease_path(&sess.id, Path::new("src/worker.rs"));
+        assert!(lock_path.is_some(), "lock path must be recorded");
+        let lock_path = lock_path.unwrap();
         assert!(lock_path.exists());
         assert!(occ.list_for_path(Path::new("src/worker.rs")).is_some());
 

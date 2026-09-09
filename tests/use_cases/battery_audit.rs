@@ -91,17 +91,10 @@ fn file_lock_acquires_and_releases() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path();
     let path = Path::new("src/lib.rs");
-    let lock_path = lock_path_for(workspace, path);
     let agent = AgentId("agent-a".into());
-    let _lock = try_lock(
-        workspace,
-        path,
-        &agent,
-        AgentKind::ClaudeCode,
-        ClaimIntent::Edit,
-    )
-    .expect("first acquire must succeed");
-    assert!(lock_path.exists(), "lock file must be created");
+    let lock = try_lock(workspace, path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
+        .expect("first acquire must succeed");
+    assert!(lock.path.exists(), "lock file must be created");
 }
 
 #[test]
