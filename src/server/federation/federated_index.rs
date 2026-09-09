@@ -492,6 +492,19 @@ impl FederatedIndex {
     /// all known repos' nodes to be projected first (via
     /// [`Self::project_nodes`]) — otherwise an edge target's
     /// `GlobalId` may not resolve.
+    ///
+    /// Edge ownership: every federated edge this method writes has a
+    /// `source_id` whose global-id prefix is `id:` (the calling repo).
+    /// Retraction (the F10 reconciliation pass) keys on that prefix,
+    /// because the calling repo is the only writer that can know
+    /// when a previously-projected edge is no longer part of the
+    /// source-of-truth graph. Cross-repo `Calls` follow the same rule:
+    /// the caller is the local repo, the target is already global and
+    /// owned by the *other* repo, but the edge itself is owned by the
+    /// caller. Cross-repo `CrossRepoSameSymbol` peer edges likewise
+    /// — they are recomputed each projection from the current node
+    /// set, so a node disappearing (or losing a match) must retract
+    /// the edge the next time the owning repo's `project_edges` runs.
     pub async fn project_edges(&self, id: &RepoId) -> Result<(), LainError> {
         let repo = self
             .get_repo(id)
@@ -510,27 +523,28 @@ impl FederatedIndex {
             local_to_global.insert(n.id.clone(), gid.as_str().to_string());
         }
 
-        // Project intra-repo edges (Calls / Contains / Uses / ...) with
-        // their endpoint ids rewritten to global ids. The backend
-        // upserts are idempotent on edge identity (source+target+
-        // edge_type), so re-running `project_edges` is safe. Edges with
-        // either endpoint missing from the local-to-global map (e.g.
-        // scanner-introduced virtual edges) are skipped — they'll show
-        // up next time the scanner emits them with stable ids.
-        //
-        // Cross-repo edges (wishlist #13): when an edge's target was
-        // already written in global form by the resolve phase (the
-        // `CrossRepoResolver` returned a `GlobalId` because the local
-        // DB missed), it does NOT appear in `local_to_global`. Try to
-        // parse it as a global id; on success, pass it through
-        // unchanged. On failure (genuinely unresolved), skip — same
-        // as the pre-fix behavior for non-cross-repo edges.
-        //
-        // BATCH: ~10k edges is normal for a large repo. The per-edge
-        // upsert saves the backend graph on every call, which would
-        // take minutes. Batch all the writes and save once.
+        // Collect every edge this projection will write into one batch so
+        // the reconciliation pass can diff against the backend's current
+        // view. Two passes: first intra-repo (from the per-repo DB) and
+        // cross-repo external (from the resolve-phase stash), then the
+        // cross-repo `CrossRepoSameSymbol` peer matches. The intra and
+        // external passes follow the original rules; see the comments
+        // below for what each guard means.
         let db = repo.db();
         let mut batch: Vec<crate::schema::GraphEdge> = Vec::new();
+
+        // Intra-repo edges (Calls / Contains / Uses / ...) with
+        // endpoints rewritten to global ids. Edges with either endpoint
+        // missing from `local_to_global` (e.g. scanner-introduced virtual
+        // edges) are skipped — they'll show up next time the scanner
+        // emits them with stable ids.
+        //
+        // Cross-repo edges (wishlist #13): when an edge's target was
+        // already written in global form by the resolve phase, it does
+        // NOT appear in `local_to_global`. Try to parse it as a global
+        // id; on success, pass it through unchanged. On failure
+        // (genuinely unresolved), skip — same as the pre-fix behavior
+        // for non-cross-repo edges.
         for edge in &db.all_edges() {
             let Some(src) = local_to_global.get(&edge.source_id) else {
                 continue;
@@ -551,31 +565,14 @@ impl FederatedIndex {
                 provenance: edge.provenance.clone(),
             });
         }
-        self.backend.upsert_edges_batch(&batch)?;
-        tracing::info!(
-            "[federation] {:?}: projected {} intra-repo edges",
-            id.as_str(),
-            batch.len()
-        );
 
         // Wishlist #13: drain the resolve phase's cross-repo edge stash
         // (edges whose target lives in another repo, written in global
-        // form so the local petgraph could not store them). Each drained
-        // edge has `source_id` rewritten through `local_to_global` and
-        // `target_id` passed through unchanged because it is already
-        // global.
+        // form so the local petgraph could not store them).
         let external = repo.db().take_pending_external_edges();
+        let mut placeholder_ids: Vec<String> = Vec::new();
         if !external.is_empty() {
-            let mut external_batch: Vec<crate::schema::GraphEdge> =
-                Vec::with_capacity(external.len());
-            let mut placeholder_ids = std::collections::HashSet::new();
             for edge in &external {
-                // Skip placeholder upsert when the target is already
-                // projected: Phase 1/2 orchestration guarantees every
-                // owning repo's nodes are present before Phase 2. The
-                // placeholder path also fires during runtime re-projection
-                // after `index()` when the owning repo hasn't been
-                // re-projected yet.
                 if let Ok(gid) = GlobalId::parse(&edge.target_id) {
                     // Targets whose owning repo is not part of this
                     // federation never get a placeholder.
@@ -596,17 +593,8 @@ impl FederatedIndex {
                     // already-projected node corrupts its metadata.
                     let target_already_present = self.backend.has_node(gid.as_str())?;
                     if !target_already_present {
-                        // Use the structured accessors instead of `split(':')`
-                        // tricks: a 5-segment id has three `:` separators
-                        // between `repo:Kind:path:name:line_start`, and
-                        // `rsplit_once(':')` on the `path:name:line_start`
-                        // tail used to split at the `name:line_start`
-                        // boundary, leaving `path` with the name glued on
-                        // and the line number mistaken for the name. The
-                        // `has_node` gate above makes this rare in practice
-                        // (the owning repo's real projection usually lands
-                        // first and overwrites the placeholder), but the
-                        // contract is the contract.
+                        // Placeholder upsert (see the original comment
+                        // for why): the real projection overwrites it.
                         let (Some(kind_str), Some(path), Some(name)) =
                             (gid.node_kind_str(), gid.path(), gid.name())
                         else {
@@ -624,7 +612,7 @@ impl FederatedIndex {
                             path,
                             name,
                         );
-                        placeholder_ids.insert(gid.as_str().to_string());
+                        placeholder_ids.push(gid.as_str().to_string());
                     }
                 }
             }
@@ -637,8 +625,7 @@ impl FederatedIndex {
                     // resolve phase and now — drop and move on.
                     continue;
                 };
-                // Target id is already global; pass it through verbatim.
-                external_batch.push(crate::schema::GraphEdge {
+                batch.push(crate::schema::GraphEdge {
                     edge_type: edge.edge_type.clone(),
                     source_id: src.clone(),
                     target_id: edge.target_id.clone(),
@@ -647,13 +634,6 @@ impl FederatedIndex {
                     provenance: edge.provenance.clone(),
                 });
             }
-            self.backend.upsert_edges_batch(&external_batch)?;
-            tracing::info!(
-                "[federation] {:?}: projected {} cross-repo edges ({} placeholder node(s))",
-                id.as_str(),
-                external_batch.len(),
-                placeholder_ids.len(),
-            );
         }
 
         // Cross-repo matching: gather every other repo's nodes once, then for
@@ -707,7 +687,6 @@ impl FederatedIndex {
             .collect();
         let mut target_nodes: std::collections::HashMap<String, GraphNode> =
             std::collections::HashMap::new();
-        let mut cross_repo_edges: Vec<GraphEdge> = Vec::new();
         for new_node in &batch_nodes {
             let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5, false);
             for (target_gid, sim, _confidence) in matches {
@@ -741,7 +720,7 @@ impl FederatedIndex {
                 if let Some(target_node) = other_nodes.iter().find(|n| n.id == target_gid) {
                     target_nodes.insert(target_gid.clone(), target_node.clone());
                 }
-                cross_repo_edges.push(GraphEdge {
+                batch.push(GraphEdge {
                     edge_type: EdgeType::CrossRepoSameSymbol,
                     source_id: new_node.id.clone(),
                     target_id: target_gid,
@@ -755,8 +734,47 @@ impl FederatedIndex {
             let nodes: Vec<GraphNode> = target_nodes.into_values().collect();
             self.backend.upsert_nodes_batch(&nodes)?;
         }
-        if !cross_repo_edges.is_empty() {
-            self.backend.upsert_edges_batch(&cross_repo_edges)?;
+
+        // Reconcile: retract every federated edge owned by this repo
+        // (source-id prefix `id:`) that the current projection does not
+        // reproduce. Without this pass, deleting a per-repo call left the
+        // federated edge alive as long as its endpoints were still
+        // indexed — `project_edges` only upserted.
+        let prefix = format!("{}:", id.as_str());
+        let new_keys: std::collections::HashSet<(crate::schema::EdgeType, String, String)> =
+            batch.iter().map(|e| (e.edge_type.clone(), e.source_id.clone(), e.target_id.clone())).collect();
+        let stale: Vec<crate::schema::GraphEdge> = self
+            .backend
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.source_id.starts_with(&prefix))
+            .filter(|e| !new_keys.contains(&(e.edge_type.clone(), e.source_id.clone(), e.target_id.clone())))
+            .collect();
+        if !stale.is_empty() {
+            let removed = self.backend.remove_edges(&stale)?;
+            tracing::info!(
+                "[federation] {:?}: retracted {removed} stale edge(s) during reconciliation",
+                id.as_str()
+            );
+        }
+
+        // BATCH: ~10k edges is normal for a large repo. The per-edge
+        // upsert saves the backend graph on every call, which would
+        // take minutes. Batch all the writes and save once.
+        if !batch.is_empty() {
+            self.backend.upsert_edges_batch(&batch)?;
+        }
+        tracing::info!(
+            "[federation] {:?}: projected {} edges (intra + external + peer)",
+            id.as_str(),
+            batch.len()
+        );
+        if !placeholder_ids.is_empty() {
+            tracing::info!(
+                "[federation] {:?}: {} cross-repo placeholder node(s) upserted",
+                id.as_str(),
+                placeholder_ids.len()
+            );
         }
 
         // Rebuild the federation-wide `symbol_to_repos` only when this
