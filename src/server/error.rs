@@ -83,7 +83,7 @@ pub enum LainError {
     #[error("federation graph was written by schema v{found}; this build expects schema v{required}. Run `lain reindex` to rebuild.")]
     FederationSchemaMismatch { found: u32, required: u32 },
 
-    #[error("federation graph payload is corrupt: {reason}. Remove it and re-run to rebuild.")]
+    #[error("federation graph payload is corrupt: {reason}. Run `lain reindex` to rebuild.")]
     FederationPayloadCorrupt { reason: String },
 }
 

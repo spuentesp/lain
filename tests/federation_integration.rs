@@ -2150,9 +2150,6 @@ async fn federation_keeps_same_named_methods_at_different_lines_distinct() {
     );
 }
 
-/// End-to-end counterpart to
-/// `petgraph_backend_rejects_pre_bump_version_header`: a federated_graph.bin
-
 /// End-to-end coverage for the signature-synthesis gate introduced in
 /// Task 3: two repos each declare a Rust function `verify_token` whose
 /// LSP signature field is empty. Setting the synthesized signature
