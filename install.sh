@@ -185,7 +185,12 @@ detect_platform() {
   case "$os" in
     Linux*)
       if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
-        platform="aarch64-unknown-linux-gnu"
+        # No aarch64-unknown-linux-gnu asset is published — release.yml
+        # has no build job for it. Advertising it here would 404 on
+        # download; fall back to "compile from source" like the
+        # Darwin-non-arm64 case below.
+        echo "unsupported"
+        return 1
       else
         platform="x86_64-unknown-linux-gnu"
       fi

@@ -14,8 +14,9 @@ const fs = require('fs');
 function getPlatform(platform = process.platform, arch = process.arch) {
   if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
   if (platform === 'linux'  && arch === 'x64')   return 'x86_64-unknown-linux-gnu';
-  if (platform === 'linux'  && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
   if (platform === 'win32'  && arch === 'x64')   return 'x86_64-pc-windows-msvc';
+  // linux+arm64 has no published release asset (no build job in
+  // release.yml) and deliberately falls through to the error below.
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
@@ -24,7 +25,6 @@ function getAssetName(platform, version) {
   const map = {
     'aarch64-apple-darwin':       `lain-${versionSlug}-aarch64-apple-darwin.tar.gz`,
     'x86_64-unknown-linux-gnu':   `lain-${versionSlug}-x86_64-unknown-linux-gnu.tar.gz`,
-    'aarch64-unknown-linux-gnu':  `lain-${versionSlug}-aarch64-unknown-linux-gnu.tar.gz`,
     'x86_64-pc-windows-msvc':     `lain-${versionSlug}-x86_64-pc-windows-msvc.tar.gz`,
   };
   const asset = map[platform];
@@ -78,8 +78,10 @@ test('linux x64 → x86_64-unknown-linux-gnu', () => {
   assert.strictEqual(getPlatform('linux', 'x64'), 'x86_64-unknown-linux-gnu');
 });
 
-test('linux arm64 → aarch64-unknown-linux-gnu', () => {
-  assert.strictEqual(getPlatform('linux', 'arm64'), 'aarch64-unknown-linux-gnu');
+test('linux arm64 throws (no published asset)', () => {
+  let threw = false;
+  try { getPlatform('linux', 'arm64'); } catch (e) { threw = true; }
+  assert(threw, 'should throw on linux arm64');
 });
 
 test('win32 x64 → x86_64-pc-windows-msvc', () => {
@@ -102,8 +104,8 @@ test('v0.1.0 → "0.1.0" slug (no leading v in asset name)', () => {
 });
 
 test('0.1.0 (no v) also works', () => {
-  const name = getAssetName('aarch64-unknown-linux-gnu', '0.1.0');
-  assert.strictEqual(name, 'lain-0.1.0-aarch64-unknown-linux-gnu.tar.gz');
+  const name = getAssetName('x86_64-pc-windows-msvc', '0.1.0');
+  assert.strictEqual(name, 'lain-0.1.0-x86_64-pc-windows-msvc.tar.gz');
 });
 
 test('macOS ARM asset name is correct', () => {
@@ -262,7 +264,6 @@ console.log('\n[ Full URL round-trip for all platforms ]');
 const platforms = [
   { p: 'darwin', a: 'arm64',  expected: 'aarch64-apple-darwin' },
   { p: 'linux',  a: 'x64',    expected: 'x86_64-unknown-linux-gnu' },
-  { p: 'linux',  a: 'arm64',  expected: 'aarch64-unknown-linux-gnu' },
   { p: 'win32',  a: 'x64',    expected: 'x86_64-pc-windows-msvc' },
 ];
 

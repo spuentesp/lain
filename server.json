@@ -22,7 +22,6 @@
     "method": "binary",
     "binaries": {
       "linux-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-unknown-linux-gnu.tar.gz",
-      "linux-aarch64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-aarch64-unknown-linux-gnu.tar.gz",
       "macos-aarch64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-aarch64-apple-darwin.tar.gz",
       "windows-x86_64": "https://github.com/spuentesp/lain/releases/download/v{version}/lain-{version}-x86_64-pc-windows-msvc.tar.gz"
     },

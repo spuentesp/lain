@@ -29,8 +29,11 @@ function getPlatform() {
   const arch = process.arch;
   if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
   if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-gnu';
-  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
   if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc';
+  // linux+arm64 deliberately falls through to this error: no
+  // aarch64-unknown-linux-gnu release asset is published (release.yml
+  // has no build job for it), so claiming support here would download
+  // a URL that 404s. See install.sh's matching "unsupported" branch.
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
@@ -39,7 +42,6 @@ function getAssetName(platform, version) {
   const map = {
     'aarch64-apple-darwin': `lain-${versionSlug}-aarch64-apple-darwin.tar.gz`,
     'x86_64-unknown-linux-gnu': `lain-${versionSlug}-x86_64-unknown-linux-gnu.tar.gz`,
-    'aarch64-unknown-linux-gnu': `lain-${versionSlug}-aarch64-unknown-linux-gnu.tar.gz`,
     'x86_64-pc-windows-msvc': `lain-${versionSlug}-x86_64-pc-windows-msvc.tar.gz`,
   };
   const asset = map[platform];
