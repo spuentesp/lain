@@ -1221,6 +1221,8 @@ impl LainServer {
                 crate::treesitter::extract_definitions(path, &content)
                     .into_iter()
                     .map(|d| HierarchicalSymbol {
+                        selection_line: d.line_start,
+                        selection_col: 0,
                         node: crate::schema::GraphNode::new_in(
                             d.kind,
                             d.name.clone(),
