@@ -187,12 +187,17 @@ if ! grep -q 'verdict: PASS' "$WORK/report.md"; then
 fi
 
 # Content check: blast_radius against a known symbol from the subject
-# repo must list at least one dependent. Picking `claim_files` because
-# it has callers across the MCP dispatch path in the lain source tree.
+# repo must list at least one dependent. Picking `run_claim_files`
+# because it has callers across the MCP dispatch path in the lain
+# source tree. The MCP tool name is `claim_files` but the graph
+# indexes Rust definitions, not tool-name strings — `claim_files` is
+# only a string literal at src/server/mcp/handler.rs:604 and
+# src/server/mcp/definitions.rs:208, so a blast_radius probe against
+# it would always "Node not found" and trip the gate.
 content_file="$WORK/raw/content-check.json"
 if ! curl -s -m 15 -o "$content_file" -X POST "$URL/mcp" \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":999,"method":"tools/call","params":{"name":"get_blast_radius","arguments":{"symbol":"claim_files"}}}'; then
+    -d '{"jsonrpc":"2.0","id":999,"method":"tools/call","params":{"name":"get_blast_radius","arguments":{"symbol":"run_claim_files"}}}'; then
     echo "content check: get_blast_radius request failed" >&2
     exit 1
 fi
