@@ -13,6 +13,7 @@ use crate::server::presence_lock;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -205,6 +206,16 @@ struct HookSession {
     agent_id: String,
     session_token: String,
     registered_at_unix: u64,
+    /// Per-path nonces returned by `presence_lock::try_lock` via the
+    /// zero-daemon `lock` CLI. Keyed by the canonical lock file path
+    /// (the same path `presence_lock::lock_path_for` returns) so the
+    /// matching `unlock` call can echo the nonce back into
+    /// `release_lock_for_path` and prove it still owns the claim.
+    /// Empty / missing on a session file written before the nonce
+    /// check existed; `unlock` falls back to a no-op when its lookup
+    /// misses, so older hook installations keep working.
+    #[serde(default)]
+    lock_nonces: std::collections::HashMap<String, String>,
 }
 
 /// Sanitize an agent name so it can be used as a single path segment
@@ -252,6 +263,57 @@ fn write_session(agent_name: &str, sess: &HookSession) -> Result<()> {
         std::fs::create_dir_all(parent).context("create hooks dir")?;
     }
     std::fs::write(&path, serde_json::to_string_pretty(sess)?).context("write session")?;
+    Ok(())
+}
+
+fn record_lock_nonce(agent_name: &str, lock_path: &Path, nonce: &str) -> Result<()> {
+    let mut sess = read_or_init_nonce_session(agent_name)?;
+    sess.lock_nonces
+        .insert(lock_path.to_string_lossy().into_owned(), nonce.to_string());
+    write_session(agent_name, &sess)
+}
+
+/// Read the hooks session and initialise a default one if missing.
+/// Used by [`record_lock_nonce`] so the zero-daemon `lock` CLI can
+/// persist a nonce even when the agent has never called `claim` / `register`.
+/// The session key is derived from the agent name alone, not from a
+/// URL, so the first `lock` call creates the session with a fresh
+/// nonce map; the first `claim` call creates it the same way.
+fn read_or_init_nonce_session(agent_name: &str) -> Result<HookSession> {
+    if let Some(s) = read_session(agent_name) {
+        return Ok(s);
+    }
+    Ok(HookSession {
+        agent_id: format!("{agent_name}@{}", std::process::id()),
+        session_token: String::new(),
+        registered_at_unix: chrono_now_unix(),
+        lock_nonces: HashMap::new(),
+    })
+}
+
+/// Read the recorded nonce for `lock_path` from the hooks session
+/// without removing it. Used by the release flow to look up the
+/// credential before attempting the actual `release_lock_for_path`
+/// call; the nonce is only removed once release succeeds.
+fn read_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<Option<String>> {
+    let Some(sess) = read_session(agent_name) else {
+        return Ok(None);
+    };
+    let key = lock_path.to_string_lossy().into_owned();
+    Ok(sess.lock_nonces.get(&key).cloned())
+}
+
+/// Remove the recorded nonce for `lock_path` from the hooks session
+/// and persist the change. Called only after a successful release;
+/// failures keep the nonce in place so the caller can retry.
+fn remove_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<()> {
+    let Some(mut sess) = read_session(agent_name) else {
+        return Ok(());
+    };
+    let key = lock_path.to_string_lossy().into_owned();
+    if sess.lock_nonces.remove(&key).is_some() {
+        write_session(agent_name, &sess)?;
+    }
     Ok(())
 }
 
@@ -338,6 +400,7 @@ fn register_if_needed(
             .context("no session_token")?
             .to_string(),
         registered_at_unix: chrono_now_unix(),
+        lock_nonces: HashMap::new(),
     };
     write_session(name, &sess)?;
     Ok(sess)
@@ -435,7 +498,8 @@ pub fn release(
 ) -> Result<()> {
     let url = &resolve_url(url)?;
     if !server_reachable(url, Duration::from_millis(200)) {
-        return release_filesystem(path, agent_name);
+        let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
+        return release_filesystem(path, &agent_id);
     }
     let parent = if parent_session_id.is_empty() {
         None
@@ -541,6 +605,8 @@ fn claim_filesystem(
     };
     match presence_lock::try_lock(&workspace_root, file_path, &agent_id, kind, parsed_intent) {
         Ok(lock) => {
+            let session_key = presence_lock::lock_path_for(&workspace_root, file_path);
+            record_lock_nonce(agent_name, &session_key, &lock.nonce)?;
             println!(
                 "lain hook: filesystem claim granted at {}",
                 lock.path.display()
@@ -574,11 +640,15 @@ fn claim_filesystem(
 }
 
 /// Filesystem-only counterpart to the in-memory `release_files` MCP
-/// tool. Idempotent — ENOENT is treated as success. Verifies that the
-/// recorded holder matches `agent_name` before removing the sentinel,
-/// preventing a delayed release from deleting a lock stolen by another
-/// agent after TTL expiry.
-fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
+/// tool. Idempotent — ENOENT is treated as success.
+///
+/// The lock file lives at `<sanitized>.lock-<nonce>`. We read the
+/// nonce from the session file (keyed by the logical `<sanitized>.lock`
+/// path), attempt atomic release via `release_lock_for_path`, and only
+/// remove the nonce from the session on success. An I/O failure preserves
+/// the nonce so the caller can retry — the Codex re-check called this
+/// out as M1.
+fn release_filesystem(path: &str, agent_id: &AgentId) -> Result<()> {
     let file_path = Path::new(path);
     // Walk up from `file_path` for `.git`; if none is found within 16
     // levels (or the walk itself errors), fall back to the file's parent
@@ -593,20 +663,33 @@ fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
                 .unwrap_or_else(|| file_path.to_path_buf())
         });
     let lock_path = presence_lock::lock_path_for(&workspace_root, file_path);
-    let deleted = presence_lock::release_lock_if_agent_matches(&lock_path, agent_name)
-        .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
-    if deleted || !lock_path.exists() {
-        println!("released {}", lock_path.display());
-    } else {
-        let (holder, _, _, _) = presence_lock::read_current_holder(&lock_path);
-        println!(
-            "lock at {} held by {}, not released for agent {}",
-            lock_path.display(),
-            holder.as_str(),
-            agent_name
-        );
+    // Session is keyed by the bare agent name (before the `@` separator),
+    // matching what record_lock_nonce uses.
+    let agent_name = agent_id.as_str().split('@').next().unwrap_or(agent_id.as_str());
+    let nonce = read_lock_nonce(agent_name, &lock_path)?;
+    match nonce {
+        None => {
+            println!("no recorded nonce for {}; sentinel left in place", lock_path.display());
+            Ok(())
+        }
+        Some(n) => match presence_lock::release_lock_for_path(&workspace_root, file_path, &n) {
+            Ok(()) => {
+                remove_lock_nonce(agent_name, &lock_path)?;
+                println!("released {}", lock_path.display());
+                Ok(())
+            }
+            Err(presence_lock::ReleaseError::NotOwner { expected, found, .. }) => Err(anyhow::anyhow!(
+                "not the owner of {}: expected nonce {}, found {}",
+                lock_path.display(),
+                expected,
+                if found.is_empty() { "<none>".to_string() } else { found }
+            )),
+            Err(presence_lock::ReleaseError::Io(e)) => {
+                // Nonce is intentionally NOT removed; retry can use it.
+                Err(anyhow::anyhow!("remove {}: {e}", lock_path.display()))
+            }
+        },
     }
-    Ok(())
 }
 
 /// Record a tool-call observation by POSTing to `/hook`. Used by
@@ -737,8 +820,9 @@ pub fn overlap_check(url: &str, base: &str, head: Option<&str>, workspace: &str)
 
 /// `lain hooks lock --workspace-root … --path … --agent-name … …`
 /// Direct, filesystem-only counterpart to `Claim`. Does NOT contact
-/// the lain server: it just writes `<root>/.lain/locks/<sanitized>.json`
-/// via `presence_lock::try_lock`. Used by automation that needs the
+/// the lain server: it just writes
+/// `<root>/.lain/locks/<sanitized>.lock-<nonce>` via
+/// `presence_lock::try_lock`. Used by automation that needs the
 /// hint layer (operator-readable sentinel, no-daemon coordination)
 /// without paying for a full `register_agent` + `claim_files` round
 /// trip.
@@ -764,6 +848,8 @@ pub fn lock(
     };
     match presence_lock::try_lock(workspace, file_path, &agent_id, kind, parsed_intent) {
         Ok(lock) => {
+            let session_key = presence_lock::lock_path_for(workspace, file_path);
+            record_lock_nonce(agent_name, &session_key, &lock.nonce)?;
             println!("{}", lock.path.display());
             Ok(())
         }
@@ -799,31 +885,42 @@ pub fn lock(
 
 /// `lain hooks unlock --workspace-root … --path … [--agent-name …]`
 /// Removes the filesystem sentinel for `path`.
-/// If `agent_name` is non-empty, checks ownership before removing, preventing a delayed
-/// unlock from releasing a lock that has been acquired by a different agent.
-/// If `agent_name` is empty, acts as an administrative force-unlock and removes the sentinel unconditionally.
+/// If `agent_name` is non-empty, uses the per-agent nonce recorded at
+/// `claim`/`lock` time so a stale handle can't remove a replacement
+/// owner's claim. If `agent_name` is empty, acts as an administrative
+/// force-unlock and removes the sentinel unconditionally.
 pub fn unlock(workspace_root: &str, path: &str, agent_name: &str) -> Result<()> {
-    let lock_path = presence_lock::lock_path_for(Path::new(workspace_root), Path::new(path));
-    if agent_name.is_empty() {
-        presence_lock::release_lock_at(&lock_path)
-            .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
-        println!("released {}", lock_path.display());
-    } else {
-        let deleted = presence_lock::release_lock_if_agent_matches(&lock_path, agent_name)
-            .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
-        if deleted || !lock_path.exists() {
-            println!("released {}", lock_path.display());
-        } else {
-            let (holder, _, _, _) = presence_lock::read_current_holder(&lock_path);
-            println!(
-                "lock at {} held by {}, not released for agent {}",
-                lock_path.display(),
-                holder.as_str(),
-                agent_name
-            );
+    let workspace = Path::new(workspace_root);
+    let file_path = Path::new(path);
+    let lock_path = presence_lock::lock_path_for(workspace, file_path);
+    let nonce = read_lock_nonce(agent_name, &lock_path)?;
+    match nonce {
+        None => {
+            // No recorded nonce: the matching `lock` was never issued
+            // by this CLI, or the session file is too old. Surface
+            // the sentinel as-is (still operator-readable) and let
+            // the operator remove it by hand if they really mean it.
+            println!("no recorded nonce for {}; sentinel left in place", lock_path.display());
+            Ok(())
         }
+        Some(n) => match presence_lock::release_lock_for_path(workspace, file_path, &n) {
+            Ok(()) => {
+                remove_lock_nonce(agent_name, &lock_path)?;
+                println!("released {}", lock_path.display());
+                Ok(())
+            }
+            Err(presence_lock::ReleaseError::NotOwner { expected, found, .. }) => Err(anyhow::anyhow!(
+                "not the owner of {}: expected nonce {}, found {}",
+                lock_path.display(),
+                expected,
+                if found.is_empty() { "<none>".to_string() } else { found }
+            )),
+            Err(presence_lock::ReleaseError::Io(e)) => {
+                // Nonce is intentionally NOT removed; retry can use it.
+                Err(anyhow::anyhow!("remove {}: {e}", lock_path.display()))
+            }
+        },
     }
-    Ok(())
 }
 
 #[cfg(test)]
