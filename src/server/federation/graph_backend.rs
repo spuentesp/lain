@@ -82,8 +82,12 @@ impl PetgraphBackend {
 
         if bin_path.exists() {
             let bytes = std::fs::read(&bin_path)?;
-            if bytes.is_empty() {
-            } else if bytes.len() < FEDERATION_GRAPH_HEADER_LEN {
+            // A zero-byte file is *truncated*, not "no graph yet" — the
+            // envelope (magic + version, 8 bytes) is mandatory, and any
+            // shorter file means a torn write or a hand-crafted sentinel.
+            // Treating it as a valid no-op (the previous behaviour) lets a
+            // `GraphDatabase::new` soft-fall-through mask the corruption.
+            if bytes.is_empty() || bytes.len() < FEDERATION_GRAPH_HEADER_LEN {
                 return Err(LainError::FederationSchemaMismatch {
                     found: 0,
                     required: FEDERATION_GRAPH_VERSION,
@@ -112,9 +116,8 @@ impl PetgraphBackend {
                         "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
                         bin_path.display()
                     );
-                    LainError::FederationSchemaMismatch {
-                        found: FEDERATION_GRAPH_VERSION,
-                        required: FEDERATION_GRAPH_VERSION,
+                    LainError::FederationPayloadCorrupt {
+                        reason: error.to_string(),
                     }
                 })?;
                 std::fs::write(&payload_path, payload)?;

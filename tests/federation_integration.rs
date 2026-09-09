@@ -1643,14 +1643,112 @@ fn federation_rejects_corrupt_payload_under_valid_header() {
         Ok(_) => panic!("expected corrupt federation payload to be rejected"),
         Err(e) => e,
     };
+    // `FederationPayloadCorrupt` distinguishes a header that *looks* valid
+    // from a payload that cannot be decoded — `FederationSchemaMismatch`
+    // would be a contradiction ("written by v{required}, this build
+    // expects v{required}") and the previous render swallowed the real
+    // bincode reason into a tracing::warn.
+    match err {
+        LainError::FederationPayloadCorrupt { reason } => {
+            assert!(
+                !reason.is_empty(),
+                "FederationPayloadCorrupt must carry a non-empty reason, got {reason:?}"
+            );
+        }
+        other => panic!("expected FederationPayloadCorrupt, got {other:?}"),
+    }
+    let _ = FEDERATION_GRAPH_VERSION;
+}
+
+/// A zero-byte `federated_graph.bin` is *truncated*, not "no graph yet".
+/// The envelope is mandatory (8 bytes: `LNF2` magic + u32 version), so a
+/// file that exists but is empty is the same class of failure as a
+/// short file: a torn write or a hand-crafted sentinel. The loader must
+/// refuse with `FederationSchemaMismatch` and never silently fall through
+/// to `GraphDatabase::new`, which would load whatever stale sidecar
+/// happens to be sitting next to it.
+#[test]
+fn federation_rejects_zero_byte_file_as_truncated() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, PetgraphBackend};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+    std::fs::write(&bin_path, b"").unwrap();
+    // Plant a corrupt sidecar so a fall-through path that *did* load the
+    // sidecar would have the chance to silently accept it. The loader
+    // must reject before that path runs.
+    std::fs::write(
+        bin_path.with_extension("bin.payload"),
+        b"definitely-not-bincode",
+    )
+    .unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("zero-byte federated_graph.bin must be rejected"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationSchemaMismatch { found, required } => {
+            assert_eq!(found, 0);
+            assert_eq!(required, FEDERATION_GRAPH_VERSION);
+        }
+        other => panic!("expected FederationSchemaMismatch, got {other:?}"),
+    }
+}
+
+/// A valid payload with extra trailing bytes must be rejected too.
+/// `validate_persisted_payload` is configured with
+/// `bincode::DefaultOptions::reject_trailing_bytes()`, so the loader
+/// sees the byte count mismatch as a deserialize failure and surfaces
+/// `FederationPayloadCorrupt`. Without that, the loader would accept
+/// the leading valid frame and silently discard the trailing junk —
+/// which is the kind of corruption that escapes the schema header and
+/// only shows up as a corrupted node count downstream.
+#[test]
+fn federation_rejects_payload_with_trailing_bytes() {
+    use lain::error::LainError;
+    use lain::federation::graph_backend::{FEDERATION_GRAPH_VERSION, PetgraphBackend};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_path = dir.path().join("federated_graph.bin");
+
+    // Build a real, round-trippable GraphState payload by writing through
+    // the loader, then capture those bytes and append garbage after them.
+    // The next load must reject the trailing bytes even though the
+    // leading payload is well-formed.
+    let seed = PetgraphBackend::new(dir.path()).expect("seed empty backend");
+    seed.upsert_node_global(
+        "repot:Function:src/lib.rs:alpha:0",
+        lain::schema::NodeType::Function,
+        "src/lib.rs",
+        "alpha",
+    )
+    .expect("seed node");
+    let valid_bytes = std::fs::read(&bin_path).expect("read seeded bytes");
     assert!(
-        matches!(
-            err,
-            LainError::FederationSchemaMismatch { found, required }
-                if found == FEDERATION_GRAPH_VERSION && required == FEDERATION_GRAPH_VERSION
-        ),
-        "expected FederationSchemaMismatch for corrupt payload, got {err:?}"
+        valid_bytes.starts_with(b"LNF2"),
+        "seed must produce a v2-envelope file, got {:02x?}",
+        &valid_bytes[..valid_bytes.len().min(8)]
     );
+    let mut tampered = valid_bytes.clone();
+    tampered.extend_from_slice(b"\xde\xad\xbe\xefgarbage-after-valid-payload");
+    std::fs::write(&bin_path, &tampered).unwrap();
+
+    let err = match PetgraphBackend::new(dir.path()) {
+        Ok(_) => panic!("federated_graph.bin with trailing bytes must be rejected"),
+        Err(e) => e,
+    };
+    match err {
+        LainError::FederationPayloadCorrupt { reason } => {
+            assert!(
+                !reason.is_empty(),
+                "FederationPayloadCorrupt must carry a non-empty reason, got {reason:?}"
+            );
+        }
+        other => panic!("expected FederationPayloadCorrupt, got {other:?}"),
+    }
+    let _ = FEDERATION_GRAPH_VERSION;
 }
 
 /// End-to-end coverage for the signature-synthesis gate introduced in
