@@ -530,9 +530,18 @@ fn apply_attribute_labels(defs: &[crate::treesitter::SymbolDef], nodes: &mut [Gr
 
 /// When the LSP returns an empty `detail`, derive a signature from
 /// the symbol's source body so cross-repo matching has a signal to
-/// work with. Cuts at the first `{` (Rust/TS/JS/Go) or `:` (Python/Ruby).
-/// Multi-line signatures (rare — mostly Rust `where` clauses) fall back
-/// to the first source line.
+/// work with.
+///
+/// Terminator by language:
+/// - Rust / TypeScript / JavaScript / Go: the first `{` (block open). Rust
+///   parameter lists contain `:` (e.g. `(x: u32)`); a single-character
+///   terminator `:` would cut those off, so Rust/TS/JS/Go look for `{` only.
+/// - Python / Ruby: the first `:` (header end).
+///
+/// `line_start` is zero-based (tree-sitter rows and the LSP
+/// `range.start.line` are both zero-based). Multi-line signatures — most
+/// often Rust `where` clauses — are joined up to and including the line
+/// that carries the terminator.
 pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option<String> {
     let node = &symbol.node;
     if let Some(sig) = &node.signature {
@@ -545,11 +554,36 @@ pub fn derive_signature(symbol: &HierarchicalSymbol, workspace: &Path) -> Option
         workspace.join(&node.path)
     };
     let content = std::fs::read_to_string(&path).ok()?;
-    let line = content.lines().nth(line_start.saturating_sub(1) as usize)?;
-    let trimmed = line.trim();
-    let end = trimmed.find(['{', ':']).unwrap_or(trimmed.len());
-    let candidate = trimmed[..end].trim();
-    if candidate.is_empty() { None } else { Some(candidate.to_string()) }
+    let terminator = terminator_for_path(&node.path);
+    let mut lines = content.lines().skip(line_start as usize);
+    let head = lines.next()?;
+    let head_trimmed = head.trim();
+    if let Some(end) = head_trimmed.find(terminator) {
+        return non_empty(head_trimmed[..end].trim());
+    }
+    let mut joined = head_trimmed.to_string();
+    for next in lines {
+        let trimmed = next.trim();
+        joined.push(' ');
+        joined.push_str(trimmed);
+        if trimmed.contains(terminator) {
+            break;
+        }
+    }
+    let end = joined.find(terminator).unwrap_or(joined.len());
+    non_empty(joined[..end].trim())
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() { None } else { Some(s.to_string()) }
+}
+
+fn terminator_for_path(path: &str) -> char {
+    let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    match ext {
+        "py" | "pyi" | "rb" => ':',
+        _ => '{',
+    }
 }
 
 /// Walk a `HierarchicalSymbol` tree, recording each symbol's id and
@@ -904,7 +938,7 @@ mod tests {
     fn derive_signature_passthrough_when_lsp_provided() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "pub fn foo() {}\n").unwrap();
-        let sym = make_symbol("foo", "lib.rs", Some(1), Some("pub fn foo()"));
+        let sym = make_symbol("foo", "lib.rs", Some(0), Some("pub fn foo()"));
 
         assert_eq!(
             derive_signature(&sym, dir.path()),
@@ -919,11 +953,15 @@ mod tests {
             dir.path().join("lib.rs"),
             "pub fn foo(x: u32) -> Result<(), Error> {\n    todo!()\n}\n",
         ).unwrap();
-        let sym = make_symbol("foo", "lib.rs", Some(1), None);
+        let sym = make_symbol("foo", "lib.rs", Some(0), None);
 
         let derived = derive_signature(&sym, dir.path()).unwrap();
         assert!(derived.starts_with("pub fn foo"), "got: {derived}");
         assert!(!derived.contains('{'), "must cut at the brace");
+        assert!(
+            derived.contains("Result<(), Error>"),
+            "must preserve the return type with generics; got: {derived}"
+        );
     }
 
     #[test]
@@ -933,7 +971,7 @@ mod tests {
             dir.path().join("foo.py"),
             "def foo(x: int) -> None:\n    pass\n",
         ).unwrap();
-        let sym = make_symbol("foo", "foo.py", Some(1), None);
+        let sym = make_symbol("foo", "foo.py", Some(0), None);
 
         let derived = derive_signature(&sym, dir.path()).unwrap();
         assert!(derived.starts_with("def foo"), "got: {derived}");
@@ -943,9 +981,88 @@ mod tests {
     #[test]
     fn derive_signature_returns_none_for_missing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let sym = make_symbol("foo", "src/lib.rs", Some(1), None);
+        let sym = make_symbol("foo", "src/lib.rs", Some(0), None);
 
         assert_eq!(derive_signature(&sym, dir.path()), None);
+    }
+
+    /// Codex contract `signature_synthesis_uses_actual_parser_coordinates`.
+    /// A definition that follows a blank line or comment must still
+    /// produce its own signature; the wave-1 `saturating_sub(1)` in
+    /// `derive_signature` read the previous (blank) line, and the
+    /// function came back with `signature = None`, so cross-repo
+    /// matching had no signal to score on.
+    #[test]
+    fn signature_synthesis_uses_actual_parser_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "// a leading doc comment\n\
+                   \n\
+                   pub fn foo(x: u32) -> Result<u32, Error> {\n    Ok(x)\n}\n";
+        std::fs::write(dir.path().join("lib.rs"), src).unwrap();
+        let sym = make_symbol("foo", "lib.rs", Some(2), None);
+
+        let derived = derive_signature(&sym, dir.path())
+            .expect("signature must synthesize when the def line is the zero-based start");
+        assert!(
+            derived.starts_with("pub fn foo"),
+            "signature must come from the def line, not the prior comment/blank; got: {derived}"
+        );
+        assert!(
+            derived.contains("Result<u32, Error>"),
+            "Rust return type with generics must be preserved; got: {derived}"
+        );
+        assert!(!derived.contains('{'), "must cut at the brace; got: {derived}");
+    }
+
+    /// Codex contract `signature_synthesis_uses_actual_parser_coordinates`,
+    /// off-by-zero complement: the parser's row 0 is the file's first
+    /// line, not the second.
+    #[test]
+    fn signature_synthesis_uses_zero_based_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn first() -> i32 { 0 }\npub fn second() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        let sym = make_symbol("first", "lib.rs", Some(0), None);
+
+        let derived = derive_signature(&sym, dir.path())
+            .expect("line_start=0 must synthesize from the very first line");
+        assert!(
+            derived.starts_with("pub fn first"),
+            "got: {derived}"
+        );
+    }
+
+    /// Codex contract `signature_synthesis_uses_actual_parser_coordinates`,
+    /// multi-line Rust signature (where clause) — the synthesized
+    /// signature must include the `where` clause, not just the head.
+    #[test]
+    fn signature_synthesis_joins_rust_where_clause_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn make<T>(v: T) -> Result<T, Error>\nwhere\n    T: Clone,\n{\n    Ok(v)\n}\n",
+        )
+        .unwrap();
+        let sym = make_symbol("make", "lib.rs", Some(0), None);
+
+        let derived = derive_signature(&sym, dir.path())
+            .expect("multi-line Rust signature must synthesize");
+        assert!(
+            derived.starts_with("fn make"),
+            "got: {derived}"
+        );
+        assert!(
+            derived.contains("where"),
+            "where clause must be included; got: {derived}"
+        );
+        assert!(
+            derived.contains("Clone"),
+            "trait bound must be included; got: {derived}"
+        );
+        assert!(!derived.contains('{'), "must still cut at the brace; got: {derived}");
     }
 
     /// The scanner must ask `get_references` for each symbol's
@@ -955,12 +1072,12 @@ mod tests {
     /// resolve phase had zero callees to link — every `Calls` edge
     /// silently disappeared.
     ///
-    /// The fixture returns a single symbol `helper` at selection
-    /// `(1, 4)` (the identifier column inside `pub fn helper`) and
-    /// one canned reference at that position pointing into `entry`.
-    /// If the scanner passes any position other than `(1, 4)` to
-    /// `get_references`, the override is not hit and the reference
-    /// set comes back empty.
+    /// The fixture returns a single symbol `helper` at zero-based
+    /// selection `(0, 8)` (the identifier column inside
+    /// `pub fn helper`) and one canned reference at that position
+    /// pointing at the use site inside `caller`. If the scanner
+    /// passes any position other than `(0, 8)` to `get_references`,
+    /// the override is not hit and the reference set comes back empty.
     #[tokio::test]
     async fn scanner_calls_get_references_at_each_symbols_selection_position() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -977,11 +1094,11 @@ mod tests {
             "helper".to_string(),
             helper_path_str.clone(),
         );
-        helper_node.line_start = Some(1);
-        helper_node.line_end = Some(1);
+        helper_node.line_start = Some(0);
+        helper_node.line_end = Some(0);
         let helper_symbol = HierarchicalSymbol {
             node: helper_node,
-            selection_line: 1,
+            selection_line: 0,
             selection_col: 8,
             children: Vec::new(),
         };
@@ -998,11 +1115,11 @@ mod tests {
             guard.set_test_document_symbols(symbols);
             let mut refs = std::collections::HashMap::new();
             refs.insert(
-                (file.clone(), 1u32, 8u32),
+                (file.clone(), 0u32, 8u32),
                 vec![ReferenceLocation {
                     path: file.clone(),
-                    line: 2,
-                    col: 12,
+                    line: 1,
+                    col: 18,
                     context: String::new(),
                 }],
             );
@@ -1038,8 +1155,8 @@ mod tests {
             callee_id, &helper_symbol.node.id,
             "external_references must pair the ref with the callee (the symbol we asked about)"
         );
-        assert_eq!(ref_loc.line, 2);
-        assert_eq!(ref_loc.col, 12);
+        assert_eq!(ref_loc.line, 1);
+        assert_eq!(ref_loc.col, 18);
     }
 
     /// The scanner must pair each returned reference with the
@@ -1065,13 +1182,13 @@ mod tests {
                 "helper".to_string(),
                 "lib.rs".to_string(),
             );
-            n.line_start = Some(1);
-            n.line_end = Some(1);
+            n.line_start = Some(0);
+            n.line_end = Some(0);
             n
         };
         let helper_symbol = HierarchicalSymbol {
             node: helper_node.clone(),
-            selection_line: 1,
+            selection_line: 0,
             selection_col: 8,
             children: Vec::new(),
         };
@@ -1088,11 +1205,11 @@ mod tests {
             guard.set_test_document_symbols(symbols);
             let mut refs = std::collections::HashMap::new();
             refs.insert(
-                (file.clone(), 1u32, 8u32),
+                (file.clone(), 0u32, 8u32),
                 vec![ReferenceLocation {
                     path: file.clone(),
-                    line: 2,
-                    col: 12,
+                    line: 1,
+                    col: 18,
                     context: String::new(),
                 }],
             );
@@ -1163,8 +1280,8 @@ mod tests {
                 "helper".to_string(),
                 "lib.rs".to_string(),
             );
-            n.line_start = Some(1);
-            n.line_end = Some(1);
+            n.line_start = Some(0);
+            n.line_end = Some(0);
             n
         };
         let caller_node = {
@@ -1173,13 +1290,13 @@ mod tests {
                 "caller".to_string(),
                 "lib.rs".to_string(),
             );
-            n.line_start = Some(2);
-            n.line_end = Some(2);
+            n.line_start = Some(1);
+            n.line_end = Some(1);
             n
         };
         let helper_symbol = HierarchicalSymbol {
             node: helper_node.clone(),
-            selection_line: 1,
+            selection_line: 0,
             selection_col: 8,
             children: Vec::new(),
         };
@@ -1196,11 +1313,11 @@ mod tests {
             guard.set_test_document_symbols(symbols);
             let mut refs = std::collections::HashMap::new();
             refs.insert(
-                (file.clone(), 1u32, 8u32),
+                (file.clone(), 0u32, 8u32),
                 vec![ReferenceLocation {
                     path: file.clone(),
-                    line: 2,
-                    col: 12,
+                    line: 1,
+                    col: 18,
                     context: String::new(),
                 }],
             );
