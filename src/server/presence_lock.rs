@@ -547,67 +547,126 @@ impl FileLock {
     }
 }
 
-/// Remove the lock file at `lock.path`, but only if the on-disk
-/// nonce matches `lock.nonce`. The check-and-delete is atomic at
-/// the filesystem level: the holder's specific nonce-bearing file
-/// is the only path touched, and `unlink` is a single syscall. A
-/// replacement owner whose lock was taken after this one lives at a
-/// different filename and cannot be clobbered.
-///
-/// Returns `Ok(())` if the file was removed or did not exist
-/// (release is idempotent for a gone sentinel). Other I/O errors and
-/// nonce mismatches are surfaced to the caller.
-pub fn release_lock(lock: &FileLock) -> Result<(), ReleaseError> {
-    match std::fs::metadata(&lock.path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(ReleaseError::Io(e)),
-        Ok(_) => {}
-    }
-    let found = read_nonce(&lock.path);
-    if found != lock.nonce {
-        return Err(ReleaseError::NotOwner {
-            path: lock.path.clone(),
-            expected: lock.nonce.clone(),
-            found,
-        });
-    }
-    match std::fs::remove_file(&lock.path) {
-        Ok(()) => Ok(()),
+/// Read the on-disk nonce for `lock_path` and compare it to
+/// `expected_nonce`. Returns `Ok(())` when they match (or when the
+/// file is missing, so a release on a gone sentinel is idempotent),
+/// `Err(ReleaseError::NotOwner)` on a mismatch. Used by
+/// `FileLock::refresh_lock` (which only checks, never deletes) and as
+/// a building block for the atomic compare-and-delete release.
+fn check_ownership(lock_path: &Path, expected_nonce: &str) -> Result<(), ReleaseError> {
+    match std::fs::metadata(lock_path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => {
+            let found = read_nonce(lock_path);
+            if found == expected_nonce {
+                Ok(())
+            } else {
+                Err(ReleaseError::NotOwner {
+                    path: lock_path.to_path_buf(),
+                    expected: expected_nonce.to_string(),
+                    found,
+                })
+            }
+        }
         Err(e) => Err(ReleaseError::Io(e)),
     }
 }
 
-/// Remove the lock file at
-/// `<workspace_root>/.lain/locks/<sanitized>.lock-<nonce>`, but only
-/// if the on-disk nonce matches `nonce`. Path-only entry point for
-/// callers (e.g. the `lain hooks unlock` CLI) that persisted the
-/// nonce from a prior `try_lock` but don't hold the `FileLock`
-/// handle anymore. Same atomicity guarantee as [`release_lock`].
+/// Atomic compare-and-delete: the lock file is renamed into a private
+/// sibling tempfile before its nonce is checked, so the original
+/// filename is not visible to other agents during the check. If the
+/// nonce matches, the tempfile is unlinked (release succeeded); if it
+/// does not match, the tempfile is renamed back to the lock path (the
+/// replacement owner's claim survives untouched). Closing the check-
+/// then-delete window that the Codex re-check called out as H3: an
+/// old owner's stale `FileLock` could otherwise read its own nonce,
+/// then `std::fs::remove_file` a freshly-acquired replacement's
+/// sentinel because the replacement landed in the same window.
+///
+/// `rename` is atomic on POSIX when source and destination live in
+/// the same directory, which is why the tempfile is created as a
+/// sibling of `lock_path` (rather than under `std::env::temp_dir`,
+/// which may be on a different filesystem). ENOENT on the initial
+/// `rename` is treated as idempotent success — the goal state of a
+/// release is "no sentinel at this path", and that's already true.
+fn release_lock_compare_and_delete(
+    lock_path: &Path,
+    expected_nonce: &str,
+) -> Result<(), ReleaseError> {
+    let lock_dir = match lock_path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => {
+            return Err(ReleaseError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "lock path has no parent directory",
+            )));
+        }
+    };
+    let temp_path = lock_dir.join(format!(".release-{}.tmp", uuid::Uuid::new_v4()));
+
+    match std::fs::rename(lock_path, &temp_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReleaseError::NotOwner {
+                path: lock_path.to_path_buf(),
+                expected: expected_nonce.to_string(),
+                found: String::new(),
+            });
+        }
+        Err(e) => return Err(ReleaseError::Io(e)),
+    }
+
+    let found = read_nonce(&temp_path);
+    if found == expected_nonce {
+        if let Err(e) = std::fs::remove_file(&temp_path) {
+            // Best-effort restore so a transient I/O error doesn't
+            // strand the holder. The caller still sees `Err(Io)` —
+            // the lock survives but the release failed.
+            let _ = std::fs::rename(&temp_path, lock_path);
+            return Err(ReleaseError::Io(e));
+        }
+        Ok(())
+    } else {
+        match std::fs::rename(&temp_path, lock_path) {
+            Ok(()) => Err(ReleaseError::NotOwner {
+                path: lock_path.to_path_buf(),
+                expected: expected_nonce.to_string(),
+                found,
+            }),
+            Err(e) => {
+                // Could not move the moved file back; surface the I/O
+                // error rather than fabricating a `NotOwner` outcome.
+                let _ = std::fs::remove_file(&temp_path);
+                Err(ReleaseError::Io(e))
+            }
+        }
+    }
+}
+
+/// Remove the lock file, but only if the on-disk nonce still matches
+/// `lock.nonce`. Returns `Ok(())` if the file was removed or did not
+/// exist (release is idempotent for a gone sentinel). Other I/O
+/// errors and nonce mismatches are surfaced to the caller.
+///
+/// The check-and-delete is performed atomically via
+/// [`release_lock_compare_and_delete`] so a competing acquire that
+/// lands between the check and the delete cannot cause this call to
+/// remove the replacement holder's sentinel.
+pub fn release_lock(lock: &FileLock) -> Result<(), ReleaseError> {
+    release_lock_compare_and_delete(&lock.path, &lock.nonce)
+}
+
+/// Remove the lock sentinel for `path` only if its on-disk nonce matches
+/// `nonce`. Path-only entry point for callers (e.g. the `lain hooks unlock`
+/// CLI) that persisted the nonce from a prior `try_lock` but don't hold the
+/// `FileLock` handle anymore. Same atomicity guarantee as [`release_lock`].
 pub fn release_lock_for_path(
     workspace_root: &Path,
     path: &Path,
     nonce: &str,
 ) -> Result<(), ReleaseError> {
     let lock_path = lock_path_for_with_nonce(workspace_root, path, nonce);
-    match std::fs::metadata(&lock_path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(ReleaseError::Io(e)),
-        Ok(_) => {}
-    }
-    let found = read_nonce(&lock_path);
-    if found != nonce {
-        return Err(ReleaseError::NotOwner {
-            path: lock_path,
-            expected: nonce.to_string(),
-            found,
-        });
-    }
-    match std::fs::remove_file(&lock_path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(ReleaseError::Io(e)),
-    }
+    release_lock_compare_and_delete(&lock_path, nonce)
 }
 
 /// Remove the lock file at `lock_path`. Idempotent — ENOENT is

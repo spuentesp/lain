@@ -266,56 +266,6 @@ fn write_session(agent_name: &str, sess: &HookSession) -> Result<()> {
     Ok(())
 }
 
-fn record_lock_nonce(agent_name: &str, lock_path: &Path, nonce: &str) -> Result<()> {
-    let mut sess = read_or_init_nonce_session(agent_name)?;
-    sess.lock_nonces
-        .insert(lock_path.to_string_lossy().into_owned(), nonce.to_string());
-    write_session(agent_name, &sess)
-}
-
-/// Read the hooks session and initialise a default one if missing.
-/// Used by [`record_lock_nonce`] so the zero-daemon `lock` CLI can
-/// persist a nonce even when the agent has never called `claim` / `register`.
-/// The session key is derived from the agent name alone, not from a
-/// URL, so the first `lock` call creates the session with a fresh
-/// nonce map; the first `claim` call creates it the same way.
-fn read_or_init_nonce_session(agent_name: &str) -> Result<HookSession> {
-    if let Some(s) = read_session(agent_name) {
-        return Ok(s);
-    }
-    Ok(HookSession {
-        agent_id: format!("{agent_name}@{}", std::process::id()),
-        session_token: String::new(),
-        registered_at_unix: chrono_now_unix(),
-        lock_nonces: HashMap::new(),
-    })
-}
-
-/// Read the recorded nonce for `lock_path` from the hooks session
-/// without removing it. Used by the release flow to look up the
-/// credential before attempting the actual `release_lock_for_path`
-/// call; the nonce is only removed once release succeeds.
-fn read_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<Option<String>> {
-    let Some(sess) = read_session(agent_name) else {
-        return Ok(None);
-    };
-    let key = lock_path.to_string_lossy().into_owned();
-    Ok(sess.lock_nonces.get(&key).cloned())
-}
-
-/// Remove the recorded nonce for `lock_path` from the hooks session
-/// and persist the change. Called only after a successful release;
-/// failures keep the nonce in place so the caller can retry.
-fn remove_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<()> {
-    let Some(mut sess) = read_session(agent_name) else {
-        return Ok(());
-    };
-    let key = lock_path.to_string_lossy().into_owned();
-    if sess.lock_nonces.remove(&key).is_some() {
-        write_session(agent_name, &sess)?;
-    }
-    Ok(())
-}
 
 /// Normalize the `--url` flag value to the canonical MCP endpoint URL.
 /// Accepts both shapes for backwards compatibility with the project-wide
@@ -413,6 +363,60 @@ fn chrono_now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Read or create the per-agent hooks session file with a fresh empty
+/// `lock_nonces` map. Used by the zero-daemon `lock` / `unlock` CLI
+/// subcommands, which don't have an MCP server to hand them a session
+/// but still need somewhere to persist the per-acquire lock nonce so
+/// the matching `unlock` can prove ownership.
+fn read_or_init_nonce_session(agent_name: &str) -> Result<HookSession> {
+    if let Some(s) = read_session(agent_name) {
+        return Ok(s);
+    }
+    let sess = HookSession {
+        agent_id: String::new(),
+        session_token: String::new(),
+        registered_at_unix: chrono_now_unix(),
+        lock_nonces: HashMap::new(),
+    };
+    write_session(agent_name, &sess)?;
+    Ok(sess)
+}
+
+fn record_lock_nonce(agent_name: &str, lock_path: &Path, nonce: &str) -> Result<()> {
+    let mut sess = read_or_init_nonce_session(agent_name)?;
+    sess.lock_nonces
+        .insert(lock_path.to_string_lossy().into_owned(), nonce.to_string());
+    write_session(agent_name, &sess)
+}
+
+/// Read the recorded nonce for `lock_path` from the hooks session
+/// without removing it. Used by the release flow to look up the
+/// credential before attempting the actual `release_lock_for_path`
+/// call; the nonce is only removed once release succeeds. The Codex
+/// re-check called this out as M1: the previous flow removed and
+/// persisted the nonce before attempting release, so an I/O failure
+/// left no nonce for a safe retry.
+fn read_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<Option<String>> {
+    let Some(sess) = read_session(agent_name) else {
+        return Ok(None);
+    };
+    let key = lock_path.to_string_lossy().into_owned();
+    Ok(sess.lock_nonces.get(&key).cloned())
+}
+
+/// Remove the recorded nonce for `lock_path` from the hooks session
+/// and persist the change. Called only after a successful release;
+/// failures keep the nonce in place so the caller can retry.
+fn remove_lock_nonce(agent_name: &str, lock_path: &Path) -> Result<()> {
+    let Some(mut sess) = read_session(agent_name) else {
+        return Ok(());
+    };
+    let key = lock_path.to_string_lossy().into_owned();
+    if sess.lock_nonces.remove(&key).is_some() {
+        write_session(agent_name, &sess)?;
+    }
+    Ok(())
+}
 /// `lain hooks claim --url … --path … [--symbol …] [--intent …] [--parent-session-id …]`
 /// Falls back to the filesystem lock layer when no lain server is reachable
 /// at `--url`. The wishlist calls this out as the zero-daemon path:
@@ -498,8 +502,7 @@ pub fn release(
 ) -> Result<()> {
     let url = &resolve_url(url)?;
     if !server_reachable(url, Duration::from_millis(200)) {
-        let agent_id = AgentId(format!("{agent_name}@{}", std::process::id()));
-        return release_filesystem(path, &agent_id);
+        return release_filesystem(path, agent_name);
     }
     let parent = if parent_session_id.is_empty() {
         None
@@ -640,15 +643,18 @@ fn claim_filesystem(
 }
 
 /// Filesystem-only counterpart to the in-memory `release_files` MCP
-/// tool. Idempotent — ENOENT is treated as success.
+/// tool. Idempotent — ENOENT is treated as success. Uses the per-agent
+/// nonce recorded at `claim` time so a stale handle can't remove a
+/// replacement owner's claim; see the Codex contract
+/// `expired_holder_cannot_release_replacement_holder` and the
+/// `release_lock_for_path` ownership check.
 ///
-/// The lock file lives at `<sanitized>.lock-<nonce>`. We read the
-/// nonce from the session file (keyed by the logical `<sanitized>.lock`
-/// path), attempt atomic release via `release_lock_for_path`, and only
-/// remove the nonce from the session on success. An I/O failure preserves
-/// the nonce so the caller can retry — the Codex re-check called this
-/// out as M1.
-fn release_filesystem(path: &str, agent_id: &AgentId) -> Result<()> {
+/// The nonce is read from the session BEFORE release is attempted and
+/// is only removed from the session once release returns `Ok`. An
+/// I/O failure therefore preserves the nonce in the session, so the
+/// caller can retry with the same credential — the Codex re-check
+/// called this out as M1.
+fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
     let file_path = Path::new(path);
     // Walk up from `file_path` for `.git`; if none is found within 16
     // levels (or the walk itself errors), fall back to the file's parent
@@ -663,9 +669,6 @@ fn release_filesystem(path: &str, agent_id: &AgentId) -> Result<()> {
                 .unwrap_or_else(|| file_path.to_path_buf())
         });
     let lock_path = presence_lock::lock_path_for(&workspace_root, file_path);
-    // Session is keyed by the bare agent name (before the `@` separator),
-    // matching what record_lock_nonce uses.
-    let agent_name = agent_id.as_str().split('@').next().unwrap_or(agent_id.as_str());
     let nonce = read_lock_nonce(agent_name, &lock_path)?;
     match nonce {
         None => {
