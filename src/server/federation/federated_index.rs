@@ -26,6 +26,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+/// The global id a node gets once its owning repo is known: `GlobalId::new`
+/// keyed off the node's own type/path/name. Shared by `project_repo`'s two
+/// rewrite passes (this repo's own nodes, and — for cross-repo matching —
+/// every other repo's nodes) so the rewrite rule can't drift between them.
+fn global_id_str(repo: &RepoId, node: &GraphNode) -> String {
+    GlobalId::new(repo, node.node_type.clone(), &node.path, &node.name)
+        .as_str()
+        .to_string()
+}
+
 pub struct FederatedIndex {
     repos: RwLock<HashMap<RepoId, Arc<RepoIndex>>>,
     backend: Arc<dyn GraphBackend>,
@@ -183,12 +193,12 @@ impl FederatedIndex {
             std::collections::HashMap::with_capacity(nodes.len());
         let mut batch_nodes: Vec<crate::schema::GraphNode> = Vec::with_capacity(nodes.len());
         for n in &nodes {
-            let gid = GlobalId::new(id, n.node_type.clone(), &n.path, &n.name);
+            let gid = global_id_str(id, n);
             let mut rewritten = n.clone();
-            rewritten.id = gid.as_str().to_string();
-            live.insert(gid.as_str().to_string());
+            rewritten.id = gid.clone();
+            live.insert(gid.clone());
             batch_nodes.push(rewritten);
-            local_to_global.insert(n.id.clone(), gid.as_str().to_string());
+            local_to_global.insert(n.id.clone(), gid);
         }
         // Batch upsert: one disk save at the end instead of ~N syncs.
         // The per-node path saved on every upsert and wedged the
@@ -285,12 +295,9 @@ impl FederatedIndex {
                             Some(parts) => parts,
                             None => continue,
                         };
-                        let _ = self.backend.upsert_node_global(
-                            gid.as_str(),
-                            kind,
-                            path,
-                            name,
-                        );
+                        let _ = self
+                            .backend
+                            .upsert_node_global(gid.as_str(), kind, path, name);
                         placeholder_ids.push(gid.as_str().to_string());
                     }
                 }
@@ -359,15 +366,27 @@ impl FederatedIndex {
             .iter()
             .filter(|(rid, _)| *rid != id)
             .flat_map(|(rid, idx)| {
-                idx.nodes().into_iter().map(move |n| {
-                    let mut rewritten = n.clone();
-                    rewritten.id = GlobalId::new(rid, n.node_type.clone(), &n.path, &n.name)
-                        .as_str()
-                        .to_string();
-                    rewritten
+                idx.nodes().into_iter().map(move |mut n| {
+                    n.id = global_id_str(rid, &n);
+                    n
                 })
             })
             .collect();
+        // Collect matched edges and the peer nodes they target, then write
+        // both in one batch each at the end. `upsert_node`/`upsert_edge`
+        // (singular) each do a synchronous `save_to_disk_sync()` per call —
+        // exactly what `upsert_nodes_batch`/`upsert_edges_batch` two blocks
+        // above this one exist to avoid ("calling upsert_node per node
+        // would do ~3k disk syncs"). Before this fix, this loop's match
+        // list was always empty (the id-parse bug dropped every
+        // candidate), so calling the singular methods here never actually
+        // cost anything; now that matches materialize, a federation with
+        // many cross-repo peers would re-wedge the loader one disk sync
+        // per match. `target_nodes` is keyed by id to dedupe: several
+        // matches can target the same peer node.
+        let mut target_nodes: std::collections::HashMap<String, GraphNode> =
+            std::collections::HashMap::new();
+        let mut cross_repo_edges: Vec<GraphEdge> = Vec::new();
         for new_node in &batch_nodes {
             let matches = find_cross_repo_matches(new_node, &other_nodes, 5, 0.5);
             for (target_gid, sim) in matches {
@@ -377,27 +396,44 @@ impl FederatedIndex {
                 // `project_repo(a)` then `project_repo(b)`), so the target
                 // may exist in `other_nodes` (read from the in-memory
                 // per-repo index) without yet existing in `self.backend`.
-                // `upsert_edge` requires both endpoints to already be
-                // present. Same placeholder pattern as the pending
-                // cross-repo `Calls` edges drained above: upsert a
-                // placeholder for the target first (idempotent on global
-                // id); the target repo's own `project_repo` pass
-                // overwrites it with the real node when it runs.
+                // `upsert_edges_batch` requires both endpoints to already
+                // be present.
+                //
+                // Queue the full node we already have in `other_nodes`,
+                // not a bare stand-in built from just its kind/path/name
+                // (the way the pending cross-repo `Calls` edges drained
+                // above have to, since that path only has a bare id
+                // string to work with). The backend's node-upsert overwrite
+                // is unconditional — `GraphNode::new`'s `is_hydrated: true`
+                // default means the "only overwrite if hydrated" guard in
+                // `GraphDatabase::upsert_node` never actually blocks
+                // anything here — so a bare 4-field placeholder written
+                // *after* the target repo's own `project_repo` has already
+                // published the real node (richer node data can arrive in
+                // either order; `project_repo` calls are not sequenced)
+                // would silently strip its signature, line numbers,
+                // docstring, and embedding. Queuing the full node here is
+                // strictly correct in both orderings: if the target hasn't
+                // been projected yet, this is that node's first (complete)
+                // appearance; if it already has been, this just re-writes
+                // the same data.
                 if let Some(target_node) = other_nodes.iter().find(|n| n.id == target_gid) {
-                    self.backend.upsert_node_global(
-                        &target_gid,
-                        target_node.node_type.clone(),
-                        &target_node.path,
-                        &target_node.name,
-                    )?;
+                    target_nodes.insert(target_gid.clone(), target_node.clone());
                 }
-                self.backend.upsert_edge(GraphEdge {
+                cross_repo_edges.push(GraphEdge {
                     edge_type: EdgeType::CrossRepoSameSymbol,
                     source_id: new_node.id.clone(),
                     target_id: target_gid,
                     weight: Some(sim),
-                })?;
+                });
             }
+        }
+        if !target_nodes.is_empty() {
+            let nodes: Vec<GraphNode> = target_nodes.into_values().collect();
+            self.backend.upsert_nodes_batch(&nodes)?;
+        }
+        if !cross_repo_edges.is_empty() {
+            self.backend.upsert_edges_batch(&cross_repo_edges)?;
         }
 
         // Rebuild the federation-wide `symbol_to_repos` only when this
@@ -446,10 +482,12 @@ impl FederatedIndex {
             .backend
             .find_nodes_by_name(name)?
             .into_iter()
-            .filter_map(|n| match crate::federation::repo_id::GlobalId::parse(&n.id) {
-                Ok(gid) => RepoId::new(gid.repo_id()).ok(),
-                Err(_) => None,
-            })
+            .filter_map(
+                |n| match crate::federation::repo_id::GlobalId::parse(&n.id) {
+                    Ok(gid) => RepoId::new(gid.repo_id()).ok(),
+                    Err(_) => None,
+                },
+            )
             .collect();
         hits.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         hits.dedup();

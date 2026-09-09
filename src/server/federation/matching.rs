@@ -120,9 +120,19 @@ pub fn find_cross_repo_matches(
         })
         .collect();
 
+    // Break similarity ties by candidate id. `candidates` (and, upstream,
+    // `FederatedIndex::project_repo`'s `other_nodes`) is built by iterating
+    // a `HashMap<RepoId, Arc<RepoIndex>>`, whose order is randomized per
+    // process — so for a name with many equally-similar matches (e.g. every
+    // repo's `new` with no populated signature, all scoring the name-only
+    // fallback's 1.0), an unordered tie-break here means `truncate(top_k)`
+    // silently keeps a different subset of `CrossRepoSameSymbol` edges on
+    // every server restart even though nothing about the indexed code
+    // changed.
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
     });
     scored.truncate(top_k);
     scored
