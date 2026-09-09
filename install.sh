@@ -404,7 +404,15 @@ main() {
   echo ""
 
   local platform
-  platform=$(detect_platform)
+  # `|| true`: `detect_platform` returns 1 (not just echoes "unsupported")
+  # for Darwin/non-arm64, Linux/aarch64, and any other unrecognized
+  # platform. Under `set -e`, a bare `platform=$(detect_platform)`
+  # assignment aborts the whole script right there on that nonzero
+  # status — before the "unsupported" check below ever runs, and before
+  # the friendly "compile from source" message prints. `|| true` keeps
+  # the captured "unsupported" output while not letting that status
+  # trip `set -e`.
+  platform=$(detect_platform) || true
 
   if [ "$platform" = "unsupported" ]; then
     error "Unsupported platform: $(uname -s)"
