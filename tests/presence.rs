@@ -2495,4 +2495,104 @@ fn claims_outside_the_workspace_are_refused() {
     let err = claim(&escape).expect_err("unborn escape");
     assert!(err.contains("outside the repository"), "{err}");
     assert!(claim("").is_err(), "empty path");
+// --- F01 rework #2: events_log boundary must not persist session_token ---
+
+/// `EventsLog::append` is the durable replay cache for SSE
+/// subscribers. After F01 rework #1 the live SSE wire went through
+/// `PresenceEventPublic` (no token), but the events log still wrote
+/// the internal `PresenceEvent` — so a `session_token` minted by
+/// `register` ended up persisted to `events.jsonl` on disk. This
+/// probe pins the closed-leak contract at the events_log boundary:
+/// the persisted JSONL line for an `AgentJoined` MUST NOT contain
+/// the bearer token.
+///
+/// Reuses the same `AgentSession::new` constructor the live `register`
+/// path uses, so the token is real (32 lowercase hex chars, non-empty)
+/// rather than a hand-rolled placeholder. Reads the on-disk file
+/// directly rather than going through `replay_after` — the spec is
+/// about *persisted bytes*, not about what the in-memory iterator
+/// hands back.
+#[test]
+fn events_log_persists_public_dto_no_token() {
+    use lain::server::events_log::{EventsLog, EVENTS_LOG_FILENAME};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let log = EventsLog::open(tmp.path()).unwrap();
+
+    let session = AgentSession::new(
+        AgentId("b1c2d3e4-1111-2222-3333-444455556666".into()),
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        Some(4242),
+        None,
+    );
+    let bearer = session.session_token.clone();
+    assert_eq!(bearer.len(), 32, "precondition: register mints 32 hex chars");
+    assert!(bearer.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let id = log.append(&PresenceEvent::AgentJoined(session));
+    assert_eq!(id, 1, "fresh log: first event gets id=1");
+
+    let path = tmp.path().join(EVENTS_LOG_FILENAME);
+    let line = std::fs::read_to_string(&path)
+        .expect("events.jsonl must exist after append")
+        .lines()
+        .next()
+        .expect("at least one line")
+        .to_string();
+    let (id_str, payload) = line.split_once('\t').expect("`id\\t{payload}` shape");
+    assert_eq!(id_str, "1");
+    assert!(
+        !payload.contains(&bearer),
+        "events.jsonl line MUST NOT carry the session_token; got payload {payload:?}",
+    );
+    // The agent's identity (id, name, kind) is the non-credential
+    // payload — confirm it's present so the test isn't passing by
+    // accident (e.g. an empty line).
+    assert!(payload.contains("alice"), "payload must still carry the agent name: {payload:?}");
+    assert!(
+        payload.contains("b1c2d3e4-1111-2222-3333-444455556666"),
+        "payload must still carry the agent id: {payload:?}",
+    );
+}
+
+/// Companion probe: the public DTO round-trips through
+/// `EventsLog::replay_after` (read path) and `sse::frame_for`
+/// (frame builder) without losing the AgentJoined event shape. The
+/// SSE frame's `data:` field is the same JSON the live path emits,
+/// minus `session_token`. Any future regression that re-exposes the
+/// token on the replay path fails here too.
+#[test]
+fn events_log_replay_roundtrips_through_frame_for() {
+    use lain::server::events_log::EventsLog;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let log = EventsLog::open(tmp.path()).unwrap();
+
+    let session = AgentSession::new(
+        AgentId("c1c2d3e4-aaaa-bbbb-cccc-ddddeeeeffff".into()),
+        "bob".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        Some(7777),
+        None,
+    );
+    let bearer = session.session_token.clone();
+    log.append(&PresenceEvent::AgentJoined(session));
+
+    let replayed: Vec<(u64, PresenceEventPublic)> = log.replay_after(0).collect();
+    assert_eq!(replayed.len(), 1);
+    let (id, public_ev) = &replayed[0];
+    assert!(matches!(public_ev, PresenceEventPublic::AgentJoined(_)));
+    assert!(!serde_json::to_string(public_ev).unwrap().contains(&bearer));
+
+    // The on-disk payload round-trips through Deserialize back to the
+    // public DTO byte-identical.
+    let path = tmp.path().join("events.jsonl");
+    let line = std::fs::read_to_string(&path).unwrap();
+    let (id_str, payload) = line.lines().next().unwrap().split_once('\t').unwrap();
+    assert_eq!(id_str, &id.to_string());
+    let parsed: PresenceEventPublic = serde_json::from_str(payload).unwrap();
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), payload);
 }
