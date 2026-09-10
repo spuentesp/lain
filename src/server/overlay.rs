@@ -123,8 +123,16 @@ impl VolatileOverlay {
         // lookup once anything else gets removed or re-upserted.
         if let Some(&old_idx) = index_map.get(&node.id) {
             let last_index = NodeIndex::new(graph.node_count() - 1);
-            graph.remove_node(old_idx);
-            if old_idx != last_index {
+            // Guarded the same way `remove_node` guards its own repoint:
+            // only touch `index_map` for the swapped-in node if a node
+            // actually came out. `old_idx` is read from `index_map`
+            // itself here, so in today's code `remove_node` returning
+            // `None` would mean `index_map` and `graph` already
+            // disagreed before this call — but repointing unconditionally
+            // on that premise would corrupt an unrelated id's mapping
+            // instead of just doing nothing, which is what should happen
+            // when there was nothing to swap.
+            if graph.remove_node(old_idx).is_some() && old_idx != last_index {
                 if let Some(moved_idx) = index_map.values_mut().find(|v| **v == last_index) {
                     *moved_idx = old_idx;
                 }

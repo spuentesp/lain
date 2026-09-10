@@ -643,16 +643,25 @@ impl RepoIndex {
         // itself inserted there never touches anything it doesn't own.
         //
         // Only purged once the static graph already has *something* at
-        // that path — i.e. the commit-triggered reindex has caught up.
-        // `sync_state` (`enrichment.rs`) calls only `sync_overlay` for
-        // each federation repo, by design, never a paired `index()` —
-        // so a path can drop out of `get_uncommitted_changes()` well
-        // before the static graph is rebuilt for it. Purging eagerly
-        // would make a symbol that's still real disappear from *both*
-        // the overlay and the graph for that window. Leaving its ids
-        // tracked for one more cycle instead matches the pre-fix
-        // behavior (a stale-but-present entry) rather than regressing
-        // past it — it just means cleanup catches up on a later cycle.
+        // that path — i.e. the commit-triggered reindex has caught up —
+        // OR the path is genuinely gone from disk, in which case
+        // waiting would never end: a committed deletion makes
+        // `index_one_repo`'s `prune_orphans` remove the path from the
+        // static graph *permanently* (it's no longer in
+        // `get_all_tracked_files()`), so `has_node_at_path` would
+        // return `false` forever and the ids-only-purged-when-present
+        // rule below would leak this path's overlay entries for the
+        // life of the process. `sync_state` (`enrichment.rs`) calls
+        // only `sync_overlay` for each federation repo, by design,
+        // never a paired `index()` — so a path can drop out of
+        // `get_uncommitted_changes()` well before the static graph is
+        // rebuilt for it, and purging eagerly in that window would make
+        // a symbol that's still real disappear from *both* the overlay
+        // and the graph. The on-disk check distinguishes the two cases
+        // without needing to inspect git history the sweep doesn't have
+        // (a path can drop out of `changes` either because it was
+        // committed, or because an uncommitted change to it was
+        // discarded — both look identical here).
         {
             let mut owned = self.overlay_paths.lock();
             let stale_paths: Vec<String> = owned
@@ -661,7 +670,9 @@ impl RepoIndex {
                 .cloned()
                 .collect();
             for path in stale_paths {
-                if self.db.find_node_by_path(&path).is_some() {
+                let graph_caught_up = self.db.has_node_at_path(&path);
+                let deleted_from_disk = !workspace_root.join(&path).is_file();
+                if graph_caught_up || deleted_from_disk {
                     if let Some(ids) = owned.remove(&path) {
                         for id in ids {
                             overlay.remove_node(&id);

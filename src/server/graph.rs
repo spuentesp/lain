@@ -862,6 +862,15 @@ impl GraphDatabase {
         self.graph.read().node_weights().find(|n| n.path == path).cloned()
     }
 
+    /// O(1) existence check via `path_index`, for callers that only need
+    /// to know "is there anything here" (e.g. `RepoIndex::sync_overlay`'s
+    /// staleness sweep, called once per stale path every cycle) rather
+    /// than the node itself — `find_node_by_path` does a full
+    /// `node_weights()` scan for that.
+    pub fn has_node_at_path(&self, path: &str) -> bool {
+        self.path_index.get(path).is_some_and(|v| !v.is_empty())
+    }
+
     /// Query nodes with optional filters (used by query executor)
     pub fn query_nodes(
         &self,

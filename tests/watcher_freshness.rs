@@ -261,6 +261,64 @@ async fn sync_overlay_keeps_stale_entry_until_graph_catches_up() {
     std::mem::forget(ri);
 }
 
+/// A deleted-and-committed file never has "something at that path" in
+/// the static graph — the reindex's `prune_orphans` removes it
+/// *permanently*, since it's no longer in `get_all_tracked_files()`.
+/// The `graph_caught_up` half of the staleness sweep's purge condition
+/// alone would therefore wait forever for a signal that will never
+/// come, leaking this path's overlay entries (and `overlay_paths`
+/// bookkeeping) for the life of the process. The `deleted_from_disk`
+/// check is what breaks that: once the file is gone from the
+/// filesystem, there is nothing to wait for, and the entry must be
+/// purged on the very next cycle.
+#[tokio::test]
+async fn sync_overlay_purges_stale_entry_for_a_deleted_file_immediately() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ri = build_repo_index(&tmp);
+
+    let scratch_file = tmp.path().join("src").join("scratch.rs");
+    std::fs::write(&scratch_file, "pub fn scratch_symbol() {}\n").unwrap();
+
+    ri.sync_overlay()
+        .await
+        .expect("first sync_overlay should succeed");
+    let names_before: Vec<String> = ri
+        .server_overlay()
+        .get_all_nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert!(
+        names_before.iter().any(|n| n.contains("scratch_symbol")),
+        "sanity: the uncommitted file's symbol should be in the overlay \
+         before it's deleted; got: {names_before:?}"
+    );
+
+    // Delete the file and commit the deletion. Nothing is (or ever
+    // will be) seeded into `ri.db()` at this path — a real reindex
+    // would prune it, never add it.
+    std::fs::remove_file(&scratch_file).unwrap();
+    commit_all(tmp.path());
+
+    ri.sync_overlay()
+        .await
+        .expect("second sync_overlay should succeed");
+    let names_after: Vec<String> = ri
+        .server_overlay()
+        .get_all_nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert!(
+        !names_after.iter().any(|n| n.contains("scratch_symbol")),
+        "sync_overlay must purge a deleted-and-committed file's overlay \
+         entries even though the static graph will never have anything \
+         at that path to confirm against; got: {names_after:?}"
+    );
+
+    std::mem::forget(ri);
+}
+
 #[tokio::test]
 async fn watcher_does_not_panic_on_edit() {
     let tmp = tempfile::tempdir().unwrap();
