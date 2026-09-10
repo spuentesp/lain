@@ -2520,17 +2520,19 @@ async fn handle_request(
                                 "get_active_workspace" => {
                                     let fed_ref = match federation.as_deref() {
                                         Some(f) => f,
-                                        None => return Ok(jsonrpc_tool_result(
-                                            id,
-                                            &format!(
+                                        None => {
+                                            return Ok(jsonrpc_tool_result(
+                                                id,
+                                                &format!(
                                                 "{}",
                                                 crate::error::LainError::Workspace(
                                                     "get_active_workspace requires federation mode"
                                                         .into()
                                                 )
                                             ),
-                                            true,
-                                        )),
+                                                true,
+                                            ))
+                                        }
                                     };
                                     return match crate::server::mcp::federation_tools::get_active_workspace(fed_ref, workspaces) {
                                         Ok(info) => {
