@@ -176,3 +176,31 @@ fn workspace_dir_source_content_hash_returns_head_for_git_repo() {
     assert!(!hash.is_empty(), "HEAD hash must not be empty");
     assert_eq!(hash.len(), 40, "SHA-1 hex is 40 chars, got {hash:?}");
 }
+
+/// `content_hash` on a freshly-`git init`-ed repo with no commits
+/// must return `Ok(None)`, NOT an error. Pre-fix the function only
+/// treated "not a git repository" as benign; `fatal: ambiguous
+/// argument 'HEAD'` (the exit-128 message for an unborn HEAD) was
+/// treated as a hard error, which `FederatedIndex::persist_manifest`
+/// then `continue`d on — silently dropping the entire repo entry
+/// from the on-disk manifest. URGENT FIXES #5 regression.
+///
+/// A freshly-init'd repo is a real-world case: the first time a user
+/// runs `lain server` against an empty checkout, the federation
+/// registers the repo *before* any commit exists. The manifest must
+/// still record the registration so a later restart can find the
+/// repo by `id` even though there's no HEAD yet to fingerprint.
+#[test]
+fn workspace_dir_source_content_hash_returns_none_for_unborn_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    // `git init` only — no commit, so HEAD doesn't resolve.
+    git2::Repository::init(tmp.path()).unwrap();
+    let src = WorkspaceDirSource::new(dummy_id(), tmp.path().to_path_buf()).unwrap();
+    let hash = src
+        .content_hash()
+        .expect("unborn HEAD must not be an error — the manifest save would skip the repo");
+    assert!(
+        hash.is_none(),
+        "unborn HEAD should yield None (no commit yet to hash), got {hash:?}",
+    );
+}
