@@ -97,6 +97,30 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
     // Use the envelope helper (not the panic-on-error text helper) so
     // we can probe both inputs and assert on each independently.
     use common::tools_call_envelope;
+    // Resolve the actual id of `target` so the by-id probe doesn't
+    // depend on a hard-coded pre-namespace UUID. PR #14 added per-repo
+    // `RepoNamespace`, so the same `(type, path, name)` now hashes
+    // against a per-server namespace and the id differs per
+    // `LainServer` instance — exactly what we want for cross-repo
+    // isolation, but it means a hard-coded UUID breaks the test as
+    // soon as the namespace differs.
+    let target_id = {
+        let env = tools_call_envelope(
+            &host,
+            "search_org",
+            serde_json::json!({"query": "target", "limit": 1, "repo_id": "repo"}),
+        );
+        env.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let needle = "\"global_id\":\"";
+                let start = s.find(needle)?;
+                let after = &s[start + needle.len()..];
+                let end = after.find("\"")?;
+                Some(after[..end].to_string())
+            })
+            .expect("search_org response must contain a global_id")
+    };
     let env_by_name = tools_call_envelope(
         &host,
         "get_call_sites",
@@ -106,7 +130,7 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
     let env_by_id = tools_call_envelope(
         &host,
         "get_call_sites",
-        serde_json::json!({"symbol": "d4037d74-1985-56a8-ae27-9bcba45f638c", "repo_id": "repo"}),
+        serde_json::json!({"symbol": target_id, "repo_id": "repo"}),
     );
     eprintln!("[get_call_sites] by id: {env_by_id}");
 

@@ -26,7 +26,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-/// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
         /// the codebase but ignored here, so exporting it and omitting
         /// `--url` failed with "the following required arguments were
         /// not provided" — a flag that looked optional and was not.
@@ -62,7 +62,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-/// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
         /// the codebase but ignored here, so exporting it and omitting
         /// `--url` failed with "the following required arguments were
         /// not provided" — a flag that looked optional and was not.
@@ -92,7 +92,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-/// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
         /// the codebase but ignored here, so exporting it and omitting
         /// `--url` failed with "the following required arguments were
         /// not provided" — a flag that looked optional and was not.
