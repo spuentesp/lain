@@ -116,9 +116,19 @@ impl VolatileOverlay {
         let mut graph = self.graph.write();
         let mut index_map = self.node_index_map.write();
 
-        // Upsert: if node already exists, remove the old one first to avoid orphans
+        // Upsert: if node already exists, remove the old one first to avoid orphans.
+        // `DiGraph::remove_node` swap-removes (see `remove_node`'s comment for the
+        // full explanation) — repoint whichever id mapped to the pre-removal last
+        // index, or that node becomes unreachable/misresolved on every later
+        // lookup once anything else gets removed or re-upserted.
         if let Some(&old_idx) = index_map.get(&node.id) {
+            let last_index = NodeIndex::new(graph.node_count() - 1);
             graph.remove_node(old_idx);
+            if old_idx != last_index {
+                if let Some(moved_idx) = index_map.values_mut().find(|v| **v == last_index) {
+                    *moved_idx = old_idx;
+                }
+            }
         }
 
         self.update_bloom(&node.id);
@@ -166,8 +176,33 @@ impl VolatileOverlay {
 
         match index_map.remove(id) {
             Some(idx) => {
+                // `DiGraph` (petgraph::Graph) is not a `StableGraph`:
+                // removing a node swap-removes it — unless `idx` is
+                // already the last index, whatever node was at
+                // `node_count() - 1` gets moved into `idx`'s now-vacant
+                // slot, and that other node's index changes. Capture the
+                // last index *before* removing, so `index_map` can be
+                // repointed for whichever id was mapped there — without
+                // this, that id's entry keeps pointing at an index that
+                // no longer holds its node (or now holds a different
+                // one), and every subsequent lookup or removal for it
+                // silently fails or targets the wrong node. This was
+                // invisible as long as callers only ever removed one
+                // node per overlay before reading it again; removing
+                // more than one in the same pass (e.g.
+                // `remove_nodes_for_path` dropping several stale paths
+                // in one `sync_overlay` cycle) is what exposed it.
+                let last_index = NodeIndex::new(graph.node_count() - 1);
                 if graph.remove_node(idx).is_some() {
                     *self.last_updated.write() = Instant::now();
+                    if idx != last_index {
+                        if let Some(moved_idx) = index_map
+                            .values_mut()
+                            .find(|v| **v == last_index)
+                        {
+                            *moved_idx = idx;
+                        }
+                    }
                     debug!("Removed node from volatile overlay: {}", id);
                     true
                 } else {
