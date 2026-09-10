@@ -10,7 +10,9 @@ pub fn unix_secs(t: SystemTime) -> i64 {
 
 /// Seconds since the epoch, as `u64`. Pre-epoch collapses to 0.
 pub fn unix_secs_u64(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Seconds since the epoch with millisecond precision, as `f64`.
@@ -25,7 +27,9 @@ pub fn now_unix_f64() -> f64 {
 }
 
 /// Convenience wrapper for the common "now" case.
-pub fn now_unix() -> i64 { unix_secs(SystemTime::now()) }
+pub fn now_unix() -> i64 {
+    unix_secs(SystemTime::now())
+}
 
 #[cfg(test)]
 mod tests {
@@ -52,9 +56,18 @@ mod tests {
 
     #[test]
     fn now_unix_is_close_to_wall_clock() {
-        let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let n = now_unix();
-        let after = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        assert!(n >= before && n <= after, "n={n}, before={before}, after={after}");
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            n >= before && n <= after,
+            "n={n}, before={before}, after={after}"
+        );
     }
 }

@@ -26,28 +26,54 @@ async fn query_graph_includes_occupancy() {
     let server = LainServer::new(tmp.path(), &mem, None).expect("server");
 
     // Register an agent and claim the file.
-    let agent = server.presence.register("alice".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
-    let _ = server.occupancy.claim(&agent.id, vec![ClaimRequest {
-        path: std::path::PathBuf::from("a.rs"),
-        symbols: vec![],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    let agent = server.presence.register(
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    let _ = server.occupancy.claim(
+        &agent.id,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("a.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
 
     // Verify the claim is observable through the helper the
     // `query_graph` handler uses to build its `occupancy.active_agents`
     // payload. Same handler, same code path as the production tool.
-    let entry = server.occupancy.list_for_path(&std::path::PathBuf::from("a.rs"));
-    assert!(entry.is_some(), "expected an occupancy entry for a.rs after claim");
+    let entry = server
+        .occupancy
+        .list_for_path(&std::path::PathBuf::from("a.rs"));
+    assert!(
+        entry.is_some(),
+        "expected an occupancy entry for a.rs after claim"
+    );
     assert_eq!(entry.unwrap().agents, vec![agent.id.clone()]);
 }
 
 #[test]
 fn register_assigns_unique_ids_and_session_tokens() {
     let reg = PresenceRegistry::new();
-    let s1 = reg.register("claude-1".into(), AgentKind::ClaudeCode, AgentMode::Interactive, Some(1234), None);
-    let s2 = reg.register("kimi-1".into(), AgentKind::Kimi, AgentMode::Interactive, Some(5678), None);
+    let s1 = reg.register(
+        "claude-1".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        Some(1234),
+        None,
+    );
+    let s2 = reg.register(
+        "kimi-1".into(),
+        AgentKind::Kimi,
+        AgentMode::Interactive,
+        Some(5678),
+        None,
+    );
     assert_ne!(s1.id, s2.id);
     assert_ne!(s1.session_token, s2.session_token);
     assert_eq!(reg.list_active(true).len(), 2);
@@ -56,7 +82,13 @@ fn register_assigns_unique_ids_and_session_tokens() {
 #[test]
 fn heartbeat_with_correct_token_refreshes() {
     let reg = PresenceRegistry::new();
-    let s = reg.register("a".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    let s = reg.register(
+        "a".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
     std::thread::sleep(std::time::Duration::from_millis(10));
     let before = reg.get(&s.id).unwrap().last_heartbeat;
     reg.heartbeat(&s.id, &s.session_token).unwrap();
@@ -67,14 +99,29 @@ fn heartbeat_with_correct_token_refreshes() {
 #[test]
 fn heartbeat_with_wrong_token_errors() {
     let reg = PresenceRegistry::new();
-    let s = reg.register("a".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
-    assert!(matches!(reg.heartbeat(&s.id, "wrong"), Err(HeartbeatError::WrongToken)));
+    let s = reg.register(
+        "a".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    assert!(matches!(
+        reg.heartbeat(&s.id, "wrong"),
+        Err(HeartbeatError::WrongToken)
+    ));
 }
 
 #[test]
 fn expire_stale_releases_old_sessions() {
     let reg = PresenceRegistry::with_expiry(std::time::Duration::from_millis(20));
-    let s = reg.register("a".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    let s = reg.register(
+        "a".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
     std::thread::sleep(std::time::Duration::from_millis(40));
     let released = reg.expire_stale();
     assert_eq!(released, vec![s.id.clone()]);
@@ -84,8 +131,20 @@ fn expire_stale_releases_old_sessions() {
 #[test]
 fn background_agents_excluded_from_default_list() {
     let reg = PresenceRegistry::new();
-    reg.register("cron".into(), AgentKind::Other("cron".into()), AgentMode::Background, None, None);
-    reg.register("claude".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    reg.register(
+        "cron".into(),
+        AgentKind::Other("cron".into()),
+        AgentMode::Background,
+        None,
+        None,
+    );
+    reg.register(
+        "claude".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
     assert_eq!(reg.list_active(false).len(), 1);
     assert_eq!(reg.list_active(true).len(), 2);
 }
@@ -93,7 +152,13 @@ fn background_agents_excluded_from_default_list() {
 #[test]
 fn by_token_resolves_session_token() {
     let reg = PresenceRegistry::new();
-    let s = reg.register("a".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    let s = reg.register(
+        "a".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
     assert_eq!(reg.by_token(&s.session_token).map(|x| x.id), Some(s.id));
     assert!(reg.by_token("missing").is_none());
 }
@@ -102,13 +167,16 @@ fn by_token_resolves_session_token() {
 fn claim_grants_empty_path_when_unoccupied() {
     let occ = lain::server::presence::OccupancyMap::new();
     let agent = AgentId("a".into());
-    let result = occ.claim(&agent, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    let result = occ.claim(
+        &agent,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     assert_eq!(result.granted.len(), 1);
     assert_eq!(result.conflicts.len(), 0);
 }
@@ -118,20 +186,26 @@ fn claim_reports_conflict_on_overlap() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
-    occ.claim(&alice, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    let result = occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &alice,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    let result = occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     assert_eq!(result.granted.len(), 0);
     assert_eq!(result.conflicts.len(), 1);
     assert_eq!(result.conflicts[0].agent_id, alice);
@@ -142,20 +216,26 @@ fn claim_different_symbols_on_same_file_no_conflict() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
-    occ.claim(&alice, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    let result = occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["validate".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &alice,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    let result = occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["validate".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     assert_eq!(result.granted.len(), 1);
     assert_eq!(result.conflicts.len(), 0);
 }
@@ -165,20 +245,26 @@ fn claim_file_level_no_symbols_overlaps_with_anything_on_file() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
-    occ.claim(&alice, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec![],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    let result = occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["anything".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &alice,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    let result = occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["anything".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     assert_eq!(result.granted.len(), 0);
     assert_eq!(result.conflicts.len(), 1);
 }
@@ -187,10 +273,25 @@ fn claim_file_level_no_symbols_overlaps_with_anything_on_file() {
 fn release_returns_removed_paths() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
-    occ.claim(&alice, vec![
-        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None },
-        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Read, ttl_seconds: None, plan_revision: None },
-    ]);
+    occ.claim(
+        &alice,
+        vec![
+            ClaimRequest {
+                path: std::path::PathBuf::from("auth.rs"),
+                symbols: vec!["login".into()],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            },
+            ClaimRequest {
+                path: std::path::PathBuf::from("db.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Read,
+                ttl_seconds: None,
+                plan_revision: None,
+            },
+        ],
+    );
     let released = occ.release(&alice, &[std::path::PathBuf::from("auth.rs")]);
     assert_eq!(released, vec![std::path::PathBuf::from("auth.rs")]);
     assert_eq!(occ.list_for_agent(&alice).len(), 1);
@@ -200,10 +301,25 @@ fn release_returns_removed_paths() {
 fn release_all_for_clears_agent() {
     let occ = lain::server::presence::OccupancyMap::new();
     let alice = AgentId("alice".into());
-    occ.claim(&alice, vec![
-        ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None },
-        ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None },
-    ]);
+    occ.claim(
+        &alice,
+        vec![
+            ClaimRequest {
+                path: std::path::PathBuf::from("auth.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            },
+            ClaimRequest {
+                path: std::path::PathBuf::from("db.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            },
+        ],
+    );
     let released = occ.release_all_for(&alice);
     assert_eq!(released.len(), 2);
     assert_eq!(occ.list_for_agent(&alice).len(), 0);
@@ -212,9 +328,29 @@ fn release_all_for_clears_agent() {
 #[test]
 fn list_for_path_shows_all_agents() {
     let occ = lain::server::presence::OccupancyMap::new();
-    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
-    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["validate".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
-    let entry = occ.list_for_path(&std::path::PathBuf::from("auth.rs")).unwrap();
+    occ.claim(
+        &AgentId("alice".into()),
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    occ.claim(
+        &AgentId("bob".into()),
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["validate".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    let entry = occ
+        .list_for_path(&std::path::PathBuf::from("auth.rs"))
+        .unwrap();
     assert_eq!(entry.agents.len(), 2);
     assert_eq!(entry.symbols.len(), 2);
 }
@@ -222,8 +358,26 @@ fn list_for_path_shows_all_agents() {
 #[test]
 fn list_all_returns_all_claimed_paths() {
     let occ = lain::server::presence::OccupancyMap::new();
-    occ.claim(&AgentId("alice".into()), vec![ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
-    occ.claim(&AgentId("bob".into()), vec![ClaimRequest { path: std::path::PathBuf::from("db.rs"), symbols: vec![], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None }]);
+    occ.claim(
+        &AgentId("alice".into()),
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    occ.claim(
+        &AgentId("bob".into()),
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("db.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
 
     let entries = occ.list_all();
     let paths: std::collections::HashSet<_> = entries.iter().map(|e| e.path.clone()).collect();
@@ -268,7 +422,8 @@ async fn sse_broadcasts_presence_events() {
     let (tx, _rx) = tokio::sync::broadcast::channel::<(u64, PresenceEvent)>(16);
     let mut stream = serve_sse(tx.subscribe(), None, log);
 
-    tx.send((7, PresenceEvent::AgentLeft(AgentId("x".into())))).unwrap();
+    tx.send((7, PresenceEvent::AgentLeft(AgentId("x".into()))))
+        .unwrap();
 
     let event = tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
         .await
@@ -323,12 +478,18 @@ async fn sse_replays_after_last_event_id() {
 fn register_agent_returns_id_and_token() {
     use lain::server::presence::PresenceRegistry;
     let reg = PresenceRegistry::new();
-    let session = reg.register("a".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    let session = reg.register(
+        "a".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
     assert!(session.id.as_str().contains("-")); // UUID has dashes
-    // Session token is 16 random bytes rendered as 32 lowercase hex chars
-    // (128 bits of entropy). The brief's draft expected 64; the actual
-    // implementation has shipped 32 since Task 2 and other tests rely on
-    // it, so we match the implementation here.
+                                                // Session token is 16 random bytes rendered as 32 lowercase hex chars
+                                                // (128 bits of entropy). The brief's draft expected 64; the actual
+                                                // implementation has shipped 32 since Task 2 and other tests rely on
+                                                // it, so we match the implementation here.
     assert_eq!(session.session_token.len(), 32);
     assert!(session.session_token.chars().all(|c| c.is_ascii_hexdigit()));
 }
@@ -337,7 +498,13 @@ fn register_agent_returns_id_and_token() {
 fn occupancy_round_trip() {
     let occ = OccupancyMap::new();
     let alice = AgentId("alice".into());
-    let req = ClaimRequest { path: std::path::PathBuf::from("auth.rs"), symbols: vec!["login".into()], intent: ClaimIntent::Edit, ttl_seconds: None, plan_revision: None };
+    let req = ClaimRequest {
+        path: std::path::PathBuf::from("auth.rs"),
+        symbols: vec!["login".into()],
+        intent: ClaimIntent::Edit,
+        ttl_seconds: None,
+        plan_revision: None,
+    };
     let r = occ.claim(&alice, vec![req]);
     assert_eq!(r.granted.len(), 1);
     let claims = occ.list_for_agent(&alice);
@@ -353,8 +520,8 @@ fn occupancy_round_trip() {
 #[tokio::test]
 async fn presence_tool_dispatchers_round_trip() {
     use lain::server::mcp::presence_tools::{
-        run_claim_files, run_list_active_agents, run_list_occupancy,
-        run_my_claims, run_register_agent, run_release_files, run_who_am_i,
+        run_claim_files, run_list_active_agents, run_list_occupancy, run_my_claims,
+        run_register_agent, run_release_files, run_who_am_i,
     };
     use lain::server::LainServer;
 
@@ -372,7 +539,8 @@ async fn presence_tool_dispatchers_round_trip() {
     let v = run_register_agent(
         &server_arc,
         serde_json::json!({"name": "alice", "kind": "claude-code"}),
-    ).unwrap();
+    )
+    .unwrap();
     let agent_id = v["agent_id"].as_str().unwrap().to_string();
     let token = v["session_token"].as_str().unwrap().to_string();
     assert!(v["expires_at_unix"].as_u64().unwrap() > 0);
@@ -394,7 +562,8 @@ async fn presence_tool_dispatchers_round_trip() {
             "session_token": token,
             "files": [{"path": "auth.rs", "symbols": ["login"]}],
         }),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(v["granted"].as_array().unwrap().len(), 1);
     assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
 
@@ -407,10 +576,7 @@ async fn presence_tool_dispatchers_round_trip() {
     assert!(matches!(ev, PresenceEvent::EditLanded { .. }));
 
     // 3. Register a second agent to provoke a conflict.
-    let v2 = run_register_agent(
-        &server_arc,
-        serde_json::json!({"name": "bob"}),
-    ).unwrap();
+    let v2 = run_register_agent(&server_arc, serde_json::json!({"name": "bob"})).unwrap();
     let bob_id = v2["agent_id"].as_str().unwrap().to_string();
     let bob_token = v2["session_token"].as_str().unwrap().to_string();
     // Drain bob's AgentJoined.
@@ -424,7 +590,8 @@ async fn presence_tool_dispatchers_round_trip() {
             "session_token": bob_token,
             "files": [{"path": "auth.rs", "symbols": ["login"]}],
         }),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(v["granted"].as_array().unwrap().len(), 0);
     assert_eq!(v["conflicts"].as_array().unwrap().len(), 1);
     // ConflictDetected fired.
@@ -437,10 +604,7 @@ async fn presence_tool_dispatchers_round_trip() {
 
     // 5. who_am_i resolves the token; claims_count comes from
     //    list_for_agent, which is non-empty for alice.
-    let v = run_who_am_i(
-        &server_arc,
-        serde_json::json!({"session_token": token}),
-    ).unwrap();
+    let v = run_who_am_i(&server_arc, serde_json::json!({"session_token": token})).unwrap();
     assert_eq!(v["agent_id"].as_str().unwrap(), agent_id);
     assert_eq!(v["claims"].as_array().unwrap().len(), 1);
 
@@ -448,7 +612,8 @@ async fn presence_tool_dispatchers_round_trip() {
     let v = run_my_claims(
         &server_arc,
         serde_json::json!({"agent_id": agent_id, "session_token": token}),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
     assert_eq!(v[0]["path"].as_str().unwrap(), "auth.rs");
 
@@ -472,7 +637,8 @@ async fn presence_tool_dispatchers_round_trip() {
             "session_token": token,
             "files": [{"path": "auth.rs"}],
         }),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(v["released"].as_array().unwrap().len(), 1);
     let (_, ev) = events.recv().await.unwrap();
     assert!(matches!(ev, PresenceEvent::ClaimReleased { .. }));
@@ -481,7 +647,8 @@ async fn presence_tool_dispatchers_round_trip() {
     let v = run_my_claims(
         &server_arc,
         serde_json::json!({"agent_id": agent_id, "session_token": token}),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(v.as_array().unwrap().len(), 0);
 }
 
@@ -493,10 +660,7 @@ async fn presence_tool_dispatchers_round_trip() {
 #[test]
 fn config_dir_contains_hooks_subdir_helper() {
     // Direct path test — we just want to make sure the helper exists.
-    let hooks = std::path::PathBuf::from(format!(
-        "{}/hooks",
-        lain::config::config_dir().display()
-    ));
+    let hooks = std::path::PathBuf::from(format!("{}/hooks", lain::config::config_dir().display()));
     // We don't create the dir; we just check the path computation.
     assert!(hooks.ends_with("hooks"));
 }
@@ -634,23 +798,29 @@ fn expire_by_ttl_releases_expired_claims() {
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
     // alice: 1s TTL on auth.rs — will expire.
-    occ.claim(&alice, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec![],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: Some(1),
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &alice,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: Some(1),
+            plan_revision: None,
+        }],
+    );
     // bob: no TTL on db.rs — survives. Different file keeps the test
     // from accidentally exercising the file-level vs symbol-level
     // conflict path.
-    occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("db.rs"),
-        symbols: vec![],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("db.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let released = occ.expire_by_ttl();
     assert_eq!(released.len(), 1);
@@ -660,8 +830,12 @@ fn expire_by_ttl_releases_expired_claims() {
     assert!(occ.list_for_agent(&alice).is_empty());
     assert_eq!(occ.list_for_agent(&bob).len(), 1);
     // The expired file's bookkeeping is cleaned; bob's file remains.
-    assert!(occ.list_for_path(&std::path::PathBuf::from("auth.rs")).is_none());
-    assert!(occ.list_for_path(&std::path::PathBuf::from("db.rs")).is_some());
+    assert!(occ
+        .list_for_path(&std::path::PathBuf::from("auth.rs"))
+        .is_none());
+    assert!(occ
+        .list_for_path(&std::path::PathBuf::from("db.rs"))
+        .is_some());
 }
 
 // --- Task 3 (parent plan): conflict shape says *what*, not just *that* ---
@@ -696,21 +870,31 @@ fn read_claim_does_not_conflict_with_edit_claim() {
     let occ = OccupancyMap::new();
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
-    occ.claim(&alice, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    let result = occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Read, // <-- read, not edit
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    assert_eq!(result.granted.len(), 1, "read claim should NOT conflict with edit");
+    occ.claim(
+        &alice,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    let result = occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Read, // <-- read, not edit
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    assert_eq!(
+        result.granted.len(),
+        1,
+        "read claim should NOT conflict with edit"
+    );
     assert_eq!(result.conflicts.len(), 0);
 }
 
@@ -723,21 +907,31 @@ fn edit_claim_still_conflicts_with_existing_edit_claim() {
     let occ = OccupancyMap::new();
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
-    occ.claim(&alice, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    let result = occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("auth.rs"),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    assert_eq!(result.granted.len(), 0, "edit-vs-edit conflict should still hold");
+    occ.claim(
+        &alice,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    let result = occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    assert_eq!(
+        result.granted.len(),
+        0,
+        "edit-vs-edit conflict should still hold"
+    );
     assert_eq!(result.conflicts.len(), 1);
     let c = &result.conflicts[0];
     assert_eq!(c.symbols, vec!["login".to_string()]);
@@ -760,23 +954,29 @@ fn file_level_edit_does_not_conflict_with_symbol_level_read() {
     let yuri = AgentId("yuri".into());
 
     // xena claims a single symbol with intent=Read. No file-level claim.
-    occ.claim(&xena, vec![ClaimRequest {
-        path: std::path::PathBuf::from("t1.rs"),
-        symbols: vec!["func_x".into()],
-        intent: ClaimIntent::Read,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &xena,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("t1.rs"),
+            symbols: vec!["func_x".into()],
+            intent: ClaimIntent::Read,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
 
     // yuri does a file-level Edit. xena's symbol-level Read is a
     // non-event per wishlist #5.
-    let result = occ.claim(&yuri, vec![ClaimRequest {
-        path: std::path::PathBuf::from("t1.rs"),
-        symbols: vec![], // file-level
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    let result = occ.claim(
+        &yuri,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("t1.rs"),
+            symbols: vec![], // file-level
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     assert_eq!(
         result.granted.len(),
         1,
@@ -800,22 +1000,32 @@ fn file_level_edit_conflicts_with_symbol_level_edit_and_reports_real_intent() {
     let yuri = AgentId("yuri".into());
 
     // xena claims a symbol with intent=Edit (no file-level).
-    occ.claim(&xena, vec![ClaimRequest {
-        path: std::path::PathBuf::from("t1.rs"),
-        symbols: vec!["func_x".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &xena,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("t1.rs"),
+            symbols: vec!["func_x".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
 
-    let result = occ.claim(&yuri, vec![ClaimRequest {
-        path: std::path::PathBuf::from("t1.rs"),
-        symbols: vec![],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
-    assert_eq!(result.granted.len(), 0, "file-level Edit blocks on symbol-level Edit");
+    let result = occ.claim(
+        &yuri,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("t1.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    assert_eq!(
+        result.granted.len(),
+        0,
+        "file-level Edit blocks on symbol-level Edit"
+    );
     assert_eq!(result.conflicts.len(), 1);
     let c = &result.conflicts[0];
     assert_eq!(
@@ -872,10 +1082,7 @@ async fn who_am_i_includes_parent_session_id() {
     let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
 
     // Register a parent (no parent_session_id).
-    let parent_reg = run_register_agent(
-        &server,
-        serde_json::json!({"name": "parent"}),
-    ).unwrap();
+    let parent_reg = run_register_agent(&server, serde_json::json!({"name": "parent"})).unwrap();
     let parent_id = parent_reg["agent_id"].as_str().unwrap().to_string();
     let parent_token = parent_reg["session_token"].as_str().unwrap().to_string();
 
@@ -883,13 +1090,17 @@ async fn who_am_i_includes_parent_session_id() {
     let sub_reg = run_register_agent(
         &server,
         serde_json::json!({"name": "sub", "parent_session_id": parent_id}),
-    ).unwrap();
+    )
+    .unwrap();
     let sub_id = sub_reg["agent_id"].as_str().unwrap().to_string();
     let sub_token = sub_reg["session_token"].as_str().unwrap().to_string();
 
     // who_am_i on the parent: parent_session_id is null.
     let v = run_who_am_i(&server, serde_json::json!({"session_token": parent_token})).unwrap();
-    assert!(v["parent_session_id"].is_null(), "top-level agent has no parent");
+    assert!(
+        v["parent_session_id"].is_null(),
+        "top-level agent has no parent"
+    );
     assert_eq!(v["agent_id"].as_str().unwrap(), parent_id);
 
     // who_am_i on the subagent: parent_session_id matches the parent.
@@ -898,7 +1109,8 @@ async fn who_am_i_includes_parent_session_id() {
     assert_eq!(v["agent_id"].as_str().unwrap(), sub_id);
 
     // list_subagents from the parent's POV returns the sub and only the sub.
-    let v = run_list_subagents(&server, serde_json::json!({"session_token": parent_token})).unwrap();
+    let v =
+        run_list_subagents(&server, serde_json::json!({"session_token": parent_token})).unwrap();
     assert_eq!(v["parent"].as_str().unwrap(), parent_id);
     let subs = v["subagents"].as_array().unwrap();
     assert_eq!(subs.len(), 1);
@@ -914,7 +1126,8 @@ async fn who_am_i_includes_parent_session_id() {
     assert_eq!(v["subagents"].as_array().unwrap().len(), 0);
 
     // list_subagents with an unknown token errors cleanly.
-    let err = run_list_subagents(&server, serde_json::json!({"session_token": "nope"})).unwrap_err();
+    let err =
+        run_list_subagents(&server, serde_json::json!({"session_token": "nope"})).unwrap_err();
     assert!(err.contains("unknown session token"), "{err}");
 }
 
@@ -968,7 +1181,8 @@ fn run_claim_files_conflict_json_has_no_unknown_name_field() {
             "session_token": alice.1,
             "files": [{"path": "auth.rs", "symbols": ["login"]}],
         }),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
 
     // Bob tries the same scope — must conflict.
@@ -979,7 +1193,8 @@ fn run_claim_files_conflict_json_has_no_unknown_name_field() {
             "session_token": bob.1,
             "files": [{"path": "auth.rs", "symbols": ["login"]}],
         }),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(v["granted"].as_array().unwrap().len(), 0);
     let conflicts = v["conflicts"].as_array().unwrap();
     assert_eq!(conflicts.len(), 1);
@@ -999,7 +1214,11 @@ fn run_claim_files_conflict_json_has_no_unknown_name_field() {
         Some("alice"),
         "a conflict must name its holder, not just its uuid"
     );
-    assert_ne!(c["name"].as_str(), Some("unknown"), "never fabricate a name");
+    assert_ne!(
+        c["name"].as_str(),
+        Some("unknown"),
+        "never fabricate a name"
+    );
     assert!(c["agent_id"].is_string());
     assert!(c["last_seen_unix"].as_u64().unwrap() > 0);
     assert!(c["intent"].as_str().unwrap() == "edit");
@@ -1046,7 +1265,9 @@ fn symbol_level_claim_records_nonzero_content_hash() {
     occ.claim(&agent, vec![req]);
     let claims = occ.list_for_agent(&agent);
     assert_eq!(claims.len(), 1);
-    let hash = claims[0].content_hash.expect("symbol-level claim must have content_hash");
+    let hash = claims[0]
+        .content_hash
+        .expect("symbol-level claim must have content_hash");
     // The hash must be non-zero (the placeholder), and re-computing the same
     // body must yield the same hash.
     assert_ne!(hash, SymbolHash::zero());
@@ -1066,23 +1287,29 @@ fn symbol_level_claim_hash_changes_when_body_changes() {
     let path = tmp.path().join("auth.rs");
     std::fs::write(&path, "pub fn login() -> &'static str { \"A\" }\n").unwrap();
     let agent = AgentId("alice".into());
-    occ.claim(&agent, vec![ClaimRequest {
-        path: path.clone(),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &agent,
+        vec![ClaimRequest {
+            path: path.clone(),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     let hash1 = occ.list_for_agent(&agent)[0].content_hash.unwrap();
 
     std::fs::write(&path, "pub fn login() -> &'static str { \"B\" }\n").unwrap();
-    occ.claim(&agent, vec![ClaimRequest {
-        path: path.clone(),
-        symbols: vec!["login".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    occ.claim(
+        &agent,
+        vec![ClaimRequest {
+            path: path.clone(),
+            symbols: vec!["login".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     // Re-claiming the same scope replaces the record rather than
     // appending beside it: an agent that re-claims a file in a loop
     // used to accumulate a row per call in `my_claims`, inflating
@@ -1090,7 +1317,11 @@ fn symbol_level_claim_hash_changes_when_body_changes() {
     // One record, carrying the current body's hash, is what a caller
     // asking "what do I hold?" needs.
     let claims = occ.list_for_agent(&agent);
-    assert_eq!(claims.len(), 1, "re-claiming a scope must replace, not duplicate");
+    assert_eq!(
+        claims.len(),
+        1,
+        "re-claiming a scope must replace, not duplicate"
+    );
     let hash2 = claims[0].content_hash.unwrap();
 
     assert_ne!(hash1, hash2);
@@ -1149,8 +1380,8 @@ fn claim_without_plan_revision_deserializes_to_none() {
 // -------------------------------------------------------------------------
 #[tokio::test]
 async fn to_old_path_fires_via_run_claim_files() {
-    use lain::server::LainServer;
     use lain::server::schema::{GraphNode, NodeType};
+    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -1181,7 +1412,11 @@ async fn to_old_path_fires_via_run_claim_files() {
     // Register an agent and claim with plan_revision=0 — that should hit
     // the TooOld branch in compute_world_state.
     let session = server_arc.presence.register(
-        "tooold".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+        "tooold".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
     );
     let args = serde_json::json!({
         "agent_id": session.id.as_str(),
@@ -1193,16 +1428,27 @@ async fn to_old_path_fires_via_run_claim_files() {
             "plan_revision": 0,
         }],
     });
-    let result = lain::server::mcp::presence_tools::run_claim_files(&server_arc, args)
-        .expect("claim_files");
+    let result =
+        lain::server::mcp::presence_tools::run_claim_files(&server_arc, args).expect("claim_files");
     // run_claim_files returns the ClaimResult directly (the dispatcher's
     // tool_text_result wrapper is what adds the {content:[{text:...}]} shape).
-    let ws = result.get("world_state").expect("world_state must be present");
-    let note = ws.get("note").and_then(|v| v.as_str()).expect("note must be set");
-    let plan = ws.get("plan").and_then(|v| v.as_u64()).expect("plan must be set");
+    let ws = result
+        .get("world_state")
+        .expect("world_state must be present");
+    let note = ws
+        .get("note")
+        .and_then(|v| v.as_str())
+        .expect("note must be set");
+    let plan = ws
+        .get("plan")
+        .and_then(|v| v.as_u64())
+        .expect("plan must be set");
 
-    assert_eq!(note, "plan_revision too old for delta; resync required",
-               "TooOld note must match the spec verbatim (note={:?})", note);
+    assert_eq!(
+        note, "plan_revision too old for delta; resync required",
+        "TooOld note must match the spec verbatim (note={:?})",
+        note
+    );
     assert_eq!(plan, 0, "plan must echo the requested plan_revision");
 }
 
@@ -1225,9 +1471,8 @@ async fn get_world_state_tool_returns_retracted_and_beyond_current() {
     let server = LainServer::new(tmp.path(), &mem, None).expect("server");
 
     // 1) Empty symbols → no-op WorldState
-    let r = lain::server::mcp::presence_tools::run_get_world_state(
-        &server, json!({}),
-    ).expect("get_world_state");
+    let r = lain::server::mcp::presence_tools::run_get_world_state(&server, json!({}))
+        .expect("get_world_state");
     assert!(r.get("current").is_some(), "current must be present");
     assert!(r.get("plan").is_some(), "plan must be present");
     assert_eq!(r["changed_symbols"].as_array().map(|a| a.len()), Some(0));
@@ -1248,21 +1493,32 @@ async fn get_world_state_tool_returns_retracted_and_beyond_current() {
     //    say; claiming the symbol was *deleted* told agents their
     //    target had been removed when it had simply never been indexed.
     let r = lain::server::mcp::presence_tools::run_get_world_state(
-        &server, json!({"symbols": ["nonexistent_xyz"]}),
-    ).expect("get_world_state");
+        &server,
+        json!({"symbols": ["nonexistent_xyz"]}),
+    )
+    .expect("get_world_state");
     let cs = r["changed_symbols"].as_array().unwrap();
-    let absent: Vec<_> = cs.iter()
+    let absent: Vec<_> = cs
+        .iter()
         .filter(|c| c["name"] == "nonexistent_xyz" && c["change_kind"] == "NotIndexed")
         .collect();
-    assert_eq!(absent.len(), 1,
-               "nonexistent_xyz must be NotIndexed; cs={cs:?}");
+    assert_eq!(
+        absent.len(),
+        1,
+        "nonexistent_xyz must be NotIndexed; cs={cs:?}"
+    );
 
     // 4) BeyondCurrent path with verbatim spec note
     let cur = server.overlay.current_revision();
     let r = lain::server::mcp::presence_tools::run_get_world_state(
-        &server, json!({"symbols": ["a"], "plan_revision": cur + 9999}),
-    ).expect("get_world_state");
-    assert_eq!(r["note"], "plan_revision beyond current — server may have restarted");
+        &server,
+        json!({"symbols": ["a"], "plan_revision": cur + 9999}),
+    )
+    .expect("get_world_state");
+    assert_eq!(
+        r["note"],
+        "plan_revision beyond current — server may have restarted"
+    );
     assert_eq!(r["plan"], cur + 9999);
 }
 
@@ -1308,47 +1564,72 @@ async fn get_recent_activity_tool_groups_by_path() {
 
     // Register 3 agents
     let alice = server.presence.register(
-        format!("alice_{}", run_id), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+        format!("alice_{}", run_id),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
     );
     let bob = server.presence.register(
-        format!("bob_{}", run_id), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+        format!("bob_{}", run_id),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
     );
     let carol = server.presence.register(
-        format!("carol_{}", run_id), AgentKind::ClaudeCode, AgentMode::Interactive, None, None,
+        format!("carol_{}", run_id),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
     );
 
     // Helper: claim one file and return the granted count
-    fn claim_count(
-        server: &LainServer,
-        agent_id: &str,
-        token: &str,
-        path: &str,
-    ) -> usize {
+    fn claim_count(server: &LainServer, agent_id: &str, token: &str, path: &str) -> usize {
         let args = json!({
             "agent_id": agent_id,
             "session_token": token,
             "files": [{"path": path, "symbols": ["x"]}],
         });
-        lain::server::mcp::presence_tools::run_claim_files(server, args)
-            .expect("claim")["granted"]
-            .as_array().unwrap().len()
+        lain::server::mcp::presence_tools::run_claim_files(server, args).expect("claim")["granted"]
+            .as_array()
+            .unwrap()
+            .len()
     }
-    assert_eq!(claim_count(&server, alice.id.as_str(), &alice.session_token, &p1), 1);
-    assert_eq!(claim_count(&server, alice.id.as_str(), &alice.session_token, &p2), 1);
-    assert_eq!(claim_count(&server, alice.id.as_str(), &alice.session_token, &p3), 1);
-    assert_eq!(claim_count(&server, bob.id.as_str(), &bob.session_token, &p_other), 1);
-    let _ = carol;  // unused
+    assert_eq!(
+        claim_count(&server, alice.id.as_str(), &alice.session_token, &p1),
+        1
+    );
+    assert_eq!(
+        claim_count(&server, alice.id.as_str(), &alice.session_token, &p2),
+        1
+    );
+    assert_eq!(
+        claim_count(&server, alice.id.as_str(), &alice.session_token, &p3),
+        1
+    );
+    assert_eq!(
+        claim_count(&server, bob.id.as_str(), &bob.session_token, &p_other),
+        1
+    );
+    let _ = carol; // unused
 
     // 1) Path-grouped digest scoped to this run's prefix
     let args = json!({"path_glob": format!("{}*", prefix)});
-    let digest = lain::server::mcp::audit_tools::run_get_recent_activity(
-        &server, args,
-    ).expect("get_recent_activity");
+    let digest = lain::server::mcp::audit_tools::run_get_recent_activity(&server, args)
+        .expect("get_recent_activity");
 
-    assert_eq!(digest["total_events"].as_u64(), Some(4),
-               "total_events should be 4 (3 alice + 1 bob); digest={digest:?}");
-    assert_eq!(digest["total_groups"].as_u64(), Some(4),
-               "total_groups should be 4 (4 distinct paths); digest={digest:?}");
+    assert_eq!(
+        digest["total_events"].as_u64(),
+        Some(4),
+        "total_events should be 4 (3 alice + 1 bob); digest={digest:?}"
+    );
+    assert_eq!(
+        digest["total_groups"].as_u64(),
+        Some(4),
+        "total_groups should be 4 (4 distinct paths); digest={digest:?}"
+    );
     assert_eq!(digest["group_by"].as_str(), Some("path"));
     assert_eq!(digest["truncated"].as_bool(), Some(false));
     assert_eq!(digest["groups"].as_array().map(|a| a.len()), Some(4));
@@ -1364,15 +1645,17 @@ async fn get_recent_activity_tool_groups_by_path() {
         assert!(ev.get("racers").is_some());
         assert!(ev.get("plan_revision").is_some());
         assert!(ev.get("landed_revision").is_some());
-        assert_eq!(g["first_ts"].as_f64(), g["last_ts"].as_f64(),
-                   "first_ts == last_ts when count==1");
+        assert_eq!(
+            g["first_ts"].as_f64(),
+            g["last_ts"].as_f64(),
+            "first_ts == last_ts when count==1"
+        );
     }
 
     // 2) Limit truncates and reports truncated=true
     let args2 = json!({"path_glob": format!("{}*", prefix), "limit": 2});
-    let digest2 = lain::server::mcp::audit_tools::run_get_recent_activity(
-        &server, args2,
-    ).expect("get_recent_activity");
+    let digest2 = lain::server::mcp::audit_tools::run_get_recent_activity(&server, args2)
+        .expect("get_recent_activity");
     assert_eq!(digest2["groups"].as_array().map(|a| a.len()), Some(2));
     assert_eq!(digest2["truncated"].as_bool(), Some(true));
     assert_eq!(digest2["total_groups"].as_u64(), Some(4));
@@ -1431,7 +1714,11 @@ fn claims_collide_across_path_spellings() {
             1,
             "spelling {spelling:?} must conflict with the absolute claim"
         );
-        assert_eq!(result.granted.len(), 0, "spelling {spelling:?} must not be granted");
+        assert_eq!(
+            result.granted.len(),
+            0,
+            "spelling {spelling:?} must not be granted"
+        );
         assert_eq!(result.conflicts[0].agent_id, alice);
     }
 }
@@ -1466,9 +1753,16 @@ fn release_matches_a_differently_spelled_claim() {
     occ.set_workspace_root(root);
     let alice = AgentId("alice".into());
 
-    occ.claim(&alice, vec![claim_req(&root.join("src/a.rs").to_string_lossy())]);
+    occ.claim(
+        &alice,
+        vec![claim_req(&root.join("src/a.rs").to_string_lossy())],
+    );
     let released = occ.release(&alice, &[std::path::PathBuf::from("src/a.rs")]);
-    assert_eq!(released.len(), 1, "relative release must find an absolute claim");
+    assert_eq!(
+        released.len(),
+        1,
+        "relative release must find an absolute claim"
+    );
 
     // And the file is now free for another agent.
     let bob = AgentId("bob".into());
@@ -1489,7 +1783,10 @@ fn claim_for_a_file_that_does_not_exist_yet_still_collides() {
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
 
-    occ.claim(&alice, vec![claim_req(&root.join("src/new.rs").to_string_lossy())]);
+    occ.claim(
+        &alice,
+        vec![claim_req(&root.join("src/new.rs").to_string_lossy())],
+    );
     let result = occ.claim(&bob, vec![claim_req("src/new.rs")]);
     assert_eq!(result.conflicts.len(), 1, "unborn file must still collide");
 }
@@ -1511,9 +1808,19 @@ fn same_relative_path_in_two_repos_stays_distinct() {
     let alice = AgentId("alice".into());
     let bob = AgentId("bob".into());
 
-    occ.claim(&alice, vec![claim_req(&repo_a.join("src/main.rs").to_string_lossy())]);
-    let result = occ.claim(&bob, vec![claim_req(&repo_b.join("src/main.rs").to_string_lossy())]);
-    assert_eq!(result.conflicts.len(), 0, "different repos must not collide");
+    occ.claim(
+        &alice,
+        vec![claim_req(&repo_a.join("src/main.rs").to_string_lossy())],
+    );
+    let result = occ.claim(
+        &bob,
+        vec![claim_req(&repo_b.join("src/main.rs").to_string_lossy())],
+    );
+    assert_eq!(
+        result.conflicts.len(),
+        0,
+        "different repos must not collide"
+    );
     assert_eq!(result.granted.len(), 1);
 }
 
@@ -1589,7 +1896,13 @@ async fn expired_session_revokes_claims_with_a_reason() {
     let tmp = tempfile::tempdir().unwrap();
     let events_log = lain::server::events_log::EventsLog::open(tmp.path()).unwrap();
 
-    let session = reg.register("alice".into(), AgentKind::ClaudeCode, AgentMode::Interactive, None, None);
+    let session = reg.register(
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
     occ.claim(&session.id, vec![claim_req("auth.rs")]);
 
     std::thread::sleep(std::time::Duration::from_millis(40));
@@ -1599,7 +1912,12 @@ async fn expired_session_revokes_claims_with_a_reason() {
     // give it up and may still believe it owns the file.
     let mut saw_revoked = false;
     while let Ok((_, ev)) = rx.try_recv() {
-        if let PresenceEvent::ClaimRevoked { agent_id, path, reason } = ev {
+        if let PresenceEvent::ClaimRevoked {
+            agent_id,
+            path,
+            reason,
+        } = ev
+        {
             assert_eq!(agent_id, session.id);
             assert_eq!(path, std::path::PathBuf::from("auth.rs"));
             assert_eq!(reason, "session_expired");
@@ -1673,19 +1991,26 @@ fn read_over_edit_grants_with_an_advisory() {
     let bob = AgentId("bob".into());
 
     occ.claim(&alice, vec![claim_req("handler.rs")]); // edit
-    let result = occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("handler.rs"),
-        symbols: vec![],
-        intent: ClaimIntent::Read,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    let result = occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("handler.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Read,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
 
     // Readers are never blocked...
     assert_eq!(result.granted.len(), 1, "a read must still be granted");
     assert_eq!(result.conflicts.len(), 0, "a read must not conflict");
     // ...but they must be told the file is being rewritten under them.
-    assert_eq!(result.advisories.len(), 1, "read over a live edit needs an advisory");
+    assert_eq!(
+        result.advisories.len(),
+        1,
+        "read over a live edit needs an advisory"
+    );
     assert_eq!(result.advisories[0].agent_id, alice);
     assert_eq!(result.advisories[0].intent, ClaimIntent::Edit);
 }
@@ -1694,13 +2019,16 @@ fn read_over_edit_grants_with_an_advisory() {
 fn read_on_a_quiet_file_carries_no_advisory() {
     let occ = lain::server::presence::OccupancyMap::new();
     let bob = AgentId("bob".into());
-    let result = occ.claim(&bob, vec![ClaimRequest {
-        path: std::path::PathBuf::from("quiet.rs"),
-        symbols: vec![],
-        intent: ClaimIntent::Read,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    let result = occ.claim(
+        &bob,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("quiet.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Read,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     assert!(result.advisories.is_empty(), "no editor, no advisory");
 }
 
@@ -1721,7 +2049,6 @@ fn read_over_another_read_carries_no_advisory() {
     assert!(result.advisories.is_empty(), "two readers are not a hazard");
 }
 
-
 /// The holder's name is resolved live, so a departed holder reports
 /// `null` rather than the fabricated "unknown" that got the field
 /// removed in the first place.
@@ -1737,18 +2064,26 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
 
     let alice = run_register_agent_for_test(&server, "alice");
     let bob = run_register_agent_for_test(&server, "bob");
-    run_claim_files(&server, serde_json::json!({
-        "agent_id": alice.0, "session_token": alice.1,
-        "files": [{"path": "auth.rs", "intent": "edit"}],
-    })).unwrap();
+    run_claim_files(
+        &server,
+        serde_json::json!({
+            "agent_id": alice.0, "session_token": alice.1,
+            "files": [{"path": "auth.rs", "intent": "edit"}],
+        }),
+    )
+    .unwrap();
 
     // Alice's session goes away while her claim is still on the file.
     server.presence.remove(&AgentId(alice.0.clone()));
 
-    let v = run_claim_files(&server, serde_json::json!({
-        "agent_id": bob.0, "session_token": bob.1,
-        "files": [{"path": "auth.rs", "intent": "edit"}],
-    })).unwrap();
+    let v = run_claim_files(
+        &server,
+        serde_json::json!({
+            "agent_id": bob.0, "session_token": bob.1,
+            "files": [{"path": "auth.rs", "intent": "edit"}],
+        }),
+    )
+    .unwrap();
     let c = &v["conflicts"].as_array().unwrap()[0];
     assert!(
         c["name"].is_null(),
@@ -1781,15 +2116,25 @@ async fn claim_files_accepts_string_form_files() {
     // String-form: the agent sent `["src/a.rs"]`, not `[{...}]`. Before
     // the fix, the dispatcher returns an opaque `invalid type: string
     // "src/a.rs", expected struct ClaimFilesEntry` and the call is dead.
-    let v = run_claim_files(&server, serde_json::json!({
-        "agent_id": alice.0, "session_token": alice.1,
-        "files": ["src/a.rs"],
-    })).expect("string-form files must be accepted");
+    let v = run_claim_files(
+        &server,
+        serde_json::json!({
+            "agent_id": alice.0, "session_token": alice.1,
+            "files": ["src/a.rs"],
+        }),
+    )
+    .expect("string-form files must be accepted");
 
     // Response shape matches the object form: the same top-level keys
     // the rest of the toolchain inspects.
-    assert!(v.get("granted").is_some(), "response must have `granted`: {v}");
-    assert!(v.get("conflicts").is_some(), "response must have `conflicts`: {v}");
+    assert!(
+        v.get("granted").is_some(),
+        "response must have `granted`: {v}"
+    );
+    assert!(
+        v.get("conflicts").is_some(),
+        "response must have `conflicts`: {v}"
+    );
     let granted = v["granted"].as_array().expect("granted must be an array");
     assert_eq!(granted.len(), 1, "the single string entry must grant");
     assert_eq!(granted[0]["path"].as_str(), Some("src/a.rs"));

@@ -12,25 +12,49 @@ fn dummy_id() -> RepoId {
 
 #[tokio::test]
 async fn local_clone_source_id_returns_configured() {
-    let src = LocalCloneSource::new(dummy_id(), "https://example.com/repo.git", "main", PathBuf::from("/tmp/repo")).unwrap();
+    let src = LocalCloneSource::new(
+        dummy_id(),
+        "https://example.com/repo.git",
+        "main",
+        PathBuf::from("/tmp/repo"),
+    )
+    .unwrap();
     assert_eq!(src.id().as_str(), "test-repo");
 }
 
 #[tokio::test]
 async fn local_clone_source_local_path_returns_configured() {
-    let src = LocalCloneSource::new(dummy_id(), "https://example.com/repo.git", "main", PathBuf::from("/tmp/repo")).unwrap();
+    let src = LocalCloneSource::new(
+        dummy_id(),
+        "https://example.com/repo.git",
+        "main",
+        PathBuf::from("/tmp/repo"),
+    )
+    .unwrap();
     assert_eq!(src.local_path(), PathBuf::from("/tmp/repo").as_path());
 }
 
 #[tokio::test]
 async fn local_clone_source_is_stale_when_never_refreshed() {
-    let src = LocalCloneSource::new(dummy_id(), "https://example.com/repo.git", "main", PathBuf::from("/tmp/repo")).unwrap();
+    let src = LocalCloneSource::new(
+        dummy_id(),
+        "https://example.com/repo.git",
+        "main",
+        PathBuf::from("/tmp/repo"),
+    )
+    .unwrap();
     assert!(src.is_stale(Duration::from_secs(0)));
 }
 
 #[tokio::test]
 async fn local_clone_source_is_not_stale_after_recent_refresh() {
-    let src = LocalCloneSource::new(dummy_id(), "https://example.com/repo.git", "main", PathBuf::from("/tmp/repo")).unwrap();
+    let src = LocalCloneSource::new(
+        dummy_id(),
+        "https://example.com/repo.git",
+        "main",
+        PathBuf::from("/tmp/repo"),
+    )
+    .unwrap();
     src.mark_refreshed(SystemTime::now());
     assert!(!src.is_stale(Duration::from_secs(60)));
 }
@@ -44,7 +68,8 @@ async fn local_clone_source_real_fetch_against_public_repo() {
         "https://github.com/octocat/Hello-World.git",
         "master",
         tmp.path().join("hello-world"),
-    ).unwrap();
+    )
+    .unwrap();
     src.fetch().await.expect("fetch should succeed");
     assert!(src.local_path().exists());
     assert!(!src.is_stale(Duration::from_secs(60)));
@@ -52,7 +77,14 @@ async fn local_clone_source_real_fetch_against_public_repo() {
 
 #[tokio::test]
 async fn shallow_clone_source_id_and_path() {
-    let src = ShallowCloneSource::new(dummy_id(), "https://example.com/repo.git", "main", PathBuf::from("/tmp/repo"), Duration::from_secs(300)).unwrap();
+    let src = ShallowCloneSource::new(
+        dummy_id(),
+        "https://example.com/repo.git",
+        "main",
+        PathBuf::from("/tmp/repo"),
+        Duration::from_secs(300),
+    )
+    .unwrap();
     assert_eq!(src.id().as_str(), "test-repo");
     assert_eq!(src.local_path(), PathBuf::from("/tmp/repo").as_path());
     assert_eq!(src.refresh_interval(), Duration::from_secs(300));
@@ -60,7 +92,14 @@ async fn shallow_clone_source_id_and_path() {
 
 #[tokio::test]
 async fn shallow_clone_source_is_stale_when_never_refreshed() {
-    let src = ShallowCloneSource::new(dummy_id(), "https://example.com/repo.git", "main", PathBuf::from("/tmp/repo"), Duration::from_secs(60)).unwrap();
+    let src = ShallowCloneSource::new(
+        dummy_id(),
+        "https://example.com/repo.git",
+        "main",
+        PathBuf::from("/tmp/repo"),
+        Duration::from_secs(60),
+    )
+    .unwrap();
     assert!(src.is_stale(Duration::from_secs(60)));
 }
 

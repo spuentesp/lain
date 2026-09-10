@@ -5,9 +5,9 @@
 //!
 //! Edges created: Implements (handler -> gRPC service method)
 
-use crate::graph::GraphDatabase;
-use crate::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
 use crate::error::LainError;
+use crate::graph::GraphDatabase;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::path::Path;
 
 /// A gRPC service method extracted from a .proto file
@@ -27,9 +27,17 @@ pub fn parse_proto(content: &str, proto_path: &str) -> Vec<ProtoService> {
     let mut services = Vec::new();
 
     // Extract package
-    let package = content.lines()
+    let package = content
+        .lines()
         .find(|l| l.trim().starts_with("package "))
-        .map(|l| l.trim().trim_start_matches("package").trim().trim_end_matches(';').trim().to_string())
+        .map(|l| {
+            l.trim()
+                .trim_start_matches("package")
+                .trim()
+                .trim_end_matches(';')
+                .trim()
+                .to_string()
+        })
         .unwrap_or_default();
 
     // Find all service blocks
@@ -41,7 +49,12 @@ pub fn parse_proto(content: &str, proto_path: &str) -> Vec<ProtoService> {
 
         if line.starts_with("service ") {
             in_service = true;
-            current_service = line.trim_start_matches("service").trim().trim_end_matches('{').trim().to_string();
+            current_service = line
+                .trim_start_matches("service")
+                .trim()
+                .trim_end_matches('{')
+                .trim()
+                .to_string();
         } else if in_service && line == "}" {
             in_service = false;
         } else if in_service && line.starts_with("rpc ") {
@@ -52,8 +65,16 @@ pub fn parse_proto(content: &str, proto_path: &str) -> Vec<ProtoService> {
 
                 if let Some(paren_close) = rest.find(')') {
                     let input_type = rest[..paren_close].trim().to_string();
-                    let returns_part = rest[paren_close..].trim_start_matches(")").trim().trim_start_matches("returns").trim();
-                    let output_type = returns_part.trim_start_matches('(').trim_end_matches(')').trim().to_string();
+                    let returns_part = rest[paren_close..]
+                        .trim_start_matches(")")
+                        .trim()
+                        .trim_start_matches("returns")
+                        .trim();
+                    let output_type = returns_part
+                        .trim_start_matches('(')
+                        .trim_end_matches(')')
+                        .trim()
+                        .to_string();
 
                     if !method_name.is_empty() && !input_type.is_empty() {
                         services.push(ProtoService {
@@ -122,12 +143,8 @@ pub fn enrich_with_proto(
     let mut count = 0;
     for svc in &services {
         let service_key = format!("{}.{}", svc.package, svc.service_name);
-        let service_id = GraphNode::generate_id(
-            &NodeType::Module,
-            &svc.proto_path,
-            &service_key,
-            None,
-        );
+        let service_id =
+            GraphNode::generate_id(&NodeType::Module, &svc.proto_path, &service_key, None);
 
         let mut service_node = GraphNode::new(
             NodeType::Module,
@@ -140,11 +157,7 @@ pub fn enrich_with_proto(
 
         // Find handler by method name (not package-qualified)
         if let Some(handler) = find_handler(graph, &svc.method_name) {
-            let edge = GraphEdge::new(
-                EdgeType::Implements,
-                handler.id.clone(),
-                service_id,
-            );
+            let edge = GraphEdge::new(EdgeType::Implements, handler.id.clone(), service_id);
             graph.insert_edge(&edge)?;
             count += 1;
         }
@@ -154,10 +167,7 @@ pub fn enrich_with_proto(
 }
 
 /// Scan workspace for .proto files and enrich graph
-pub fn scan_workspace(
-    graph: &GraphDatabase,
-    root: &Path,
-) -> Result<usize, LainError> {
+pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainError> {
     let mut count = 0;
 
     let walker = ignore::WalkBuilder::new(root)

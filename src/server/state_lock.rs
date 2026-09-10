@@ -130,7 +130,10 @@ mod tests {
         {
             let lock = acquire(&state);
             assert!(lock.is_held());
-            assert!(lock_path_for(&state).exists(), "sentinel must exist while held");
+            assert!(
+                lock_path_for(&state).exists(),
+                "sentinel must exist while held"
+            );
         }
         assert!(
             !lock_path_for(&state).exists(),
@@ -150,7 +153,9 @@ mod tests {
         // Dropping the non-holder must not delete the real holder's
         // sentinel.
         drop(second);
-        assert!(lock_path_for(&state).exists(), "non-holder must not release");
+        assert!(
+            lock_path_for(&state).exists(),
+            "non-holder must not release"
+        );
     }
-
 }

@@ -1,6 +1,6 @@
 //! Tests for tuning.rs
 
-use crate::tuning::{TuningConfig, IngestionConfig, RuntimeConfig};
+use crate::tuning::{IngestionConfig, RuntimeConfig, TuningConfig};
 
 #[test]
 fn test_tuning_config_default() {
@@ -44,7 +44,10 @@ fn test_runtime_config_default() {
 fn test_tuning_config_clone() {
     let config = TuningConfig::default();
     let cloned = config.clone();
-    assert_eq!(cloned.semantic_similarity_threshold, config.semantic_similarity_threshold);
+    assert_eq!(
+        cloned.semantic_similarity_threshold,
+        config.semantic_similarity_threshold
+    );
     assert_eq!(cloned.anchor_weight, config.anchor_weight);
     assert_eq!(cloned.max_pattern_edges, config.max_pattern_edges);
 }
@@ -61,7 +64,10 @@ fn test_tuning_config_serde() {
     let config = TuningConfig::default();
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: TuningConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.semantic_similarity_threshold, config.semantic_similarity_threshold);
+    assert_eq!(
+        deserialized.semantic_similarity_threshold,
+        config.semantic_similarity_threshold
+    );
 }
 
 #[test]

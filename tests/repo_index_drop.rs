@@ -55,9 +55,7 @@ fn build_repo_index(tmp: &tempfile::TempDir) -> RepoIndex {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir).unwrap(),
-    );
+    let source = Box::new(WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir).unwrap());
     RepoIndex::new(source, &data_dir).unwrap()
 }
 

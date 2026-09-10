@@ -144,10 +144,9 @@ fn user_facing_strings_never_name_a_command_that_does_not_exist() {
 /// binary that disagreed with each other three ways.
 #[test]
 fn the_readme_command_table_matches_the_binary() {
-    let readme = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
-    )
-    .expect("read README.md");
+    let readme =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .expect("read README.md");
 
     // Rows look like: | `lain server` | Start the MCP server ... |
     let mut documented = HashSet::new();
@@ -196,10 +195,9 @@ fn the_readme_command_table_matches_the_binary() {
 /// binary.
 #[test]
 fn the_readme_does_not_claim_a_stale_subcommand_count() {
-    let readme = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"),
-    )
-    .expect("read README.md");
+    let readme =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
+            .expect("read README.md");
 
     for spelled in [
         "three subcommands",

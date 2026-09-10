@@ -8,7 +8,13 @@ fn upsert_edge_is_idempotent() {
     let b = GraphNode::new(NodeType::Function, "b".into(), "/src/b.rs".into());
     db.upsert_node(a.clone()).unwrap();
     db.upsert_node(b.clone()).unwrap();
-    db.upsert_edge(GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone())).unwrap();
-    db.upsert_edge(GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone())).unwrap();
-    assert_eq!(db.all_edges().len(), 1, "same edge inserted twice must collapse to one");
+    db.upsert_edge(GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone()))
+        .unwrap();
+    db.upsert_edge(GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone()))
+        .unwrap();
+    assert_eq!(
+        db.all_edges().len(),
+        1,
+        "same edge inserted twice must collapse to one"
+    );
 }

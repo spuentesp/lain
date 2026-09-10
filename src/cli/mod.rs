@@ -15,10 +15,10 @@ pub mod signal;
 pub mod workspace;
 pub mod workspaces;
 
-pub use query::run_query;
-pub use ask::run_ask;
-pub use server::run_server;
 pub use crate::resolve_repos_config;
+pub use ask::run_ask;
+pub use query::run_query;
+pub use server::run_server;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

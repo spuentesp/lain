@@ -69,16 +69,27 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()
                 .context("build tokio runtime for workspaces subcommand")?;
-            rt.block_on(lain::cli::workspaces::run(action, &lain::cli::resolve_repos_config(&config)))
+            rt.block_on(lain::cli::workspaces::run(
+                action,
+                &lain::cli::resolve_repos_config(&config),
+            ))
         }
-        Some(Commands::Repos { config, action }) => lain::cli::repos::run(action, &lain::cli::resolve_repos_config(&config)),
-        Some(Commands::Query { workspace, expression }) => {
+        Some(Commands::Repos { config, action }) => {
+            lain::cli::repos::run(action, &lain::cli::resolve_repos_config(&config))
+        }
+        Some(Commands::Query {
+            workspace,
+            expression,
+        }) => {
             // `query` reads `<workspace>/.lain/graph.bin`; without
             // `--workspace` it walks up for `.git` exactly like
             // `lain mcp` (see cli::query::run_query).
             lain::cli::query::run_query(&expression, workspace.as_deref())
         }
-        Some(Commands::Ask { config: _, question: _ }) => {
+        Some(Commands::Ask {
+            config: _,
+            question: _,
+        }) => {
             // NOTE: `cli::ask::run_ask` is the PreToolUse hook handler
             // — it reads JSON from stdin and outputs a permission
             // decision. The `--config` / `--question` flags on the
@@ -104,10 +115,7 @@ fn main() -> Result<()> {
                 .build()
                 .context("build tokio runtime for mcp subcommand")?;
             match owner_url {
-                Some(url) => rt.block_on(lain::cli::mcp::run_sidecar(
-                    &workspace,
-                    &url,
-                )),
+                Some(url) => rt.block_on(lain::cli::mcp::run_sidecar(&workspace, &url)),
                 None => rt.block_on(lain::cli::mcp::run_mcp(
                     &workspace,
                     embedding_model.as_deref(),
@@ -126,11 +134,7 @@ fn main() -> Result<()> {
             workspace,
             tool,
             args,
-        }) => lain::cli::oneshot::run_oneshot(
-            workspace.as_deref(),
-            &tool,
-            &args,
-        ),
+        }) => lain::cli::oneshot::run_oneshot(workspace.as_deref(), &tool, &args),
         Some(Commands::Doctor) => {
             // `doctor` returns its own exit code (0 clean, 1 hard
             // failure). Anything else (e.g. a network error from

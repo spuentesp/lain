@@ -1,19 +1,19 @@
 //! Stable In-Memory Graph Database using petgraph
 //!
-//! Uses petgraph's StableGraph for robust graph operations and 
+//! Uses petgraph's StableGraph for robust graph operations and
 //! bincode for high-performance binary persistence.
 
 use crate::error::LainError;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use dashmap::DashMap;
+use parking_lot::RwLock;
+use petgraph::stable_graph::{NodeIndex, StableGraph};
+use petgraph::visit::{EdgeRef, IntoNodeReferences};
+use petgraph::Direction;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use dashmap::DashMap;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use petgraph::stable_graph::{StableGraph, NodeIndex};
-use petgraph::visit::{EdgeRef, IntoNodeReferences};
-use petgraph::Direction;
 use tracing::warn;
 
 /// Bumped whenever the meaning of `GraphNode.path` changes. Version 2 is
@@ -203,20 +203,23 @@ impl GraphDatabase {
         let mut graph = self.graph.write();
 
         // Collect work for parallel DashMap updates: (node_id, path, idx)
-        let dash_work: Vec<(String, String, NodeIndex)> = new_nodes.iter().filter_map(|node| {
-            if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
-                // Update existing
-                let existing_hydrated = graph[idx].is_hydrated;
-                if node.is_hydrated || !existing_hydrated {
-                    graph[idx] = node.clone();
+        let dash_work: Vec<(String, String, NodeIndex)> = new_nodes
+            .iter()
+            .filter_map(|node| {
+                if let Some(idx) = self.index_map.get(&node.id).map(|r| *r.value()) {
+                    // Update existing
+                    let existing_hydrated = graph[idx].is_hydrated;
+                    if node.is_hydrated || !existing_hydrated {
+                        graph[idx] = node.clone();
+                    }
+                    None
+                } else {
+                    let path = node.path.clone();
+                    let idx = graph.add_node(node.clone());
+                    Some((node.id.clone(), path, idx))
                 }
-                None
-            } else {
-                let path = node.path.clone();
-                let idx = graph.add_node(node.clone());
-                Some((node.id.clone(), path, idx))
-            }
-        }).collect();
+            })
+            .collect();
 
         // Release graph lock before parallel DashMap updates
         drop(graph);
@@ -329,13 +332,13 @@ impl GraphDatabase {
                                 }
                             }
                             graph.remove_node(idx); // incident edges go with it
-                            // Remove the stale id → index entry NOW, not
-                            // after the replacements are inserted: node ids
-                            // are deterministic (same path+name → same id),
-                            // so a deferred removal wipes the *fresh* entry
-                            // inserted below and every id-keyed lookup
-                            // (get_edges_to, blast radius) silently returns
-                            // empty while name-keyed lookups still work.
+                                                    // Remove the stale id → index entry NOW, not
+                                                    // after the replacements are inserted: node ids
+                                                    // are deterministic (same path+name → same id),
+                                                    // so a deferred removal wipes the *fresh* entry
+                                                    // inserted below and every id-keyed lookup
+                                                    // (get_edges_to, blast radius) silently returns
+                                                    // empty while name-keyed lookups still work.
                             self.index_map.remove(&id);
                             removed_ids.push(id);
                         }
@@ -561,12 +564,20 @@ impl GraphDatabase {
         self.check_writable()?;
         let mut graph = self.graph.write();
 
-        let source_idx = self.index_map.get(&edge.source_id)
+        let source_idx = self
+            .index_map
+            .get(&edge.source_id)
             .map(|r| *r.value())
-            .ok_or_else(|| LainError::NotFound(format!("Source node {} not found", edge.source_id)))?;
-        let target_idx = self.index_map.get(&edge.target_id)
+            .ok_or_else(|| {
+                LainError::NotFound(format!("Source node {} not found", edge.source_id))
+            })?;
+        let target_idx = self
+            .index_map
+            .get(&edge.target_id)
             .map(|r| *r.value())
-            .ok_or_else(|| LainError::NotFound(format!("Target node {} not found", edge.target_id)))?;
+            .ok_or_else(|| {
+                LainError::NotFound(format!("Target node {} not found", edge.target_id))
+            })?;
 
         graph.add_edge(source_idx, target_idx, edge.clone());
         Ok(())
@@ -608,8 +619,16 @@ impl GraphDatabase {
             let target_local = self.index_map.get(&edge.target_id).is_some();
             match (source_local, target_local) {
                 (true, true) => {
-                    let s = self.index_map.get(&edge.source_id).map(|r| *r.value()).unwrap();
-                    let t = self.index_map.get(&edge.target_id).map(|r| *r.value()).unwrap();
+                    let s = self
+                        .index_map
+                        .get(&edge.source_id)
+                        .map(|r| *r.value())
+                        .unwrap();
+                    let t = self
+                        .index_map
+                        .get(&edge.target_id)
+                        .map(|r| *r.value())
+                        .unwrap();
                     graph.add_edge(s, t, edge.clone());
                 }
                 (true, false) => {
@@ -651,7 +670,10 @@ impl GraphDatabase {
         let source_idx = self.index_map.get(&edge.source_id).map(|r| *r.value());
         let target_idx = self.index_map.get(&edge.target_id).map(|r| *r.value());
         if let (Some(s), Some(t)) = (source_idx, target_idx) {
-            if graph.edges_connecting(s, t).any(|e| e.weight().edge_type == edge.edge_type) {
+            if graph
+                .edges_connecting(s, t)
+                .any(|e| e.weight().edge_type == edge.edge_type)
+            {
                 return Ok(());
             }
         }
@@ -662,7 +684,10 @@ impl GraphDatabase {
     pub fn get_node(&self, id: &str) -> Result<Option<GraphNode>, LainError> {
         let graph = self.graph.read();
 
-        Ok(self.index_map.get(id).and_then(|r| graph.node_weight(*r.value()).cloned()))
+        Ok(self
+            .index_map
+            .get(id)
+            .and_then(|r| graph.node_weight(*r.value()).cloned()))
     }
 
     pub fn get_node_by_id(&self, id: &str) -> Result<Option<GraphNode>, LainError> {
@@ -755,10 +780,17 @@ impl GraphDatabase {
             current = parents[&idx];
         }
         indices.reverse();
-        Ok(indices.into_iter().filter_map(|idx| graph.node_weight(idx).cloned()).collect())
+        Ok(indices
+            .into_iter()
+            .filter_map(|idx| graph.node_weight(idx).cloned())
+            .collect())
     }
 
-    pub fn subgraph_around(&self, center: &str, radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError> {
+    pub fn subgraph_around(
+        &self,
+        center: &str,
+        radius: u32,
+    ) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError> {
         let graph = self.graph.read();
         let Some(center_idx) = self.index_map.get(center).map(|r| *r.value()) else {
             return Ok(Vec::new());
@@ -779,14 +811,18 @@ impl GraphDatabase {
             }
         }
         let selected: HashSet<_> = indices.iter().copied().collect();
-        Ok(indices.into_iter().filter_map(|idx| {
-            let node = graph.node_weight(idx).cloned()?;
-            let edges = graph.edges_directed(idx, Direction::Outgoing)
-                .filter(|e| selected.contains(&e.target()))
-                .map(|e| e.weight().clone())
-                .collect();
-            Some((node, edges))
-        }).collect())
+        Ok(indices
+            .into_iter()
+            .filter_map(|idx| {
+                let node = graph.node_weight(idx).cloned()?;
+                let edges = graph
+                    .edges_directed(idx, Direction::Outgoing)
+                    .filter(|e| selected.contains(&e.target()))
+                    .map(|e| e.weight().clone())
+                    .collect();
+                Some((node, edges))
+            })
+            .collect())
     }
 
     pub fn node_count(&self) -> usize {
@@ -799,7 +835,8 @@ impl GraphDatabase {
 
     pub fn get_nodes_by_type(&self, node_type: NodeType) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
-        Ok(graph.node_weights()
+        Ok(graph
+            .node_weights()
             .filter(|n| n.node_type == node_type)
             .cloned()
             .collect())
@@ -808,7 +845,8 @@ impl GraphDatabase {
     /// Get nodes matching any of the given node types in a single graph traversal
     pub fn get_nodes_by_types(&self, node_types: &[NodeType]) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
-        Ok(graph.node_weights()
+        Ok(graph
+            .node_weights()
             .filter(|n| node_types.contains(&n.node_type))
             .cloned()
             .collect())
@@ -821,7 +859,10 @@ impl GraphDatabase {
 
     pub fn all_nodes(&self) -> Vec<GraphNode> {
         let graph = self.graph.read();
-        graph.node_references().map(|(_, node)| node.clone()).collect()
+        graph
+            .node_references()
+            .map(|(_, node)| node.clone())
+            .collect()
     }
 
     pub fn all_edges(&self) -> Vec<GraphEdge> {
@@ -859,7 +900,11 @@ impl GraphDatabase {
     }
 
     pub fn find_node_by_path(&self, path: &str) -> Option<GraphNode> {
-        self.graph.read().node_weights().find(|n| n.path == path).cloned()
+        self.graph
+            .read()
+            .node_weights()
+            .find(|n| n.path == path)
+            .cloned()
     }
 
     /// O(1) existence check via `path_index`, for callers that only need
@@ -880,7 +925,8 @@ impl GraphDatabase {
         path_filter: Option<&str>,
     ) -> Vec<GraphNode> {
         let graph = self.graph.read();
-        graph.node_weights()
+        graph
+            .node_weights()
             .filter(|n| {
                 // Type filter
                 if let Some(sel) = type_selector {
@@ -897,7 +943,11 @@ impl GraphDatabase {
                 }
                 // Label filter (is_deprecated is the only label for now)
                 if let Some(sel) = label_selector {
-                    let label = if n.is_deprecated { Some("deprecated") } else { None };
+                    let label = if n.is_deprecated {
+                        Some("deprecated")
+                    } else {
+                        None
+                    };
                     if !sel.matches(label) {
                         return false;
                     }
@@ -915,12 +965,19 @@ impl GraphDatabase {
     }
 
     /// Get neighbors of a node by ID
-    pub fn get_neighbors(&self, node_id: &str, direction: Direction) -> Vec<(GraphNode, GraphEdge)> {
+    pub fn get_neighbors(
+        &self,
+        node_id: &str,
+        direction: Direction,
+    ) -> Vec<(GraphNode, GraphEdge)> {
         let graph = self.graph.read();
 
-        let Some(idx) = self.index_map.get(node_id).map(|r| *r.value()) else { return Vec::new(); };
+        let Some(idx) = self.index_map.get(node_id).map(|r| *r.value()) else {
+            return Vec::new();
+        };
 
-        graph.edges_directed(idx, direction)
+        graph
+            .edges_directed(idx, direction)
             .filter_map(|e| {
                 let neighbor_idx = match direction {
                     Direction::Incoming => e.source(),
@@ -936,11 +993,7 @@ impl GraphDatabase {
 
     /// BFS traverse from a node ID following outgoing edges with depth tracking.
     /// Returns (neighbor_node, edge, depth) tuples.
-    pub fn bfs_from(
-        &self,
-        start_id: &str,
-        max_depth: u32,
-    ) -> Vec<(GraphNode, GraphEdge, u32)> {
+    pub fn bfs_from(&self, start_id: &str, max_depth: u32) -> Vec<(GraphNode, GraphEdge, u32)> {
         let graph = self.graph.read();
 
         let Some(start_idx) = self.index_map.get(start_id).map(|r| *r.value()) else {
@@ -977,9 +1030,12 @@ impl GraphDatabase {
     pub fn get_edges_from(&self, source_id: &str) -> Result<Vec<GraphEdge>, LainError> {
         let graph = self.graph.read();
 
-        let Some(idx) = self.index_map.get(source_id).map(|r| *r.value()) else { return Ok(Vec::new()); };
+        let Some(idx) = self.index_map.get(source_id).map(|r| *r.value()) else {
+            return Ok(Vec::new());
+        };
 
-        Ok(graph.edges_directed(idx, Direction::Outgoing)
+        Ok(graph
+            .edges_directed(idx, Direction::Outgoing)
             .map(|e| e.weight().clone())
             .collect())
     }
@@ -987,9 +1043,12 @@ impl GraphDatabase {
     pub fn get_edges_to(&self, target_id: &str) -> Result<Vec<GraphEdge>, LainError> {
         let graph = self.graph.read();
 
-        let Some(idx) = self.index_map.get(target_id).map(|r| *r.value()) else { return Ok(Vec::new()); };
+        let Some(idx) = self.index_map.get(target_id).map(|r| *r.value()) else {
+            return Ok(Vec::new());
+        };
 
-        Ok(graph.edges_directed(idx, Direction::Incoming)
+        Ok(graph
+            .edges_directed(idx, Direction::Incoming)
             .map(|e| e.weight().clone())
             .collect())
     }
@@ -1209,7 +1268,8 @@ impl GraphDatabase {
         }
 
         // 2. BFS from entry points
-        let mut current_layer: Vec<NodeIndex> = graph.node_indices()
+        let mut current_layer: Vec<NodeIndex> = graph
+            .node_indices()
             .filter(|&idx| {
                 let n = &graph[idx];
                 n.name == "main" || n.name == "App"
@@ -1218,23 +1278,26 @@ impl GraphDatabase {
 
         let mut depth = 0;
         let mut visited = HashMap::new();
-        
+
         while !current_layer.is_empty() && depth < 50 {
             let mut next_layer = Vec::new();
             for idx in current_layer {
-                if visited.contains_key(&idx) { continue; }
+                if visited.contains_key(&idx) {
+                    continue;
+                }
                 visited.insert(idx, depth);
-                
+
                 if let Some(node) = graph.node_weight_mut(idx) {
                     node.depth_from_main = Some(depth);
                 }
-                
+
                 // Find children via Contains edges
-                let children: Vec<_> = graph.edges_directed(idx, Direction::Outgoing)
+                let children: Vec<_> = graph
+                    .edges_directed(idx, Direction::Outgoing)
                     .filter(|e| e.weight().edge_type == EdgeType::Contains)
                     .map(|e| e.target())
                     .collect();
-                
+
                 next_layer.extend(children);
             }
             current_layer = next_layer;
@@ -1245,21 +1308,33 @@ impl GraphDatabase {
 
     pub fn find_entry_points(&self) -> Result<Vec<GraphNode>, LainError> {
         let graph = self.graph.read();
-        Ok(graph.node_weights()
+        Ok(graph
+            .node_weights()
             .filter(|n| n.name == "main" || n.name == "App")
             .cloned()
             .collect())
     }
 
-    pub fn insert_co_change_edges(&self, pairs: &[(String, String, usize)]) -> Result<(), LainError> {
+    pub fn insert_co_change_edges(
+        &self,
+        pairs: &[(String, String, usize)],
+    ) -> Result<(), LainError> {
         let mut edges = Vec::new();
         for (p1, p2, count) in pairs {
-            let filename1 = Path::new(p1).file_name().unwrap_or_default().to_string_lossy().to_string();
-            let filename2 = Path::new(p2).file_name().unwrap_or_default().to_string_lossy().to_string();
-            
+            let filename1 = Path::new(p1)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let filename2 = Path::new(p2)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
             let id1 = GraphNode::generate_id(&NodeType::File, p1, &filename1, None);
             let id2 = GraphNode::generate_id(&NodeType::File, p2, &filename2, None);
-            
+
             let mut edge = GraphEdge::new(EdgeType::CoChangedWith, id1, id2);
             edge.weight = Some(*count as f32);
             edges.push(edge);
@@ -1268,12 +1343,21 @@ impl GraphDatabase {
         self.insert_edges_batch(&edges).map(|_| ())
     }
 
-    pub fn get_co_change_partners(&self, file_path: &str) -> Result<Vec<(String, usize)>, LainError> {
+    pub fn get_co_change_partners(
+        &self,
+        file_path: &str,
+    ) -> Result<Vec<(String, usize)>, LainError> {
         let graph = self.graph.read();
 
-        let filename = Path::new(file_path).file_name().unwrap_or_default().to_string_lossy().to_string();
+        let filename = Path::new(file_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let id = GraphNode::generate_id(&NodeType::File, file_path, &filename, None);
-        let Some(idx) = self.index_map.get(&id).map(|r| *r.value()) else { return Ok(Vec::new()); };
+        let Some(idx) = self.index_map.get(&id).map(|r| *r.value()) else {
+            return Ok(Vec::new());
+        };
 
         // Fold by target path before returning. The graph can hold more
         // than one node for a path (and more than one edge into them),
@@ -1340,11 +1424,16 @@ impl GraphDatabase {
         let graph = self.graph.read();
 
         if let Some(indices) = self.path_index.get(path) {
-            indices.iter()
+            indices
+                .iter()
                 .filter_map(|&idx| graph.node_weight(idx))
                 .filter(|n| n.node_type != NodeType::File)
                 .filter(|n| n.line_start.unwrap_or(0) <= line && n.line_end.unwrap_or(0) >= line)
-                .min_by_key(|n| n.line_end.unwrap_or(0).saturating_sub(n.line_start.unwrap_or(0)))
+                .min_by_key(|n| {
+                    n.line_end
+                        .unwrap_or(0)
+                        .saturating_sub(n.line_start.unwrap_or(0))
+                })
                 .cloned()
         } else {
             None
@@ -1354,10 +1443,13 @@ impl GraphDatabase {
     pub fn has_references_from(&self, id: &str) -> bool {
         let graph = self.graph.read();
 
-        let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else { return false; };
+        let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
+            return false;
+        };
 
-        graph.edges_directed(idx, Direction::Outgoing)
-            .any(|e| e.weight().edge_type == EdgeType::Calls || e.weight().edge_type == EdgeType::Uses)
+        graph.edges_directed(idx, Direction::Outgoing).any(|e| {
+            e.weight().edge_type == EdgeType::Calls || e.weight().edge_type == EdgeType::Uses
+        })
     }
 
     /// Save graph to disk asynchronously (non-blocking)
@@ -1368,10 +1460,15 @@ impl GraphDatabase {
             let state = GraphState {
                 path_format_version: PATH_FORMAT_VERSION,
                 graph: self.graph.read().clone(),
-                index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
+                index_map: self
+                    .index_map
+                    .iter()
+                    .map(|r| (r.key().clone(), *r.value()))
+                    .collect(),
                 last_commit: self.last_commit.read().clone(),
             };
-            let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
+            let data =
+                bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
             let persistence_path = self.persistence_path.clone();
             (data, persistence_path)
         };
@@ -1386,9 +1483,13 @@ impl GraphDatabase {
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
         let state = GraphState {
-                path_format_version: PATH_FORMAT_VERSION,
+            path_format_version: PATH_FORMAT_VERSION,
             graph: self.graph.read().clone(),
-            index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
+            index_map: self
+                .index_map
+                .iter()
+                .map(|r| (r.key().clone(), *r.value()))
+                .collect(),
             last_commit: self.last_commit.read().clone(),
         };
         let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
@@ -1401,7 +1502,8 @@ impl GraphDatabase {
         // load_from_disk is allowed on read-only graphs — it's how we hydrate
         // the static sidecar view from the owner's on-disk snapshot. Only
         // *mutations* are gated by `check_writable`.
-        let data = std::fs::read(&self.persistence_path).map_err(|e| LainError::Database(e.to_string()))?;
+        let data = std::fs::read(&self.persistence_path)
+            .map_err(|e| LainError::Database(e.to_string()))?;
 
         // Fail soft. A graph we cannot read is not a fatal condition: the
         // source tree is the source of truth and the caller re-indexes. This
@@ -1434,7 +1536,10 @@ impl GraphDatabase {
 
         let mut path_index = HashMap::new();
         for (idx, node) in state.graph.node_references() {
-            path_index.entry(node.path.clone()).or_insert_with(Vec::new).push(idx);
+            path_index
+                .entry(node.path.clone())
+                .or_insert_with(Vec::new)
+                .push(idx);
         }
 
         *self.graph.write() = state.graph;
@@ -1452,9 +1557,13 @@ impl GraphDatabase {
 
     pub fn export_to_json(&self) -> Result<String, LainError> {
         let state = GraphState {
-                path_format_version: PATH_FORMAT_VERSION,
+            path_format_version: PATH_FORMAT_VERSION,
             graph: self.graph.read().clone(),
-            index_map: self.index_map.iter().map(|r| (r.key().clone(), *r.value())).collect(),
+            index_map: self
+                .index_map
+                .iter()
+                .map(|r| (r.key().clone(), *r.value()))
+                .collect(),
             last_commit: self.last_commit.read().clone(),
         };
         serde_json::to_string_pretty(&state).map_err(|e| LainError::Database(e.to_string()))
@@ -1514,10 +1623,14 @@ mod replace_tests {
         let keep = GraphNode::new(NodeType::Function, "keep".into(), "src/keep.rs".into());
         g.insert_nodes_batch(&[gone, keep]).unwrap();
 
-        g.replace_nodes_for_paths(&["src/gone.rs".to_string()], &[]).unwrap();
+        g.replace_nodes_for_paths(&["src/gone.rs".to_string()], &[])
+            .unwrap();
 
         assert!(g.find_node_by_name("gone").is_none());
-        assert!(g.find_node_by_name("keep").is_some(), "other files untouched");
+        assert!(
+            g.find_node_by_name("keep").is_some(),
+            "other files untouched"
+        );
     }
 
     /// Namespace nodes are directory-scoped and shared by every file beneath
@@ -1528,9 +1641,13 @@ mod replace_tests {
         let ns = GraphNode::new(NodeType::Namespace, "src".into(), "src".into());
         g.insert_nodes_batch(&[ns]).unwrap();
 
-        g.replace_nodes_for_paths(&["src".to_string()], &[]).unwrap();
+        g.replace_nodes_for_paths(&["src".to_string()], &[])
+            .unwrap();
 
-        assert!(g.find_node_by_name("src").is_some(), "namespace must survive");
+        assert!(
+            g.find_node_by_name("src").is_some(),
+            "namespace must survive"
+        );
     }
 
     /// The sweep drops files git no longer tracks and leaves the rest alone.
@@ -1571,8 +1688,14 @@ mod remove_by_id_tests {
 
         assert_eq!(removed, 1);
         assert!(g.find_node_by_name("a").is_none());
-        assert!(g.find_node_by_name("b").is_some(), "sibling in same file survives");
-        assert!(g.get_node(&b_id).unwrap().is_some(), "survivor still resolves by id");
+        assert!(
+            g.find_node_by_name("b").is_some(),
+            "sibling in same file survives"
+        );
+        assert!(
+            g.get_node(&b_id).unwrap().is_some(),
+            "survivor still resolves by id"
+        );
     }
 
     /// Removing the last node for a path must clear the path entry too, or a
@@ -1589,7 +1712,10 @@ mod remove_by_id_tests {
 
         g.remove_nodes_by_ids(&[id]).unwrap();
 
-        assert!(g.find_node_by_path("src/solo.rs").is_none(), "path entry cleared");
+        assert!(
+            g.find_node_by_path("src/solo.rs").is_none(),
+            "path entry cleared"
+        );
     }
 }
 
@@ -1608,7 +1734,10 @@ mod freshness_tests {
         let tmp = std::env::temp_dir().join("lain_test_fresh_absent");
         let _ = std::fs::remove_dir_all(&tmp);
         let g = GraphDatabase::new(&tmp).unwrap();
-        assert_eq!(g.freshness(Path::new("/nowhere"), "src/nope.rs"), Freshness::Absent);
+        assert_eq!(
+            g.freshness(Path::new("/nowhere"), "src/nope.rs"),
+            Freshness::Absent
+        );
     }
 
     /// The signal that matters: a file edited but not committed is invisible to
@@ -1648,7 +1777,8 @@ mod freshness_tests {
             .unwrap()
             .as_secs() as i64
             + 3600;
-        g.insert_nodes_batch(&[node_at("src/b.rs", far_future)]).unwrap();
+        g.insert_nodes_batch(&[node_at("src/b.rs", far_future)])
+            .unwrap();
 
         assert_eq!(g.freshness(&ws, "src/b.rs"), Freshness::Fresh);
         // A current file must produce no banner — a note on every answer is
@@ -1687,17 +1817,29 @@ mod anchor_hub_tests {
         let mut edges = Vec::new();
         for i in 0..20 {
             let caller = func(&format!("caller{i}"), "src/a.rs", (1, 10));
-            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), helper.id.clone()));
+            edges.push(GraphEdge::new(
+                EdgeType::Calls,
+                caller.id.clone(),
+                helper.id.clone(),
+            ));
             nodes.push(caller);
         }
         for i in 0..5 {
             let caller = func(&format!("hubcaller{i}"), "src/b.rs", (1, 10));
-            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), hub.id.clone()));
+            edges.push(GraphEdge::new(
+                EdgeType::Calls,
+                caller.id.clone(),
+                hub.id.clone(),
+            ));
             nodes.push(caller);
         }
         for i in 0..10 {
             let callee = func(&format!("callee{i}"), "src/c.rs", (1, 10));
-            edges.push(GraphEdge::new(EdgeType::Calls, hub.id.clone(), callee.id.clone()));
+            edges.push(GraphEdge::new(
+                EdgeType::Calls,
+                hub.id.clone(),
+                callee.id.clone(),
+            ));
             nodes.push(callee);
         }
         g.insert_nodes_batch(&nodes).unwrap();
@@ -1707,7 +1849,12 @@ mod anchor_hub_tests {
 
         g.calculate_anchor_scores().unwrap();
 
-        let helper_score = g.get_node(&helper.id).unwrap().unwrap().anchor_score.unwrap();
+        let helper_score = g
+            .get_node(&helper.id)
+            .unwrap()
+            .unwrap()
+            .anchor_score
+            .unwrap();
         let hub_score = g.get_node(&hub.id).unwrap().unwrap().anchor_score.unwrap();
         assert!(
             hub_score > helper_score,
@@ -1746,7 +1893,11 @@ mod anchor_hub_tests {
         let mut edges = Vec::new();
         for i in 0..50 {
             let caller = func(&format!("caller{i}"), "src/a.rs", (1, 10));
-            edges.push(GraphEdge::new(EdgeType::Calls, caller.id.clone(), leaf.id.clone()));
+            edges.push(GraphEdge::new(
+                EdgeType::Calls,
+                caller.id.clone(),
+                leaf.id.clone(),
+            ));
             nodes.push(caller);
         }
         g.insert_nodes_batch(&nodes).unwrap();
@@ -1778,7 +1929,8 @@ mod anchor_hub_tests {
         let e4 = GraphEdge::new(EdgeType::Calls, cfg_test_hub.id.clone(), callee.id.clone());
         let tid = test_hub.id.clone();
         let cid = cfg_test_hub.id.clone();
-        g.insert_nodes_batch(&[test_hub, cfg_test_hub, caller, callee]).unwrap();
+        g.insert_nodes_batch(&[test_hub, cfg_test_hub, caller, callee])
+            .unwrap();
         for e in [e1, e2, e3, e4] {
             g.upsert_edge(e).unwrap();
         }
@@ -1802,10 +1954,18 @@ mod anchor_hub_tests {
         let mut nodes = vec![prod.clone(), callee.clone()];
         // calls_out = 1 so the leaf rule alone can't zero the score;
         // only the test-caller filter can.
-        let mut edges = vec![GraphEdge::new(EdgeType::Calls, prod.id.clone(), callee.id.clone())];
+        let mut edges = vec![GraphEdge::new(
+            EdgeType::Calls,
+            prod.id.clone(),
+            callee.id.clone(),
+        )];
         for i in 0..30 {
             let tcaller = func(&format!("test_caller{i}"), "tests/it.rs", (1, 10));
-            edges.push(GraphEdge::new(EdgeType::Calls, tcaller.id.clone(), prod.id.clone()));
+            edges.push(GraphEdge::new(
+                EdgeType::Calls,
+                tcaller.id.clone(),
+                prod.id.clone(),
+            ));
             nodes.push(tcaller);
         }
         g.insert_nodes_batch(&nodes).unwrap();
@@ -1876,9 +2036,12 @@ mod anchor_hub_tests {
         let hid3 = hub.id.clone();
         let cid = hub_caller.id.clone();
         let lid = hub_callee.id.clone();
-        g.insert_nodes_batch(&[big_dead, hub, hub_caller, hub_callee]).unwrap();
-        g.upsert_edge(GraphEdge::new(EdgeType::Calls, cid, hid2)).unwrap();
-        g.upsert_edge(GraphEdge::new(EdgeType::Calls, hid3, lid)).unwrap();
+        g.insert_nodes_batch(&[big_dead, hub, hub_caller, hub_callee])
+            .unwrap();
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, cid, hid2))
+            .unwrap();
+        g.upsert_edge(GraphEdge::new(EdgeType::Calls, hid3, lid))
+            .unwrap();
 
         g.calculate_anchor_scores().unwrap();
 

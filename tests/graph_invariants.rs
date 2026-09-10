@@ -4,7 +4,7 @@ mod common;
 
 use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
-use lain::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
+use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use lain::tools::handlers::impact::get_blast_radius;
 
 /// Local thin shim over [`common::call_graph_fixture`]: every test in
@@ -94,7 +94,10 @@ async fn test_blast_radius_dedups_callers_and_count_matches_listing() {
         .find_map(|l| l.strip_prefix("- Total transitively affected nodes: "))
         .and_then(|n| n.parse().ok())
         .expect("total line present when dependents exist");
-    assert_eq!(listed, total, "listed dependents must equal the headline count:\n{text}");
+    assert_eq!(
+        listed, total,
+        "listed dependents must equal the headline count:\n{text}"
+    );
 }
 
 #[test]
@@ -140,7 +143,10 @@ fn test_graph_get_neighbors_incoming() {
     let neighbors = graph.get_neighbors(&b_node.id, petgraph::Direction::Incoming);
     // b is called by a and x
     assert_eq!(neighbors.len(), 2);
-    let mut names: Vec<_> = neighbors.iter().map(|(node, _)| node.name.as_str()).collect();
+    let mut names: Vec<_> = neighbors
+        .iter()
+        .map(|(node, _)| node.name.as_str())
+        .collect();
     names.sort_unstable();
     assert_eq!(names, vec!["a", "x"]);
 }
@@ -153,7 +159,10 @@ fn test_graph_get_neighbors_outgoing() {
     let neighbors = graph.get_neighbors(&main_node.id, petgraph::Direction::Outgoing);
     // main calls a and x
     assert_eq!(neighbors.len(), 2);
-    let mut names: Vec<_> = neighbors.iter().map(|(node, _)| node.name.as_str()).collect();
+    let mut names: Vec<_> = neighbors
+        .iter()
+        .map(|(node, _)| node.name.as_str())
+        .collect();
     names.sort_unstable();
     assert_eq!(names, vec!["a", "x"]);
 }
@@ -176,7 +185,10 @@ fn test_graph_dead_code_detection() {
 
     // y has no incoming or outgoing edges (it was added but nothing calls it or it calls nothing)
     // Actually y has no incoming, and main doesn't call y. So y is dead.
-    assert!(dead_nodes.contains(&"y".to_string()), "y should be detected as dead");
+    assert!(
+        dead_nodes.contains(&"y".to_string()),
+        "y should be detected as dead"
+    );
 }
 
 #[test]
@@ -184,7 +196,8 @@ fn test_overlay_takes_priority_over_graph() {
     let graph = make_test_graph();
 
     // Add a conflicting node to overlay
-    let mut overlay_node = GraphNode::new(NodeType::Function, "a".to_string(), "/src/a.rs".to_string());
+    let mut overlay_node =
+        GraphNode::new(NodeType::Function, "a".to_string(), "/src/a.rs".to_string());
     overlay_node.signature = Some("OVERLAY_SIG".to_string());
     let overlay = make_overlay_with_node("a", "/src/a.rs");
 
@@ -200,9 +213,20 @@ fn test_overlay_takes_priority_over_graph() {
 
 #[test]
 fn test_graph_id_determinism() {
-    let n1 = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
-    assert_eq!(n1.id, n2.id, "Same node type+path+name must produce same ID");
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    assert_eq!(
+        n1.id, n2.id,
+        "Same node type+path+name must produce same ID"
+    );
 }
 
 #[test]
@@ -211,8 +235,16 @@ fn test_graph_edge_insertion_duplicate() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let n1 = GraphNode::new(NodeType::Function, "n1".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "n2".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "n1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "n2".to_string(),
+        "/src/lib.rs".to_string(),
+    );
 
     graph.upsert_node(n1.clone()).unwrap();
     graph.upsert_node(n2.clone()).unwrap();
@@ -233,7 +265,13 @@ fn test_graph_batch_node_insert() {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     let nodes: Vec<GraphNode> = (0..100)
-        .map(|i| GraphNode::new(NodeType::Function, format!("fn_{}", i), "/src/lib.rs".to_string()))
+        .map(|i| {
+            GraphNode::new(
+                NodeType::Function,
+                format!("fn_{}", i),
+                "/src/lib.rs".to_string(),
+            )
+        })
         .collect();
 
     graph.insert_nodes_batch(&nodes).unwrap();
@@ -250,13 +288,25 @@ fn test_graph_batch_edge_insert() {
 
     // Create a chain: n0 -> n1 -> n2 -> ... -> n99
     let nodes: Vec<GraphNode> = (0..100)
-        .map(|i| GraphNode::new(NodeType::Function, format!("fn_{}", i), "/src/lib.rs".to_string()))
+        .map(|i| {
+            GraphNode::new(
+                NodeType::Function,
+                format!("fn_{}", i),
+                "/src/lib.rs".to_string(),
+            )
+        })
         .collect();
 
     graph.insert_nodes_batch(&nodes).unwrap();
 
     let edges: Vec<GraphEdge> = (0..99)
-        .map(|i| GraphEdge::new(EdgeType::Calls, nodes[i].id.clone(), nodes[i+1].id.clone()))
+        .map(|i| {
+            GraphEdge::new(
+                EdgeType::Calls,
+                nodes[i].id.clone(),
+                nodes[i + 1].id.clone(),
+            )
+        })
         .collect();
 
     graph.insert_edges_batch(&edges).unwrap();

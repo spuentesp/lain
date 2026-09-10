@@ -24,7 +24,9 @@ fn read_version(path: &str) -> String {
     let after = &content[idx + needle.len()..];
     let after = after.trim_start().trim_start_matches(':').trim_start();
     let after = after.trim_start_matches('"');
-    let end = after.find(|c: char| c == '"' || c == ',' || c == '\n').unwrap();
+    let end = after
+        .find(|c: char| c == '"' || c == ',' || c == '\n')
+        .unwrap();
     after[..end].to_string()
 }
 
@@ -42,7 +44,9 @@ fn assert_all_json_versions_match(path: &str, expected: &str) {
         let after = &content[abs + needle.len()..];
         let after = after.trim_start().trim_start_matches(':').trim_start();
         let after = after.trim_start_matches('"');
-        let end = after.find(|c: char| c == '"' || c == ',' || c == '\n').unwrap();
+        let end = after
+            .find(|c: char| c == '"' || c == ',' || c == '\n')
+            .unwrap();
         let found = &after[..end];
         assert_eq!(
             found, expected,
@@ -62,18 +66,18 @@ fn assert_all_json_versions_match(path: &str, expected: &str) {
 
 #[test]
 fn all_versions_match() {
-    let files = [
-        "server.json",
-        "npm-shim/package.json",
-        "Formula/lain.rb",
-    ];
+    let files = ["server.json", "npm-shim/package.json", "Formula/lain.rb"];
     let versions: Vec<(&str, String)> = files.iter().map(|f| (*f, read_version(f))).collect();
     let first = &versions[0].1;
     for (name, v) in &versions {
         assert_eq!(v, first, "{} has version {}, expected {}", name, v, first);
     }
     assert!(!first.is_empty());
-    assert!(first.contains('.'), "version {} should be semver (e.g. 0.4.0)", first);
+    assert!(
+        first.contains('.'),
+        "version {} should be semver (e.g. 0.4.0)",
+        first
+    );
 
     // For each JSON file, also assert that any nested "version" field matches
     // the top-level one. This guards against partial bumps (e.g. a

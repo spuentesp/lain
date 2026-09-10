@@ -8,9 +8,7 @@
 use crate::error::LainError;
 use crate::server::tools::handlers;
 use crate::server::tools::registry::{ToolCapability, ToolContext, ToolHandler, ToolHandlerEntry};
-use crate::server::tools::utils::{
-    bool_arg, opt_str_arg, required_str_arg, u32_arg, usize_arg,
-};
+use crate::server::tools::utils::{bool_arg, opt_str_arg, required_str_arg, u32_arg, usize_arg};
 use async_trait::async_trait;
 use inventory;
 use serde_json::{Map, Value};
@@ -27,9 +25,7 @@ fn ui_link(
     ctx: &ToolContext,
 ) -> Option<(
     &std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<String, crate::server::tools::UiSession>,
-        >,
+        tokio::sync::Mutex<std::collections::HashMap<String, crate::server::tools::UiSession>>,
     >,
     u16,
     std::time::Duration,
@@ -218,14 +214,8 @@ impl ToolHandler for GetCallChainHandler {
     ) -> Result<String, LainError> {
         let from = required_str_arg(args, "from")?;
         let to = required_str_arg(args, "to")?;
-        handlers::navigation::get_call_chain(
-            &ctx.graph,
-            &ctx.overlay,
-            &from,
-            &to,
-            ui_link(ctx),
-        )
-        .await
+        handlers::navigation::get_call_chain(&ctx.graph, &ctx.overlay, &from, &to, ui_link(ctx))
+            .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCallChainHandler));
@@ -418,13 +408,7 @@ impl ToolHandler for GetCouplingRadarHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::impact::get_coupling_radar(
-            &ctx.graph,
-            &ctx.overlay,
-            &symbol,
-            ui_link(ctx),
-        )
-        .await
+        handlers::impact::get_coupling_radar(&ctx.graph, &ctx.overlay, &symbol, ui_link(ctx)).await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCouplingRadarHandler));
@@ -563,7 +547,13 @@ impl ToolHandler for ExplainSymbolHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::metrics::explain_symbol(&ctx.workspace, &ctx.graph, &ctx.overlay, &ctx.occupancy, &symbol)
+        handlers::metrics::explain_symbol(
+            &ctx.workspace,
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.occupancy,
+            &symbol,
+        )
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
@@ -726,7 +716,14 @@ impl ToolHandler for SyncStateHandler {
         ctx: &ToolContext,
         _args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::enrichment::sync_state(&ctx.graph, &ctx.git, &ctx.tuning.ingestion, &ctx.jobs, &ctx.last_outcome, ctx.federation.as_ref())
+        handlers::enrichment::sync_state(
+            &ctx.graph,
+            &ctx.git,
+            &ctx.tuning.ingestion,
+            &ctx.jobs,
+            &ctx.last_outcome,
+            ctx.federation.as_ref(),
+        )
     }
 }
 inventory::submit!(ToolHandlerEntry(&SyncStateHandler));
@@ -761,7 +758,14 @@ impl ToolHandler for RunBuildHandler {
             opt_str_arg(args, "cwd")
         };
         let release = bool_arg(args, "release").unwrap_or(false);
-        handlers::execution::run_build(&ctx.graph, &ctx.overlay, Some(&cwd), release, &ctx.tuning.runtime).await
+        handlers::execution::run_build(
+            &ctx.graph,
+            &ctx.overlay,
+            Some(&cwd),
+            release,
+            &ctx.tuning.runtime,
+        )
+        .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&RunBuildHandler));
@@ -836,7 +840,14 @@ impl ToolHandler for RunClippyHandler {
             opt_str_arg(args, "cwd")
         };
         let fix = bool_arg(args, "fix").unwrap_or(false);
-        handlers::execution::run_clippy(&ctx.graph, &ctx.overlay, Some(&cwd), fix, &ctx.tuning.runtime).await
+        handlers::execution::run_clippy(
+            &ctx.graph,
+            &ctx.overlay,
+            Some(&cwd),
+            fix,
+            &ctx.tuning.runtime,
+        )
+        .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&RunClippyHandler));

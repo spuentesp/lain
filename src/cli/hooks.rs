@@ -228,9 +228,7 @@ pub fn resolve_url(flag: &str) -> Result<String> {
     }
     match std::env::var("LAIN_URL") {
         Ok(v) if !v.is_empty() => Ok(v),
-        _ => anyhow::bail!(
-            "no lain server URL: pass --url http://localhost:9999 or set LAIN_URL"
-        ),
+        _ => anyhow::bail!("no lain server URL: pass --url http://localhost:9999 or set LAIN_URL"),
     }
 }
 
@@ -254,10 +252,7 @@ fn register_if_needed(
                 "arguments": { "agent_id": s.agent_id, "session_token": s.session_token }
             }),
         ) {
-            Ok(r) => r
-                .get("isError")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            Ok(r) => r.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
             Err(_) => true,
         };
         if !stale {
@@ -602,15 +597,10 @@ fn git_rev_parse_full(ref_str: &str) -> Result<String> {
 /// the pre-commit hook) can parse `total_overlaps` and the per-file
 /// details directly. Exits non-zero on infrastructure failure so the
 /// pre-commit hook can distinguish "no overlap" from "could not run".
-pub fn overlap_check(
-    url: &str,
-    base: &str,
-    head: Option<&str>,
-    workspace: &str,
-) -> Result<()> {
+pub fn overlap_check(url: &str, base: &str, head: Option<&str>, workspace: &str) -> Result<()> {
     let url = &resolve_url(url)?;
-    let base_sha = git_rev_parse_full(base)
-        .with_context(|| format!("resolving base ref {base:?}"))?;
+    let base_sha =
+        git_rev_parse_full(base).with_context(|| format!("resolving base ref {base:?}"))?;
     let head_input = head.unwrap_or("HEAD");
     let head_sha = git_rev_parse_full(head_input)
         .with_context(|| format!("resolving head ref {head_input:?}"))?;
@@ -725,12 +715,24 @@ mod tests {
     #[test]
     fn mcp_endpoint_handles_both_shapes() {
         // Bare URL → append /mcp.
-        assert_eq!(mcp_endpoint("http://localhost:9999"), "http://localhost:9999/mcp");
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999"),
+            "http://localhost:9999/mcp"
+        );
         // Full URL → unchanged.
-        assert_eq!(mcp_endpoint("http://localhost:9999/mcp"), "http://localhost:9999/mcp");
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999/mcp"),
+            "http://localhost:9999/mcp"
+        );
         // Trailing slash on either shape → normalized.
-        assert_eq!(mcp_endpoint("http://localhost:9999/"), "http://localhost:9999/mcp");
-        assert_eq!(mcp_endpoint("http://localhost:9999/mcp/"), "http://localhost:9999/mcp");
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999/"),
+            "http://localhost:9999/mcp"
+        );
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999/mcp/"),
+            "http://localhost:9999/mcp"
+        );
         // Custom host/port + path prefix.
         assert_eq!(
             mcp_endpoint("http lain.local:8080"),
@@ -757,10 +759,7 @@ mod tests {
             sanitize_agent_name("ORCA_WORKTREE_ID=dc0ac63e-…::/home/sebastian/lain"),
             "ORCA_WORKTREE_ID_dc0ac63e-____home_sebastian_lain"
         );
-        assert_eq!(
-            sanitize_agent_name("claude-code"),
-            "claude-code"
-        );
+        assert_eq!(sanitize_agent_name("claude-code"), "claude-code");
         // Empty and hidden-file names get a leading underscore so they
         // don't disappear or look like dotfiles.
         assert_eq!(sanitize_agent_name(""), "_");

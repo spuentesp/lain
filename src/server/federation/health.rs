@@ -58,7 +58,13 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        for h in [RepoHealth::Ready, RepoHealth::Indexing, RepoHealth::Degraded, RepoHealth::Unavailable, RepoHealth::Missing] {
+        for h in [
+            RepoHealth::Ready,
+            RepoHealth::Indexing,
+            RepoHealth::Degraded,
+            RepoHealth::Unavailable,
+            RepoHealth::Missing,
+        ] {
             let s = serde_json::to_string(&h).unwrap();
             let back: RepoHealth = serde_json::from_str(&s).unwrap();
             assert_eq!(h, back);

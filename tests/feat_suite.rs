@@ -41,7 +41,10 @@ fn git_init(path: &std::path::Path) {
         .status()
         .expect("git init");
     assert!(status.success(), "git init failed");
-    for (k, v) in [("user.email", "feat-suite@lain"), ("user.name", "feat-suite")] {
+    for (k, v) in [
+        ("user.email", "feat-suite@lain"),
+        ("user.name", "feat-suite"),
+    ] {
         std::process::Command::new("git")
             .args(["config", k, v])
             .current_dir(path)
@@ -71,10 +74,7 @@ fn git_init(path: &std::path::Path) {
 /// instead of as raw strings. Splitting on either separator handles
 /// both platforms in one branch.
 fn path_components_eq(path: &str, expected: &[&str]) -> bool {
-    let actual: Vec<&str> = path
-        .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .collect();
+    let actual: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
     actual == expected
 }
 
@@ -143,9 +143,12 @@ fn boot_server(port: u16) -> ServerGuard {
     let child = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",
-            "--transport", "http",
-            "--port", &port.to_string(),
-            "--workspace", "auto",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--workspace",
+            "auto",
             "--config",
             project.path().join("repos.yaml").to_str().unwrap(),
         ])
@@ -190,13 +193,24 @@ fn feat_suite_end_to_end() {
     assert_eq!(health_raw.0, 200, "/health not 200: {}", health_raw.1);
     let health: serde_json::Value =
         serde_json::from_str(&health_raw.1).expect("/health body not JSON");
-    for field in ["version", "status", "tools_count", "graph_nodes", "graph_edges", "federation"] {
+    for field in [
+        "version",
+        "status",
+        "tools_count",
+        "graph_nodes",
+        "graph_edges",
+        "federation",
+    ] {
         assert!(
             health.get(field).is_some(),
             "/health missing required field `{field}`: {health}"
         );
     }
-    assert_eq!(health["status"].as_str(), Some("ok"), "/health status: {health}");
+    assert_eq!(
+        health["status"].as_str(),
+        Some("ok"),
+        "/health status: {health}"
+    );
     // `/health` reports `ToolRegistry::definitions().len()` — the
     // inventory-registered handlers only. The full surface (which
     // tools/list appends with special/federation/workspace/server

@@ -3,8 +3,8 @@
 #[cfg(test)]
 mod tests {
     use lain::tools::handlers::decoration::{
-        CargoTextParser, EnrichedError, ErrorParser, GoBuildParser, GoTestParser,
-        JestParser, ParsedError, PytestParser, Severity, TestOutputParser,
+        CargoTextParser, EnrichedError, ErrorParser, GoBuildParser, GoTestParser, JestParser,
+        ParsedError, PytestParser, Severity, TestOutputParser,
     };
 
     // ─── CargoTextParser Tests ─────────────────────────────────────────────────
@@ -369,7 +369,10 @@ warning: unused variable: `timeout`
         let profile = detect_project_profile(dir.path());
 
         // Explicit override takes precedence
-        assert_eq!(profile.resolve(Some("javascript")), Some(Toolchain::JavaScript));
+        assert_eq!(
+            profile.resolve(Some("javascript")),
+            Some(Toolchain::JavaScript)
+        );
         assert_eq!(profile.resolve(Some("rust")), Some(Toolchain::Rust));
         assert_eq!(profile.resolve(Some("go")), None); // Not present
     }

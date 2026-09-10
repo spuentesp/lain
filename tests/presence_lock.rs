@@ -24,8 +24,7 @@ fn try_lock_acquires_release_releases() {
     let ws = tmp.path();
     let path = ws.join("foo.rs");
     let agent = make_agent("alice");
-    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("lock");
+    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("lock");
     assert!(lock.path.exists());
     release_lock(&lock).unwrap();
     assert!(!lock.path.exists());
@@ -42,8 +41,8 @@ fn try_lock_returns_conflict_on_duplicate() {
     let path = ws.join("foo.rs");
     let alice = make_agent("alice");
     let bob = make_agent("bob");
-    let first = try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("first");
+    let first =
+        try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("first");
     let second = try_lock(ws, &path, &bob, AgentKind::ClaudeCode, ClaimIntent::Edit);
     assert!(second.is_err());
     let conflict = second.unwrap_err();
@@ -63,8 +62,8 @@ fn stale_lock_can_be_taken_after_mtime_window() {
     let path = ws.join("foo.rs");
     let alice = make_agent("alice");
     let bob = make_agent("bob");
-    let first = try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("first");
+    let first =
+        try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("first");
     // Backdate the lock file's mtime to simulate a dead writer. Uses
     // `File::set_modified` (stable) rather than the nightly-only
     // `std::fs::set_file_mtime`.
@@ -76,8 +75,8 @@ fn stale_lock_can_be_taken_after_mtime_window() {
             .unwrap();
         f.set_modified(past).unwrap();
     }
-    let second = try_lock(ws, &path, &bob, AgentKind::Kimi, ClaimIntent::Read)
-        .expect("stale lock taken");
+    let second =
+        try_lock(ws, &path, &bob, AgentKind::Kimi, ClaimIntent::Read).expect("stale lock taken");
     release_lock(&second).unwrap();
 }
 
@@ -92,8 +91,7 @@ fn refresh_lock_keeps_lock_alive() {
     let ws = tmp.path();
     let path = ws.join("foo.rs");
     let agent = make_agent("alice");
-    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit)
-        .expect("lock");
+    let lock = try_lock(ws, &path, &agent, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("lock");
     let mtime_before = std::fs::metadata(&lock.path).unwrap().modified().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(50));
     lock.refresh_lock().unwrap();

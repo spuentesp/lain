@@ -87,7 +87,11 @@ fn test_lain_error_serialize() {
 
 #[test]
 fn test_lain_error_from_git2() {
-    let git_err = git2::Error::new(git2::ErrorCode::NotFound, git2::ErrorClass::Reference, "reference not found");
+    let git_err = git2::Error::new(
+        git2::ErrorCode::NotFound,
+        git2::ErrorClass::Reference,
+        "reference not found",
+    );
     let err = LainError::from(git_err);
     assert!(format!("{}", err).contains("reference not found"));
 }

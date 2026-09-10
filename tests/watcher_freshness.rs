@@ -36,9 +36,7 @@ fn build_repo_index(tmp: &tempfile::TempDir) -> Arc<RepoIndex> {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir).unwrap(),
-    );
+    let source = Box::new(WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir).unwrap());
     Arc::new(RepoIndex::new(source, &data_dir).unwrap())
 }
 
@@ -326,7 +324,9 @@ async fn watcher_does_not_panic_on_edit() {
 
     // start_watcher must succeed (was sync, now async — this exercises
     // the new signature).
-    ri.start_watcher().await.expect("start_watcher should succeed");
+    ri.start_watcher()
+        .await
+        .expect("start_watcher should succeed");
 
     // Give the inotify backend a moment to register the watch.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -380,7 +380,10 @@ async fn watcher_does_not_panic_on_edit() {
     // ran). Pre-fix, the inotify thread panicked on the first event and
     // the overlay stayed at whatever it had before the test.
     let overlay = ri.server_overlay();
-    let before = poll_until(&overlay, std::time::Duration::from_secs(5), |n| !n.is_empty()).await;
+    let before = poll_until(&overlay, std::time::Duration::from_secs(5), |n| {
+        !n.is_empty()
+    })
+    .await;
     assert!(
         !before.is_empty(),
         "after the first edit, the receiver task should have refreshed \
@@ -399,7 +402,10 @@ async fn watcher_does_not_panic_on_edit() {
     // overlay (because no further `sync_overlay` runs) and the assertion
     // below fails — giving us a Rust-level signal that the watcher
     // panicked, not just a process-level "did the test crash".
-    let after = poll_until(&overlay, std::time::Duration::from_secs(5), |n| !n.is_empty()).await;
+    let after = poll_until(&overlay, std::time::Duration::from_secs(5), |n| {
+        !n.is_empty()
+    })
+    .await;
     assert!(
         !after.is_empty(),
         "after the second edit, the overlay should still be populated by \
@@ -443,9 +449,8 @@ async fn sync_state_refreshes_overlay_for_new_file() {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap());
     let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
     ri.set_overlay(shared_overlay.clone());
 
@@ -461,9 +466,8 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     // Install BEFORE add_repo so the new RepoIndex picks up the shared
     // overlay in its constructor branch.
     fed.install_overlay(shared_overlay.clone());
-    let fed_source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let fed_source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap());
     fed.add_repo(fed_source, &fed_data_dir)
         .await
         .expect("add_repo");
@@ -503,15 +507,8 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     // `parking_lot::Mutex`, so we can call it directly from the
     // `current_thread` runtime that `#[tokio::test]` defaults to — no
     // `spawn_blocking` hop required.
-    sync_state(
-        &graph,
-        &git,
-        &ingestion,
-        &jobs,
-        &last_outcome,
-        Some(&fed),
-    )
-    .expect("sync_state should not error");
+    sync_state(&graph, &git, &ingestion, &jobs, &last_outcome, Some(&fed))
+        .expect("sync_state should not error");
 
     // The spawned task is async; poll the overlay for up to ~15s.
     // Pre-fix, sync_state short-circuited on commit equality and the
@@ -652,15 +649,8 @@ async fn sync_state_refreshes_overlay_for_multiple_repos() {
         lain::server::refresh::RefreshOutcome::default(),
     ));
 
-    sync_state(
-        &graph,
-        &git,
-        &ingestion,
-        &jobs,
-        &last_outcome,
-        Some(&fed),
-    )
-    .expect("sync_state should not error");
+    sync_state(&graph, &git, &ingestion, &jobs, &last_outcome, Some(&fed))
+        .expect("sync_state should not error");
 
     // Poll the overlay for up to ~15s. Cold LSP startup can take a
     // couple of seconds on the first repo, and with two repos the
@@ -686,12 +676,20 @@ async fn sync_state_refreshes_overlay_for_multiple_repos() {
     assert!(
         populated_alpha,
         "shared overlay missing post_sync_alpha_symbol after sync_state over 2 repos; nodes: {:?}",
-        shared_overlay.get_all_nodes().iter().map(|n| (&n.name, &n.node_type)).collect::<Vec<_>>()
+        shared_overlay
+            .get_all_nodes()
+            .iter()
+            .map(|n| (&n.name, &n.node_type))
+            .collect::<Vec<_>>()
     );
     assert!(
         populated_beta,
         "shared overlay missing post_sync_beta_symbol after sync_state over 2 repos; nodes: {:?}",
-        shared_overlay.get_all_nodes().iter().map(|n| (&n.name, &n.node_type)).collect::<Vec<_>>()
+        shared_overlay
+            .get_all_nodes()
+            .iter()
+            .map(|n| (&n.name, &n.node_type))
+            .collect::<Vec<_>>()
     );
 
     // Hold handles alive so the spawned background task doesn't race
@@ -718,7 +716,9 @@ async fn watcher_survives_six_concurrent_agents() {
     let tmp = tempfile::tempdir().unwrap();
     let ri = build_repo_index(&tmp);
 
-    ri.start_watcher().await.expect("start_watcher should succeed");
+    ri.start_watcher()
+        .await
+        .expect("start_watcher should succeed");
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let overlay = ri.server_overlay();
@@ -786,8 +786,7 @@ async fn watcher_survives_six_concurrent_agents() {
         n.iter().any(|n| n.name.starts_with("agent_"))
     })
     .await;
-    let after_swarm_names: Vec<String> =
-        after_swarm.into_iter().map(|n| n.name).collect();
+    let after_swarm_names: Vec<String> = after_swarm.into_iter().map(|n| n.name).collect();
     assert!(
         after_swarm_names.iter().any(|n| n.starts_with("agent_")),
         "after six concurrent writes + receiver signal, the overlay \
@@ -810,8 +809,7 @@ async fn watcher_survives_six_concurrent_agents() {
         n.iter().any(|n| n.name.starts_with("agent_"))
     })
     .await;
-    let after_followup_names: Vec<String> =
-        after_followup.into_iter().map(|n| n.name).collect();
+    let after_followup_names: Vec<String> = after_followup.into_iter().map(|n| n.name).collect();
     assert!(
         after_followup_names.iter().any(|n| n.starts_with("agent_")),
         "after the follow-up edit + receiver signal, the overlay should \

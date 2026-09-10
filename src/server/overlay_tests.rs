@@ -1,7 +1,7 @@
 //! Tests for overlay.rs
 
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 
 #[test]
 fn test_overlay_new() {
@@ -14,7 +14,11 @@ fn test_overlay_new() {
 #[test]
 fn test_overlay_insert_node() {
     let overlay = VolatileOverlay::new();
-    let node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let id = node.id.clone();
     let idx = overlay.insert_node(node);
     assert!(idx.index() < usize::MAX);
@@ -27,12 +31,20 @@ fn test_overlay_insert_node() {
 #[test]
 fn test_overlay_insert_node_upsert() {
     let overlay = VolatileOverlay::new();
-    let node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let id = node.id.clone();
     overlay.insert_node(node);
 
     // Insert with same ID — should replace
-    let mut node2 = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node2 = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node2.signature = Some("new_sig".to_string());
     overlay.insert_node(node2);
 
@@ -52,9 +64,21 @@ fn test_overlay_get_node_not_found() {
 #[test]
 fn test_overlay_get_all_nodes() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "fn2".to_string(), "/src/lib.rs".to_string());
-    let n3 = GraphNode::new(NodeType::Struct, "struct1".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "fn2".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n3 = GraphNode::new(
+        NodeType::Struct,
+        "struct1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
 
     overlay.insert_node(n1);
     overlay.insert_node(n2);
@@ -67,9 +91,21 @@ fn test_overlay_get_all_nodes() {
 #[test]
 fn test_overlay_find_nodes_by_name() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "test_function".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "Test_Function".to_string(), "/src/lib.rs".to_string());
-    let n3 = GraphNode::new(NodeType::Function, "other".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "test_function".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "Test_Function".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n3 = GraphNode::new(
+        NodeType::Function,
+        "other".to_string(),
+        "/src/lib.rs".to_string(),
+    );
 
     overlay.insert_node(n1);
     overlay.insert_node(n2);
@@ -77,13 +113,19 @@ fn test_overlay_find_nodes_by_name() {
 
     let found = overlay.find_nodes_by_name("test_function");
     assert!(!found.is_empty());
-    assert!(found.iter().any(|n| n.name == "test_function" || n.name == "Test_Function"));
+    assert!(found
+        .iter()
+        .any(|n| n.name == "test_function" || n.name == "Test_Function"));
 }
 
 #[test]
 fn test_overlay_find_nodes_by_name_case_insensitive() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "MyFunction".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "MyFunction".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     overlay.insert_node(n1);
 
     let found = overlay.find_nodes_by_name("myfunction");
@@ -94,7 +136,11 @@ fn test_overlay_find_nodes_by_name_case_insensitive() {
 #[test]
 fn test_overlay_find_nodes_by_name_not_found() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     overlay.insert_node(n1);
 
     let found = overlay.find_nodes_by_name("nonexistent");
@@ -104,9 +150,21 @@ fn test_overlay_find_nodes_by_name_not_found() {
 #[test]
 fn test_overlay_find_nodes_by_type() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Struct, "struct1".to_string(), "/src/lib.rs".to_string());
-    let n3 = GraphNode::new(NodeType::Function, "fn2".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Struct,
+        "struct1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n3 = GraphNode::new(
+        NodeType::Function,
+        "fn2".to_string(),
+        "/src/lib.rs".to_string(),
+    );
 
     overlay.insert_node(n1);
     overlay.insert_node(n2);
@@ -122,9 +180,21 @@ fn test_overlay_find_nodes_by_type() {
 #[test]
 fn test_overlay_find_nodes_by_path() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/main.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "fn2".to_string(), "/src/main.rs".to_string());
-    let n3 = GraphNode::new(NodeType::Function, "fn3".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/main.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "fn2".to_string(),
+        "/src/main.rs".to_string(),
+    );
+    let n3 = GraphNode::new(
+        NodeType::Function,
+        "fn3".to_string(),
+        "/src/lib.rs".to_string(),
+    );
 
     overlay.insert_node(n1);
     overlay.insert_node(n2);
@@ -137,8 +207,16 @@ fn test_overlay_find_nodes_by_path() {
 #[test]
 fn test_overlay_insert_edge() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
@@ -153,7 +231,11 @@ fn test_overlay_insert_edge() {
 #[test]
 fn test_overlay_insert_edge_source_not_found() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     overlay.insert_node(n1);
 
@@ -166,7 +248,11 @@ fn test_overlay_insert_edge_source_not_found() {
 #[test]
 fn test_overlay_insert_edge_target_not_found() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     overlay.insert_node(n1);
 
@@ -179,8 +265,16 @@ fn test_overlay_insert_edge_target_not_found() {
 #[test]
 fn test_overlay_insert_edge_duplicate_idempotent() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
@@ -199,9 +293,21 @@ fn test_overlay_insert_edge_duplicate_idempotent() {
 #[test]
 fn test_overlay_get_outgoing_edges() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "callee1".to_string(), "/src/lib.rs".to_string());
-    let n3 = GraphNode::new(NodeType::Function, "callee2".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "callee1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n3 = GraphNode::new(
+        NodeType::Function,
+        "callee2".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
     let n3_id = n3.id.clone();
@@ -210,8 +316,12 @@ fn test_overlay_get_outgoing_edges() {
     overlay.insert_node(n2);
     overlay.insert_node(n3);
 
-    overlay.insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id.clone(), n2_id)).unwrap();
-    overlay.insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id.clone(), n3_id)).unwrap();
+    overlay
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id.clone(), n2_id))
+        .unwrap();
+    overlay
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id.clone(), n3_id))
+        .unwrap();
 
     let outgoing = overlay.get_outgoing_edges(&n1_id);
     assert_eq!(outgoing.len(), 2);
@@ -220,7 +330,11 @@ fn test_overlay_get_outgoing_edges() {
 #[test]
 fn test_overlay_get_outgoing_edges_none() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "lonely".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "lonely".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     overlay.insert_node(n1);
 
@@ -238,15 +352,25 @@ fn test_overlay_get_outgoing_edges_unknown_node() {
 #[test]
 fn test_overlay_stats() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "fn2".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "fn2".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
     overlay.insert_node(n1);
     overlay.insert_node(n2);
 
-    overlay.insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n2_id)).unwrap();
+    overlay
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n2_id))
+        .unwrap();
 
     let stats = overlay.stats();
     assert_eq!(stats.node_count, 2);
@@ -256,7 +380,11 @@ fn test_overlay_stats() {
 #[test]
 fn test_overlay_clear() {
     let overlay = VolatileOverlay::new();
-    overlay.insert_node(GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string()));
+    overlay.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
 
     overlay.clear();
 
@@ -269,9 +397,17 @@ fn test_overlay_clear() {
 #[test]
 fn test_overlay_clear_then_insert() {
     let overlay = VolatileOverlay::new();
-    overlay.insert_node(GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string()));
+    overlay.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
     overlay.clear();
-    overlay.insert_node(GraphNode::new(NodeType::Function, "fn2".to_string(), "/src/lib.rs".to_string()));
+    overlay.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn2".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
 
     let stats = overlay.stats();
     assert_eq!(stats.node_count, 1);
@@ -282,9 +418,21 @@ fn test_overlay_merge() {
     let overlay1 = VolatileOverlay::new();
     let overlay2 = VolatileOverlay::new();
 
-    overlay1.insert_node(GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string()));
-    overlay1.insert_node(GraphNode::new(NodeType::Function, "fn2".to_string(), "/src/lib.rs".to_string()));
-    overlay2.insert_node(GraphNode::new(NodeType::Function, "fn3".to_string(), "/src/lib.rs".to_string()));
+    overlay1.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
+    overlay1.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn2".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
+    overlay2.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn3".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
 
     overlay1.merge(&overlay2);
 
@@ -298,16 +446,34 @@ fn test_overlay_merge_preserves_edges() {
     let overlay1 = VolatileOverlay::new();
     let overlay2 = VolatileOverlay::new();
 
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
     overlay1.insert_node(n1);
     overlay1.insert_node(n2);
-    overlay1.insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id.clone(), n2_id.clone())).unwrap();
+    overlay1
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            n1_id.clone(),
+            n2_id.clone(),
+        ))
+        .unwrap();
 
-    overlay2.insert_node(GraphNode::new(NodeType::Function, "other".to_string(), "/src/lib.rs".to_string()));
+    overlay2.insert_node(GraphNode::new(
+        NodeType::Function,
+        "other".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
 
     overlay1.merge(&overlay2);
 
@@ -319,14 +485,24 @@ fn test_overlay_merge_preserves_edges() {
 #[test]
 fn test_overlay_get_all_edges() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
     overlay.insert_node(n1);
     overlay.insert_node(n2);
-    overlay.insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n2_id)).unwrap();
+    overlay
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n2_id))
+        .unwrap();
 
     let edges = overlay.get_all_edges();
     assert_eq!(edges.len(), 1);
@@ -356,7 +532,11 @@ fn test_overlay_insert_node_multiple() {
     let overlay = VolatileOverlay::new();
 
     for i in 0..100 {
-        overlay.insert_node(GraphNode::new(NodeType::Function, format!("fn_{}", i), "/src/lib.rs".to_string()));
+        overlay.insert_node(GraphNode::new(
+            NodeType::Function,
+            format!("fn_{}", i),
+            "/src/lib.rs".to_string(),
+        ));
     }
 
     let stats = overlay.stats();
@@ -366,14 +546,24 @@ fn test_overlay_insert_node_multiple() {
 #[test]
 fn test_overlay_get_incoming_edges() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
     overlay.insert_node(n1);
     overlay.insert_node(n2);
-    overlay.insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n2_id.clone())).unwrap();
+    overlay
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n2_id.clone()))
+        .unwrap();
 
     let incoming = overlay.get_incoming_edges(&n2_id);
     assert_eq!(incoming.len(), 1);
@@ -383,9 +573,21 @@ fn test_overlay_get_incoming_edges() {
 #[test]
 fn test_overlay_get_incoming_edges_multiple() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller1".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "caller2".to_string(), "/src/lib.rs".to_string());
-    let n3 = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller1".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "caller2".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n3 = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
     let n3_id = n3.id.clone();
@@ -394,8 +596,16 @@ fn test_overlay_get_incoming_edges_multiple() {
     overlay.insert_node(n2);
     overlay.insert_node(n3);
 
-    overlay.insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n3_id.clone())).unwrap();
-    overlay.insert_edge(&GraphEdge::new(EdgeType::Calls, n2_id.clone(), n3_id.clone())).unwrap();
+    overlay
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, n1_id, n3_id.clone()))
+        .unwrap();
+    overlay
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            n2_id.clone(),
+            n3_id.clone(),
+        ))
+        .unwrap();
 
     let incoming = overlay.get_incoming_edges(&n3_id);
     assert_eq!(incoming.len(), 2);
@@ -404,7 +614,11 @@ fn test_overlay_get_incoming_edges_multiple() {
 #[test]
 fn test_overlay_get_incoming_edges_none() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "lonely".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "lonely".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     overlay.insert_node(n1);
 
@@ -422,8 +636,16 @@ fn test_overlay_get_incoming_edges_unknown_node() {
 #[test]
 fn test_overlay_insert_edge_all_edge_types() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "a".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "b".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "a".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "b".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
@@ -446,7 +668,11 @@ fn test_overlay_insert_edge_all_edge_types() {
 #[test]
 fn test_overlay_find_nodes_by_path_not_found() {
     let overlay = VolatileOverlay::new();
-    overlay.insert_node(GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string()));
+    overlay.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
 
     let found = overlay.find_nodes_by_path("/nonexistent/path.rs");
     assert!(found.is_empty());
@@ -464,25 +690,49 @@ fn test_overlay_last_update_age_secs_initial() {
 fn test_overlay_last_update_age_updates_on_insert() {
     let overlay = VolatileOverlay::new();
     // Insert a node
-    overlay.insert_node(GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string()));
+    overlay.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
     let age = overlay.last_update_age_secs();
-    assert!(age < 1.0, "After insert, overlay should have fresh timestamp, got {}", age);
+    assert!(
+        age < 1.0,
+        "After insert, overlay should have fresh timestamp, got {}",
+        age
+    );
 }
 
 #[test]
 fn test_overlay_last_update_age_updates_on_clear() {
     let overlay = VolatileOverlay::new();
-    overlay.insert_node(GraphNode::new(NodeType::Function, "fn1".to_string(), "/src/lib.rs".to_string()));
+    overlay.insert_node(GraphNode::new(
+        NodeType::Function,
+        "fn1".to_string(),
+        "/src/lib.rs".to_string(),
+    ));
     overlay.clear();
     let age = overlay.last_update_age_secs();
-    assert!(age < 1.0, "After clear, overlay should have fresh timestamp, got {}", age);
+    assert!(
+        age < 1.0,
+        "After clear, overlay should have fresh timestamp, got {}",
+        age
+    );
 }
 
 #[test]
 fn test_overlay_last_update_age_updates_on_edge() {
     let overlay = VolatileOverlay::new();
-    let n1 = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let n1_id = n1.id.clone();
     let n2_id = n2.id.clone();
 
@@ -494,7 +744,11 @@ fn test_overlay_last_update_age_updates_on_edge() {
     overlay.insert_edge(&edge).unwrap();
 
     let age = overlay.last_update_age_secs();
-    assert!(age < 1.0, "After edge insert, overlay should have fresh timestamp, got {}", age);
+    assert!(
+        age < 1.0,
+        "After edge insert, overlay should have fresh timestamp, got {}",
+        age
+    );
 }
 
 // ─── RevisionLog wiring (Task 1.2) ─────────────────────────────────────────
@@ -510,15 +764,26 @@ fn overlay_reports_current_revision_after_inserts() {
     let node = GraphNode::new(NodeType::Function, "f1".to_string(), "/p.rs".to_string());
     vo.insert_node(node);
     let rev = vo.current_revision();
-    assert!(rev >= 1, "expected current_revision >= 1 after one insert, got {rev}");
+    assert!(
+        rev >= 1,
+        "expected current_revision >= 1 after one insert, got {rev}"
+    );
 }
 
 #[test]
 fn overlay_diffs_since_filters_correctly() {
     let vo = VolatileOverlay::new();
-    vo.insert_node(GraphNode::new(NodeType::Function, "a".to_string(), "/a.rs".to_string()));
+    vo.insert_node(GraphNode::new(
+        NodeType::Function,
+        "a".to_string(),
+        "/a.rs".to_string(),
+    ));
     let mid = vo.current_revision();
-    vo.insert_node(GraphNode::new(NodeType::Function, "b".to_string(), "/b.rs".to_string()));
+    vo.insert_node(GraphNode::new(
+        NodeType::Function,
+        "b".to_string(),
+        "/b.rs".to_string(),
+    ));
     let diffs = vo.diffs_since(mid).unwrap();
     assert_eq!(diffs.len(), 1);
     assert!(diffs[0].added.iter().any(|n| n.name == "b"));
@@ -528,6 +793,13 @@ fn overlay_diffs_since_filters_correctly() {
 fn overlay_diffs_since_beyond_current_errors() {
     use crate::server::revision_log::LookupResult;
     let vo = VolatileOverlay::new();
-    vo.insert_node(GraphNode::new(NodeType::Function, "a".to_string(), "/a.rs".to_string()));
-    assert!(matches!(vo.diffs_since(999), Err(LookupResult::BeyondCurrent)));
+    vo.insert_node(GraphNode::new(
+        NodeType::Function,
+        "a".to_string(),
+        "/a.rs".to_string(),
+    ));
+    assert!(matches!(
+        vo.diffs_since(999),
+        Err(LookupResult::BeyondCurrent)
+    ));
 }

@@ -38,9 +38,12 @@ fn single_workspace_flag_yields_single_entry() {
 fn repeated_workspace_flag_yields_all_entries_in_order() {
     let got = parse_mcp(&[
         "mcp",
-        "--workspace", "/tmp/a",
-        "--workspace", "/tmp/b",
-        "--workspace", "/tmp/c",
+        "--workspace",
+        "/tmp/a",
+        "--workspace",
+        "/tmp/b",
+        "--workspace",
+        "/tmp/c",
     ]);
     assert_eq!(
         got,
@@ -56,9 +59,12 @@ fn repeated_workspace_flag_yields_all_entries_in_order() {
 fn interleaved_workspace_and_other_flags_preserves_workspace_order() {
     let got = parse_mcp(&[
         "mcp",
-        "--workspace", "/tmp/a",
-        "--embedding-model", "/path/to/model",
-        "--workspace", "/tmp/b",
+        "--workspace",
+        "/tmp/a",
+        "--embedding-model",
+        "/path/to/model",
+        "--workspace",
+        "/tmp/b",
     ]);
     assert_eq!(
         got,

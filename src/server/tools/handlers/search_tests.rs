@@ -1,4 +1,3 @@
-
 /// The importance bonus must be bounded by the corpus-wide anchor
 /// scale, not renormalized within each result set.
 ///

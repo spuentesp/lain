@@ -1,4 +1,6 @@
-use lain::server::attribution::{AttributionBackend, AttributionWatcher, NoopBackend, ProcFsBackend};
+use lain::server::attribution::{
+    AttributionBackend, AttributionWatcher, NoopBackend, ProcFsBackend,
+};
 use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,9 +26,8 @@ fn attribution_auto_claims_via_pid_on_linux() {
     );
 
     let (tx, _rx) = tokio::sync::broadcast::channel(8);
-    let events_log = Arc::new(
-        lain::server::events_log::EventsLog::open(&tmp.path().join("events")).unwrap(),
-    );
+    let events_log =
+        Arc::new(lain::server::events_log::EventsLog::open(&tmp.path().join("events")).unwrap());
     let watcher = AttributionWatcher::new(
         presence.clone(),
         occupancy.clone(),
@@ -80,7 +81,10 @@ fn attribution_backend_trait_returns_writer_pid() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     let pid = backend.lookup_writer_pid(&file);
     let _ = child.wait();
-    assert!(pid.is_some(), "ProcFsBackend must find the writer pid on Linux");
+    assert!(
+        pid.is_some(),
+        "ProcFsBackend must find the writer pid on Linux"
+    );
 }
 
 #[test]

@@ -1,15 +1,15 @@
-use anyhow::Result;
-use std::collections::HashMap;
-use std::sync::Arc;
-use parking_lot::Mutex;
 use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::query::executor::Executor;
 use crate::query::spec::{
-    ConnectOp, DepthSpec, Direction, EdgeSelector, FilterOp, FindOp,
-    GraphOp, GroupBy, GroupOp, LabelSelector, LimitOp, NameSelector,
-    QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp, TypeSelector,
+    ConnectOp, DepthSpec, Direction, EdgeSelector, FilterOp, FindOp, GraphOp, GroupBy, GroupOp,
+    LabelSelector, LimitOp, NameSelector, QuerySpec, SemanticFilterOp, SortDirection, SortField,
+    SortOp, TypeSelector,
 };
+use anyhow::Result;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Result<()> {
     // Resolve the workspace root: explicit `--workspace`, else walk up
@@ -75,12 +75,25 @@ fn parse_query_string(expr: &str) -> QuerySpec {
 
         if part.starts_with("find ") {
             let remainder = part[5..].trim();
-            if !remainder.is_empty() && !remainder.starts_with("name ") && !remainder.starts_with("limit") {
-                current_type = Some(TypeSelector::Single(remainder.split_whitespace().next().unwrap_or(remainder).into()));
+            if !remainder.is_empty()
+                && !remainder.starts_with("name ")
+                && !remainder.starts_with("limit")
+            {
+                current_type = Some(TypeSelector::Single(
+                    remainder
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(remainder)
+                        .into(),
+                ));
             }
             if remainder.contains("name ") {
                 if let Some(name_part) = remainder.split("name ").nth(1) {
-                    let raw = name_part.split_whitespace().next().unwrap_or(name_part).trim_matches('"');
+                    let raw = name_part
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(name_part)
+                        .trim_matches('"');
                     current_name = Some(name_selector_from_string(raw));
                 }
             }
@@ -105,7 +118,10 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                     if depth_str.contains("..=") || depth_str.contains("..") {
                         let parts: Vec<&str> = depth_str.split("..").collect();
                         let min: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(1);
-                        let max: u32 = parts.last().and_then(|s| s.trim_end_matches('=').parse().ok()).unwrap_or(min);
+                        let max: u32 = parts
+                            .last()
+                            .and_then(|s| s.trim_end_matches('=').parse().ok())
+                            .unwrap_or(min);
                         connect_depth = DepthSpec::Range { min, max };
                     } else if let Ok(d) = depth_str.parse() {
                         connect_depth = DepthSpec::Single(d);
@@ -149,7 +165,9 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                 let rest = rest.trim();
                 if let Some(stripped) = rest.strip_prefix('\'').and_then(|s| s.split_once('\'')) {
                     like = Some(stripped.0.to_string());
-                } else if let Some(stripped) = rest.strip_prefix('"').and_then(|s| s.split_once('"')) {
+                } else if let Some(stripped) =
+                    rest.strip_prefix('"').and_then(|s| s.split_once('"'))
+                {
                     like = Some(stripped.0.to_string());
                 } else {
                     like = Some(rest.split_whitespace().next().unwrap_or("").to_string());
@@ -157,11 +175,18 @@ fn parse_query_string(expr: &str) -> QuerySpec {
             }
             if remainder.contains("threshold ") {
                 if let Some(t) = remainder.split("threshold ").nth(1) {
-                    threshold = t.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(0.3);
+                    threshold = t
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.3);
                 }
             }
             if let Some(like_str) = like {
-                extra_ops.push(GraphOp::SemanticFilter(SemanticFilterOp { like: like_str, threshold }));
+                extra_ops.push(GraphOp::SemanticFilter(SemanticFilterOp {
+                    like: like_str,
+                    threshold,
+                }));
             }
         } else if part.starts_with("sort ") {
             let remainder = part[5..].trim();
@@ -175,7 +200,10 @@ fn parse_query_string(expr: &str) -> QuerySpec {
             } else {
                 SortDirection::Asc
             };
-            extra_ops.push(GraphOp::Sort(SortOp { by: field, direction: dir }));
+            extra_ops.push(GraphOp::Sort(SortOp {
+                by: field,
+                direction: dir,
+            }));
         } else if part.starts_with("group ") {
             let remainder = part[6..].trim();
             let by = match remainder.split_whitespace().next().unwrap_or("type") {
@@ -186,7 +214,9 @@ fn parse_query_string(expr: &str) -> QuerySpec {
             extra_ops.push(GraphOp::Group(GroupOp { by }));
         } else if part.starts_with("limit ") {
             let remainder = part[6..].trim();
-            limit_count = remainder.split_whitespace().next()
+            limit_count = remainder
+                .split_whitespace()
+                .next()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100);
         }
@@ -211,7 +241,10 @@ fn parse_query_string(expr: &str) -> QuerySpec {
 
     ops.extend(extra_ops);
 
-    ops.push(GraphOp::Limit(LimitOp { count: limit_count, offset: 0 }));
+    ops.push(GraphOp::Limit(LimitOp {
+        count: limit_count,
+        offset: 0,
+    }));
     QuerySpec::new(ops)
 }
 

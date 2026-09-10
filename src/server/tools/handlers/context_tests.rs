@@ -1,9 +1,11 @@
 //! Tests for tools/handlers/context.rs
 
-use crate::server::tools::handlers::context::{get_context_for_prompt, get_code_snippet, get_call_sites};
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphNode, NodeType, EdgeType, GraphEdge};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::tools::handlers::context::{
+    get_call_sites, get_code_snippet, get_context_for_prompt,
+};
 
 fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
     let tmp = std::env::temp_dir().join("test_context_graph");
@@ -11,16 +13,40 @@ fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     // Create a simple call graph: caller -> callee
-    let caller = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/main.rs".to_string());
-    let callee = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/callee.rs".to_string());
-    let file_node = GraphNode::new(NodeType::File, "main.rs".to_string(), "/src/main.rs".to_string());
+    let caller = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/main.rs".to_string(),
+    );
+    let callee = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/callee.rs".to_string(),
+    );
+    let file_node = GraphNode::new(
+        NodeType::File,
+        "main.rs".to_string(),
+        "/src/main.rs".to_string(),
+    );
 
     graph.upsert_node(caller.clone()).unwrap();
     graph.upsert_node(callee.clone()).unwrap();
     graph.upsert_node(file_node.clone()).unwrap();
 
-    graph.insert_edge(&GraphEdge::new(EdgeType::Contains, file_node.id.clone(), caller.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, caller.id.clone(), callee.id.clone())).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file_node.id.clone(),
+            caller.id.clone(),
+        ))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            caller.id.clone(),
+            callee.id.clone(),
+        ))
+        .unwrap();
 
     let overlay = VolatileOverlay::new();
     (graph, overlay)
@@ -31,7 +57,11 @@ fn test_get_context_for_prompt_existing() {
     let (graph, overlay) = make_test_graph();
 
     // Add node with full info to overlay
-    let mut node = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/main.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/main.rs".to_string(),
+    );
     node.signature = Some("(x: i32) -> i32".to_string());
     node.docstring = Some("A test function".to_string());
     node.depth_from_main = Some(0);
@@ -57,7 +87,11 @@ fn test_get_context_for_prompt_not_found() {
 fn test_get_context_for_prompt_with_max_tokens() {
     let (graph, overlay) = make_test_graph();
 
-    let mut node = GraphNode::new(NodeType::Function, "big_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "big_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.docstring = Some("A".repeat(1000));
     overlay.insert_node(node);
 

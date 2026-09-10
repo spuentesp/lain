@@ -22,7 +22,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-use common::{git_init_committed};
+use common::git_init_committed;
 
 #[test]
 fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
@@ -75,9 +75,8 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
     // calls between callers and `real_hub` before the test asserted —
     // a flake that surfaced during stub verification. Building the
     // graph directly removes the timing dependency.)
-    let source: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
-        WorkspaceDirSource::new(RepoId::new("repo").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let source: Box<dyn lain::federation::repo_source::RepoSource> =
+        Box::new(WorkspaceDirSource::new(RepoId::new("repo").unwrap(), repo_dir.clone()).unwrap());
     let per_repo = RepoIndex::new(source, project.path()).unwrap();
     let db = per_repo.db().clone();
 
@@ -91,9 +90,15 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
         db.upsert_node(n).unwrap();
     };
     insert("real_hub", "src/lib.rs", 0, 3);
-    for (i, name) in ["caller_one", "caller_two", "caller_three", "caller_four", "caller_five"]
-        .iter()
-        .enumerate()
+    for (i, name) in [
+        "caller_one",
+        "caller_two",
+        "caller_three",
+        "caller_four",
+        "caller_five",
+    ]
+    .iter()
+    .enumerate()
     {
         insert(name, "src/lib.rs", 5 + i as u32 * 2, 7 + i as u32 * 2);
     }
@@ -104,15 +109,28 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
     // Insert Calls edges from each caller to real_hub. This is
     // the "5 callers" anchor signal the test relies on.
     let mut find = |name: &str, path: &str| {
-        db.find_node_by_name(name)
-            .or_else(|| db.find_all_nodes_by_name(name).into_iter().find(|n| n.path == path))
+        db.find_node_by_name(name).or_else(|| {
+            db.find_all_nodes_by_name(name)
+                .into_iter()
+                .find(|n| n.path == path)
+        })
     };
     let real_hub = find("real_hub", "src/lib.rs").expect("real_hub");
     let real_hub_id = real_hub.id.clone();
-    for name in ["caller_one", "caller_two", "caller_three", "caller_four", "caller_five"] {
+    for name in [
+        "caller_one",
+        "caller_two",
+        "caller_three",
+        "caller_four",
+        "caller_five",
+    ] {
         let caller = find(name, "src/lib.rs").expect(name);
-        db.insert_edge(&GraphEdge::new(EdgeType::Calls, caller.id, real_hub_id.clone()))
-            .unwrap();
+        db.insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            caller.id,
+            real_hub_id.clone(),
+        ))
+        .unwrap();
     }
     // real_hub also CALLS the stdlib-named helpers. Without
     // calls_out > 0, `calculate_anchor_scores` treats real_hub as a
@@ -123,8 +141,12 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
     // in the scorer's sense.
     for stdlib_name in ["parse", "default", "as_str"] {
         let callee = find(stdlib_name, "src/lib.rs").expect(stdlib_name);
-        db.insert_edge(&GraphEdge::new(EdgeType::Calls, real_hub_id.clone(), callee.id))
-            .unwrap();
+        db.insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            real_hub_id.clone(),
+            callee.id,
+        ))
+        .unwrap();
     }
     // Compute anchor scores. Without this the test sees every
     // function at score None / 0 and order is purely by insertion
@@ -212,20 +234,19 @@ fn find_anchors_on_empty_graph_returns_empty_list() {
     std::fs::write(
         repo_dir.join("Cargo.toml"),
         "[package]\nname = \"empty-anchors\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    ).unwrap();
+    )
+    .unwrap();
     // Empty lib.rs — no functions to index.
     std::fs::write(repo_dir.join("src/lib.rs"), "").unwrap();
     git_init_committed(&repo_dir);
 
-    let source: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
-        WorkspaceDirSource::new(RepoId::new("repo").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let source: Box<dyn lain::federation::repo_source::RepoSource> =
+        Box::new(WorkspaceDirSource::new(RepoId::new("repo").unwrap(), repo_dir.clone()).unwrap());
     let per_repo = RepoIndex::new(source, project.path()).unwrap();
     let db = per_repo.db().clone();
 
     let overlay = lain::overlay::VolatileOverlay::new();
-    let text = find_anchors(&db, &overlay, 10)
-        .expect("find_anchors on empty graph must succeed");
+    let text = find_anchors(&db, &overlay, 10).expect("find_anchors on empty graph must succeed");
     let _ = per_repo;
     assert!(
         text.is_empty() || text.contains("No anchors"),

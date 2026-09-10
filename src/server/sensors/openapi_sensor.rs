@@ -5,12 +5,12 @@
 //!
 //! Edges created: CallsHttp (route path+method -> handler function)
 
-use crate::graph::GraphDatabase;
-use crate::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
 use crate::error::LainError;
+use crate::graph::GraphDatabase;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
-use serde::Deserialize;
 
 /// OpenAPI operation extracted from spec
 #[derive(Debug, Clone)]
@@ -54,7 +54,10 @@ impl OpenApiOperation {
         Self {
             method: method.to_uppercase(),
             path: path.to_string(),
-            operation_id: op.operation_id.clone().unwrap_or_else(|| format!("{}:{}", method, path)),
+            operation_id: op
+                .operation_id
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", method, path)),
             summary: op.summary.clone().unwrap_or_default(),
             spec_path: spec_path.to_string(),
         }
@@ -63,7 +66,8 @@ impl OpenApiOperation {
 
 /// Find handler in graph by operationId
 fn find_handler(graph: &GraphDatabase, operation_id: &str) -> Option<GraphNode> {
-    graph.find_node_by_name(operation_id)
+    graph
+        .find_node_by_name(operation_id)
         .or_else(|| graph.find_node_by_name(&to_snake_case(operation_id)))
         .or_else(|| graph.find_node_by_name(&to_camel_case(operation_id)))
 }
@@ -116,10 +120,7 @@ pub fn parse_openapi(content: &str, spec_path: &str) -> Vec<OpenApiOperation> {
         ] {
             if let Some(operation) = op {
                 operations.push(OpenApiOperation::from_operation(
-                    method,
-                    &path,
-                    operation,
-                    spec_path,
+                    method, &path, operation, spec_path,
                 ));
             }
         }
@@ -163,15 +164,15 @@ pub fn enrich_with_openapi(
         );
         route_node.id = route_id.clone();
         route_node.signature = Some(op.operation_id.clone());
-        route_node.docstring = if op.summary.is_empty() { None } else { Some(op.summary.clone()) };
+        route_node.docstring = if op.summary.is_empty() {
+            None
+        } else {
+            Some(op.summary.clone())
+        };
         graph.upsert_node(route_node)?;
 
         if let Some(handler) = find_handler(graph, &op.operation_id) {
-            let edge = GraphEdge::new(
-                EdgeType::CallsHttp,
-                route_id,
-                handler.id.clone(),
-            );
+            let edge = GraphEdge::new(EdgeType::CallsHttp, route_id, handler.id.clone());
             graph.insert_edge(&edge)?;
             count += 1;
         }
@@ -188,18 +189,19 @@ const SPEC_SNIFF_BYTES: usize = 8 * 1024;
 /// Reads at most [`SPEC_SNIFF_BYTES`] and never loads the whole file.
 fn sniff_is_openapi(path: &Path) -> bool {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
     let mut buf = vec![0u8; SPEC_SNIFF_BYTES];
-    let Ok(n) = f.read(&mut buf) else { return false };
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
     buf.truncate(n);
     let head = String::from_utf8_lossy(&buf);
     head.contains("openapi") || head.contains("swagger")
 }
 
-pub fn scan_workspace(
-    graph: &GraphDatabase,
-    root: &Path,
-) -> Result<usize, LainError> {
+pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainError> {
     let mut count = 0;
 
     let walker = ignore::WalkBuilder::new(root)

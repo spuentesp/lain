@@ -29,7 +29,7 @@ impl GitSensor {
     /// Open a Git repository at the given path
     pub fn new(workspace: &Path) -> Result<Self, LainError> {
         let repo = Repository::open(workspace)?;
-        
+
         Ok(Self {
             repo,
             workspace: workspace.to_path_buf(),
@@ -67,23 +67,21 @@ impl GitSensor {
     /// Get all uncommitted changes (staged and unstaged)
     pub fn get_uncommitted_changes(&self) -> Result<Vec<FileChange>, LainError> {
         let mut changes = Vec::new();
-        
+
         // Get HEAD commit for comparison
         let head = self.repo.head().ok();
         let head_commit = head.as_ref().and_then(|h| h.peel_to_commit().ok());
-        
+
         // Get staged changes
         let mut opts = DiffOptions::new();
         opts.include_untracked(true);
-        
+
         // Compare index to HEAD for staged changes
         if let Some(commit) = head_commit {
-            let diff = self.repo.diff_tree_to_index(
-                commit.tree().ok().as_ref(),
-                None,
-                Some(&mut opts),
-            )?;
-            
+            let diff =
+                self.repo
+                    .diff_tree_to_index(commit.tree().ok().as_ref(), None, Some(&mut opts))?;
+
             diff.foreach(
                 &mut |delta, _| {
                     if let Some(path) = delta.new_file().path() {
@@ -100,10 +98,10 @@ impl GitSensor {
                 None,
             )?;
         }
-        
+
         // Get unstaged changes (workdir to index)
         let diff = self.repo.diff_index_to_workdir(None, Some(&mut opts))?;
-        
+
         diff.foreach(
             &mut |delta, _| {
                 if let Some(path) = delta.new_file().path() {
@@ -125,14 +123,14 @@ impl GitSensor {
             None,
             None,
         )?;
-        
+
         // Get untracked files
         let mut status_opts = StatusOptions::new();
         status_opts.include_untracked(true);
         status_opts.recurse_untracked_dirs(true);
-        
+
         let statuses = self.repo.statuses(Some(&mut status_opts))?;
-        
+
         for entry in statuses.iter() {
             if entry.status().is_wt_new() {
                 if let Some(path) = entry.path() {
@@ -145,7 +143,7 @@ impl GitSensor {
                 }
             }
         }
-        
+
         debug!("Found {} uncommitted changes", changes.len());
         Ok(changes)
     }
@@ -153,12 +151,12 @@ impl GitSensor {
     /// Get diff content for a specific file
     pub fn get_file_diff(&self, path: &Path) -> Result<String, LainError> {
         let relative = path.strip_prefix(&self.workspace).unwrap_or(path);
-        
+
         let mut opts = DiffOptions::new();
         opts.pathspec(relative);
-        
+
         let diff = self.repo.diff_index_to_workdir(None, Some(&mut opts))?;
-        
+
         let mut diff_text = String::new();
         diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
             let prefix = match line.origin() {
@@ -173,7 +171,7 @@ impl GitSensor {
             }
             true
         })?;
-        
+
         Ok(diff_text)
     }
 
@@ -212,10 +210,10 @@ impl GitSensor {
                 break;
             }
             commit_count += 1;
-            
+
             let commit = self.repo.find_commit(oid)?;
             let message = commit.message().unwrap_or("").to_string();
-            
+
             // Get the parent commit tree to find changed files
             let tree = commit.tree()?;
             let parent_tree = if commit.parent_count() > 0 {
@@ -223,14 +221,12 @@ impl GitSensor {
             } else {
                 None
             };
-            
+
             // Diff to find changed files
-            let diff = self.repo.diff_tree_to_tree(
-                parent_tree.as_ref(),
-                Some(&tree),
-                None,
-            )?;
-            
+            let diff = self
+                .repo
+                .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
+
             let mut files = Vec::new();
             diff.foreach(
                 &mut |delta, _| {
@@ -245,7 +241,7 @@ impl GitSensor {
                 None,
                 None,
             )?;
-            
+
             commits.push(CommitInfo {
                 id: commit.id().to_string(),
                 message: message.split('\n').next().unwrap_or("").to_string(),
@@ -253,14 +249,19 @@ impl GitSensor {
                 time: commit.time().seconds(),
             });
         }
-        
+
         debug!("Retrieved {} commits for co-change analysis", commits.len());
         Ok(commits)
     }
 
     /// Analyze co-changes from commit history
     /// Returns pairs of files that frequently change together
-    pub fn analyze_co_changes(&self, count: usize, threshold: usize, max_files: usize) -> Result<Vec<CoChangePair>, LainError> {
+    pub fn analyze_co_changes(
+        &self,
+        count: usize,
+        threshold: usize,
+        max_files: usize,
+    ) -> Result<Vec<CoChangePair>, LainError> {
         let commits = self.get_commit_history(count)?;
 
         use std::collections::HashMap;
@@ -270,7 +271,12 @@ impl GitSensor {
             // Optimization: Skip commits that touch too many files
             // to avoid O(N^2) complexity explosions in pair generation.
             if commit.files.len() > max_files {
-                debug!("Skipping commit {} for co-change: {} files exceeds max {}", commit.id, commit.files.len(), max_files);
+                debug!(
+                    "Skipping commit {} for co-change: {} files exceeds max {}",
+                    commit.id,
+                    commit.files.len(),
+                    max_files
+                );
                 continue;
             }
 
@@ -301,7 +307,11 @@ impl GitSensor {
         // Sort by co-change count descending
         co_changes.sort_by_key(|b| std::cmp::Reverse(b.co_change_count));
 
-        debug!("Found {} co-change pairs above threshold {}", co_changes.len(), threshold);
+        debug!(
+            "Found {} co-change pairs above threshold {}",
+            co_changes.len(),
+            threshold
+        );
         Ok(co_changes)
     }
 
@@ -342,11 +352,9 @@ impl GitSensor {
                 None
             };
 
-            let diff = self.repo.diff_tree_to_tree(
-                parent_tree.as_ref(),
-                Some(&tree),
-                None,
-            )?;
+            let diff = self
+                .repo
+                .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
 
             let mut files = Vec::new();
             diff.foreach(

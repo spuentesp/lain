@@ -6,7 +6,6 @@
 //! `get_federation_health`, `search_org`, etc.) is exposed at
 //! `POST /mcp` exactly like a single-workspace `lain --transport http`.
 
-use anyhow::{anyhow, Result};
 use crate::federation::health::RepoHealth;
 use crate::federation::loader::{load_federation, load_federation_with_workspace};
 use crate::server::{
@@ -14,6 +13,7 @@ use crate::server::{
     LainServer, Transport,
 };
 use crate::state::ActiveWorkspace;
+use anyhow::{anyhow, Result};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -165,10 +165,7 @@ pub async fn run_server(
     // operator convenience.
     if let Some(p) = repos_yaml.as_deref() {
         if let Err(e) = crate::config::recent_projects::record(p) {
-            tracing::warn!(
-                "could not record recent project {}: {e}",
-                p.display()
-            );
+            tracing::warn!("could not record recent project {}: {e}", p.display());
         }
     }
 
@@ -184,9 +181,7 @@ pub async fn run_server(
 
     // Reap expired `/ui/...` sessions; the HTTP transport creates one per
     // interactive blast-radius link and nothing ever removed them.
-    crate::server::ingest::background::spawn_ui_session_reaper(
-        server.tool_executor.ctx.clone(),
-    );
+    crate::server::ingest::background::spawn_ui_session_reaper(server.tool_executor.ctx.clone());
 
     info!(
         "lain server: starting on {:?} transport (port {})",
@@ -226,11 +221,11 @@ async fn load_federation_for_workspace(
 ) -> Result<Arc<FederatedIndex>, anyhow::Error> {
     let arg = workspace_arg.trim();
     let resolved_name: Option<String> = match arg {
-        "" | "none" => None,  // explicit "no workspace" — today's behavior
+        "" | "none" => None, // explicit "no workspace" — today's behavior
         "auto" => {
             match ActiveWorkspace::load() {
                 Ok(Some(active)) => Some(active.name),
-                Ok(None) => None,  // no pointer set → fall through to all-repos
+                Ok(None) => None, // no pointer set → fall through to all-repos
                 Err(e) => {
                     // Don't fail startup over a corrupt pointer file;
                     // log and fall through. The operator can re-run
@@ -265,17 +260,11 @@ use crate::server::reload::run_rebuild;
 /// rebuild task that consumes the bus. Returns immediately after
 /// spawning — failures are logged and non-fatal so the MCP server
 /// can still come up even if the socket dir is unwritable.
-async fn spawn_hot_reload(
-    config_path: &Path,
-    server: &LainServer,
-) {
+async fn spawn_hot_reload(config_path: &Path, server: &LainServer) {
     let bus = server.reload_bus();
 
     // File watcher — fires `request_reload` on hand-edits.
-    let _watcher_join = crate::server::watcher::spawn_config_watcher(
-        config_path,
-        Arc::clone(&bus),
-    );
+    let _watcher_join = crate::server::watcher::spawn_config_watcher(config_path, Arc::clone(&bus));
 
     // Unix socket — CLI signals. Unix only; on Windows the file watcher
     // is still the reload path (CLI-prompted reloads via the
@@ -283,7 +272,9 @@ async fn spawn_hot_reload(
     #[cfg(unix)]
     {
         let sock_path = crate::cli::signal::socket_path_for(config_path);
-        if let Err(e) = crate::cli::signal::spawn_signal_listener_at(&sock_path, Arc::clone(&bus)).await {
+        if let Err(e) =
+            crate::cli::signal::spawn_signal_listener_at(&sock_path, Arc::clone(&bus)).await
+        {
             tracing::warn!(
                 "hot reload: could not bind signal socket at {}: {e}",
                 sock_path.display()
@@ -291,10 +282,7 @@ async fn spawn_hot_reload(
             // Continue: the file watcher is still up; only CLI-prompted
             // reloads are unavailable.
         } else {
-            tracing::info!(
-                "hot reload: signal listener at {}",
-                sock_path.display()
-            );
+            tracing::info!("hot reload: signal listener at {}", sock_path.display());
         }
     }
 

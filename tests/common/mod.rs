@@ -122,7 +122,10 @@ pub fn http_request(host: &str, raw: &str) -> (u16, String) {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let body_start = response.find("\r\n\r\n").map(|i| i + 4).unwrap_or(response.len());
+    let body_start = response
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(response.len());
     (status, response[body_start..].to_string())
 }
 
@@ -165,7 +168,11 @@ pub fn tools_call_text(host: &str, name: &str, arguments: serde_json::Value) -> 
 /// Issue `tools/call <name> <args>` and return the full JSON-RPC
 /// response envelope. Does NOT panic on `isError=true` — callers
 /// inspect `result.isError` and `error.code` themselves.
-pub fn tools_call_envelope(host: &str, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+pub fn tools_call_envelope(
+    host: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
     let body = serde_json::json!({
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
@@ -222,9 +229,12 @@ fn boot_server_impl(port: u16, repos_yaml_path: &Path, cwd: Option<&Path>) -> Se
     command
         .args([
             "server",
-            "--transport", "http",
-            "--port", &port.to_string(),
-            "--workspace", "auto",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--workspace",
+            "auto",
             "--config",
             repos_yaml_path.to_str().unwrap(),
         ])
@@ -260,14 +270,10 @@ pub fn wait_for_health(host: &str, deadline: Duration) {
         }
         match TcpStream::connect(host) {
             Ok(mut stream) => {
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .ok();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 let _ = stream.write_all(
-                    format!(
-                        "GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-                    )
-                    .as_bytes(),
+                    format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
                 );
                 let mut response = String::new();
                 let _ = stream.read_to_string(&mut response);
@@ -425,11 +431,23 @@ pub fn git_init_committed(path: &Path) {
             .expect("git failed");
         assert!(status.success(), "git {args:?} failed: {status}");
     };
-    run(&["-c", "user.email=test@lain", "-c", "user.name=test", "add", "-A"]);
     run(&[
-        "-c", "user.email=test@lain",
-        "-c", "user.name=test",
-        "commit", "-q", "-m", "fixture",
+        "-c",
+        "user.email=test@lain",
+        "-c",
+        "user.name=test",
+        "add",
+        "-A",
+    ]);
+    run(&[
+        "-c",
+        "user.email=test@lain",
+        "-c",
+        "user.name=test",
+        "commit",
+        "-q",
+        "-m",
+        "fixture",
     ]);
 }
 

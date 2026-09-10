@@ -53,8 +53,9 @@ pub fn signal_reload(repos_yaml: &Path) -> anyhow::Result<()> {
             stream.write_all(b"reload\n")?;
             Ok(())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
-            || e.kind() == std::io::ErrorKind::NotFound =>
+        Err(e)
+            if e.kind() == std::io::ErrorKind::ConnectionRefused
+                || e.kind() == std::io::ErrorKind::NotFound =>
         {
             // Stale socket from a previous run; clean up so the next
             // call short-circuits on the `!sock.exists()` check.
@@ -86,13 +87,13 @@ pub async fn spawn_signal_listener_at(
     use anyhow::Context;
 
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await
+        tokio::fs::create_dir_all(parent)
+            .await
             .with_context(|| format!("create_dir_all {}", parent.display()))?;
     }
     // Best-effort cleanup of any stale socket file from a previous run.
     let _ = tokio::fs::remove_file(path).await;
-    let listener = UnixListener::bind(path)
-        .with_context(|| format!("bind {}", path.display()))?;
+    let listener = UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
     let bound = path.to_path_buf();
     tokio::spawn(async move {
         loop {
@@ -102,18 +103,14 @@ pub async fn spawn_signal_listener_at(
                     match stream.read(&mut buf).await {
                         Ok(n) if &buf[..n] == b"reload\n" => {
                             if let Err(e) = bus.request_reload() {
-                                tracing::warn!(
-                                    "signal listener: bus.request_reload() failed: {e}"
-                                );
+                                tracing::warn!("signal listener: bus.request_reload() failed: {e}");
                             }
                         }
                         Ok(_) => {
                             // Unknown command — ignore silently.
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "signal listener: read error: {e}"
-                            );
+                            tracing::warn!("signal listener: read error: {e}");
                         }
                     }
                 }

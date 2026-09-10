@@ -43,16 +43,14 @@ fn dump(out: &std::path::Path) -> Result<()> {
         .context("init stub embedder for schema dump")?;
     let inert = crate::server::mcp::handler::inert_tool_names(&embedder);
     let tools = crate::server::mcp::definitions::dump_tools_schema(inert);
-    let pretty = serde_json::to_string_pretty(&tools)
-        .context("serialize schema dump")?;
+    let pretty = serde_json::to_string_pretty(&tools).context("serialize schema dump")?;
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create parent dir {}", parent.display()))?;
         }
     }
-    std::fs::write(out, pretty.as_bytes())
-        .with_context(|| format!("write {}", out.display()))?;
+    std::fs::write(out, pretty.as_bytes()).with_context(|| format!("write {}", out.display()))?;
     println!("Wrote {} tools to {}", tools.len(), out.display());
     Ok(())
 }

@@ -70,20 +70,24 @@ fn emit_tools_list_check(base: &str) -> bool {
     // and the regression went uncaught by `doctor_smoke` because that
     // test does not set `LAIN_URL`. See final-review-report.md
     // Critical #1.
-    let value = match crate::cli::mcp_client::post_json_rpc(&url, "tools/list", serde_json::json!({})) {
-        Ok(v) => v,
-        Err(e) => return emit(
-            Severity::Fail,
-            format!("MCP endpoint {url} did not answer tools/list: {e}"),
-        ),
-    };
-    let tools = value
-        .get("tools")
-        .and_then(|t| t.as_array());
+    let value =
+        match crate::cli::mcp_client::post_json_rpc(&url, "tools/list", serde_json::json!({})) {
+            Ok(v) => v,
+            Err(e) => {
+                return emit(
+                    Severity::Fail,
+                    format!("MCP endpoint {url} did not answer tools/list: {e}"),
+                )
+            }
+        };
+    let tools = value.get("tools").and_then(|t| t.as_array());
     match tools {
         Some(list) if !list.is_empty() => emit(
             Severity::Ok,
-            format!("MCP surface live: tools/list advertises {} tools", list.len()),
+            format!(
+                "MCP surface live: tools/list advertises {} tools",
+                list.len()
+            ),
         ),
         Some(_) => emit(
             Severity::Fail,
@@ -124,15 +128,21 @@ pub fn run_doctor() -> Result<i32> {
     // both, plus the legacy single-file dev path, before failing —
     // a `[FAIL]` here on a release binary was a long-standing bug
     // (wishlist #6's "one version of truth" promise).
-    let source_hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("hooks/claude-code/pre-edit.sh");
+    let source_hook =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("hooks/claude-code/pre-edit.sh");
     let installed_hook = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("../share/lain/hooks/claude-code/pre-edit.sh")))
+        .and_then(|exe| {
+            exe.parent()
+                .map(|p| p.join("../share/lain/hooks/claude-code/pre-edit.sh"))
+        })
         .unwrap_or_else(|| std::path::PathBuf::from("<no install path>"));
     let flat_hook = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("hooks/claude-code/pre-edit.sh")))
+        .and_then(|exe| {
+            exe.parent()
+                .map(|p| p.join("hooks/claude-code/pre-edit.sh"))
+        })
         .unwrap_or_else(|| std::path::PathBuf::from("<no flat path>"));
     let candidates = [&source_hook, &installed_hook, &flat_hook];
     let found = candidates.iter().find(|p| p.exists());
@@ -183,10 +193,9 @@ pub fn run_doctor() -> Result<i32> {
         // does NOT reap (it must stay fast and side-effect-free).
         // `lain doctor` is the natural place — it's a periodic
         // operator-facing check that already enumerates the dir.
-        let reaped = crate::config::prune_old_sessions(std::time::Duration::from_secs(
-            30 * 24 * 3600,
-        ))
-        .unwrap_or(0);
+        let reaped =
+            crate::config::prune_old_sessions(std::time::Duration::from_secs(30 * 24 * 3600))
+                .unwrap_or(0);
         let count = std::fs::read_dir(&hd).map(|d| d.count()).unwrap_or(0);
         let reap_note = if reaped > 0 {
             format!(" — reaped {reaped} stale session file(s) older than 30 days")
@@ -225,7 +234,10 @@ pub fn run_doctor() -> Result<i32> {
     // `/mcp` so the same `LAIN_URL` that hooks use works here without
     // requiring a separate "diagnostic" URL.
     if let Ok(url) = std::env::var("LAIN_URL").or_else(|_| std::env::var("LAIN_SERVER_URL")) {
-        let base = url.trim_end_matches("/mcp").trim_end_matches('/').to_string();
+        let base = url
+            .trim_end_matches("/mcp")
+            .trim_end_matches('/')
+            .to_string();
         let health_url = format!("{base}/health");
         match reqwest::blocking::get(&health_url) {
             Ok(r) if r.status().is_success() => {
@@ -241,7 +253,10 @@ pub fn run_doctor() -> Result<i32> {
                 }
             }
             Ok(r) => {
-                emit(Severity::Fail, format!("server at {url} returned {}", r.status()));
+                emit(
+                    Severity::Fail,
+                    format!("server at {url} returned {}", r.status()),
+                );
                 failures += 1;
             }
             Err(e) => {

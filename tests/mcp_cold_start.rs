@@ -152,7 +152,11 @@ impl LainChild {
         let mut child = cmd.spawn().expect("spawn lain mcp");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
-        LainChild { child, stdin, stdout }
+        LainChild {
+            child,
+            stdin,
+            stdout,
+        }
     }
 
     fn send(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -188,10 +192,7 @@ trait ChildWaitTimeout {
     fn wait_timeout(&mut self, dur: Duration) -> std::io::Result<Option<std::process::ExitStatus>>;
 }
 impl ChildWaitTimeout for std::process::Child {
-    fn wait_timeout(
-        &mut self,
-        dur: Duration,
-    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+    fn wait_timeout(&mut self, dur: Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
         let start = Instant::now();
         loop {
             match self.try_wait()? {
@@ -286,11 +287,7 @@ fn startup_degrades_when_reindex_times_out() {
     };
     let fixture = build_fixture();
 
-    let mut child = LainChild::spawn(
-        &bin,
-        fixture.path(),
-        &[("LAIN_REINDEX_TIMEOUT", "1")],
-    );
+    let mut child = LainChild::spawn(&bin, fixture.path(), &[("LAIN_REINDEX_TIMEOUT", "1")]);
 
     let init_params = serde_json::json!({
         "protocolVersion": version,

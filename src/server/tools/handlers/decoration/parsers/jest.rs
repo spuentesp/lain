@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 use crate::server::tools::handlers::decoration::parsers::ErrorParser;
+use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 
 /// Parser for Jest JSON output (--json flag)
 /// Format: JSON with "results" array containing failed test messages
@@ -25,7 +25,8 @@ impl ErrorParser for JestParser {
 
         let mut errors = Vec::new();
         for result in results {
-            let Some(assertion_results) = result.get("assertionResults").and_then(|a| a.as_array()) else {
+            let Some(assertion_results) = result.get("assertionResults").and_then(|a| a.as_array())
+            else {
                 continue;
             };
 
@@ -126,7 +127,10 @@ mod tests {
         let parser = JestParser;
         let errors = parser.parse(output);
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path.to_string_lossy(), "src/components/Button.test.js");
+        assert_eq!(
+            errors[0].path.to_string_lossy(),
+            "src/components/Button.test.js"
+        );
     }
 
     #[test]

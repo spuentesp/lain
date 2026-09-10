@@ -5,9 +5,9 @@
 //! (write-temp-then-rename) so the watcher either sees the old
 //! contents or the new contents, never a partial write.
 
+use crate::server::federation::config::{FederationConfig, RepoConfig, SourceConfig};
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use crate::server::federation::config::{FederationConfig, RepoConfig, SourceConfig};
 use std::path::Path;
 
 /// Subcommands for `lain repos`.

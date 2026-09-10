@@ -1,11 +1,11 @@
+use super::scan::{scan_file_batch, PatternRef, StaticFileRef};
+use super::LainServer;
 use crate::error::LainError;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
 use crate::server::overlay::VolatileOverlay;
-use super::LainServer;
-use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
@@ -112,8 +112,11 @@ impl LainServer {
         while let Some(res) = set.join_next().await {
             // Check timeout - abort remaining tasks and break
             if scan_start.elapsed() >= scan_timeout {
-                warn!("Scan phase timed out after {:?}, aborting {} remaining tasks",
-                      scan_timeout, set.len());
+                warn!(
+                    "Scan phase timed out after {:?}, aborting {} remaining tasks",
+                    scan_timeout,
+                    set.len()
+                );
                 partial = true;
                 set.abort_all();
                 break;
@@ -137,11 +140,18 @@ impl LainServer {
                             }
                         }
                     }
-                    debug!("Batch completed: {} files scanned, {} failed in batch", scanned, failed);
+                    debug!(
+                        "Batch completed: {} files scanned, {} failed in batch",
+                        scanned, failed
+                    );
 
                     // Incremental flush every batch_size files
                     if batch_nodes.len() >= batch_size {
-                        info!("Flush phase 1: writing {} nodes ({} files scanned)", batch_nodes.len(), scanned);
+                        info!(
+                            "Flush phase 1: writing {} nodes ({} files scanned)",
+                            batch_nodes.len(),
+                            scanned
+                        );
                         // Replace rather than insert, so a re-scan drops the
                         // symbols a file no longer defines instead of layering
                         // new nodes on top of stale ones. Scan results arrive
@@ -198,20 +208,35 @@ impl LainServer {
               scanned, failed, all_external_refs.len(), all_static_refs.len(), all_pattern_refs.len());
 
         // 3. Resolve Phase: Link external references to internal nodes (CALLS/USES)
-        info!("Resolving topology: Linking {} external references...", all_external_refs.len());
-        let call_edges =
-            super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs, None, None);
+        info!(
+            "Resolving topology: Linking {} external references...",
+            all_external_refs.len()
+        );
+        let call_edges = super::resolve::resolve_call_edges(
+            &self.graph,
+            &self.config.workspace,
+            &all_external_refs,
+            None,
+            None,
+        );
         info!("Ingesting {} call edges", call_edges.len());
         insert_edges_reporting(&self.graph, &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
-        info!("Resolving {} tree-sitter static references...", all_static_refs.len());
-        let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs, None, None);
+        info!(
+            "Resolving {} tree-sitter static references...",
+            all_static_refs.len()
+        );
+        let static_edges =
+            super::resolve::resolve_static_edges(&self.graph, &all_static_refs, None, None);
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
         insert_edges_reporting(&self.graph, &static_edges, "static")?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
-        info!("Resolving {} pattern references for cross-boundary detection...", all_pattern_refs.len());
+        info!(
+            "Resolving {} pattern references for cross-boundary detection...",
+            all_pattern_refs.len()
+        );
         let pattern_edges = super::resolve::resolve_pattern_edges(
             &self.graph,
             &all_pattern_refs,
@@ -220,7 +245,10 @@ impl LainServer {
                 super::resolve::PatternLimits::DEFAULT,
             ),
         );
-        info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
+        info!(
+            "Ingesting {} cross-boundary pattern edges",
+            pattern_edges.len()
+        );
         insert_edges_reporting(&self.graph, &pattern_edges, "pattern")?;
 
         // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
@@ -244,9 +272,11 @@ impl LainServer {
                 self.tuning.ingestion.cochange_commit_window,
                 self.tuning.ingestion.cochange_min_pair_count,
                 self.tuning.ingestion.cochange_max_commit_files,
-            ).unwrap_or_default()
+            )
+            .unwrap_or_default()
         };
-        let co_change_tuples: Vec<_> = co_change_pairs.into_iter()
+        let co_change_tuples: Vec<_> = co_change_pairs
+            .into_iter()
             .map(|p| (p.file1, p.file2, p.co_change_count))
             .collect();
         self.graph.insert_co_change_edges(&co_change_tuples)?;
@@ -270,7 +300,8 @@ impl LainServer {
         tokio::spawn(async move {
             let all_nodes = graph_clone.get_all_nodes();
             // Top anchors get embedded first (pre-warm)
-            let mut anchors: Vec<_> = all_nodes.iter()
+            let mut anchors: Vec<_> = all_nodes
+                .iter()
                 .filter_map(|n| n.anchor_score.map(|s| (s, n.clone())))
                 .collect();
             anchors.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -311,12 +342,18 @@ impl LainServer {
                     }
                 }
             }
-            info!("NLP pre-warm complete ({} embedded). Queuing {} remaining nodes.", count, rest.len());
+            info!(
+                "NLP pre-warm complete ({} embedded). Queuing {} remaining nodes.",
+                count,
+                rest.len()
+            );
 
             // Background lazy enrichment with backpressure
             let mut budget = nlp_budget_per_pass;
             for chunk in rest.chunks(nlp_batch_size) {
-                if budget == 0 { break; }
+                if budget == 0 {
+                    break;
+                }
                 let to_embed: Vec<_> = chunk.iter().take(budget).cloned().collect();
                 let batch_len = to_embed.len();
                 for node in &to_embed {
@@ -338,9 +375,9 @@ impl LainServer {
                                             warn!("embedding not stored for {}: {e}", gn.name);
                                         }
                                     }
-                                    Err(e) => warn!(
-                                        "embedding not serialised for {}: {e}", gn.name
-                                    ),
+                                    Err(e) => {
+                                        warn!("embedding not serialised for {}: {e}", gn.name)
+                                    }
                                 }
                             }
                         }
@@ -455,7 +492,10 @@ impl LainServer {
         let symbols = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
-            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
+            match lsp
+                .get_document_symbols_hierarchical(path, &self.config.workspace)
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("No LSP symbols for changed file {:?}: {}", path, e);
@@ -544,7 +584,10 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
                 .map(|p| crate::graph::graph_path(path, p))
                 .collect();
             if tracked.is_empty() {
-                warn!("[federation] Skipping orphan sweep for {:?}: no tracked files", path);
+                warn!(
+                    "[federation] Skipping orphan sweep for {:?}: no tracked files",
+                    path
+                );
             } else {
                 match db.prune_orphans(&tracked) {
                     Ok(0) => info!("[federation] {:?}: orphan sweep found nothing", path),
@@ -590,7 +633,10 @@ pub async fn index_one_repo(
         }
     }
 
-    info!("[federation] Building core topology for {:?} at commit {}", path, latest_commit);
+    info!(
+        "[federation] Building core topology for {:?} at commit {}",
+        path, latest_commit
+    );
 
     // `force=true` means the caller has independent evidence the
     // worktree changed (a kernel `notify` event, an explicit reindex
@@ -604,7 +650,10 @@ pub async fn index_one_repo(
         info!("[federation] Forced full re-scan of worktree {:?}", path);
         git.get_all_tracked_files()?
     } else if let Some(ref last) = last_commit {
-        info!("[federation] Incremental update since {} for {:?}", last, path);
+        info!(
+            "[federation] Incremental update since {} for {:?}",
+            last, path
+        );
         git.get_changed_files_since(last)?
     } else {
         info!("[federation] Full repository scan for {:?}", path);
@@ -616,7 +665,10 @@ pub async fn index_one_repo(
         // commit lands here, because `get_changed_files_since` skips
         // paths that are gone from disk. Sweep before advancing the
         // marker, or those nodes are stranded permanently.
-        info!("[federation] No files to scan for {:?}; sweeping orphans.", path);
+        info!(
+            "[federation] No files to scan for {:?}; sweeping orphans.",
+            path
+        );
         sweep_orphans(path, db, git);
         db.set_last_commit(latest_commit)?;
         db.save_to_disk_sync()?;
@@ -651,7 +703,15 @@ pub async fn index_one_repo(
         let git_time = latest_time;
 
         set.spawn(async move {
-            scan_file_batch(chunk, workspace, lsp_mux, lsp_sync_time, git_time, commit_hash).await
+            scan_file_batch(
+                chunk,
+                workspace,
+                lsp_mux,
+                lsp_sync_time,
+                git_time,
+                commit_hash,
+            )
+            .await
         });
     }
 
@@ -737,24 +797,23 @@ pub async fn index_one_repo(
     );
 
     // Resolve phase: link external references to internal nodes (CALLS)
-    let call_edges = super::resolve::resolve_call_edges(
-        db,
+    let call_edges =
+        super::resolve::resolve_call_edges(db, path, &all_external_refs, resolver, source_repo);
+    info!(
+        "[federation] {:?}: ingesting {} call edges",
         path,
-        &all_external_refs,
-        resolver,
-        source_repo,
+        call_edges.len()
     );
-    info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
     insert_edges_reporting(db, &call_edges, "call")?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
-    let static_edges = super::resolve::resolve_static_edges(
-        db,
-        &all_static_refs,
-        resolver,
-        source_repo,
+    let static_edges =
+        super::resolve::resolve_static_edges(db, &all_static_refs, resolver, source_repo);
+    info!(
+        "[federation] {:?}: ingesting {} static tree-sitter edges",
+        path,
+        static_edges.len()
     );
-    info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
     insert_edges_reporting(db, &static_edges, "static")?;
 
     // Pattern resolve: cross-boundary detection
@@ -763,7 +822,11 @@ pub async fn index_one_repo(
         &all_pattern_refs,
         super::resolve::PatternLimits::FEDERATION,
     );
-    info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
+    info!(
+        "[federation] {:?}: ingesting {} cross-boundary pattern edges",
+        path,
+        pattern_edges.len()
+    );
     db.insert_edges_batch(&pattern_edges)?;
 
     // Refresh the federation's symbol index so the just-populated
@@ -777,7 +840,10 @@ pub async fn index_one_repo(
     // runs after symbol nodes exist so route->handler links resolve.
     let sensor_counts = crate::server::sensors::run_all(db, path);
     if sensor_counts.total() > 0 {
-        info!("[federation] {:?}: protocol sensors contributed {:?}", path, sensor_counts);
+        info!(
+            "[federation] {:?}: protocol sensors contributed {:?}",
+            path, sensor_counts
+        );
     }
 
     // Co-change analysis

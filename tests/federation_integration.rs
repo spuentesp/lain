@@ -59,9 +59,8 @@ async fn repo_index_indexes_files_via_index_one_repo() {
     // Build a RepoIndex on the temp repo.
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("smoke").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("smoke").unwrap(), repo_dir.clone()).unwrap());
     let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
 
     // Health should start at Indexing.
@@ -95,9 +94,8 @@ async fn repo_index_index_is_idempotent_on_same_commit() {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("idem").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("idem").unwrap(), repo_dir.clone()).unwrap());
     let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
 
     ri.index().await.expect("first index should succeed");
@@ -158,12 +156,9 @@ async fn repo_index_index_completes_within_timeout() {
     // below cargo-test's 60s "still running" watchdog. If this fires,
     // the underlying Drop chain is hanging again and the production
     // shutdown fix has regressed.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        ri.index(),
-    )
-    .await
-    .expect("RepoIndex::index did not complete within 30s — Drop shutdown regressed");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), ri.index())
+        .await
+        .expect("RepoIndex::index did not complete within 30s — Drop shutdown regressed");
     result.expect("RepoIndex::index returned an error");
     assert_eq!(ri.health(), RepoHealth::Ready);
 
@@ -221,14 +216,18 @@ fn git_init_committed_with_local_id(dir: &std::path::Path) {
         );
     };
     run(&[
-        "-c", "user.email=cross-repo-proving@lain",
-        "-c", "user.name=cross-repo-proving",
+        "-c",
+        "user.email=cross-repo-proving@lain",
+        "-c",
+        "user.name=cross-repo-proving",
         "add",
         "-A",
     ]);
     run(&[
-        "-c", "user.email=cross-repo-proving@lain",
-        "-c", "user.name=cross-repo-proving",
+        "-c",
+        "user.email=cross-repo-proving@lain",
+        "-c",
+        "user.name=cross-repo-proving",
         "commit",
         "-q",
         "-m",
@@ -243,8 +242,7 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
     // Bail loudly if rust-analyzer is not on PATH — the test depends
     // on LSP hydration to materialize cross-repo `Calls` edges, and
     // silently skipping would make a green test meaningless.
-    which::which("rust-analyzer")
-        .expect("rust-analyzer must be on PATH for this test");
+    which::which("rust-analyzer").expect("rust-analyzer must be on PATH for this test");
 
     // The whole `Tmp` must outlive every await below — `RepoIndex::index`
     // (and the LSP it spawns) keep file handles into the fixture
@@ -321,9 +319,7 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
     );
     std::fs::write(&cfg_path, repos_yaml).unwrap();
 
-    let fed = load_federation(&cfg_path)
-        .await
-        .expect("load_federation");
+    let fed = load_federation(&cfg_path).await.expect("load_federation");
     let repo_a = fed
         .get_repo(&RepoId::new("a").unwrap())
         .expect("repo a registered");
@@ -449,14 +445,15 @@ async fn repo_index_start_watcher_does_not_panic() {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("watch").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("watch").unwrap(), repo_dir.clone()).unwrap());
     let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
 
     // start_watcher should succeed. The notify watcher spawns its own
     // background thread; we don't need to wait for events.
-    ri.start_watcher().await.expect("start_watcher should succeed");
+    ri.start_watcher()
+        .await
+        .expect("start_watcher should succeed");
 
     // Give the inotify backend a moment to register the watch. If
     // registration failed (e.g. on a sandboxed filesystem), the watcher
@@ -491,9 +488,7 @@ fn write_tiny_rust_crate(path: &std::path::Path, name: &str) {
     std::fs::create_dir_all(path.join("src")).unwrap();
     std::fs::write(
         path.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
-        ),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
     )
     .unwrap();
     std::fs::write(
@@ -541,8 +536,7 @@ async fn five_repos_indexed_and_queried() {
 #[tokio::test]
 async fn adding_repo_at_runtime_appears_in_queries() {
     let tmp = tempfile::tempdir().unwrap();
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed: Arc<FederatedIndex> = Arc::new(FederatedIndex::new(backend));
 
     // Two separate tempdirs as the repo workspaces — `PetgraphBackend` writes
@@ -572,8 +566,7 @@ async fn adding_repo_at_runtime_appears_in_queries() {
 async fn stopped_repo_degrades_to_unavailable_others_continue() {
     // Set up two repos; remove one; assert the other still serves.
     let tmp = tempfile::tempdir().unwrap();
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed: Arc<FederatedIndex> = Arc::new(FederatedIndex::new(backend));
 
     let ws_a = tempfile::tempdir().unwrap();
@@ -658,16 +651,14 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
     // Build a tiny federation with three repos so the workspace
     // member-resolution path has something to consult.
     let tmp = tempfile::tempdir().unwrap();
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp.path()).unwrap());
     let fed: Arc<FederatedIndex> = Arc::new(FederatedIndex::new(backend));
 
     for id in ["repo-a", "repo-b", "repo-c"] {
         let ws = tempfile::tempdir().unwrap();
         init_bare_git_repo(ws.path());
         let src: Box<dyn RepoSource> = Box::new(
-            WorkspaceDirSource::new(RepoId::new(id).unwrap(), ws.path().to_path_buf())
-                .unwrap(),
+            WorkspaceDirSource::new(RepoId::new(id).unwrap(), ws.path().to_path_buf()).unwrap(),
         );
         fed.add_repo(src, tmp.path()).await.unwrap();
     }
@@ -751,7 +742,6 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
     assert_eq!(infos[0].description.as_deref(), Some("after rebuild"));
 }
 
-
 // ---------------------------------------------------------------------------
 // `detect_overlap` — commit-time symbol overlap between two git refs.
 //
@@ -808,7 +798,9 @@ async fn detect_overlap_reports_shared_symbols() {
     .unwrap();
     git_out(&repo_dir, &["add", "auth.rs"]);
     git_out(&repo_dir, &["commit", "--quiet", "-m", "base"]);
-    let base_oid = git_out(&repo_dir, &["rev-parse", "HEAD"]).trim().to_string();
+    let base_oid = git_out(&repo_dir, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
 
     // Head commit: `login` body changes (shared symbol → overlap), `logout`
     // is deleted, `refresh` is new, and a brand-new file `token.rs` appears
@@ -875,17 +867,11 @@ async fn detect_overlap_reports_shared_symbols() {
     assert_eq!(auth["repo"].as_str(), Some("auth-svc"));
     assert_eq!(
         auth["symbols_base"].as_array().unwrap(),
-        &vec![
-            serde_json::json!("login"),
-            serde_json::json!("logout")
-        ],
+        &vec![serde_json::json!("login"), serde_json::json!("logout")],
     );
     assert_eq!(
         auth["symbols_head"].as_array().unwrap(),
-        &vec![
-            serde_json::json!("login"),
-            serde_json::json!("refresh")
-        ],
+        &vec![serde_json::json!("login"), serde_json::json!("refresh")],
     );
     assert_eq!(
         auth["overlap"].as_array().unwrap(),
@@ -980,7 +966,9 @@ async fn detect_overlap_two_shared_functions_is_high() {
     .unwrap();
     git_out(&repo_dir, &["add", "auth.rs"]);
     git_out(&repo_dir, &["commit", "--quiet", "-m", "base"]);
-    let base_oid = git_out(&repo_dir, &["rev-parse", "HEAD"]).trim().to_string();
+    let base_oid = git_out(&repo_dir, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
 
     // Both functions survive with changed bodies → both overlap.
     std::fs::write(
@@ -1107,7 +1095,11 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     );
     std::fs::write(&cfg_path, yaml).unwrap();
     let fed = load_federation(&cfg_path).await.unwrap();
-    assert_eq!(fed.list_repos().len(), 1, "federation must have exactly one repo");
+    assert_eq!(
+        fed.list_repos().len(),
+        1,
+        "federation must have exactly one repo"
+    );
 
     // Index the repo: `load_federation` + `add_repo` only sets up
     // the sled DB; the actual indexed content is materialized by
@@ -1119,7 +1111,9 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     let alpha_id_proj = RepoId::new("alpha").unwrap();
     let alpha_repo = fed.get_repo(&alpha_id_proj).expect("alpha present");
     alpha_repo.index().await.expect("index alpha");
-    fed.project_repo(&alpha_id_proj).await.expect("project_repo");
+    fed.project_repo(&alpha_id_proj)
+        .await
+        .expect("project_repo");
 
     // Build a LainServer in federation mode. The single-repo
     // fix should bind `tool_executor.graph` to the federation's
@@ -1144,9 +1138,7 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     // pre-fix server returned. The test asserts the graph is
     // reachable from the executor by counting nodes.
     let alpha_id = RepoId::new("alpha").unwrap();
-    let alpha_repo = fed
-        .get_repo(&alpha_id)
-        .expect("alpha repo present");
+    let alpha_repo = fed.get_repo(&alpha_id).expect("alpha repo present");
     let repo_graph = alpha_repo.db();
     let executor_count = server.tool_executor.graph().node_count();
     let real_count = repo_graph.node_count();
@@ -1265,10 +1257,12 @@ fn seed_static_graph(backend: &dyn GraphBackend, repo_id: &str, name: &str) {
 
 /// Register an agent against `server` and return `(agent_id, session_token)`.
 fn register(server: &Arc<LainServer>, name: &str) -> (String, String) {
-    let v = run_register_agent(server, serde_json::json!({"name": name}))
-        .expect("register_agent");
+    let v = run_register_agent(server, serde_json::json!({"name": name})).expect("register_agent");
     let agent_id = v["agent_id"].as_str().expect("agent_id").to_string();
-    let token = v["session_token"].as_str().expect("session_token").to_string();
+    let token = v["session_token"]
+        .as_str()
+        .expect("session_token")
+        .to_string();
     (agent_id, token)
 }
 
@@ -1319,8 +1313,11 @@ async fn agent_a_query_then_agent_b_edit_then_agent_a_claim_sees_delta() {
     //    revision bumps, and the broadcast bus broadcasts the diff
     //    (we go directly via `overlay.insert_node` to avoid
     //    flakiness from a subscriber task's timing).
-    let edited_node =
-        lain::schema::GraphNode::new(NodeType::Function, "verify_token".into(), "src/auth.rs".into());
+    let edited_node = lain::schema::GraphNode::new(
+        NodeType::Function,
+        "verify_token".into(),
+        "src/auth.rs".into(),
+    );
     server.overlay.insert_node(edited_node);
     let rev_after_edit = server.overlay.current_revision();
     assert!(
@@ -1454,13 +1451,14 @@ async fn agent_a_plan_revision_beyond_current_gets_note() {
     // is different from it having been deleted. The subject of this
     // assertion is that the set survives the error path at all.
     let cs: Vec<&serde_json::Value> = ws["changed_symbols"]
-        .as_array().unwrap()
+        .as_array()
+        .unwrap()
         .iter()
-        .filter(|c| c["change_kind"] == "NotIndexed"
-                  && c["name"] == "verify_token")
+        .filter(|c| c["change_kind"] == "NotIndexed" && c["name"] == "verify_token")
         .collect();
     assert_eq!(
-        cs.len(), 1,
+        cs.len(),
+        1,
         "BeyondCurrent must preserve the absent-symbol set; resp={resp}"
     );
     assert_eq!(
@@ -1548,20 +1546,31 @@ async fn resolve_node_ambiguous_returns_other_definitions() {
 
     db.upsert_node({
         let mut n = GraphNode::new(NodeType::Function, "parse".into(), "src/lib.rs".into());
-        n.line_start = Some(1); n.line_end = Some(3);
+        n.line_start = Some(1);
+        n.line_end = Some(3);
         n
-    }).unwrap();
+    })
+    .unwrap();
     db.upsert_node({
         let mut n = GraphNode::new(NodeType::Function, "parse".into(), "src/types.rs".into());
-        n.line_start = Some(1); n.line_end = Some(3);
+        n.line_start = Some(1);
+        n.line_end = Some(3);
         n
-    }).unwrap();
+    })
+    .unwrap();
 
     let overlay = VolatileOverlay::new();
     let (chosen, others) = resolve_node_ambiguous(&db, &overlay, "parse")
         .expect("resolve_node_ambiguous should succeed for indexed name");
     assert_eq!(chosen.name, "parse");
-    assert_eq!(others.len(), 1, "expected exactly one alternative, got 0 (or more)");
+    assert_eq!(
+        others.len(),
+        1,
+        "expected exactly one alternative, got 0 (or more)"
+    );
     assert_eq!(others[0].name, "parse");
-    assert_ne!(others[0].path, chosen.path, "alternative should be a different path");
+    assert_ne!(
+        others[0].path, chosen.path,
+        "alternative should be a different path"
+    );
 }

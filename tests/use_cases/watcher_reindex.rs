@@ -70,7 +70,17 @@ async fn reload_after_file_change_picks_up_new_symbol_end_to_end() {
     std::fs::write(repo_dir.join("src/lib.rs"), new_lib).unwrap();
     use std::process::Command;
     let commit = Command::new("git")
-        .args(["-c", "user.email=test@lain", "-c", "user.name=test", "commit", "-q", "-m", "add function", "-a"])
+        .args([
+            "-c",
+            "user.email=test@lain",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-q",
+            "-m",
+            "add function",
+            "-a",
+        ])
         .current_dir(&repo_dir)
         .status()
         .expect("git commit");
@@ -112,14 +122,15 @@ async fn reload_after_file_change_picks_up_new_symbol_end_to_end() {
         new_node.is_some(),
         "after reindex, the per-repo DB must contain \
          `added_after_reload`; got nodes: {:?}",
-        repo.nodes().iter().map(|n| (&n.name, &n.path)).collect::<Vec<_>>()
+        repo.nodes()
+            .iter()
+            .map(|n| (&n.name, &n.path))
+            .collect::<Vec<_>>()
     );
     let backend = fed.backend();
     use lain::federation::graph_backend::GraphBackend;
     let backend_nodes = backend.list_nodes().expect("list_nodes");
-    let backend_has_new = backend_nodes
-        .iter()
-        .any(|n| n.name == "added_after_reload");
+    let backend_has_new = backend_nodes.iter().any(|n| n.name == "added_after_reload");
     assert!(
         backend_has_new,
         "after reindex + project_repo, the federated backend must \
@@ -219,7 +230,10 @@ async fn index_forced_picks_up_uncommitted_edits() {
         new_node.is_some(),
         "after index_forced without a commit, the per-repo DB must \
          contain `added_after_uncommitted_edit`; got nodes: {:?}",
-        repo.nodes().iter().map(|n| (&n.name, &n.path)).collect::<Vec<_>>()
+        repo.nodes()
+            .iter()
+            .map(|n| (&n.name, &n.path))
+            .collect::<Vec<_>>()
     );
 
     // 5. Sanity: a plain `index()` *without* a commit still

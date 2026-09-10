@@ -94,10 +94,7 @@ pub fn find_cross_repo_matches(
     let mut scored: Vec<(String, f32)> = candidates
         .iter()
         .filter_map(|candidate| {
-            let candidate_repo = GlobalId::parse(&candidate.id)
-                .ok()?
-                .repo_id()
-                .to_string();
+            let candidate_repo = GlobalId::parse(&candidate.id).ok()?.repo_id().to_string();
             if Some(&candidate_repo) == new_repo.as_ref() {
                 return None;
             }

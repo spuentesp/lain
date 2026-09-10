@@ -6,7 +6,9 @@
 //! delegate to live here, alongside the staging-dir / graph-init /
 //! single-repo-binding / embedder helpers they call.
 
-use super::background::{default_attribution_backend, spawn_presence_expiry_loop, start_attribution_watcher};
+use super::background::{
+    default_attribution_backend, spawn_presence_expiry_loop, start_attribution_watcher,
+};
 use super::config::{LainConfig, Transport, PRESENCE_EVENT_CHANNEL_CAPACITY};
 use super::server::LainServer;
 use crate::server::attribution::AttributionBackend;
@@ -147,15 +149,24 @@ fn allocate_staging_dir() -> Result<PathBuf, LainError> {
         let sig = git2::Signature::now("lain", "lain@localhost")
             .map_err(|e| LainError::Other(format!("staging signature: {e}")))?;
         let tree_oid = {
-            let mut idx = repo.index()
+            let mut idx = repo
+                .index()
                 .map_err(|e| LainError::Other(format!("staging index: {e}")))?;
             idx.write_tree()
                 .map_err(|e| LainError::Other(format!("staging tree: {e}")))?
         };
-        let tree = repo.find_tree(tree_oid)
+        let tree = repo
+            .find_tree(tree_oid)
             .map_err(|e| LainError::Other(format!("staging find_tree: {e}")))?;
-        repo.commit(Some("HEAD"), &sig, &sig, "staging placeholder for federation mode — holds no code", &tree, &[])
-            .map_err(|e| LainError::Other(format!("staging commit: {e}")))?;
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "staging placeholder for federation mode — holds no code",
+            &tree,
+            &[],
+        )
+        .map_err(|e| LainError::Other(format!("staging commit: {e}")))?;
     }
     Ok(dir)
 }
@@ -258,7 +269,10 @@ fn build_embedder_pair(
     if cross.is_active() {
         info!("Cross-encoder reranker active (from {:?})", cross_dir);
     } else {
-        info!("Cross-encoder reranker disabled (no model at {:?})", cross_dir);
+        info!(
+            "Cross-encoder reranker disabled (no model at {:?})",
+            cross_dir
+        );
     }
     Ok((embedder, cross))
 }
@@ -369,9 +383,7 @@ fn build_federation_server(
     // `events_log_path_from_config` only borrows the path; we clone the
     // Arc into the struct below.
     let events_log_path = LainServer::events_log_path_from_config(&mem_path);
-    let events_log = Arc::new(
-        EventsLog::open(&events_log_path).expect("open events.jsonl"),
-    );
+    let events_log = Arc::new(EventsLog::open(&events_log_path).expect("open events.jsonl"));
     spawn_presence_expiry_loop(
         presence.clone(),
         occupancy.clone(),
@@ -485,18 +497,23 @@ impl LainServer {
                 let home = std::env::var("HOME").unwrap_or_default();
                 PathBuf::from(home).join(".local/lain/models/cross-encoder")
             });
-        let cross_encoder = CrossEncoder::from_dir_with_threads(
-            &cross_dir,
-            tuning.ingestion.nlp_max_threads,
-        );
+        let cross_encoder =
+            CrossEncoder::from_dir_with_threads(&cross_dir, tuning.ingestion.nlp_max_threads);
         if cross_encoder.is_active() {
             info!("Cross-encoder reranker active (from {:?})", cross_dir);
         } else {
-            info!("Cross-encoder reranker disabled (no model at {:?})", cross_dir);
+            info!(
+                "Cross-encoder reranker disabled (no model at {:?})",
+                cross_dir
+            );
         }
 
         let git = Arc::new(Mutex::new(GitSensor::new(workspace)?));
-        let lsp_pool = Arc::new(LspPool::new(workspace, tuning.ingestion.lsp_pool_size, &tuning.runtime)?);
+        let lsp_pool = Arc::new(LspPool::new(
+            workspace,
+            tuning.ingestion.lsp_pool_size,
+            &tuning.runtime,
+        )?);
 
         let tool_executor = ToolExecutor::new(
             graph.clone(),
@@ -516,9 +533,7 @@ impl LainServer {
         // the LainServer struct. `events_log_path_from_config` only
         // borrows the path; we clone the Arc into the struct below.
         let events_log_path = LainServer::events_log_path_from_config(memory_path);
-        let events_log = Arc::new(
-            EventsLog::open(&events_log_path).expect("open events.jsonl"),
-        );
+        let events_log = Arc::new(EventsLog::open(&events_log_path).expect("open events.jsonl"));
         let server = Self {
             presence_state_seen: Arc::new(Mutex::new(None)),
             config,

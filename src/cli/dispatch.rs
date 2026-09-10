@@ -65,27 +65,16 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
             base,
             head,
             workspace,
-        } => crate::cli::hooks::overlap_check(
-            &url,
-            &base,
-            head.as_deref(),
-            &workspace,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}")),
+        } => crate::cli::hooks::overlap_check(&url, &base, head.as_deref(), &workspace)
+            .map_err(|e| anyhow::anyhow!("{e}")),
         HooksAction::Lock {
             workspace_root,
             path,
             agent_name,
             agent_kind,
             intent,
-        } => crate::cli::hooks::lock(
-            &workspace_root,
-            &path,
-            &agent_name,
-            &agent_kind,
-            &intent,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}")),
+        } => crate::cli::hooks::lock(&workspace_root, &path, &agent_name, &agent_kind, &intent)
+            .map_err(|e| anyhow::anyhow!("{e}")),
         HooksAction::Unlock {
             workspace_root,
             path,
@@ -115,7 +104,10 @@ mod tests {
         let help = clap::builder::Command::render_help(&mut cmd).to_string();
         // Kept subcommands must appear.
         assert!(help.contains("server"), "help must list `server`: {help}");
-        assert!(help.contains("workspaces"), "help must list `workspaces`: {help}");
+        assert!(
+            help.contains("workspaces"),
+            "help must list `workspaces`: {help}"
+        );
         assert!(help.contains("repos"), "help must list `repos`: {help}");
         assert!(help.contains("query"), "help must list `query`: {help}");
         assert!(help.contains("ask"), "help must list `ask`: {help}");
@@ -125,7 +117,13 @@ mod tests {
         // `init` was reintroduced in B (the ergonomic shortcut commit)
         // as a kept subcommand. Make sure the help string reflects that.
         assert!(help.contains("init"), "help must list `init`: {help}");
-        assert!(!help.contains("agents"), "help must not list `agents`: {help}");
-        assert!(!help.contains("projects"), "help must not list `projects`: {help}");
+        assert!(
+            !help.contains("agents"),
+            "help must not list `agents`: {help}"
+        );
+        assert!(
+            !help.contains("projects"),
+            "help must not list `projects`: {help}"
+        );
     }
 }

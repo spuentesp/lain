@@ -157,7 +157,10 @@ async fn a_repo_with_no_routes_still_indexes_cleanly() {
     ri.index().await.expect("index must still succeed");
 
     let nodes = ri.nodes();
-    assert!(nodes.iter().any(|n| n.name == "helper"), "symbols still indexed");
+    assert!(
+        nodes.iter().any(|n| n.name == "helper"),
+        "symbols still indexed"
+    );
     assert_eq!(
         nodes
             .iter()

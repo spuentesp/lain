@@ -42,9 +42,12 @@ fn build_fixture() -> (tempfile::TempDir, GraphDatabase) {
     let a = find("helper_a").id.clone();
     let b = find("helper_b").id.clone();
     let d = find("do_stuff").id.clone();
-    db.insert_edge(&GraphEdge::new(EdgeType::Calls, orch.clone(), a.clone())).unwrap();
-    db.insert_edge(&GraphEdge::new(EdgeType::Calls, orch, b)).unwrap();
-    db.insert_edge(&GraphEdge::new(EdgeType::Calls, d, a)).unwrap();
+    db.insert_edge(&GraphEdge::new(EdgeType::Calls, orch.clone(), a.clone()))
+        .unwrap();
+    db.insert_edge(&GraphEdge::new(EdgeType::Calls, orch, b))
+        .unwrap();
+    db.insert_edge(&GraphEdge::new(EdgeType::Calls, d, a))
+        .unwrap();
     db.calculate_anchor_scores().unwrap();
     (dir, db)
 }
@@ -166,8 +169,10 @@ fn navigate_to_anchor_works_for_indexed_anchor() {
     use lain::server::tools::handlers::navigation::navigate_to_anchor;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    assert!(navigate_to_anchor(&db, &overlay, "orchestrate").is_ok()
-            || navigate_to_anchor(&db, &overlay, "orchestrate").is_err());
+    assert!(
+        navigate_to_anchor(&db, &overlay, "orchestrate").is_ok()
+            || navigate_to_anchor(&db, &overlay, "orchestrate").is_err()
+    );
 }
 #[test]
 fn navigate_to_anchor_rejects_unknown_node() {
@@ -271,7 +276,10 @@ fn architectural_observations_handles_empty_graph() {
 fn describe_schema_works() {
     use lain::server::tools::handlers::query::describe_schema;
     let text = describe_schema().expect("describe_schema must work");
-    assert!(text.contains("Function"), "schema must describe Function node type");
+    assert!(
+        text.contains("Function"),
+        "schema must describe Function node type"
+    );
 }
 
 // ─── suggest_refactor_targets ────────────────────────────────────
@@ -309,17 +317,25 @@ fn blast_radius_data_surface_finds_inbound_callers() {
     let (_dir, db) = build_fixture();
     let helper_a = db.find_node_by_name("helper_a").unwrap();
     let edges = db.get_edges_to(&helper_a.id).unwrap_or_default();
-    let calls_in: Vec<_> = edges.iter()
+    let calls_in: Vec<_> = edges
+        .iter()
         .filter(|e| e.edge_type == EdgeType::Calls)
         .collect();
-    assert_eq!(calls_in.len(), 2, "helper_a has 2 incoming Calls (orchestrate + do_stuff)");
+    assert_eq!(
+        calls_in.len(),
+        2,
+        "helper_a has 2 incoming Calls (orchestrate + do_stuff)"
+    );
 }
 
 #[test]
 fn blast_radius_data_surface_handles_unknown_symbol() {
     let (_dir, db) = build_fixture();
     let n = db.find_node_by_name("definitely_not_a_symbol");
-    assert!(n.is_none(), "unknown symbol returns None at the data surface");
+    assert!(
+        n.is_none(),
+        "unknown symbol returns None at the data surface"
+    );
 }
 
 // ─── get_call_sites ──────────────────────────────────────────────
@@ -329,7 +345,8 @@ fn call_sites_data_surface_returns_distinct_callers() {
     let (_dir, db) = build_fixture();
     let helper_a = db.find_node_by_name("helper_a").unwrap();
     let edges = db.get_edges_to(&helper_a.id).unwrap_or_default();
-    let distinct_callers: std::collections::HashSet<_> = edges.iter()
+    let distinct_callers: std::collections::HashSet<_> = edges
+        .iter()
         .filter(|e| e.edge_type == EdgeType::Calls)
         .map(|e| e.source_id.clone())
         .collect();
@@ -345,7 +362,10 @@ fn call_chain_data_surface_finds_path_via_edges() {
     let a = db.find_node_by_name("helper_a").unwrap();
     let edges = db.get_edges_from(&orch.id).unwrap_or_default();
     let reaches_a = edges.iter().any(|e| e.target_id == a.id);
-    assert!(reaches_a, "orchestrate → helper_a Calls edge must exist for call_chain");
+    assert!(
+        reaches_a,
+        "orchestrate → helper_a Calls edge must exist for call_chain"
+    );
 }
 
 #[test]
@@ -355,7 +375,10 @@ fn call_chain_data_surface_rejects_no_path() {
     let dead = db.find_node_by_name("dead_one").unwrap();
     let edges = db.get_edges_from(&orch.id).unwrap_or_default();
     let reaches_dead = edges.iter().any(|e| e.target_id == dead.id);
-    assert!(!reaches_dead, "orchestrate → dead_one has no path; call_chain must report none");
+    assert!(
+        !reaches_dead,
+        "orchestrate → dead_one has no path; call_chain must report none"
+    );
 }
 
 // ─── get_coupling_radar ──────────────────────────────────────────
@@ -370,13 +393,18 @@ fn coupling_radar_data_surface_returns_cochange_edges() {
     let mid = m.id.clone();
     db.upsert_node(n).unwrap();
     db.upsert_node(m).unwrap();
-    db.insert_edge(&GraphEdge::new(EdgeType::CoChangedWith, nid, mid)).unwrap();
+    db.insert_edge(&GraphEdge::new(EdgeType::CoChangedWith, nid, mid))
+        .unwrap();
     let a = db.find_node_by_name("a").unwrap();
     let edges = db.get_edges_from(&a.id).unwrap_or_default();
-    let cochange: Vec<_> = edges.iter()
+    let cochange: Vec<_> = edges
+        .iter()
         .filter(|e| e.edge_type == EdgeType::CoChangedWith)
         .collect();
-    assert!(!cochange.is_empty(), "CoChangedWith edges must surface for coupling_radar");
+    assert!(
+        !cochange.is_empty(),
+        "CoChangedWith edges must surface for coupling_radar"
+    );
 }
 
 // ─── get_code_snippet ────────────────────────────────────────────
@@ -385,7 +413,11 @@ fn coupling_radar_data_surface_returns_cochange_edges() {
 fn code_snippet_works_for_real_path() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    std::fs::write(dir.path().join("src/lib.rs"), "marker_unique_42\npub fn x() {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "marker_unique_42\npub fn x() {}\n",
+    )
+    .unwrap();
     let content = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
     assert!(content.contains("marker_unique_42"));
 }
@@ -393,7 +425,10 @@ fn code_snippet_works_for_real_path() {
 #[test]
 fn code_snippet_rejects_missing_path() {
     let result = std::fs::read_to_string("/nonexistent/path/file_xyz_unique.rs");
-    assert!(result.is_err(), "missing path must error at the data surface");
+    assert!(
+        result.is_err(),
+        "missing path must error at the data surface"
+    );
 }
 
 #[test]
@@ -430,10 +465,14 @@ fn cross_runtime_callers_data_surface_filters_by_runtime() {
     let (_dir, db) = build_fixture();
     let helper_a = db.find_node_by_name("helper_a").unwrap();
     let edges = db.get_edges_to(&helper_a.id).unwrap_or_default();
-    let cross_runtime: Vec<_> = edges.iter()
+    let cross_runtime: Vec<_> = edges
+        .iter()
         .filter(|e| e.edge_type == EdgeType::CallsHttp)
         .collect();
-    assert!(cross_runtime.is_empty(), "no CallsHttp edges in Rust-only fixture");
+    assert!(
+        cross_runtime.is_empty(),
+        "no CallsHttp edges in Rust-only fixture"
+    );
 }
 
 #[test]
@@ -466,18 +505,24 @@ fn find_dead_code_data_surface_finds_zero_caller_node() {
     let (_dir, db) = build_fixture();
     let dead = db.find_node_by_name("dead_one").unwrap();
     let edges = db.get_edges_to(&dead.id).unwrap_or_default();
-    let calls_in: Vec<_> = edges.iter()
+    let calls_in: Vec<_> = edges
+        .iter()
         .filter(|e| e.edge_type == EdgeType::Calls)
         .collect();
-    assert!(calls_in.is_empty(), "dead_one has 0 callers; find_dead_code must report it");
+    assert!(
+        calls_in.is_empty(),
+        "dead_one has 0 callers; find_dead_code must report it"
+    );
 }
 
 #[test]
 fn find_dead_code_data_surface_excludes_test_path() {
     let (_dir, db) = build_fixture();
     let test_helper = db.find_node_by_name("test_helper").unwrap();
-    assert!(test_helper.path.contains("tests/"),
-            "test_helper is under tests/, must be excluded");
+    assert!(
+        test_helper.path.contains("tests/"),
+        "test_helper is under tests/, must be excluded"
+    );
 }
 
 // ─── query_graph ─────────────────────────────────────────────────
@@ -586,8 +631,10 @@ fn graph_database_get_nodes_by_type_filters() {
     let (_dir, db) = build_fixture();
     let fns = db.get_nodes_by_type(NodeType::Function).unwrap_or_default();
     let structs = db.get_nodes_by_type(NodeType::Struct).unwrap_or_default();
-    assert!(fns.len() > structs.len(),
-            "Function count must exceed Struct count in fixture");
+    assert!(
+        fns.len() > structs.len(),
+        "Function count must exceed Struct count in fixture"
+    );
 }
 
 #[test]
@@ -595,8 +642,10 @@ fn graph_database_get_edges_to_returns_inbound() {
     let (_dir, db) = build_fixture();
     let helper_a = db.find_node_by_name("helper_a").unwrap();
     let edges = db.get_edges_to(&helper_a.id).unwrap_or_default();
-    let calls_in: Vec<_> = edges.iter()
-        .filter(|e| e.edge_type == EdgeType::Calls).collect();
+    let calls_in: Vec<_> = edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls)
+        .collect();
     assert_eq!(calls_in.len(), 2, "helper_a has 2 incoming Calls edges");
 }
 
@@ -632,8 +681,10 @@ fn graph_database_upsert_edge_is_idempotent() {
     db.upsert_node(a).unwrap();
     db.upsert_node(b).unwrap();
     // Two upserts of the same edge must result in one stored edge.
-    db.upsert_edge(GraphEdge::new(EdgeType::Calls, aid.clone(), bid.clone())).unwrap();
-    db.upsert_edge(GraphEdge::new(EdgeType::Calls, aid.clone(), bid.clone())).unwrap();
+    db.upsert_edge(GraphEdge::new(EdgeType::Calls, aid.clone(), bid.clone()))
+        .unwrap();
+    db.upsert_edge(GraphEdge::new(EdgeType::Calls, aid.clone(), bid.clone()))
+        .unwrap();
     let edges = db.get_edges_from(&aid).unwrap_or_default();
     let calls: Vec<_> = edges.iter().filter(|e| e.target_id == bid).collect();
     assert_eq!(calls.len(), 1, "duplicate edge upsert must dedup");

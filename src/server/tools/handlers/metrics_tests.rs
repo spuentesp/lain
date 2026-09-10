@@ -1,14 +1,17 @@
 //! Tests for tools/handlers/metrics.rs
 
-use crate::nlp::NlpEmbedder;
-use crate::server::presence::OccupancyMap;
-use crate::server::tools::handlers::metrics::{find_anchors, get_anchor_score, get_context_depth, find_dead_code, explain_symbol, suggest_refactor_targets};
 use crate::graph::GraphDatabase;
+use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphNode, NodeType, EdgeType, GraphEdge};
-use std::sync::Arc;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::presence::OccupancyMap;
+use crate::server::tools::handlers::metrics::{
+    explain_symbol, find_anchors, find_dead_code, get_anchor_score, get_context_depth,
+    suggest_refactor_targets,
+};
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn make_test_graph_with_nodes() -> (GraphDatabase, VolatileOverlay) {
     let tmp = std::env::temp_dir().join("test_metrics_graph");
@@ -16,7 +19,11 @@ fn make_test_graph_with_nodes() -> (GraphDatabase, VolatileOverlay) {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     // Create a simple function graph: main -> a -> b
-    let main = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
+    let main = GraphNode::new(
+        NodeType::Function,
+        "main".to_string(),
+        "/src/main.rs".to_string(),
+    );
     let a = GraphNode::new(NodeType::Function, "a".to_string(), "/src/a.rs".to_string());
     let b = GraphNode::new(NodeType::Function, "b".to_string(), "/src/b.rs".to_string());
 
@@ -24,8 +31,16 @@ fn make_test_graph_with_nodes() -> (GraphDatabase, VolatileOverlay) {
     graph.upsert_node(a.clone()).unwrap();
     graph.upsert_node(b.clone()).unwrap();
 
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, main.id.clone(), a.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone())).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            main.id.clone(),
+            a.id.clone(),
+        ))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone()))
+        .unwrap();
 
     let overlay = VolatileOverlay::new();
     (graph, overlay)
@@ -49,7 +64,11 @@ fn test_get_anchor_score_existing() {
     let (graph, overlay) = make_test_graph_with_nodes();
 
     // Create node with anchor score in overlay
-    let mut node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.anchor_score = Some(0.5);
     overlay.insert_node(node);
 
@@ -73,7 +92,11 @@ fn test_get_context_depth_existing() {
     let (graph, overlay) = make_test_graph_with_nodes();
 
     // Create node with depth in overlay
-    let mut node = GraphNode::new(NodeType::Function, "deep_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "deep_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.depth_from_main = Some(3);
     overlay.insert_node(node);
 
@@ -98,7 +121,14 @@ fn test_find_dead_code() {
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
 
-    let result = find_dead_code(std::path::Path::new(""), &graph, &overlay, None, &embedder, &cache);
+    let result = find_dead_code(
+        std::path::Path::new(""),
+        &graph,
+        &overlay,
+        None,
+        &embedder,
+        &cache,
+    );
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("dead code") || text.contains("Found"));
@@ -109,7 +139,11 @@ fn test_explain_symbol_existing() {
     let (graph, overlay) = make_test_graph_with_nodes();
 
     // Put node in overlay with all fields
-    let mut node = GraphNode::new(NodeType::Function, "documented_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "documented_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.signature = Some("(x: i32) -> i32".to_string());
     node.docstring = Some("Does something useful".to_string());
     node.depth_from_main = Some(2);
@@ -117,7 +151,13 @@ fn test_explain_symbol_existing() {
     overlay.insert_node(node);
 
     let occupancy = OccupancyMap::new();
-    let result = explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "documented_fn");
+    let result = explain_symbol(
+        std::path::Path::new(""),
+        &graph,
+        &overlay,
+        &occupancy,
+        "documented_fn",
+    );
     assert!(result.is_ok());
     let text = result.unwrap();
     assert!(text.contains("documented_fn"));
@@ -131,7 +171,13 @@ fn test_explain_symbol_not_found() {
 
     // find_dead_code returns empty (not error), but explain_symbol should error
     let occupancy = OccupancyMap::new();
-    let result = explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "nonexistent_node_xyz");
+    let result = explain_symbol(
+        std::path::Path::new(""),
+        &graph,
+        &overlay,
+        &occupancy,
+        "nonexistent_node_xyz",
+    );
     assert!(result.is_err());
 }
 
@@ -154,7 +200,11 @@ fn test_suggest_refactor_targets_with_debt() {
     let overlay = VolatileOverlay::new();
 
     // Create a high fan-in/fan-out node that might trigger debt scoring
-    let mut node = GraphNode::new(NodeType::Class, "GodClass".to_string(), "/src/main.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Class,
+        "GodClass".to_string(),
+        "/src/main.rs".to_string(),
+    );
     node.fan_in = Some(15);
     node.fan_out = Some(15);
     node.anchor_score = Some(0.1);
@@ -179,8 +229,17 @@ fn graph_with_an_unindexed_file() -> (GraphDatabase, VolatileOverlay) {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     // watcher.rs: four functions, no call edges recorded at all.
-    for name in ["run_watcher_thread", "filter_event", "is_watched_file", "spawn_config_watcher"] {
-        let mut n = GraphNode::new(NodeType::Function, name.to_string(), "/src/watcher.rs".to_string());
+    for name in [
+        "run_watcher_thread",
+        "filter_event",
+        "is_watched_file",
+        "spawn_config_watcher",
+    ] {
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "/src/watcher.rs".to_string(),
+        );
         n.fan_in = Some(0);
         n.fan_out = Some(0);
         n.calls_in = Some(0);
@@ -190,13 +249,25 @@ fn graph_with_an_unindexed_file() -> (GraphDatabase, VolatileOverlay) {
 
     // lib.rs: indexed — its functions have call edges, and one genuine
     // orphan sits among them.
-    let mut caller = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
+    let mut caller = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     caller.calls_in = Some(1);
     caller.calls_out = Some(1);
-    let mut callee = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let mut callee = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     callee.calls_in = Some(1);
     callee.calls_out = Some(0);
-    let mut orphan = GraphNode::new(NodeType::Function, "orphan".to_string(), "/src/lib.rs".to_string());
+    let mut orphan = GraphNode::new(
+        NodeType::Function,
+        "orphan".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     orphan.calls_in = Some(0);
     orphan.calls_out = Some(0);
     graph.upsert_node(caller).unwrap();
@@ -212,10 +283,23 @@ fn unindexed_files_are_excluded_and_reported_not_called_dead() {
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
 
-    let text = find_dead_code(std::path::Path::new(""), &graph, &overlay, None, &embedder, &cache).unwrap();
+    let text = find_dead_code(
+        std::path::Path::new(""),
+        &graph,
+        &overlay,
+        None,
+        &embedder,
+        &cache,
+    )
+    .unwrap();
 
     // None of the watcher.rs symbols may be presented as dead.
-    for name in ["run_watcher_thread", "filter_event", "is_watched_file", "spawn_config_watcher"] {
+    for name in [
+        "run_watcher_thread",
+        "filter_event",
+        "is_watched_file",
+        "spawn_config_watcher",
+    ] {
         assert!(
             !text.contains(&format!("- {name} (")),
             "unindexed symbol {name} must not be listed as dead:\n{text}"
@@ -279,13 +363,27 @@ fn explain_symbol_does_not_report_a_defining_file_as_a_caller() {
     let overlay = VolatileOverlay::new();
     let occupancy = OccupancyMap::new();
 
-    let file = GraphNode::new(NodeType::File, "hooks.rs".to_string(), "/src/cli/hooks.rs".to_string());
-    let leaf = GraphNode::new(NodeType::Function, "sanitize".to_string(), "/src/cli/hooks.rs".to_string());
+    let file = GraphNode::new(
+        NodeType::File,
+        "hooks.rs".to_string(),
+        "/src/cli/hooks.rs".to_string(),
+    );
+    let leaf = GraphNode::new(
+        NodeType::Function,
+        "sanitize".to_string(),
+        "/src/cli/hooks.rs".to_string(),
+    );
     graph.upsert_node(file.clone()).unwrap();
     graph.upsert_node(leaf.clone()).unwrap();
 
     // The only incoming edge is structural (File -> Symbol), not a call.
-    graph.upsert_edge(GraphEdge::new(EdgeType::Contains, file.id.clone(), leaf.id.clone())).unwrap();
+    graph
+        .upsert_edge(GraphEdge::new(
+            EdgeType::Contains,
+            file.id.clone(),
+            leaf.id.clone(),
+        ))
+        .unwrap();
 
     let text = explain_symbol(
         std::path::Path::new(""),
@@ -310,14 +408,38 @@ fn explain_symbol_still_reports_real_callers() {
     let overlay = VolatileOverlay::new();
     let occupancy = OccupancyMap::new();
 
-    let caller = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/a.rs".to_string());
-    let callee = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/a.rs".to_string());
+    let caller = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/a.rs".to_string(),
+    );
+    let callee = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/a.rs".to_string(),
+    );
     graph.upsert_node(caller.clone()).unwrap();
     graph.upsert_node(callee.clone()).unwrap();
-    graph.upsert_edge(GraphEdge::new(EdgeType::Calls, caller.id.clone(), callee.id.clone())).unwrap();
+    graph
+        .upsert_edge(GraphEdge::new(
+            EdgeType::Calls,
+            caller.id.clone(),
+            callee.id.clone(),
+        ))
+        .unwrap();
 
-    let text = explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "callee").unwrap();
-    assert!(text.contains("Called by"), "a real Calls edge must show up:\n{text}");
+    let text = explain_symbol(
+        std::path::Path::new(""),
+        &graph,
+        &overlay,
+        &occupancy,
+        "callee",
+    )
+    .unwrap();
+    assert!(
+        text.contains("Called by"),
+        "a real Calls edge must show up:\n{text}"
+    );
     assert!(text.contains("caller"), "the caller must be named:\n{text}");
 }
 
@@ -330,20 +452,40 @@ fn test_symbols_are_excluded_from_dead_code() {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     // A test file's functions: no production caller, by design.
-    for name in ["test_git_sensor_in_temp_repo", "test_repo_identity_invalid", "sample_event"] {
-        let mut n = GraphNode::new(NodeType::Function, name.to_string(), "/src/server/git_tests.rs".to_string());
+    for name in [
+        "test_git_sensor_in_temp_repo",
+        "test_repo_identity_invalid",
+        "sample_event",
+    ] {
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "/src/server/git_tests.rs".to_string(),
+        );
         n.calls_in = Some(0);
         n.calls_out = Some(1); // indexed: the file has call edges
         graph.upsert_node(n).unwrap();
     }
     // A genuinely unreferenced production function in an indexed file.
-    let mut orphan = GraphNode::new(NodeType::Function, "orphan".to_string(), "/src/lib.rs".to_string());
+    let mut orphan = GraphNode::new(
+        NodeType::Function,
+        "orphan".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     orphan.calls_in = Some(0);
     orphan.calls_out = Some(0);
-    let mut live = GraphNode::new(NodeType::Function, "live".to_string(), "/src/lib.rs".to_string());
+    let mut live = GraphNode::new(
+        NodeType::Function,
+        "live".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     live.calls_in = Some(2);
     live.calls_out = Some(3);
-    let mut helper = GraphNode::new(NodeType::Function, "helper".to_string(), "/src/lib.rs".to_string());
+    let mut helper = GraphNode::new(
+        NodeType::Function,
+        "helper".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     helper.calls_in = Some(1);
     helper.calls_out = Some(1);
     graph.upsert_node(orphan).unwrap();
@@ -352,7 +494,15 @@ fn test_symbols_are_excluded_from_dead_code() {
 
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
-    let text = find_dead_code(std::path::Path::new(""), &graph, &VolatileOverlay::new(), None, &embedder, &cache).unwrap();
+    let text = find_dead_code(
+        std::path::Path::new(""),
+        &graph,
+        &VolatileOverlay::new(),
+        None,
+        &embedder,
+        &cache,
+    )
+    .unwrap();
 
     for name in ["test_git_sensor_in_temp_repo", "test_repo_identity_invalid"] {
         assert!(
@@ -373,7 +523,9 @@ fn test_symbols_are_excluded_from_dead_code() {
 #[test]
 fn test_detection_prefers_the_label_over_conventions() {
     use crate::server::tools::handlers::metrics::is_test_symbol;
-    let mk = |name: &str, path: &str| GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
+    let mk = |name: &str, path: &str| {
+        GraphNode::new(NodeType::Function, name.to_string(), path.to_string())
+    };
 
     // The authoritative signal: the `test` label, now set by both the
     // tree-sitter extractor (`#[test]`) and the LSP path (enclosing
@@ -397,7 +549,6 @@ fn test_detection_prefers_the_label_over_conventions() {
     assert!(!is_test_symbol(&mk("latest", "/src/server/graph.rs")));
 }
 
-
 /// The analysis is now reachable as data, so a consumer never has to
 /// parse the prose to learn what was found.
 #[test]
@@ -408,7 +559,11 @@ fn dead_code_analysis_is_available_without_parsing_prose() {
     let report = analyze_dead_code(&graph, std::path::Path::new("")).unwrap();
 
     assert_eq!(
-        report.unreferenced.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+        report
+            .unreferenced
+            .iter()
+            .map(|n| n.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["orphan"],
         "the genuine orphan is the only strong signal"
     );
@@ -434,19 +589,35 @@ fn a_dead_function_is_found_even_though_its_file_contains_it() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let file = GraphNode::new(NodeType::File, "lib.rs".to_string(), "/src/lib.rs".to_string());
+    let file = GraphNode::new(
+        NodeType::File,
+        "lib.rs".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     graph.upsert_node(file.clone()).unwrap();
 
     // Three functions so the file is not mistaken for unindexed.
-    let mut caller = GraphNode::new(NodeType::Function, "caller".to_string(), "/src/lib.rs".to_string());
+    let mut caller = GraphNode::new(
+        NodeType::Function,
+        "caller".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     caller.calls_in = Some(0);
     caller.calls_out = Some(1);
-    let mut callee = GraphNode::new(NodeType::Function, "callee".to_string(), "/src/lib.rs".to_string());
+    let mut callee = GraphNode::new(
+        NodeType::Function,
+        "callee".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     callee.calls_in = Some(1);
     callee.calls_out = Some(0);
     // The genuinely dead one — no callers, no callees — but its file
     // `Contains` it, so `fan_in` is 1 and the old filter skipped it.
-    let mut orphan = GraphNode::new(NodeType::Function, "orphan".to_string(), "/src/lib.rs".to_string());
+    let mut orphan = GraphNode::new(
+        NodeType::Function,
+        "orphan".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     orphan.calls_in = Some(0);
     orphan.calls_out = Some(0);
 
@@ -458,16 +629,32 @@ fn a_dead_function_is_found_even_though_its_file_contains_it() {
     }
     for n in [&caller, &callee, &orphan] {
         graph
-            .upsert_edge(GraphEdge::new(EdgeType::Contains, file.id.clone(), n.id.clone()))
+            .upsert_edge(GraphEdge::new(
+                EdgeType::Contains,
+                file.id.clone(),
+                n.id.clone(),
+            ))
             .unwrap();
     }
     graph
-        .upsert_edge(GraphEdge::new(EdgeType::Calls, caller.id.clone(), callee.id.clone()))
+        .upsert_edge(GraphEdge::new(
+            EdgeType::Calls,
+            caller.id.clone(),
+            callee.id.clone(),
+        ))
         .unwrap();
 
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
-    let text = find_dead_code(std::path::Path::new(""), &graph, &VolatileOverlay::new(), None, &embedder, &cache).unwrap();
+    let text = find_dead_code(
+        std::path::Path::new(""),
+        &graph,
+        &VolatileOverlay::new(),
+        None,
+        &embedder,
+        &cache,
+    )
+    .unwrap();
 
     assert!(
         text.contains("- orphan ("),
@@ -478,7 +665,6 @@ fn a_dead_function_is_found_even_though_its_file_contains_it() {
         "a function with a real caller is not dead:\n{text}"
     );
 }
-
 
 /// A symbol referenced only by a serde attribute string or a function
 /// pointer is not dead. Both shipped as "dead" on this repo while being
@@ -501,24 +687,45 @@ fn a_name_referenced_only_by_attribute_or_pointer_is_not_dead() {
 
     let db = GraphDatabase::new(&tmp.path().join("g")).unwrap();
     for name in ["default_ref", "run_resolver", "truly_dead"] {
-        let mut n = GraphNode::new(NodeType::Function, name.to_string(), "src/cfg.rs".to_string());
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/cfg.rs".to_string(),
+        );
         n.calls_in = Some(0);
         n.calls_out = Some(0);
         db.upsert_node(n).unwrap();
     }
     // One symbol with a call edge, so the file does not trip the
     // "no call edges at all → unindexed" guard and get excluded whole.
-    let mut live = GraphNode::new(NodeType::Function, "use_it".to_string(), "src/cfg.rs".to_string());
+    let mut live = GraphNode::new(
+        NodeType::Function,
+        "use_it".to_string(),
+        "src/cfg.rs".to_string(),
+    );
     live.calls_in = Some(1);
     live.calls_out = Some(1);
     db.upsert_node(live).unwrap();
 
     let report = analyze_dead_code(&db, tmp.path()).unwrap();
-    let dead: Vec<&str> = report.unreferenced.iter().map(|n| n.name.as_str()).collect();
+    let dead: Vec<&str> = report
+        .unreferenced
+        .iter()
+        .map(|n| n.name.as_str())
+        .collect();
 
-    assert!(!dead.contains(&"default_ref"), "serde attribute reference missed: {dead:?}");
-    assert!(!dead.contains(&"run_resolver"), "function-pointer reference missed: {dead:?}");
-    assert!(dead.contains(&"truly_dead"), "a genuinely dead symbol must survive the filter: {dead:?}");
+    assert!(
+        !dead.contains(&"default_ref"),
+        "serde attribute reference missed: {dead:?}"
+    );
+    assert!(
+        !dead.contains(&"run_resolver"),
+        "function-pointer reference missed: {dead:?}"
+    );
+    assert!(
+        dead.contains(&"truly_dead"),
+        "a genuinely dead symbol must survive the filter: {dead:?}"
+    );
     assert_eq!(report.name_referenced, 2);
 }
 
@@ -595,11 +802,31 @@ fn find_dead_code_does_not_report_a_symbol_called_from_another_file() {
 fn whole_word_hits_requires_a_boundary_on_both_sides() {
     use super::metrics::whole_word_hits;
 
-    assert_eq!(whole_word_hits("call run() here", "run"), 1, "standalone word");
-    assert_eq!(whole_word_hits("run_tests()", "run"), 0, "prefix of a longer ident");
-    assert_eq!(whole_word_hits("do_run()", "run"), 0, "suffix of a longer ident");
-    assert_eq!(whole_word_hits("a_run_b", "run"), 0, "infix of a longer ident");
-    assert_eq!(whole_word_hits("run; run()", "run"), 2, "counts each occurrence");
+    assert_eq!(
+        whole_word_hits("call run() here", "run"),
+        1,
+        "standalone word"
+    );
+    assert_eq!(
+        whole_word_hits("run_tests()", "run"),
+        0,
+        "prefix of a longer ident"
+    );
+    assert_eq!(
+        whole_word_hits("do_run()", "run"),
+        0,
+        "suffix of a longer ident"
+    );
+    assert_eq!(
+        whole_word_hits("a_run_b", "run"),
+        0,
+        "infix of a longer ident"
+    );
+    assert_eq!(
+        whole_word_hits("run; run()", "run"),
+        2,
+        "counts each occurrence"
+    );
 }
 
 /// `is_trait_context` is a path heuristic. Both halves matter: the
@@ -661,10 +888,9 @@ async fn refactor_advice_requires_both_halves_of_each_heuristic() {
     // Both high: a God Object.
     mk("both_high", 50, 15, 0, 5.0);
 
-    let out = crate::server::tools::handlers::metrics::suggest_refactor_targets(
-        &graph, &overlay, 50,
-    )
-    .expect("suggest_refactor_targets");
+    let out =
+        crate::server::tools::handlers::metrics::suggest_refactor_targets(&graph, &overlay, 50)
+            .expect("suggest_refactor_targets");
 
     assert!(
         out.contains("both_high"),
@@ -698,10 +924,9 @@ async fn a_stable_symbol_is_not_called_fragile_however_much_it_co_changes() {
     n.anchor_score = Some(9.0); // but extremely stable
     graph.upsert_node(n).unwrap();
 
-    let out = crate::server::tools::handlers::metrics::suggest_refactor_targets(
-        &graph, &overlay, 50,
-    )
-    .expect("suggest_refactor_targets");
+    let out =
+        crate::server::tools::handlers::metrics::suggest_refactor_targets(&graph, &overlay, 50)
+            .expect("suggest_refactor_targets");
 
     assert!(
         !out.contains("Fragile/Spaghetti"),
@@ -724,11 +949,7 @@ fn the_unindexed_file_threshold_is_exact() {
     let mk = |path: &str, n: usize, calls_out: u32| -> Vec<GraphNode> {
         (0..n)
             .map(|i| {
-                let mut g = GraphNode::new(
-                    NodeType::Function,
-                    format!("f{i}"),
-                    path.to_string(),
-                );
+                let mut g = GraphNode::new(NodeType::Function, format!("f{i}"), path.to_string());
                 g.calls_out = Some(calls_out);
                 g
             })
@@ -776,8 +997,7 @@ fn find_dead_code_applies_the_name_and_trait_filters_together() {
         graph.upsert_node(file.clone()).unwrap();
         let mut made = Vec::new();
         for (i, name) in names.iter().enumerate() {
-            let mut n =
-                GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
+            let mut n = GraphNode::new(NodeType::Function, name.to_string(), path.to_string());
             n.calls_in = Some(0);
             // One function per file must have an outgoing call, or
             // `unindexed_files` suppresses the whole file and this test
@@ -788,7 +1008,11 @@ fn find_dead_code_applies_the_name_and_trait_filters_together() {
             n.fan_out = Some(1);
             graph.upsert_node(n.clone()).unwrap();
             graph
-                .upsert_edge(GraphEdge::new(EdgeType::Contains, file.id.clone(), n.id.clone()))
+                .upsert_edge(GraphEdge::new(
+                    EdgeType::Contains,
+                    file.id.clone(),
+                    n.id.clone(),
+                ))
                 .unwrap();
             made.push(n);
         }
@@ -805,10 +1029,16 @@ fn find_dead_code_applies_the_name_and_trait_filters_together() {
 
     // A trait-context path: ordinary names, must be filtered by the
     // *path* half alone.
-    add_file("/src/widget_trait.rs", ["driver_a", "size_widget", "drop_widget"]);
+    add_file(
+        "/src/widget_trait.rs",
+        ["driver_a", "size_widget", "drop_widget"],
+    );
     // An ordinary path: a conventional name must be filtered by the
     // *name* half alone.
-    add_file("/src/plain.rs", ["driver_b", "new", "genuinely_dead_helper"]);
+    add_file(
+        "/src/plain.rs",
+        ["driver_b", "new", "genuinely_dead_helper"],
+    );
 
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
@@ -874,9 +1104,18 @@ fn occupancy_reports_read_intent_as_read() {
         }],
     );
 
-    let text =
-        explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "login").unwrap();
-    assert!(text.contains("Occupancy"), "an active claim must be surfaced:\n{text}");
+    let text = explain_symbol(
+        std::path::Path::new(""),
+        &graph,
+        &overlay,
+        &occupancy,
+        "login",
+    )
+    .unwrap();
+    assert!(
+        text.contains("Occupancy"),
+        "an active claim must be surfaced:\n{text}"
+    );
     assert!(
         text.contains("\"read\""),
         "a Read claim must report as read, not edit:\n{text}"
@@ -924,8 +1163,14 @@ fn occupancy_ignores_edit_claims_on_other_files() {
         ],
     );
 
-    let text =
-        explain_symbol(std::path::Path::new(""), &graph, &overlay, &occupancy, "login").unwrap();
+    let text = explain_symbol(
+        std::path::Path::new(""),
+        &graph,
+        &overlay,
+        &occupancy,
+        "login",
+    )
+    .unwrap();
     assert!(
         !text.contains("\"edit\""),
         "an Edit claim on billing.rs must not mark auth.rs as being edited:\n{text}"

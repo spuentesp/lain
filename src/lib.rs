@@ -1,8 +1,8 @@
 //! Lain — local MCP server for cross-repo and per-repo code analysis.
 
-pub mod server;
 pub mod cli;
 pub mod config;
+pub mod server;
 pub mod state;
 
 // Re-export the top-level clap `Command` factory at the crate root so

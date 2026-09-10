@@ -22,10 +22,10 @@ pub enum NodeType {
     Variable,
     Constant,
     // Cross-runtime node types
-    HttpRoute,  // HTTP endpoint (e.g., GET /api/users)
-    Topic,      // Message queue topic (Kafka, RabbitMQ)
-    Resource,   // IaC resource (Terraform, k8s)
-    Schema,     // Data schema (OpenAPI, Protobuf, JSON Schema)
+    HttpRoute, // HTTP endpoint (e.g., GET /api/users)
+    Topic,     // Message queue topic (Kafka, RabbitMQ)
+    Resource,  // IaC resource (Terraform, k8s)
+    Schema,    // Data schema (OpenAPI, Protobuf, JSON Schema)
 }
 
 impl NodeType {
@@ -59,7 +59,6 @@ impl NodeType {
             NodeType::Schema,
         ]
     }
-
 
     /// Whether any indexer in this build actually emits this node type.
     ///
@@ -154,7 +153,6 @@ impl NodeType {
             _ => &[],
         }
     }
-
 }
 
 impl std::fmt::Display for NodeType {
@@ -166,18 +164,18 @@ impl std::fmt::Display for NodeType {
 /// Edge types in the Lain graph
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EdgeType {
-    Contains,       // File -> Symbol
+    Contains,      // File -> Symbol
     Calls,         // Function -> Function
     Uses,          // Code -> Variable/Type
-    Implements,   // Class -> Interface
+    Implements,    // Class -> Interface
     Imports,       // File -> File
     CoChangedWith, // File -> File (Git temporal coupling)
     Pattern,       // Semantic boundary indicator (path prefixes, topic names)
     // Cross-runtime edge types
-    CallsHttp,     // HTTP route -> handler (method, path pattern)
-    Produces,      // Producer -> Topic (Kafka producer, event emitter)
-    Consumes,      // Consumer -> Topic (Kafka consumer, queue listener)
-    DeployedTo,    // IaC resource -> cloud resource (k8s, AWS, etc.)
+    CallsHttp,           // HTTP route -> handler (method, path pattern)
+    Produces,            // Producer -> Topic (Kafka producer, event emitter)
+    Consumes,            // Consumer -> Topic (Kafka consumer, queue listener)
+    DeployedTo,          // IaC resource -> cloud resource (k8s, AWS, etc.)
     CrossRepoSameSymbol, // Federation-only: same symbol across different repos (added Task 10)
 }
 
@@ -208,7 +206,6 @@ impl EdgeType {
             EdgeType::CrossRepoSameSymbol,
         ]
     }
-
 
     /// Whether any indexer in this build actually emits this edge type.
     /// See [`NodeType::is_indexed`] for why this exists.
@@ -316,11 +313,7 @@ impl std::fmt::Display for EdgeType {
 pub fn is_type_level_target(t: &NodeType) -> bool {
     matches!(
         t,
-        NodeType::Struct
-            | NodeType::Enum
-            | NodeType::Trait
-            | NodeType::Class
-            | NodeType::Interface
+        NodeType::Struct | NodeType::Enum | NodeType::Trait | NodeType::Class | NodeType::Interface
     )
 }
 

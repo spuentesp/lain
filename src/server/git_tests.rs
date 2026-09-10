@@ -97,8 +97,8 @@ fn test_git_sensor_get_file_diff_on_clean_file() {
 
 #[test]
 fn test_git_sensor_file_change_struct() {
-    use crate::git::FileChange;
     use crate::git::ChangeType;
+    use crate::git::FileChange;
 
     let change = FileChange {
         path: std::path::PathBuf::from("/test/path.rs"),
@@ -255,7 +255,11 @@ fn get_new_commits_since_returns_newer_commits_not_older() {
     fs::create_dir_all(&dir).unwrap();
 
     let git = |args: &[&str]| {
-        Command::new("git").args(args).current_dir(&dir).output().unwrap();
+        Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
     };
     git(&["init"]);
     git(&["config", "user.email", "t@t"]);
@@ -279,12 +283,23 @@ fn get_new_commits_since_returns_newer_commits_not_older() {
     // From the first commit, the two later ones are "new".
     let since_first = sensor.get_new_commits_since(&shas[0]).unwrap();
     let ids: Vec<&str> = since_first.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(since_first.len(), 2, "expected the two commits after c0, got {ids:?}");
+    assert_eq!(
+        since_first.len(),
+        2,
+        "expected the two commits after c0, got {ids:?}"
+    );
     assert!(ids.contains(&shas[1].as_str()), "c1 missing from {ids:?}");
     assert!(ids.contains(&shas[2].as_str()), "c2 missing from {ids:?}");
-    assert!(!ids.contains(&shas[0].as_str()), "the since-commit itself must be excluded");
+    assert!(
+        !ids.contains(&shas[0].as_str()),
+        "the since-commit itself must be excluded"
+    );
 
     // From HEAD, nothing is newer — the old code returned the entire history here.
     let since_head = sensor.get_new_commits_since(&shas[2]).unwrap();
-    assert!(since_head.is_empty(), "HEAD has no newer commits, got {} ", since_head.len());
+    assert!(
+        since_head.is_empty(),
+        "HEAD has no newer commits, got {} ",
+        since_head.len()
+    );
 }

@@ -5,9 +5,9 @@
 //!
 //! Edges created: Uses (handler -> WebSocket endpoint)
 
-use crate::graph::GraphDatabase;
-use crate::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
 use crate::error::LainError;
+use crate::graph::GraphDatabase;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::path::Path;
 
 /// WebSocket endpoint extracted from code
@@ -24,7 +24,8 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, u32)> {
     let mut endpoints = Vec::new();
 
     let ws_url_re = regex::Regex::new(r#""(wss?://[^"']+)""#).unwrap();
-    let handler_re = regex::Regex::new(r#"(on(?:open|message|close|error))\s*[=:]\s*(\w+)"#).unwrap();
+    let handler_re =
+        regex::Regex::new(r#"(on(?:open|message|close|error))\s*[=:]\s*(\w+)"#).unwrap();
     let ctor_re = regex::Regex::new(r#"new\s+WebSocket\s*\(\s*["']([^"']+)["']"#).unwrap();
 
     for (line_no, line) in content.lines().enumerate() {
@@ -42,7 +43,10 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, u32)> {
         }
         // Event handlers
         for cap in handler_re.captures_iter(line) {
-            let handler_name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let handler_name = cap
+                .get(2)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
             if !handler_name.is_empty() {
                 endpoints.push((String::new(), handler_name, line_no as u32 + 1));
             }
@@ -90,18 +94,9 @@ pub fn enrich_with_websocket(
             url.clone()
         };
 
-        let node_id = GraphNode::generate_id(
-            &NodeType::Variable,
-            &node_path,
-            &display_name,
-            None,
-        );
+        let node_id = GraphNode::generate_id(&NodeType::Variable, &node_path, &display_name, None);
 
-        let mut node = GraphNode::new(
-            NodeType::Variable,
-            display_name,
-            node_path.clone(),
-        );
+        let mut node = GraphNode::new(NodeType::Variable, display_name, node_path.clone());
         node.id = node_id.clone();
         node.line_start = Some(line);
         if !handler_name.is_empty() {
@@ -111,11 +106,7 @@ pub fn enrich_with_websocket(
 
         if !handler_name.is_empty() {
             if let Some(handler) = find_handler(graph, &handler_name) {
-                let edge = GraphEdge::new(
-                    EdgeType::Uses,
-                    handler.id.clone(),
-                    node_id,
-                );
+                let edge = GraphEdge::new(EdgeType::Uses, handler.id.clone(), node_id);
                 graph.insert_edge(&edge)?;
                 count += 1;
             }
@@ -130,10 +121,7 @@ pub fn enrich_with_websocket(
 }
 
 /// Scan workspace for WebSocket patterns
-pub fn scan_workspace(
-    graph: &GraphDatabase,
-    root: &Path,
-) -> Result<usize, LainError> {
+pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainError> {
     let mut count = 0;
 
     let walker = ignore::WalkBuilder::new(root)

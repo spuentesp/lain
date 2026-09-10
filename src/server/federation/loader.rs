@@ -3,7 +3,7 @@ use crate::federation::config::FederationConfig;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use crate::federation::manifest::{FederationManifest, RepoEntry};
-use crate::federation::workspace::{WorkspacesFile, WorkspaceIndex, filter_repos_by_workspace};
+use crate::federation::workspace::{filter_repos_by_workspace, WorkspaceIndex, WorkspacesFile};
 use crate::server::time;
 use crate::state::resolve_active_workspace;
 use std::path::Path;
@@ -57,7 +57,8 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         }));
     }
     for h in handles {
-        h.await.map_err(|e| LainError::Other(format!("join: {e}")))??;
+        h.await
+            .map_err(|e| LainError::Other(format!("join: {e}")))??;
     }
 
     // Persist the manifest on a best-effort basis: a save failure must not
@@ -127,7 +128,10 @@ pub async fn load_federation_with_workspace(
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
     let mut handles = Vec::with_capacity(picked.len());
     for repo_config in picked {
-        let permit = semaphore.clone().acquire_owned().await
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|e| LainError::Other(format!("semaphore: {e}")))?;
         let fed_clone = fed.clone();
         let data_dir = config.data_dir.clone();
@@ -142,7 +146,8 @@ pub async fn load_federation_with_workspace(
         }));
     }
     for h in handles {
-        h.await.map_err(|e| LainError::Other(format!("join: {e}")))??;
+        h.await
+            .map_err(|e| LainError::Other(format!("join: {e}")))??;
     }
 
     // Discarding this hid a failed save entirely: the federation came up

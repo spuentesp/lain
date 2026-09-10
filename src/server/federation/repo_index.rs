@@ -161,7 +161,8 @@ pub struct RepoIndex {
     /// don't need it (tests, single-repo mode). The federation
     /// loader sets this right after `add_repo` so a subsequent
     /// `index()` can use it to materialize cross-repo `Calls` edges.
-    cross_repo_resolver: parking_lot::Mutex<Option<Arc<dyn crate::federation::cross_repo::CrossRepoResolver>>>,
+    cross_repo_resolver:
+        parking_lot::Mutex<Option<Arc<dyn crate::federation::cross_repo::CrossRepoResolver>>>,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -237,7 +238,6 @@ impl RepoIndex {
     pub fn health(&self) -> RepoHealth {
         *self.health.read()
     }
-
 
     /// Install the federation's shared `VolatileOverlay`. Called by
     /// [`crate::server::federation::federated_index::FederatedIndex::install_overlay`]
@@ -627,7 +627,8 @@ impl RepoIndex {
         // `change.path` (from `get_uncommitted_changes`) is absolute
         // (`self.workspace.join(path)` in `git.rs`).
         let workspace_root = self.source.local_path();
-        let current_paths: HashSet<String> = changes.iter()
+        let current_paths: HashSet<String> = changes
+            .iter()
             .map(|c| crate::graph::graph_path(workspace_root, &c.path))
             .collect();
 
@@ -790,17 +791,12 @@ impl RepoIndex {
                 let Ok(content) = std::fs::read_to_string(path) else {
                     return Ok(Vec::new());
                 };
-                let graph_key =
-                    crate::graph::graph_path(self.source.local_path(), path);
+                let graph_key = crate::graph::graph_path(self.source.local_path(), path);
                 crate::treesitter::extract_definitions(path, &content)
                     .into_iter()
                     .map(|d| HierarchicalSymbol {
-                        node: GraphNode::new(
-                            d.kind,
-                            d.name.clone(),
-                            graph_key.clone(),
-                        )
-                        .with_location(d.line_start, d.line_end),
+                        node: GraphNode::new(d.kind, d.name.clone(), graph_key.clone())
+                            .with_location(d.line_start, d.line_end),
                         children: vec![],
                     })
                     .collect()

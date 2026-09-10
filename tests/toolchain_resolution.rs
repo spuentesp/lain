@@ -125,7 +125,9 @@ fn resolver_stage_end_to_end_with_a_real_manager() {
     let p = profile(tmp.path(), Some(&resolver));
     assert_eq!(
         resolve_program("widget", Some(&p)),
-        tmp.path().join("versions/v1.0.0/bin/widget").to_string_lossy(),
+        tmp.path()
+            .join("versions/v1.0.0/bin/widget")
+            .to_string_lossy(),
         "the glob must still answer when no manager is installed"
     );
 }
@@ -142,7 +144,10 @@ fn resolution_reflects_the_environment_it_is_asked_in() {
 
     // Absent to begin with.
     std::env::set_var("PATH", "/nonexistent-for-this-test");
-    assert_eq!(resolve_program("installed-later", Some(&p)), "installed-later");
+    assert_eq!(
+        resolve_program("installed-later", Some(&p)),
+        "installed-later"
+    );
 
     // Installed while the process is running — the next call must see it.
     write_exe(&bin.join("installed-later"), "true");

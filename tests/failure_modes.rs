@@ -40,7 +40,10 @@ fn git_init(path: &std::path::Path) {
         .status()
         .expect("git init");
     assert!(status.success(), "git init failed");
-    for (k, v) in [("user.email", "failure-modes@lain"), ("user.name", "failure-modes")] {
+    for (k, v) in [
+        ("user.email", "failure-modes@lain"),
+        ("user.name", "failure-modes"),
+    ] {
         std::process::Command::new("git")
             .args(["config", k, v])
             .current_dir(path)
@@ -121,9 +124,12 @@ fn boot_server(port: u16) -> ServerGuard {
     let child = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",
-            "--transport", "http",
-            "--port", &port.to_string(),
-            "--workspace", "auto",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--workspace",
+            "auto",
             "--config",
             repos_yaml_path.to_str().unwrap(),
         ])
@@ -149,18 +155,14 @@ fn boot_server(port: u16) -> ServerGuard {
     loop {
         if start.elapsed() > Duration::from_secs(30) {
             let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-            panic!(
-                "server did not become healthy within 30s on {host}; last stderr:\n{log}"
-            );
+            panic!("server did not become healthy within 30s on {host}; last stderr:\n{log}");
         }
         let attempt = (|| -> std::io::Result<(u16, String)> {
             let mut stream = TcpStream::connect(&host)?;
             stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
             stream.write_all(
-                format!(
-                    "GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
+                format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
             )?;
             let mut response = String::new();
             stream.read_to_string(&mut response)?;
@@ -292,10 +294,7 @@ fn server_survives_malformed_json() {
     }
 
     // Server alive after the bad request.
-    assert!(
-        server.is_alive(),
-        "server PID died after malformed JSON"
-    );
+    assert!(server.is_alive(), "server PID died after malformed JSON");
 
     // New connection must still serve tools/list correctly.
     let tools_list = jsonrpc(
@@ -364,9 +363,7 @@ fn server_handles_concurrent_overloaded_clients() {
         let tools = r
             .pointer("/result/tools")
             .and_then(|v| v.as_array())
-            .unwrap_or_else(|| {
-                panic!("concurrent client #{i} got malformed response: {r}")
-            });
+            .unwrap_or_else(|| panic!("concurrent client #{i} got malformed response: {r}"));
         assert!(
             !tools.is_empty(),
             "concurrent client #{i} got empty tools array: {r}"
@@ -431,11 +428,7 @@ fn tools_return_structured_error_not_panic() {
     //     well-formed JSON but doesn't resolve to a real symbol.
     //     Either the tool rejects it up front (Missing required
     //     argument) or the resolver reports NotFound.
-    let env = tools_call_envelope(
-        &host,
-        "get_blast_radius",
-        serde_json::json!({"symbol": ""}),
-    );
+    let env = tools_call_envelope(&host, "get_blast_radius", serde_json::json!({"symbol": ""}));
     assert!(
         env.pointer("/result").is_some() || env.pointer("/error").is_some(),
         "get_blast_radius with empty symbol produced no envelope: {env}"
@@ -445,7 +438,9 @@ fn tools_return_structured_error_not_panic() {
     // "Missing required argument: symbol" or a NotFound carrying
     // the empty/blank name. Both are acceptable.
     assert!(
-        err_text.contains("symbol") || err_text.contains("not found") || err_text.contains("NotFound"),
+        err_text.contains("symbol")
+            || err_text.contains("not found")
+            || err_text.contains("NotFound"),
         "get_blast_radius empty-symbol error should mention the symbol arg; got: {err_text}"
     );
     assert!(
@@ -492,11 +487,7 @@ fn tools_return_structured_error_not_panic() {
     //     still responds to a benign call. If anything above
     //     half-killed the worker pool, this would be the first to
     //     notice (e.g. an unhandled poison error).
-    let env = tools_call_envelope(
-        &host,
-        "get_health",
-        serde_json::json!({}),
-    );
+    let env = tools_call_envelope(&host, "get_health", serde_json::json!({}));
     assert!(
         env.pointer("/result").is_some() && env.pointer("/error").is_none(),
         "get_health after hostile calls failed: {env}"
@@ -642,9 +633,12 @@ fn request_reload_handles_corrupt_yaml() {
     let child = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",
-            "--transport", "http",
-            "--port", &port2.to_string(),
-            "--workspace", "auto",
+            "--transport",
+            "http",
+            "--port",
+            &port2.to_string(),
+            "--workspace",
+            "auto",
             "--config",
             repos_yaml_path.to_str().unwrap(),
         ])
@@ -669,10 +663,8 @@ fn request_reload_handles_corrupt_yaml() {
             let mut stream = TcpStream::connect(&host2)?;
             stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
             stream.write_all(
-                format!(
-                    "GET /health HTTP/1.1\r\nHost: {host2}\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
+                format!("GET /health HTTP/1.1\r\nHost: {host2}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
             )?;
             let mut response = String::new();
             stream.read_to_string(&mut response)?;
@@ -706,11 +698,7 @@ fn request_reload_handles_corrupt_yaml() {
 
     // 6b. Fire request_reload. It returns immediately with
     //     `{accepted: true, ...}` — the rebuild itself is async.
-    let _accepted = tools_call_envelope(
-        &host2,
-        "request_reload",
-        serde_json::json!({}),
-    );
+    let _accepted = tools_call_envelope(&host2, "request_reload", serde_json::json!({}));
 
     // 6c. Poll get_reload_status. The async rebuild should finish
     //     quickly and the bus should record a Failed state with a
@@ -718,11 +706,7 @@ fn request_reload_handles_corrupt_yaml() {
     let mut failed = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let env = tools_call_envelope(
-            &host2,
-            "get_reload_status",
-            serde_json::json!({}),
-        );
+        let env = tools_call_envelope(&host2, "get_reload_status", serde_json::json!({}));
         let text = env
             .pointer("/result/content/0/text")
             .and_then(|v| v.as_str())
@@ -769,20 +753,12 @@ fn request_reload_handles_corrupt_yaml() {
     // 6e. Restore the file and reload again. The server should
     //     come back to idle and a fresh tools/list must work.
     std::fs::write(&repos_yaml_path, &good_yaml).unwrap();
-    let _ = tools_call_envelope(
-        &host2,
-        "request_reload",
-        serde_json::json!({}),
-    );
+    let _ = tools_call_envelope(&host2, "request_reload", serde_json::json!({}));
 
     let mut recovered = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let env = tools_call_envelope(
-            &host2,
-            "get_reload_status",
-            serde_json::json!({}),
-        );
+        let env = tools_call_envelope(&host2, "get_reload_status", serde_json::json!({}));
         let text = env
             .pointer("/result/content/0/text")
             .and_then(|v| v.as_str())

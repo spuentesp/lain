@@ -33,7 +33,10 @@ fn legacy_stem_state_file_is_migrated_to_hashed_name() {
         resolved.display()
     );
     assert!(!legacy.exists(), "legacy file must be renamed away");
-    assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "{\"migrated\":true}");
+    assert_eq!(
+        std::fs::read_to_string(&resolved).unwrap(),
+        "{\"migrated\":true}"
+    );
 
     // Idempotent: a second resolution keeps the hashed path.
     assert_eq!(state_path_for_workspace(&cfg), resolved);

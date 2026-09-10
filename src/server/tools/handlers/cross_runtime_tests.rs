@@ -1,9 +1,9 @@
 //! Tests for tools/handlers/cross_runtime.rs
 
-use crate::server::tools::handlers::cross_runtime::get_cross_runtime_callers;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphNode, NodeType, EdgeType, GraphEdge};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::tools::handlers::cross_runtime::get_cross_runtime_callers;
 
 fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
     let tmp = std::env::temp_dir().join("test_cross_runtime");
@@ -11,9 +11,21 @@ fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     // Create nodes with different edge types
-    let handler = GraphNode::new(NodeType::Function, "handle_request".to_string(), "/src/handler.rs".to_string());
-    let http_route = GraphNode::new(NodeType::HttpRoute, "GET /api/users".to_string(), "/openapi.yaml".to_string());
-    let grpc_service = GraphNode::new(NodeType::Class, "UserService".to_string(), "/proto/user.proto".to_string());
+    let handler = GraphNode::new(
+        NodeType::Function,
+        "handle_request".to_string(),
+        "/src/handler.rs".to_string(),
+    );
+    let http_route = GraphNode::new(
+        NodeType::HttpRoute,
+        "GET /api/users".to_string(),
+        "/openapi.yaml".to_string(),
+    );
+    let grpc_service = GraphNode::new(
+        NodeType::Class,
+        "UserService".to_string(),
+        "/proto/user.proto".to_string(),
+    );
 
     let handler_id = handler.id.clone();
     graph.upsert_node(handler.clone()).unwrap();
@@ -21,9 +33,21 @@ fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
     graph.upsert_node(grpc_service.clone()).unwrap();
 
     // HTTP route calls handler
-    graph.insert_edge(&GraphEdge::new(EdgeType::CallsHttp, http_route.id.clone(), handler_id.clone())).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::CallsHttp,
+            http_route.id.clone(),
+            handler_id.clone(),
+        ))
+        .unwrap();
     // gRPC implements edge to handler
-    graph.insert_edge(&GraphEdge::new(EdgeType::Implements, grpc_service.id.clone(), handler_id.clone())).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Implements,
+            grpc_service.id.clone(),
+            handler_id.clone(),
+        ))
+        .unwrap();
 
     let overlay = VolatileOverlay::new();
     (graph, overlay)

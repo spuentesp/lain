@@ -19,7 +19,13 @@ use lain::server::LainServer;
 use std::sync::Arc;
 
 /// Convenience: assert `claim_files` succeeds and return the parsed JSON.
-fn claim(server: &Arc<LainServer>, agent_id: &str, token: &str, plan_revision: u64, symbols: &[&str]) -> serde_json::Value {
+fn claim(
+    server: &Arc<LainServer>,
+    agent_id: &str,
+    token: &str,
+    plan_revision: u64,
+    symbols: &[&str],
+) -> serde_json::Value {
     let syms: Vec<String> = symbols.iter().map(|s| s.to_string()).collect();
     let args = serde_json::json!({
         "agent_id": agent_id,
@@ -56,7 +62,12 @@ fn insert_verify_token(backend: &dyn GraphBackend) {
     let repo = RepoId::new("test").unwrap();
     let gid = GlobalId::new(&repo, NodeType::Function, "src/auth.rs", "verify_token");
     backend
-        .upsert_node_global(gid.as_str(), NodeType::Function, "src/auth.rs", "verify_token")
+        .upsert_node_global(
+            gid.as_str(),
+            NodeType::Function,
+            "src/auth.rs",
+            "verify_token",
+        )
         .expect("upsert_node_global");
 }
 
@@ -105,7 +116,10 @@ async fn claim_with_retracted_symbol_populates_world_state() {
     assert_eq!(removed, 1, "remove_nodes should retract the seed");
     // Sanity: the backend no longer sees the symbol.
     let after = backend.find_nodes_by_name("verify_token").unwrap();
-    assert!(after.is_empty(), "verify_token should be gone after retraction");
+    assert!(
+        after.is_empty(),
+        "verify_token should be gone after retraction"
+    );
 
     // ── Step 3: claim again — verify_token must show Retracted ──────────
     let resp2 = claim(&server, &agent_id, &token, 0, &["verify_token"]);
@@ -176,7 +190,10 @@ async fn symbol_never_in_the_graph_is_not_indexed_rather_than_retracted() {
     // with this name and neither does the graph.
     let resp = claim(&server, &agent_id, &token, 0, &["never_existed"]);
     let ws = &resp["world_state"];
-    assert!(!ws.is_null(), "world_state must be Some when plan_revision is provided");
+    assert!(
+        !ws.is_null(),
+        "world_state must be Some when plan_revision is provided"
+    );
 
     let symbols = ws["changed_symbols"].as_array().unwrap();
     assert_eq!(symbols.len(), 1, "expected one entry; got {symbols:?}");

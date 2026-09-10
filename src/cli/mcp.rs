@@ -126,8 +126,7 @@ pub(crate) fn build_repos_yaml_for_workspaces(workspaces: &[PathBuf]) -> String 
     // Track how many times each basename has been seen so we only
     // suffix on collisions, never by default. Uniqueness without
     // suffixing when the basenames already differ.
-    let mut seen: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for ws in workspaces {
         let base = ws
             .file_name()
@@ -239,10 +238,7 @@ pub async fn run_mcp(
 /// tempfile under the process's temp dir, and hands it to
 /// `run_server --transport stdio`. The tempfile is cleaned up after
 /// the server exits (success or failure).
-async fn run_mcp_federation(
-    workspaces: &[PathBuf],
-    embedding_model: Option<&Path>,
-) -> Result<()> {
+async fn run_mcp_federation(workspaces: &[PathBuf], embedding_model: Option<&Path>) -> Result<()> {
     let yaml = build_repos_yaml_for_workspaces(workspaces);
     let tmp_path = std::env::temp_dir().join(format!(
         "lain-mcp-repos-{}-{}.yaml",
@@ -252,8 +248,7 @@ async fn run_mcp_federation(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    std::fs::write(&tmp_path, &yaml)
-        .map_err(|e| anyhow!("write {}: {e}", tmp_path.display()))?;
+    std::fs::write(&tmp_path, &yaml).map_err(|e| anyhow!("write {}: {e}", tmp_path.display()))?;
     tracing::info!(
         "lain mcp: {} workspace(s) — delegating to federation boot via {}",
         workspaces.len(),
@@ -264,23 +259,15 @@ async fn run_mcp_federation(
     // and the stdio MCP server. We just need to feed it the config
     // and let it do its job. `workspace_arg = ""` means "all repos"
     // (no workspace filter).
-    let result = crate::cli::server::run_server(
-        &tmp_path,
-        "stdio",
-        0,
-        "info",
-        "",
-        false,
-        embedding_model,
-    )
-    .await;
+    let result =
+        crate::cli::server::run_server(&tmp_path, "stdio", 0, "info", "", false, embedding_model)
+            .await;
 
     // Cleanup. Best-effort — a leftover tempfile in /tmp is annoying
     // but not a correctness issue.
     let _ = std::fs::remove_file(&tmp_path);
     result
 }
-
 
 /// Run a read-only **sidecar** MCP server against an owner.
 ///
@@ -305,7 +292,10 @@ pub async fn run_sidecar(argv_workspaces: &[PathBuf], owner_url: &str) -> Result
             workspaces.len()
         ));
     }
-    let workspace = workspaces.into_iter().next().expect("len() == 1 checked above");
+    let workspace = workspaces
+        .into_iter()
+        .next()
+        .expect("len() == 1 checked above");
 
     let mem_path = workspace.join(".lain").join("graph.bin");
     if !mem_path.exists() {
@@ -330,10 +320,12 @@ pub async fn run_sidecar(argv_workspaces: &[PathBuf], owner_url: &str) -> Result
         crate::overlay::subscribe(owner, follow_overlay).await;
     });
 
-    tracing::info!("sidecar mode: following {owner_url} for {}", workspace.display());
+    tracing::info!(
+        "sidecar mode: following {owner_url} for {}",
+        workspace.display()
+    );
 
-    let executor =
-        crate::tools::ToolExecutor::new_read_only(graph, overlay, workspace.clone());
+    let executor = crate::tools::ToolExecutor::new_read_only(graph, overlay, workspace.clone());
     crate::server::mcp::handler::LainMcpServer::new_read_only(executor)
         .run_stdio()
         .await
@@ -368,10 +360,7 @@ mod tests {
     #[test]
     fn parse_lain_workspace_env_trims_whitespace_and_drops_empties() {
         let got = parse_lain_workspace_env(" /a , , /b , ");
-        assert_eq!(
-            got,
-            vec![PathBuf::from("/a"), PathBuf::from("/b")]
-        );
+        assert_eq!(got, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }
 
     #[test]
@@ -415,7 +404,11 @@ mod tests {
         // Each path must appear at least once; each entry must be a
         // workspace_dir source; IDs must be unique.
         for ws in &workspaces {
-            assert!(yaml.contains(&format!("path: {}", ws.display())), "missing path {} in:\n{yaml}", ws.display());
+            assert!(
+                yaml.contains(&format!("path: {}", ws.display())),
+                "missing path {} in:\n{yaml}",
+                ws.display()
+            );
         }
         assert_eq!(yaml.matches("type: workspace_dir").count(), 3);
         // Parse it back through FederationConfig to make sure the
@@ -434,10 +427,7 @@ mod tests {
     fn build_repos_yaml_disambiguates_duplicate_basenames() {
         // Two siblings named "repo" — without suffixing, both would
         // generate id "repo" and the federation loader would reject.
-        let workspaces = vec![
-            PathBuf::from("/srv/repo"),
-            PathBuf::from("/srv/repo"),
-        ];
+        let workspaces = vec![PathBuf::from("/srv/repo"), PathBuf::from("/srv/repo")];
         let yaml = build_repos_yaml_for_workspaces(&workspaces);
         let parsed = crate::server::federation::config::FederationConfig::load_from_str(&yaml)
             .expect("duplicate-basename yaml must still parse");
@@ -452,10 +442,7 @@ mod tests {
         // The old logic always suffixed i >= 1, producing `repo_b-1`
         // instead of `repo_b` — annoying for downstream tool calls that
         // want to reference repos by their natural name.
-        let workspaces = vec![
-            PathBuf::from("/srv/repo_a"),
-            PathBuf::from("/srv/repo_b"),
-        ];
+        let workspaces = vec![PathBuf::from("/srv/repo_a"), PathBuf::from("/srv/repo_b")];
         let yaml = build_repos_yaml_for_workspaces(&workspaces);
         let parsed = crate::server::federation::config::FederationConfig::load_from_str(&yaml)
             .expect("unique-basename yaml must parse");

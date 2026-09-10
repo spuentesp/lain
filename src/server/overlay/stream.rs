@@ -58,10 +58,7 @@ pub fn subscribe_channel() -> broadcast::Receiver<OverlayDiff> {
 /// `Lag` is swallowed because the sidecar's overlay is a best-effort
 /// cache of recent work; the static graph on disk still holds the full
 /// history.
-pub async fn subscribe_apply(
-    overlay: VolatileOverlay,
-    mut rx: broadcast::Receiver<OverlayDiff>,
-) {
+pub async fn subscribe_apply(overlay: VolatileOverlay, mut rx: broadcast::Receiver<OverlayDiff>) {
     use tokio::sync::broadcast::error::RecvError;
     loop {
         match rx.recv().await {
@@ -113,7 +110,11 @@ mod tests {
         let overlay = VolatileOverlay::new();
         let (tx, rx) = tokio::sync::broadcast::channel::<OverlayDiff>(4);
         let apply_handle = tokio::spawn(subscribe_apply(overlay.clone(), rx));
-        let node = GraphNode::new(NodeType::Function, "fake-name".into(), "/tmp/fake.rs".into());
+        let node = GraphNode::new(
+            NodeType::Function,
+            "fake-name".into(),
+            "/tmp/fake.rs".into(),
+        );
         let node_id = node.id.clone();
         tx.send(OverlayDiff {
             revision: 1,
@@ -204,7 +205,11 @@ mod tests {
         let rx = subscribe_channel();
         let overlay = VolatileOverlay::new();
         let apply_handle = tokio::spawn(subscribe_apply(overlay.clone(), rx));
-        let node = GraphNode::new(NodeType::Function, "fake-name".into(), "/tmp/fake.rs".into());
+        let node = GraphNode::new(
+            NodeType::Function,
+            "fake-name".into(),
+            "/tmp/fake.rs".into(),
+        );
         let node_id = node.id.clone();
         broadcast_overlay_diff(OverlayDiff {
             revision: 1,
@@ -248,7 +253,11 @@ mod tests {
         use std::sync::Arc;
         use tokio::net::TcpListener;
 
-        let node = GraphNode::new(NodeType::Function, "owner-node".into(), "/tmp/owner.rs".into());
+        let node = GraphNode::new(
+            NodeType::Function,
+            "owner-node".into(),
+            "/tmp/owner.rs".into(),
+        );
         let node_id = node.id.clone();
         let diff = Arc::new(
             serde_json::to_string(&OverlayDiff {
@@ -260,7 +269,9 @@ mod tests {
             .expect("encode diff"),
         );
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind mock server");
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind mock server");
         let addr = listener.local_addr().expect("mock address");
         let server = tokio::spawn(async move {
             loop {
@@ -274,21 +285,15 @@ mod tests {
                         let diff = Arc::clone(&diff);
                         async move {
                             let (status, content_type, body) = match request.uri().path() {
-                                "/overlay/get_snapshot" => (
-                                    StatusCode::OK,
-                                    "application/json",
-                                    "[]".to_string(),
-                                ),
+                                "/overlay/get_snapshot" => {
+                                    (StatusCode::OK, "application/json", "[]".to_string())
+                                }
                                 "/overlay/subscribe" => (
                                     StatusCode::OK,
                                     "text/event-stream",
                                     format!("event: overlay\ndata: {diff}\n\n"),
                                 ),
-                                _ => (
-                                    StatusCode::NOT_FOUND,
-                                    "text/plain",
-                                    "not found".to_string(),
-                                ),
+                                _ => (StatusCode::NOT_FOUND, "text/plain", "not found".to_string()),
                             };
                             Ok::<_, Infallible>(
                                 Response::builder()
@@ -307,10 +312,7 @@ mod tests {
         });
 
         let overlay = VolatileOverlay::new();
-        let subscription = tokio::spawn(subscribe(
-            format!("http://{addr}/mcp"),
-            overlay.clone(),
-        ));
+        let subscription = tokio::spawn(subscribe(format!("http://{addr}/mcp"), overlay.clone()));
         let received = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if overlay.get_node(&node_id).is_some() {
@@ -323,6 +325,9 @@ mod tests {
 
         subscription.abort();
         server.abort();
-        assert!(received.is_ok(), "sidecar did not apply the owner's SSE diff");
+        assert!(
+            received.is_ok(),
+            "sidecar did not apply the owner's SSE diff"
+        );
     }
 }

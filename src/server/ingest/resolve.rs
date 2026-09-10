@@ -12,12 +12,12 @@
 //! functions in this module are pure: `&self` only on the `db` they
 //! mutate through the public `insert_edges_batch`/`upsert_edge` API.
 
+use super::scan::{PatternRef, StaticFileRef};
 use crate::federation::cross_repo::CrossRepoResolver;
 use crate::federation::repo_id::RepoId;
 use crate::graph::{graph_path, GraphDatabase};
-use crate::schema::{is_type_level_target, EdgeType, GraphEdge};
 use crate::lsp::ReferenceLocation;
-use super::scan::{PatternRef, StaticFileRef};
+use crate::schema::{is_type_level_target, EdgeType, GraphEdge};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -89,7 +89,9 @@ pub fn resolve_call_edges(
                 resolved_target = Some(target.id);
             }
         } else if let (Some(resolver), Some(src)) = (resolver, source_repo) {
-            if let Some(gid) = resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line)) {
+            if let Some(gid) =
+                resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line))
+            {
                 let gid_str = gid.as_str().to_string();
                 if gid_str != *source_id {
                     resolved_target = Some(gid_str);
@@ -97,7 +99,11 @@ pub fn resolve_call_edges(
             }
         }
         if let Some(target_id) = resolved_target {
-            edges.push(GraphEdge::new(EdgeType::Calls, source_id.clone(), target_id));
+            edges.push(GraphEdge::new(
+                EdgeType::Calls,
+                source_id.clone(),
+                target_id,
+            ));
         }
     }
     edges
@@ -170,10 +176,11 @@ pub fn resolve_static_edges(
     let mut name_index: HashMap<String, Vec<(String, crate::schema::NodeType, String)>> =
         HashMap::new();
     for node in db.get_all_nodes() {
-        name_index
-            .entry(node.name.clone())
-            .or_default()
-            .push((node.id.clone(), node.node_type.clone(), node.path.clone()));
+        name_index.entry(node.name.clone()).or_default().push((
+            node.id.clone(),
+            node.node_type.clone(),
+            node.path.clone(),
+        ));
     }
 
     let mut edges: Vec<GraphEdge> = Vec::new();
@@ -184,12 +191,9 @@ pub fn resolve_static_edges(
         };
         let Some(candidates) = name_index.get(sr.target_name.as_str()) else {
             if let (Some(resolver), Some(src)) = (resolver, source_repo) {
-                if let Some(gid) = resolver.resolve_cross_repo(
-                    src,
-                    Some(&sr.target_name),
-                    None,
-                    None,
-                ) {
+                if let Some(gid) =
+                    resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None)
+                {
                     let gid_str = gid.as_str().to_string();
                     if gid_str != source_node.id {
                         let key = (source_node.id.clone(), gid_str.clone());
@@ -272,10 +276,8 @@ pub fn resolve_pattern_edges(
         .into_iter()
         .filter(|n| matches!(n.node_type, crate::schema::NodeType::File))
         .collect();
-    let file_nodes: HashMap<&str, &crate::schema::GraphNode> = nodes
-        .iter()
-        .map(|n| (n.path.as_str(), n))
-        .collect();
+    let file_nodes: HashMap<&str, &crate::schema::GraphNode> =
+        nodes.iter().map(|n| (n.path.as_str(), n)).collect();
 
     let mut value_to_files: HashMap<String, Vec<String>> = HashMap::new();
     for pr in refs {
@@ -429,7 +431,6 @@ mod ambiguous_name_tests {
         assert_eq!(edges[0].target_id, local_id);
     }
 
-
     /// A tree-sitter name reference must not link across languages. A
     /// name that happens to be unique repo-wide still had exactly one
     /// candidate, so a Python caller linked straight to a Rust
@@ -458,7 +459,6 @@ mod ambiguous_name_tests {
             edges.len()
         );
     }
-
 
     /// The same-language case must keep working, including across the
     /// extensions that belong to one language family.

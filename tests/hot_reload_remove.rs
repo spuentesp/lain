@@ -33,8 +33,7 @@ async fn remove_repo_from_workspace_makes_it_invisible_to_list_repos() {
     // `/tmp/lain-federation-{pid}`. A prior test in the same process
     // may have left it in an inconsistent state — clear it so this
     // test starts fresh.
-    let staging = std::env::temp_dir()
-        .join(format!("lain-federation-{}", std::process::id()));
+    let staging = std::env::temp_dir().join(format!("lain-federation-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     let server = lain::server::LainServer::with_federation(
         Arc::clone(&fed),
@@ -55,11 +54,8 @@ async fn remove_repo_from_workspace_makes_it_invisible_to_list_repos() {
         loop {
             match sub.try_recv() {
                 Ok(()) => {
-                    let _ = lain::server::reload::run_rebuild(
-                        &server_for_loop,
-                        &bus_for_loop,
-                    )
-                    .await;
+                    let _ =
+                        lain::server::reload::run_rebuild(&server_for_loop, &bus_for_loop).await;
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -100,10 +96,8 @@ async fn build_federation(
     use lain::server::federation::federated_index::FederatedIndex;
     use lain::server::federation::graph_backend::PetgraphBackend;
 
-    let cfg: FederationConfig = serde_yaml::from_str(
-        &std::fs::read_to_string(repos_yaml).unwrap(),
-    )
-    .unwrap();
+    let cfg: FederationConfig =
+        serde_yaml::from_str(&std::fs::read_to_string(repos_yaml).unwrap()).unwrap();
     let backend: Arc<dyn lain::server::federation::graph_backend::GraphBackend> =
         Arc::new(PetgraphBackend::new(&cfg.data_dir).expect("PetgraphBackend::new"));
     let fed = Arc::new(FederatedIndex::new(backend));

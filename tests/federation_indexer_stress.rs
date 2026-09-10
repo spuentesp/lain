@@ -132,7 +132,9 @@ fn build_fixture(root: &Path) {
     for i in 0..FILE_COUNT {
         let path = src.join(format!("helper_{i:04}.rs"));
         let mut body = String::with_capacity(FUNCS_PER_FILE * 96);
-        body.push_str(&format!("use crate::compute;\nuse crate::helper_compute;\n"));
+        body.push_str(&format!(
+            "use crate::compute;\nuse crate::helper_compute;\n"
+        ));
         for j in 0..FUNCS_PER_FILE {
             // Two user-defined Calls per function body (compute +
             // helper_compute), so each caller emits exactly two static
@@ -182,9 +184,9 @@ fn assert_post_index_invariants(alpha: &Arc<RepoIndex>, label: &str) -> (usize, 
             nodes.len()
         )
     });
-    let incoming = db.get_edges_to(&compute.id).unwrap_or_else(|e| {
-        panic!("[{label}] get_edges_to({}) failed: {e}", compute.id)
-    });
+    let incoming = db
+        .get_edges_to(&compute.id)
+        .unwrap_or_else(|e| panic!("[{label}] get_edges_to({}) failed: {e}", compute.id));
     let has_calls = incoming
         .iter()
         .any(|e| matches!(e.edge_type, EdgeType::Calls));
@@ -223,7 +225,11 @@ fn assert_post_index_invariants(alpha: &Arc<RepoIndex>, label: &str) -> (usize, 
     (nodes.len(), edges.len())
 }
 
-fn build_repoindex(repo_path: &std::path::PathBuf, data_dir: &Path, repo_id: &str) -> Arc<RepoIndex> {
+fn build_repoindex(
+    repo_path: &std::path::PathBuf,
+    data_dir: &Path,
+    repo_id: &str,
+) -> Arc<RepoIndex> {
     let source = Box::new(
         WorkspaceDirSource::new(RepoId::new(repo_id).unwrap(), repo_path.clone())
             .expect("workspace dir source"),

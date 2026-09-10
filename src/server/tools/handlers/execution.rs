@@ -8,9 +8,9 @@
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::tuning::RuntimeConfig;
-use crate::toolchains::{detect_toolchains, load_toolchain_profiles, ToolchainProfile};
 use crate::server::tools::handlers::decoration::{decorate_output, get_parser, GraphEnricher};
+use crate::toolchains::{detect_toolchains, load_toolchain_profiles, ToolchainProfile};
+use crate::tuning::RuntimeConfig;
 use std::path::Path;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -163,7 +163,12 @@ pub async fn run_build(
         format!("{}\n{}", stdout, stderr)
     };
 
-    let mut response = format!("Running `{}` in {:?} (toolchain: {})\n", profile.build_cmd(), work_dir, toolchain_name);
+    let mut response = format!(
+        "Running `{}` in {:?} (toolchain: {})\n",
+        profile.build_cmd(),
+        work_dir,
+        toolchain_name
+    );
     response.push_str(&format!("Exit code: {}\n", exit_code));
 
     if exit_code == 0 {
@@ -179,7 +184,11 @@ pub async fn run_build(
                 response.push_str(&stderr);
             }
         } else {
-            response.push_str(&format!("\n⚠️  Unknown parser '{}' — raw output:\n{}", profile.build_parser_id(), stderr));
+            response.push_str(&format!(
+                "\n⚠️  Unknown parser '{}' — raw output:\n{}",
+                profile.build_parser_id(),
+                stderr
+            ));
         }
     }
 
@@ -222,9 +231,11 @@ pub async fn run_tests(
     cmd.current_dir(work_dir);
 
     let default_timeout = runtime.default_test_timeout_secs;
-    let timeout_duration = Duration::from_secs(timeout_secs.unwrap_or(default_timeout as usize) as u64);
+    let timeout_duration =
+        Duration::from_secs(timeout_secs.unwrap_or(default_timeout as usize) as u64);
 
-    let result = timeout(timeout_duration, cmd.output()).await
+    let result = timeout(timeout_duration, cmd.output())
+        .await
         .map_err(|_| LainError::Mcp("Tests timed out".to_string()))?
         .map_err(|e| spawn_error(&program, work_dir, e))?;
 
@@ -235,7 +246,12 @@ pub async fn run_tests(
     // Use stdout, fall back to stderr if empty
     let test_output = if stdout.is_empty() { &stderr } else { &stdout };
 
-    let mut response = format!("Running `{}` in {:?} (toolchain: {})\n", profile.test_cmd(), work_dir, toolchain_name);
+    let mut response = format!(
+        "Running `{}` in {:?} (toolchain: {})\n",
+        profile.test_cmd(),
+        work_dir,
+        toolchain_name
+    );
     if let Some(f) = filter {
         response.push_str(&format!("Filter: {}\n", f));
     }
@@ -254,7 +270,11 @@ pub async fn run_tests(
                 response.push_str(test_output);
             }
         } else {
-            response.push_str(&format!("\n⚠️  Unknown parser '{}' — raw output:\n{}", profile.test_parser_id(), test_output));
+            response.push_str(&format!(
+                "\n⚠️  Unknown parser '{}' — raw output:\n{}",
+                profile.test_parser_id(),
+                test_output
+            ));
         }
     }
 
@@ -271,7 +291,9 @@ pub async fn run_clippy(
     let work_dir = cwd.map(Path::new).unwrap_or(Path::new("."));
 
     if !work_dir.join("Cargo.toml").exists() {
-        return Err(LainError::NotFound("Cargo.toml not found - not a Rust project".to_string()));
+        return Err(LainError::NotFound(
+            "Cargo.toml not found - not a Rust project".to_string(),
+        ));
     }
 
     // `clippy` is Rust by definition, so resolve through the rust
@@ -325,14 +347,18 @@ pub async fn run_clippy(
     if exit_code == 0 {
         response.push_str("\n✅ Clippy passed - no issues found\n");
     } else {
-        response.push_str(&format!("\n❌ Clippy found issues (exit code {})\n", exit_code));
+        response.push_str(&format!(
+            "\n❌ Clippy found issues (exit code {})\n",
+            exit_code
+        ));
         // Use decoration: try JSON first, fall back to text parser
         if let Some(parser) = get_parser("cargo-json") {
             let enriched = decorate_output(&combined, parser, &GraphEnricher, graph, overlay);
             if enriched != combined {
                 response.push_str(&enriched);
             } else if let Some(text_parser) = get_parser("text") {
-                let enriched = decorate_output(&combined, text_parser, &GraphEnricher, graph, overlay);
+                let enriched =
+                    decorate_output(&combined, text_parser, &GraphEnricher, graph, overlay);
                 if !enriched.is_empty() && enriched != combined {
                     response.push_str(&enriched);
                 } else {
@@ -363,8 +389,14 @@ mod spawn_tests {
         let err = spawn_error("cargo", Path::new("/ws/project"), e);
         let msg = err.to_string();
         assert!(msg.contains("cargo"), "must name the program: {msg}");
-        assert!(msg.contains("/ws/project"), "must name the directory: {msg}");
-        assert!(msg.contains("PATH="), "must show the PATH it searched: {msg}");
+        assert!(
+            msg.contains("/ws/project"),
+            "must name the directory: {msg}"
+        );
+        assert!(
+            msg.contains("PATH="),
+            "must show the PATH it searched: {msg}"
+        );
     }
 
     #[test]

@@ -50,7 +50,6 @@ fn tool_error_message(env: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-
 /// Initialize a git repo at `path`, configure a local identity,
 /// and commit everything in the working tree. Mirrors `feat_suite.rs`.
 fn git_init(path: &std::path::Path) {
@@ -60,7 +59,10 @@ fn git_init(path: &std::path::Path) {
         .status()
         .expect("git init");
     assert!(status.success(), "git init failed");
-    for (k, v) in [("user.email", "feat-negative@lain"), ("user.name", "feat-negative")] {
+    for (k, v) in [
+        ("user.email", "feat-negative@lain"),
+        ("user.name", "feat-negative"),
+    ] {
         std::process::Command::new("git")
             .args(["config", k, v])
             .current_dir(path)
@@ -141,9 +143,12 @@ fn boot_server(port: u16) -> ServerGuard {
     let child = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",
-            "--transport", "http",
-            "--port", &port.to_string(),
-            "--workspace", "auto",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--workspace",
+            "auto",
             "--config",
             project.path().join("repos.yaml").to_str().unwrap(),
         ])
@@ -225,11 +230,7 @@ fn feat_negative_paths_end_to_end() {
     // a negative number returns `None`, so the value is treated
     // as `None` and the default limit is used. The call succeeds.
     // We assert that to lock the current behavior in.
-    let env = tools_call_envelope(
-        &host,
-        "find_anchors",
-        serde_json::json!({"limit": -1}),
-    );
+    let env = tools_call_envelope(&host, "find_anchors", serde_json::json!({"limit": -1}));
     assert!(
         env.pointer("/result").is_some(),
         "find_anchors with limit=-1 should produce a result envelope: {env}"
@@ -260,11 +261,7 @@ fn feat_negative_paths_end_to_end() {
         "get_blast_radius missing-symbol message should name `symbol`: {text}"
     );
 
-    let env = tools_call_envelope(
-        &host,
-        "get_blast_radius",
-        serde_json::json!({"symbol": 42}),
-    );
+    let env = tools_call_envelope(&host, "get_blast_radius", serde_json::json!({"symbol": 42}));
     assert_eq!(
         env.pointer("/result/isError").and_then(|v| v.as_bool()),
         Some(true),
@@ -429,11 +426,7 @@ fn feat_negative_paths_end_to_end() {
 
     // query_graph with an empty ops array should produce a valid
     // (likely empty) result rather than crashing.
-    let env = tools_call_envelope(
-        &host,
-        "query_graph",
-        serde_json::json!({"ops": []}),
-    );
+    let env = tools_call_envelope(&host, "query_graph", serde_json::json!({"ops": []}));
     assert!(
         env.pointer("/result").is_some(),
         "query_graph with empty ops should produce a result envelope: {env}"
@@ -471,7 +464,8 @@ fn feat_negative_paths_end_to_end() {
     // doesn't have to rewrite the test.
     let text = tool_result_text(&env).unwrap_or_default();
     assert!(
-        text.contains("name") && (text.contains("Missing required argument") || text.contains("missing field")),
+        text.contains("name")
+            && (text.contains("Missing required argument") || text.contains("missing field")),
         "register_agent missing-name message should mention `name` and the \
          missing-field phrasing: {text}"
     );
@@ -495,26 +489,29 @@ fn feat_negative_paths_end_to_end() {
         "register_agent with unknown kind should not set isError=true: {env}"
     );
     let text = tool_result_text(&env).unwrap_or_default();
-    let reg: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-        panic!("register_agent response not JSON: {e}\n{text}")
-    });
-    let kind_agent = reg.get("agent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-    assert!(kind_agent.is_some(), "register_agent response missing agent_id: {reg}");
-    let active = tools_call_envelope(
-        &host,
-        "list_active_agents",
-        serde_json::json!({}),
+    let reg: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("register_agent response not JSON: {e}\n{text}"));
+    let kind_agent = reg
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    assert!(
+        kind_agent.is_some(),
+        "register_agent response missing agent_id: {reg}"
     );
+    let active = tools_call_envelope(&host, "list_active_agents", serde_json::json!({}));
     let active_text = tool_result_text(&active).unwrap_or_default();
     let active: serde_json::Value = serde_json::from_str(&active_text)
         .unwrap_or_else(|e| panic!("list_active_agents not JSON: {e}\n{active_text}"));
-    let active_arr = active.as_array().unwrap_or_else(|| {
-        panic!("list_active_agents not array: {active}")
-    });
+    let active_arr = active
+        .as_array()
+        .unwrap_or_else(|| panic!("list_active_agents not array: {active}"));
     let found_kind = active_arr.iter().find_map(|a| {
         let id = a.get("agent_id").and_then(|v| v.as_str())?;
         if Some(id) == kind_agent.as_deref() {
-            a.get("kind").and_then(|v| v.as_str()).map(|s| s.to_string())
+            a.get("kind")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
         } else {
             None
         }
@@ -541,25 +538,25 @@ fn feat_negative_paths_end_to_end() {
          (it's coerced to interactive): {env}"
     );
     let text = tool_result_text(&env).unwrap_or_default();
-    let reg: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
-        panic!("register_agent response not JSON: {e}\n{text}")
-    });
-    let mode_agent = reg.get("agent_id").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let active = tools_call_envelope(
-        &host,
-        "list_active_agents",
-        serde_json::json!({}),
-    );
+    let reg: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("register_agent response not JSON: {e}\n{text}"));
+    let mode_agent = reg
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let active = tools_call_envelope(&host, "list_active_agents", serde_json::json!({}));
     let active_text = tool_result_text(&active).unwrap_or_default();
     let active: serde_json::Value = serde_json::from_str(&active_text)
         .unwrap_or_else(|e| panic!("list_active_agents not JSON: {e}\n{active_text}"));
-    let active_arr = active.as_array().unwrap_or_else(|| {
-        panic!("list_active_agents not array: {active}")
-    });
+    let active_arr = active
+        .as_array()
+        .unwrap_or_else(|| panic!("list_active_agents not array: {active}"));
     let found_mode = active_arr.iter().find_map(|a| {
         let id = a.get("agent_id").and_then(|v| v.as_str())?;
         if Some(id) == mode_agent.as_deref() {
-            a.get("mode").and_then(|v| v.as_str()).map(|s| s.to_string())
+            a.get("mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
         } else {
             None
         }
@@ -634,7 +631,8 @@ fn feat_negative_paths_end_to_end() {
     );
     let text = tool_result_text(&env).unwrap_or_default();
     assert!(
-        text.contains("Missing required argument: session_token") || text.contains("missing field `session_token`"),
+        text.contains("Missing required argument: session_token")
+            || text.contains("missing field `session_token`"),
         "who_am_i missing-session_token message should name session_token: {text}"
     );
 
@@ -788,7 +786,8 @@ fn feat_negative_paths_end_to_end() {
     );
     let text = tool_result_text(&env).unwrap_or_default();
     assert!(
-        text.contains("Missing required argument: session_token") || text.contains("missing field `session_token`"),
+        text.contains("Missing required argument: session_token")
+            || text.contains("missing field `session_token`"),
         "list_subagents missing message should name session_token: {text}"
     );
 
@@ -865,11 +864,7 @@ fn feat_negative_paths_end_to_end() {
         "search_org with no args should set isError=true: {env}"
     );
 
-    let env = tools_call_envelope(
-        &host,
-        "search_org",
-        serde_json::json!({"limit": 10}),
-    );
+    let env = tools_call_envelope(&host, "search_org", serde_json::json!({"limit": 10}));
     assert_eq!(
         env.pointer("/result/isError").and_then(|v| v.as_bool()),
         Some(true),
@@ -901,11 +896,7 @@ fn feat_negative_paths_end_to_end() {
     // get_cross_repo_blast_radius — `symbol` and `depth` required,
     // and `depth` is a *string range* (e.g. "1..3"), not a number.
     // ─────────────────────────────────────────────────────────────
-    let env = tools_call_envelope(
-        &host,
-        "get_cross_repo_blast_radius",
-        serde_json::json!({}),
-    );
+    let env = tools_call_envelope(&host, "get_cross_repo_blast_radius", serde_json::json!({}));
     assert_eq!(
         env.pointer("/result/isError").and_then(|v| v.as_bool()),
         Some(true),

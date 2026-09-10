@@ -51,10 +51,18 @@ pub struct LockConflict {
 }
 
 impl LockConflict {
-    pub fn agent_id(&self) -> AgentId { self.holder.clone() }
-    pub fn kind(&self) -> AgentKind { self.kind.clone() }
-    pub fn intent(&self) -> ClaimIntent { self.intent.clone() }
-    pub fn mtime(&self) -> SystemTime { self.mtime }
+    pub fn agent_id(&self) -> AgentId {
+        self.holder.clone()
+    }
+    pub fn kind(&self) -> AgentKind {
+        self.kind.clone()
+    }
+    pub fn intent(&self) -> ClaimIntent {
+        self.intent.clone()
+    }
+    pub fn mtime(&self) -> SystemTime {
+        self.mtime
+    }
 }
 
 /// Acquire a filesystem lock for `path` under `workspace_root`. Atomic
@@ -90,8 +98,7 @@ pub fn try_lock(
                     // Second attempt failed too — re-read the
                     // current holder and report the conflict so the
                     // caller can decide whether to roll back.
-                    let (holder, cur_kind, cur_intent, mtime) =
-                        read_current_holder(&lock_path);
+                    let (holder, cur_kind, cur_intent, mtime) = read_current_holder(&lock_path);
                     return Err(LockConflict {
                         holder,
                         kind: cur_kind,
@@ -193,19 +200,14 @@ fn read_current_holder(lock_path: &Path) -> (AgentId, AgentKind, ClaimIntent, Sy
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::now());
     let body_str = std::fs::read_to_string(lock_path).unwrap_or_default();
-    let body: serde_json::Value =
-        serde_json::from_str(&body_str).unwrap_or(serde_json::json!({}));
+    let body: serde_json::Value = serde_json::from_str(&body_str).unwrap_or(serde_json::json!({}));
     let holder = AgentId(
         body.get("agent_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
     );
-    let kind = AgentKind::parse(
-        body.get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("other"),
-    );
+    let kind = AgentKind::parse(body.get("kind").and_then(|v| v.as_str()).unwrap_or("other"));
     let intent = match body
         .get("intent")
         .and_then(|v| v.as_str())

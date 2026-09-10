@@ -107,20 +107,13 @@ pub struct GetRecentActivityArgs {
 
 const RECENT_ACTIVITY_DEFAULT_LIMIT: usize = 20;
 
-pub fn run_get_recent_activity(
-    server: &LainServer,
-    args: Value,
-) -> Result<Value, String> {
+pub fn run_get_recent_activity(server: &LainServer, args: Value) -> Result<Value, String> {
     let state_dir = server.state_dir_for_audit();
     run_get_recent_activity_with_dir(&state_dir, args)
 }
 
-pub fn run_get_recent_activity_with_dir(
-    state_dir: &Path,
-    args: Value,
-) -> Result<Value, String> {
-    let a: GetRecentActivityArgs =
-        serde_json::from_value(args).map_err(|e| e.to_string())?;
+pub fn run_get_recent_activity_with_dir(state_dir: &Path, args: Value) -> Result<Value, String> {
+    let a: GetRecentActivityArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let limit = a.limit.unwrap_or(RECENT_ACTIVITY_DEFAULT_LIMIT);
     let group_by = a.group_by.as_deref().unwrap_or("path");
 
@@ -130,7 +123,8 @@ pub fn run_get_recent_activity_with_dir(
     }
 
     let total_events = events.len();
-    let mut groups: std::collections::BTreeMap<String, GroupAccum> = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<String, GroupAccum> =
+        std::collections::BTreeMap::new();
     for ev in &events {
         let key = group_key(ev, group_by);
         let entry = groups.entry(key).or_default();
@@ -149,7 +143,11 @@ pub fn run_get_recent_activity_with_dir(
     }
     // Convert to a sorted vector by last_ts desc (most recent group first)
     let mut sorted: Vec<(String, GroupAccum)> = groups.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.last_ts.partial_cmp(&a.1.last_ts).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.1.last_ts
+            .partial_cmp(&a.1.last_ts)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let total_groups = sorted.len();
     let truncated = total_groups > limit;
@@ -255,8 +253,14 @@ mod tests {
             serde_json::json!({ "since_unix": null, "path_glob": "/b/**" }),
         )
         .expect("run_get_audit_log_with_dir");
-        let arr = value.as_array().expect("top-level value must be a JSON array");
-        assert_eq!(arr.len(), 1, "JSON array should hold one event, got {arr:?}");
+        let arr = value
+            .as_array()
+            .expect("top-level value must be a JSON array");
+        assert_eq!(
+            arr.len(),
+            1,
+            "JSON array should hold one event, got {arr:?}"
+        );
         assert_eq!(arr[0]["path"], serde_json::json!("/b/foo.rs"));
     }
 

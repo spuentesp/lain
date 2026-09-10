@@ -128,9 +128,15 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     eprintln!("[workspace_peers] repo_a nodes: {}", a_nodes.len());
     eprintln!("[workspace_peers] repo_b nodes: {}", b_nodes.len());
     let backend_edges = fed.backend().all_edges().expect("all_edges");
-    eprintln!("[workspace_peers] federated backend edges: {}", backend_edges.len());
+    eprintln!(
+        "[workspace_peers] federated backend edges: {}",
+        backend_edges.len()
+    );
     for e in backend_edges.iter().take(20) {
-        eprintln!("[workspace_peers]   edge {} -> {} ({:?})", e.source_id, e.target_id, e.edge_type);
+        eprintln!(
+            "[workspace_peers]   edge {} -> {} ({:?})",
+            e.source_id, e.target_id, e.edge_type
+        );
     }
 
     // Now call `get_workspace_graph` directly on the federation.
@@ -140,8 +146,8 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     // cost for the same coverage; the federation is already
     // constructed and projected.
     use lain::server::federation::repo_id::RepoId;
-    use lain::server::mcp::federation_tools::workspace::get_workspace_graph;
     use lain::server::federation::workspace::WorkspacesFile;
+    use lain::server::mcp::federation_tools::workspace::get_workspace_graph;
 
     let workspaces_yaml = std::fs::read_to_string(root.join("workspaces.yaml")).unwrap();
     let workspaces: WorkspacesFile =
@@ -185,11 +191,12 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
 
     // Pin the node-level contract first: the workspace graph
     // surfaces the function nodes from both repos.
-    let both_functions_present = nodes.iter().any(|n| {
-        n.id == "a:Function:src/lib.rs:shared_helper" && n.name == "shared_helper"
-    }) && nodes.iter().any(|n| {
-        n.id == "b:Function:src/lib.rs:shared_helper" && n.name == "shared_helper"
-    });
+    let both_functions_present = nodes
+        .iter()
+        .any(|n| n.id == "a:Function:src/lib.rs:shared_helper" && n.name == "shared_helper")
+        && nodes
+            .iter()
+            .any(|n| n.id == "b:Function:src/lib.rs:shared_helper" && n.name == "shared_helper");
     assert!(
         both_functions_present,
         "workspace graph must surface both `shared_helper` function \

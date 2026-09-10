@@ -1,7 +1,7 @@
 //! Tests for graph.rs
 
 use crate::graph::GraphDatabase;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::collections::HashSet;
 
 fn make_test_graph() -> GraphDatabase {
@@ -14,12 +14,20 @@ fn make_test_graph() -> GraphDatabase {
     // main -> x -> b (b has two callers)
     // dead (no connections)
 
-    let main = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
+    let main = GraphNode::new(
+        NodeType::Function,
+        "main".to_string(),
+        "/src/main.rs".to_string(),
+    );
     let a = GraphNode::new(NodeType::Function, "a".to_string(), "/src/a.rs".to_string());
     let b = GraphNode::new(NodeType::Function, "b".to_string(), "/src/b.rs".to_string());
     let c = GraphNode::new(NodeType::Function, "c".to_string(), "/src/c.rs".to_string());
     let x = GraphNode::new(NodeType::Function, "x".to_string(), "/src/x.rs".to_string());
-    let dead = GraphNode::new(NodeType::Function, "dead".to_string(), "/src/dead.rs".to_string());
+    let dead = GraphNode::new(
+        NodeType::Function,
+        "dead".to_string(),
+        "/src/dead.rs".to_string(),
+    );
 
     graph.upsert_node(main.clone()).unwrap();
     graph.upsert_node(a.clone()).unwrap();
@@ -28,11 +36,29 @@ fn make_test_graph() -> GraphDatabase {
     graph.upsert_node(x.clone()).unwrap();
     graph.upsert_node(dead.clone()).unwrap();
 
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, main.id.clone(), a.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, b.id.clone(), c.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, main.id.clone(), x.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, x.id.clone(), b.id.clone())).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            main.id.clone(),
+            a.id.clone(),
+        ))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, b.id.clone(), c.id.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            main.id.clone(),
+            x.id.clone(),
+        ))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, x.id.clone(), b.id.clone()))
+        .unwrap();
 
     graph
 }
@@ -163,7 +189,11 @@ fn test_get_node_at_location() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let mut node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.line_start = Some(10);
     node.line_end = Some(20);
     graph.upsert_node(node).unwrap();
@@ -230,8 +260,16 @@ fn test_insert_co_change_edges() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let n1 = GraphNode::new(NodeType::File, "file1.rs".to_string(), "/src/file1.rs".to_string());
-    let n2 = GraphNode::new(NodeType::File, "file2.rs".to_string(), "/src/file2.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::File,
+        "file1.rs".to_string(),
+        "/src/file1.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::File,
+        "file2.rs".to_string(),
+        "/src/file2.rs".to_string(),
+    );
 
     graph.upsert_node(n1.clone()).unwrap();
     graph.upsert_node(n2.clone()).unwrap();
@@ -320,7 +358,13 @@ fn test_insert_nodes_batch() {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     let nodes: Vec<GraphNode> = (0..10)
-        .map(|i| GraphNode::new(NodeType::Function, format!("fn_{}", i), "/src/lib.rs".to_string()))
+        .map(|i| {
+            GraphNode::new(
+                NodeType::Function,
+                format!("fn_{}", i),
+                "/src/lib.rs".to_string(),
+            )
+        })
         .collect();
 
     let result = graph.insert_nodes_batch(&nodes);
@@ -359,7 +403,11 @@ fn open_read_only_rejects_writes() {
     let owner = GraphDatabase::new(&path).expect("new owner");
 
     // Build a real test node using the existing graph_tests.rs pattern.
-    let n = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
+    let n = GraphNode::new(
+        NodeType::Function,
+        "main".to_string(),
+        "/src/main.rs".to_string(),
+    );
     let id = n.id.clone();
     owner.upsert_node(n.clone()).expect("owner insert");
     // Persist so open_read_only below can hydrate from disk.
@@ -375,18 +423,20 @@ fn open_read_only_rejects_writes() {
     let r = ro.upsert_node(write_node);
     assert!(r.is_err(), "upsert_node on a read-only graph must error");
 
-    let r2 = ro.insert_edge(&GraphEdge::new(
-        EdgeType::Calls,
-        id.clone(),
-        id.clone(),
-    ));
+    let r2 = ro.insert_edge(&GraphEdge::new(EdgeType::Calls, id.clone(), id.clone()));
     assert!(r2.is_err(), "insert_edge on a read-only graph must error");
 
     let r3 = ro.set_last_commit("deadbeef".to_string());
-    assert!(r3.is_err(), "set_last_commit on a read-only graph must error");
+    assert!(
+        r3.is_err(),
+        "set_last_commit on a read-only graph must error"
+    );
 
     // Reads still succeed and reflect the owner's snapshot.
-    let n2 = ro.get_node(&id).expect("get on read-only").expect("node present");
+    let n2 = ro
+        .get_node(&id)
+        .expect("get on read-only")
+        .expect("node present");
     assert_eq!(n2.id, n.id);
 }
 /// Co-change output showed `src/server/presence_lock.rs (2 times)`
@@ -403,18 +453,38 @@ fn co_change_partners_are_deduped_by_path() {
     let partner = "/src/server/presence_lock.rs";
     let other = "/src/main.rs";
 
-    graph.upsert_node(GraphNode::new(NodeType::File, "hooks.rs".to_string(), source.to_string())).unwrap();
-    graph.upsert_node(GraphNode::new(NodeType::File, "presence_lock.rs".to_string(), partner.to_string())).unwrap();
-    graph.upsert_node(GraphNode::new(NodeType::File, "main.rs".to_string(), other.to_string())).unwrap();
+    graph
+        .upsert_node(GraphNode::new(
+            NodeType::File,
+            "hooks.rs".to_string(),
+            source.to_string(),
+        ))
+        .unwrap();
+    graph
+        .upsert_node(GraphNode::new(
+            NodeType::File,
+            "presence_lock.rs".to_string(),
+            partner.to_string(),
+        ))
+        .unwrap();
+    graph
+        .upsert_node(GraphNode::new(
+            NodeType::File,
+            "main.rs".to_string(),
+            other.to_string(),
+        ))
+        .unwrap();
 
     // The same relationship recorded repeatedly — what the enrichment
     // pass produces when a path resolves through more than one node.
-    graph.insert_co_change_edges(&[
-        (source.to_string(), partner.to_string(), 2),
-        (source.to_string(), partner.to_string(), 2),
-        (source.to_string(), partner.to_string(), 2),
-        (source.to_string(), other.to_string(), 2),
-    ]).unwrap();
+    graph
+        .insert_co_change_edges(&[
+            (source.to_string(), partner.to_string(), 2),
+            (source.to_string(), partner.to_string(), 2),
+            (source.to_string(), partner.to_string(), 2),
+            (source.to_string(), other.to_string(), 2),
+        ])
+        .unwrap();
 
     let partners = graph.get_co_change_partners(source).unwrap();
     let lock_rows = partners.iter().filter(|(p, _)| p == partner).count();

@@ -125,8 +125,7 @@ impl AttributionBackend for ProcFsBackend {
 #[cfg(target_os = "linux")]
 fn is_fd_writable(pid: u32, fd_name: &std::ffi::OsStr) -> bool {
     use std::fs;
-    let fdinfo_path = std::path::PathBuf::from(format!("/proc/{pid}/fdinfo/"))
-        .join(fd_name);
+    let fdinfo_path = std::path::PathBuf::from(format!("/proc/{pid}/fdinfo/")).join(fd_name);
     let Ok(contents) = fs::read_to_string(&fdinfo_path) else {
         return false;
     };
@@ -333,7 +332,9 @@ impl AttributionWatcher {
             let ignore_sensors: Vec<(PathBuf, crate::server::git::GitSensor)> = roots
                 .iter()
                 .filter_map(|r| {
-                    crate::server::git::GitSensor::new(r).ok().map(|g| (r.clone(), g))
+                    crate::server::git::GitSensor::new(r)
+                        .ok()
+                        .map(|g| (r.clone(), g))
                 })
                 .collect();
             let is_ignored = |p: &Path| -> Option<bool> {
@@ -359,10 +360,7 @@ impl AttributionWatcher {
 
             for res in rx {
                 if let Ok(event) = res {
-                    if matches!(
-                        event.kind,
-                        EventKind::Modify(_) | EventKind::Create(_)
-                    ) {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                         for path in event.paths {
                             if path.is_file() && is_attributable(&path, is_ignored(&path)) {
                                 attribute_edit(
@@ -429,7 +427,6 @@ fn is_attributable(path: &Path, ignored: Option<bool>) -> bool {
         || name.starts_with('#');
     !scratch
 }
-
 
 /// Best-effort attribution of a single file edit. See the module-level
 /// docs for the strategy order: PID lookup, then single-agent fallback,
@@ -515,8 +512,15 @@ mod filter_tests {
     /// written by an unrelated shell command.
     #[test]
     fn vcs_internals_are_never_attributed_without_git_help() {
-        for p in ["/ws/.git/index.lock", "/ws/.git/COMMIT_EDITMSG", "/ws/.lain/graph.bin"] {
-            assert!(!is_attributable(Path::new(p), None), "{p} must not be attributed");
+        for p in [
+            "/ws/.git/index.lock",
+            "/ws/.git/COMMIT_EDITMSG",
+            "/ws/.lain/graph.bin",
+        ] {
+            assert!(
+                !is_attributable(Path::new(p), None),
+                "{p} must not be attributed"
+            );
         }
     }
 
@@ -530,7 +534,10 @@ mod filter_tests {
             "/ws/node_modules/left-pad/index.js",
             "/ws/dist/bundle.js",
         ] {
-            assert!(!is_attributable(Path::new(p), Some(true)), "{p} must not be attributed");
+            assert!(
+                !is_attributable(Path::new(p), Some(true)),
+                "{p} must not be attributed"
+            );
         }
     }
 
@@ -542,7 +549,10 @@ mod filter_tests {
             "/ws/src/.#main.rs",
             "/ws/src/main.rs.tmp",
         ] {
-            assert!(!is_attributable(Path::new(p), None), "{p} must not be attributed");
+            assert!(
+                !is_attributable(Path::new(p), None),
+                "{p} must not be attributed"
+            );
         }
     }
 
@@ -554,7 +564,10 @@ mod filter_tests {
             "/ws/tests/presence.rs",
             "/ws/README.md",
         ] {
-            assert!(is_attributable(Path::new(p), Some(false)), "{p} must be attributed");
+            assert!(
+                is_attributable(Path::new(p), Some(false)),
+                "{p} must be attributed"
+            );
         }
     }
 

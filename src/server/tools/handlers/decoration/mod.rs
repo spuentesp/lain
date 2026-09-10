@@ -14,13 +14,11 @@ pub use decorator::decorate_output;
 pub use enricher::{ErrorEnricher, GraphEnricher};
 pub use parsers::{get_parser, ErrorParser};
 pub use parsers::{
-    CargoJsonParser, CargoTextParser, GoBuildParser, GoTestParser, JestParser,
-    PytestParser, TestOutputParser,
+    CargoJsonParser, CargoTextParser, GoBuildParser, GoTestParser, JestParser, PytestParser,
+    TestOutputParser,
 };
-pub use project::{detect_project_profile, Toolchain, ProjectProfile};
-pub use types::{
-    EnrichedError, EnrichedReport, FailureSummary, ParsedError, Severity,
-};
+pub use project::{detect_project_profile, ProjectProfile, Toolchain};
+pub use types::{EnrichedError, EnrichedReport, FailureSummary, ParsedError, Severity};
 
 #[cfg(test)]
 mod tests {

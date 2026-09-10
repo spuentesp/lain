@@ -1,11 +1,11 @@
 //! Enrichment and sync domain handlers
 
 use crate::error::LainError;
+use crate::git::{CommitInfo, GitSensor};
 use crate::graph::GraphDatabase;
-use crate::git::{GitSensor, CommitInfo};
 use crate::tuning::IngestionConfig;
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 pub fn run_enrichment(
     graph: &GraphDatabase,
@@ -73,7 +73,10 @@ pub fn run_enrichment(
             }
         }
 
-        tracing::info!("Background enrichment job completed in {:?}", start_time.elapsed());
+        tracing::info!(
+            "Background enrichment job completed in {:?}",
+            start_time.elapsed()
+        );
     });
 
     Ok("Enrichment job started in background. Check 'get_health' later for status.".to_string())
@@ -137,7 +140,9 @@ pub fn sync_state(
         // Every early return below must land in the job record, so the
         // caller's `get_job_status` can distinguish "still running"
         // from "failed two minutes ago".
-        let finish = |registry: Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
+        let finish = |registry: Arc<
+            Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>,
+        >,
                       id: String,
                       result: Result<String, String>| async move {
             let mut guard = registry.lock();
@@ -169,7 +174,12 @@ pub fn sync_state(
                         format!("sync_state: {e}"),
                     );
                 }
-                finish(jobs_registry, job_id_for_task, Err(format!("failed to get last commit: {e}"))).await;
+                finish(
+                    jobs_registry,
+                    job_id_for_task,
+                    Err(format!("failed to get last commit: {e}")),
+                )
+                .await;
                 return;
             }
         };
@@ -194,11 +204,16 @@ pub fn sync_state(
         };
 
         // Analyze co-changes from new commits only
-        let mut new_pairs: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+        let mut new_pairs: std::collections::HashMap<(String, String), usize> =
+            std::collections::HashMap::new();
         for commit in &new_commits {
             // Skip mega-commits to avoid O(N^2) pair explosion
             if commit.files.len() > cochange_max_commit_files {
-                tracing::debug!("Skipping mega-commit {} ({} files) in sync co-change", commit.id, commit.files.len());
+                tracing::debug!(
+                    "Skipping mega-commit {} ({} files) in sync co-change",
+                    commit.id,
+                    commit.files.len()
+                );
                 continue;
             }
             let mut files = commit.files.clone();
@@ -258,7 +273,10 @@ pub fn sync_state(
         let mut total_lsp_failures: u32 = 0;
         if let Some(fed_ref) = fed_handle.as_ref() {
             let mut set: tokio::task::JoinSet<
-                Result<(crate::federation::repo_id::RepoId, u32), (crate::federation::repo_id::RepoId, LainError)>,
+                Result<
+                    (crate::federation::repo_id::RepoId, u32),
+                    (crate::federation::repo_id::RepoId, LainError),
+                >,
             > = tokio::task::JoinSet::new();
             for (id, _) in fed_ref.list_repos() {
                 let Some(repo) = fed_ref.get_repo(&id) else {
@@ -283,11 +301,7 @@ pub fn sync_state(
                         total_lsp_failures = total_lsp_failures.saturating_add(lsp_failures);
                     }
                     Ok(Err((id, e))) => {
-                        tracing::warn!(
-                            "[sync_state] overlay refresh for {} failed: {}",
-                            id,
-                            e
-                        );
+                        tracing::warn!("[sync_state] overlay refresh for {} failed: {}", id, e);
                         *outcome_slot.lock() = crate::server::refresh::RefreshOutcome::failed(
                             std::time::SystemTime::now(),
                             format!("sync_state overlay refresh for {}: {}", id, e),
@@ -297,10 +311,7 @@ pub fn sync_state(
                         // A panic in the spawned task — the future
                         // itself doesn't panic today, but a panic
                         // from a future inside it would surface here.
-                        tracing::error!(
-                            "[sync_state] overlay refresh task panicked: {}",
-                            join_err
-                        );
+                        tracing::error!("[sync_state] overlay refresh task panicked: {}", join_err);
                     }
                 }
             }

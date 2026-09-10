@@ -20,18 +20,15 @@ repos:
 /// `data_dir` hint. With `--print`, render to stdout instead of
 /// writing — useful for piping or for CI sanity checks. With
 /// `--force`, overwrite an existing `./repos.yaml`.
-pub fn run_init(
-    workspace: Option<&Path>,
-    force: bool,
-    print: bool,
-) -> Result<()> {
+pub fn run_init(workspace: Option<&Path>, force: bool, print: bool) -> Result<()> {
     let workspace = match workspace {
         Some(p) => p.to_path_buf(),
-        None => find_git_workspace(None)?
-            .ok_or_else(|| anyhow!(
+        None => find_git_workspace(None)?.ok_or_else(|| {
+            anyhow!(
                 "no `.git` found in any parent directory and no --workspace given; \
                  pass --workspace PATH or run from inside a clone"
-            ))?,
+            )
+        })?,
     };
     if !workspace.join(".git").exists() {
         return Err(anyhow!(

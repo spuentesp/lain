@@ -54,12 +54,9 @@ pub fn record_in(dir: &Path, project_path: &Path) -> Result<()> {
     );
     list.truncate(MAX_ENTRIES);
 
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create config dir {}", dir.display()))?;
-    let text = serde_json::to_string_pretty(&list)
-        .context("serialize recent_projects.json")?;
-    std::fs::write(&path, text)
-        .with_context(|| format!("write {}", path.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create config dir {}", dir.display()))?;
+    let text = serde_json::to_string_pretty(&list).context("serialize recent_projects.json")?;
+    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -76,13 +73,13 @@ pub fn list_in(dir: &Path) -> Result<Vec<RecentProject>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     if text.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let list: Vec<RecentProject> = serde_json::from_str(&text)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let list: Vec<RecentProject> =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
     Ok(list)
 }
 
@@ -169,7 +166,10 @@ mod tests {
         let list = list_in(tmp.path()).unwrap();
         assert_eq!(list.len(), MAX_ENTRIES);
         // The most recently inserted (p24) should be at the top.
-        let last = tmp.path().join(format!("p{}", MAX_ENTRIES + 4)).join("repos.yaml");
+        let last = tmp
+            .path()
+            .join(format!("p{}", MAX_ENTRIES + 4))
+            .join("repos.yaml");
         assert_eq!(list[0].path, last);
     }
 }

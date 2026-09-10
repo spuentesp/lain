@@ -9,9 +9,9 @@
 //!
 //! Edges created: CallsHttp (route -> handler function)
 
-use crate::graph::GraphDatabase;
-use crate::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
 use crate::error::LainError;
+use crate::graph::GraphDatabase;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::collections::HashMap;
 
 /// A detected HTTP route
@@ -156,63 +156,82 @@ fn get_route_patterns() -> HashMap<&'static str, RoutePattern> {
     const HTTP_VERBS: &str = "get|post|put|delete|patch|options|head";
 
     // Rust: axum — `.route("/path", get(handler))`
-    patterns.insert("rust-axum", RoutePattern::new(
-        &format!(r"\.route\s*\([^,]*,\s*(?i:({HTTP_VERBS}))\s*\("),
-        r#"\.route\s*\(\s*"([^"]+)""#,
-        &format!(r"(?i:(?:{HTTP_VERBS}))\s*\(\s*(\w+)\s*[,)]"),
-    ));
+    patterns.insert(
+        "rust-axum",
+        RoutePattern::new(
+            &format!(r"\.route\s*\([^,]*,\s*(?i:({HTTP_VERBS}))\s*\("),
+            r#"\.route\s*\(\s*"([^"]+)""#,
+            &format!(r"(?i:(?:{HTTP_VERBS}))\s*\(\s*(\w+)\s*[,)]"),
+        ),
+    );
 
     // Rust: actix-web — `#[get("/path")]` or `#[get(path = "/path")]`,
     // handler on the following line.
-    patterns.insert("rust-actix", RoutePattern::new(
-        &format!(r"#\[(?i:({HTTP_VERBS}))\s*\("),
-        &format!(r#"#\[(?i:(?:{HTTP_VERBS}))\s*\(\s*(?:path\s*=\s*)?"([^"]+)""#),
-        r"(?:async\s+)?fn\s+(\w+)\s*[(<]",
-    ));
+    patterns.insert(
+        "rust-actix",
+        RoutePattern::new(
+            &format!(r"#\[(?i:({HTTP_VERBS}))\s*\("),
+            &format!(r#"#\[(?i:(?:{HTTP_VERBS}))\s*\(\s*(?:path\s*=\s*)?"([^"]+)""#),
+            r"(?:async\s+)?fn\s+(\w+)\s*[(<]",
+        ),
+    );
 
     // Python: FastAPI — `@app.get("/path")` then `async def handler(...)`
-    patterns.insert("python-fastapi", RoutePattern::new(
-        &format!(r"@[\w\.]+\.({HTTP_VERBS})\s*\("),
-        &format!(r#"@[\w\.]+\.(?:{HTTP_VERBS})\s*\(\s*["']([^"']+)["']"#),
-        r"(?:async\s+)?def\s+(\w+)\s*\(",
-    ));
+    patterns.insert(
+        "python-fastapi",
+        RoutePattern::new(
+            &format!(r"@[\w\.]+\.({HTTP_VERBS})\s*\("),
+            &format!(r#"@[\w\.]+\.(?:{HTTP_VERBS})\s*\(\s*["']([^"']+)["']"#),
+            r"(?:async\s+)?def\s+(\w+)\s*\(",
+        ),
+    );
 
     // Python: Flask — `@app.route("/path", methods=["POST"])` then `def handler(...)`
-    patterns.insert("python-flask", RoutePattern::new(
-        r#"methods\s*=\s*\[\s*["'](\w+)"#,
-        r#"@[\w\.]+\.route\s*\(\s*["']([^"']+)["']"#,
-        r"def\s+(\w+)\s*\(",
-    ));
+    patterns.insert(
+        "python-flask",
+        RoutePattern::new(
+            r#"methods\s*=\s*\[\s*["'](\w+)"#,
+            r#"@[\w\.]+\.route\s*\(\s*["']([^"']+)["']"#,
+            r"def\s+(\w+)\s*\(",
+        ),
+    );
 
     // TypeScript/JS: Express / Fastify — `router.post("/path", handler)`
-    patterns.insert("ts-express", RoutePattern::new(
-        &format!(r"\.({HTTP_VERBS})\s*\("),
-        &format!(r#"\.(?:{HTTP_VERBS})\s*\(\s*["'`]([^"'`]+)["'`]"#),
-        &format!(r#"\.(?:{HTTP_VERBS})\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(\w+)"#),
-    ));
+    patterns.insert(
+        "ts-express",
+        RoutePattern::new(
+            &format!(r"\.({HTTP_VERBS})\s*\("),
+            &format!(r#"\.(?:{HTTP_VERBS})\s*\(\s*["'`]([^"'`]+)["'`]"#),
+            &format!(r#"\.(?:{HTTP_VERBS})\s*\(\s*["'`][^"'`]+["'`]\s*,\s*(?:async\s*)?(\w+)"#),
+        ),
+    );
 
     // Go: net/http — `http.HandleFunc("/path", handler)`; the API
     // carries no verb, so the default GET applies.
-    patterns.insert("go-std", RoutePattern::without_method(
-        r#"HandleFunc\s*\(\s*"([^"]+)""#,
-        r#"HandleFunc\s*\(\s*"[^"]+"\s*,\s*(\w+)"#,
-    ));
+    patterns.insert(
+        "go-std",
+        RoutePattern::without_method(
+            r#"HandleFunc\s*\(\s*"([^"]+)""#,
+            r#"HandleFunc\s*\(\s*"[^"]+"\s*,\s*(\w+)"#,
+        ),
+    );
 
     // Go: Gin / Echo — `router.GET("/path", handler)`, any receiver name.
-    patterns.insert("go-gin", RoutePattern::new(
-        r"\.(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(",
-        r#"\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"([^"]+)""#,
-        r#"\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"[^"]+"\s*,\s*(\w+)"#,
-    ));
+    patterns.insert(
+        "go-gin",
+        RoutePattern::new(
+            r"\.(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(",
+            r#"\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"([^"]+)""#,
+            r#"\.(?:GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s*\(\s*"[^"]+"\s*,\s*(\w+)"#,
+        ),
+    );
 
     patterns
 }
 
 /// Scan a file for HTTP routes
 pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRoute> {
-    let extension = path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     // `extension` was computed and then dropped: every pattern set ran
     // against every file, so Go's `r.GET("/x", h)` pattern was matched
@@ -247,12 +266,20 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
 }
 
 /// Convert HTTP routes to graph nodes and edges
-pub fn routes_to_graph(graph: &GraphDatabase, routes: &[HttpRoute]) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+pub fn routes_to_graph(
+    graph: &GraphDatabase,
+    routes: &[HttpRoute],
+) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
     for route in routes {
-        let node_id = GraphNode::generate_id(&NodeType::HttpRoute, &route.handler_path, &format!("{}:{}", route.method, route.path), None);
+        let node_id = GraphNode::generate_id(
+            &NodeType::HttpRoute,
+            &route.handler_path,
+            &format!("{}:{}", route.method, route.path),
+            None,
+        );
 
         let mut node = GraphNode::new(
             NodeType::HttpRoute,
@@ -325,7 +352,8 @@ pub fn scan_workspace_routes(
             // it had just created. The sensor ran, reported a node, and
             // the node was gone by the end of the same index pass.
             for r in &mut routes {
-                r.handler_path = crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
+                r.handler_path =
+                    crate::graph::graph_path(root, std::path::Path::new(&r.handler_path));
             }
             // Go through `routes_to_graph` rather than building nodes
             // inline. The inline version emitted *no* `CallsHttp` edges at
@@ -377,14 +405,16 @@ mod tests {
     /// every Actix, FastAPI and Flask route was silently skipped.
     #[test]
     fn a_handler_on_the_following_line_is_found() {
-        let actix = "#[get(\"/api/users\")]\nasync fn list_users() -> impl Responder {\n    todo!()\n}\n";
+        let actix =
+            "#[get(\"/api/users\")]\nasync fn list_users() -> impl Responder {\n    todo!()\n}\n";
         let r = scan_file_for_routes(std::path::Path::new("api.rs"), actix);
         assert_eq!(r.len(), 1, "actix route should be found: {r:?}");
         assert_eq!(r[0].method, "GET");
         assert_eq!(r[0].path, "/api/users");
         assert_eq!(r[0].handler_name, "list_users");
 
-        let fastapi = "@app.post(\"/api/widgets\")\nasync def create_widget(body: Widget):\n    ...\n";
+        let fastapi =
+            "@app.post(\"/api/widgets\")\nasync def create_widget(body: Widget):\n    ...\n";
         let r = scan_file_for_routes(std::path::Path::new("api.py"), fastapi);
         assert_eq!(r.len(), 1, "fastapi route should be found: {r:?}");
         assert_eq!(r[0].method, "POST");
@@ -395,7 +425,8 @@ mod tests {
     /// Flask puts the verb in a `methods=` kwarg and the handler below.
     #[test]
     fn flask_routes_pick_up_their_method_and_handler() {
-        let flask = "@app.route(\"/api/orders\", methods=[\"POST\"])\ndef create_order():\n    pass\n";
+        let flask =
+            "@app.route(\"/api/orders\", methods=[\"POST\"])\ndef create_order():\n    pass\n";
         let r = scan_file_for_routes(std::path::Path::new("app.py"), flask);
         assert_eq!(r.len(), 1, "flask route should be found: {r:?}");
         assert_eq!(r[0].method, "POST");
@@ -487,7 +518,10 @@ mod tests {
         );
 
         let unknown = scan_file_for_routes(std::path::Path::new("notes.txt"), go_source);
-        assert!(unknown.is_empty(), "an unhandled extension yields no routes");
+        assert!(
+            unknown.is_empty(),
+            "an unhandled extension yields no routes"
+        );
     }
 
     /// `get_cross_runtime_callers` filters on `CallsHttp`, so a route with

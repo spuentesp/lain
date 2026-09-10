@@ -11,7 +11,7 @@ use lain::graph::GraphDatabase;
 use lain::nlp::NlpEmbedder;
 use lain::query::executor::Executor;
 use lain::query::spec::*;
-use lain::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,7 +30,11 @@ fn build_medium_graph(n_functions: usize) -> GraphDatabase {
     let graph = GraphDatabase::new(&tmp).unwrap();
 
     // Create a file node
-    let file = GraphNode::new(NodeType::File, "mod.rs".to_string(), "/src/mod.rs".to_string());
+    let file = GraphNode::new(
+        NodeType::File,
+        "mod.rs".to_string(),
+        "/src/mod.rs".to_string(),
+    );
     graph.upsert_node(file.clone()).unwrap();
 
     // First pass: create all function nodes and collect their IDs
@@ -45,11 +49,13 @@ fn build_medium_graph(n_functions: usize) -> GraphDatabase {
         graph.upsert_node(func.clone()).unwrap();
 
         // File contains function
-        graph.insert_edge(&GraphEdge::new(
-            EdgeType::Contains,
-            file.id.clone(),
-            func.id.clone(),
-        )).unwrap();
+        graph
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Contains,
+                file.id.clone(),
+                func.id.clone(),
+            ))
+            .unwrap();
     }
 
     // Second pass: create edges using the collected IDs
@@ -58,11 +64,9 @@ fn build_medium_graph(n_functions: usize) -> GraphDatabase {
             // Chain links: f_i calls f_{i+1}
             let source_id = func_ids[i].1.clone();
             let target_id = func_ids[i + 1].1.clone();
-            graph.insert_edge(&GraphEdge::new(
-                EdgeType::Calls,
-                source_id,
-                target_id,
-            )).unwrap();
+            graph
+                .insert_edge(&GraphEdge::new(EdgeType::Calls, source_id, target_id))
+                .unwrap();
         }
     }
 
@@ -78,11 +82,13 @@ fn build_medium_graph(n_functions: usize) -> GraphDatabase {
     for i in 0..(n_functions / 10).min(100) {
         let idx = i * 10;
         if idx < func_ids.len() {
-            graph.insert_edge(&GraphEdge::new(
-                EdgeType::Calls,
-                anchor.id.clone(),
-                func_ids[idx].1.clone(),
-            )).unwrap();
+            graph
+                .insert_edge(&GraphEdge::new(
+                    EdgeType::Calls,
+                    anchor.id.clone(),
+                    func_ids[idx].1.clone(),
+                ))
+                .unwrap();
         }
     }
 
@@ -118,7 +124,10 @@ fn bench_graph_find_exact() {
     let sizes = [100, 500, 1000, 2000];
 
     println!("\n=== Graph Find (Exact Match) ===");
-    println!("{:<10} {:<15} {:<15} {:<15} {:<10}", "N", "Graph (μs)", "Naive Grep (μs)", "Speedup", "Nodes");
+    println!(
+        "{:<10} {:<15} {:<15} {:<15} {:<10}",
+        "N", "Graph (μs)", "Naive Grep (μs)", "Speedup", "Nodes"
+    );
 
     for &n in &sizes {
         let graph = build_medium_graph(n);
@@ -127,15 +136,13 @@ fn bench_graph_find_exact() {
 
         // LAIN-mcp graph query
         let start = Instant::now();
-        let spec = QuerySpec::new(vec![
-            GraphOp::Find(FindOp {
-                type_selector: Some(TypeSelector::Single("Function".to_string())),
-                name: Some(NameSelector::Exact(format!("function_{}", n / 2))),
-                id: None,
-                label_selector: None,
-                path: None,
-            }),
-        ]);
+        let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+            type_selector: Some(TypeSelector::Single("Function".to_string())),
+            name: Some(NameSelector::Exact(format!("function_{}", n / 2))),
+            id: None,
+            label_selector: None,
+            path: None,
+        })]);
         let result = exec.execute(&spec).unwrap();
         let graph_us = start.elapsed().as_micros();
 
@@ -144,8 +151,15 @@ fn bench_graph_find_exact() {
         let _found = naive_grep_find(&format!("function_{}", n / 2), n);
         let naive_us = start.elapsed().as_micros();
 
-        let speedup = if naive_us > 0 { naive_us as f64 / graph_us as f64 } else { 0.0 };
-        println!("{:<10} {:<15} {:<15} {:<15.1}x {:<10}", n, graph_us, naive_us, speedup, result.count);
+        let speedup = if naive_us > 0 {
+            naive_us as f64 / graph_us as f64
+        } else {
+            0.0
+        };
+        println!(
+            "{:<10} {:<15} {:<15} {:<15.1}x {:<10}",
+            n, graph_us, naive_us, speedup, result.count
+        );
     }
 }
 
@@ -154,7 +168,10 @@ fn bench_graph_traverse_blast_radius() {
     let sizes = [100, 500, 1000];
 
     println!("\n=== Graph Blast Radius (2-hop traversal) ===");
-    println!("{:<10} {:<15} {:<15} {:<15} {:<10}", "N", "Graph (μs)", "Naive LSP (μs)", "Speedup", "Affected");
+    println!(
+        "{:<10} {:<15} {:<15} {:<15} {:<10}",
+        "N", "Graph (μs)", "Naive LSP (μs)", "Speedup", "Affected"
+    );
 
     for &n in &sizes {
         let graph = build_medium_graph(n);
@@ -186,8 +203,15 @@ fn bench_graph_traverse_blast_radius() {
         let _callers = naive_lsp_find("function_0", n);
         let naive_us = start.elapsed().as_micros();
 
-        let speedup = if naive_us > 0 { naive_us as f64 / graph_us as f64 } else { 0.0 };
-        println!("{:<10} {:<15} {:<15} {:<15.1}x {:<10}", n, graph_us, naive_us, speedup, result.count);
+        let speedup = if naive_us > 0 {
+            naive_us as f64 / graph_us as f64
+        } else {
+            0.0
+        };
+        println!(
+            "{:<10} {:<15} {:<15} {:<15.1}x {:<10}",
+            n, graph_us, naive_us, speedup, result.count
+        );
     }
 }
 
@@ -196,7 +220,10 @@ fn bench_graph_cross_file_queries() {
     let sizes = [100, 500, 1000];
 
     println!("\n=== Cross-File Impact Analysis ===");
-    println!("{:<10} {:<15} {:<15} {:<15} {:<10}", "N", "Graph (μs)", "Multi-File (μs)", "Speedup", "Related");
+    println!(
+        "{:<10} {:<15} {:<15} {:<15} {:<10}",
+        "N", "Graph (μs)", "Multi-File (μs)", "Speedup", "Related"
+    );
 
     for &n in &sizes {
         let graph = build_medium_graph(n);
@@ -228,8 +255,15 @@ fn bench_graph_cross_file_queries() {
         let _affected_count: usize = (0..n).filter(|&i| i % 10 == 0).count();
         let naive_us = start.elapsed().as_micros();
 
-        let speedup = if naive_us > 0 { naive_us as f64 / graph_us as f64 } else { 0.0 };
-        println!("{:<10} {:<15} {:<15} {:<15.1}x {:<10}", n, graph_us, naive_us, speedup, result.count);
+        let speedup = if naive_us > 0 {
+            naive_us as f64 / graph_us as f64
+        } else {
+            0.0
+        };
+        println!(
+            "{:<10} {:<15} {:<15} {:<15.1}x {:<10}",
+            n, graph_us, naive_us, speedup, result.count
+        );
     }
 }
 
@@ -238,7 +272,10 @@ fn bench_query_with_filter_and_sort() {
     let sizes = [100, 500, 1000];
 
     println!("\n=== Complex Query (Filter + Sort + Limit) ===");
-    println!("{:<10} {:<15} {:<15} {:<15}", "N", "Graph (μs)", "Naive (μs)", "Speedup");
+    println!(
+        "{:<10} {:<15} {:<15} {:<15}",
+        "N", "Graph (μs)", "Naive (μs)", "Speedup"
+    );
 
     for &n in &sizes {
         let graph = build_medium_graph(n);
@@ -275,8 +312,15 @@ fn bench_query_with_filter_and_sort() {
         let _top10: Vec<_> = all_funcs.into_iter().take(10).collect();
         let naive_us = start.elapsed().as_micros();
 
-        let speedup = if naive_us > 0 { naive_us as f64 / graph_us as f64 } else { 0.0 };
-        println!("{:<10} {:<15} {:<15} {:<15.1}x", n, graph_us, naive_us, speedup);
+        let speedup = if naive_us > 0 {
+            naive_us as f64 / graph_us as f64
+        } else {
+            0.0
+        };
+        println!(
+            "{:<10} {:<15} {:<15} {:<15.1}x",
+            n, graph_us, naive_us, speedup
+        );
     }
 }
 
@@ -285,7 +329,10 @@ fn bench_scalability_large_graph() {
     let sizes = [1000, 2000, 5000];
 
     println!("\n=== Scalability: Large Graphs ===");
-    println!("{:<10} {:<15} {:<15} {:<15}", "N", "Find (μs)", "Traverse (μs)", "Total");
+    println!(
+        "{:<10} {:<15} {:<15} {:<15}",
+        "N", "Find (μs)", "Traverse (μs)", "Total"
+    );
 
     for &n in &sizes {
         let graph = build_medium_graph(n);
@@ -294,15 +341,13 @@ fn bench_scalability_large_graph() {
 
         // Find operation
         let start = Instant::now();
-        let spec = QuerySpec::new(vec![
-            GraphOp::Find(FindOp {
-                type_selector: Some(TypeSelector::Single("Function".to_string())),
-                name: Some(NameSelector::Exact(format!("function_{}", n / 2))),
-                id: None,
-                label_selector: None,
-                path: None,
-            }),
-        ]);
+        let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+            type_selector: Some(TypeSelector::Single("Function".to_string())),
+            name: Some(NameSelector::Exact(format!("function_{}", n / 2))),
+            id: None,
+            label_selector: None,
+            path: None,
+        })]);
         exec.execute(&spec).unwrap();
         let find_us = start.elapsed().as_micros();
 
@@ -327,7 +372,10 @@ fn bench_scalability_large_graph() {
         let traverse_us = start.elapsed().as_micros();
 
         let total_us = find_us + traverse_us;
-        println!("{:<10} {:<15} {:<15} {:<15}", n, find_us, traverse_us, total_us);
+        println!(
+            "{:<10} {:<15} {:<15} {:<15}",
+            n, find_us, traverse_us, total_us
+        );
     }
 }
 
@@ -353,15 +401,13 @@ fn comparison_table_output() {
 
         // LAIN-mcp exact find
         let start = Instant::now();
-        let spec = QuerySpec::new(vec![
-            GraphOp::Find(FindOp {
-                type_selector: Some(TypeSelector::Single("Function".to_string())),
-                name: Some(NameSelector::Exact(format!("function_{}", n / 2))),
-                id: None,
-                label_selector: None,
-                path: None,
-            }),
-        ]);
+        let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+            type_selector: Some(TypeSelector::Single("Function".to_string())),
+            name: Some(NameSelector::Exact(format!("function_{}", n / 2))),
+            id: None,
+            label_selector: None,
+            path: None,
+        })]);
         exec.execute(&spec).unwrap();
         let lain_us = start.elapsed().as_micros();
 
@@ -375,8 +421,14 @@ fn comparison_table_output() {
         naive_lsp_find(&format!("function_{}", n / 2), n);
         let lsp_us = start.elapsed().as_micros();
 
-        println!("║ N={:<28} │ {:^12} │ {:^10} │ {:^7} │ {:^9} ║",
-                 n, format!("{}μs", lain_us), format!("{}μs", grep_us), format!("{}μs", lsp_us), "N/A");
+        println!(
+            "║ N={:<28} │ {:^12} │ {:^10} │ {:^7} │ {:^9} ║",
+            n,
+            format!("{}μs", lain_us),
+            format!("{}μs", grep_us),
+            format!("{}μs", lsp_us),
+            "N/A"
+        );
     }
 
     println!("╠═══════════════════════════════════════════════════════════════════════════════╣");

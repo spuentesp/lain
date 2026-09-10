@@ -4,14 +4,13 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::query::spec::{
-    ConnectOp, Direction, EdgeSelector, FilterOp, GraphNodeRef, GraphPath, GraphEdgeRef,
-    GroupBy, GroupOp, LimitOp, QueryGroup, QueryMeta, QueryMode,
-    QueryResult, QuerySpec, SemanticFilterOp, SortDirection, SortField, SortOp,
-    FindOp,
+    ConnectOp, Direction, EdgeSelector, FilterOp, FindOp, GraphEdgeRef, GraphNodeRef, GraphPath,
+    GroupBy, GroupOp, LimitOp, QueryGroup, QueryMeta, QueryMode, QueryResult, QuerySpec,
+    SemanticFilterOp, SortDirection, SortField, SortOp,
 };
 use crate::tools::utils::{build_enriched_text, cosine_similarity};
-use petgraph::Direction as PetDirection;
 use parking_lot::Mutex;
+use petgraph::Direction as PetDirection;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -211,7 +210,11 @@ impl<'a> Executor<'a> {
                 id: n.id.clone(),
                 node_type: n.node_type.to_string(),
                 name: n.name.clone(),
-                label: if n.is_deprecated { Some("deprecated".into()) } else { None },
+                label: if n.is_deprecated {
+                    Some("deprecated".into())
+                } else {
+                    None
+                },
             })
             .collect();
 
@@ -290,7 +293,8 @@ impl<'a> Executor<'a> {
         let mut found_nodes = Vec::new();
 
         let mut visited = HashMap::new();
-        let mut queue: Vec<(String, Vec<String>, Vec<(String, String)>)> = vec![(start_id.into(), vec![start_id.into()], vec![])];
+        let mut queue: Vec<(String, Vec<String>, Vec<(String, String)>)> =
+            vec![(start_id.into(), vec![start_id.into()], vec![])];
 
         while let Some((current_id, path_ids, path_edges)) = queue.pop() {
             let current_depth = path_ids.len() - 1;
@@ -301,7 +305,11 @@ impl<'a> Executor<'a> {
                         id: node.id.clone(),
                         node_type: node.node_type.to_string(),
                         name: node.name.clone(),
-                        label: if node.is_deprecated { Some("deprecated".into()) } else { None },
+                        label: if node.is_deprecated {
+                            Some("deprecated".into())
+                        } else {
+                            None
+                        },
                     });
                 }
             }
@@ -381,11 +389,14 @@ impl<'a> Executor<'a> {
         // Embed the query once. `embed_query`, not `embed`: this is a
         // user query and must carry the configured prefix, which this
         // call site silently omitted.
-        let query_emb = self.embedder.embed_query(&sem.like)
+        let query_emb = self
+            .embedder
+            .embed_query(&sem.like)
             .map_err(|e| LainError::Nlp(format!("Failed to embed query: {}", e)))?;
 
         // Get full graph nodes to access their embeddings
-        let all_graph_nodes: HashMap<String, crate::schema::GraphNode> = self.graph
+        let all_graph_nodes: HashMap<String, crate::schema::GraphNode> = self
+            .graph
             .get_all_nodes()
             .into_iter()
             .map(|n| (n.id.clone(), n))
@@ -417,7 +428,9 @@ impl<'a> Executor<'a> {
         // Check stored embedding
         if let Some(ref e_json) = node.embedding {
             if let Ok(emb) = serde_json::from_str::<Vec<f32>>(e_json) {
-                self.embedding_cache.lock().insert(node.id.clone(), emb.clone());
+                self.embedding_cache
+                    .lock()
+                    .insert(node.id.clone(), emb.clone());
                 return Some(emb);
             }
         }
@@ -425,7 +438,9 @@ impl<'a> Executor<'a> {
         // On-demand embed
         let text = build_enriched_text(node, self.workspace);
         self.embedder.embed(&text).ok().map(|emb| {
-            self.embedding_cache.lock().insert(node.id.clone(), emb.clone());
+            self.embedding_cache
+                .lock()
+                .insert(node.id.clone(), emb.clone());
             emb
         })
     }
@@ -454,12 +469,24 @@ impl<'a> Executor<'a> {
 
     fn apply_sort(&self, nodes: &mut Vec<GraphNodeRef>, sort: &SortOp) {
         let cmp = match (sort.by, sort.direction) {
-            (SortField::Name, SortDirection::Asc) => |a: &GraphNodeRef, b: &GraphNodeRef| a.name.cmp(&b.name),
-            (SortField::Name, SortDirection::Desc) => |a: &GraphNodeRef, b: &GraphNodeRef| b.name.cmp(&a.name),
-            (SortField::Type, SortDirection::Asc) => |a: &GraphNodeRef, b: &GraphNodeRef| a.node_type.cmp(&b.node_type),
-            (SortField::Type, SortDirection::Desc) => |a: &GraphNodeRef, b: &GraphNodeRef| b.node_type.cmp(&a.node_type),
-            (SortField::Label, SortDirection::Asc) => |a: &GraphNodeRef, b: &GraphNodeRef| a.label.cmp(&b.label),
-            (SortField::Label, SortDirection::Desc) => |a: &GraphNodeRef, b: &GraphNodeRef| b.label.cmp(&a.label),
+            (SortField::Name, SortDirection::Asc) => {
+                |a: &GraphNodeRef, b: &GraphNodeRef| a.name.cmp(&b.name)
+            }
+            (SortField::Name, SortDirection::Desc) => {
+                |a: &GraphNodeRef, b: &GraphNodeRef| b.name.cmp(&a.name)
+            }
+            (SortField::Type, SortDirection::Asc) => {
+                |a: &GraphNodeRef, b: &GraphNodeRef| a.node_type.cmp(&b.node_type)
+            }
+            (SortField::Type, SortDirection::Desc) => {
+                |a: &GraphNodeRef, b: &GraphNodeRef| b.node_type.cmp(&a.node_type)
+            }
+            (SortField::Label, SortDirection::Asc) => {
+                |a: &GraphNodeRef, b: &GraphNodeRef| a.label.cmp(&b.label)
+            }
+            (SortField::Label, SortDirection::Desc) => {
+                |a: &GraphNodeRef, b: &GraphNodeRef| b.label.cmp(&a.label)
+            }
         };
         nodes.sort_by(cmp);
     }
@@ -483,7 +510,6 @@ impl<'a> Executor<'a> {
     // `explain` built a `QueryExplanation` describing a query plan. It had
     // no caller and no test, and nothing else ever constructed the type, so
     // the whole explain path was unreachable.
-
 }
 
 impl From<Direction> for PetDirection {

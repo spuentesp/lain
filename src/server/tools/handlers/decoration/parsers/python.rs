@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 use crate::server::tools::handlers::decoration::parsers::ErrorParser;
+use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 
 /// Parser for Python pytest output (human-readable short format)
 /// Format: `path/file.py:line: error: message`
@@ -32,7 +32,8 @@ impl ErrorParser for PytestParser {
                     // Determine severity
                     let severity = if message.to_lowercase().contains("error")
                         || message.to_lowercase().contains("failed")
-                        || message.to_lowercase().contains("exception") {
+                        || message.to_lowercase().contains("exception")
+                    {
                         Severity::Error
                     } else {
                         Severity::Warning
@@ -65,8 +66,12 @@ fn find_python_error_pos(line: &str) -> Option<usize> {
             let after_py = py_pos + 3; // skip ".py"
             let rest = &line[pos + after_py..];
             // Skip non-digit chars (like leading ':' in ":10:") then find digits
-            let after_non_digit = rest.find(|c: char| c.is_ascii_digit()).unwrap_or(rest.len());
-            let after_digits = rest[after_non_digit..].find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len() - after_non_digit);
+            let after_non_digit = rest
+                .find(|c: char| c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            let after_digits = rest[after_non_digit..]
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len() - after_non_digit);
             let total_skipped = after_non_digit + after_digits;
             if after_non_digit < rest.len()
                 && rest.len() > total_skipped

@@ -14,7 +14,7 @@ use uuid::Uuid;
 pub fn trace_dependency(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    symbol: &str
+    symbol: &str,
 ) -> Result<String, LainError> {
     // 1. Resolve handle
     let start_node = resolve_node(graph, overlay, symbol)?;
@@ -36,7 +36,9 @@ pub fn trace_dependency(
 
         // Static edges
         if let Ok(edges) = graph.get_edges_from(&node.id) {
-            for e in edges { targets.insert(e.target_id); }
+            for e in edges {
+                targets.insert(e.target_id);
+            }
         }
 
         // Overlay edges
@@ -54,9 +56,14 @@ pub fn trace_dependency(
         }
     }
 
-    Ok(format!("Found {} dependency nodes in Merged Brain:\n{}",
+    Ok(format!(
+        "Found {} dependency nodes in Merged Brain:\n{}",
         results.len(),
-        results.iter().map(|n| format!("- {} ({:?})", n.name, n.node_type)).collect::<Vec<_>>().join("\n")
+        results
+            .iter()
+            .map(|n| format!("- {} ({:?})", n.name, n.node_type))
+            .collect::<Vec<_>>()
+            .join("\n")
     ))
 }
 
@@ -65,7 +72,11 @@ pub async fn get_call_chain(
     overlay: &VolatileOverlay,
     from: &str,
     to: &str,
-    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16, std::time::Duration)>,
+    ui_sessions: Option<(
+        &Arc<AsyncMutex<HashMap<String, UiSession>>>,
+        u16,
+        std::time::Duration,
+    )>,
 ) -> Result<String, LainError> {
     let start = resolve_node(graph, overlay, from)?;
     let end = resolve_node(graph, overlay, to)?;
@@ -85,7 +96,9 @@ pub async fn get_call_chain(
 
         let mut targets = HashSet::new();
         if let Ok(edges) = graph.get_edges_from(&current_id) {
-            for e in edges { targets.insert(e.target_id); }
+            for e in edges {
+                targets.insert(e.target_id);
+            }
         }
         let overlay_edges = overlay.get_outgoing_edges(&current_id);
         for (target, _) in overlay_edges {
@@ -101,13 +114,20 @@ pub async fn get_call_chain(
     }
 
     if !found {
-        return Ok(format!("No call path found from '{}' to '{}' in Merged Brain.", from, to));
+        return Ok(format!(
+            "No call path found from '{}' to '{}' in Merged Brain.",
+            from, to
+        ));
     }
 
     let mut path = Vec::new();
     let mut current = Some(end.id.clone());
     while let Some(id) = current {
-        let node = if let Some(n) = overlay.get_node(&id) { Some(n) } else { graph.get_node(&id)? };
+        let node = if let Some(n) = overlay.get_node(&id) {
+            Some(n)
+        } else {
+            graph.get_node(&id)?
+        };
         if let Some(n) = node {
             path.push(n.name);
         }
@@ -124,8 +144,7 @@ pub async fn get_call_chain(
             id: session_id.clone(),
             session_type: "call-chain".to_string(),
             created_at: std::time::SystemTime::now(),
-            expires_at: std::time::SystemTime::now()
-                + ttl,
+            expires_at: std::time::SystemTime::now() + ttl,
             data: UiSessionData::CallChain {
                 from: from.to_string(),
                 to: to.to_string(),
@@ -157,7 +176,7 @@ pub async fn get_call_chain(
 pub fn navigate_to_anchor(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    symbol: &str
+    symbol: &str,
 ) -> Result<String, LainError> {
     let start = resolve_node(graph, overlay, symbol)?;
 
@@ -168,18 +187,24 @@ pub fn navigate_to_anchor(
     queue.push_back(start);
 
     while let Some(current) = queue.pop_front() {
-        if visited.contains(&current.id) { continue; }
+        if visited.contains(&current.id) {
+            continue;
+        }
         visited.insert(current.id.clone());
 
         let score = current.anchor_score.unwrap_or(0.0);
-        if best_anchor.is_none() || score > best_anchor.as_ref().unwrap().anchor_score.unwrap_or(0.0) {
+        if best_anchor.is_none()
+            || score > best_anchor.as_ref().unwrap().anchor_score.unwrap_or(0.0)
+        {
             best_anchor = Some(current.clone());
         }
 
         // Neighbors from both
         let mut targets = HashSet::new();
         if let Ok(edges) = graph.get_edges_from(&current.id) {
-            for edge in edges { targets.insert(edge.target_id); }
+            for edge in edges {
+                targets.insert(edge.target_id);
+            }
         }
         for (target, _) in overlay.get_outgoing_edges(&current.id) {
             targets.insert(target.id);
@@ -223,7 +248,7 @@ pub fn get_layered_map(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     layer: usize,
-    granularity: &str
+    granularity: &str,
 ) -> Result<String, LainError> {
     let mut all_nodes = Vec::new();
     // Includes `Method` — a layered map that omits impl blocks is a
@@ -242,15 +267,21 @@ pub fn get_layered_map(
     // Merge overlay using HashSet for O(N)
     let mut seen_ids: HashSet<String> = all_nodes.iter().map(|n| n.id.clone()).collect();
     for on in overlay.get_all_nodes() {
-        if seen_ids.insert(on.id.clone()) { all_nodes.push(on); }
+        if seen_ids.insert(on.id.clone()) {
+            all_nodes.push(on);
+        }
     }
 
-    let filtered: Vec<_> = all_nodes.into_iter()
+    let filtered: Vec<_> = all_nodes
+        .into_iter()
         .filter(|n| n.depth_from_main.unwrap_or(u32::MAX) as usize == layer)
         .collect();
 
     if filtered.is_empty() {
-        return Ok(format!("No nodes found at Layer {}. Ensure core memory is built.", layer));
+        return Ok(format!(
+            "No nodes found at Layer {}. Ensure core memory is built.",
+            layer
+        ));
     }
 
     let mut output = format!("## Architectural Map: Layer {}\n\n", layer);
@@ -271,16 +302,14 @@ pub fn get_layered_map(
             for m in modules {
                 output.push_str(&format!("- **{}**\n", m));
             }
-        },
+        }
         "file" => {
             output.push_str("### Files involved in this layer:\n");
-            let files: HashSet<_> = filtered.into_iter()
-                .map(|n| n.path.clone())
-                .collect();
+            let files: HashSet<_> = filtered.into_iter().map(|n| n.path.clone()).collect();
             for f in files {
                 output.push_str(&format!("- {}\n", f));
             }
-        },
+        }
         _ => {
             output.push_str("### Symbols at this layer:\n");
             for n in filtered {
@@ -289,7 +318,10 @@ pub fn get_layered_map(
         }
     }
 
-    output.push_str(&format!("\n*Use `get_layered_map(layer: {})` to see what these components depend on.*", layer + 1));
+    output.push_str(&format!(
+        "\n*Use `get_layered_map(layer: {})` to see what these components depend on.*",
+        layer + 1
+    ));
 
     Ok(output)
 }

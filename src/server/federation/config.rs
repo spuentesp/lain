@@ -1,6 +1,8 @@
 use crate::error::LainError;
 use crate::federation::repo_id::RepoId;
-use crate::federation::repo_source::{LocalCloneSource, RepoSource, ShallowCloneSource, WorkspaceDirSource};
+use crate::federation::repo_source::{
+    LocalCloneSource, RepoSource, ShallowCloneSource, WorkspaceDirSource,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,12 +30,18 @@ impl Default for FederationConfig {
     }
 }
 
-fn default_data_dir() -> PathBuf { PathBuf::from("./.lain/federation") }
-fn default_max_concurrent_indexers() -> usize { 8 }
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("./.lain/federation")
+}
+fn default_max_concurrent_indexers() -> usize {
+    8
+}
 /// Default fraction of repos that must be `Ready`.
 pub const DEFAULT_READY_THRESHOLD: f32 = 0.8;
 
-fn default_ready_threshold() -> f32 { DEFAULT_READY_THRESHOLD }
+fn default_ready_threshold() -> f32 {
+    DEFAULT_READY_THRESHOLD
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepoConfig {
@@ -44,17 +52,34 @@ pub struct RepoConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceConfig {
-    LocalClone { url: String, #[serde(default = "default_ref")] r#ref: String },
-    ShallowClone { url: String, #[serde(default = "default_ref")] r#ref: String, #[serde(default = "default_refresh_interval_secs")] refresh_interval_secs: u64 },
-    WorkspaceDir { path: PathBuf },
+    LocalClone {
+        url: String,
+        #[serde(default = "default_ref")]
+        r#ref: String,
+    },
+    ShallowClone {
+        url: String,
+        #[serde(default = "default_ref")]
+        r#ref: String,
+        #[serde(default = "default_refresh_interval_secs")]
+        refresh_interval_secs: u64,
+    },
+    WorkspaceDir {
+        path: PathBuf,
+    },
 }
 
-fn default_ref() -> String { "main".into() }
-fn default_refresh_interval_secs() -> u64 { 300 }
+fn default_ref() -> String {
+    "main".into()
+}
+fn default_refresh_interval_secs() -> u64 {
+    300
+}
 
 impl FederationConfig {
     pub fn load(path: &Path) -> Result<Self, LainError> {
-        let s = std::fs::read_to_string(path).map_err(|e| LainError::Io(format!("read config: {e}")))?;
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| LainError::Io(format!("read config: {e}")))?;
         Self::load_from_str(&s)
     }
     pub fn load_from_str(s: &str) -> Result<Self, LainError> {
@@ -74,9 +99,26 @@ impl FederationConfig {
     pub fn build_source_for(&self, repo: &RepoConfig) -> Result<Box<dyn RepoSource>, LainError> {
         let id = RepoId::new(&repo.id)?;
         let src: Box<dyn RepoSource> = match &repo.source {
-            SourceConfig::LocalClone { url, r#ref } => Box::new(LocalCloneSource::new(id, url, r#ref, self.data_dir.join(&repo.id))?),
-            SourceConfig::ShallowClone { url, r#ref, refresh_interval_secs } => Box::new(ShallowCloneSource::new(id, url, r#ref, self.data_dir.join(&repo.id), Duration::from_secs(*refresh_interval_secs))?),
-            SourceConfig::WorkspaceDir { path } => Box::new(WorkspaceDirSource::new(id, path.clone())?),
+            SourceConfig::LocalClone { url, r#ref } => Box::new(LocalCloneSource::new(
+                id,
+                url,
+                r#ref,
+                self.data_dir.join(&repo.id),
+            )?),
+            SourceConfig::ShallowClone {
+                url,
+                r#ref,
+                refresh_interval_secs,
+            } => Box::new(ShallowCloneSource::new(
+                id,
+                url,
+                r#ref,
+                self.data_dir.join(&repo.id),
+                Duration::from_secs(*refresh_interval_secs),
+            )?),
+            SourceConfig::WorkspaceDir { path } => {
+                Box::new(WorkspaceDirSource::new(id, path.clone())?)
+            }
         };
         Ok(src)
     }

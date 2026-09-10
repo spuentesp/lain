@@ -4,7 +4,7 @@ use crate::graph::GraphDatabase;
 use crate::nlp::NlpEmbedder;
 use crate::query::executor::Executor;
 use crate::query::spec::*;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,13 +20,21 @@ fn make_test_graph() -> GraphDatabase {
     // main -> y (dead)
     // file (main.rs) contains main
 
-    let main = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
+    let main = GraphNode::new(
+        NodeType::Function,
+        "main".to_string(),
+        "/src/main.rs".to_string(),
+    );
     let a = GraphNode::new(NodeType::Function, "a".to_string(), "/src/a.rs".to_string());
     let b = GraphNode::new(NodeType::Function, "b".to_string(), "/src/b.rs".to_string());
     let c = GraphNode::new(NodeType::Function, "c".to_string(), "/src/c.rs".to_string());
     let x = GraphNode::new(NodeType::Function, "x".to_string(), "/src/x.rs".to_string());
     let y = GraphNode::new(NodeType::Function, "y".to_string(), "/src/y.rs".to_string());
-    let file = GraphNode::new(NodeType::File, "main.rs".to_string(), "/src/main.rs".to_string());
+    let file = GraphNode::new(
+        NodeType::File,
+        "main.rs".to_string(),
+        "/src/main.rs".to_string(),
+    );
 
     graph.upsert_node(main.clone()).unwrap();
     graph.upsert_node(a.clone()).unwrap();
@@ -36,12 +44,36 @@ fn make_test_graph() -> GraphDatabase {
     graph.upsert_node(y.clone()).unwrap();
     graph.upsert_node(file.clone()).unwrap();
 
-    graph.insert_edge(&GraphEdge::new(EdgeType::Contains, file.id.clone(), main.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, main.id.clone(), a.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, b.id.clone(), c.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, main.id.clone(), x.id.clone())).unwrap();
-    graph.insert_edge(&GraphEdge::new(EdgeType::Calls, x.id.clone(), b.id.clone())).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            file.id.clone(),
+            main.id.clone(),
+        ))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            main.id.clone(),
+            a.id.clone(),
+        ))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, a.id.clone(), b.id.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, b.id.clone(), c.id.clone()))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Calls,
+            main.id.clone(),
+            x.id.clone(),
+        ))
+        .unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(EdgeType::Calls, x.id.clone(), b.id.clone()))
+        .unwrap();
 
     graph
 }
@@ -69,15 +101,13 @@ fn test_execute_find_all_functions() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Single("Function".to_string())),
-            name: None,
-            id: None,
-            label_selector: None,
-            path: None,
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Function".to_string())),
+        name: None,
+        id: None,
+        label_selector: None,
+        path: None,
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -92,15 +122,13 @@ fn test_execute_find_by_name() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: None,
-            name: Some(NameSelector::Exact("main".to_string())),
-            id: None,
-            label_selector: None,
-            path: None,
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: None,
+        name: Some(NameSelector::Exact("main".to_string())),
+        id: None,
+        label_selector: None,
+        path: None,
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -115,15 +143,13 @@ fn test_execute_find_empty_result() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Single("Class".to_string())),
-            name: None,
-            id: None,
-            label_selector: None,
-            path: None,
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Class".to_string())),
+        name: None,
+        id: None,
+        label_selector: None,
+        path: None,
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -326,7 +352,10 @@ fn test_execute_limit() {
             type_selector: Some(TypeSelector::Single("Function".to_string())),
             ..Default::default()
         }),
-        GraphOp::Limit(LimitOp { count: 3, offset: 0 }),
+        GraphOp::Limit(LimitOp {
+            count: 3,
+            offset: 0,
+        }),
     ]);
 
     let result = exec.execute(&spec);
@@ -346,7 +375,10 @@ fn test_execute_limit_with_offset() {
             type_selector: Some(TypeSelector::Single("Function".to_string())),
             ..Default::default()
         }),
-        GraphOp::Limit(LimitOp { count: 2, offset: 2 }),
+        GraphOp::Limit(LimitOp {
+            count: 2,
+            offset: 2,
+        }),
     ]);
 
     let result = exec.execute(&spec);
@@ -366,7 +398,10 @@ fn test_execute_sort_by_name_asc() {
             type_selector: Some(TypeSelector::Single("Function".to_string())),
             ..Default::default()
         }),
-        GraphOp::Sort(SortOp { by: SortField::Name, direction: SortDirection::Asc }),
+        GraphOp::Sort(SortOp {
+            by: SortField::Name,
+            direction: SortDirection::Asc,
+        }),
     ]);
 
     let result = exec.execute(&spec);
@@ -389,7 +424,10 @@ fn test_execute_sort_by_name_desc() {
             type_selector: Some(TypeSelector::Single("Function".to_string())),
             ..Default::default()
         }),
-        GraphOp::Sort(SortOp { by: SortField::Name, direction: SortDirection::Desc }),
+        GraphOp::Sort(SortOp {
+            by: SortField::Name,
+            direction: SortDirection::Desc,
+        }),
     ]);
 
     let result = exec.execute(&spec);
@@ -472,12 +510,10 @@ fn test_execute_meta_timing() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Single("Function".to_string())),
-            ..Default::default()
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Function".to_string())),
+        ..Default::default()
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -493,19 +529,21 @@ fn test_execute_with_label_filter_deprecated() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let mut node = GraphNode::new(NodeType::Function, "deprecated_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "deprecated_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.is_deprecated = true;
     graph.upsert_node(node).unwrap();
 
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Single("Function".to_string())),
-            label_selector: Some(LabelSelector::Single("deprecated".to_string())),
-            ..Default::default()
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Function".to_string())),
+        label_selector: Some(LabelSelector::Single("deprecated".to_string())),
+        ..Default::default()
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -573,15 +611,13 @@ fn test_execute_find_with_path_filter() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: None,
-            name: None,
-            id: None,
-            label_selector: None,
-            path: Some("/src/main.rs".to_string()),
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: None,
+        name: None,
+        id: None,
+        label_selector: None,
+        path: Some("/src/main.rs".to_string()),
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -624,13 +660,11 @@ fn test_execute_with_startswith_name_selector() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Single("Function".to_string())),
-            name: Some(NameSelector::StartsWith("a".to_string())),
-            ..Default::default()
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Function".to_string())),
+        name: Some(NameSelector::StartsWith("a".to_string())),
+        ..Default::default()
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -645,13 +679,11 @@ fn test_execute_with_endswith_name_selector() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Single("Function".to_string())),
-            name: Some(NameSelector::EndsWith("n".to_string())),
-            ..Default::default()
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Function".to_string())),
+        name: Some(NameSelector::EndsWith("n".to_string())),
+        ..Default::default()
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -694,12 +726,13 @@ fn test_execute_find_multiple_types() {
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
 
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Or(vec!["Function".to_string(), "File".to_string()])),
-            ..Default::default()
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Or(vec![
+            "Function".to_string(),
+            "File".to_string(),
+        ])),
+        ..Default::default()
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -743,7 +776,10 @@ fn test_execute_limit_exceeds_count() {
             type_selector: Some(TypeSelector::Single("Function".to_string())),
             ..Default::default()
         }),
-        GraphOp::Limit(LimitOp { count: 100, offset: 0 }),
+        GraphOp::Limit(LimitOp {
+            count: 100,
+            offset: 0,
+        }),
     ]);
 
     let result = exec.execute(&spec);
@@ -759,22 +795,28 @@ fn test_execute_with_label_filter_not() {
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let mut node1 = GraphNode::new(NodeType::Function, "deprecated_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node1 = GraphNode::new(
+        NodeType::Function,
+        "deprecated_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node1.is_deprecated = true;
-    let mut node2 = GraphNode::new(NodeType::Function, "stable_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node2 = GraphNode::new(
+        NodeType::Function,
+        "stable_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node2.is_deprecated = false;
     graph.upsert_node(node1).unwrap();
     graph.upsert_node(node2).unwrap();
 
     let (embedder, cache) = make_test_executor_params();
     let mut exec = Executor::new(&graph, &embedder, &cache, std::path::Path::new(""));
-    let spec = QuerySpec::new(vec![
-        GraphOp::Find(FindOp {
-            type_selector: Some(TypeSelector::Single("Function".to_string())),
-            label_selector: Some(LabelSelector::Not(vec!["deprecated".to_string()])),
-            ..Default::default()
-        }),
-    ]);
+    let spec = QuerySpec::new(vec![GraphOp::Find(FindOp {
+        type_selector: Some(TypeSelector::Single("Function".to_string())),
+        label_selector: Some(LabelSelector::Not(vec!["deprecated".to_string()])),
+        ..Default::default()
+    })]);
 
     let result = exec.execute(&spec);
     assert!(result.is_ok());
@@ -864,8 +906,14 @@ fn an_unknown_edge_type_is_rejected_rather_than_silently_matching_nothing() {
         .execute(&spec)
         .expect_err("an edge type that does not exist must be an error, not an empty result");
     let msg = err.to_string();
-    assert!(msg.contains("Defines"), "error should name the bad edge: {msg}");
-    assert!(msg.contains("Contains"), "error should list the valid edges: {msg}");
+    assert!(
+        msg.contains("Defines"),
+        "error should name the bad edge: {msg}"
+    );
+    assert!(
+        msg.contains("Contains"),
+        "error should list the valid edges: {msg}"
+    );
 }
 
 /// The real edge for File -> Symbol still works, so the guard rejects
@@ -934,7 +982,10 @@ fn mode_tool_requires_a_named_query() {
         .execute(&spec)
         .expect_err("mode `tool` without `named` must be reported, not ignored");
     let msg = err.to_string();
-    assert!(msg.contains("named"), "error should name the missing field: {msg}");
+    assert!(
+        msg.contains("named"),
+        "error should name the missing field: {msg}"
+    );
 }
 
 #[test]
@@ -951,7 +1002,9 @@ fn mode_tool_runs_the_named_query() {
         ..QuerySpec::default()
     };
 
-    let result = exec.execute(&spec).expect("named query runs under mode tool");
+    let result = exec
+        .execute(&spec)
+        .expect("named query runs under mode tool");
     assert!(result.legacy, "a named query reports itself as legacy");
 }
 
@@ -1012,13 +1065,8 @@ fn mode_auto_is_the_default_and_still_dispatches_both_ways() {
 fn an_unlimited_query_is_capped_at_the_configured_default() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::with_default_limit(
-        &graph,
-        &embedder,
-        &cache,
-        std::path::Path::new(""),
-        2,
-    );
+    let mut exec =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 2);
 
     let spec = QuerySpec::new(vec![GraphOp::Find(FindOp::new().r#type("Function"))]);
     let result = exec.execute(&spec).expect("query runs");
@@ -1038,17 +1086,15 @@ fn an_unlimited_query_is_capped_at_the_configured_default() {
 fn an_explicit_limit_wins_over_the_default_cap() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::with_default_limit(
-        &graph,
-        &embedder,
-        &cache,
-        std::path::Path::new(""),
-        2,
-    );
+    let mut exec =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 2);
 
     let spec = QuerySpec::new(vec![
         GraphOp::Find(FindOp::new().r#type("Function")),
-        GraphOp::Limit(LimitOp { count: 4, offset: 0 }),
+        GraphOp::Limit(LimitOp {
+            count: 4,
+            offset: 0,
+        }),
     ]);
     let result = exec.execute(&spec).expect("query runs");
 
@@ -1064,13 +1110,8 @@ fn an_explicit_limit_wins_over_the_default_cap() {
 fn a_small_result_is_not_marked_truncated() {
     let graph = make_test_graph();
     let (embedder, cache) = make_test_executor_params();
-    let mut exec = Executor::with_default_limit(
-        &graph,
-        &embedder,
-        &cache,
-        std::path::Path::new(""),
-        1000,
-    );
+    let mut exec =
+        Executor::with_default_limit(&graph, &embedder, &cache, std::path::Path::new(""), 1000);
 
     let spec = QuerySpec::new(vec![GraphOp::Find(FindOp::new().r#type("Function"))]);
     let result = exec.execute(&spec).expect("query runs");
@@ -1138,9 +1179,18 @@ fn a_minimum_depth_excludes_nearer_nodes() {
         .map(|n| n.name)
         .collect();
 
-    assert!(names.contains(&"b".to_string()), "depth 2 reaches b: {names:?}");
-    assert!(!names.contains(&"a".to_string()), "depth 2 skips a: {names:?}");
-    assert!(!names.contains(&"main".to_string()), "and never the start: {names:?}");
+    assert!(
+        names.contains(&"b".to_string()),
+        "depth 2 reaches b: {names:?}"
+    );
+    assert!(
+        !names.contains(&"a".to_string()),
+        "depth 2 skips a: {names:?}"
+    );
+    assert!(
+        !names.contains(&"main".to_string()),
+        "and never the start: {names:?}"
+    );
 }
 
 /// A max depth must stop the walk. `main -> a -> b -> c`: depth 1..=2
@@ -1170,5 +1220,8 @@ fn a_maximum_depth_stops_the_walk() {
 
     assert!(names.contains(&"a".to_string()), "depth 1: {names:?}");
     assert!(names.contains(&"b".to_string()), "depth 2: {names:?}");
-    assert!(!names.contains(&"c".to_string()), "depth 3 is out of range: {names:?}");
+    assert!(
+        !names.contains(&"c".to_string()),
+        "depth 3 is out of range: {names:?}"
+    );
 }

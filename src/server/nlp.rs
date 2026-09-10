@@ -6,9 +6,9 @@
 use crate::error::LainError;
 use ort::session::Session;
 use ort::value::Tensor;
+use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use tokenizers::{Encoding, Tokenizer};
 
 #[derive(Clone)]
@@ -18,7 +18,9 @@ enum EmbedInner {
         tokenizer: Arc<Tokenizer>,
         embedding_dim: usize,
     },
-    Stub { embedding_dim: usize },
+    Stub {
+        embedding_dim: usize,
+    },
 }
 
 /// Compose the text actually embedded for a query.
@@ -82,22 +84,30 @@ impl NlpEmbedder {
     /// Like `new()` but with explicit intra-op thread cap (0 = auto).
     pub fn new_with_threads(max_threads: usize) -> Result<Self, LainError> {
         // Check env var first, then fall back to relative path
-        let (model_path, tokenizer_path) = if let Some(model_env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
-            Self::resolve_model_paths(Path::new(&model_env))
-        } else {
-            (Path::new("models/all-MiniLM-L6-v2.onnx").to_path_buf(),
-             Path::new("models/tokenizer.json").to_path_buf())
-        };
+        let (model_path, tokenizer_path) =
+            if let Some(model_env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
+                Self::resolve_model_paths(Path::new(&model_env))
+            } else {
+                (
+                    Path::new("models/all-MiniLM-L6-v2.onnx").to_path_buf(),
+                    Path::new("models/tokenizer.json").to_path_buf(),
+                )
+            };
 
         if !model_path.exists() || !tokenizer_path.exists() {
-            tracing::warn!("NLP model files not found at {:?}, using stub embedder", model_path);
+            tracing::warn!(
+                "NLP model files not found at {:?}, using stub embedder",
+                model_path
+            );
             return Ok(Self::new_stub());
         }
 
         // Initialize ORT global logging once
         if !ort::init()
             .with_name("lain-nlp")
-            .with_execution_providers([ort::execution_providers::CPUExecutionProvider::default().build()])
+            .with_execution_providers([
+                ort::execution_providers::CPUExecutionProvider::default().build()
+            ])
             .commit()
         {
             tracing::warn!("ORT initialization returned false - may indicate already initialized");
@@ -116,17 +126,26 @@ impl NlpEmbedder {
         max_threads: usize,
     ) -> Result<Self, LainError> {
         if !model_path.exists() {
-            return Err(LainError::Nlp(format!("Model file not found: {:?}", model_path)));
+            return Err(LainError::Nlp(format!(
+                "Model file not found: {:?}",
+                model_path
+            )));
         }
         if !tokenizer_path.exists() {
-            return Err(LainError::Nlp(format!("Tokenizer file not found: {:?}", tokenizer_path)));
+            return Err(LainError::Nlp(format!(
+                "Tokenizer file not found: {:?}",
+                tokenizer_path
+            )));
         }
 
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| LainError::Nlp(format!("Failed to load tokenizer: {}", e)))?;
 
         let threads = resolve_intra_threads(max_threads);
-        tracing::info!("NLP embedder: using {} intra-op thread(s) per call", threads);
+        tracing::info!(
+            "NLP embedder: using {} intra-op thread(s) per call",
+            threads
+        );
         let mut session = Session::builder()?
             .with_intra_threads(threads)?
             .commit_from_file(model_path)?;
@@ -148,9 +167,12 @@ impl NlpEmbedder {
         let dummy_mask = vec![1_i64, 1_i64, 1_i64];
         let dummy_types = vec![0_i64, 0_i64, 0_i64];
 
-        let ids_tensor = Tensor::from_array(([1, 3], dummy_ids)).map_err(|e| LainError::Nlp(e.to_string()))?;
-        let mask_tensor = Tensor::from_array(([1, 3], dummy_mask)).map_err(|e| LainError::Nlp(e.to_string()))?;
-        let type_tensor = Tensor::from_array(([1, 3], dummy_types)).map_err(|e| LainError::Nlp(e.to_string()))?;
+        let ids_tensor =
+            Tensor::from_array(([1, 3], dummy_ids)).map_err(|e| LainError::Nlp(e.to_string()))?;
+        let mask_tensor =
+            Tensor::from_array(([1, 3], dummy_mask)).map_err(|e| LainError::Nlp(e.to_string()))?;
+        let type_tensor =
+            Tensor::from_array(([1, 3], dummy_types)).map_err(|e| LainError::Nlp(e.to_string()))?;
 
         let inputs = ort::inputs![
             "input_ids" => ids_tensor,
@@ -158,8 +180,11 @@ impl NlpEmbedder {
             "token_type_ids" => type_tensor,
         ];
 
-        let outputs = session.run(inputs).map_err(|e| LainError::Nlp(e.to_string()))?;
-        let last_hidden_state = outputs["last_hidden_state"].try_extract_tensor::<f32>()
+        let outputs = session
+            .run(inputs)
+            .map_err(|e| LainError::Nlp(e.to_string()))?;
+        let last_hidden_state = outputs["last_hidden_state"]
+            .try_extract_tensor::<f32>()
             .map_err(|e| LainError::Nlp(e.to_string()))?;
 
         let shape = last_hidden_state.0;
@@ -168,7 +193,10 @@ impl NlpEmbedder {
 
     #[doc(hidden)]
     pub fn new_stub() -> Self {
-        Self { inner: EmbedInner::Stub { embedding_dim: 384 }, query_prefix: String::new() }
+        Self {
+            inner: EmbedInner::Stub { embedding_dim: 384 },
+            query_prefix: String::new(),
+        }
     }
 
     /// Returns true if this embedder is a stub (no actual model loaded)
@@ -239,9 +267,11 @@ impl NlpEmbedder {
             EmbedInner::Stub { embedding_dim } => {
                 return Ok((0..n).map(|_| vec![0.0f32; *embedding_dim]).collect());
             }
-            EmbedInner::Onnx { session, tokenizer, embedding_dim } => {
-                (session, tokenizer, *embedding_dim)
-            }
+            EmbedInner::Onnx {
+                session,
+                tokenizer,
+                embedding_dim,
+            } => (session, tokenizer, *embedding_dim),
         };
 
         let max_len: usize = 512;
@@ -276,7 +306,13 @@ impl NlpEmbedder {
             }
             per_text_lens.push(encoded.get_ids().len());
             all_ids.push(encoded.get_ids().iter().map(|&x| x as i64).collect());
-            all_masks.push(encoded.get_attention_mask().iter().map(|&x| x as i64).collect());
+            all_masks.push(
+                encoded
+                    .get_attention_mask()
+                    .iter()
+                    .map(|&x| x as i64)
+                    .collect(),
+            );
             all_types.push(encoded.get_type_ids().iter().map(|&x| x as i64).collect());
         }
 
@@ -411,7 +447,10 @@ impl CrossEncoder {
         };
 
         let threads = resolve_intra_threads(max_threads);
-        tracing::info!("Cross-encoder: using {} intra-op thread(s) per call", threads);
+        tracing::info!(
+            "Cross-encoder: using {} intra-op thread(s) per call",
+            threads
+        );
         let session = match Session::builder() {
             Ok(b) => match b.with_intra_threads(threads) {
                 Ok(mut b) => match b.commit_from_file(&model_path) {
@@ -436,11 +475,13 @@ impl CrossEncoder {
         if !ort::init()
             .with_name("lain-cross-encoder")
             .with_execution_providers([
-                ort::execution_providers::CPUExecutionProvider::default().build(),
+                ort::execution_providers::CPUExecutionProvider::default().build()
             ])
             .commit()
         {
-            tracing::debug!("ORT init returned false for cross-encoder (may be already initialized)");
+            tracing::debug!(
+                "ORT init returned false for cross-encoder (may be already initialized)"
+            );
         }
 
         tracing::info!("Cross-encoder reranker loaded from {:?}", dir);
@@ -471,7 +512,11 @@ impl CrossEncoder {
             .map_err(|e| LainError::Nlp(format!("Cross-encoder tokenization: {}", e)))?;
 
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
-        let attention_mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&x| x as i64).collect();
+        let attention_mask: Vec<i64> = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
         let token_type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&x| x as i64).collect();
         let seq_len = input_ids.len();
 
@@ -517,7 +562,6 @@ pub fn resolve_intra_threads(max_threads: usize) -> usize {
         max_threads.max(1)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

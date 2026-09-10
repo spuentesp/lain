@@ -344,7 +344,15 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert!(parsed.get("ts_unix").is_some(), "ts_unix missing: {parsed}");
         // The other contract fields are all there too.
-        for k in ["ts_unix", "agent_id", "path", "claim_set", "racers", "plan_revision", "landed_revision"] {
+        for k in [
+            "ts_unix",
+            "agent_id",
+            "path",
+            "claim_set",
+            "racers",
+            "plan_revision",
+            "landed_revision",
+        ] {
             assert!(parsed.get(k).is_some(), "field {k} missing: {parsed}");
         }
     }

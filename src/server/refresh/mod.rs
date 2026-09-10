@@ -170,9 +170,7 @@ pub fn parse_reindex_timeout() -> Duration {
         Ok(s) => match s.parse::<u64>() {
             Ok(secs) => Duration::from_secs(secs),
             Err(_) => {
-                eprintln!(
-                    "LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; using default 300s"
-                );
+                eprintln!("LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; using default 300s");
                 Duration::from_secs(300)
             }
         },
@@ -242,7 +240,9 @@ mod tests {
         // a banner.
         let mut o = RefreshOutcome::ok(SystemTime::now());
         o.lsp_failures_last_cycle = 3;
-        let line = o.lsp_warn_line().expect("banner must appear when count > 0");
+        let line = o
+            .lsp_warn_line()
+            .expect("banner must appear when count > 0");
         assert!(line.contains("3 file"));
         assert!(line.contains("LSP"));
         assert!(line.contains("overlay"));
@@ -258,7 +258,9 @@ mod tests {
         o.lsp_failures_last_cycle = 7;
         let banner = o.banner_line();
         assert!(banner.is_some(), "Failed outcome must keep its banner");
-        let lsp = o.lsp_warn_line().expect("LSP banner must surface independently");
+        let lsp = o
+            .lsp_warn_line()
+            .expect("LSP banner must surface independently");
         assert!(lsp.contains("7 file"));
     }
 

@@ -64,11 +64,7 @@ async fn incremental_reindex_keeps_callers_in_unchanged_files() {
     std::fs::create_dir_all(&src).unwrap();
 
     // `caller.rs` is never touched again; `target.rs` is what changes.
-    std::fs::write(
-        src.join("target.rs"),
-        "pub fn the_target() -> u32 { 1 }\n",
-    )
-    .unwrap();
+    std::fs::write(src.join("target.rs"), "pub fn the_target() -> u32 { 1 }\n").unwrap();
     std::fs::write(
         src.join("caller.rs"),
         "use crate::target::the_target;\npub fn calls_it() -> u32 { the_target() + 1 }\n",
@@ -78,9 +74,8 @@ async fn incremental_reindex_keeps_callers_in_unchanged_files() {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("inc").unwrap(), repo.clone()).unwrap(),
-    );
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("inc").unwrap(), repo.clone()).unwrap());
     let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
 
     ri.index().await.expect("full index");
@@ -92,11 +87,7 @@ async fn incremental_reindex_keeps_callers_in_unchanged_files() {
 
     // Change only `target.rs`, so the incremental pass re-scans it and
     // nothing else. `caller.rs` is untouched and will not be re-resolved.
-    std::fs::write(
-        src.join("target.rs"),
-        "pub fn the_target() -> u32 { 2 }\n",
-    )
-    .unwrap();
+    std::fs::write(src.join("target.rs"), "pub fn the_target() -> u32 { 2 }\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "--quiet", "-m", "touch target only"]);
 
@@ -136,10 +127,17 @@ async fn deleting_a_symbol_still_drops_its_inbound_edges() {
         Box::new(WorkspaceDirSource::new(RepoId::new("del").unwrap(), repo.clone()).unwrap());
     let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
     ri.index().await.expect("full index");
-    assert!(incoming_calls(&ri, "the_target") > 0, "fixture: no caller found");
+    assert!(
+        incoming_calls(&ri, "the_target") > 0,
+        "fixture: no caller found"
+    );
 
     // Delete the symbol outright.
-    std::fs::write(src.join("target.rs"), "pub fn something_else() -> u32 { 2 }\n").unwrap();
+    std::fs::write(
+        src.join("target.rs"),
+        "pub fn something_else() -> u32 { 2 }\n",
+    )
+    .unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "--quiet", "-m", "delete the_target"]);
     ri.index().await.expect("incremental index");
@@ -215,17 +213,24 @@ async fn two_full_indexes_of_one_commit_agree() {
     std::fs::create_dir_all(&src).unwrap();
     // Several files with cross-file calls, so the graph has real
     // structure to disagree about.
-    std::fs::write(src.join("a.rs"), "pub fn a_one() -> u32 { 1 }\npub fn a_two() -> u32 { a_one() + 1 }\n").unwrap();
-    std::fs::write(src.join("b.rs"), "use crate::a::a_one;\npub fn b_one() -> u32 { a_one() * 2 }\n").unwrap();
+    std::fs::write(
+        src.join("a.rs"),
+        "pub fn a_one() -> u32 { 1 }\npub fn a_two() -> u32 { a_one() + 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("b.rs"),
+        "use crate::a::a_one;\npub fn b_one() -> u32 { a_one() * 2 }\n",
+    )
+    .unwrap();
     std::fs::write(src.join("c.rs"), "use crate::b::b_one;\npub fn c_one() -> u32 { b_one() + a_helper() }\npub fn a_helper() -> u32 { 3 }\n").unwrap();
     init_repo(&repo);
 
     let index_once = |slot: &str| {
         let data_dir = tmp.path().join(slot);
         std::fs::create_dir_all(&data_dir).unwrap();
-        let source = Box::new(
-            WorkspaceDirSource::new(RepoId::new(slot).unwrap(), repo.clone()).unwrap(),
-        );
+        let source =
+            Box::new(WorkspaceDirSource::new(RepoId::new(slot).unwrap(), repo.clone()).unwrap());
         Arc::new(RepoIndex::new(source, &data_dir).unwrap())
     };
 

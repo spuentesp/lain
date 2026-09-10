@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 use crate::server::tools::handlers::decoration::parsers::ErrorParser;
+use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 
 /// Parser for Go build output (human-readable format)
 /// Format: `path/to/file.go:line:col: message`
@@ -108,7 +108,10 @@ impl ErrorParser for GoTestParser {
                 }
             }
             // Reset on non-failure output
-            else if !trimmed.is_empty() && !trimmed.starts_with("---") && !trimmed.starts_with("===") {
+            else if !trimmed.is_empty()
+                && !trimmed.starts_with("---")
+                && !trimmed.starts_with("===")
+            {
                 pending_test = None;
             }
         }

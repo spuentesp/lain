@@ -21,10 +21,10 @@
 //! The auth check fires once per HTTP request, not per SSE event. SSE
 //! subscribers stay connected for as long as their initial GET passes.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use parking_lot::Mutex;
 
 /// Per-key authentication + rate limit state.
 #[derive(Debug, Clone)]
@@ -42,12 +42,12 @@ pub struct AuthState {
 impl AuthState {
     /// Read the policy from environment. Called once at server startup.
     pub fn from_env() -> Self {
-        let api_keys = std::env::var("LAIN_API_KEYS")
-            .ok()
-            .map(|raw| raw.split(',')
+        let api_keys = std::env::var("LAIN_API_KEYS").ok().map(|raw| {
+            raw.split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>());
+                .collect::<Vec<_>>()
+        });
         let api_keys = api_keys.filter(|v| !v.is_empty());
 
         let rate_limit_disabled = std::env::var("LAIN_RATE_LIMIT")
@@ -81,12 +81,18 @@ impl AuthState {
             }
         };
 
-        AuthState { api_keys, rate_limit }
+        AuthState {
+            api_keys,
+            rate_limit,
+        }
     }
 
     /// No-env fallback: dev mode (no auth, no rate limit).
     pub fn dev_mode() -> Self {
-        AuthState { api_keys: None, rate_limit: None }
+        AuthState {
+            api_keys: None,
+            rate_limit: None,
+        }
     }
 
     /// Check the `Authorization: Bearer <key>` header against the configured
@@ -94,7 +100,7 @@ impl AuthState {
     /// otherwise. Stdio callers should skip this entirely.
     pub fn check_bearer(&self, auth_header: Option<&str>) -> Result<(), AuthError> {
         let Some(expected_keys) = &self.api_keys else {
-            return Ok(());  // dev mode
+            return Ok(()); // dev mode
         };
         let header = auth_header.ok_or(AuthError::Missing)?;
         let token = bearer_token(header).ok_or(AuthError::Malformed)?;
@@ -218,7 +224,10 @@ mod tests {
     fn rate_limit_defaults_off_without_keys_and_on_with_them() {
         // Constructed directly rather than through `from_env`, which
         // reads process-global state and would race other tests.
-        let dev = AuthState { api_keys: None, rate_limit: None };
+        let dev = AuthState {
+            api_keys: None,
+            rate_limit: None,
+        };
         for _ in 0..500 {
             assert!(
                 dev.check_rate("anonymous").is_ok(),
@@ -276,7 +285,7 @@ mod tests {
 
     #[test]
     fn rate_limit_drains_bucket() {
-        let rl = RateLimit::new(3);  // 3 rpm = 1 token / 20s
+        let rl = RateLimit::new(3); // 3 rpm = 1 token / 20s
         let k = "k1";
         assert!(rl.try_consume(k).is_ok());
         assert!(rl.try_consume(k).is_ok());
@@ -289,7 +298,7 @@ mod tests {
     fn rate_limit_buckets_are_per_key() {
         let rl = RateLimit::new(1);
         assert!(rl.try_consume("a").is_ok());
-        assert!(rl.try_consume("b").is_ok());  // separate bucket
+        assert!(rl.try_consume("b").is_ok()); // separate bucket
         assert!(rl.try_consume("a").is_err());
     }
 }

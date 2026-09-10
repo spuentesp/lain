@@ -15,7 +15,9 @@
 use std::path::{Path, PathBuf};
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -36,7 +38,10 @@ fn every_rust_file_under_src_is_declared_as_a_module() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&root, &mut files);
-    assert!(!files.is_empty(), "found no .rs files to check under {root:?}");
+    assert!(
+        !files.is_empty(),
+        "found no .rs files to check under {root:?}"
+    );
 
     let mut orphans = Vec::new();
     for f in &files {
@@ -88,7 +93,9 @@ fn every_rust_file_under_src_is_declared_as_a_module() {
 #[test]
 fn every_test_attribute_sits_on_a_function() {
     fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -107,7 +114,9 @@ fn every_test_attribute_sits_on_a_function() {
 
     let mut orphans = Vec::new();
     for f in &files {
-        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        let Ok(src) = std::fs::read_to_string(f) else {
+            continue;
+        };
         let lines: Vec<&str> = src.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let t = line.trim();

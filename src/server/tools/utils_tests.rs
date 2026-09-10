@@ -1,20 +1,28 @@
 //! Tests for tools/utils.rs
 
-use crate::server::tools::utils::*;
-use crate::schema::{GraphNode, NodeType};
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
+use crate::schema::{GraphNode, NodeType};
+use crate::server::tools::utils::*;
 
 #[test]
 fn test_build_enriched_text_name_only() {
-    let node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let result = build_enriched_text(&node, std::path::Path::new(""));
     assert_eq!(result, "test_fn | /src/lib.rs");
 }
 
 #[test]
 fn test_build_enriched_text_with_signature() {
-    let mut node = GraphNode::new(NodeType::Function, "add".to_string(), "/src/math.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "add".to_string(),
+        "/src/math.rs".to_string(),
+    );
     node.signature = Some("(a: i32, b: i32) -> i32".to_string());
     let result = build_enriched_text(&node, std::path::Path::new(""));
     assert!(result.contains("add"));
@@ -24,7 +32,11 @@ fn test_build_enriched_text_with_signature() {
 
 #[test]
 fn test_build_enriched_text_with_docstring() {
-    let mut node = GraphNode::new(NodeType::Function, "process".to_string(), "/src/main.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "process".to_string(),
+        "/src/main.rs".to_string(),
+    );
     node.docstring = Some("Processes the input queue".to_string());
     let result = build_enriched_text(&node, std::path::Path::new(""));
     assert!(result.contains("process"));
@@ -34,7 +46,11 @@ fn test_build_enriched_text_with_docstring() {
 
 #[test]
 fn test_build_enriched_text_all_fields() {
-    let mut node = GraphNode::new(NodeType::Function, "full_fn".to_string(), "/src/full.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "full_fn".to_string(),
+        "/src/full.rs".to_string(),
+    );
     node.signature = Some("(x: String) -> Result<(), Error>".to_string());
     node.docstring = Some("Full documentation here".to_string());
     let result = build_enriched_text(&node, std::path::Path::new(""));
@@ -49,7 +65,10 @@ fn test_build_enriched_text_all_fields() {
 #[test]
 fn test_get_str_arg_present() {
     let mut args = serde_json::Map::new();
-    args.insert("key".to_string(), serde_json::Value::String("value".to_string()));
+    args.insert(
+        "key".to_string(),
+        serde_json::Value::String("value".to_string()),
+    );
     let args_ref: Option<&serde_json::Map<String, serde_json::Value>> = Some(&args);
 
     let result = get_str_arg(args_ref, "key");
@@ -76,7 +95,10 @@ fn test_get_str_arg_present_but_wrong_type() {
 #[test]
 fn test_get_usize_arg_present() {
     let mut args = serde_json::Map::new();
-    args.insert("count".to_string(), serde_json::Value::Number(serde_json::Number::from(100)));
+    args.insert(
+        "count".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(100)),
+    );
     let args_ref: Option<&serde_json::Map<String, serde_json::Value>> = Some(&args);
 
     let result = get_usize_arg(args_ref, "count");
@@ -93,7 +115,10 @@ fn test_get_usize_arg_missing() {
 #[test]
 fn test_get_usize_arg_wrong_type() {
     let mut args = serde_json::Map::new();
-    args.insert("count".to_string(), serde_json::Value::String("not_a_number".to_string()));
+    args.insert(
+        "count".to_string(),
+        serde_json::Value::String("not_a_number".to_string()),
+    );
     let args_ref: Option<&serde_json::Map<String, serde_json::Value>> = Some(&args);
 
     let result = get_usize_arg(args_ref, "count");
@@ -130,7 +155,10 @@ fn test_get_bool_arg_missing() {
 #[test]
 fn test_get_bool_arg_wrong_type() {
     let mut args = serde_json::Map::new();
-    args.insert("flag".to_string(), serde_json::Value::String("true".to_string()));
+    args.insert(
+        "flag".to_string(),
+        serde_json::Value::String("true".to_string()),
+    );
     let args_ref: Option<&serde_json::Map<String, serde_json::Value>> = Some(&args);
 
     let result = get_bool_arg(args_ref, "flag");
@@ -166,7 +194,12 @@ fn test_cosine_similarity_45_degree() {
     // cos(45°) = 1 / sqrt(2) ≈ 0.7071
     let expected = (2.0f32).sqrt() / 2.0;
     let diff = (result - expected).abs();
-    assert!(diff < 1e-2, "expected ~0.707, got {}, diff {}", result, diff);
+    assert!(
+        diff < 1e-2,
+        "expected ~0.707, got {}, diff {}",
+        result,
+        diff
+    );
 }
 
 #[test]
@@ -210,7 +243,11 @@ fn test_resolve_node_in_overlay() {
     let graph = GraphDatabase::new(&tmp).unwrap();
     let overlay = VolatileOverlay::new();
 
-    let node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let id = node.id.clone();
     overlay.insert_node(node);
 
@@ -226,7 +263,11 @@ fn test_resolve_node_in_graph() {
     let graph = GraphDatabase::new(&tmp).unwrap();
     let overlay = VolatileOverlay::new();
 
-    let node = GraphNode::new(NodeType::Function, "test_fn".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "test_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let id = node.id.clone();
     graph.upsert_node(node).unwrap();
 
@@ -242,7 +283,11 @@ fn test_resolve_node_by_name() {
     let graph = GraphDatabase::new(&tmp).unwrap();
     let overlay = VolatileOverlay::new();
 
-    let node = GraphNode::new(NodeType::Function, "my_function".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "my_function".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     graph.upsert_node(node).unwrap();
 
     let result = resolve_node(&graph, &overlay, "my_function");
@@ -269,8 +314,16 @@ fn test_resolve_node_overlay_priority() {
     let overlay = VolatileOverlay::new();
 
     // Same name in both overlay and graph - overlay should win
-    let n1 = GraphNode::new(NodeType::Function, "shared_name".to_string(), "/src/overlay.rs".to_string());
-    let n2 = GraphNode::new(NodeType::Function, "shared_name".to_string(), "/src/graph.rs".to_string());
+    let n1 = GraphNode::new(
+        NodeType::Function,
+        "shared_name".to_string(),
+        "/src/overlay.rs".to_string(),
+    );
+    let n2 = GraphNode::new(
+        NodeType::Function,
+        "shared_name".to_string(),
+        "/src/graph.rs".to_string(),
+    );
     overlay.insert_node(n1);
     graph.upsert_node(n2).unwrap();
 
@@ -293,7 +346,11 @@ fn test_token_recall_partial_match() {
         "GraphDatabase save bincode",
         "the GraphDatabase struct holds the merged brain",
     );
-    assert!((score - 1.0 / 3.0).abs() < 1e-6, "expected ~0.333, got {}", score);
+    assert!(
+        (score - 1.0 / 3.0).abs() < 1e-6,
+        "expected ~0.333, got {}",
+        score
+    );
 }
 
 #[test]
@@ -314,7 +371,11 @@ fn test_token_recall_case_insensitive() {
 fn test_token_recall_filters_short_and_numeric() {
     // "a", "42", "x" should be filtered out as noise
     let score = token_recall("a 42 x Tokenizer", "the Tokenizer handles encoding");
-    assert!((score - 1.0).abs() < 1e-6, "expected 1.0 (only Tokenizer counted), got {}", score);
+    assert!(
+        (score - 1.0).abs() < 1e-6,
+        "expected 1.0 (only Tokenizer counted), got {}",
+        score
+    );
 }
 
 #[test]
@@ -334,11 +395,11 @@ fn test_stem_basic_suffixes() {
     // -s → drop (but not -ss, -us)
     assert_eq!(stem("tokens"), "token");
     assert_eq!(stem("files"), "file");
-    assert_eq!(stem("queries"), "query");  // consonant + ies → y
-    assert_eq!(stem("ties"), "tie");        // plural -s strips regardless
-    assert_eq!(stem("class"), "class");     // -ss preserved
-    assert_eq!(stem("status"), "status");   // -us preserved
-    // short words unchanged
+    assert_eq!(stem("queries"), "query"); // consonant + ies → y
+    assert_eq!(stem("ties"), "tie"); // plural -s strips regardless
+    assert_eq!(stem("class"), "class"); // -ss preserved
+    assert_eq!(stem("status"), "status"); // -us preserved
+                                          // short words unchanged
     assert_eq!(stem("go"), "go");
     assert_eq!(stem("be"), "be");
     // already a stem
@@ -384,5 +445,9 @@ fn test_token_recall_benefits_from_stemming() {
     // "indexing" → "index" are still different — that's correct.
     // But "queries" → "query" and corpus has "query" should now match.
     let score = token_recall("queries the database", "run a database query");
-    assert!(score > 0.0, "expected non-zero recall after stemming, got {}", score);
+    assert!(
+        score > 0.0,
+        "expected non-zero recall after stemming, got {}",
+        score
+    );
 }

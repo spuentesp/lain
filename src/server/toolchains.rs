@@ -17,9 +17,9 @@
 //! test_parser = "cargo-test"
 //! ```
 
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use serde::Deserialize;
 
 /// Detect toolchains in a directory.
 /// Returns list of detected toolchain names.
@@ -123,28 +123,28 @@ pub struct ToolchainProfile {
 impl ToolchainProfile {
     /// Get the effective build command, falling back to defaults
     pub fn build_cmd(&self) -> String {
-        self.build_command.clone().unwrap_or_else(|| {
-            match self.name.as_str() {
+        self.build_command
+            .clone()
+            .unwrap_or_else(|| match self.name.as_str() {
                 "rust" => "cargo build --message-format=json".to_string(),
                 "go" => "go build".to_string(),
                 "javascript" | "typescript" => "npm run build".to_string(),
                 "python" => "python -m build".to_string(),
                 _ => format!("echo 'no build command for {}'", self.name),
-            }
-        })
+            })
     }
 
     /// Get the effective test command, falling back to defaults
     pub fn test_cmd(&self) -> String {
-        self.test_command.clone().unwrap_or_else(|| {
-            match self.name.as_str() {
+        self.test_command
+            .clone()
+            .unwrap_or_else(|| match self.name.as_str() {
                 "rust" => "cargo test --message-format=short".to_string(),
                 "go" => "go test".to_string(),
                 "javascript" | "typescript" => "npm test".to_string(),
                 "python" => "pytest".to_string(),
                 _ => format!("echo 'no test command for {}'", self.name),
-            }
-        })
+            })
     }
 
     /// Get the build parser ID, falling back to "text" (generic fallback)
@@ -212,61 +212,102 @@ pub fn get_toolchain_profile(name: &str) -> Option<ToolchainProfile> {
 /// See toolchains/rust.toml for the full format.
 fn default_profiles() -> HashMap<String, ToolchainProfile> {
     HashMap::from([
-        ("rust".to_string(), ToolchainProfile {
-            name: "rust".to_string(),
-            marker: "Cargo.toml".to_string(),
-            priority: 100,
-            build_command: Some("cargo build --message-format=json".to_string()),
-            test_command: Some("cargo test --message-format=short".to_string()),
-            build_parser: Some("cargo-json".to_string()),
-            test_parser: Some("cargo-test".to_string()),
-            program_resolver: Some("rustup which".to_string()),
-            program_dirs: vec!["~/.cargo/bin".to_string(), "~/.rustup/toolchains/*/bin".to_string()],
-        }),
-        ("go".to_string(), ToolchainProfile {
-            name: "go".to_string(),
-            marker: "go.mod".to_string(),
-            priority: 90,
-            build_command: Some("go build".to_string()),
-            test_command: Some("go test".to_string()),
-            build_parser: Some("go-build".to_string()),
-            test_parser: Some("go-test".to_string()),
-            program_resolver: None,
-            program_dirs: vec!["/usr/local/go/bin".to_string(), "~/go/bin".to_string(), "~/.local/go/bin".to_string(), "~/sdk/*/bin".to_string()],
-        }),
-        ("javascript".to_string(), ToolchainProfile {
-            name: "javascript".to_string(),
-            marker: "package.json".to_string(),
-            priority: 80,
-            build_command: Some("npm run build".to_string()),
-            test_command: Some("npm test".to_string()),
-            build_parser: Some("text".to_string()),
-            test_parser: Some("jest".to_string()),
-            program_resolver: None,
-            program_dirs: vec!["~/.volta/bin".to_string(), "~/.bun/bin".to_string(), "~/.yarn/bin".to_string(), "~/.local/share/pnpm".to_string(), "~/.nvm/versions/node/*/bin".to_string(), "~/.fnm/aliases/default/bin".to_string()],
-        }),
-        ("typescript".to_string(), ToolchainProfile {
-            name: "typescript".to_string(),
-            marker: "tsconfig.json".to_string(),
-            priority: 85,
-            build_command: Some("npm run build".to_string()),
-            test_command: Some("npm test".to_string()),
-            build_parser: Some("text".to_string()),
-            test_parser: Some("jest".to_string()),
-            program_resolver: None,
-            program_dirs: vec!["~/.volta/bin".to_string(), "~/.bun/bin".to_string(), "~/.yarn/bin".to_string(), "~/.local/share/pnpm".to_string(), "~/.nvm/versions/node/*/bin".to_string(), "~/.fnm/aliases/default/bin".to_string()],
-        }),
-        ("python".to_string(), ToolchainProfile {
-            name: "python".to_string(),
-            marker: "pyproject.toml".to_string(),
-            priority: 80,
-            build_command: Some("python -m build".to_string()),
-            test_command: Some("pytest".to_string()),
-            build_parser: Some("text".to_string()),
-            test_parser: Some("pytest".to_string()),
-            program_resolver: Some("pyenv which".to_string()),
-            program_dirs: vec!["~/.pyenv/shims".to_string(), "~/.rye/shims".to_string(), "~/.local/pipx/venvs/*/bin".to_string()],
-        }),
+        (
+            "rust".to_string(),
+            ToolchainProfile {
+                name: "rust".to_string(),
+                marker: "Cargo.toml".to_string(),
+                priority: 100,
+                build_command: Some("cargo build --message-format=json".to_string()),
+                test_command: Some("cargo test --message-format=short".to_string()),
+                build_parser: Some("cargo-json".to_string()),
+                test_parser: Some("cargo-test".to_string()),
+                program_resolver: Some("rustup which".to_string()),
+                program_dirs: vec![
+                    "~/.cargo/bin".to_string(),
+                    "~/.rustup/toolchains/*/bin".to_string(),
+                ],
+            },
+        ),
+        (
+            "go".to_string(),
+            ToolchainProfile {
+                name: "go".to_string(),
+                marker: "go.mod".to_string(),
+                priority: 90,
+                build_command: Some("go build".to_string()),
+                test_command: Some("go test".to_string()),
+                build_parser: Some("go-build".to_string()),
+                test_parser: Some("go-test".to_string()),
+                program_resolver: None,
+                program_dirs: vec![
+                    "/usr/local/go/bin".to_string(),
+                    "~/go/bin".to_string(),
+                    "~/.local/go/bin".to_string(),
+                    "~/sdk/*/bin".to_string(),
+                ],
+            },
+        ),
+        (
+            "javascript".to_string(),
+            ToolchainProfile {
+                name: "javascript".to_string(),
+                marker: "package.json".to_string(),
+                priority: 80,
+                build_command: Some("npm run build".to_string()),
+                test_command: Some("npm test".to_string()),
+                build_parser: Some("text".to_string()),
+                test_parser: Some("jest".to_string()),
+                program_resolver: None,
+                program_dirs: vec![
+                    "~/.volta/bin".to_string(),
+                    "~/.bun/bin".to_string(),
+                    "~/.yarn/bin".to_string(),
+                    "~/.local/share/pnpm".to_string(),
+                    "~/.nvm/versions/node/*/bin".to_string(),
+                    "~/.fnm/aliases/default/bin".to_string(),
+                ],
+            },
+        ),
+        (
+            "typescript".to_string(),
+            ToolchainProfile {
+                name: "typescript".to_string(),
+                marker: "tsconfig.json".to_string(),
+                priority: 85,
+                build_command: Some("npm run build".to_string()),
+                test_command: Some("npm test".to_string()),
+                build_parser: Some("text".to_string()),
+                test_parser: Some("jest".to_string()),
+                program_resolver: None,
+                program_dirs: vec![
+                    "~/.volta/bin".to_string(),
+                    "~/.bun/bin".to_string(),
+                    "~/.yarn/bin".to_string(),
+                    "~/.local/share/pnpm".to_string(),
+                    "~/.nvm/versions/node/*/bin".to_string(),
+                    "~/.fnm/aliases/default/bin".to_string(),
+                ],
+            },
+        ),
+        (
+            "python".to_string(),
+            ToolchainProfile {
+                name: "python".to_string(),
+                marker: "pyproject.toml".to_string(),
+                priority: 80,
+                build_command: Some("python -m build".to_string()),
+                test_command: Some("pytest".to_string()),
+                build_parser: Some("text".to_string()),
+                test_parser: Some("pytest".to_string()),
+                program_resolver: Some("pyenv which".to_string()),
+                program_dirs: vec![
+                    "~/.pyenv/shims".to_string(),
+                    "~/.rye/shims".to_string(),
+                    "~/.local/pipx/venvs/*/bin".to_string(),
+                ],
+            },
+        ),
     ])
 }
 
@@ -400,7 +441,11 @@ pub type RunResolver = dyn Fn(&[String], &str) -> Option<std::path::PathBuf>;
 /// Returns `None` when nothing matched, which the caller renders as the
 /// bare program name so the spawn failure names what was actually
 /// missing rather than a path we invented.
-pub fn resolve_in(lookup: &ProgramLookup, program: &str, run: &RunResolver) -> Option<std::path::PathBuf> {
+pub fn resolve_in(
+    lookup: &ProgramLookup,
+    program: &str,
+    run: &RunResolver,
+) -> Option<std::path::PathBuf> {
     // 1. An explicit `$CARGO` / `$GO` beats everything: the user said so.
     if let Some(p) = &lookup.env_override {
         return Some(p.clone());
@@ -466,7 +511,11 @@ pub fn expand_program_dir(spec: &str) -> Vec<std::path::PathBuf> {
         .filter(|e| e.path().is_dir())
         .map(|e| {
             let key = version_key(&e.file_name().to_string_lossy());
-            let path = if suffix.is_empty() { e.path() } else { e.path().join(suffix) };
+            let path = if suffix.is_empty() {
+                e.path()
+            } else {
+                e.path().join(suffix)
+            };
             (key, path)
         })
         .collect();
@@ -527,7 +576,12 @@ fn lookup_for(program: &str, profile: Option<&ToolchainProfile>) -> ProgramLooku
         .filter(|p| p.is_file());
 
     let profile_dirs = profile
-        .map(|p| p.program_dirs.iter().flat_map(|d| expand_program_dir(d)).collect())
+        .map(|p| {
+            p.program_dirs
+                .iter()
+                .flat_map(|d| expand_program_dir(d))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut resolvers: Vec<Vec<String>> = profile
@@ -543,7 +597,10 @@ fn lookup_for(program: &str, profile: Option<&ToolchainProfile>) -> ProgramLooku
     ProgramLookup {
         path_dirs,
         profile_dirs,
-        universal_dirs: UNIVERSAL_PROGRAM_DIRS.iter().flat_map(|d| expand_program_dir(d)).collect(),
+        universal_dirs: UNIVERSAL_PROGRAM_DIRS
+            .iter()
+            .flat_map(|d| expand_program_dir(d))
+            .collect(),
         resolvers,
         env_override,
     }
@@ -583,9 +640,13 @@ fn run_resolver_command(argv: &[String], program: &str) -> Option<std::path::Pat
 /// reaches the resolver commands, and that is a few milliseconds
 /// against a build measured in seconds.
 pub fn resolve_program(program: &str, profile: Option<&ToolchainProfile>) -> String {
-    resolve_in(&lookup_for(program, profile), program, &run_resolver_command)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| program.to_string())
+    resolve_in(
+        &lookup_for(program, profile),
+        program,
+        &run_resolver_command,
+    )
+    .map(|p| p.to_string_lossy().to_string())
+    .unwrap_or_else(|| program.to_string())
 }
 
 #[cfg(test)]
@@ -703,7 +764,11 @@ mod program_resolution_tests {
         }
         let spec = format!("{}/versions/node/*/bin", tmp.path().display());
         let hits = expand_program_dir(&spec);
-        assert_eq!(hits.len(), 2, "both installed versions must be searched: {hits:?}");
+        assert_eq!(
+            hits.len(),
+            2,
+            "both installed versions must be searched: {hits:?}"
+        );
         assert!(hits.iter().all(|h| h.ends_with("bin")));
     }
 
@@ -724,7 +789,14 @@ mod program_resolution_tests {
         // backwards.
         let order: Vec<String> = hits
             .iter()
-            .map(|h| h.parent().unwrap().file_name().unwrap().to_string_lossy().to_string())
+            .map(|h| {
+                h.parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect();
         assert_eq!(order, vec!["v24.14.1", "v20.20.0", "v10.1.0", "v9.0.0"]);
     }
