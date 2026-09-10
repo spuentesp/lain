@@ -162,6 +162,11 @@ pub struct RepoIndex {
     /// loader sets this right after `add_repo` so a subsequent
     /// `index()` can use it to materialize cross-repo `Calls` edges.
     cross_repo_resolver: parking_lot::Mutex<Option<Arc<dyn crate::federation::cross_repo::CrossRepoResolver>>>,
+    /// Per-repo UUID namespace used to derive `GraphNode::id`s for
+    /// every node this `RepoIndex` produces. See PR #14 follow-up:
+    /// `RepoNamespace::from_repo_id` makes this stable across process
+    /// restarts and hot re-adds (same `repo_id` → same namespace).
+    pub(crate) id_namespace: crate::schema::RepoNamespace,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -180,6 +185,8 @@ pub struct RepoIndex {
 impl RepoIndex {
     pub fn new(source: Box<dyn RepoSource>, data_dir: &Path) -> Result<Self, LainError> {
         let local_path = source.local_path().to_path_buf();
+        // Read the namespace *before* moving `source` into the struct.
+        let id_namespace = *source.id_namespace();
         let db = GraphDatabase::new(&data_dir.join("graph.bin"))?;
         // Read the repo's own `.lain/tuning.toml` (falling back to
         // defaults when absent) rather than hard-coding. The LSP poll
@@ -201,6 +208,7 @@ impl RepoIndex {
             overlay_updated: Arc::new(tokio::sync::Notify::new()),
             last_overlay_lsp_failures: std::sync::atomic::AtomicU32::new(0),
             cross_repo_resolver: parking_lot::Mutex::new(None),
+            id_namespace,
         })
     }
 
@@ -763,7 +771,7 @@ impl RepoIndex {
             let lsp = self.lsp.next();
             let mut lsp = lsp.lock().await;
             match lsp
-                .get_document_symbols_hierarchical(path, self.source.local_path())
+                .get_document_symbols_hierarchical(path, self.source.local_path(), &self.id_namespace)
                 .await
             {
                 Ok(syms) if !syms.is_empty() => Some(syms),
@@ -800,7 +808,7 @@ impl RepoIndex {
                             d.name.clone(),
                             graph_key.clone(),
                         )
-                        .with_location(d.line_start, d.line_end),
+                        .with_location_in(d.line_start, d.line_end, &self.id_namespace),
                         children: vec![],
                     })
                     .collect()

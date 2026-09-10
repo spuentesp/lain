@@ -72,6 +72,14 @@ pub struct LainServer {
     /// `ingestion.rs`, a sibling module. Mirrors the visibility on
     /// `federation`, `federation_workspaces`, etc.
     pub(crate) overlay_paths: Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    /// Per-server `RepoNamespace` for the LSP path. Mints one
+    /// namespace at construction; stable for the lifetime of the
+    /// server. Threaded through `LspMultiplexer` so every overlay
+    /// node minted by the single-workspace pipeline carries the same
+    /// namespace as the federation-side `RepoIndex`. PR #13
+    /// follow-up: the watcher and `process_change` paths use this
+    /// when minting new overlay nodes.
+    pub(crate) id_namespace: crate::schema::RepoNamespace,
     /// Outcome of the most recent startup re-index. Written by the
     /// re-index spawn in `LainMcpServer::run_stdio` / `run_http`;
     /// read by `ToolExecutor::get_health` and (in step 3) by the tool
@@ -388,6 +396,40 @@ impl LainServer {
             .keys()
             .cloned()
             .collect()
+    }
+
+    /// Record that this server's watcher (or any other overlay writer
+    /// outside `process_change`) inserted a node at workspace-relative
+    /// `key` with the given `node_id`. Mirrors the bookkeeping
+    /// `process_change` does, so the next `sync_volatile_overlay`
+    /// cycle can purge by id if this path drops out of the changes
+    /// list. URGENT FIXES #3 follow-up: the watcher bypasses
+    /// `process_change` and was previously leaving its insertions
+    /// invisible to the staleness sweep.
+    pub fn overlay_paths_record_insert(
+        &self,
+        key: String,
+        node_id: String,
+    ) {
+        self.overlay_paths
+            .lock()
+            .entry(key)
+            .or_default()
+            .push(node_id);
+    }
+
+    /// Replace the bookkeeping entry for `key` with a fresh list of
+    /// `node_ids`. Used when a re-saved file should drop the previous
+    /// version's overlay entries from the same path before inserting
+    /// the new ones. The watcher calls this once per file event with
+    /// the freshly inserted ids; `process_change` does the equivalent
+    /// inline.
+    pub fn overlay_paths_replace(
+        &self,
+        key: String,
+        node_ids: Vec<String>,
+    ) {
+        self.overlay_paths.lock().insert(key, node_ids);
     }
     // (removed: had no caller and no test anywhere in the tree)
 

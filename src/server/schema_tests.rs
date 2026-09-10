@@ -236,9 +236,9 @@ fn test_edge_type_equality() {
 #[test]
 fn test_graph_node_id_differs_by_line_range() {
     let top_level = GraphNode::new(NodeType::Function, "add".to_string(), "/src/lib.rs".to_string())
-        .with_location(1, 1);
+        .with_location_in(1, 1, &crate::schema::RepoNamespace::for_test());
     let impl_method = GraphNode::new(NodeType::Function, "add".to_string(), "/src/lib.rs".to_string())
-        .with_location(7, 7);
+        .with_location_in(7, 7, &crate::schema::RepoNamespace::for_test());
     assert_ne!(
         top_level.id, impl_method.id,
         "Functions named 'add' at different lines must have distinct IDs (got {} vs {})",

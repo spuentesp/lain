@@ -1257,8 +1257,8 @@ impl GraphDatabase {
             let filename1 = Path::new(p1).file_name().unwrap_or_default().to_string_lossy().to_string();
             let filename2 = Path::new(p2).file_name().unwrap_or_default().to_string_lossy().to_string();
             
-            let id1 = GraphNode::generate_id(&NodeType::File, p1, &filename1, None);
-            let id2 = GraphNode::generate_id(&NodeType::File, p2, &filename2, None);
+            let id1 = GraphNode::generate_id(&NodeType::File, p1, &filename1, None, &crate::schema::RepoNamespace::for_test());
+            let id2 = GraphNode::generate_id(&NodeType::File, p2, &filename2, None, &crate::schema::RepoNamespace::for_test());
             
             let mut edge = GraphEdge::new(EdgeType::CoChangedWith, id1, id2);
             edge.weight = Some(*count as f32);
@@ -1272,7 +1272,7 @@ impl GraphDatabase {
         let graph = self.graph.read();
 
         let filename = Path::new(file_path).file_name().unwrap_or_default().to_string_lossy().to_string();
-        let id = GraphNode::generate_id(&NodeType::File, file_path, &filename, None);
+        let id = GraphNode::generate_id(&NodeType::File, file_path, &filename, None, &crate::schema::RepoNamespace::for_test());
         let Some(idx) = self.index_map.get(&id).map(|r| *r.value()) else { return Ok(Vec::new()); };
 
         // Fold by target path before returning. The graph can hold more

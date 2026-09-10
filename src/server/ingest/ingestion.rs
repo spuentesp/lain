@@ -3,7 +3,7 @@ use crate::git::GitSensor;
 use crate::graph::{graph_path, GraphDatabase};
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
-use crate::server::overlay::VolatileOverlay;
+use crate::server::overlay::{OverlayDiff, VolatileOverlay};
 use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
 use std::collections::HashSet;
@@ -455,6 +455,13 @@ impl LainServer {
         // matches the federation's contract and prevents a still-real
         // symbol from vanishing between commit and the next reindex
         // when those happen close together.
+        //
+        // Both sweep branches collect their removed ids into
+        // `removed_ids` and broadcast a single `OverlayDiff` at the
+        // end of the cycle, so sidecars consuming `/overlay/subscribe`
+        // see purges as well as inserts (URGENT FIXES #3 follow-up:
+        // pre-fix the broadcast only carried additions).
+        let mut removed_ids: Vec<String> = Vec::new();
         {
             let mut owned = self.overlay_paths.lock();
             let head = self.git.lock().get_latest_commit_info().ok().map(|(h, _)| h);
@@ -471,9 +478,10 @@ impl LainServer {
                 let deleted_from_disk = !workspace_root.join(&path).is_file();
                 if graph_caught_up || deleted_from_disk {
                     if let Some(ids) = owned.remove(&path) {
-                        for id in ids {
-                            self.overlay.remove_node(&id);
+                        for id in &ids {
+                            self.overlay.remove_node(id);
                         }
+                        removed_ids.extend(ids);
                     }
                 }
             }
@@ -486,13 +494,14 @@ impl LainServer {
         for change in &changes {
             let key = graph_path(&workspace_root, &change.path);
             let old_ids = self.overlay_paths.lock().remove(&key);
-            if let Some(ids) = &old_ids {
-                for id in ids {
+            if let Some(ids) = old_ids {
+                for id in &ids {
                     self.overlay.remove_node(id);
                 }
+                removed_ids.extend(ids);
                 tracing::debug!(
                     "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
-                    ids.len(),
+                    removed_ids.len(),
                     change.path
                 );
             }
@@ -506,6 +515,21 @@ impl LainServer {
                 warn!("Failed to process change {:?}: {}", change.path, e);
             }
         }
+
+        // Broadcast the diff so any sidecar consuming
+        // `/overlay/subscribe` sees the same removals the local
+        // `VolatileOverlay` saw. `OverlayDiff.added` is empty here
+        // because the inserted ids went through `process_change` →
+        // `broadcast_overlay_insert` (which has its own broadcast).
+        if !removed_ids.is_empty() {
+            crate::server::overlay::broadcast_overlay_diff(OverlayDiff {
+                revision: self.next_revision(),
+                added: vec![],
+                removed: removed_ids,
+                updated: vec![],
+            });
+        }
+
         Ok(())
     }
 
@@ -513,7 +537,7 @@ impl LainServer {
         let symbols = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
-            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
+            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace, &self.id_namespace).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("No LSP symbols for changed file {:?}: {}", path, e);

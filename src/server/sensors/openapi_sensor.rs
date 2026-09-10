@@ -153,7 +153,7 @@ pub fn enrich_with_openapi(
             &NodeType::HttpRoute,
             &op.spec_path,
             &format!("{}:{}", op.method, op.path),
-            None,
+            None, &crate::schema::RepoNamespace::for_test()
         );
 
         let mut route_node = GraphNode::new(

@@ -107,7 +107,7 @@ pub async fn scan_file_structure(
     // 4. Recursive symbols (no more per-symbol lock acquisition)
     let symbols_result = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_document_symbols_hierarchical(&path, &workspace).await
+        lsp.get_document_symbols_hierarchical(&path, &workspace, &crate::schema::RepoNamespace::for_test()).await
     };
 
     match symbols_result {
@@ -354,7 +354,7 @@ fn add_tree_sitter_definitions(
     let defs = crate::treesitter::extract_definitions(path, &content);
     for def in defs {
         let mut node = GraphNode::new(def.kind, def.name.clone(), graph_key.to_string())
-            .with_location(def.line_start, def.line_end);
+            .with_location_in(def.line_start, def.line_end, &crate::schema::RepoNamespace::for_test());
         node.last_lsp_sync = Some(lsp_sync);
         node.last_git_sync = Some(git_sync);
         node.commit_hash = Some(commit_hash.clone());

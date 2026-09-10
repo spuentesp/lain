@@ -94,7 +94,7 @@ pub fn enrich_with_websocket(
             &NodeType::Variable,
             &node_path,
             &display_name,
-            None,
+            None, &crate::schema::RepoNamespace::for_test()
         );
 
         let mut node = GraphNode::new(

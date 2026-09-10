@@ -384,6 +384,41 @@ pub struct GraphNode {
     pub is_hydrated: bool,
 }
 
+/// Per-repository UUID namespace for `GraphNode` ids. See PR #14 +
+/// follow-up. `RepoNamespace` is `Copy` (the underlying `Uuid` is)
+/// so call sites can pass it by value without `&` everywhere.
+#[derive(Clone, Copy, Debug)]
+pub struct RepoNamespace(pub(crate) uuid::Uuid);
+
+impl RepoNamespace {
+    /// Stable test namespace. Distinct from any production namespace
+    /// so test-produced ids never collide with real ids.
+    pub fn for_test() -> Self {
+        Self(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            b"lain::RepoNamespace::for_test",
+        ))
+    }
+
+    /// Mint a fresh v4 namespace. Production callers prefer
+    /// `from_repo_id` for stability across hot re-adds.
+    pub fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// Derive a stable namespace from a repo's identity.
+    pub fn from_repo_id(repo_id: &crate::federation::repo_id::RepoId) -> Self {
+        Self(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            repo_id.as_str().as_bytes(),
+        ))
+    }
+
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+}
+
 impl GraphNode {
     /// Generate a stable UUID for a graph node.
     ///
@@ -391,21 +426,52 @@ impl GraphNode {
     /// (type, path, name) — e.g. a top-level `fn add` and an `impl` method
     /// `add` — get distinct IDs. Pass `None` for nodes where line range is
     /// not meaningful (e.g. sensors that produce one node per external entity).
+    ///
+    /// `namespace` namespaces the id by repo so two federation repos with
+    /// identical `(type, path, name, line)` produce distinct ids
+    /// (URGENT FIXES #2 follow-up). Tests use
+    /// `RepoNamespace::for_test()`; production code passes the owning
+    /// repo's namespace.
     pub fn generate_id(
         node_type: &NodeType,
         path: &str,
         name: &str,
         line_start: Option<u32>,
+        namespace: &RepoNamespace,
     ) -> String {
         let id_input = match line_start {
-            Some(line) => format!("{:?}:{}:{}:{}", node_type, path, name, line),
-            None => format!("{:?}:{}:{}", node_type, path, name),
+            Some(line) => format!(
+                "{:?}:{}:{}:{}:{}",
+                namespace.as_uuid(),
+                node_type,
+                path,
+                name,
+                line
+            ),
+            None => format!(
+                "{:?}:{}:{}:{}",
+                namespace.as_uuid(),
+                node_type,
+                path,
+                name
+            ),
         };
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id_input.as_bytes()).to_string()
+        uuid::Uuid::new_v5(&namespace.as_uuid(), id_input.as_bytes()).to_string()
     }
 
     pub fn new(node_type: NodeType, name: String, path: String) -> Self {
-        let id = Self::generate_id(&node_type, &path, &name, None);
+        // Tests-only convenience constructor; production goes through
+        // `new_in` with the repo's `RepoNamespace`. See PR #14 follow-up.
+        Self::new_in(node_type, name, path, &RepoNamespace::for_test())
+    }
+
+    pub fn new_in(
+        node_type: NodeType,
+        name: String,
+        path: String,
+        namespace: &RepoNamespace,
+    ) -> Self {
+        let id = Self::generate_id(&node_type, &path, &name, None, namespace);
 
         Self {
             id,
@@ -438,7 +504,34 @@ impl GraphNode {
         self.line_end = Some(line_end);
         // Re-derive the ID so two same-named symbols at different lines
         // (e.g. top-level fn vs impl method) get distinct IDs.
-        self.id = Self::generate_id(&self.node_type, &self.path, &self.name, Some(line_start));
+        let ns = RepoNamespace::for_test();
+        self.id = Self::generate_id(
+            &self.node_type,
+            &self.path,
+            &self.name,
+            Some(line_start),
+            &ns,
+        );
+        self
+    }
+
+    /// Production equivalent of `with_location` — preserves the
+    /// owning repo's namespace across the re-derivation.
+    pub fn with_location_in(
+        mut self,
+        line_start: u32,
+        line_end: u32,
+        namespace: &RepoNamespace,
+    ) -> Self {
+        self.line_start = Some(line_start);
+        self.line_end = Some(line_end);
+        self.id = Self::generate_id(
+            &self.node_type,
+            &self.path,
+            &self.name,
+            Some(line_start),
+            namespace,
+        );
         self
     }
 }
