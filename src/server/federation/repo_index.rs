@@ -8,6 +8,7 @@ use crate::schema::{GraphEdge, GraphNode};
 use crate::server::ingest::ingestion::index_one_repo;
 use crate::server::overlay::VolatileOverlay;
 use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -118,6 +119,24 @@ pub struct RepoIndex {
     /// (tests); production wires the federation's overlay in via
     /// [`Self::set_overlay`] right after `add_repo`.
     server_overlay: parking_lot::Mutex<Arc<VolatileOverlay>>,
+    /// Path -> node ids this repo currently has live in the shared
+    /// `VolatileOverlay`, as of the last `sync_overlay` cycle. Tracking
+    /// ids (not just paths) is load-bearing: the overlay is shared
+    /// across every repo in the federation, and two repos can easily
+    /// have a file at the same relative path (`src/lib.rs` is the
+    /// common case). Removing "whatever is at this path" would delete
+    /// another repo's live nodes too; removing specific ids this repo
+    /// itself inserted never touches anything it doesn't own.
+    overlay_paths: parking_lot::Mutex<HashMap<String, Vec<String>>>,
+    /// Serializes `sync_overlay` calls for this repo. It can be invoked
+    /// both by the watcher's receiver task and by `sync_state`'s
+    /// per-repo `JoinSet` (`enrichment.rs`) landing on the same repo at
+    /// once; without this, two overlapping calls each snapshot
+    /// `get_uncommitted_changes()` independently and the later one to
+    /// finish overwrites `overlay_paths` with its own (possibly
+    /// stale-relative-to-the-other-call) view, corrupting the
+    /// staleness bookkeeping.
+    sync_overlay_lock: AsyncMutex<()>,
     /// Active file-system watcher for this repo. `None` until
     /// `start_watcher` is called. The watcher is dropped (and the
     /// background thread stops) when the `RepoIndex` is dropped.
@@ -176,6 +195,8 @@ impl RepoIndex {
             health: Arc::new(RwLock::new(RepoHealth::Indexing)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
+            overlay_paths: parking_lot::Mutex::new(HashMap::new()),
+            sync_overlay_lock: AsyncMutex::new(()),
             watcher: parking_lot::Mutex::new(None),
             overlay_updated: Arc::new(tokio::sync::Notify::new()),
             last_overlay_lsp_failures: std::sync::atomic::AtomicU32::new(0),
@@ -581,6 +602,12 @@ impl RepoIndex {
         if self.db.is_read_only() {
             return Ok(());
         }
+        // Serialize concurrent calls for this repo (the watcher's
+        // receiver task and `sync_state`'s per-repo `JoinSet` in
+        // `enrichment.rs` can both land on the same repo at once) so
+        // `overlay_paths` bookkeeping below is never read-modified by
+        // two overlapping cycles.
+        let _sync_guard = self.sync_overlay_lock.lock().await;
         let overlay = self.server_overlay.lock().clone();
 
         // Reset the per-cycle LSP-failure counter at the start so a
@@ -592,44 +619,93 @@ impl RepoIndex {
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let changes = self.git.lock().await.get_uncommitted_changes()?;
+        // Overlay nodes are keyed by the workspace-relative form
+        // (`process_overlay_change` mints them via `graph_path`, per its
+        // own doc comment: "every site that mints or looks up a path key
+        // goes through this... producer keys and consumer keys are only
+        // comparable because both sides are reduced here first"), but
+        // `change.path` (from `get_uncommitted_changes`) is absolute
+        // (`self.workspace.join(path)` in `git.rs`).
+        let workspace_root = self.source.local_path();
+        let current_paths: HashSet<String> = changes.iter()
+            .map(|c| crate::graph::graph_path(workspace_root, &c.path))
+            .collect();
 
-        // Drop entries for THIS repo's changed paths BEFORE scanning.
-        // The federation's overlay is shared across repos (one
-        // `VolatileOverlay` per federation, not per repo), so a
-        // blanket `overlay.clear()` would wipe every other repo's
-        // entries — the single-repo behavior was correct only because
-        // there was nothing else to clobber. Per-path removal
-        // preserves the rest of the federation's working tree.
-        for change in &changes {
-            let removed = overlay.remove_nodes_for_path(&change.path.to_string_lossy());
-            if removed > 0 {
-                tracing::debug!(
-                    "[federation] sync_overlay: dropped {} stale overlay node(s) for {:?}",
-                    removed,
-                    change.path
-                );
+        // Staleness sweep: paths this repo owned as of the last cycle
+        // that are no longer uncommitted (committed, or the uncommitted
+        // change was discarded). Removed *by id*, not by
+        // `remove_nodes_for_path` — the `VolatileOverlay` is shared
+        // across every repo in the federation (one instance per
+        // federation, not per repo), and two repos routinely share a
+        // relative path (`src/lib.rs` is the common case). Removing
+        // "whatever is at this path" would delete another repo's live
+        // nodes at the same path too; removing the exact ids this repo
+        // itself inserted there never touches anything it doesn't own.
+        //
+        // Only purged once the static graph already has *something* at
+        // that path — i.e. the commit-triggered reindex has caught up.
+        // `sync_state` (`enrichment.rs`) calls only `sync_overlay` for
+        // each federation repo, by design, never a paired `index()` —
+        // so a path can drop out of `get_uncommitted_changes()` well
+        // before the static graph is rebuilt for it. Purging eagerly
+        // would make a symbol that's still real disappear from *both*
+        // the overlay and the graph for that window. Leaving its ids
+        // tracked for one more cycle instead matches the pre-fix
+        // behavior (a stale-but-present entry) rather than regressing
+        // past it — it just means cleanup catches up on a later cycle.
+        {
+            let mut owned = self.overlay_paths.lock();
+            let stale_paths: Vec<String> = owned
+                .keys()
+                .filter(|p| !current_paths.contains(*p))
+                .cloned()
+                .collect();
+            for path in stale_paths {
+                if self.db.find_node_by_path(&path).is_some() {
+                    if let Some(ids) = owned.remove(&path) {
+                        for id in ids {
+                            overlay.remove_node(&id);
+                        }
+                    }
+                }
             }
         }
 
+        // Drop entries for THIS repo's changed paths BEFORE scanning —
+        // again by id, for the same cross-repo-sharing reason above.
         for change in &changes {
+            let key = crate::graph::graph_path(workspace_root, &change.path);
+            let old_ids = self.overlay_paths.lock().remove(&key);
+            if let Some(ids) = &old_ids {
+                for id in ids {
+                    overlay.remove_node(id);
+                }
+                tracing::debug!(
+                    "[federation] sync_overlay: dropped {} stale overlay node(s) for {:?}",
+                    ids.len(),
+                    change.path
+                );
+            }
+
             // Skip LSP re-scan for files that were deleted — there's
-            // nothing to scan, and the entry removal above already
-            // wiped them.
-            if matches!(
-                change.change_type,
-                crate::git::ChangeType::Deleted
-            ) {
+            // nothing to scan, and the removal above already wiped them.
+            if matches!(change.change_type, crate::git::ChangeType::Deleted) {
                 continue;
             }
-            if let Err(e) = self
+            match self
                 .process_overlay_change(&change.path, &overlay, &self.last_overlay_lsp_failures)
                 .await
             {
-                tracing::warn!(
-                    "[federation] overlay refresh: failed for {:?}: {}",
-                    change.path,
-                    e
-                );
+                Ok(new_ids) => {
+                    self.overlay_paths.lock().insert(key, new_ids);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[federation] overlay refresh: failed for {:?}: {}",
+                        change.path,
+                        e
+                    );
+                }
             }
         }
 
@@ -641,6 +717,7 @@ impl RepoIndex {
                 failed
             );
         }
+        overlay.touch();
         Ok(())
     }
 
@@ -658,7 +735,7 @@ impl RepoIndex {
         path: &Path,
         overlay: &Arc<crate::server::overlay::VolatileOverlay>,
         lsp_failures: &std::sync::atomic::AtomicU32,
-    ) -> Result<(), LainError> {
+    ) -> Result<Vec<String>, LainError> {
         // 1. Try the LSP path first. A successful but empty response (cold
         // LSP that hasn't analyzed the file yet) falls through to
         // tree-sitter; only a true `Err` counts as an LSP failure for the
@@ -700,7 +777,7 @@ impl RepoIndex {
             Some(s) => s,
             None => {
                 let Ok(content) = std::fs::read_to_string(path) else {
-                    return Ok(());
+                    return Ok(Vec::new());
                 };
                 let graph_key =
                     crate::graph::graph_path(self.source.local_path(), path);
@@ -719,10 +796,12 @@ impl RepoIndex {
             }
         };
 
+        let mut ids = Vec::with_capacity(symbols.len());
         for symbol in symbols {
+            ids.push(symbol.node.id.clone());
             overlay.insert_node(symbol.node.clone());
         }
-        Ok(())
+        Ok(ids)
     }
 }
 

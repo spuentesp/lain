@@ -85,6 +85,182 @@ async fn sync_overlay_picks_up_new_file() {
     std::mem::forget(ri);
 }
 
+fn commit_all(path: &std::path::Path) {
+    use std::process::Command;
+    Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "add", "-A"])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "commit", "-q", "-m", "commit"])
+        .status()
+        .unwrap();
+}
+
+/// `sync_overlay` drops a changed path's stale overlay entries and then
+/// re-scans it fresh (its "drop entries for changed paths BEFORE
+/// scanning" step) — a real, narrow window where a concurrent read can
+/// observe the path as transiently empty between the drop and the
+/// re-insert. `overlay_updated` fires once per receiver iteration, and
+/// under load (a poll-based watcher, or several fs events queued and
+/// drained back-to-back) more than one iteration can complete close
+/// together — waking on a single `notified()` is not guaranteed to line
+/// up with the specific edit a test just made, only with "some cycle
+/// finished, possibly one still catching up". Poll for `predicate`
+/// instead of asserting on one snapshot: this still correctly fails
+/// (once `budget` elapses) if the receiver task actually died, since a
+/// dead receiver never repopulates the overlay no matter how long this
+/// waits.
+async fn poll_until(
+    overlay: &lain::overlay::VolatileOverlay,
+    budget: std::time::Duration,
+    mut predicate: impl FnMut(&[lain::schema::GraphNode]) -> bool,
+) -> Vec<lain::schema::GraphNode> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let nodes = overlay.get_all_nodes();
+        if predicate(&nodes) || std::time::Instant::now() >= deadline {
+            return nodes;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// `sync_overlay` refreshes entries for paths that are *currently*
+/// uncommitted, but had no mechanism to drop entries for a path that
+/// *was* uncommitted on a previous cycle and has since been committed
+/// (or had its uncommitted change discarded). Without that cleanup, a
+/// stale pre-commit node kept answering `resolve_node`/`explain_symbol`
+/// etc. via the overlay (which is consulted before the persisted graph)
+/// even after the file's committed state was re-indexed — a caller
+/// could see a symbol that no longer exists in the working tree, or
+/// stale line numbers for one that does.
+///
+/// The cleanup only fires once the static graph has *something* at the
+/// now-committed path (see `sync_overlay`'s comment on why: purging
+/// eagerly can make a symbol vanish from both layers in the window
+/// before the graph catches up, which is real — `sync_state` in
+/// `enrichment.rs` calls only `sync_overlay` per repo, never a paired
+/// `index()`). This test seeds the static graph directly after the
+/// commit rather than depending on the real LSP/tree-sitter pipeline's
+/// timing — the fix only cares that *something* exists at the path,
+/// not how it got there — to deterministically put the graph in the
+/// state a real reindex would leave it in before asserting the overlay
+/// cleanup follows through.
+#[tokio::test]
+async fn sync_overlay_removes_stale_entries_after_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ri = build_repo_index(&tmp);
+
+    let scratch_file = tmp.path().join("src").join("scratch.rs");
+    std::fs::write(&scratch_file, "pub fn scratch_symbol() {}\n").unwrap();
+
+    ri.sync_overlay()
+        .await
+        .expect("first sync_overlay should succeed");
+    let names_before: Vec<String> = ri
+        .server_overlay()
+        .get_all_nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert!(
+        names_before.iter().any(|n| n.contains("scratch_symbol")),
+        "sanity: the uncommitted file's symbol should be in the overlay \
+         before it's committed; got: {names_before:?}"
+    );
+
+    // The file is no longer uncommitted, so it drops out of
+    // `get_uncommitted_changes()` on the next cycle.
+    commit_all(tmp.path());
+    // Simulate the reindex catching up directly rather than depending
+    // on the real LSP/tree-sitter pipeline's timing in a test — the
+    // fix under test only cares that the static graph has *something*
+    // at this path, not how it got there.
+    ri.db()
+        .upsert_node(lain::schema::GraphNode::new(
+            lain::schema::NodeType::Function,
+            "scratch_symbol".into(),
+            "src/scratch.rs".into(),
+        ))
+        .expect("seed static graph with the reindexed symbol");
+
+    ri.sync_overlay()
+        .await
+        .expect("second sync_overlay should succeed");
+    let names_after: Vec<String> = ri
+        .server_overlay()
+        .get_all_nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert!(
+        !names_after.iter().any(|n| n.contains("scratch_symbol")),
+        "sync_overlay must drop overlay entries for a path once it's no \
+         longer uncommitted, even though that path isn't in this cycle's \
+         changed-paths list; got: {names_after:?}"
+    );
+
+    std::mem::forget(ri);
+}
+
+/// Companion to `sync_overlay_removes_stale_entries_after_commit`:
+/// pins the safety half of the same fix. `sync_state` (`enrichment.rs`)
+/// calls only `sync_overlay` per federation repo, never a paired
+/// `index()` — so a path can drop out of `get_uncommitted_changes()`
+/// (committed) before the static graph has anything at that path yet.
+/// Purging the overlay entry in that window would make a symbol that's
+/// still real disappear from *both* layers until some later reindex
+/// happens to run. Without the static-graph check, this test's commit
+/// would trigger the exact same removal as the sibling test above —
+/// but here nothing is ever seeded into `ri.db()`, so the entry must
+/// survive.
+#[tokio::test]
+async fn sync_overlay_keeps_stale_entry_until_graph_catches_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ri = build_repo_index(&tmp);
+
+    let scratch_file = tmp.path().join("src").join("scratch.rs");
+    std::fs::write(&scratch_file, "pub fn scratch_symbol() {}\n").unwrap();
+
+    ri.sync_overlay()
+        .await
+        .expect("first sync_overlay should succeed");
+    let names_before: Vec<String> = ri
+        .server_overlay()
+        .get_all_nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert!(
+        names_before.iter().any(|n| n.contains("scratch_symbol")),
+        "sanity: the uncommitted file's symbol should be in the overlay \
+         before it's committed; got: {names_before:?}"
+    );
+
+    // Committed, but — unlike the sibling test — the static graph is
+    // never seeded. `ri.db()` genuinely has nothing at this path.
+    commit_all(tmp.path());
+
+    ri.sync_overlay()
+        .await
+        .expect("second sync_overlay should succeed");
+    let names_after: Vec<String> = ri
+        .server_overlay()
+        .get_all_nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect();
+    assert!(
+        names_after.iter().any(|n| n.contains("scratch_symbol")),
+        "sync_overlay must NOT drop a path's overlay entries while the \
+         static graph has nothing there yet — doing so would make a \
+         still-real symbol vanish from both layers; got: {names_after:?}"
+    );
+
+    std::mem::forget(ri);
+}
+
 #[tokio::test]
 async fn watcher_does_not_panic_on_edit() {
     let tmp = tempfile::tempdir().unwrap();
@@ -115,6 +291,20 @@ async fn watcher_does_not_panic_on_edit() {
         }
     };
 
+    // `sync_overlay` drops a changed path's stale overlay entries and
+    // then re-scans it fresh (see `sync_overlay`'s "drop entries for
+    // changed paths BEFORE scanning" step) — a real, narrow window
+    // where a concurrent read can observe the path as transiently
+    // empty between the drop and the re-insert. `overlay_updated` also
+    // fires once per receiver iteration, and the poll-based watcher can
+    // legitimately produce more than one iteration close together (e.g.
+    // one noticing lib.rs's pre-existing content on the first tick,
+    // another for this edit) — a single `wait_for_refresh` here is not
+    // guaranteed to correspond to the specific edit that just happened,
+    // only to "some cycle completed". Poll instead of asserting on one
+    // snapshot: it still correctly fails (via the outer timeout) if the
+    // receiver task actually died, since a dead receiver never
+    // repopulates the overlay no matter how long this waits.
     // Modify a tracked file. Pre-fix, this would panic the inotify thread.
     let target = tmp.path().join("src").join("lib.rs");
     std::fs::write(&target, "pub fn existing() { /* edited */ }\n").unwrap();
@@ -132,7 +322,7 @@ async fn watcher_does_not_panic_on_edit() {
     // ran). Pre-fix, the inotify thread panicked on the first event and
     // the overlay stayed at whatever it had before the test.
     let overlay = ri.server_overlay();
-    let before = overlay.get_all_nodes();
+    let before = poll_until(&overlay, std::time::Duration::from_secs(5), |n| !n.is_empty()).await;
     assert!(
         !before.is_empty(),
         "after the first edit, the receiver task should have refreshed \
@@ -151,7 +341,7 @@ async fn watcher_does_not_panic_on_edit() {
     // overlay (because no further `sync_overlay` runs) and the assertion
     // below fails — giving us a Rust-level signal that the watcher
     // panicked, not just a process-level "did the test crash".
-    let after = overlay.get_all_nodes();
+    let after = poll_until(&overlay, std::time::Duration::from_secs(5), |n| !n.is_empty()).await;
     assert!(
         !after.is_empty(),
         "after the second edit, the overlay should still be populated by \
@@ -534,7 +724,10 @@ async fn watcher_survives_six_concurrent_agents() {
     // overlay still held the pre-existing `existing` symbol from
     // lib.rs but no agent_* entries landed — which is exactly the
     // failure mode a wedged receiver under load would produce.
-    let after_swarm = overlay.get_all_nodes();
+    let after_swarm = poll_until(&overlay, std::time::Duration::from_secs(10), |n| {
+        n.iter().any(|n| n.name.starts_with("agent_"))
+    })
+    .await;
     let after_swarm_names: Vec<String> =
         after_swarm.into_iter().map(|n| n.name).collect();
     assert!(
@@ -555,7 +748,10 @@ async fn watcher_survives_six_concurrent_agents() {
     // after the swarm. Content assertion that an `agent_*` symbol
     // still exists — the edit to lib.rs doesn't introduce new symbols,
     // so the agent_* entries from the swarm must still be present.
-    let after_followup = overlay.get_all_nodes();
+    let after_followup = poll_until(&overlay, std::time::Duration::from_secs(10), |n| {
+        n.iter().any(|n| n.name.starts_with("agent_"))
+    })
+    .await;
     let after_followup_names: Vec<String> =
         after_followup.into_iter().map(|n| n.name).collect();
     assert!(
