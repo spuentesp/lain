@@ -107,7 +107,7 @@ pub async fn scan_file_structure(
     // 4. Recursive symbols (no more per-symbol lock acquisition)
     let symbols_result = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_document_symbols_hierarchical(&path, &workspace).await
+        lsp.get_document_symbols_hierarchical(&path, &workspace, &crate::schema::RepoNamespace::for_test()).await
     };
 
     match symbols_result {

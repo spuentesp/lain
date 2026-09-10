@@ -225,6 +225,19 @@ impl FileWatcher {
                         warn!("FileWatcher: failed to process {:?}: {}", path, e);
                     }
                 }
+
+                // Reconcile the volatile overlay after each batch so
+                // commits / reverts / deletions between watcher events
+                // are picked up. Without this, `sync_volatile_overlay`
+                // only ran once at startup — every subsequent overlay
+                // mutation lived until the next process restart (URGENT
+                // FIXES #3 follow-up). Per-batch is cheap because the
+                // sweep walks `overlay_paths` once and a freshly
+                // inserted file's path is *not* in `current_paths` on
+                // the next cycle only if the user committed it.
+                if let Err(e) = server.sync_volatile_overlay().await {
+                    tracing::warn!("FileWatcher: reconcile failed: {e}");
+                }
             }
         });
     }
@@ -648,7 +661,7 @@ async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn st
     let symbols = {
         let lsp = server.lsp_pool.next();
         let mut lsp = lsp.lock().await;
-        match lsp.get_document_symbols_hierarchical(path, &server.config.workspace).await {
+        match lsp.get_document_symbols_hierarchical(path, &server.config.workspace, &server.id_namespace).await {
             Ok(s) => s,
             Err(e) => {
                 debug!("FileWatcher: No LSP symbols for {:?}: {}", path, e);
@@ -658,13 +671,35 @@ async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn st
     };
 
     let count = symbols.len();
+    if count == 0 {
+        return Ok(());
+    }
+    // Track the workspace-relative path + the ids we inserted so the
+    // next `sync_volatile_overlay` cycle can purge by id if this path
+    // drops out of the changes list. The watcher bypasses
+    // `process_change`, so the bookkeeping has to happen here too —
+    // otherwise the staleness sweep never knows about watcher-inserted
+    // ids and they linger after a commit (URGENT FIXES #3 follow-up).
+    let workspace_root = server.config.workspace.clone();
+    let key = crate::graph::graph_path(&workspace_root, path);
+    let mut new_ids: Vec<String> = Vec::with_capacity(count);
     for mut symbol in symbols {
         symbol.node.last_lsp_sync = Some(now);
+        // Capture the id before moving `symbol.node` into the overlay
+        // / broadcast so we can record it in `overlay_paths`.
+        let node_id = symbol.node.id.clone();
         let node = symbol.node.clone();
         server.overlay.insert_node(symbol.node);
         // Broadcast the new node to any subscribed sidecar.
         server.broadcast_overlay_insert(node);
+        new_ids.push(node_id);
     }
+    // Replace rather than append — a re-saved file should drop the
+    // overlay entries from the previous version, same as
+    // `process_change`. The accessor is on `LainServer` because
+    // `overlay_paths` itself is `pub(crate)` and the watcher lives
+    // in a sibling module.
+    server.overlay_paths_replace(key, new_ids);
 
     debug!("FileWatcher: updated overlay with {} symbols from {:?}", count, path);
     Ok(())

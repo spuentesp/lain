@@ -51,6 +51,31 @@ pub struct LainServer {
     pub lsp_pool: Arc<LspPool>,
     pub tool_executor: ToolExecutor,
     pub tuning: Arc<TuningConfig>,
+    /// Per-server `RepoNamespace` used by `LspMultiplexer` when
+    /// minting overlay / graph nodes via the single-workspace path.
+    /// Mints one namespace at construction; stable for the lifetime
+    /// of the server. The federation-side `RepoIndex` carries its own
+    /// per-repo namespace — single-workspace mode has only one repo,
+    /// so one namespace is sufficient. (URGENT FIXES #2 follow-up: the
+    /// LSP path was using `GraphNode::new` which falls back to the
+    /// shared test namespace; without a real per-server namespace,
+    /// two servers in a hypothetical cross-process federation would
+    /// collide.)
+    pub(crate) id_namespace: crate::schema::RepoNamespace,
+    /// Workspace-relative paths this server has overlay nodes for, with
+    /// the exact ids it inserted at each path. Mirrors
+    /// `RepoIndex::overlay_paths` in the federation so `sync_volatile_overlay`
+    /// can reconcile prior overlay ownership with the current uncommitted
+    /// changes — a path that drops out of `get_uncommitted_changes()`
+    /// (committed, reverted, deleted, or an uncommitted edit discarded)
+    /// is no longer swept at all without this bookkeeping. Removing by
+    /// id rather than by path is the same discipline the federation
+    /// side uses: it never touches an entry it didn't insert.
+    ///
+    /// `pub(crate)` because the reconciliation methods
+    /// (`sync_volatile_overlay`, `process_change`) live in
+    /// `ingestion.rs`, a sibling module.
+    pub(crate) overlay_paths: Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
     /// Outcome of the most recent startup re-index. Written by the
     /// re-index spawn in `LainMcpServer::run_stdio` / `run_http`;
     /// read by `ToolExecutor::get_health` and (in step 3) by the tool
@@ -333,6 +358,37 @@ impl LainServer {
             removed: vec![],
             updated: vec![],
         });
+    }
+
+    /// Record that this server's watcher (or any other overlay writer
+    /// outside `process_change`) inserted `node` at workspace-relative
+    /// `key`. Mirrors the bookkeeping `process_change` does, so the
+    /// next `sync_volatile_overlay` cycle can purge by id if this
+    /// path drops out of the changes list. URGENT FIXES #3 follow-up:
+    /// the watcher bypasses `process_change` and was previously
+    /// leaving its insertions invisible to the staleness sweep.
+    pub fn overlay_paths_record_insert(
+        &self,
+        key: String,
+        node_id: String,
+    ) {
+        self.overlay_paths
+            .lock()
+            .entry(key)
+            .or_default()
+            .push(node_id);
+    }
+
+    /// Replace the bookkeeping entry for `key` with a fresh list of
+    /// `node_ids`. Used when a re-saved file should drop the previous
+    /// version's overlay entries from the same path before inserting
+    /// the new ones.
+    pub fn overlay_paths_replace(
+        &self,
+        key: String,
+        node_ids: Vec<String>,
+    ) {
+        self.overlay_paths.lock().insert(key, node_ids);
     }
     // (removed: had no caller and no test anywhere in the tree)
 

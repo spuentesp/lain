@@ -430,6 +430,26 @@ impl RepoNamespace {
         Self(uuid::Uuid::new_v4())
     }
 
+    /// Derive a stable namespace from a repo's identity. Two repos
+    /// with the same `repo_id` produce the same namespace across
+    /// process restarts and hot re-adds (`FederatedIndex::remove_repo`
+    /// + `add_repo` of the same `repo_id`) — so the federation's
+    /// shared `VolatileOverlay` doesn't accumulate duplicate entries
+    /// across remove/re-add cycles.
+    ///
+    /// Derived as `new_v5(NAMESPACE_URL, repo_id)` so the namespace
+    /// is fully determined by the repo id. Different repos →
+    /// different namespaces; same repo → same namespace. A namespace
+    /// derived this way is still distinct from `RepoNamespace::for_test()`
+    /// because the test namespace uses a fixed URL byte string as
+    /// its v5 input, not a repo id.
+    pub fn from_repo_id(repo_id: &crate::federation::repo_id::RepoId) -> Self {
+        Self(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            repo_id.as_str().as_bytes(),
+        ))
+    }
+
     /// The underlying `Uuid`. Used by `GraphNode::generate_id`.
     pub fn as_uuid(&self) -> uuid::Uuid {
         self.0

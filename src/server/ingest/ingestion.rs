@@ -1,9 +1,9 @@
 use crate::error::LainError;
 use crate::git::GitSensor;
-use crate::graph::GraphDatabase;
+use crate::graph::{graph_path, GraphDatabase};
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
-use crate::server::overlay::VolatileOverlay;
+use crate::server::overlay::{OverlayDiff, VolatileOverlay};
 use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
 use std::collections::HashSet;
@@ -409,35 +409,87 @@ impl LainServer {
         Ok(())
     }
 
-    pub async fn sync_volatile_overlay(&mut self) -> Result<(), LainError> {
+    pub async fn sync_volatile_overlay(&self) -> Result<(), LainError> {
         // Sidecars populate their overlay from the owner's /overlay/subscribe
         // stream; they never re-scan the local working tree.
         if self.graph.is_read_only() {
             return Ok(());
         }
-        // Drop entries for THIS server's changed paths BEFORE scanning.
-        // Mirrors the federation-side fix in
-        // `RepoIndex::sync_overlay`: a blanket `overlay.clear()` wipes
-        // every entry in the overlay, which is correct today only
-        // because `LainServer` owns a single overlay and there is
-        // nothing else to clobber. Per-path removal is the safe
-        // default and matches the Federation's contract, so any
-        // future code that shares or merges overlays stays sound.
+        // Compute the workspace-relative `current_paths` for this
+        // cycle. The pre-fix code iterated the raw `changes` list and
+        // never visited paths that had dropped out of uncommitted
+        // state (committed, reverted, deleted, uncommitted edit
+        // discarded) — those overlay entries lingered forever. The
+        // federation side had this same bug and was fixed by
+        // `RepoIndex::overlay_paths`; we mirror it here for
+        // single-repo mode.
         let changes = self.git.lock().get_uncommitted_changes()?;
-        for change in &changes {
-            let removed = self
-                .overlay
-                .remove_nodes_for_path(&change.path.to_string_lossy());
-            if removed > 0 {
-                tracing::debug!(
-                    "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
-                    removed,
-                    change.path
-                );
+        let workspace_root = self.config.workspace.clone();
+        let current_paths: HashSet<String> = changes
+            .iter()
+            .map(|c| graph_path(&workspace_root, &c.path))
+            .collect();
+
+        // Staleness sweep: paths this server owned as of the last
+        // cycle that are no longer in `current_paths`. Removed *by id*
+        // using `overlay_paths` — the bookkeeping tracks every id this
+        // server inserted at each path, so we never touch an entry we
+        // didn't put there. Two-tier purge: a stale path is purged
+        // only when (a) the file is genuinely gone from disk, or (b)
+        // the static graph's indexed commit matches HEAD (a real
+        // reindex pass landed). Together they cover both "commit
+        // landed but reindex hasn't run" (file still exists, keep
+        // overlay) and "path is genuinely gone" (purge eagerly).
+        //
+        // Both sweep branches collect their removed ids into
+        // `removed_ids` and broadcast a single `OverlayDiff` at the
+        // end of the cycle, so sidecars consuming `/overlay/subscribe`
+        // see purges as well as inserts (URGENT FIXES #3 follow-up:
+        // pre-fix the broadcast only carried additions).
+        let mut removed_ids: Vec<String> = Vec::new();
+        {
+            let mut owned = self.overlay_paths.lock();
+            let head = self.git.lock().get_latest_commit_info().ok().map(|(h, _)| h);
+            let graph_caught_up = match head {
+                Some(h) => self.graph.get_last_commit()?.as_deref() == Some(h.as_str()),
+                None => false,
+            };
+            let stale: Vec<String> = owned
+                .keys()
+                .filter(|p| !current_paths.contains(*p))
+                .cloned()
+                .collect();
+            for path in stale {
+                let deleted_from_disk = !workspace_root.join(&path).is_file();
+                if graph_caught_up || deleted_from_disk {
+                    if let Some(ids) = owned.remove(&path) {
+                        for id in &ids {
+                            self.overlay.remove_node(id);
+                        }
+                        removed_ids.extend(ids);
+                    }
+                }
             }
         }
 
+        // Drop entries for THIS server's currently-changed paths
+        // BEFORE re-scanning, then re-scan fresh. Same pattern as
+        // `RepoIndex::sync_overlay`'s "drop entries for THIS repo's
+        // changed paths BEFORE scanning" step.
         for change in &changes {
+            let key = graph_path(&workspace_root, &change.path);
+            let old_ids = self.overlay_paths.lock().remove(&key);
+            if let Some(ids) = old_ids {
+                for id in &ids {
+                    self.overlay.remove_node(id);
+                }
+                removed_ids.extend(ids);
+                tracing::debug!(
+                    "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
+                    removed_ids.len(),
+                    change.path
+                );
+            }
             // Skip LSP re-scan for files that were deleted — there's
             // nothing to scan, and the entry removal above already
             // wiped them.
@@ -448,14 +500,29 @@ impl LainServer {
                 warn!("Failed to process change {:?}: {}", change.path, e);
             }
         }
+
+        // Broadcast the diff so any sidecar consuming
+        // `/overlay/subscribe` sees the same removals the local
+        // `VolatileOverlay` saw. `OverlayDiff.added` is empty here
+        // because the inserted ids went through `process_change` →
+        // `broadcast_overlay_insert` (which has its own broadcast).
+        if !removed_ids.is_empty() {
+            crate::server::overlay::broadcast_overlay_diff(OverlayDiff {
+                revision: self.next_revision(),
+                added: vec![],
+                removed: removed_ids,
+                updated: vec![],
+            });
+        }
+
         Ok(())
     }
 
-    async fn process_change(&mut self, path: &Path) -> Result<(), LainError> {
+    async fn process_change(&self, path: &Path) -> Result<(), LainError> {
         let symbols = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
-            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
+            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace, &self.id_namespace).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("No LSP symbols for changed file {:?}: {}", path, e);
