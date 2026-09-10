@@ -24,6 +24,7 @@
 //! this test.
 
 #[path = "../common/mod.rs"]
+#[allow(clippy::duplicate_mod)]
 mod common;
 use common::{git_init_committed, tools_call_text};
 

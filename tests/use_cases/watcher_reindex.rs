@@ -22,6 +22,7 @@
 //! query path the agent would hit.
 
 #[path = "../common/mod.rs"]
+#[allow(clippy::duplicate_mod)]
 mod common;
 use common::{boot_single_repo, git_init_committed};
 

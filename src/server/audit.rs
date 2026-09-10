@@ -27,7 +27,7 @@
 //! and the append itself, which is not a concern in practice.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 

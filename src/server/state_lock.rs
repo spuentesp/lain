@@ -36,7 +36,6 @@ use std::time::{Duration, SystemTime};
 /// Gap between attempts.
 /// A sentinel older than this is assumed to belong to a process that
 /// died before releasing, and is taken over.
-
 /// Sentinel path for a given state file.
 pub fn lock_path_for(state_path: &Path) -> PathBuf {
     let mut name = state_path
@@ -74,7 +73,6 @@ impl Drop for StateLock {
 }
 
 /// Acquire the lock for `state_path`, retrying until [`ACQUIRE_TIMEOUT`].
-///
 /// Always returns a `StateLock` — on timeout it returns one with
 /// `held == false` so the caller proceeds unlocked rather than failing.
 pub fn acquire(state_path: &Path) -> StateLock {
