@@ -553,3 +553,46 @@ async fn content_hash_changes_after_git_commit() {
     let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
     assert_eq!(loaded.repos[0].source_config, serde_yaml::to_value(&expected).unwrap());
 }
+
+/// A repo registered against a freshly-init'd git repo with no commits
+/// must still appear in the persisted manifest. Pre-fix, the empty
+/// `HEAD` made `git rev-parse` return exit 128 with "ambiguous
+/// argument 'HEAD'", `RepoSource::content_hash` returned `Err`,
+/// `persist_manifest` `continue`d on that repo, and the on-disk
+/// manifest silently dropped it. The next process restart would
+/// re-register from `repos.yaml`, but the manifest snapshot would
+/// have a hole in it — exactly the kind of silent drift this fix is
+/// supposed to prevent.
+#[tokio::test]
+async fn add_repo_persists_unborn_head_repo() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    // `git init` only — no commit, so HEAD doesn't resolve. This is
+    // the real-world case the regression was hidden behind: a user
+    // runs `lain server` against an empty checkout.
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(
+        loaded.repos.len(),
+        1,
+        "a repo with an unborn HEAD must still appear in the persisted manifest; \
+         the pre-fix code skipped it because `git rev-parse HEAD` returned exit 128",
+    );
+    assert_eq!(loaded.repos[0].id.as_str(), "a");
+    assert!(
+        loaded.repos[0].content_hash.is_empty(),
+        "an unborn HEAD has no hash to record; content_hash must be empty, \
+         got {:?}",
+        loaded.repos[0].content_hash,
+    );
+}

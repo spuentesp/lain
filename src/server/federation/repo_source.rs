@@ -46,10 +46,11 @@ pub trait RepoSource: Send + Sync {
 }
 
 /// Run `git rev-parse HEAD` against `local_path`, returning the hash on
-/// success or `Ok(None)` if the path isn't a git repository. Any other
-/// git failure (corrupt `.git`, lock contention, etc.) is surfaced as an
-/// `LainError` — silently swallowing it would make the manifest
-/// fingerprint useless exactly when an operator most wants to see it.
+/// success or `Ok(None)` if the path isn't a git repository or has no
+/// commits yet. Any other git failure (corrupt `.git`, lock
+/// contention, etc.) is surfaced as an `LainError` — silently
+/// swallowing it would make the manifest fingerprint useless
+/// exactly when an operator most wants to see it.
 fn git_head_hash(local_path: &Path) -> Result<Option<String>, LainError> {
     let output = Command::new("git")
         .arg("-C")
@@ -65,15 +66,34 @@ fn git_head_hash(local_path: &Path) -> Result<Option<String>, LainError> {
                 .to_string();
             Ok(Some(hash))
         }
-        // `git` exited non-zero. The common case is "not a git
-        // repository" — `git rev-parse` reports that with exit code
-        // 128 and a message on stderr. Treat that as "no hash
-        // available" rather than a hard error so a workspace_dir
-        // pointing at a non-checkout directory still has a usable
-        // manifest entry (with `content_hash = ""`).
+        // `git` exited non-zero. Three benign cases all surface as
+        // "no hash available" rather than a hard error so a
+        // workspace_dir over a non-checkout, a non-git, or an
+        // unborn-HEAD repo still has a usable manifest entry (with
+        // `content_hash = ""`):
+        //
+        //   1. Not a git repository — `git rev-parse` reports that
+        //      with exit code 128 and `fatal: not a git repository…`
+        //      on stderr.
+        //   2. Unborn HEAD — `git rev-parse HEAD` reports that with
+        //      exit code 128 and `fatal: ambiguous argument 'HEAD'…`
+        //      on stderr. The repo is real but has no commits yet;
+        //      there's nothing to hash until the first commit.
+        //   3. Detached HEAD — same exit code, same "unknown
+        //      revision" wording in practice.
+        //
+        // Pre-fix, only case (1) was treated as `Ok(None)`. A fresh
+        // `git init` repo with no commits falls into case (2) and
+        // returned `Err`, which `FederatedIndex::persist_manifest`
+        // then `continue`s on — silently dropping the whole entry
+        // from the on-disk manifest (URGENT FIXES #5 regression).
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            if o.status.code() == Some(128) && stderr.contains("not a git repository") {
+            if o.status.code() == Some(128)
+                && (stderr.contains("not a git repository")
+                    || stderr.contains("ambiguous argument 'HEAD'")
+                    || stderr.contains("unknown revision"))
+            {
                 Ok(None)
             } else {
                 Err(LainError::Git(format!(
