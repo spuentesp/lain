@@ -18,6 +18,10 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);
     let fed = Arc::new(FederatedIndex::new(backend));
     fed.set_ready_threshold(config.ready_threshold);
+    // Wire the manifest path before any add_repo so a runtime add_repo
+    // / remove_repo persists its mutation. Without this, only the
+    // end-of-load save_manifest below sees the file written.
+    fed.set_manifest_path(Some(manifest_path.clone()));
 
     let sources = config.build_sources()?;
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_indexers));
@@ -118,6 +122,10 @@ pub async fn load_federation_with_workspace(
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&config.data_dir)?);
     let fed = Arc::new(FederatedIndex::new(backend));
     fed.set_ready_threshold(config.ready_threshold);
+    // Wire the manifest path before any add_repo so a runtime add_repo
+    // / remove_repo persists its mutation. Without this, only the
+    // end-of-load save_manifest below sees the file written.
+    fed.set_manifest_path(Some(manifest_path.clone()));
 
     // Spawn per-repo indexers up to `max_concurrent_indexers` in flight, then
     // await them all. Mirrors `load_federation`'s per-repo loop exactly —
@@ -166,18 +174,13 @@ pub async fn load_federation_with_workspace(
 /// currently serving — useful for observability and future tooling, but not
 /// (yet) the source of truth for which repos the server knows about.
 ///
-/// TODO: once `add_repo`/`remove_repo` mutations become runtime-mutable
-/// (rather than reloaded from YAML on every restart), persist the manifest
-/// from those mutation sites instead of from this single end-of-load call,
-/// so the on-disk manifest stays consistent with the live in-memory state.
-///
-/// TODO: populate `source_config` from the live `RepoSource` config — today
-/// we only persist the kind label (`"workspace_dir"` etc.); round-tripping
-/// the full YAML config would require plumbing the original `SourceConfig`
-/// through `RepoSource`.
-///
-/// TODO: populate `content_hash` from `git rev-parse HEAD` (or equivalent)
-/// for the repo's local checkout.
+/// `source_config` is now the verbatim `SourceConfig` the `RepoSource` was
+/// constructed from (round-tripped via `serde_yaml`), and `content_hash`
+/// is `git rev-parse HEAD` for git-backed sources (or `""` for sources
+/// without a local checkout — `WorkspaceDirSource` over a non-repo dir,
+/// sensor-backed sources, etc.). When `add_repo`/`remove_repo` mutate the
+/// federation at runtime, callers should invoke `save_manifest` again so
+/// the on-disk file stays in sync.
 fn save_manifest(fed: &FederatedIndex, path: &Path) -> Result<(), LainError> {
     let mut manifest = FederationManifest::default();
     for (id, health) in fed.list_repos() {
@@ -188,15 +191,33 @@ fn save_manifest(fed: &FederatedIndex, path: &Path) -> Result<(), LainError> {
             // mid-`remove_repo`) doesn't tear down a successful load.
             continue;
         };
+        let source = repo.source();
+        // Serialize the original `SourceConfig` YAML the source was
+        // constructed from. Storing the verbatim value rather than a
+        // re-derived one means the manifest can be inspected to see
+        // exactly what `repos.yaml` said at load time — useful when
+        // reconciling a stale manifest against the current config.
+        let source_config = serde_yaml::to_value(source.source_config())
+            .map_err(|e| LainError::Serialization(format!(
+                "manifest source_config for {id}: {e}"
+            )))?;
+        // Best-effort content fingerprint. `Err` propagates because a
+        // corrupt `.git` or lock contention is exactly the case an
+        // operator most wants a clear error for — silently writing an
+        // empty hash would mask a real problem. Sources that don't
+        // have a checkout return `Ok(None)` and we write `""`.
+        let content_hash = match source.content_hash() {
+            Ok(Some(hash)) => hash,
+            Ok(None) => String::new(),
+            Err(e) => return Err(e),
+        };
         let last_indexed_unix = time::unix_secs(repo.last_indexed());
         manifest.add_repo(RepoEntry {
             id: id.clone(),
-            source_kind: repo.source().kind().to_string(),
-            // TODO: serialize the original `SourceConfig` YAML.
-            source_config: serde_yaml::Value::Null,
+            source_kind: source.kind().to_string(),
+            source_config,
             last_indexed_unix,
-            // TODO: hash the repo's HEAD commit (or content tree).
-            content_hash: String::new(),
+            content_hash,
             health,
         });
     }

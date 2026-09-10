@@ -57,6 +57,17 @@ pub struct FederatedIndex {
     /// had no `healthy` field at all, so the documented behaviour did
     /// not exist in any form.
     ready_threshold: RwLock<f32>,
+    /// Optional path to the on-disk `FederationManifest`. When set,
+    /// `add_repo` and `remove_repo` rewrite the manifest after the
+    /// mutation succeeds so the snapshot on disk stays in sync with
+    /// the live membership. `None` in unit tests that don't care
+    /// about persistence; set by `load_federation` (and the workspace
+    /// variant) before the first `add_repo`.
+    ///
+    /// Best-effort: a save failure is logged but does not surface as
+    /// a mutation error. The manifest is observability today — losing
+    /// one save shouldn't tear down a successful federation load.
+    manifest_path: RwLock<Option<std::path::PathBuf>>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -87,6 +98,60 @@ impl FederatedIndex {
             symbol_to_repos: DashMap::new(),
             federation_overlay: RwLock::new(None),
             ready_threshold: RwLock::new(crate::federation::config::DEFAULT_READY_THRESHOLD),
+            manifest_path: RwLock::new(None),
+        }
+    }
+
+    /// Set the path the federation should rewrite `FederationManifest`
+    /// to after each successful `add_repo` / `remove_repo`. The loader
+    /// sets this once, before the first mutation, so a runtime
+    /// membership change survives a process restart. Pass `None` to
+    /// opt out (the test harness typically does).
+    pub fn set_manifest_path(&self, path: Option<std::path::PathBuf>) {
+        *self.manifest_path.write() = path;
+    }
+
+    /// Snapshot the federation's current membership to the configured
+    /// manifest path. No-op when no path has been set. Best-effort:
+    /// callers should treat the result as a hint — a save failure
+    /// doesn't tear down the caller, but the warning is logged so
+    /// operators see it.
+    fn persist_manifest(&self) {
+        let Some(path) = self.manifest_path.read().clone() else {
+            return;
+        };
+        let mut manifest = crate::federation::manifest::FederationManifest::default();
+        for (id, health) in self.list_repos() {
+            let Some(repo) = self.get_repo(&id) else {
+                continue;
+            };
+            let source = repo.source();
+            let source_config = match serde_yaml::to_value(source.source_config()) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("federation manifest: source_config for {id}: {e}");
+                    continue;
+                }
+            };
+            let content_hash = match source.content_hash() {
+                Ok(Some(hash)) => hash,
+                Ok(None) => String::new(),
+                Err(e) => {
+                    tracing::warn!("federation manifest: content_hash for {id}: {e}");
+                    continue;
+                }
+            };
+            manifest.add_repo(crate::federation::manifest::RepoEntry {
+                id: id.clone(),
+                source_kind: source.kind().to_string(),
+                source_config,
+                last_indexed_unix: crate::server::time::unix_secs(repo.last_indexed()),
+                content_hash,
+                health,
+            });
+        }
+        if let Err(e) = manifest.save(&path) {
+            tracing::warn!("federation manifest not saved to {path:?}: {e}");
         }
     }
 
@@ -135,12 +200,18 @@ impl FederatedIndex {
         }
         self.repos.write().insert(id, index);
         self.rebuild_symbol_index();
+        // Refresh the on-disk manifest so a runtime add survives a
+        // restart. Best-effort; a save failure doesn't fail the add.
+        self.persist_manifest();
         Ok(())
     }
 
     pub fn remove_repo(&self, id: &RepoId) -> Result<(), LainError> {
         self.repos.write().remove(id);
         self.rebuild_symbol_index();
+        // Mirror `add_repo`: keep the manifest in sync with live
+        // membership. See `persist_manifest` for the failure semantics.
+        self.persist_manifest();
         Ok(())
     }
 

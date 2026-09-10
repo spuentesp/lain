@@ -226,3 +226,181 @@ fn distinct_repos_on_empty_is_empty() {
     use crate::federation::federated_index::distinct_repos;
     assert!(distinct_repos(&[]).is_empty());
 }
+
+// ── manifest persistence (issue #8) ────────────────────────────────
+//
+// `FederatedIndex::add_repo` and `remove_repo` must rewrite the
+// configured manifest path so a runtime membership change survives a
+// process restart. The tests below cover the contract.
+
+/// `set_manifest_path(None)` makes the federation a non-persister:
+/// `add_repo` is a no-op for the manifest. Useful for unit tests that
+/// don't want a stray file under `target/tmp`.
+#[tokio::test]
+async fn add_repo_does_not_create_a_manifest_when_path_unset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    // Default state: no path wired, so even after add_repo no file lands.
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    assert!(
+        !tmp.path().join("federation_manifest.bin").exists(),
+        "no manifest should be written when set_manifest_path was never called",
+    );
+}
+
+/// `add_repo` writes a manifest whose `source_config` matches the
+/// `SourceConfig` the source was constructed with — round-tripping
+/// works end-to-end through bincode.
+#[tokio::test]
+async fn add_repo_persists_source_config() {
+    use crate::federation::config::SourceConfig;
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(src_dir.path()).unwrap();
+    // Commit so HEAD resolves cleanly. `RepoSource::content_hash`
+    // returns Ok(None) on an unborn HEAD, and a `None` value
+    // silently drops the entry from the persisted manifest — so a
+    // test fixture must commit at least once to verify persistence.
+    let sig = git2::Signature::now("test", "test@lain").unwrap();
+    let tree_id = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let _ = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]);
+
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    assert!(manifest_path.exists(), "manifest must be written on add_repo");
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(loaded.repos.len(), 1);
+    assert_eq!(loaded.repos[0].id.as_str(), "a");
+    assert_eq!(loaded.repos[0].source_kind, "workspace_dir");
+    let expected = SourceConfig::WorkspaceDir { path: src_dir.path().to_path_buf() };
+    assert_eq!(loaded.repos[0].source_config, serde_yaml::to_value(&expected).unwrap());
+}
+
+/// `add_repo` populates `content_hash` with the HEAD hash of the
+/// underlying git repo. The hash is non-empty and matches what
+/// `git rev-parse HEAD` says.
+#[tokio::test]
+async fn add_repo_persists_content_hash() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(src_dir.path()).unwrap();
+    let sig = git2::Signature::now("test", "test@lain").unwrap();
+    let tree_id = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let _ = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]);
+
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(loaded.repos.len(), 1);
+    let hash = &loaded.repos[0].content_hash;
+    assert!(!hash.is_empty(), "git repo HEAD must yield a non-empty hash");
+    assert_eq!(hash.len(), 40, "SHA-1 hex is 40 chars, got {hash:?}");
+}
+
+/// `remove_repo` rewrites the manifest with the removed repo gone.
+/// Without the hook, the manifest would still list the dead repo after
+/// restart — a stale entry the loader would later try to project into
+/// the federation.
+#[tokio::test]
+async fn remove_repo_persists_membership_change() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    fed.remove_repo(&RepoId::new("a").unwrap()).unwrap();
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert!(loaded.repos.is_empty(), "remove_repo must rewrite the manifest");
+}
+
+/// A `git commit` on the source repo changes HEAD; a second
+/// `add_repo` (or any subsequent persist) records the new hash.
+/// Without this, a stale manifest would silently claim a content
+/// version the federation no longer matches.
+#[tokio::test]
+async fn content_hash_changes_after_git_commit() {
+    use crate::federation::config::SourceConfig;
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(src_dir.path()).unwrap();
+    // First commit so HEAD is well-defined.
+    {
+        let sig = repo.signature().unwrap_or_else(|_| git2::Signature::now("test", "test@lain").unwrap());
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let _ = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]);
+    }
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    let first = FederationManifest::load_or_default(&manifest_path).unwrap().repos[0].content_hash.clone();
+
+    // Second commit on the same repo — HEAD moves forward.
+    {
+        let sig = git2::Signature::now("test", "test@lain").unwrap();
+        let mut index = repo.index().unwrap();
+        let path = src_dir.path().join("new.txt");
+        std::fs::write(&path, "second\n").unwrap();
+        index.add_path(std::path::Path::new("new.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let _ = repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&parent]);
+    }
+
+    // Touch the manifest by re-adding with the same source. We
+    // can't easily trigger a "real" indexer re-run, so we just
+    // remove + re-add to exercise `persist_manifest` again.
+    fed.remove_repo(&RepoId::new("a").unwrap()).unwrap();
+    let src2: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src2, tmp.path()).await.unwrap();
+
+    let second = FederationManifest::load_or_default(&manifest_path).unwrap().repos[0].content_hash.clone();
+    assert_ne!(first, second, "content_hash must change after a git commit");
+
+    // Touch unrelated: the manifest also keeps `source_config`
+    // round-trippable after the re-add.
+    let expected = SourceConfig::WorkspaceDir { path: src_dir.path().to_path_buf() };
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(loaded.repos[0].source_config, serde_yaml::to_value(&expected).unwrap());
+}

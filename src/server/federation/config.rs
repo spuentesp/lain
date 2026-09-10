@@ -41,7 +41,7 @@ pub struct RepoConfig {
     pub source: SourceConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceConfig {
     LocalClone { url: String, #[serde(default = "default_ref")] r#ref: String },
@@ -73,10 +73,11 @@ impl FederationConfig {
     /// at a time as it iterates the workspace's filtered member set.
     pub fn build_source_for(&self, repo: &RepoConfig) -> Result<Box<dyn RepoSource>, LainError> {
         let id = RepoId::new(&repo.id)?;
+        let local_path = self.data_dir.join(&repo.id);
         let src: Box<dyn RepoSource> = match &repo.source {
-            SourceConfig::LocalClone { url, r#ref } => Box::new(LocalCloneSource::new(id, url, r#ref, self.data_dir.join(&repo.id))?),
-            SourceConfig::ShallowClone { url, r#ref, refresh_interval_secs } => Box::new(ShallowCloneSource::new(id, url, r#ref, self.data_dir.join(&repo.id), Duration::from_secs(*refresh_interval_secs))?),
-            SourceConfig::WorkspaceDir { path } => Box::new(WorkspaceDirSource::new(id, path.clone())?),
+            SourceConfig::LocalClone { url, r#ref } => Box::new(LocalCloneSource::with_config(id, url, r#ref, local_path, repo.source.clone())?),
+            SourceConfig::ShallowClone { url, r#ref, refresh_interval_secs } => Box::new(ShallowCloneSource::with_config(id, url, r#ref, local_path, Duration::from_secs(*refresh_interval_secs), repo.source.clone())?),
+            SourceConfig::WorkspaceDir { path } => Box::new(WorkspaceDirSource::with_config(id, path.clone(), repo.source.clone())?),
         };
         Ok(src)
     }
