@@ -282,13 +282,13 @@ impl VolatileOverlay {
     /// Remove every overlay node whose `path` equals the given path.
     /// Returns the number of nodes removed (zero if the path was not
     /// represented in the overlay).
-/// Used by `RepoIndex::sync_overlay` and
+    /// Used by `RepoIndex::sync_overlay` and
     /// `LainServer::process_change` to drop stale entries for a file
     /// before re-scanning it via LSP. Without a path-keyed remove the
     /// caller would have to either `overlay.clear()` (which wipes
     /// every repo's entries in the shared federation overlay) or
     /// enumerate every node id it knows about (which it doesn't).
-/// Concurrency: this holds the index_map lock briefly to copy the
+    /// Concurrency: this holds the index_map lock briefly to copy the
     /// candidate ids, then calls `remove_node` for each (which takes
     /// per-node locks). Other writers can insert nodes between
     /// iterations; a concurrent insert for the same path is fine —

@@ -27,7 +27,8 @@
     "arm64"
   ],
   "scripts": {
-    "postinstall": "node scripts/install.js"
+    "postinstall": "node scripts/install.js",
+    "test": "node scripts/install.test.js"
   },
   "engines": {
     "node": ">=18.0.0"
