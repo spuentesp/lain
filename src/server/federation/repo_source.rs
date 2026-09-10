@@ -40,13 +40,14 @@ impl LocalCloneSource {
         if url.is_empty() {
             return Err(LainError::Config("RepoSource url cannot be empty".into()));
         }
+        let id_namespace = crate::schema::RepoNamespace::from_repo_id(&repo_id);
         Ok(Self {
             repo_id,
             url: url.to_string(),
             git_ref: git_ref.to_string(),
             local_path,
             last_refreshed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
-            id_namespace: crate::schema::RepoNamespace::fresh(),
+            id_namespace,
         })
     }
     pub fn mark_refreshed(&self, t: SystemTime) {
@@ -180,10 +181,11 @@ impl WorkspaceDirSource {
         if local_path.as_os_str().is_empty() {
             return Err(LainError::Config("WorkspaceDirSource path cannot be empty".into()));
         }
+        let id_namespace = crate::schema::RepoNamespace::from_repo_id(&repo_id);
         Ok(Self {
             repo_id,
             local_path,
-            id_namespace: crate::schema::RepoNamespace::fresh(),
+            id_namespace,
         })
     }
 }

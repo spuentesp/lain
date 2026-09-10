@@ -779,7 +779,7 @@ impl RepoIndex {
             let lsp = self.lsp.next();
             let mut lsp = lsp.lock().await;
             match lsp
-                .get_document_symbols_hierarchical(path, self.source.local_path())
+                .get_document_symbols_hierarchical(path, self.source.local_path(), &self.id_namespace)
                 .await
             {
                 Ok(syms) if !syms.is_empty() => Some(syms),

@@ -455,7 +455,7 @@ impl LainServer {
         let symbols = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
-            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace).await {
+            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace, &self.id_namespace).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("No LSP symbols for changed file {:?}: {}", path, e);
