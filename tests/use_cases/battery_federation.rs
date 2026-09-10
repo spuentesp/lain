@@ -13,6 +13,7 @@ use lain::server::mcp::federation_tools::federation::{
 use lain::server::mcp::federation_tools::workspace::{get_active_workspace, list_workspaces};
 
 #[path = "../common/mod.rs"]
+#[allow(clippy::duplicate_mod)]
 mod common;
 use common::git_init_committed;
 

@@ -41,7 +41,6 @@ pub struct VolatileOverlay {
 /// bumps the reference counts). Used for sharing one overlay between
 /// `FederatedIndex` (so index() can touch it) and `LainServer`
 /// (which the tool executor dispatches against).
-
 impl VolatileOverlay {
     /// Create a new volatile overlay
     pub fn new() -> Self {
@@ -290,15 +289,13 @@ impl VolatileOverlay {
     /// Remove every overlay node whose `path` equals the given path.
     /// Returns the number of nodes removed (zero if the path was not
     /// represented in the overlay).
-    ///
-    /// Used by `RepoIndex::sync_overlay` and
+/// Used by `RepoIndex::sync_overlay` and
     /// `LainServer::process_change` to drop stale entries for a file
     /// before re-scanning it via LSP. Without a path-keyed remove the
     /// caller would have to either `overlay.clear()` (which wipes
     /// every repo's entries in the shared federation overlay) or
     /// enumerate every node id it knows about (which it doesn't).
-    ///
-    /// Concurrency: this holds the index_map lock briefly to copy the
+/// Concurrency: this holds the index_map lock briefly to copy the
     /// candidate ids, then calls `remove_node` for each (which takes
     /// per-node locks). Other writers can insert nodes between
     /// iterations; a concurrent insert for the same path is fine —
@@ -526,7 +523,6 @@ pub struct OverlayStats {
 
 /// Subscribe to the owner's overlay stream and merge incoming `OverlayDiff`s
 /// into `overlay`.
-///
 /// Wire format (Task 4):
 ///   * `GET <owner_url>/overlay/get_snapshot` → JSON array of every
 ///     `GraphNode` currently in the owner's volatile overlay. Called
@@ -535,7 +531,6 @@ pub struct OverlayStats {
 ///   * `GET <owner_url>/overlay/subscribe` → `application/x-ndjson`,
 ///     one `OverlayDiff` per line. Stays open until the owner shuts
 ///     down or the sidecar drops the connection.
-///
 /// This function spawns the shared `stream::subscribe_apply` apply loop
 /// exactly once and feeds it from a local broadcast channel; the
 /// streaming body parser below pushes every parsed diff into that
@@ -585,7 +580,6 @@ pub async fn subscribe(owner_url: String, overlay: VolatileOverlay) -> ! {
 }
 
 /// Normalize the configured owner URL to the HTTP singleton root.
-///
 /// Agent configurations conventionally use `http://localhost:9999` (bare
 /// server URL) or `http://localhost:9999/mcp` (full MCP endpoint); the
 /// `lain hooks` CLI accepts either shape and appends `/mcp` when given
@@ -602,7 +596,6 @@ fn owner_base_url(owner_url: &str) -> String {
 }
 
 /// Fetch the owner's current overlay snapshot and apply it to `overlay`.
-///
 /// `GET <owner_url>/overlay/get_snapshot` returns `Vec<GraphNode>` as a
 /// JSON array. We upsert each node by id, so the merge is idempotent —
 /// re-running on reconnect converges to the owner's current state even
@@ -644,7 +637,6 @@ async fn hydrate_snapshot(owner_url: &str, overlay: &VolatileOverlay) -> Result<
 /// HTTP singleton implementations that use an event-stream response. Each
 /// decoded `OverlayDiff` is pushed into `tx`, which is consumed by the
 /// `subscribe_apply` task spawned in `subscribe`.
-///
 /// The function accumulates bytes across chunks because HTTP framing does not
 /// align with line boundaries — a single chunk may contain several lines or a
 /// partial line. Malformed payloads are logged at debug level and dropped.

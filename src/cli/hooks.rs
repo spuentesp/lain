@@ -26,8 +26,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        ///
-        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+/// Falls back to `$LAIN_URL`. The env var was read elsewhere in
         /// the codebase but ignored here, so exporting it and omitting
         /// `--url` failed with "the following required arguments were
         /// not provided" — a flag that looked optional and was not.
@@ -63,8 +62,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        ///
-        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+/// Falls back to `$LAIN_URL`. The env var was read elsewhere in
         /// the codebase but ignored here, so exporting it and omitting
         /// `--url` failed with "the following required arguments were
         /// not provided" — a flag that looked optional and was not.
@@ -94,8 +92,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        ///
-        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
+/// Falls back to `$LAIN_URL`. The env var was read elsewhere in
         /// the codebase but ignored here, so exporting it and omitting
         /// `--url` failed with "the following required arguments were
         /// not provided" — a flag that looked optional and was not.
@@ -206,17 +203,14 @@ fn write_session(agent_name: &str, sess: &HookSession) -> Result<()> {
 }
 
 /// Normalize the `--url` flag value to the canonical MCP endpoint URL.
-///
 /// Accepts both shapes for backwards compatibility with the project-wide
 /// `LAIN_URL=http://localhost:9999/mcp` default:
 /// - bare server URL (`http://localhost:9999`) → `http://localhost:9999/mcp`
 /// - full MCP URL (`http://localhost:9999/mcp`) → unchanged
 /// - full MCP URL with trailing slash (`http://localhost:9999/mcp/`) → strip
-///
 /// The hook scripts and e2e tests now pass the bare form; older callers
 /// that still pass the full form continue to work.
 /// Resolve the server URL from the flag, falling back to `$LAIN_URL`.
-///
 /// `--url` used to be mandatory while `LAIN_URL` was read elsewhere in
 /// the codebase and ignored here, so exporting it and omitting the flag
 /// failed with clap's "required arguments were not provided" — the
@@ -303,7 +297,6 @@ fn chrono_now_unix() -> u64 {
 }
 
 /// `lain hooks claim --url … --path … [--symbol …] [--intent …] [--parent-session-id …]`
-///
 /// Falls back to the filesystem lock layer when no lain server is reachable
 /// at `--url`. The wishlist calls this out as the zero-daemon path:
 /// subagents and short-lived agents shouldn't have to go through
@@ -383,7 +376,6 @@ pub fn claim(
 }
 
 /// `lain hooks release --url … --path … [--parent-session-id …]`
-///
 /// Same zero-daemon fallback as `claim`: when no server is reachable,
 /// remove the filesystem sentinel directly. Idempotent — ENOENT is
 /// treated as success.
@@ -478,7 +470,6 @@ fn server_reachable(url: &str, timeout: Duration) -> bool {
 /// stale `.lain` directories in system temp dirs that break later
 /// test runs. `.git` is the right anchor: it's never created by
 /// lain itself, so the walk-up can't be confused by our own state.
-
 /// Filesystem-only counterpart to the in-memory `claim_files` MCP tool.
 /// No server round trip, no `register_agent` heartbeat — just an
 /// `O_EXCL` write under `<workspace>/.lain/locks/`. The wishlist (#3,
@@ -590,7 +581,6 @@ fn git_rev_parse_full(ref_str: &str) -> Result<String> {
 }
 
 /// `lain hooks overlap-check --url … --base … [--head …] --workspace …`
-///
 /// Resolves `base` (and optional `head`) to full SHAs, then proxies
 /// to the server's `detect_overlap` MCP tool. The JSON returned by
 /// the server is written verbatim to stdout so shell scripts (e.g.
@@ -623,14 +613,12 @@ pub fn overlap_check(url: &str, base: &str, head: Option<&str>, workspace: &str)
 }
 
 /// `lain hooks lock --workspace-root … --path … --agent-name … …`
-///
 /// Direct, filesystem-only counterpart to `Claim`. Does NOT contact
 /// the lain server: it just writes `<root>/.lain/locks/<sanitized>.json`
 /// via `presence_lock::try_lock`. Used by automation that needs the
 /// hint layer (operator-readable sentinel, no-daemon coordination)
 /// without paying for a full `register_agent` + `claim_files` round
 /// trip.
-///
 /// On success: prints the lock file path to stdout, exits 0.
 /// On conflict: prints holder / kind / intent / mtime as JSON to
 /// stderr and returns Err so the caller sees a non-zero exit code.
@@ -687,7 +675,6 @@ pub fn lock(
 }
 
 /// `lain hooks unlock --workspace-root … --path … --agent-name …`
-///
 /// Removes the filesystem sentinel for `path` regardless of holder.
 /// Idempotent — ENOENT is treated as success. We compute the sentinel
 /// path via `presence_lock::lock_path_for` and remove it via

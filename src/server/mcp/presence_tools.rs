@@ -18,7 +18,6 @@ use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
 
 /// Resolve a session token to its session, refreshing the heartbeat as
 /// a side effect.

@@ -13,6 +13,7 @@
 //!   variant of the heading, not the single-call "1 found" variant.
 
 #[path = "../common/mod.rs"]
+#[allow(clippy::duplicate_mod)]
 mod common;
 use common::{boot_single_repo_in_dir, git_init_committed, tools_call_text};
 

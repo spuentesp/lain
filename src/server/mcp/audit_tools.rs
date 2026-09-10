@@ -21,7 +21,6 @@
 use crate::server::audit::{read_audit_log, AuditEvent};
 use crate::server::glob_match;
 use crate::server::ingest::LainServer;
-use crate::server::path_util::posix_string;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;

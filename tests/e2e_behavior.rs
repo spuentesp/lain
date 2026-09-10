@@ -81,12 +81,16 @@ fn run_claude_prompt(workspace: &std::path::Path, prompt: &str) -> (String, Stri
 
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Drain remaining lines.
-                for line in out_reader.flatten() {
+                // Drain remaining lines. `map_while(Result::ok)` rather
+                // than `.flatten()` because clippy::lines_filter_map_ok
+                // flags the latter: `Lines` keeps yielding `Err` on read
+                // error forever, and an infinite-loop read on a closed
+                // child pipe can hang the test process.
+                for line in out_reader.map_while(Result::ok) {
                     stdout.push_str(&line);
                     stdout.push('\n');
                 }
-                for line in err_reader.flatten() {
+                for line in err_reader.map_while(Result::ok) {
                     stderr.push_str(&line);
                     stderr.push('\n');
                 }

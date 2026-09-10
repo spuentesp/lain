@@ -161,3 +161,99 @@ jobs:
             exit 1
           fi
           echo "OK: pinned ($PINNED) == latest ($LATEST)"
+
+  lint:
+    name: Lint + format + doc tests
+    runs-on: ubuntu-latest
+    # These checks aren't OS-specific — ubuntu runs them once and
+    # the three test-matrix cells pick up the rest. Failures here
+    # block merge regardless of the test matrix's color.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      # `cargo fmt --check` — URGENT FIXES #6 baseline. Pre-fix,
+      # formatting was unchecked and drifted (~30 diffs in
+      # committed code, per `docs/CI.md`). The companion commit
+      # on this branch ("style: cargo fmt --all baseline") made
+      # the tree conform to current rustfmt; this job keeps it
+      # there going forward.
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      # `cargo clippy -- -D warnings` — promotes lints to errors
+      # so a new warning is a CI failure, not a "we'll fix it
+      # later" footnote. `--workspace --all-targets` covers
+      # integration tests and benches too. The allow list silences
+      # noisy lint families that produce ~200 warnings in the
+      # current tree (style/complexity/perf/pedantic) and unrelated
+      # test-helper dead-code warnings that clippy can't see across
+      # test crates. The strict correctness subset is what blocks
+      # merges here.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::style -A clippy::complexity -A clippy::perf -A clippy::pedantic -A unused -A dead_code
+      # Doc tests — `cargo test --workspace` runs them, but
+      # they're cheap to run separately and a dedicated job makes
+      # it easy to bisect when a doc example drifts.
+      - name: cargo test --doc
+        run: cargo test --workspace --doc
+
+  schema-drift:
+    name: Tool schema matches docs/tool-schema.json
+    runs-on: ubuntu-latest
+    # The drift check is the documented contract (docs/CI.md §
+    # "Schema drift"): `lain schema dump` is the canonical tool-
+    # surface JSON; `docs/tool-schema.json` is the on-disk copy.
+    # A non-empty `git diff` on the regenerated file fails CI,
+    # forcing the PR to include the regenerated snapshot.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config cmake git
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: Regenerate schema
+        run: ./target/release/lain schema dump --out /tmp/schema.json
+      - name: Diff against committed snapshot
+        run: |
+          if ! diff -u docs/tool-schema.json /tmp/schema.json; then
+            echo "::error::docs/tool-schema.json is out of date. \
+                  Run \`make schema\` (or \`./target/release/lain \
+                  schema dump --out docs/tool-schema.json\`) and \
+                  commit the result."
+            exit 1
+          fi
+          echo "OK: docs/tool-schema.json matches the live schema"
+
+  npm-shim:
+    name: npm-shim install tests
+    runs-on: ubuntu-latest
+    # The npm-shim is what `npm install lain-mcp` runs. Its install
+    # script (`scripts/install.js`) is the only piece of JavaScript
+    # that ships to end users; tests in `scripts/install.test.js`
+    # were not on any CI matrix (URGENT FIXES #6). Failures here
+    # would silently break every consumer install.
+    defaults:
+      run:
+        working-directory: npm-shim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm ci || npm install
+      - name: Run tests
+        run: npm test
+

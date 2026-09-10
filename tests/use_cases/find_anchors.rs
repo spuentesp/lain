@@ -21,6 +21,7 @@
 //! `parse`/`default`/`as_str` above the real hub).
 
 #[path = "../common/mod.rs"]
+#[allow(clippy::duplicate_mod)]
 mod common;
 use common::git_init_committed;
 

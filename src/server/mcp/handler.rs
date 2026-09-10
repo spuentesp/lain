@@ -1511,6 +1511,11 @@ impl LainMcpServer {
     }
 
     /// Run with HTTP transport (for MCP clients and browser diagnostics)
+    // The `let x = x;` rebindings inside the accept loop are intentional:
+    // they re-bind the outer locals (read from `self` above) so the inner
+    // `tokio::spawn`'s `move` closure can capture them by ownership without
+    // pulling `self` across threads (which has non-`Send` fields).
+    #[allow(clippy::redundant_locals)]
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
