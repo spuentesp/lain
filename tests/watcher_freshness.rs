@@ -176,7 +176,11 @@ async fn sync_overlay_removes_stale_entries_after_commit() {
     // Simulate the reindex catching up directly rather than depending
     // on the real LSP/tree-sitter pipeline's timing in a test — the
     // fix under test only cares that the static graph has *something*
-    // at this path, not how it got there.
+    // at this path, not how it got there. `set_last_commit` is also
+    // required now: the post-fix purge signal is
+    // `indexed_current_commit = db.last_commit == HEAD`, and the
+    // graph's `last_commit` field is only set when an `index()` pass
+    // finishes. Seeding it directly is the test-time equivalent.
     ri.db()
         .upsert_node(lain::schema::GraphNode::new(
             lain::schema::NodeType::Function,
@@ -184,6 +188,15 @@ async fn sync_overlay_removes_stale_entries_after_commit() {
             "src/scratch.rs".into(),
         ))
         .expect("seed static graph with the reindexed symbol");
+    let head = git2::Repository::open(tmp.path())
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    ri.db().set_last_commit(head).unwrap();
 
     ri.sync_overlay()
         .await
@@ -820,5 +833,226 @@ async fn watcher_survives_six_concurrent_agents() {
     );
 
     // Hold the RepoIndex alive for the rest of the test process.
+    std::mem::forget(ri);
+}
+
+// ── issue #1 (committed symbols disappear before reindexing) ───────────
+//
+// The pre-fix `sync_overlay` purged a path's overlay entries as soon as
+// the static graph had *anything* at that path (`has_node_at_path`). An
+// older pre-commit node satisfied that predicate, so a freshly-committed
+// addition whose indexer pass hadn't run yet was purged in the same
+// cycle — the overlay entry vanished while the static graph never got
+// a chance to add the new symbol. Both layers silently lost the
+// function. The fix uses `indexed_current_commit` (graph's
+// `last_commit == HEAD`) as the purge signal, plus the on-disk check
+// for genuine deletions. These three tests pin the contract.
+
+// Pull the names of every node in the federation's shared overlay.
+fn overlay_names(ri: &RepoIndex) -> Vec<String> {
+    ri.server_overlay()
+        .get_all_nodes()
+        .iter()
+        .map(|n| n.name.clone())
+        .collect()
+}
+
+/// A symbol added to a *file that already existed* in the indexed
+/// graph must remain queryable through the overlay until the static
+/// graph catches up. Pre-fix, the cycle following the commit purged
+/// the overlay entry because the pre-existing node at the path
+/// satisfied `has_node_at_path` — the new symbol never reached the
+/// static graph because no `index()` ran between the commit and the
+/// next sync_overlay, and it never reached the overlay because it
+/// was purged in that same cycle.
+#[tokio::test]
+async fn sync_overlay_retains_committed_addition_in_existing_file_until_reindex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ri = build_repo_index(&tmp);
+
+    // Existing file — `lib.rs` was written by `build_repo_index`. The
+    // pre-fix `has_node_at_path` rule would let any node at this path
+    // (even the pre-commit `existing` symbol) satisfy "graph caught up".
+    let target = tmp.path().join("src").join("lib.rs");
+    std::fs::write(
+        &target,
+        "pub fn existing() {}\npub fn committed_addition() {}\n",
+    )
+    .unwrap();
+
+    // First sync: overlay picks up both symbols (the new one too — it's
+    // an uncommitted file edit).
+    ri.sync_overlay().await.expect("first sync");
+    let names = overlay_names(&ri);
+    assert!(
+        names.iter().any(|n| n == "committed_addition"),
+        "the new symbol must be in the overlay before commit; got: {names:?}",
+    );
+
+    // Commit. The static graph is NOT re-seeded here — only the on-disk
+    // git state advances. Pre-fix this is exactly the window where the
+    // overlay entry gets purged by mistake.
+    commit_all(tmp.path());
+
+    ri.sync_overlay().await.expect("second sync");
+    let names_after = overlay_names(&ri);
+    assert!(
+        names_after.iter().any(|n| n == "committed_addition"),
+        "a committed addition must remain in the overlay until the \
+         static graph catches up — pre-fix, this dropped the symbol \
+         from both layers; got: {names_after:?}",
+    );
+
+    std::mem::forget(ri);
+}
+
+/// Once the indexer catches up (graph's `last_commit == HEAD`), the
+/// overlay entry can be retired because the static graph now carries
+/// the symbol. Pre-fix, this was already the behavior — but only by
+/// accident: the purge relied on the *pre-commit* node satisfying
+/// `has_node_at_path`. With the new signal (`indexed_current_commit`),
+/// the purge waits for a real reindex pass instead of a stale node.
+///
+/// We seed the static graph directly (the same pattern as
+/// `sync_overlay_removes_stale_entries_after_commit`) rather than
+/// calling `index()`: in a unit-test environment there's no rust-
+/// analyzer available, so a real `index()` pass would either time out
+/// or produce a graph that's empty for a reason unrelated to the
+/// signal under test. `set_last_commit(head)` is what makes the new
+/// signal fire — the same role it plays in production when an indexer
+/// pass completes.
+#[tokio::test]
+async fn sync_overlay_purges_committed_addition_after_reindex_catches_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ri = build_repo_index(&tmp);
+
+    let target = tmp.path().join("src").join("lib.rs");
+    std::fs::write(
+        &target,
+        "pub fn existing() {}\npub fn committed_addition() {}\n",
+    )
+    .unwrap();
+    ri.sync_overlay().await.expect("first sync");
+
+    commit_all(tmp.path());
+
+    // Seed the static graph + commit marker together, representing the
+    // state the real indexer would leave things in after a successful
+    // reindex pass on the committed tree.
+    ri.db()
+        .upsert_node(lain::schema::GraphNode::new(
+            lain::schema::NodeType::Function,
+            "committed_addition".into(),
+            "src/lib.rs".into(),
+        ))
+        .expect("seed static graph with the reindexed symbol");
+    let head = git2::Repository::open(tmp.path())
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    ri.db().set_last_commit(head).unwrap();
+
+    ri.sync_overlay().await.expect("second sync");
+    let names_after = overlay_names(&ri);
+    assert!(
+        !names_after.iter().any(|n| n == "committed_addition"),
+        "once the indexer has caught up, the overlay can retire the \
+         committed-addition entry; got: {names_after:?}",
+    );
+    assert!(
+        ri.db().find_node_by_name("committed_addition").is_some(),
+        "the symbol must be reachable through the static graph now \
+         that the indexer has caught up",
+    );
+
+    std::mem::forget(ri);
+}
+
+/// A symbol added, committed, then `git revert`-ed must disappear from
+/// the overlay along with the commit. The pre-fix `has_node_at_path`
+/// rule would keep the entry forever because the pre-revert commit's
+/// `existing` node still satisfies the predicate. The fix's
+/// `indexed_current_commit` requires the static graph's commit marker
+/// to actually match HEAD before the entry is purged — and the
+/// on-disk check fires immediately for the reverted file because the
+/// new (revert) state is what's on disk.
+#[tokio::test]
+async fn sync_overlay_purges_reverted_addition_after_revert() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ri = build_repo_index(&tmp);
+
+    // First commit: baseline `existing` only. We need a parent for the
+    // subsequent revert; an init+commit on the bare `existing` file is
+    // enough.
+    commit_all(tmp.path());
+
+    // Second commit: add `committed_addition`.
+    let target = tmp.path().join("src").join("lib.rs");
+    std::fs::write(
+        &target,
+        "pub fn existing() {}\npub fn committed_addition() {}\n",
+    )
+    .unwrap();
+    ri.sync_overlay().await.expect("first sync");
+    commit_all(tmp.path());
+
+    // Seed the static graph + commit marker — represent the state the
+    // real indexer would leave things in after a successful reindex
+    // pass on the committed tree. Without this, the post-fix
+    // `indexed_current_commit` flag would stay `false` and the
+    // overlay entry would never be retired.
+    ri.db()
+        .upsert_node(lain::schema::GraphNode::new(
+            lain::schema::NodeType::Function,
+            "committed_addition".into(),
+            "src/lib.rs".into(),
+        ))
+        .expect("seed static graph with the reindexed symbol");
+    let head = git2::Repository::open(tmp.path())
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    ri.db().set_last_commit(head).unwrap();
+
+    ri.sync_overlay().await.expect("post-index sync");
+    assert!(
+        !overlay_names(&ri).iter().any(|n| n == "committed_addition"),
+        "after a successful reindex, the overlay must retire the \
+         committed-addition entry; otherwise the static graph and the \
+         overlay hold duplicate facts",
+    );
+
+    // `git reset --hard` to HEAD~1 — restore lib.rs to its baseline
+    // state (only `existing`).
+    let repo = git2::Repository::open(tmp.path()).unwrap();
+    let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+    let parent = head_commit.parent(0).unwrap();
+    let mut opts = git2::build::CheckoutBuilder::default();
+    opts.force();
+    repo.reset(parent.as_object(), git2::ResetType::Hard, Some(&mut opts))
+        .expect("git reset to parent");
+    // After `reset --hard`, the graph's `last_commit` is stale — set
+    // it to the new HEAD so the purge signal fires. (In production
+    // this happens via the next `index()` pass.)
+    let new_head = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+    ri.db().set_last_commit(new_head).unwrap();
+
+    ri.sync_overlay().await.expect("post-revert sync");
+    assert!(
+        !overlay_names(&ri).iter().any(|n| n == "committed_addition"),
+        "after `git reset --hard` to the parent, the symbol must not \
+         be queryable through the overlay — the file no longer \
+         contains it; got: {:?}",
+        overlay_names(&ri),
+    );
+
     std::mem::forget(ri);
 }

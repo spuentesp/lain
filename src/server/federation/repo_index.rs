@@ -618,7 +618,31 @@ impl RepoIndex {
         self.last_overlay_lsp_failures
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
-        let changes = self.git.lock().await.get_uncommitted_changes()?;
+        let (changes, indexed_current_commit) = {
+            let git = self.git.lock().await;
+            let changes = git.get_uncommitted_changes()?;
+            // The canonical signal that an indexer pass has caught up
+            // with HEAD is `db.last_commit == git HEAD`. Comparing the
+            // two is O(1) per cycle and independent of which paths
+            // changed. Unborn repositories have no HEAD at all; treat
+            // them as "graph does not match HEAD" so we never purge
+            // eagerly while the indexer hasn't run once.
+            //
+            // The pre-fix rule used `db.has_node_at_path(&path)` as
+            // proof of "graph caught up" — but an older node at the
+            // same path satisfied that predicate even when newly
+            // committed additions had never been indexed. The result
+            // was a window between commit and index() in which the
+            // overlay entry for a freshly-committed symbol was purged
+            // (the older pre-commit node satisfied `has_node_at_path`)
+            // while the static graph never got a chance to add the
+            // new symbol — both layers silently lost the function.
+            let indexed_current_commit = match git.get_latest_commit_info() {
+                Ok((head, _)) => self.db.get_last_commit()?.as_deref() == Some(head.as_str()),
+                Err(_) => false,
+            };
+            (changes, indexed_current_commit)
+        };
         // Overlay nodes are keyed by the workspace-relative form
         // (`process_overlay_change` mints them via `graph_path`, per its
         // own doc comment: "every site that mints or looks up a path key
@@ -642,26 +666,25 @@ impl RepoIndex {
         // nodes at the same path too; removing the exact ids this repo
         // itself inserted there never touches anything it doesn't own.
         //
-        // Only purged once the static graph already has *something* at
-        // that path — i.e. the commit-triggered reindex has caught up —
-        // OR the path is genuinely gone from disk, in which case
-        // waiting would never end: a committed deletion makes
+        // Purging waits until `indexed_current_commit` (graph's
+        // `last_commit == HEAD`) so a freshly-committed addition whose
+        // indexer pass hasn't run yet is preserved by the overlay
+        // until the static graph catches up. The on-disk check is
+        // retained for genuine deletions: a committed `git rm` makes
         // `index_one_repo`'s `prune_orphans` remove the path from the
-        // static graph *permanently* (it's no longer in
-        // `get_all_tracked_files()`), so `has_node_at_path` would
-        // return `false` forever and the ids-only-purged-when-present
-        // rule below would leak this path's overlay entries for the
-        // life of the process. `sync_state` (`enrichment.rs`) calls
-        // only `sync_overlay` for each federation repo, by design,
-        // never a paired `index()` — so a path can drop out of
+        // static graph permanently (it's no longer in
+        // `get_all_tracked_files()`), so `indexed_current_commit`
+        // alone would leak the overlay entry for the life of the
+        // process. `sync_state` (`enrichment.rs`) calls only
+        // `sync_overlay` for each federation repo, by design, never a
+        // paired `index()` — so a path can drop out of
         // `get_uncommitted_changes()` well before the static graph is
-        // rebuilt for it, and purging eagerly in that window would make
-        // a symbol that's still real disappear from *both* the overlay
-        // and the graph. The on-disk check distinguishes the two cases
-        // without needing to inspect git history the sweep doesn't have
-        // (a path can drop out of `changes` either because it was
-        // committed, or because an uncommitted change to it was
-        // discarded — both look identical here).
+        // rebuilt for it, and purging eagerly in that window would
+        // make a symbol that's still real disappear from *both* the
+        // overlay and the graph. The on-disk check distinguishes
+        // "commit landed but reindex hasn't run" (file still exists,
+        // keep overlay) from "path is genuinely gone" (file gone,
+        // purge eagerly).
         {
             let mut owned = self.overlay_paths.lock();
             let stale_paths: Vec<String> = owned
@@ -670,9 +693,8 @@ impl RepoIndex {
                 .cloned()
                 .collect();
             for path in stale_paths {
-                let graph_caught_up = self.db.has_node_at_path(&path);
                 let deleted_from_disk = !workspace_root.join(&path).is_file();
-                if graph_caught_up || deleted_from_disk {
+                if indexed_current_commit || deleted_from_disk {
                     if let Some(ids) = owned.remove(&path) {
                         for id in ids {
                             overlay.remove_node(&id);
