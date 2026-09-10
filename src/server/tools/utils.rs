@@ -514,46 +514,96 @@ mod tests {
         );
     }
 
-    // `std::env::set_current_dir` mutates process-wide state, and this
-    // is the `--lib` binary shared by ~800 tests running on cargo test's
-    // default thread pool — any other test doing its own relative
-    // `Path::exists()` check could observe this test's diverted cwd
-    // without this lock serializing the window.
-    static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Restores the process cwd on drop — including on panic/unwind —
-    /// so a failing assertion inside the guarded region can't leave the
-    /// cwd diverted for every other test still running in this binary.
-    struct CwdGuard {
-        previous: std::path::PathBuf,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    impl CwdGuard {
-        fn enter(dir: &std::path::Path) -> Self {
-            let lock = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::current_dir().unwrap();
-            std::env::set_current_dir(dir).unwrap();
-            Self { previous, _lock: lock }
-        }
-    }
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.previous);
-        }
-    }
-
+    /// `resolve_node` treats a bare handle as a path when
+    /// `Path::new(handle).exists()` is true (so a workspace-relative
+    /// `src/lib.rs` lands in the path-keyed lookup). That makes the
+    /// resolver's behavior depend on the *process's* cwd at lookup
+    /// time — a process-global property that ~800 lib tests share.
+    /// The pre-fix test changed cwd at runtime, which let any other
+    /// test doing a relative `Path::exists()` see the diverted cwd.
+    /// The right fix is to run the assertion in a fresh process whose
+    /// cwd is observable only to itself: the parent forks the test
+    /// binary with a `cwd` set to a directory that contains a `target/`
+    /// (the exact collision case), the child runs the assertion in
+    /// that cwd, and the parent checks the exit status. No
+    /// `set_current_dir` ever happens in the parent — the lock-based
+    /// `CwdGuard` machinery that used to serialize this is gone.
     #[test]
     fn resolve_node_prefers_name_when_name_is_existing_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("target")).unwrap();
-        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        // Env var set by the parent process below; absence means "I am
+        // the parent, spawn a child". Presence means "I am the child,
+        // run the assertion in the cwd the parent picked".
+        const CHILD_ENV: &str = "LAIN_RESOLVER_COLLISION_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Parent: fork the test binary with `--exact <this test>`
+            // and a cwd that contains a `target/` directory. The
+            // `--exact` filter is critical — without it the child
+            // would run every other `--lib` test in parallel, and the
+            // `current_dir` argument would still be visible to them.
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("target")).unwrap();
+            // Cargo discovers unit tests in `--lib` under paths
+            // *relative to the lib root* — `cargo test --list`
+            // reports `server::tools::utils::tests::...`, not the
+            // `lain::`-prefixed full path. Strip the crate prefix so
+            // `--exact` matches.
+            let module = module_path!();
+            let module = module
+                .strip_prefix("lain::")
+                .unwrap_or(module);
+            let test_path = format!(
+                "{module}::resolve_node_prefers_name_when_name_is_existing_directory"
+            );
+            let exe = std::env::current_exe().expect("test binary path");
+            let output = std::process::Command::new(exe)
+                .args(["--exact", &test_path, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .current_dir(dir.path())
+                .output()
+                .expect("spawn child test process");
+            assert!(
+                output.status.success(),
+                "child did not pass: exit {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            // The child should have actually executed the test — not
+            // silently no-op'd because of a typo in `--exact`. The
+            // harness prints `running 1 test` to stdout when a
+            // single-test run starts.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("running 1 test"),
+                "child stdout did not contain the single-test marker; \
+                 the `--exact` filter likely missed the test path \
+                 and no test ran. Stdout:\n{stdout}",
+            );
+            return;
+        }
+        // Child: the cwd has a `target/` directory and an indexed
+        // function also named `target`. `resolve_node("target")` must
+        // resolve by name (returning the function), not by path
+        // (which would either return nothing or, in a buggy path-
+        // canonicalization order, surface `target/` as a node).
+        assert!(
+            Path::new("target").is_dir(),
+            "child cwd must contain a `target/` directory for this test \
+             to mean anything",
+        );
+        // Build a graph file in the child's cwd; `GraphDatabase::new`
+        // takes a path so we point it at a relative name resolved
+        // against cwd. (`tempfile::tempdir` from the parent is gone
+        // — the child has its own filesystem view.)
+        let graph_path = std::path::Path::new("graph.bin");
+        let db = GraphDatabase::new(graph_path).unwrap();
         db.upsert_node(GraphNode::new(
             crate::schema::NodeType::Function,
             "target".into(),
             "src/lib.rs".into(),
-        )).unwrap();
+        ))
+        .unwrap();
         let overlay = VolatileOverlay::new();
-        let _guard = CwdGuard::enter(dir.path());
         let result = resolve_node(&db, &overlay, "target");
         assert_eq!(result.unwrap().name, "target");
     }
