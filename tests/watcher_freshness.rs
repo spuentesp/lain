@@ -6,7 +6,7 @@ mod common;
 use lain::federation::repo_id::RepoId;
 use lain::federation::repo_index::RepoIndex;
 use lain::federation::repo_source::WorkspaceDirSource;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn init_temp_git_repo(path: &std::path::Path) {
@@ -821,4 +821,228 @@ async fn watcher_survives_six_concurrent_agents() {
 
     // Hold the RepoIndex alive for the rest of the test process.
     std::mem::forget(ri);
+}
+
+// ── issue #3 (single-repo overlay cleanup) ───────────────────────────
+//
+// `LainServer::sync_volatile_overlay` had two bugs at once:
+//   1. it only iterated current `changes`, so a path that dropped out
+//      of `get_uncommitted_changes()` (committed, reverted, deleted,
+//      uncommitted edit discarded) was never swept;
+//   2. `remove_nodes_for_path` was keyed by `change.path` (absolute)
+//      while the overlay is keyed by workspace-relative paths, so
+//      even the entries it tried to remove were missed.
+//
+// The fix mirrors the federation's `overlay_paths` discipline: track
+// every workspace-relative path this server inserted nodes at, plus
+// the exact ids, and sweep entries not in the current cycle's changes
+// list by id. These three tests pin the contract for single-repo mode.
+
+use lain::server::LainServer;
+
+/// Build a `LainServer` rooted at a real git repo with one tracked
+/// file. Returns `(server, repo_root, tmp)`. The caller is responsible
+/// for keeping `tmp` alive — dropping it tears the workspace down.
+async fn build_lain_server_with_repo(repo_id: &str) -> (Arc<LainServer>, PathBuf, tempfile::TempDir) {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().to_path_buf();
+    Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&repo_root).status().unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "config", "user.email", "t@t"])
+        .status().unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "config", "user.name", "t"])
+        .status().unwrap();
+    std::fs::write(repo_root.join("README.md"), "init\n").unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "add", "-A"])
+        .status().unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "commit", "-q", "-m", "init"])
+        .status().unwrap();
+
+    let mem = tmp.path().join("graph.bin");
+    let server = LainServer::new(&repo_root, &mem, None).expect("LainServer::new");
+    let server = Arc::new(server);
+    // Pin the server's lifetime so the spawned background tasks don't
+    // observe a torn Arc when the test scope ends. `forget` is the
+    // pattern this file already uses for `RepoIndex` (line 826+).
+    (server, repo_root, tmp)
+}
+
+fn commit_at(repo: &Path, message: &str) {
+    use std::process::Command;
+    Command::new("git").args(["-C", repo.to_str().unwrap(), "add", "-A"]).status().unwrap();
+    Command::new("git").args(["-C", repo.to_str().unwrap(), "commit", "-q", "-m", message]).status().unwrap();
+}
+
+fn reset_to_parent(repo: &Path) {
+    use git2::Repository;
+    let r = Repository::open(repo).unwrap();
+    let head = r.head().unwrap().peel_to_commit().unwrap();
+    let parent = head.parent(0).expect("reset needs a parent");
+    let mut opts = git2::build::CheckoutBuilder::default();
+    opts.force();
+    r.reset(parent.as_object(), git2::ResetType::Hard, Some(&mut opts))
+        .expect("git reset to parent");
+}
+
+fn make_node(path: &str, name: &str, id: &str) -> lain::schema::GraphNode {
+    let mut n = lain::schema::GraphNode::new(
+        lain::schema::NodeType::Function,
+        name.into(),
+        path.into(),
+    );
+    n.id = id.into();
+    n
+}
+
+/// Reverted path: track a path + id in `overlay_paths`, revert the
+/// commit that introduced the path, run `sync_volatile_overlay`. The
+/// injected entry must be gone after the cycle. Pre-fix the entry
+/// lived forever because the sweep only iterated the current
+/// `changes` list, which no longer contained the reverted file.
+#[tokio::test]
+async fn sync_volatile_overlay_purges_reverted_path() {
+    let (server, repo_root, _tmp) = build_lain_server_with_repo("test").await;
+
+    // Make a baseline commit so `reset_to_parent` has a parent to
+    // land on (the builder only commits once).
+    commit_at(&repo_root, "baseline");
+
+    // Seed `overlay_paths` + the overlay directly via the test helper,
+    // bypassing `process_change` (which calls LSP — not installed in
+    // the unit-test env). The bookkeeping mirrors what
+    // `process_change` writes on a successful LSP scan.
+    server.overlay_paths_test_insert(
+        "src/scratch.rs".into(),
+        make_node("src/scratch.rs", "scratch_symbol", "test-scratch-symbol-id"),
+    );
+
+    // Commit the change so the path drops out of `get_uncommitted_changes()`.
+    let target = repo_root.join("src").join("scratch.rs");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "pub fn scratch_symbol() {}\n").unwrap();
+    commit_at(&repo_root, "add scratch");
+
+    // Revert: the file is gone from `changes` (committed + reset
+    // leaves no uncommitted state), the path is no longer in
+    // `current_paths`, but `overlay_paths` still lists it. Pre-fix the
+    // entry lived forever; the fix must drop it.
+    reset_to_parent(&repo_root);
+
+    server.sync_volatile_overlay().await.expect("post-revert sync");
+    assert!(
+        !server.overlay.get_all_nodes().iter().any(|n| n.id == "test-scratch-symbol-id"),
+        "after `git reset --hard` to the parent, the symbol must not \
+         remain in the overlay; got: {:?}",
+        server.overlay.get_all_nodes().iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+    );
+    assert!(
+        !server.overlay_paths_test_keys().iter().any(|p| p == "src/scratch.rs"),
+        "after `git reset --hard` to the parent, the path must not \
+         remain tracked in `overlay_paths`; got: {:?}",
+        server.overlay_paths_test_keys(),
+    );
+
+    std::mem::forget(server);
+}
+
+/// Deleted-and-committed path: track a path + id, run `git rm` +
+/// commit, run `sync_volatile_overlay`. Pre-fix the file path was
+/// absolute (`change.path.to_string_lossy()`) while the overlay is
+/// keyed by workspace-relative paths, so the `remove_nodes_for_path`
+/// call missed every overlay entry. The post-fix code uses `graph_path`
+/// for the lookup key.
+#[tokio::test]
+async fn sync_volatile_overlay_purges_deleted_path() {
+    let (server, repo_root, _tmp) = build_lain_server_with_repo("test").await;
+
+    // Seed the overlay bookkeeping for `src/scratch.rs`.
+    server.overlay_paths_test_insert(
+        "src/scratch.rs".into(),
+        make_node("src/scratch.rs", "scratch_symbol", "test-scratch-symbol-id"),
+    );
+
+    // Make sure the file actually exists on disk and is tracked, so
+    // `git rm` has a real path to remove.
+    let target = repo_root.join("src").join("scratch.rs");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "pub fn scratch_symbol() {}\n").unwrap();
+    commit_at(&repo_root, "add scratch");
+
+    // `git rm` + commit so the deletion is committed (not just an
+    // uncommitted rm). After this cycle, `change_type == Deleted` and
+    // the path drops out of `current_paths` once the commit lands.
+    use std::process::Command;
+    Command::new("git").args(["-C", repo_root.to_str().unwrap(), "rm", "-q", "src/scratch.rs"]).status().unwrap();
+    commit_at(&repo_root, "delete scratch");
+
+    server.sync_volatile_overlay().await.expect("post-delete sync");
+    assert!(
+        !server.overlay.get_all_nodes().iter().any(|n| n.id == "test-scratch-symbol-id"),
+        "after `git rm` + commit, the symbol must not remain in the \
+         overlay; got: {:?}",
+        server.overlay.get_all_nodes().iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+    );
+    assert!(
+        !server.overlay_paths_test_keys().iter().any(|p| p == "src/scratch.rs"),
+        "after `git rm` + commit, the path must not remain tracked in \
+         `overlay_paths`; got: {:?}",
+        server.overlay_paths_test_keys(),
+    );
+
+    std::mem::forget(server);
+}
+
+/// A symbol kept across a commit (no reindex runs) must remain
+/// queryable through the overlay until a reindex replaces it with a
+/// static-graph node. This is the safety half of the contract — the
+/// pre-fix bug purged eagerly and could make a still-real symbol
+/// vanish from both layers; the fix's `overlay_paths` discipline
+/// keeps coverage intact across commits.
+///
+/// Note: this test only runs on the cleanup half (the safety half)
+/// because the federation side's equivalent
+/// (`sync_overlay_keeps_stale_entry_until_graph_catches_up`) already
+/// covers the broader "index hasn't run yet" case. Single-repo mode
+/// shares the same shape: `sync_state` calls `sync_volatile_overlay`
+/// without a paired reindex.
+#[tokio::test]
+async fn sync_volatile_overlay_keeps_committed_path_until_reindex() {
+    let (server, repo_root, _tmp) = build_lain_server_with_repo("test").await;
+
+    // Seed the overlay bookkeeping for `src/lib.rs`.
+    server.overlay_paths_test_insert(
+        "src/lib.rs".into(),
+        make_node("src/lib.rs", "committed_addition", "test-committed-addition-id"),
+    );
+
+    // Commit the change so the path drops out of `get_uncommitted_changes()`.
+    let target = repo_root.join("src").join("lib.rs");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target,
+        "pub fn existing() {}\npub fn committed_addition() {}\n",
+    )
+    .unwrap();
+    commit_at(&repo_root, "add committed_addition");
+
+    server.sync_volatile_overlay().await.expect("post-commit sync");
+    assert!(
+        server.overlay.get_all_nodes().iter().any(|n| n.id == "test-committed-addition-id"),
+        "a committed addition must remain in the overlay until the \
+         static graph catches up — pre-fix, this dropped the symbol \
+         from both layers; got: {:?}",
+        server.overlay.get_all_nodes().iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+    );
+    assert!(
+        server.overlay_paths_test_keys().iter().any(|p| p == "src/lib.rs"),
+        "the path must still be tracked in `overlay_paths` until a \
+         reindex runs; got: {:?}",
+        server.overlay_paths_test_keys(),
+    );
+
+    std::mem::forget(server);
 }

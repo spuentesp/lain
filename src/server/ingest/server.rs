@@ -51,6 +51,27 @@ pub struct LainServer {
     pub lsp_pool: Arc<LspPool>,
     pub tool_executor: ToolExecutor,
     pub tuning: Arc<TuningConfig>,
+    /// Workspace-relative paths this server has overlay nodes for, with
+    /// the exact ids it inserted at each path. Mirrors
+    /// `RepoIndex::overlay_paths` in the federation so `sync_volatile_overlay`
+    /// can reconcile prior overlay ownership with the current uncommitted
+    /// changes — a path that drops out of `get_uncommitted_changes()`
+    /// (committed, reverted, deleted, or an uncommitted edit discarded)
+    /// is no longer swept at all without this bookkeeping. Removing by
+    /// id rather than by path is the same discipline the federation
+    /// side uses: it never touches an entry it didn't insert.
+    ///
+    /// Wrapped in `Arc` so `LainServer: Clone` (other fields are
+    /// already Arc-shared; `parking_lot::Mutex` itself isn't Clone).
+    /// The bookkeeping is logically per-server-instance but the
+    /// mutex is genuinely shared across clones since they're the
+    /// same Arc.
+    ///
+    /// `pub(crate)` because the reconciliation methods
+    /// (`sync_volatile_overlay`, `process_change`) live in
+    /// `ingestion.rs`, a sibling module. Mirrors the visibility on
+    /// `federation`, `federation_workspaces`, etc.
+    pub(crate) overlay_paths: Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
     /// Outcome of the most recent startup re-index. Written by the
     /// re-index spawn in `LainMcpServer::run_stdio` / `run_http`;
     /// read by `ToolExecutor::get_health` and (in step 3) by the tool
@@ -333,6 +354,40 @@ impl LainServer {
             removed: vec![],
             updated: vec![],
         });
+    }
+
+    /// Test-only helper: insert `node` into the overlay and record
+    /// `node.id` under the workspace-relative `key` in `overlay_paths`
+    /// — the same bookkeeping `process_change` does when LSP
+    /// produces real symbols. Lets the integration tests exercise
+    /// `sync_volatile_overlay`'s staleness sweep without needing
+    /// rust-analyzer in the test environment. `pub` (not `#[cfg(test)]`)
+    /// because integration tests live in a separate crate that
+    /// doesn't see `#[cfg(test)]` items; the `test_` prefix flags it
+    /// as a non-production surface.
+    pub fn overlay_paths_test_insert(
+        &self,
+        key: String,
+        node: crate::server::schema::GraphNode,
+    ) {
+        self.overlay_paths
+            .lock()
+            .entry(key)
+            .or_default()
+            .push(node.id.clone());
+        self.overlay.insert_node(node);
+    }
+
+    /// Test-only helper: read the current `overlay_paths` snapshot.
+    /// Returns the workspace-relative paths this server has overlay
+    /// nodes tracked for, in arbitrary order. See
+    /// [`Self::overlay_paths_test_insert`] for the visibility rationale.
+    pub fn overlay_paths_test_keys(&self) -> Vec<String> {
+        self.overlay_paths
+            .lock()
+            .keys()
+            .cloned()
+            .collect()
     }
     // (removed: had no caller and no test anywhere in the tree)
 

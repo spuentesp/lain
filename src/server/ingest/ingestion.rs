@@ -1,6 +1,6 @@
 use crate::error::LainError;
 use crate::git::GitSensor;
-use crate::graph::GraphDatabase;
+use crate::graph::{graph_path, GraphDatabase};
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
 use crate::server::overlay::VolatileOverlay;
@@ -409,35 +409,93 @@ impl LainServer {
         Ok(())
     }
 
-    pub async fn sync_volatile_overlay(&mut self) -> Result<(), LainError> {
+    pub async fn sync_volatile_overlay(&self) -> Result<(), LainError> {
         // Sidecars populate their overlay from the owner's /overlay/subscribe
         // stream; they never re-scan the local working tree.
         if self.graph.is_read_only() {
             return Ok(());
         }
-        // Drop entries for THIS server's changed paths BEFORE scanning.
-        // Mirrors the federation-side fix in
-        // `RepoIndex::sync_overlay`: a blanket `overlay.clear()` wipes
-        // every entry in the overlay, which is correct today only
-        // because `LainServer` owns a single overlay and there is
-        // nothing else to clobber. Per-path removal is the safe
-        // default and matches the Federation's contract, so any
-        // future code that shares or merges overlays stays sound.
+        // Compute the set of workspace-relative paths currently
+        // uncommitted in the working tree. The federation side does
+        // the same in `RepoIndex::sync_overlay`; mirroring it here
+        // keeps the two implementations on a single mental model —
+        // every overlay owner tracks the workspace-relative paths it
+        // owns, and any path not in this cycle's changes is purged by
+        // id.
         let changes = self.git.lock().get_uncommitted_changes()?;
-        for change in &changes {
-            let removed = self
-                .overlay
-                .remove_nodes_for_path(&change.path.to_string_lossy());
-            if removed > 0 {
-                tracing::debug!(
-                    "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
-                    removed,
-                    change.path
-                );
+        let workspace_root = self.config.workspace.clone();
+        let current_paths: HashSet<String> = changes
+            .iter()
+            .map(|c| graph_path(&workspace_root, &c.path))
+            .collect();
+
+        // Staleness sweep: paths this server owned as of the last
+        // cycle that are no longer uncommitted (committed, reverted,
+        // deleted, or an uncommitted edit discarded). Removed *by id*
+        // using `overlay_paths` — the bookkeeping tracks every id
+        // this server inserted at each path, so we never touch an
+        // entry we didn't put there.
+        //
+        // Pre-fix had two bugs at once: the sweep only iterated the
+        // current `changes` list (so a path that dropped out of
+        // uncommitted state — committed, reverted, deleted — was
+        // never visited again), and `remove_nodes_for_path` was
+        // keyed by `change.path.to_string_lossy()` (absolute), while
+        // the overlay itself is keyed by workspace-relative paths.
+        // Both had to go. Mirroring the federation's `overlay_paths`
+        // discipline fixes both in one move.
+        //
+        // Two-tier purge condition: a stale path is purged only when
+        // (a) the file is genuinely gone from disk (deleted or fully
+        // reverted away — there's nothing live to preserve), or
+        // (b) the static graph's indexed commit matches HEAD (a real
+        // reindex pass landed and the symbol is now reachable through
+        // the static layer). The federation uses `indexed_current_commit`
+        // for (b); single-repo mode is the same code path. This
+        // matches the federation's contract and prevents a still-real
+        // symbol from vanishing between commit and the next reindex
+        // when those happen close together.
+        {
+            let mut owned = self.overlay_paths.lock();
+            let head = self.git.lock().get_latest_commit_info().ok().map(|(h, _)| h);
+            let graph_caught_up = match head {
+                Some(h) => self.graph.get_last_commit()?.as_deref() == Some(h.as_str()),
+                None => false,
+            };
+            let stale: Vec<String> = owned
+                .keys()
+                .filter(|p| !current_paths.contains(*p))
+                .cloned()
+                .collect();
+            for path in stale {
+                let deleted_from_disk = !workspace_root.join(&path).is_file();
+                if graph_caught_up || deleted_from_disk {
+                    if let Some(ids) = owned.remove(&path) {
+                        for id in ids {
+                            self.overlay.remove_node(&id);
+                        }
+                    }
+                }
             }
         }
 
+        // Drop entries for THIS server's currently-changed paths
+        // BEFORE re-scanning, then re-scan fresh. Same pattern as
+        // `RepoIndex::sync_overlay`'s "drop entries for THIS repo's
+        // changed paths BEFORE scanning" step.
         for change in &changes {
+            let key = graph_path(&workspace_root, &change.path);
+            let old_ids = self.overlay_paths.lock().remove(&key);
+            if let Some(ids) = &old_ids {
+                for id in ids {
+                    self.overlay.remove_node(id);
+                }
+                tracing::debug!(
+                    "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
+                    ids.len(),
+                    change.path
+                );
+            }
             // Skip LSP re-scan for files that were deleted — there's
             // nothing to scan, and the entry removal above already
             // wiped them.
@@ -451,7 +509,7 @@ impl LainServer {
         Ok(())
     }
 
-    async fn process_change(&mut self, path: &Path) -> Result<(), LainError> {
+    async fn process_change(&self, path: &Path) -> Result<(), LainError> {
         let symbols = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
@@ -463,13 +521,24 @@ impl LainServer {
                 }
             }
         };
+        if symbols.is_empty() {
+            return Ok(());
+        }
+        // Track the workspace-relative path + the ids we inserted
+        // there so the next `sync_volatile_overlay` cycle can purge
+        // by id if this path drops out of the changes list.
+        let workspace_root = self.config.workspace.clone();
+        let key = graph_path(&workspace_root, path);
+        let mut new_ids: Vec<String> = Vec::with_capacity(symbols.len());
         for symbol in symbols {
             self.overlay.insert_node(symbol.node.clone());
             // Broadcast the new node to any subscribed sidecar. The
             // read-only gate above (`is_read_only`) ensures this only
             // runs for owners.
-            self.broadcast_overlay_insert(symbol.node);
+            self.broadcast_overlay_insert(symbol.node.clone());
+            new_ids.push(symbol.node.id);
         }
+        self.overlay_paths.lock().insert(key, new_ids);
         Ok(())
     }
 }
