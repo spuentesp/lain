@@ -162,6 +162,14 @@ pub struct RepoIndex {
     /// loader sets this right after `add_repo` so a subsequent
     /// `index()` can use it to materialize cross-repo `Calls` edges.
     cross_repo_resolver: parking_lot::Mutex<Option<Arc<dyn crate::federation::cross_repo::CrossRepoResolver>>>,
+    /// Per-repo UUID namespace used to derive `GraphNode::id`s for
+    /// every node this `RepoIndex` produces. Two repos in the same
+    /// federation with identical `(type, path, name, line)` therefore
+    /// produce distinct ids, and the shared `VolatileOverlay` keeps
+    /// the symbols separate. The namespace is minted once at
+    /// construction and is stable for the lifetime of the
+    /// `RepoIndex`. URGENT FIXES #2.
+    pub(crate) id_namespace: crate::schema::RepoNamespace,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -187,6 +195,13 @@ impl RepoIndex {
         let runtime = crate::tuning::load_tuning_config(&local_path).runtime;
         let lsp = LspPool::new(&local_path, 4, &runtime)?;
         let git = Arc::new(AsyncMutex::new(GitSensor::new(&local_path)?));
+        // Read the namespace *before* moving `source` into the struct —
+        // we need the source's id, and `Box<dyn RepoSource>` isn't
+        // `Copy`. URGENT FIXES #2: every `GraphNode` this repo produces
+        // for the federation overlay must use a per-repo namespace
+        // so identical `(type, path, name, line)` across repos
+        // doesn't collapse into one overlay entry.
+        let id_namespace = *source.id_namespace();
         Ok(Self {
             source,
             db,
@@ -201,6 +216,7 @@ impl RepoIndex {
             overlay_updated: Arc::new(tokio::sync::Notify::new()),
             last_overlay_lsp_failures: std::sync::atomic::AtomicU32::new(0),
             cross_repo_resolver: parking_lot::Mutex::new(None),
+            id_namespace,
         })
     }
 
@@ -783,7 +799,10 @@ impl RepoIndex {
         // 2. Tree-sitter fallback for the empty-LSP / LSP-error cases.
         // Same shape as `add_tree_sitter_definitions` in `scan.rs:341` —
         // read the file once, mint a `GraphNode` per `SymbolDef`, and let
-        // the caller `insert_node` into the overlay.
+        // the caller `insert_node` into the overlay. The id namespace
+        // comes from `self.id_namespace` so this repo's nodes never
+        // collide with another repo's identically-named symbol
+        // (URGENT FIXES #2).
         let symbols = match lsp_symbols {
             Some(s) => s,
             None => {
@@ -795,12 +814,13 @@ impl RepoIndex {
                 crate::treesitter::extract_definitions(path, &content)
                     .into_iter()
                     .map(|d| HierarchicalSymbol {
-                        node: GraphNode::new(
+                        node: GraphNode::new_in(
                             d.kind,
                             d.name.clone(),
                             graph_key.clone(),
+                            &self.id_namespace,
                         )
-                        .with_location(d.line_start, d.line_end),
+                        .with_location_in(d.line_start, d.line_end, &self.id_namespace),
                         children: vec![],
                     })
                     .collect()

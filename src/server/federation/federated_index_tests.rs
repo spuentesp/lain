@@ -10,7 +10,7 @@
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use crate::federation::repo_id::RepoId;
-use crate::federation::repo_source::WorkspaceDirSource;
+use crate::federation::repo_source::{RepoSource, WorkspaceDirSource};
 use crate::schema::NodeType;
 use std::sync::Arc;
 
@@ -225,4 +225,71 @@ fn distinct_repos_keeps_genuine_cross_repo_ambiguity() {
 fn distinct_repos_on_empty_is_empty() {
     use crate::federation::federated_index::distinct_repos;
     assert!(distinct_repos(&[]).is_empty());
+}
+
+/// Two repos with identical `(type, path, name)` symbols must produce
+/// distinct `GraphNode::id`s. Pre-fix, both ids were the same UUID v5
+/// because `GraphNode::generate_id` only hashed the `(type, path, name,
+/// line)` input — no repo identity. Two federation repos with a
+/// function `foo` at `src/lib.rs:1` would mint the same id, and
+/// `RepoIndex::sync_overlay`'s id-keyed cleanup would remove one
+/// repo's overlay node when the other's `process_overlay_change`
+/// fired. URGENT FIXES #2.
+#[test]
+fn two_repos_with_identical_symbols_get_distinct_ids() {
+    use crate::federation::repo_source::WorkspaceDirSource;
+    use crate::schema::{GraphNode, NodeType, RepoNamespace};
+    let tmp = tempfile::tempdir().unwrap();
+    // Two tempdir repos with identical content. We don't index them —
+    // the namespace difference is what matters for id uniqueness, and
+    // minting the same `(type, path, name, line)` from two namespaces
+    // is the contract we're testing.
+    let repo_a = tmp.path().join("a");
+    let repo_b = tmp.path().join("b");
+    std::fs::create_dir_all(&repo_a).unwrap();
+    std::fs::create_dir_all(&repo_b).unwrap();
+    let src_a = WorkspaceDirSource::new(RepoId::new("a").unwrap(), repo_a.clone()).unwrap();
+    let src_b = WorkspaceDirSource::new(RepoId::new("b").unwrap(), repo_b.clone()).unwrap();
+
+    // Use the production constructor (with the repo's namespace)
+    // for both. Different repos → different namespaces → different ids.
+    let node_a = GraphNode::new_in(
+        NodeType::Function,
+        "foo".into(),
+        "src/lib.rs".into(),
+        src_a.id_namespace(),
+    );
+    let node_b = GraphNode::new_in(
+        NodeType::Function,
+        "foo".into(),
+        "src/lib.rs".into(),
+        src_b.id_namespace(),
+    );
+    assert_ne!(
+        node_a.id, node_b.id,
+        "two repos with identical symbols must produce distinct ids; \
+         the pre-fix code produced equal ids, which made the shared \
+         VolatileOverlay collapse them and let id-keyed cleanup in \
+         one repo remove the other's symbol"
+    );
+
+    // Sanity: identical symbols WITHIN one repo still collide (same
+    // path + name + line → same id). That's correct — the namespace
+    // is what disambiguates *between* repos, not within one.
+    let node_a2 = GraphNode::new_in(
+        NodeType::Function,
+        "foo".into(),
+        "src/lib.rs".into(),
+        src_a.id_namespace(),
+    );
+    assert_eq!(
+        node_a.id, node_a2.id,
+        "same repo + same symbol → same id (collision within a repo \
+         is expected; the id is a uniqueness handle, not a content hash)",
+    );
+
+    // The test namespace must not collide with any real namespace.
+    let test_node = GraphNode::new(NodeType::Function, "foo".into(), "src/lib.rs".into());
+    assert_ne!(node_a.id, test_node.id);
+    assert_ne!(node_b.id, test_node.id);
 }

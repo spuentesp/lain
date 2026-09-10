@@ -384,6 +384,58 @@ pub struct GraphNode {
     pub is_hydrated: bool,
 }
 
+/// Per-repository UUID namespace for `GraphNode` ids. Mints a stable
+/// `Uuid` once per `RepoIndex` (and once per `LainServer` in single-
+/// repo mode) and threads it through every id-generation path so two
+/// repositories with identical `(type, path, name, line)` produce
+/// distinct node ids.
+///
+/// Without this, the federation's shared `VolatileOverlay` collapses
+/// identical symbols across repos into one entry, and id-keyed
+/// `RepoIndex::sync_overlay` cleanup removes one repo's node when
+/// the other is reindexed (URGENT FIXES #2).
+///
+/// Construction is `pub(crate)` because the namespace is meaningful
+/// only inside the federation / single-server subsystems that own
+/// the node identity; library code (tests, sensor backends) goes
+/// through `RepoNamespace::for_test()` which returns a stable
+/// non-production namespace so tests don't have to thread state.
+#[derive(Clone, Copy, Debug)]
+pub struct RepoNamespace(pub(crate) uuid::Uuid);
+
+impl RepoNamespace {
+    /// A stable namespace for unit and integration tests. Distinct
+    /// from `Uuid::NAMESPACE_URL` so production ids and test ids
+    /// can never collide. Two tests calling this get the *same*
+    /// namespace, so nodes minted in different test functions are
+    /// comparable — that matches how every test today hard-codes
+    /// expected ids.
+    pub fn for_test() -> Self {
+        // Stable: derived from a fixed namespace URL once.
+        // Any constant works as long as it's distinct from
+        // `Uuid::NAMESPACE_URL` and never changes between runs.
+        static FOR_TEST_NS: std::sync::LazyLock<uuid::Uuid> = std::sync::LazyLock::new(|| {
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                b"lain::RepoNamespace::for_test",
+            )
+        });
+        Self(*FOR_TEST_NS)
+    }
+
+    /// Mint a fresh namespace for a new repo / server. Production
+    /// callers store the result on their long-lived struct so the
+    /// id space is stable across the lifetime of that struct.
+    pub fn fresh() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// The underlying `Uuid`. Used by `GraphNode::generate_id`.
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        self.0
+    }
+}
+
 impl GraphNode {
     /// Generate a stable UUID for a graph node.
     ///
@@ -391,21 +443,49 @@ impl GraphNode {
     /// (type, path, name) — e.g. a top-level `fn add` and an `impl` method
     /// `add` — get distinct IDs. Pass `None` for nodes where line range is
     /// not meaningful (e.g. sensors that produce one node per external entity).
+    ///
+    /// `namespace` namespaces the id by repo so that two repos with
+    /// identical `(type, path, name, line)` produce distinct ids.
+    /// Production code passes the namespace minted by its owning
+    /// `RepoIndex` / `LainServer`; tests pass
+    /// `RepoNamespace::for_test()`.
     pub fn generate_id(
         node_type: &NodeType,
         path: &str,
         name: &str,
         line_start: Option<u32>,
+        namespace: &RepoNamespace,
     ) -> String {
         let id_input = match line_start {
-            Some(line) => format!("{:?}:{}:{}:{}", node_type, path, name, line),
-            None => format!("{:?}:{}:{}", node_type, path, name),
+            Some(line) => format!(
+                "{:?}:{}:{}:{}:{}",
+                namespace.as_uuid(),
+                node_type,
+                path,
+                name,
+                line
+            ),
+            None => format!(
+                "{:?}:{}:{}:{}",
+                namespace.as_uuid(),
+                node_type,
+                path,
+                name
+            ),
         };
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id_input.as_bytes()).to_string()
+        uuid::Uuid::new_v5(&namespace.as_uuid(), id_input.as_bytes()).to_string()
     }
 
-    pub fn new(node_type: NodeType, name: String, path: String) -> Self {
-        let id = Self::generate_id(&node_type, &path, &name, None);
+    /// Production constructor. Takes the repo's `RepoNamespace`
+    /// so the id is unique across repos. Use `GraphNode::new` only
+    /// in tests, where a shared test namespace is acceptable.
+    pub fn new_in(
+        node_type: NodeType,
+        name: String,
+        path: String,
+        namespace: &RepoNamespace,
+    ) -> Self {
+        let id = Self::generate_id(&node_type, &path, &name, None, namespace);
 
         Self {
             id,
@@ -433,12 +513,55 @@ impl GraphNode {
         }
     }
 
+    /// Test-only constructor. Uses a shared test namespace so two
+    /// tests producing the same `(type, path, name)` get the same
+    /// id — that matches how every test today asserts on expected
+    /// ids. Production code paths must use [`Self::new_in`] with
+    /// the owning repo's `RepoNamespace`; the namespace parameter
+    /// is the entire fix for URGENT FIXES #2.
+    pub fn new(node_type: NodeType, name: String, path: String) -> Self {
+        Self::new_in(node_type, name, path, &RepoNamespace::for_test())
+    }
+
     pub fn with_location(mut self, line_start: u32, line_end: u32) -> Self {
         self.line_start = Some(line_start);
         self.line_end = Some(line_end);
         // Re-derive the ID so two same-named symbols at different lines
         // (e.g. top-level fn vs impl method) get distinct IDs.
-        self.id = Self::generate_id(&self.node_type, &self.path, &self.name, Some(line_start));
+        // `with_location` is the test-only entry point; production
+        // callers go through `with_location_in` so the namespace
+        // stays consistent across the original construction and
+        // this re-derivation.
+        let ns = RepoNamespace::for_test();
+        self.id = Self::generate_id(
+            &self.node_type,
+            &self.path,
+            &self.name,
+            Some(line_start),
+            &ns,
+        );
+        self
+    }
+
+    /// Production equivalent of `with_location` — preserves the
+    /// owning repo's namespace when re-deriving the id so a node
+    /// minted by [`Self::new_in`] and re-keyed here still belongs
+    /// to the same repo.
+    pub fn with_location_in(
+        mut self,
+        line_start: u32,
+        line_end: u32,
+        namespace: &RepoNamespace,
+    ) -> Self {
+        self.line_start = Some(line_start);
+        self.line_end = Some(line_end);
+        self.id = Self::generate_id(
+            &self.node_type,
+            &self.path,
+            &self.name,
+            Some(line_start),
+            namespace,
+        );
         self
     }
 }
