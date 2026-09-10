@@ -15,7 +15,9 @@ pub fn resolve_node(
     overlay: &VolatileOverlay,
     handle: &str
 ) -> Result<GraphNode, LainError> {
-    // Canonicalize path if the handle looks like one
+    // Preserve the original spelling for IDs and names. A symbol name can
+    // also be an existing directory (for example `target`), so resolving
+    // paths first can hide a valid symbol.
     let canonical_handle = if Path::new(handle).exists() {
         dunce::canonicalize(handle).map(|p| p.to_string_lossy().to_string()).unwrap_or(handle.to_string())
     } else {
@@ -23,14 +25,14 @@ pub fn resolve_node(
     };
 
     // 1. Try Overlay by ID
-    if let Some(n) = overlay.get_node(&canonical_handle) { return Ok(n); }
+    if let Some(n) = overlay.get_node(handle) { return Ok(n); }
     // 2. Try Graph by ID
-    if let Ok(Some(n)) = graph.get_node(&canonical_handle) { return Ok(n); }
+    if let Ok(Some(n)) = graph.get_node(handle) { return Ok(n); }
     // 3. Try Overlay by Name
-    let overlay_names = overlay.find_nodes_by_name(&canonical_handle);
-    if let Some(n) = overlay_names.iter().find(|n| n.name == canonical_handle) { return Ok(n.clone()); }
+    let overlay_names = overlay.find_nodes_by_name(handle);
+    if let Some(n) = overlay_names.iter().find(|n| n.name == handle) { return Ok(n.clone()); }
     // 4. Try Graph by Name
-    if let Some(n) = graph.find_node_by_name(&canonical_handle) { return Ok(n); }
+    if let Some(n) = graph.find_node_by_name(handle) { return Ok(n); }
     // 5. Try Graph by Path. Try the handle verbatim first: graph keys are
     //    workspace-relative, and a caller asking about "src/cli/hooks.rs" is
     //    already using the canonical form — canonicalizing it to an absolute
@@ -510,6 +512,50 @@ mod tests {
             !err.contains("until it is committed"),
             "the committed-code explanation is the wrong cause here: {err}"
         );
+    }
+
+    // `std::env::set_current_dir` mutates process-wide state, and this
+    // is the `--lib` binary shared by ~800 tests running on cargo test's
+    // default thread pool — any other test doing its own relative
+    // `Path::exists()` check could observe this test's diverted cwd
+    // without this lock serializing the window.
+    static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restores the process cwd on drop — including on panic/unwind —
+    /// so a failing assertion inside the guarded region can't leave the
+    /// cwd diverted for every other test still running in this binary.
+    struct CwdGuard {
+        previous: std::path::PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl CwdGuard {
+        fn enter(dir: &std::path::Path) -> Self {
+            let lock = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(dir).unwrap();
+            Self { previous, _lock: lock }
+        }
+    }
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    #[test]
+    fn resolve_node_prefers_name_when_name_is_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        db.upsert_node(GraphNode::new(
+            crate::schema::NodeType::Function,
+            "target".into(),
+            "src/lib.rs".into(),
+        )).unwrap();
+        let overlay = VolatileOverlay::new();
+        let _guard = CwdGuard::enter(dir.path());
+        let result = resolve_node(&db, &overlay, "target");
+        assert_eq!(result.unwrap().name, "target");
     }
 
     #[test]
