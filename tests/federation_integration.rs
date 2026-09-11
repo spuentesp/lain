@@ -1505,19 +1505,16 @@ async fn resolve_node_finds_indexed_function_by_name() {
 
     let overlay = VolatileOverlay::new();
 
-    // `resolve_node` treats `handle` as a path when it points at something
-    // on disk; running the test from /home/sebastian/lain would make the
-    // literal name "target" resolve to the real target/ directory and skip
-    // name matching. chdir to the tempdir so the handle is unambiguously
-    // a name, then restore cwd before returning.
-    let prev_cwd = std::env::current_dir().ok();
-    std::env::set_current_dir(dir.path()).expect("chdir to tempdir");
-
+    // The pre-fix test used to chdir to the tempdir to dodge a
+    // collision between the literal name "target" and the real
+    // `target/` build directory. After `4182fd7` (resolve_node tries
+    // id/name lookup before path canonicalization), the path
+    // canonicalization happens *after* the name lookup, so a
+    // `target/` directory in the test runner's cwd no longer hides
+    // the symbol — the chdir is dead code. The cwd mutation also
+    // affected every parallel test in the same process (URGENT FIXES
+    // item #4). Removing both the chdir and the restoration.
     let result = resolve_node(&db, &overlay, "target");
-
-    if let Some(p) = prev_cwd.as_ref() {
-        let _ = std::env::set_current_dir(p);
-    }
 
     assert!(
         result.is_ok(),
