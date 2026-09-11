@@ -447,3 +447,83 @@ async fn add_repo_persists_unborn_head_repo() {
         loaded.repos[0].content_hash,
     );
 }
+
+/// `persist_manifest`'s read-modify-write cycle is serialized by
+/// `persist_lock` so two concurrent writers can't each snapshot the
+/// membership at slightly different moments and overwrite each
+/// other's writes. Pre-fix, an `add_repo` racing with a `remove_repo`
+/// would each build a manifest, race to write the temp file + rename,
+/// and the rename-atomicity left the on-disk manifest pointing to
+/// whichever writer's content committed last — a state that
+/// arbitrarily lost a member without any single mutation having
+/// caused it. Post-fix, the second writer sees the first's post-
+/// mutation state before building its own snapshot, so the final
+/// file content matches the final in-memory state.
+#[tokio::test]
+async fn concurrent_add_and_remove_serialize_persist_manifest() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = std::sync::Arc::new(FederatedIndex::new(petgraph_backend(&tmp)));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    // Seed a repo. Both racers operate on this baseline.
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("seed").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    // Race: a second `add_repo` (for "added") and a `remove_repo` (of
+    // the same "added" id) landing at the same instant. Both call
+    // `persist_manifest`; the lock forces the second to observe the
+    // first's post-mutation membership.
+    let added = RepoId::new("added").unwrap();
+    let added_for_rm = added.clone();
+    let fed_for_add = fed.clone();
+    let fed_for_rm = fed.clone();
+    let data_dir = tmp.path().to_path_buf();
+    let add_task = tokio::spawn(async move {
+        let src = tempfile::tempdir().unwrap();
+        git2::Repository::init(src.path()).unwrap();
+        let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(added, src.path().to_path_buf()).unwrap(),
+        );
+        fed_for_add.add_repo(s, &data_dir).await.unwrap();
+    });
+    let rm_task = tokio::spawn(async move {
+        // Fire-and-forget remove; ignore the not-found case if add
+        // hadn't yet registered the id.
+        let _ = fed_for_rm.remove_repo(&added_for_rm);
+    });
+    let _ = tokio::join!(add_task, rm_task);
+
+    // Post-condition: the on-disk manifest matches the final
+    // in-memory membership. Either `added` is present (if remove
+    // happened before add) or absent (if add happened first). What's
+    // not acceptable is a torn entry: an `added` row with a
+    // half-populated source_config, or a row whose `last_indexed_unix`
+    // is older than the membership actually has. The lock
+    // guarantees the snapshot is consistent with whatever final
+    // membership `list_repos` reports right now.
+    let in_mem: std::collections::BTreeMap<String, _> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| (id.to_string(), ()))
+        .collect();
+    let on_disk = FederationManifest::load_or_default(&manifest_path).unwrap();
+    let on_disk_ids: std::collections::BTreeSet<_> = on_disk
+        .repos
+        .iter()
+        .map(|e| e.id.as_str().to_string())
+        .collect();
+    let in_mem_ids: std::collections::BTreeSet<_> = in_mem.keys().cloned().collect();
+    assert_eq!(
+        on_disk_ids, in_mem_ids,
+        "on-disk manifest membership must match in-memory after concurrent \
+         add/remove; pre-fix `persist_lock` could let the older snapshot \
+         overwrite the newer one. on_disk={:?} in_mem={:?}",
+        on_disk_ids, in_mem_ids
+    );
+}
