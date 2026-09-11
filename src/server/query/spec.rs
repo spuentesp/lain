@@ -14,19 +14,15 @@ use std::ops::RangeInclusive;
 /// Mode for query execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum QueryMode {
     /// Use the new ops-array style query
     Query,
     /// Delegate to legacy named tool handlers
     Tool,
     /// Auto-detect: try ops first, fallback to named
+    #[default]
     Auto,
-}
-
-impl Default for QueryMode {
-    fn default() -> Self {
-        QueryMode::Auto
-    }
 }
 
 /// Main query specification
@@ -296,16 +292,12 @@ impl EdgeSelector {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Direction {
+    #[default]
     Outgoing,
     Incoming,
     Both,
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::Outgoing
-    }
 }
 
 // =============================================================================
@@ -497,7 +489,7 @@ impl Default for ConnectOp {
 // Filter Operation
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FilterOp {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_filter: Option<TypeSelector>,
@@ -507,16 +499,6 @@ pub struct FilterOp {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<NameSelector>,
-}
-
-impl Default for FilterOp {
-    fn default() -> Self {
-        Self {
-            type_filter: None,
-            label_filter: None,
-            name: None,
-        }
-    }
 }
 
 // =============================================================================
@@ -556,15 +538,11 @@ pub enum SortField {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SortDirection {
+    #[default]
     Asc,
     Desc,
-}
-
-impl Default for SortDirection {
-    fn default() -> Self {
-        SortDirection::Asc
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

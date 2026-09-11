@@ -26,7 +26,7 @@ use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -268,20 +268,17 @@ pub fn wait_for_health(host: &str, deadline: Duration) {
                 deadline, host
             );
         }
-        match TcpStream::connect(host) {
-            Ok(mut stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-                let _ = stream.write_all(
-                    format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
-                        .as_bytes(),
-                );
-                let mut response = String::new();
-                let _ = stream.read_to_string(&mut response);
-                if response.starts_with("HTTP/1.1 200") {
-                    return;
-                }
+        if let Ok(mut stream) = TcpStream::connect(host) {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            let _ = stream.write_all(
+                format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            );
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+            if response.starts_with("HTTP/1.1 200") {
+                return;
             }
-            Err(_) => {}
         }
         std::thread::sleep(Duration::from_millis(100));
     }

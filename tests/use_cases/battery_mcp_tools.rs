@@ -24,7 +24,7 @@ use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 fn build_fixture() -> (tempfile::TempDir, GraphDatabase) {
     let dir = tempfile::tempdir().unwrap();
     let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
-    let mut n = |name: &str, path: &str, kind: NodeType| {
+    let n = |name: &str, path: &str, kind: NodeType| {
         let mut node = GraphNode::new(kind, name.into(), path.into());
         node.line_start = Some(1);
         node.line_end = Some(5);

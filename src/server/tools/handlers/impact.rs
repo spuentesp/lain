@@ -69,9 +69,9 @@ pub async fn get_blast_radius(
     // Overlay freshness indicator
     let overlay_age = overlay.last_update_age_secs();
     let freshness = if overlay_age < 5.0 {
-        format!("live ({}s ago)", format!("{:.1}", overlay_age))
+        format!("live ({:.1}s ago)", overlay_age)
     } else if overlay_age < 60.0 {
-        format!("recent ({}s ago)", format!("{:.0}", overlay_age))
+        format!("recent ({:.0}s ago)", overlay_age)
     } else {
         "stale".to_string()
     };

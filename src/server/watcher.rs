@@ -369,9 +369,9 @@ fn register_directory(
 ///   `handle_watch_command` call so tests can wait for dynamic
 ///   registration to finish before exercising downstream behavior.
 ///   `FileWatcher::start` passes `None`.
-/// Optional hooks used by tests to gate on watcher lifecycle events.
-/// `FileWatcher::start` passes `None` for every field; the test bodies
-/// in `mod tests` populate what they need via [`WatcherThreadArgs::for_test`].
+///   Optional hooks used by tests to gate on watcher lifecycle events.
+///   `FileWatcher::start` passes `None` for every field; the test bodies
+///   in `mod tests` populate what they need via [`WatcherThreadArgs::for_test`].
 #[derive(Default)]
 pub(crate) struct WatcherTestHooks {
     /// If `Some`, the watcher thread sends the number of registered

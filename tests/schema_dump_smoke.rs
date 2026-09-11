@@ -11,7 +11,7 @@ fn lain() -> Command {
 /// `lain schema dump --out <tmp>` writes a JSON file containing every
 /// tool that `tools/list` returns when the server runs with federation
 /// + workspaces. Pin the surface by name: at minimum the well-known
-/// tools from each subset must appear.
+///   tools from each subset must appear.
 #[test]
 fn lain_schema_dump_writes_tools_list_shape() {
     let tmp = tempfile::tempdir().expect("tempdir");

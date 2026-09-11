@@ -19,6 +19,7 @@ use std::time::SystemTime;
 /// - `started_at`, `last_sync_at`: seconds since UNIX epoch
 /// - `last_error`: most recent sync error message, or null
 /// - `repo_count`, `workspace_count`: live counts from the federation
+///
 /// Everything `get_server_status` reports that is not derived from the
 /// build or the process itself.
 ///

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{free_port, jsonrpc, tools_call_text, ServerGuard};
+use common::{free_port, tools_call_text, ServerGuard};
 
 /// Initialize a real git repo at `path` with a committable local
 /// identity and commit the working tree. `GitSensor::new` opens the
@@ -746,12 +746,11 @@ fn request_reload_rebuilds_state() {
     let accepted = tools_call_text(&host, "request_reload", serde_json::json!({}));
     let accepted_v: serde_json::Value =
         serde_json::from_str(&accepted).unwrap_or_else(|e| panic!("not JSON: {e}\n{accepted}"));
-    assert_eq!(
+    assert!(
         accepted_v
             .get("accepted")
             .and_then(|x| x.as_bool())
             .unwrap_or(false),
-        true,
         "request_reload must report accepted=true; got {accepted_v}"
     );
 

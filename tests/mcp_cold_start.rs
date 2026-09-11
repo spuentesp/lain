@@ -174,11 +174,10 @@ impl LainChild {
     }
 
     fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
-        let resp = self.send(
+        self.send(
             "tools/call",
             serde_json::json!({"name": name, "arguments": arguments}),
-        );
-        resp
+        )
     }
 
     fn shutdown(mut self) {

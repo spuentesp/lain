@@ -16,7 +16,7 @@ proptest! {
     fn test_cosine_similarity_bounds(a in prop::collection::vec(0f32..=1e6_f32, 1..=128),
                                       b in prop::collection::vec(0f32..=1e6_f32, 1..=128)) {
         let result = cosine_similarity(&a, &b);
-        prop_assert!(result >= -1.0 && result <= 1.0);
+        prop_assert!((-1.0..=1.0).contains(&result));
     }
 
     #[test]

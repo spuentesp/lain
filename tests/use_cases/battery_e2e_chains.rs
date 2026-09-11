@@ -16,12 +16,11 @@
 use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
 use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
-use std::path::Path;
 
 fn build_fixture() -> (tempfile::TempDir, GraphDatabase) {
     let dir = tempfile::tempdir().unwrap();
     let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
-    let mut n = |name: &str, path: &str, kind: NodeType, ls: u32, le: u32| {
+    let n = |name: &str, path: &str, kind: NodeType, ls: u32, le: u32| {
         let mut node = GraphNode::new(kind, name.into(), path.into());
         node.line_start = Some(ls);
         node.line_end = Some(le);

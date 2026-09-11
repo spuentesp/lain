@@ -165,7 +165,7 @@ pub fn get_workspace_graph(
         })?;
     let members: std::collections::HashSet<String> = active.members.iter().cloned().collect();
 
-    let all_nodes = fed.backend().list_nodes().map_err(LainError::from)?;
+    let all_nodes = fed.backend().list_nodes()?;
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut truncated = false;
     for n in all_nodes {
@@ -201,7 +201,7 @@ pub fn get_workspace_graph(
     let node_ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
 
     let mut edges: Vec<GraphEdge> = Vec::new();
-    let all_edges = fed.backend().all_edges().map_err(LainError::from)?;
+    let all_edges = fed.backend().all_edges()?;
     for e in all_edges {
         if !node_ids.contains(e.source_id.as_str()) || !node_ids.contains(e.target_id.as_str()) {
             continue;

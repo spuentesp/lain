@@ -501,7 +501,7 @@ impl ServerHandler for LainHandler {
                 return Ok(tool_text_result(
                     payload.to_string(),
                     false,
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     static_graph_generation_unix,
                 ));
             }
@@ -512,7 +512,7 @@ impl ServerHandler for LainHandler {
                         return Ok(tool_text_result(
                             format!("{e}"),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         ))
                     }
@@ -523,7 +523,7 @@ impl ServerHandler for LainHandler {
                         return Ok(tool_text_result(
                             format!("serialization error: {e}"),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         ));
                     }
@@ -531,7 +531,7 @@ impl ServerHandler for LainHandler {
                 return Ok(tool_text_result(
                     text,
                     false,
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     static_graph_generation_unix,
                 ));
             }
@@ -542,7 +542,7 @@ impl ServerHandler for LainHandler {
                         return Ok(tool_text_result(
                             "reload bus not configured on this server".to_string(),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         ));
                     }
@@ -553,7 +553,7 @@ impl ServerHandler for LainHandler {
                 return Ok(tool_text_result(
                     text,
                     false,
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     static_graph_generation_unix,
                 ));
             }
@@ -564,7 +564,7 @@ impl ServerHandler for LainHandler {
                         return Ok(tool_text_result(
                             "reload bus not configured on this server".to_string(),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         ));
                     }
@@ -574,13 +574,13 @@ impl ServerHandler for LainHandler {
                         serde_json::to_string(&payload)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
-                        &self.executor.overlay(),
+                        self.executor.overlay(),
                         static_graph_generation_unix,
                     )),
                     Err(e) => Ok(tool_text_result(
                         format!("{e}"),
                         true,
-                        &self.executor.overlay(),
+                        self.executor.overlay(),
                         static_graph_generation_unix,
                     )),
                 };
@@ -588,7 +588,7 @@ impl ServerHandler for LainHandler {
             "register_agent" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_register_agent,
@@ -597,7 +597,7 @@ impl ServerHandler for LainHandler {
             "heartbeat" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_heartbeat,
@@ -606,7 +606,7 @@ impl ServerHandler for LainHandler {
             "list_active_agents" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_list_active_agents,
@@ -615,7 +615,7 @@ impl ServerHandler for LainHandler {
             "who_am_i" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_who_am_i,
@@ -624,7 +624,7 @@ impl ServerHandler for LainHandler {
             "list_subagents" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_list_subagents,
@@ -633,7 +633,7 @@ impl ServerHandler for LainHandler {
             "claim_files" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_claim_files,
@@ -642,7 +642,7 @@ impl ServerHandler for LainHandler {
             "release_files" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_release_files,
@@ -651,7 +651,7 @@ impl ServerHandler for LainHandler {
             "list_occupancy" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_list_occupancy,
@@ -660,7 +660,7 @@ impl ServerHandler for LainHandler {
             "my_claims" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_my_claims,
@@ -669,7 +669,7 @@ impl ServerHandler for LainHandler {
             "detect_overlap" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_detect_overlap,
@@ -678,7 +678,7 @@ impl ServerHandler for LainHandler {
             "get_audit_log" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::audit_tools::run_get_audit_log,
@@ -687,7 +687,7 @@ impl ServerHandler for LainHandler {
             "get_world_state" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::presence_tools::run_get_world_state,
@@ -696,7 +696,7 @@ impl ServerHandler for LainHandler {
             "get_recent_activity" => {
                 return Ok(dispatch_presence_tool(
                     self.server.as_deref(),
-                    &self.executor.overlay(),
+                    self.executor.overlay(),
                     &params.name,
                     &args_owned,
                     crate::server::mcp::audit_tools::run_get_recent_activity,
@@ -713,7 +713,7 @@ impl ServerHandler for LainHandler {
                         serde_json::to_string(&repos)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
-                        &self.executor.overlay(),
+                        self.executor.overlay(),
                         static_graph_generation_unix,
                     ));
                 }
@@ -724,7 +724,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 "Missing required argument: repo_id".to_string(),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -735,7 +735,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 format!("{e}"),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -781,14 +781,14 @@ impl ServerHandler for LainHandler {
                                 serde_json::to_string(&value)
                                     .unwrap_or_else(|e| format!("serialization error: {e}")),
                                 false,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ))
                         }
                         Err(e) => Ok(tool_text_result(
                             format!("{e}"),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         )),
                     };
@@ -799,7 +799,7 @@ impl ServerHandler for LainHandler {
                         serde_json::to_string(&health)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
-                        &self.executor.overlay(),
+                        self.executor.overlay(),
                         static_graph_generation_unix,
                     ));
                 }
@@ -810,7 +810,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 "Missing required argument: query".to_string(),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -823,7 +823,7 @@ impl ServerHandler for LainHandler {
                                     "Invalid argument: limit must be a non-negative integer"
                                         .to_string(),
                                     true,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 ));
                             }
@@ -835,7 +835,7 @@ impl ServerHandler for LainHandler {
                                     "Invalid argument: limit must be a non-negative integer"
                                         .to_string(),
                                     true,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 ));
                             }
@@ -844,7 +844,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 "Missing required argument: limit".to_string(),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -854,7 +854,7 @@ impl ServerHandler for LainHandler {
                         serde_json::to_string(&hits)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
-                        &self.executor.overlay(),
+                        self.executor.overlay(),
                         static_graph_generation_unix,
                     ));
                 }
@@ -865,7 +865,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 "Missing required argument: symbol".to_string(),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -881,7 +881,7 @@ impl ServerHandler for LainHandler {
                                 return Ok(tool_text_result(
                                     e.to_string(),
                                     true,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 ));
                             }
@@ -892,7 +892,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 e,
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ))
                         }
@@ -904,13 +904,13 @@ impl ServerHandler for LainHandler {
                             serde_json::to_string(&r)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         )),
                         Err(e) => Ok(tool_text_result(
                             format!("{e}"),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         )),
                     };
@@ -922,7 +922,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 "Missing required argument: repo_id".to_string(),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -933,7 +933,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 "Missing required argument: symbol".to_string(),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -945,7 +945,7 @@ impl ServerHandler for LainHandler {
                                 return Ok(tool_text_result(
                                     e.to_string(),
                                     true,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 ));
                             }
@@ -956,7 +956,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 e,
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ))
                         }
@@ -966,10 +966,10 @@ impl ServerHandler for LainHandler {
                             serde_json::to_string(&r)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                         static_graph_generation_unix,
                         )),
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
+                        Err(e) => Ok(tool_text_result(format!("{e}"), true, self.executor.overlay(), static_graph_generation_unix)),
                     };
                 }
                 _ => {}
@@ -989,8 +989,7 @@ impl ServerHandler for LainHandler {
         // call. The synchronous helpers below complete in microseconds,
         // so the read guard never blocks the writers in `set_workspace`.
         if let Some(workspaces_lock) = &self.workspaces {
-            let workspaces: &crate::federation::workspace::WorkspacesFile =
-                &*workspaces_lock.read();
+            let workspaces: &crate::federation::workspace::WorkspacesFile = &workspaces_lock.read();
             match params.name.as_str() {
                 "list_workspaces" => {
                     let active = ActiveWorkspace::load().ok().flatten();
@@ -1002,7 +1001,7 @@ impl ServerHandler for LainHandler {
                         serde_json::to_string(&infos)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
-                        &self.executor.overlay(),
+                        self.executor.overlay(),
                         static_graph_generation_unix,
                     ));
                 }
@@ -1017,13 +1016,13 @@ impl ServerHandler for LainHandler {
                                     serde_json::to_string(&info)
                                         .unwrap_or_else(|e| format!("serialization error: {e}")),
                                     false,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 )),
                                 Err(e) => Ok(tool_text_result(
                                     format!("{e}"),
                                     true,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 )),
                             }
@@ -1034,7 +1033,7 @@ impl ServerHandler for LainHandler {
                             )
                             .to_string(),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         )),
                     };
@@ -1046,7 +1045,7 @@ impl ServerHandler for LainHandler {
                             return Ok(tool_text_result(
                                 "Missing required argument: name".to_string(),
                                 true,
-                                &self.executor.overlay(),
+                                self.executor.overlay(),
                                 static_graph_generation_unix,
                             ));
                         }
@@ -1090,13 +1089,13 @@ impl ServerHandler for LainHandler {
                             serde_json::to_string(&d)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         )),
                         Err(e) => Ok(tool_text_result(
                             format!("{e}"),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         )),
                     };
@@ -1112,13 +1111,13 @@ impl ServerHandler for LainHandler {
                                     serde_json::to_string(&graph)
                                         .unwrap_or_else(|e| format!("serialization error: {e}")),
                                     false,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 )),
                                 Err(e) => Ok(tool_text_result(
                                     format!("{e}"),
                                     true,
-                                    &self.executor.overlay(),
+                                    self.executor.overlay(),
                                     static_graph_generation_unix,
                                 )),
                             }
@@ -1129,7 +1128,7 @@ impl ServerHandler for LainHandler {
                             )
                             .to_string(),
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         )),
                     };
@@ -1158,7 +1157,7 @@ impl ServerHandler for LainHandler {
                         return Ok(tool_text_result(
                             text,
                             true,
-                            &self.executor.overlay(),
+                            self.executor.overlay(),
                             static_graph_generation_unix,
                         ))
                     }
@@ -1175,13 +1174,13 @@ impl ServerHandler for LainHandler {
             Ok(text) => tool_text_result(
                 text,
                 false,
-                &self.executor.overlay(),
+                self.executor.overlay(),
                 static_graph_generation_unix,
             ),
             Err(e) => tool_text_result(
                 format!("Error: {e}"),
                 true,
-                &self.executor.overlay(),
+                self.executor.overlay(),
                 static_graph_generation_unix,
             ),
         };
@@ -2097,8 +2096,8 @@ async fn handle_request(
                             // a clean error.
                             "register_agent" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2108,8 +2107,8 @@ async fn handle_request(
                             }
                             "heartbeat" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2119,8 +2118,8 @@ async fn handle_request(
                             }
                             "list_active_agents" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2130,8 +2129,8 @@ async fn handle_request(
                             }
                             "who_am_i" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2141,8 +2140,8 @@ async fn handle_request(
                             }
                             "list_subagents" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2152,8 +2151,8 @@ async fn handle_request(
                             }
                             "claim_files" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2163,8 +2162,8 @@ async fn handle_request(
                             }
                             "release_files" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2174,8 +2173,8 @@ async fn handle_request(
                             }
                             "list_occupancy" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2185,8 +2184,8 @@ async fn handle_request(
                             }
                             "my_claims" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2196,8 +2195,8 @@ async fn handle_request(
                             }
                             "detect_overlap" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2207,8 +2206,8 @@ async fn handle_request(
                             }
                             "get_audit_log" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2218,8 +2217,8 @@ async fn handle_request(
                             }
                             "get_world_state" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2229,8 +2228,8 @@ async fn handle_request(
                             }
                             "get_recent_activity" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result,
-                                    &jsonrpc_error,
+                                    jsonrpc_tool_result,
+                                    jsonrpc_error,
                                     id,
                                     name,
                                     &args_map,
@@ -2500,7 +2499,7 @@ async fn handle_request(
                         // hitting this connection.
                         if let Some(workspaces_lock) = &workspaces {
                             let workspaces: &crate::federation::workspace::WorkspacesFile =
-                                &*workspaces_lock.read();
+                                &workspaces_lock.read();
                             match name {
                                 "list_workspaces" => {
                                     let active =
@@ -2734,7 +2733,7 @@ async fn handle_request(
                 }
             };
             let mut html = BLAST_RADIUS_HTML.to_string();
-            html = html.replace("SYMBOL_PLACEHOLDER", &symbol);
+            html = html.replace("SYMBOL_PLACEHOLDER", symbol);
             html = html.replace(
                 "NODES_PLACEHOLDER",
                 &serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),

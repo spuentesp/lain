@@ -352,8 +352,7 @@ pub fn run_use(name: &str, config: Option<&Path>) -> Result<()> {
                 "workspace '{name}' not found in {}",
                 path.display()
             ))
-        )
-        .into());
+        ));
     }
     ActiveWorkspace {
         name: name.to_string(),

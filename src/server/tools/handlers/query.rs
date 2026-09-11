@@ -69,10 +69,10 @@ pub fn query_graph(
     // or the spec fields directly as top-level arguments.
     let spec = if let Some(args) = arguments {
         if let Some(spec_val) = args.get("spec").or_else(|| args.get("query")) {
-            serde_json::from_value(spec_val.clone()).map_err(|e| LainError::Json(e))?
+            serde_json::from_value(spec_val.clone()).map_err(LainError::Json)?
         } else {
             // User provided unwrapped query spec directly as arguments
-            serde_json::from_value(Value::Object(args.clone())).map_err(|e| LainError::Json(e))?
+            serde_json::from_value(Value::Object(args.clone())).map_err(LainError::Json)?
         }
     } else {
         QuerySpec::default()
@@ -85,7 +85,7 @@ pub fn query_graph(
     // Round-trip the executor's `QueryResult` through `serde_json::Value`
     // so we can splice the occupancy summary into the same JSON object
     // (rather than wrapping the whole thing in another envelope).
-    let mut value: Value = serde_json::to_value(&result).map_err(|e| LainError::Json(e))?;
+    let mut value: Value = serde_json::to_value(&result).map_err(LainError::Json)?;
     match value.as_object_mut() {
         Some(obj) => {
             obj.insert(
@@ -104,11 +104,11 @@ pub fn query_graph(
         }
     }
 
-    serde_json::to_string_pretty(&value).map_err(|e| LainError::Json(e))
+    serde_json::to_string_pretty(&value).map_err(LainError::Json)
 }
 
 /// Describe the graph schema for LLM session initialization
 pub fn describe_schema() -> Result<String, LainError> {
     let schema = crate::query::schema::describe_schema();
-    serde_json::to_string_pretty(&schema).map_err(|e| LainError::Json(e))
+    serde_json::to_string_pretty(&schema).map_err(LainError::Json)
 }

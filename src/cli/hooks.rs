@@ -208,14 +208,14 @@ fn write_session(agent_name: &str, sess: &HookSession) -> Result<()> {
 /// - bare server URL (`http://localhost:9999`) → `http://localhost:9999/mcp`
 /// - full MCP URL (`http://localhost:9999/mcp`) → unchanged
 /// - full MCP URL with trailing slash (`http://localhost:9999/mcp/`) → strip
-/// The hook scripts and e2e tests now pass the bare form; older callers
-/// that still pass the full form continue to work.
-/// Resolve the server URL from the flag, falling back to `$LAIN_URL`.
-/// `--url` used to be mandatory while `LAIN_URL` was read elsewhere in
-/// the codebase and ignored here, so exporting it and omitting the flag
-/// failed with clap's "required arguments were not provided" — the
-/// error names the flag but not the variable that should have covered
-/// for it.
+///   The hook scripts and e2e tests now pass the bare form; older callers
+///   that still pass the full form continue to work.
+///   Resolve the server URL from the flag, falling back to `$LAIN_URL`.
+///   `--url` used to be mandatory while `LAIN_URL` was read elsewhere in
+///   the codebase and ignored here, so exporting it and omitting the flag
+///   failed with clap's "required arguments were not provided" — the
+///   error names the flag but not the variable that should have covered
+///   for it.
 pub fn resolve_url(flag: &str) -> Result<String> {
     if !flag.is_empty() {
         return Ok(flag.to_string());

@@ -796,8 +796,8 @@ impl GraphDatabase {
             }
             for graph_edge in graph.edges_directed(current, Direction::Outgoing) {
                 let next = graph_edge.target();
-                if !parents.contains_key(&next) {
-                    parents.insert(next, Some(current));
+                if let std::collections::hash_map::Entry::Vacant(e) = parents.entry(next) {
+                    e.insert(Some(current));
                     queue.push_back(next);
                 }
             }

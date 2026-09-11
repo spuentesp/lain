@@ -26,7 +26,7 @@
 #[path = "../common/mod.rs"]
 #[allow(clippy::duplicate_mod)]
 mod common;
-use common::{git_init_committed, tools_call_text};
+use common::git_init_committed;
 
 #[tokio::test]
 async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {

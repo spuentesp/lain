@@ -447,8 +447,8 @@ impl ToolExecutor {
                 }
             }
             "debug_sleep" => {
-                let secs = args.get("secs").and_then(|v| v.as_u64()).unwrap_or(1) as u64;
-                tokio::time::sleep(tokio::time::Duration::from_secs(secs as u64)).await;
+                let secs = args.get("secs").and_then(|v| v.as_u64()).unwrap_or(1);
+                tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
                 return Ok(format!("Slept for {} second(s)", secs));
             }
             _ => {}

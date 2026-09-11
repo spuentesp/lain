@@ -11,7 +11,7 @@ use lain::server::presence::{AgentId, AgentKind, ClaimIntent};
 use lain::server::presence_lock::{release_lock, try_lock};
 
 fn make_agent(id: &str) -> AgentId {
-    AgentId(format!("{id}-{}", std::process::id()).into())
+    AgentId(format!("{id}-{}", std::process::id()))
 }
 
 /// Acquire a fresh lock and confirm both that the helper returned

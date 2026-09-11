@@ -3,18 +3,13 @@
 use std::path::PathBuf;
 
 /// Severity level for parsed diagnostics
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Severity {
+    #[default]
     Error,
     Warning,
     Note,
     Help,
-}
-
-impl Default for Severity {
-    fn default() -> Self {
-        Severity::Error
-    }
 }
 
 /// A parsed error/warning from command output

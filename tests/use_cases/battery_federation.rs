@@ -10,7 +10,6 @@ use lain::federation::repo_id::RepoId;
 use lain::server::mcp::federation_tools::federation::{
     get_cross_repo_blast_radius, get_federation_health, get_repo_info, list_repos, search_org,
 };
-use lain::server::mcp::federation_tools::workspace::{get_active_workspace, list_workspaces};
 
 #[path = "../common/mod.rs"]
 #[allow(clippy::duplicate_mod)]
@@ -111,7 +110,6 @@ async fn list_repos_returns_all_registered() {
 
 #[tokio::test]
 async fn list_repos_handles_empty_federation() {
-    use lain::federation::federated_index::FederatedIndex;
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("repos.yaml"), "data_dir: /tmp\nrepos: []\n").unwrap();
     let fed = load_federation(&dir.path().join("repos.yaml"))

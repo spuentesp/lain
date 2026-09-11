@@ -17,8 +17,8 @@
 mod common;
 
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use common::{free_port, http_request, jsonrpc, tools_call_text, wait_for_health, ServerGuard};
 
@@ -249,7 +249,7 @@ fn feat_suite_end_to_end() {
     assert!(
         root_resp.1.contains("<html") || root_resp.1.to_lowercase().contains("<!doctype html"),
         "/ response does not look like HTML: first 200 chars: {}",
-        &root_resp.1.chars().take(200).collect::<String>()
+        root_resp.1.chars().take(200).collect::<String>()
     );
 
     // ─── Category B — advertised tool surface ──────────────────────

@@ -324,11 +324,11 @@ impl NlpEmbedder {
         for i in 0..n {
             let len = per_text_lens[i];
             ids_flat.extend_from_slice(&all_ids[i]);
-            ids_flat.extend(std::iter::repeat(pad_id).take(batch_seq_len - len));
+            ids_flat.extend(std::iter::repeat_n(pad_id, batch_seq_len - len));
             masks_flat.extend_from_slice(&all_masks[i]);
-            masks_flat.extend(std::iter::repeat(0_i64).take(batch_seq_len - len));
+            masks_flat.extend(std::iter::repeat_n(0_i64, batch_seq_len - len));
             types_flat.extend_from_slice(&all_types[i]);
-            types_flat.extend(std::iter::repeat(0_i64).take(batch_seq_len - len));
+            types_flat.extend(std::iter::repeat_n(0_i64, batch_seq_len - len));
         }
 
         // 3. Build [batch, seq_len] tensors and run ONNX once.
@@ -358,14 +358,14 @@ impl NlpEmbedder {
         // length avoids OOB panics.
         let out_seq_len = shape[1] as usize;
         let mut out = Vec::with_capacity(n);
-        for b in 0..n {
+        for (b, batch_mask) in all_masks.iter().enumerate().take(n) {
             let mut emb = vec![0.0f32; embedding_dim];
             let mut count = 0usize;
             for i in 0..out_seq_len {
                 // attention_mask==0 at this position means [PAD] — skip.
-                // all_masks[b] may be shorter than out_seq_len for short
+                // batch_mask may be shorter than out_seq_len for short
                 // inputs; in that case treat as padded.
-                let is_padded = i >= all_masks[b].len() || all_masks[b][i] == 0;
+                let is_padded = i >= batch_mask.len() || batch_mask[i] == 0;
                 if is_padded {
                     continue;
                 }
@@ -557,7 +557,7 @@ pub fn resolve_intra_threads(max_threads: usize) -> usize {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        cores.min(4).max(1)
+        cores.clamp(1, 4)
     } else {
         max_threads.max(1)
     }

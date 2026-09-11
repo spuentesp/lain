@@ -25,13 +25,11 @@
 //! on `isError=true`, which is exactly what we *don't* want to assert
 //! against here.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod common;
-use common::{free_port, http_request, jsonrpc, tools_call_envelope, wait_for_health, ServerGuard};
+use common::{free_port, jsonrpc, tools_call_envelope, wait_for_health, ServerGuard};
 
 /// Pull the text payload out of a `tools/call` result envelope. Returns
 /// `None` when the call hit a JSON-RPC-level error (no `result`).

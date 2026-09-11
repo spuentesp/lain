@@ -360,7 +360,7 @@ pub fn dump_tools_schema(inert: &[&str]) -> Vec<serde_json::Value> {
     let drop_inert = |t: &serde_json::Value| -> bool {
         t.get("name")
             .and_then(|v| v.as_str())
-            .map_or(true, |n| not_inert(n))
+            .is_none_or(&not_inert)
     };
     tools.extend(
         defs_to_value_tools(FEDERATION_TOOL_DEFS)

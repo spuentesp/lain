@@ -72,10 +72,12 @@ fn test_tuning_config_serde() {
 
 #[test]
 fn test_tuning_config_serde_roundtrip() {
-    let mut config = TuningConfig::default();
-    config.semantic_similarity_threshold = 0.7;
-    config.anchor_weight = 0.5;
-    config.max_pattern_edges = 500;
+    let config = TuningConfig {
+        semantic_similarity_threshold: 0.7,
+        anchor_weight: 0.5,
+        max_pattern_edges: 500,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string_pretty(&config).unwrap();
     let deserialized: TuningConfig = serde_json::from_str(&json).unwrap();
@@ -87,9 +89,11 @@ fn test_tuning_config_serde_roundtrip() {
 
 #[test]
 fn test_ingestion_config_serde() {
-    let mut config = IngestionConfig::default();
-    config.lsp_pool_size = 8;
-    config.files_per_batch = 100;
+    let config = IngestionConfig {
+        lsp_pool_size: 8,
+        files_per_batch: 100,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: IngestionConfig = serde_json::from_str(&json).unwrap();
@@ -99,9 +103,11 @@ fn test_ingestion_config_serde() {
 
 #[test]
 fn test_runtime_config_serde() {
-    let mut config = RuntimeConfig::default();
-    config.default_command_timeout_secs = 120;
-    config.default_test_timeout_secs = 600;
+    let config = RuntimeConfig {
+        default_command_timeout_secs: 120,
+        default_test_timeout_secs: 600,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string(&config).unwrap();
     let deserialized: RuntimeConfig = serde_json::from_str(&json).unwrap();
@@ -111,9 +117,11 @@ fn test_runtime_config_serde() {
 
 #[test]
 fn test_tuning_config_threshold_bounds() {
-    let mut config = TuningConfig::default();
+    let mut config = TuningConfig {
+        semantic_similarity_threshold: 0.0,
+        ..Default::default()
+    };
     // Valid threshold values
-    config.semantic_similarity_threshold = 0.0;
     assert_eq!(config.semantic_similarity_threshold, 0.0);
 
     config.semantic_similarity_threshold = 1.0;
@@ -125,8 +133,10 @@ fn test_tuning_config_threshold_bounds() {
 
 #[test]
 fn test_tuning_config_anchor_weight_bounds() {
-    let mut config = TuningConfig::default();
-    config.anchor_weight = 0.0;
+    let mut config = TuningConfig {
+        anchor_weight: 0.0,
+        ..Default::default()
+    };
     assert_eq!(config.anchor_weight, 0.0);
 
     config.anchor_weight = 1.0;
@@ -135,32 +145,40 @@ fn test_tuning_config_anchor_weight_bounds() {
 
 #[test]
 fn test_ingestion_config_zero_batch_size() {
-    let mut config = IngestionConfig::default();
-    config.ingest_batch_size = 0;
+    let config = IngestionConfig {
+        ingest_batch_size: 0,
+        ..Default::default()
+    };
     assert_eq!(config.ingest_batch_size, 0);
 }
 
 #[test]
 fn test_ingestion_config_large_values() {
-    let mut config = IngestionConfig::default();
-    config.max_files_per_scan = 100000;
-    config.cochange_commit_window = 1000;
+    let config = IngestionConfig {
+        max_files_per_scan: 100000,
+        cochange_commit_window: 1000,
+        ..Default::default()
+    };
     assert_eq!(config.max_files_per_scan, 100000);
     assert_eq!(config.cochange_commit_window, 1000);
 }
 
 #[test]
 fn test_runtime_config_zero_timeout() {
-    let mut config = RuntimeConfig::default();
-    config.default_command_timeout_secs = 0;
-    config.default_test_timeout_secs = 0;
+    let config = RuntimeConfig {
+        default_command_timeout_secs: 0,
+        default_test_timeout_secs: 0,
+        ..Default::default()
+    };
     assert_eq!(config.default_command_timeout_secs, 0);
     assert_eq!(config.default_test_timeout_secs, 0);
 }
 
 #[test]
 fn test_runtime_config_poll_intervals() {
-    let mut config = RuntimeConfig::default();
-    config.lsp_symbol_poll_interval_ms = 10;
+    let config = RuntimeConfig {
+        lsp_symbol_poll_interval_ms: 10,
+        ..Default::default()
+    };
     assert_eq!(config.lsp_symbol_poll_interval_ms, 10);
 }

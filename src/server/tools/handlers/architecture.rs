@@ -376,7 +376,7 @@ pub fn architectural_observations(
         })
         .collect();
 
-    file_fan_outs.sort_by(|a, b| b.1.cmp(&a.1));
+    file_fan_outs.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     output.push_str("### High Fan-Out Modules\n\n");
     output.push_str(&format!(
@@ -394,11 +394,9 @@ pub fn architectural_observations(
             let edges = graph.get_edges_from(&file.id).unwrap_or_default();
             let mut dirs: HashSet<String> = HashSet::new();
             for edge in &edges {
-                if let Ok(target_nodes) = graph.get_node(&edge.target_id) {
-                    if let Some(target) = target_nodes {
-                        if let Some(parent) = std::path::Path::new(&target.path).parent() {
-                            dirs.insert(parent.to_string_lossy().to_string());
-                        }
+                if let Ok(Some(target)) = graph.get_node(&edge.target_id) {
+                    if let Some(parent) = std::path::Path::new(&target.path).parent() {
+                        dirs.insert(parent.to_string_lossy().to_string());
                     }
                 }
             }
@@ -408,7 +406,7 @@ pub fn architectural_observations(
                 file.name, count, dir_count
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // ── Cross-Boundary Patterns (via Pattern edges) ──────────────────────────
@@ -421,24 +419,22 @@ pub fn architectural_observations(
         if let Ok(edges) = graph.get_edges_from(&file.id) {
             for edge in &edges {
                 if matches!(edge.edge_type, crate::schema::EdgeType::Pattern) {
-                    if let Ok(target) = graph.get_node(&edge.target_id) {
-                        if let Some(t) = target {
-                            let boundary_key = format!(
-                                "{} <-> {}",
-                                std::path::Path::new(&file.path)
-                                    .parent()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default(),
-                                std::path::Path::new(&t.path)
-                                    .parent()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default()
-                            );
-                            pattern_boundaries
-                                .entry(boundary_key)
-                                .or_default()
-                                .push(file.name.clone());
-                        }
+                    if let Ok(Some(t)) = graph.get_node(&edge.target_id) {
+                        let boundary_key = format!(
+                            "{} <-> {}",
+                            std::path::Path::new(&file.path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                            std::path::Path::new(&t.path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        );
+                        pattern_boundaries
+                            .entry(boundary_key)
+                            .or_default()
+                            .push(file.name.clone());
                     }
                 }
             }
@@ -450,7 +446,7 @@ pub fn architectural_observations(
         .iter()
         .filter(|(_, files)| files.len() >= 2)
         .collect();
-    cross_boundary.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    cross_boundary.sort_by_key(|a| std::cmp::Reverse(a.1.len()));
 
     if cross_boundary.is_empty() {
         output.push_str("No significant cross-boundary patterns detected.\n");
@@ -460,7 +456,7 @@ pub fn architectural_observations(
         for (boundary, files) in cross_boundary.iter().take(10) {
             output.push_str(&format!("| `{}` | {} |\n", boundary, files.len()));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // ── Observations Summary ───────────────────────────────────────────────

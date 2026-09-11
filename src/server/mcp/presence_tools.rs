@@ -18,7 +18,6 @@ use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
 
 /// Resolve a session token to its session, refreshing the heartbeat as
 /// a side effect.
@@ -973,11 +972,12 @@ fn runtime_conflict_severity(
 
     if overlap.is_empty() {
         let mut paths = std::collections::HashSet::new();
-        overlap.extend(conflicts.iter().filter_map(|conflict| {
-            paths
-                .insert(conflict.path.clone())
-                .then(|| (posix_string(&conflict.path), NodeType::File))
-        }));
+        overlap.extend(
+            conflicts
+                .iter()
+                .filter(|&conflict| paths.insert(conflict.path.clone()))
+                .map(|conflict| (posix_string(&conflict.path), NodeType::File)),
+        );
     }
 
     overlap_severity(&overlap)

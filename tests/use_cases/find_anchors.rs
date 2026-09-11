@@ -84,7 +84,7 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
     // Insert nodes. Use the same `name:path` format the indexer
     // would, so `find_anchors` resolves them via the per-repo DB
     // the same way.
-    let mut insert = |name: &str, path: &str, ls: u32, le: u32| {
+    let insert = |name: &str, path: &str, ls: u32, le: u32| {
         let mut n = GraphNode::new(NodeType::Function, name.into(), path.into());
         n.line_start = Some(ls);
         n.line_end = Some(le);
@@ -109,7 +109,7 @@ fn find_anchors_ranks_real_hub_above_stdlib_named_helpers() {
 
     // Insert Calls edges from each caller to real_hub. This is
     // the "5 callers" anchor signal the test relies on.
-    let mut find = |name: &str, path: &str| {
+    let find = |name: &str, path: &str| {
         db.find_node_by_name(name).or_else(|| {
             db.find_all_nodes_by_name(name)
                 .into_iter()

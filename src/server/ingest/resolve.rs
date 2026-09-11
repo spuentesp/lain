@@ -304,7 +304,7 @@ pub fn resolve_pattern_edges(
         let pairs = dirs.len() * (dirs.len() - 1) / 2;
         scored.push((pairs, value, files));
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     let max_edges = (scored.len() * limits.edges_per_value).min(limits.max_edges);
     let mut edges: Vec<GraphEdge> = Vec::new();

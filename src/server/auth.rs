@@ -51,7 +51,7 @@ impl AuthState {
         let api_keys = api_keys.filter(|v| !v.is_empty());
 
         let rate_limit_disabled = std::env::var("LAIN_RATE_LIMIT")
-            .map(|v| v.to_ascii_lowercase() == "off")
+            .map(|v| v.eq_ignore_ascii_case("off"))
             .unwrap_or(false);
         let explicit_rpm = std::env::var("LAIN_RATE_LIMIT_RPM")
             .ok()

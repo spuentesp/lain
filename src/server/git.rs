@@ -204,13 +204,7 @@ impl GitSensor {
         let mut revwalk = self.repo.revwalk()?;
         revwalk.push_head()?;
 
-        let mut commit_count = 0;
-        for oid in revwalk.flatten() {
-            if commit_count >= count {
-                break;
-            }
-            commit_count += 1;
-
+        for oid in revwalk.flatten().take(count) {
             let commit = self.repo.find_commit(oid)?;
             let message = commit.message().unwrap_or("").to_string();
 

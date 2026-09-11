@@ -327,7 +327,7 @@ fn jsonrpc(host: &str, body: &str) -> (u16, String, Duration) {
 
 /// Median of a small sample set. Cheaper than full p99 reporting and
 /// absorbs a single cold-cache outlier without false failures.
-fn median(samples: &mut Vec<Duration>) -> Duration {
+fn median(samples: &mut [Duration]) -> Duration {
     if samples.is_empty() {
         return Duration::ZERO;
     }

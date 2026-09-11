@@ -44,7 +44,7 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-fn report(name: &str, samples: &mut Vec<Duration>) {
+fn report(name: &str, samples: &mut [Duration]) {
     samples.sort();
     let p50 = percentile(samples, 0.50);
     let p90 = percentile(samples, 0.90);

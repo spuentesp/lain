@@ -207,7 +207,7 @@ fn test_query_graph_schema_matches_docs() {
         Some(&bad_args),
         100,
     );
-    let err = result.err().expect("misread format must error");
+    let err = result.expect_err("misread format must error");
     let err_text = err.to_string();
     assert!(
         err_text.contains("missing field") && err_text.contains("op"),

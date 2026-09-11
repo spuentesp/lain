@@ -189,9 +189,7 @@ pub fn load_toolchain_profiles(dir: Option<&Path>) -> HashMap<String, ToolchainP
     // Merge with defaults for any built-in toolchains not explicitly configured
     let defaults = default_profiles();
     for (name, default_profile) in defaults {
-        if !profiles.contains_key(&name) {
-            profiles.insert(name, default_profile);
-        }
+        profiles.entry(name).or_insert(default_profile);
     }
 
     if profiles.is_empty() {

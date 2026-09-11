@@ -1182,7 +1182,7 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
     // `get_uncommitted_changes` returns it. `build_core_memory`
     // already committed; this is a second edit on top of the
     // initial commit.
-    std::fs::write(&target.clone(), "pub fn shared_symbol() -> u32 { 7 }\n")
+    std::fs::write(target.clone(), "pub fn shared_symbol() -> u32 { 7 }\n")
         .expect("rewrite lib again");
 
     // 3. `sync_volatile_overlay` calls `process_change` per
@@ -1307,7 +1307,7 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
     let target = repo_root.join("src").join("lib.rs");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::write(&target, "pub fn shared_symbol() -> u32 { 0 }\n").unwrap();
-    std::fs::write(&target.clone(), "pub fn shared_symbol() -> u32 { 1 }\n").unwrap();
+    std::fs::write(target.clone(), "pub fn shared_symbol() -> u32 { 1 }\n").unwrap();
     server.sync_volatile_overlay().await.expect("initial sync");
     let initial_count = server.overlay.get_all_nodes().len();
     assert!(
@@ -1332,7 +1332,7 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
     // final state is consistent (overlay + overlay_paths agree) and
     // the test only hangs briefly — it doesn't deadlock.
     let barrier_a = Arc::clone(&barrier);
-    let barrier_b = Arc::clone(&barrier);
+    let _barrier_b = Arc::clone(&barrier);
     let task_a = tokio::spawn(async move {
         barrier_a.wait().await;
         server_a.process_change(&path_a).await

@@ -10,7 +10,7 @@
 //! - GET `/theme.css`     → theme.css (text/css) — shared palette
 //! - GET `/styles.css`    → styles.css (text/css)
 //! - GET `/assets/*`      → vendored static assets under
-//!                           command_center/assets/
+//!   command_center/assets/
 //!
 //! `/assets/*` is whitelisted explicitly so an unvetted path under
 //! that prefix can't be used to exfiltrate other include_str!()

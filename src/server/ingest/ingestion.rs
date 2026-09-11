@@ -8,7 +8,6 @@ use crate::schema::{GraphEdge, GraphNode};
 use crate::server::overlay::{OverlayDiff, VolatileOverlay};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 impl LainServer {

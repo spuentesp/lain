@@ -34,8 +34,11 @@ fn replace_nodes_for_paths_preserves_index_map_for_deterministic_ids() {
 
     // Re-scan the same path; deterministic id collides with the first.
     let compute2 = make_node(NodeType::Function, "compute", "/src/compute.rs");
-    db.replace_nodes_for_paths(&[compute2.path.clone()], &[compute2.clone()])
-        .unwrap();
+    db.replace_nodes_for_paths(
+        std::slice::from_ref(&compute2.path),
+        std::slice::from_ref(&compute2),
+    )
+    .unwrap();
 
     // Id-keyed lookup must resolve the (new) node. Pre-fix this returned
     // `None` because the deferred removal wiped the fresh index entry.

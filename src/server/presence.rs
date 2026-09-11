@@ -1041,7 +1041,7 @@ impl OccupancyMap {
                             }
                             req_conflicts.push(ConflictEntry {
                                 agent_id: other.clone(),
-                                inferred: entry.inferred.contains(&other),
+                                inferred: entry.inferred.contains(other),
                                 path: req.path.clone(),
                                 symbols: vec![],
                                 intent: other_intent,
@@ -1060,7 +1060,7 @@ impl OccupancyMap {
                                     if entry.intent_for(other, sym) == Some(ClaimIntent::Edit) {
                                         req_conflicts.push(ConflictEntry {
                                             agent_id: other.clone(),
-                                            inferred: entry.inferred.contains(&other),
+                                            inferred: entry.inferred.contains(other),
                                             path: req.path.clone(),
                                             symbols: vec![sym.clone()],
                                             intent: ClaimIntent::Edit,
@@ -1804,7 +1804,7 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
         s.by_token.insert(sess.session_token, AgentId(k));
     }
     for (path_str, agents, symbols) in state.occupancy_by_file {
-        let pb = PathBuf::from(path_str);
+        let pb = path_str;
         let entry = o.by_file.entry(pb).or_default();
         for a in agents {
             entry.agents.insert(AgentId(a));
@@ -1824,7 +1824,7 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
     // looks read-only, and the read-vs-edit advisory is
     // silently dropped.
     for (path_str, intents) in state.occupancy_file_intents {
-        let pb = PathBuf::from(path_str);
+        let pb = path_str;
         let entry = o.by_file.entry(pb).or_default();
         let per_agent = entry
             .intents
@@ -1859,7 +1859,7 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
 fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
     let bytes = std::fs::read(path).ok()?;
     let src = std::str::from_utf8(&bytes).ok()?;
-    let defs = crate::server::treesitter::extract_definitions(path, &src);
+    let defs = crate::server::treesitter::extract_definitions(path, src);
     let def = defs.into_iter().find(|d| d.name == symbol)?;
     let start = def.byte_start as usize;
     let end = def.byte_end as usize;

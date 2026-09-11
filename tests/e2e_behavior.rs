@@ -64,19 +64,13 @@ fn run_claude_prompt(workspace: &std::path::Path, prompt: &str) -> (String, Stri
     let mut err_reader = BufReader::new(stderr_pipe).lines();
 
     loop {
-        match out_reader.next() {
-            Some(Ok(line)) => {
-                stdout.push_str(&line);
-                stdout.push('\n');
-            }
-            Some(Err(_)) | None => {}
+        if let Some(Ok(line)) = out_reader.next() {
+            stdout.push_str(&line);
+            stdout.push('\n');
         }
-        match err_reader.next() {
-            Some(Ok(line)) => {
-                stderr.push_str(&line);
-                stderr.push('\n');
-            }
-            Some(Err(_)) | None => {}
+        if let Some(Ok(line)) = err_reader.next() {
+            stderr.push_str(&line);
+            stderr.push('\n');
         }
 
         match child.try_wait() {

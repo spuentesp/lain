@@ -205,7 +205,7 @@ fn get_call_sites_for_unknown_symbol_returns_not_found() {
 // an empty list, not fail. Pin the boundary contract.
 #[test]
 fn get_call_sites_for_unreferenced_symbol_returns_empty() {
-    use lain::schema::{EdgeType, GraphNode, NodeType};
+    use lain::schema::{GraphNode, NodeType};
     use lain::server::tools::handlers::context::get_call_sites;
     let project = tempfile::tempdir().unwrap();
     let db_path = project.path().join("graph.bin");

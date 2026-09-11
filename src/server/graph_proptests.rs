@@ -345,7 +345,7 @@ proptest! {
                     .split("\n\n")
                     .nth(1)
                     .unwrap_or("")
-                    .trim_end_matches(|c: char| c == ' ' || c == ']');
+                    .trim_end_matches([' ', ']']);
                 // Drop the trailing "[Interactive …]" tail if ui_sessions
                 // added one (None here, so absent).
                 let names: Vec<&str> = chain_part.split(" → ").collect();

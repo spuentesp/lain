@@ -424,8 +424,8 @@ impl RepoNamespace {
     /// with the same `repo_id` produce the same namespace across
     /// process restarts and hot re-adds (`FederatedIndex::remove_repo`
     /// + `add_repo` of the same `repo_id`) — so the federation's
-    /// shared `VolatileOverlay` doesn't accumulate duplicate entries
-    /// across remove/re-add cycles.
+    ///   shared `VolatileOverlay` doesn't accumulate duplicate entries
+    ///   across remove/re-add cycles.
     ///
     /// Derived as `new_v5(NAMESPACE_URL, repo_id)` so the namespace
     /// is fully determined by the repo id. Different repos →

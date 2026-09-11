@@ -353,9 +353,9 @@ impl RepoIndex {
             let source_repo = self.source.id();
             index_one_repo(
                 &path,
-                &db,
+                db,
                 &lsp,
-                &*git_guard,
+                &git_guard,
                 &overlay,
                 resolver_ref,
                 Some(source_repo),
@@ -428,9 +428,9 @@ impl RepoIndex {
             let source_repo = self.source.id();
             index_one_repo(
                 &path,
-                &db,
+                db,
                 &lsp,
-                &*git_guard,
+                &git_guard,
                 &overlay,
                 resolver_ref,
                 Some(source_repo),

@@ -56,7 +56,7 @@ async fn reload_after_file_change_picks_up_new_symbol_end_to_end() {
 
     // 1. Boot the server and wait for the initial index. The
     //    boot pipeline calls `repo.index()` once per repo.
-    let (host, _guard) = boot_single_repo(&repo_dir, &repos_yaml_path, &["initial_function"]);
+    let (_host, _guard) = boot_single_repo(&repo_dir, &repos_yaml_path, &["initial_function"]);
 
     // 2. Modify the fixture to add a new function. Same path the
     //    in-process file-watcher would take on a `notify` event,
@@ -129,7 +129,6 @@ async fn reload_after_file_change_picks_up_new_symbol_end_to_end() {
             .collect::<Vec<_>>()
     );
     let backend = fed.backend();
-    use lain::federation::graph_backend::GraphBackend;
     let backend_nodes = backend.list_nodes().expect("list_nodes");
     let backend_has_new = backend_nodes.iter().any(|n| n.name == "added_after_reload");
     assert!(

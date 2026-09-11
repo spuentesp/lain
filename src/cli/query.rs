@@ -73,8 +73,8 @@ fn parse_query_string(expr: &str) -> QuerySpec {
     for part in parts {
         let part = part.trim();
 
-        if part.starts_with("find ") {
-            let remainder = part[5..].trim();
+        if let Some(rest) = part.strip_prefix("find ") {
+            let remainder = rest.trim();
             if !remainder.is_empty()
                 && !remainder.starts_with("name ")
                 && !remainder.starts_with("limit")
@@ -97,8 +97,8 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                     current_name = Some(name_selector_from_string(raw));
                 }
             }
-        } else if part.starts_with("connect ") {
-            let remainder = part[8..].trim();
+        } else if let Some(rest) = part.strip_prefix("connect ") {
+            let remainder = rest.trim();
             let edge_name = remainder.split_whitespace().next().unwrap_or("Calls");
             connect_edge = Some(EdgeSelector::Single(edge_name.to_string()));
 
@@ -128,8 +128,8 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                     }
                 }
             }
-        } else if part.starts_with("filter ") {
-            let remainder = part[7..].trim();
+        } else if let Some(rest) = part.strip_prefix("filter ") {
+            let remainder = rest.trim();
             let mut filter = FilterOp::default();
             // Supported forms:
             //   filter label X
@@ -156,8 +156,8 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                 }
             }
             extra_ops.push(GraphOp::Filter(filter));
-        } else if part.starts_with("semantic_filter ") {
-            let remainder = part[16..].trim();
+        } else if let Some(rest) = part.strip_prefix("semantic_filter ") {
+            let remainder = rest.trim();
             let mut like: Option<String> = None;
             let mut threshold: f32 = 0.3;
             // Parse `like 'foo bar'` or `like "foo bar"` or `like foo`
@@ -188,8 +188,8 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                     threshold,
                 }));
             }
-        } else if part.starts_with("sort ") {
-            let remainder = part[5..].trim();
+        } else if let Some(rest) = part.strip_prefix("sort ") {
+            let remainder = rest.trim();
             let field = match remainder.split_whitespace().next().unwrap_or("name") {
                 "type" => SortField::Type,
                 "label" => SortField::Label,
@@ -204,16 +204,16 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                 by: field,
                 direction: dir,
             }));
-        } else if part.starts_with("group ") {
-            let remainder = part[6..].trim();
+        } else if let Some(rest) = part.strip_prefix("group ") {
+            let remainder = rest.trim();
             let by = match remainder.split_whitespace().next().unwrap_or("type") {
                 "label" => GroupBy::Label,
                 "name" => GroupBy::Name,
                 _ => GroupBy::Type,
             };
             extra_ops.push(GraphOp::Group(GroupOp { by }));
-        } else if part.starts_with("limit ") {
-            let remainder = part[6..].trim();
+        } else if let Some(rest) = part.strip_prefix("limit ") {
+            let remainder = rest.trim();
             limit_count = remainder
                 .split_whitespace()
                 .next()

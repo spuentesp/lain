@@ -8,6 +8,12 @@ use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 /// Regex-based fallback parser for human-readable cargo output
 pub struct CargoTextParser;
 
+impl Default for CargoTextParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CargoTextParser {
     pub fn new() -> Self {
         Self

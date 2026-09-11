@@ -65,10 +65,8 @@ pub fn get_cross_runtime_callers(
         }
     } else {
         for edge in http_incoming {
-            if let Ok(source) = graph.get_node(&edge.source_id) {
-                if let Some(n) = source {
-                    output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
-                }
+            if let Ok(Some(n)) = graph.get_node(&edge.source_id) {
+                output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
             }
         }
     }
@@ -87,10 +85,8 @@ pub fn get_cross_runtime_callers(
         }
     } else {
         for edge in grpc_incoming {
-            if let Ok(source) = graph.get_node(&edge.source_id) {
-                if let Some(n) = source {
-                    output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
-                }
+            if let Ok(Some(n)) = graph.get_node(&edge.source_id) {
+                output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
             }
         }
     }
@@ -101,10 +97,8 @@ pub fn get_cross_runtime_callers(
         output.push_str("- No GraphQL fields use this resolver\n");
     } else {
         for edge in gql_incoming {
-            if let Ok(source) = graph.get_node(&edge.source_id) {
-                if let Some(n) = source {
-                    output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
-                }
+            if let Ok(Some(n)) = graph.get_node(&edge.source_id) {
+                output.push_str(&format!("- **{}** ({})\n", n.name, n.path));
             }
         }
     }

@@ -137,7 +137,7 @@ fn test_git_sensor_in_temp_repo() {
 
     // Init git repo
     let result = Command::new("git")
-        .args(&["init"])
+        .args(["init"])
         .current_dir(&temp_dir)
         .output();
 
@@ -163,7 +163,7 @@ fn test_git_sensor_in_temp_repo_with_file() {
 
     // Init git repo and add a file
     let _ = Command::new("git")
-        .args(&["init"])
+        .args(["init"])
         .current_dir(&temp_dir)
         .output();
 
@@ -171,7 +171,7 @@ fn test_git_sensor_in_temp_repo_with_file() {
     fs::write(&test_file, "hello world").unwrap();
 
     let _ = Command::new("git")
-        .args(&["add", "test.txt"])
+        .args(["add", "test.txt"])
         .current_dir(&temp_dir)
         .output();
 

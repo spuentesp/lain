@@ -531,6 +531,7 @@ pub struct OverlayStats {
 ///   * `GET <owner_url>/overlay/subscribe` → `application/x-ndjson`,
 ///     one `OverlayDiff` per line. Stays open until the owner shuts
 ///     down or the sidecar drops the connection.
+///
 /// This function spawns the shared `stream::subscribe_apply` apply loop
 /// exactly once and feeds it from a local broadcast channel; the
 /// streaming body parser below pushes every parsed diff into that

@@ -132,9 +132,7 @@ fn build_fixture(root: &Path) {
     for i in 0..FILE_COUNT {
         let path = src.join(format!("helper_{i:04}.rs"));
         let mut body = String::with_capacity(FUNCS_PER_FILE * 96);
-        body.push_str(&format!(
-            "use crate::compute;\nuse crate::helper_compute;\n"
-        ));
+        body.push_str("use crate::compute;\nuse crate::helper_compute;\n");
         for j in 0..FUNCS_PER_FILE {
             // Two user-defined Calls per function body (compute +
             // helper_compute), so each caller emits exactly two static
@@ -225,13 +223,9 @@ fn assert_post_index_invariants(alpha: &Arc<RepoIndex>, label: &str) -> (usize, 
     (nodes.len(), edges.len())
 }
 
-fn build_repoindex(
-    repo_path: &std::path::PathBuf,
-    data_dir: &Path,
-    repo_id: &str,
-) -> Arc<RepoIndex> {
+fn build_repoindex(repo_path: &Path, data_dir: &Path, repo_id: &str) -> Arc<RepoIndex> {
     let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new(repo_id).unwrap(), repo_path.clone())
+        WorkspaceDirSource::new(RepoId::new(repo_id).unwrap(), repo_path.to_path_buf())
             .expect("workspace dir source"),
     );
     Arc::new(RepoIndex::new(source, data_dir).expect("RepoIndex::new"))

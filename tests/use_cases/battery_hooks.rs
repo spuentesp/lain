@@ -224,7 +224,7 @@ fn kimi_pre_edit_exits_zero_with_no_input() {
 #[test]
 fn claude_code_pre_edit_respects_lain_agent_name_env() {
     let out = Command::new(hook_script("claude-code", "pre-edit.sh"))
-        .args(&["/tmp/no_such_file_xyz_unique.rs"])
+        .args(["/tmp/no_such_file_xyz_unique.rs"])
         .env("LAIN_URL", "http://localhost:9999")
         .env("LAIN_AGENT_NAME", "test-agent-fixed")
         .env_remove("CLAUDE_AGENT_NAME")

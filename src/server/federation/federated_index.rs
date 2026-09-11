@@ -602,7 +602,7 @@ impl FederatedIndex {
         // Snapshot the repo ids we have, then release the read lock before
         // collecting nodes from each repo (avoids holding the lock across
         // potentially-slow node reads).
-        let repo_ids: Vec<RepoId> = self.repos.read().iter().map(|(id, _)| id.clone()).collect();
+        let repo_ids: Vec<RepoId> = self.repos.read().keys().cloned().collect();
         for repo_id in &repo_ids {
             if let Some(idx) = self.get_repo(repo_id) {
                 for node in idx.nodes() {

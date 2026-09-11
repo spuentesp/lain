@@ -24,9 +24,7 @@ fn read_version(path: &str) -> String {
     let after = &content[idx + needle.len()..];
     let after = after.trim_start().trim_start_matches(':').trim_start();
     let after = after.trim_start_matches('"');
-    let end = after
-        .find(|c: char| c == '"' || c == ',' || c == '\n')
-        .unwrap();
+    let end = after.find(['"', ',', '\n']).unwrap();
     after[..end].to_string()
 }
 
@@ -44,9 +42,7 @@ fn assert_all_json_versions_match(path: &str, expected: &str) {
         let after = &content[abs + needle.len()..];
         let after = after.trim_start().trim_start_matches(':').trim_start();
         let after = after.trim_start_matches('"');
-        let end = after
-            .find(|c: char| c == '"' || c == ',' || c == '\n')
-            .unwrap();
+        let end = after.find(['"', ',', '\n']).unwrap();
         let found = &after[..end];
         assert_eq!(
             found, expected,

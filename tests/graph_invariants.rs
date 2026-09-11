@@ -315,8 +315,8 @@ fn test_graph_batch_edge_insert() {
     let all_nodes = graph.get_all_nodes();
     assert_eq!(all_nodes.len(), 100);
 
-    for i in 0..99 {
-        let outgoing = graph.get_edges_from(&nodes[i].id).unwrap();
+    for node in nodes.iter().take(99) {
+        let outgoing = graph.get_edges_from(&node.id).unwrap();
         assert!(!outgoing.is_empty());
     }
 }

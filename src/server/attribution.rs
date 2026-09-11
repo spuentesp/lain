@@ -358,20 +358,18 @@ impl AttributionWatcher {
                 return;
             }
 
-            for res in rx {
-                if let Ok(event) = res {
-                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                        for path in event.paths {
-                            if path.is_file() && is_attributable(&path, is_ignored(&path)) {
-                                attribute_edit(
-                                    &path,
-                                    &presence,
-                                    &occupancy,
-                                    &event_tx,
-                                    &events_log,
-                                    backend.as_ref(),
-                                );
-                            }
+            for event in rx.into_iter().flatten() {
+                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                    for path in event.paths {
+                        if path.is_file() && is_attributable(&path, is_ignored(&path)) {
+                            attribute_edit(
+                                &path,
+                                &presence,
+                                &occupancy,
+                                &event_tx,
+                                &events_log,
+                                backend.as_ref(),
+                            );
                         }
                     }
                 }

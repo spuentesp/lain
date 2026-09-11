@@ -90,13 +90,68 @@ pub fn prune_old_sessions(max_age: std::time::Duration) -> std::io::Result<usize
         let age = now
             .duration_since(modified)
             .unwrap_or(std::time::Duration::ZERO);
-        if age >= max_age {
-            if std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
+        if age >= max_age && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
         }
     }
     Ok(removed)
+}
+
+/// Return the path to the lain state dir (`~/.local/lain/state`).
+/// `LainServer::save_state` / `load_state` write and read the
+/// `PresenceRegistry` + `OccupancyMap` JSON snapshot here, one file
+/// per workspace (`<stem>-<hash>.json`, see `state_path_for_workspace`). `$XDG_STATE_HOME/lain`
+/// takes precedence when present (per the XDG spec).
+pub fn state_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("lain");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home)
+        .join(".local")
+        .join("lain")
+        .join("state")
+}
+
+/// Resolve the persisted-state file for a given workspace. The
+/// filename is `<stem>-<hash>.json` where `stem` is the last
+///     path component of the workspace, sanitized to only alphanumerics
+///     + `-_` (punctuation becomes `-`), and `hash` is the first 8 hex
+///     chars of the BLAKE3 of the absolute (canonicalized) workspace
+///     path. The hash disambiguates two configs that share a filename
+///     stem — previously two different `repos.yaml` files in different
+///     directories both mapped to `repos.json` and silently shared
+///     presence state.
+///
+/// One-shot migration: if the legacy `<stem>.json` exists and the
+/// hashed name doesn't, the legacy file is renamed over. If two
+/// colliding configs both have legacy state, the first launch wins
+/// the rename; the other starts empty (same as a fresh config).
+pub fn state_path_for_workspace(workspace: &std::path::Path) -> PathBuf {
+    let stem = workspace
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("default");
+    let cleaned: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let abs = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let digest = blake3::hash(abs.to_string_lossy().as_bytes()).to_hex();
+    let path = state_dir().join(format!("{}-{}.json", cleaned, &digest[..8]));
+    let legacy = state_dir().join(format!("{}.json", cleaned));
+    if legacy.exists() && !path.exists() {
+        let _ = std::fs::rename(&legacy, &path);
+    }
+    path
 }
 
 #[cfg(test)]
@@ -200,61 +255,4 @@ mod tests {
         let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
         f.set_modified(t).unwrap();
     }
-}
-
-/// Return the path to the lain state dir (`~/.local/lain/state`).
-/// `LainServer::save_state` / `load_state` write and read the
-/// `PresenceRegistry` + `OccupancyMap` JSON snapshot here, one file
-/// per workspace (`<stem>-<hash>.json`, see `state_path_for_workspace`). `$XDG_STATE_HOME/lain`
-/// takes precedence when present (per the XDG spec).
-pub fn state_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("lain");
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home)
-        .join(".local")
-        .join("lain")
-        .join("state")
-}
-
-/// Resolve the persisted-state file for a given workspace. The
-/// filename is `<stem>-<hash>.json` where `stem` is the last
-/// path component of the workspace, sanitized to only alphanumerics
-/// + `-_` (punctuation becomes `-`), and `hash` is the first 8 hex
-/// chars of the BLAKE3 of the absolute (canonicalized) workspace
-/// path. The hash disambiguates two configs that share a filename
-/// stem — previously two different `repos.yaml` files in different
-/// directories both mapped to `repos.json` and silently shared
-/// presence state.
-///
-/// One-shot migration: if the legacy `<stem>.json` exists and the
-/// hashed name doesn't, the legacy file is renamed over. If two
-/// colliding configs both have legacy state, the first launch wins
-/// the rename; the other starts empty (same as a fresh config).
-pub fn state_path_for_workspace(workspace: &std::path::Path) -> PathBuf {
-    let stem = workspace
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("default");
-    let cleaned: String = stem
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let abs = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let digest = blake3::hash(abs.to_string_lossy().as_bytes()).to_hex();
-    let path = state_dir().join(format!("{}-{}.json", cleaned, &digest[..8]));
-    let legacy = state_dir().join(format!("{}.json", cleaned));
-    if legacy.exists() && !path.exists() {
-        let _ = std::fs::rename(&legacy, &path);
-    }
-    path
 }

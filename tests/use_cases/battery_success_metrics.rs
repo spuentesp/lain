@@ -21,7 +21,7 @@ use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 fn build_fixture() -> (tempfile::TempDir, GraphDatabase) {
     let dir = tempfile::tempdir().unwrap();
     let db = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
-    let mut n = |name: &str, path: &str, kind: NodeType, ls: u32, le: u32| {
+    let n = |name: &str, path: &str, kind: NodeType, ls: u32, le: u32| {
         let mut node = GraphNode::new(kind, name.into(), path.into());
         node.line_start = Some(ls);
         node.line_end = Some(le);
@@ -420,7 +420,7 @@ fn get_call_sites_returns_each_call_line_separately() {
     for i in 0..3 {
         let caller = GraphNode::new(
             NodeType::Function,
-            format!("caller_{i}").into(),
+            format!("caller_{i}"),
             "src/lib.rs".into(),
         );
         let cid = caller.id.clone();
@@ -502,7 +502,7 @@ fn lain_version_output_contains_lain_and_version() {
     // target/debug/ so the binary is alongside the test binary.
     let exe = std::env::current_exe().expect("current_exe");
     // exe is target/debug/deps/<testname>-<hash>; lain is in target/debug/lain.
-    let mut lain = exe.parent().unwrap().parent().unwrap().join("lain");
+    let lain = exe.parent().unwrap().parent().unwrap().join("lain");
     #[cfg(target_os = "windows")]
     {
         lain.set_extension("exe");

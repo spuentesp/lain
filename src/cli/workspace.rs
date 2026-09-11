@@ -102,10 +102,7 @@ pub fn parent_process_cwd() -> Option<PathBuf> {
     {
         let ppid = std::os::unix::process::parent_id();
         let link = format!("/proc/{ppid}/cwd");
-        match std::fs::read_link(&link) {
-            Ok(p) => Some(p),
-            Err(_) => None,
-        }
+        std::fs::read_link(&link).ok()
     }
     #[cfg(not(target_os = "linux"))]
     {

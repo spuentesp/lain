@@ -126,16 +126,16 @@ pub fn search_org(fed: &FederatedIndex, query: &str, limit: usize) -> Vec<Symbol
     for (repo_id, _) in fed.list_repos() {
         if let Some(repo) = fed.get_repo(&repo_id) {
             for n in repo.nodes() {
-                if n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q) {
-                    if seen.insert(key(repo_id.as_str(), &n.name, &n.path)) {
-                        hits.push(SymbolMatch {
-                            global_id: n.id.clone(),
-                            repo_id: repo_id.to_string(),
-                            name: n.name.clone(),
-                            path: n.path.clone(),
-                            kind: n.node_type.to_string(),
-                        });
-                    }
+                if (n.name.to_lowercase().contains(&q) || n.path.to_lowercase().contains(&q))
+                    && seen.insert(key(repo_id.as_str(), &n.name, &n.path))
+                {
+                    hits.push(SymbolMatch {
+                        global_id: n.id.clone(),
+                        repo_id: repo_id.to_string(),
+                        name: n.name.clone(),
+                        path: n.path.clone(),
+                        kind: n.node_type.to_string(),
+                    });
                 }
             }
         }

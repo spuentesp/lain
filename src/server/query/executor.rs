@@ -328,7 +328,7 @@ impl<'a> Executor<'a> {
                 continue;
             }
 
-            let neighbors = self.graph.get_neighbors(&current_id, direction.into());
+            let neighbors = self.graph.get_neighbors(&current_id, direction);
 
             for (neighbor, edge) in neighbors {
                 if !edge_selector.matches(&edge.edge_type.to_string()) {
@@ -437,11 +437,10 @@ impl<'a> Executor<'a> {
 
         // On-demand embed
         let text = build_enriched_text(node, self.workspace);
-        self.embedder.embed(&text).ok().map(|emb| {
+        self.embedder.embed(&text).ok().inspect(|emb| {
             self.embedding_cache
                 .lock()
                 .insert(node.id.clone(), emb.clone());
-            emb
         })
     }
 
@@ -467,7 +466,7 @@ impl<'a> Executor<'a> {
             .collect()
     }
 
-    fn apply_sort(&self, nodes: &mut Vec<GraphNodeRef>, sort: &SortOp) {
+    fn apply_sort(&self, nodes: &mut [GraphNodeRef], sort: &SortOp) {
         let cmp = match (sort.by, sort.direction) {
             (SortField::Name, SortDirection::Asc) => {
                 |a: &GraphNodeRef, b: &GraphNodeRef| a.name.cmp(&b.name)
