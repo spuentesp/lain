@@ -376,3 +376,503 @@ async fn cross_repo_overlay_inserts_distinct_ids_for_identical_symbols() {
 }
 
 
+// ── manifest persistence (issue #8) ────────────────────────────────
+//
+// `FederatedIndex::add_repo` and `remove_repo` must rewrite the
+// configured manifest path so a runtime membership change survives a
+// process restart. The tests below cover the contract.
+
+/// `set_manifest_path(None)` makes the federation a non-persister:
+/// `add_repo` is a no-op for the manifest. Useful for unit tests that
+/// don't want a stray file under `target/tmp`.
+#[tokio::test]
+async fn add_repo_does_not_create_a_manifest_when_path_unset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    // Default state: no path wired, so even after add_repo no file lands.
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    assert!(
+        !tmp.path().join("federation_manifest.bin").exists(),
+        "no manifest should be written when set_manifest_path was never called",
+    );
+}
+
+/// `add_repo` writes a manifest whose `source_config` matches the
+/// `SourceConfig` the source was constructed with — round-tripping
+/// works end-to-end through bincode.
+#[tokio::test]
+async fn add_repo_persists_source_config() {
+    use crate::federation::config::SourceConfig;
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(src_dir.path()).unwrap();
+    // Commit so HEAD resolves cleanly. `RepoSource::content_hash`
+    // returns Ok(None) on an unborn HEAD, and a `None` value
+    // silently drops the entry from the persisted manifest — so a
+    // test fixture must commit at least once to verify persistence.
+    let sig = git2::Signature::now("test", "test@lain").unwrap();
+    let tree_id = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let _ = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]);
+
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    assert!(
+        manifest_path.exists(),
+        "manifest must be written on add_repo"
+    );
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(loaded.repos.len(), 1);
+    assert_eq!(loaded.repos[0].id.as_str(), "a");
+    assert_eq!(loaded.repos[0].source_kind, "workspace_dir");
+    let expected = SourceConfig::WorkspaceDir {
+        path: src_dir.path().to_path_buf(),
+    };
+    assert_eq!(
+        loaded.repos[0].source_config,
+        serde_yaml::to_value(&expected).unwrap()
+    );
+}
+
+/// `add_repo` populates `content_hash` with the HEAD hash of the
+/// underlying git repo. The hash is non-empty and matches what
+/// `git rev-parse HEAD` says.
+#[tokio::test]
+async fn add_repo_persists_content_hash() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(src_dir.path()).unwrap();
+    let sig = git2::Signature::now("test", "test@lain").unwrap();
+    let tree_id = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let _ = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]);
+
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(loaded.repos.len(), 1);
+    let hash = &loaded.repos[0].content_hash;
+    assert!(
+        !hash.is_empty(),
+        "git repo HEAD must yield a non-empty hash"
+    );
+    assert_eq!(hash.len(), 40, "SHA-1 hex is 40 chars, got {hash:?}");
+}
+
+/// `remove_repo` rewrites the manifest with the removed repo gone.
+/// Without the hook, the manifest would still list the dead repo after
+/// restart — a stale entry the loader would later try to project into
+/// the federation.
+#[tokio::test]
+async fn remove_repo_persists_membership_change() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    fed.remove_repo(&RepoId::new("a").unwrap()).unwrap();
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert!(
+        loaded.repos.is_empty(),
+        "remove_repo must rewrite the manifest"
+    );
+}
+
+/// A `git commit` on the source repo changes HEAD; a second
+/// `add_repo` (or any subsequent persist) records the new hash.
+/// Without this, a stale manifest would silently claim a content
+/// version the federation no longer matches.
+#[tokio::test]
+async fn content_hash_changes_after_git_commit() {
+    use crate::federation::config::SourceConfig;
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(src_dir.path()).unwrap();
+    // First commit so HEAD is well-defined.
+    {
+        let sig = repo
+            .signature()
+            .unwrap_or_else(|_| git2::Signature::now("test", "test@lain").unwrap());
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let _ = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]);
+    }
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+    let first = FederationManifest::load_or_default(&manifest_path)
+        .unwrap()
+        .repos[0]
+        .content_hash
+        .clone();
+
+    // Second commit on the same repo — HEAD moves forward.
+    {
+        let sig = git2::Signature::now("test", "test@lain").unwrap();
+        let mut index = repo.index().unwrap();
+        let path = src_dir.path().join("new.txt");
+        std::fs::write(&path, "second\n").unwrap();
+        index.add_path(std::path::Path::new("new.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let _ = repo.commit(Some("HEAD"), &sig, &sig, "second", &tree, &[&parent]);
+    }
+
+    // Touch the manifest by re-adding with the same source. We
+    // can't easily trigger a "real" indexer re-run, so we just
+    // remove + re-add to exercise `persist_manifest` again.
+    fed.remove_repo(&RepoId::new("a").unwrap()).unwrap();
+    let src2: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src2, tmp.path()).await.unwrap();
+
+    let second = FederationManifest::load_or_default(&manifest_path)
+        .unwrap()
+        .repos[0]
+        .content_hash
+        .clone();
+    assert_ne!(first, second, "content_hash must change after a git commit");
+
+    // Touch unrelated: the manifest also keeps `source_config`
+    // round-trippable after the re-add.
+    let expected = SourceConfig::WorkspaceDir {
+        path: src_dir.path().to_path_buf(),
+    };
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(
+        loaded.repos[0].source_config,
+        serde_yaml::to_value(&expected).unwrap()
+    );
+}
+
+/// A repo registered against a freshly-init'd git repo with no commits
+/// must still appear in the persisted manifest. Pre-fix, the empty
+/// `HEAD` made `git rev-parse` return exit 128 with "ambiguous
+/// argument 'HEAD'", `RepoSource::content_hash` returned `Err`,
+/// `persist_manifest` `continue`d on that repo, and the on-disk
+/// manifest silently dropped it. The next process restart would
+/// re-register from `repos.yaml`, but the manifest snapshot would
+/// have a hole in it — exactly the kind of silent drift this fix is
+/// supposed to prevent.
+#[tokio::test]
+async fn add_repo_persists_unborn_head_repo() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = FederatedIndex::new(petgraph_backend(&tmp));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    // `git init` only — no commit, so HEAD doesn't resolve. This is
+    // the real-world case the regression was hidden behind: a user
+    // runs `lain server` against an empty checkout.
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
+    assert_eq!(
+        loaded.repos.len(),
+        1,
+        "a repo with an unborn HEAD must still appear in the persisted manifest; \
+         the pre-fix code skipped it because `git rev-parse HEAD` returned exit 128",
+    );
+    assert_eq!(loaded.repos[0].id.as_str(), "a");
+    assert!(
+        loaded.repos[0].content_hash.is_empty(),
+        "an unborn HEAD has no hash to record; content_hash must be empty, \
+         got {:?}",
+        loaded.repos[0].content_hash,
+    );
+}
+
+/// `persist_manifest`'s read-modify-write cycle is serialized by
+/// `persist_lock` so two concurrent writers can't each snapshot the
+/// membership at slightly different moments and overwrite each
+/// other's writes. Pre-fix, an `add_repo` racing with a `remove_repo`
+/// would each build a manifest, race to write the temp file + rename,
+/// and the rename-atomicity left the on-disk manifest pointing to
+/// whichever writer's content committed last — a state that
+/// arbitrarily lost a member without any single mutation having
+/// caused it. Post-fix, the second writer sees the first's post-
+/// mutation state before building its own snapshot, so the final
+/// file content matches the final in-memory state.
+#[tokio::test]
+async fn concurrent_add_and_remove_serialize_persist_manifest() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = std::sync::Arc::new(FederatedIndex::new(petgraph_backend(&tmp)));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    // Seed a repo. Both racers operate on this baseline.
+    let src_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(src_dir.path()).unwrap();
+    let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("seed").unwrap(), src_dir.path().to_path_buf())
+            .unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    // Race: a second `add_repo` (for "added") and a `remove_repo` (of
+    // the same "added" id) landing at the same instant. Both call
+    // `persist_manifest`; the lock forces the second to observe the
+    // first's post-mutation membership.
+    let added = RepoId::new("added").unwrap();
+    let added_for_rm = added.clone();
+    let fed_for_add = fed.clone();
+    let fed_for_rm = fed.clone();
+    let data_dir = tmp.path().to_path_buf();
+    let add_task = tokio::spawn(async move {
+        let src = tempfile::tempdir().unwrap();
+        git2::Repository::init(src.path()).unwrap();
+        let s: Box<dyn crate::federation::repo_source::RepoSource> =
+            Box::new(WorkspaceDirSource::new(added, src.path().to_path_buf()).unwrap());
+        fed_for_add.add_repo(s, &data_dir).await.unwrap();
+    });
+    let rm_task = tokio::spawn(async move {
+        // Fire-and-forget remove; ignore the not-found case if add
+        // hadn't yet registered the id.
+        let _ = fed_for_rm.remove_repo(&added_for_rm);
+    });
+    let _ = tokio::join!(add_task, rm_task);
+
+    // Post-condition: the on-disk manifest matches the final
+    // in-memory membership. Either `added` is present (if remove
+    // happened before add) or absent (if add happened first). What's
+    // not acceptable is a torn entry: an `added` row with a
+    // half-populated source_config, or a row whose `last_indexed_unix`
+    // is older than the membership actually has. The lock
+    // guarantees the snapshot is consistent with whatever final
+    // membership `list_repos` reports right now.
+    let in_mem: std::collections::BTreeMap<String, _> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| (id.to_string(), ()))
+        .collect();
+    let on_disk = FederationManifest::load_or_default(&manifest_path).unwrap();
+    let on_disk_ids: std::collections::BTreeSet<_> = on_disk
+        .repos
+        .iter()
+        .map(|e| e.id.as_str().to_string())
+        .collect();
+    let in_mem_ids: std::collections::BTreeSet<_> = in_mem.keys().cloned().collect();
+    assert_eq!(
+        on_disk_ids, in_mem_ids,
+        "on-disk manifest membership must match in-memory after concurrent \
+         add/remove; pre-fix `persist_lock` could let the older snapshot \
+         overwrite the newer one. on_disk={:?} in_mem={:?}",
+        on_disk_ids, in_mem_ids
+    );
+}
+
+/// Two concurrent `add_repo` calls for the same `RepoId`. The
+/// in-memory `repos` map is keyed by id so the second `insert`
+/// overwrites the first; the manifest's `add_repo` is also a
+/// single-entry write so the on-disk manifest must end up with
+/// exactly one row for that id, not two. Pre-fix `persist_lock`,
+/// both writers would snapshot the membership *after their own
+/// insert* but before the other's — depending on lock timing the
+/// on-disk manifest could end up with a torn entry (a row whose
+/// source_config was from one RepoIndex and whose
+/// `last_indexed_unix` was from the other), or two rows for the
+/// same id if a non-membership-keyed manifest format ever slipped
+/// in. Post-fix the lock holds the snapshot against the final
+/// in-memory state and the HashMap-keyed insert means duplicates
+/// collapse to one row.
+#[tokio::test]
+async fn concurrent_add_same_id_collapse_to_one_manifest_row() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = std::sync::Arc::new(FederatedIndex::new(petgraph_backend(&tmp)));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let id = RepoId::new("dup").unwrap();
+    let data_dir = tmp.path().to_path_buf();
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let fed = fed.clone();
+        let id = id.clone();
+        let data_dir = data_dir.clone();
+        handles.push(tokio::spawn(async move {
+            let src = tempfile::tempdir().unwrap();
+            git2::Repository::init(src.path()).unwrap();
+            let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(id, src.path().to_path_buf()).unwrap(),
+            );
+            fed.add_repo(s, &data_dir).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let on_disk = FederationManifest::load_or_default(&manifest_path).unwrap();
+    let dup_rows: Vec<_> = on_disk
+        .repos
+        .iter()
+        .filter(|e| e.id.as_str() == "dup")
+        .collect();
+    assert_eq!(
+        dup_rows.len(),
+        1,
+        "two concurrent add_repo for the same id must collapse to one \
+         on-disk row, not two; got {} rows",
+        dup_rows.len(),
+    );
+    assert_eq!(
+        fed.list_repos().len(),
+        1,
+        "in-memory membership must also collapse to one entry for the \
+         duplicated id, not two",
+    );
+}
+
+/// Mixed-type concurrent mutations exercise the same lock with a
+/// broader call mix than the `add`/`remove` race above. Three adds
+/// for distinct ids fire at once — the same shape as the real-world
+/// trigger, where a YAML reload can issue a burst of adds without
+/// interleaved removes. The post-state must contain every
+/// successfully-added id and the seed, and the on-disk manifest
+/// must match the final in-memory membership.
+///
+/// Implementation note: the src `tempfile::tempdir()` for each
+/// racer is created in the *outer* scope and only borrowed by the
+/// task, not owned by it. If the tempdir were owned by the task
+/// closure, it would be dropped when the task returns — at which
+/// point the next racer's `persist_manifest` iteration would call
+/// `git rev-parse HEAD` against a deleted dir and `content_hash()`
+/// would error out with `cannot change to '/tmp/.tmpXXX': No such
+/// file`, causing the snapshot to drop the prior racer's row. The
+/// bug is in the *fixture*, not the production lock; the
+/// pre-existing `concurrent_add_and_remove_serialize_persist_manifest`
+/// doesn't trip over it because the lone add-task owns its src
+/// tempdir and the rm-task owns no src.
+#[tokio::test]
+async fn concurrent_mixed_mutations_persist_manifest_consistently() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = std::sync::Arc::new(FederatedIndex::new(petgraph_backend(&tmp)));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    // Pre-seed one repo so the in-memory map is non-empty at the
+    // start; the mixed racers all see the same baseline.
+    let seed_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(seed_dir.path()).unwrap();
+    let seed_src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(
+            RepoId::new("seed").unwrap(),
+            seed_dir.path().to_path_buf(),
+        )
+        .unwrap(),
+    );
+    fed.add_repo(seed_src, tmp.path()).await.unwrap();
+
+    let ids = ["alpha", "beta", "gamma"];
+    let data_dir = tmp.path().to_path_buf();
+
+    // Outer-scope tempdirs: kept alive for the whole test so the
+    // post-join persist snapshots can still `git rev-parse` them.
+    let mut src_dirs = Vec::new();
+    for id_str in ids {
+        let d = tempfile::tempdir().unwrap();
+        git2::Repository::init(d.path()).unwrap();
+        src_dirs.push((id_str.to_string(), d));
+    }
+
+    let mut handles = Vec::new();
+    for (id_str, d) in &src_dirs {
+        let fed = fed.clone();
+        let data_dir = data_dir.clone();
+        let id = RepoId::new(id_str.as_str()).unwrap();
+        let src_path = d.path().to_path_buf();
+        handles.push(tokio::spawn(async move {
+            let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(id, src_path).unwrap(),
+            );
+            fed.add_repo(s, &data_dir).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let on_disk = FederationManifest::load_or_default(&manifest_path).unwrap();
+    let on_disk_ids: std::collections::BTreeSet<_> = on_disk
+        .repos
+        .iter()
+        .map(|e| e.id.as_str().to_string())
+        .collect();
+    let in_mem_ids: std::collections::BTreeSet<_> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let mut expected = std::collections::BTreeSet::new();
+    expected.insert("seed".to_string());
+    for id in ids {
+        expected.insert(id.to_string());
+    }
+    assert_eq!(
+        on_disk_ids, expected,
+        "on-disk manifest must contain every successfully-added id and the \
+         seed; pre-fix `persist_lock` could let one writer's snapshot miss \
+         a concurrent insert. on_disk={:?} expected={:?}",
+        on_disk_ids, expected,
+    );
+    assert_eq!(
+        in_mem_ids, expected,
+        "in-memory membership must match the expected set after the mixed \
+         race; got {:?}",
+        in_mem_ids,
+    );
+    assert_eq!(
+        on_disk_ids, in_mem_ids,
+        "the lock must keep the on-disk snapshot consistent with the \
+         final in-memory state; on_disk={:?} in_mem={:?}",
+        on_disk_ids, in_mem_ids,
+    );
+}
