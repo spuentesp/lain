@@ -429,10 +429,7 @@ impl WorkspaceDirSource {
             repo_id,
             local_path,
             source_config,
-<<<<<<< HEAD
             id_namespace,
-=======
->>>>>>> 43a7faf (style: cargo fmt --all baseline (URGENT FIXES #6 follow-up))
         })
     }
 }
@@ -454,12 +451,7 @@ impl RepoSource for WorkspaceDirSource {
     fn content_hash(&self) -> Result<Option<String>, LainError> {
         git_head_hash(&self.local_path)
     }
-<<<<<<< HEAD
     fn id_namespace(&self) -> &crate::schema::RepoNamespace { &self.id_namespace }
-    async fn fetch(&self) -> Result<(), LainError> { Ok(()) }
-    fn last_refreshed(&self) -> SystemTime { SystemTime::now() }
-    fn is_stale(&self, _max_age: Duration) -> bool { false }
-=======
     async fn fetch(&self) -> Result<(), LainError> {
         Ok(())
     }
@@ -469,5 +461,4 @@ impl RepoSource for WorkspaceDirSource {
     fn is_stale(&self, _max_age: Duration) -> bool {
         false
     }
->>>>>>> 43a7faf (style: cargo fmt --all baseline (URGENT FIXES #6 follow-up))
 }
