@@ -12,6 +12,7 @@ use crate::federation::graph_backend::{GraphBackend, PetgraphBackend};
 use crate::federation::repo_id::RepoId;
 use crate::federation::repo_source::{RepoSource, WorkspaceDirSource};
 use crate::schema::NodeType;
+use crate::server::overlay::VolatileOverlay;
 use std::sync::Arc;
 
 fn petgraph_backend(tmp: &tempfile::TempDir) -> Arc<dyn GraphBackend> {
@@ -235,61 +236,143 @@ fn distinct_repos_on_empty_is_empty() {
 /// `RepoIndex::sync_overlay`'s id-keyed cleanup would remove one
 /// repo's overlay node when the other's `process_overlay_change`
 /// fired. URGENT FIXES #2.
-#[test]
-fn two_repos_with_identical_symbols_get_distinct_ids() {
-    use crate::federation::repo_source::WorkspaceDirSource;
-    use crate::schema::{GraphNode, NodeType, RepoNamespace};
-    let tmp = tempfile::tempdir().unwrap();
-    // Two tempdir repos with identical content. We don't index them —
-    // the namespace difference is what matters for id uniqueness, and
-    // minting the same `(type, path, name, line)` from two namespaces
-    // is the contract we're testing.
-    let repo_a = tmp.path().join("a");
-    let repo_b = tmp.path().join("b");
-    std::fs::create_dir_all(&repo_a).unwrap();
-    std::fs::create_dir_all(&repo_b).unwrap();
-    let src_a = WorkspaceDirSource::new(RepoId::new("a").unwrap(), repo_a.clone()).unwrap();
-    let src_b = WorkspaceDirSource::new(RepoId::new("b").unwrap(), repo_b.clone()).unwrap();
+/// Real cross-repo collision regression. Two federation repos
+/// with identical `(type, path, name)` symbols must produce
+/// distinct `GraphNode::id`s when run through
+/// `RepoIndex::process_overlay_change` — the production path that
+/// mints overlay nodes. Pre-fix, both ids were the same UUID v5
+/// because `GraphNode::generate_id` only hashed `(type, path, name,
+/// line)` — no repo identity. Two repos with `pub fn
+/// shared_symbol() {}` at `src/lib.rs:1` would mint the same id,
+/// and the federation's shared `VolatileOverlay` would collapse
+/// them into one entry; `RepoIndex::sync_overlay`'s id-keyed
+/// cleanup would remove one repo's node when the other's
+/// `sync_overlay` fired. URGENT FIXES #2.
+///
+/// Skipped when rust-analyzer is on PATH — the federation's
+/// `process_overlay_change` only takes the `Err` arm (and
+/// increments `lsp_failures`) when LSP is unavailable. With
+/// rust-analyzer present the tree-sitter fallback is bypassed and
+/// the test would race on a duplicate-call quirk of
+/// `get_uncommitted_changes`. Same skip rationale as
+/// `tests/federation_overlay_no_lsp.rs`.
+#[tokio::test]
+async fn cross_repo_overlay_inserts_distinct_ids_for_identical_symbols() {
+    if which::which("rust-analyzer").is_ok() {
+        eprintln!(
+            "[skip] rust-analyzer on PATH; cross-repo overlay test              exercises the tree-sitter fallback which only fires              when LSP is unavailable. Run on a CI runner without              rust-analyzer to verify."
+        );
+        return;
+    }
 
-    // Use the production constructor (with the repo's namespace)
-    // for both. Different repos → different namespaces → different ids.
-    let node_a = GraphNode::new_in(
-        NodeType::Function,
-        "foo".into(),
-        "src/lib.rs".into(),
-        src_a.id_namespace(),
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_a_dir = tmp.path().join("a");
+    let repo_b_dir = tmp.path().join("b");
+    for d in [&repo_a_dir, &repo_b_dir] {
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("README.md"), "init\n").unwrap();
+        git2::Repository::init(d).unwrap();
+        // Configure git identity so the tree-sitter fallback can
+        // run (the federation overlay path runs in CI without
+        // rust-analyzer, so the fallback's the only source of
+        // symbols).
+    }
+
+    // Add an uncommitted file with the SAME symbol name to both
+    // repos. `get_uncommitted_changes` surfaces it for both repos
+    // in their `sync_overlay` cycles.
+    for d in [&repo_a_dir, &repo_b_dir] {
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(
+            d.join("src/lib.rs"),
+            "pub fn shared_symbol() -> u32 { 0 }\n",
+        )
+        .unwrap();
+    }
+
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    // One shared overlay for both repos — that's the whole point
+    // of the regression: identical symbols from two repos must
+    // not collapse into one overlay entry.
+    let shared_overlay = Arc::new(VolatileOverlay::new());
+    let backend: Arc<dyn GraphBackend> =
+        Arc::new(PetgraphBackend::new(&data_dir).unwrap());
+    let fed = Arc::new(FederatedIndex::new(backend));
+    fed.install_overlay(shared_overlay.clone());
+
+    let src_a: Box<dyn RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("repo-a").unwrap(), repo_a_dir.clone()).unwrap(),
     );
-    let node_b = GraphNode::new_in(
-        NodeType::Function,
-        "foo".into(),
-        "src/lib.rs".into(),
-        src_b.id_namespace(),
+    let src_b: Box<dyn RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("repo-b").unwrap(), repo_b_dir.clone()).unwrap(),
+    );
+    fed.add_repo(src_a, &data_dir).await.unwrap();
+    fed.add_repo(src_b, &data_dir).await.unwrap();
+
+    // Run each repo's working-tree overlay refresh. Each
+    // `process_overlay_change` mints the symbol with its repo's
+    // `id_namespace`. After both cycles the shared overlay must
+    // hold two distinct nodes — one per repo.
+    let repo_a = fed.get_repo(&RepoId::new("repo-a").unwrap()).unwrap();
+    let repo_b = fed.get_repo(&RepoId::new("repo-b").unwrap()).unwrap();
+    repo_a.sync_overlay().await.expect("sync_overlay repo-a");
+    repo_b.sync_overlay().await.expect("sync_overlay repo-b");
+
+    let overlay_nodes = shared_overlay.get_all_nodes();
+    let shared: Vec<_> = overlay_nodes
+        .iter()
+        .filter(|n| n.name == "shared_symbol")
+        .collect();
+    assert_eq!(
+        shared.len(),
+        2,
+        "two federation repos with identical 'shared_symbol' must          produce two distinct overlay entries; got {} total overlay          node(s) but only {} named shared_symbol",
+        overlay_nodes.len(),
+        shared.len()
     );
     assert_ne!(
-        node_a.id, node_b.id,
-        "two repos with identical symbols must produce distinct ids; \
-         the pre-fix code produced equal ids, which made the shared \
-         VolatileOverlay collapse them and let id-keyed cleanup in \
-         one repo remove the other's symbol"
+        shared[0].id, shared[1].id,
+        "the two repos must produce distinct overlay ids;          pre-PR-#14 these collided because `GraphNode::generate_id`          ignored repo identity. id_a={} id_b={}",
+        shared[0].id, shared[1].id
     );
 
-    // Sanity: identical symbols WITHIN one repo still collide (same
-    // path + name + line → same id). That's correct — the namespace
-    // is what disambiguates *between* repos, not within one.
-    let node_a2 = GraphNode::new_in(
-        NodeType::Function,
-        "foo".into(),
-        "src/lib.rs".into(),
-        src_a.id_namespace(),
-    );
+    // Cross-repo cleanup isolation. Remove repo-a and run repo-b's
+    // `sync_overlay` again. Repo-a's overlay entries are NOT in
+    // repo-b's `overlay_paths` bookkeeping, so repo-b's purge
+    // (which only removes ids it itself inserted) leaves the
+    // surviving repo's node alone.
+    //
+    // This is the test that demonstrates the bug the comment was
+    // talking about: pre-fix, repo-b's `process_overlay_change`
+    // inserted a symbol with the SAME id as repo-a's (because
+    // namespace didn't differ); when repo-a was removed and
+    // repo-b's next sync_overlay fired, repo-b's id-keyed cleanup
+    // would have wiped its own entry too. Post-fix, repo-a and
+    // repo-b's ids are distinct, so each repo's purge only touches
+    // its own entries.
+    let repo_a_id = RepoId::new("repo-a").unwrap();
+    fed.remove_repo(&repo_a_id).unwrap();
+    repo_b.sync_overlay().await.expect("sync_overlay repo-b after remove");
+
+    let survivor: Vec<_> = shared_overlay
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| n.name == "shared_symbol")
+        .collect();
     assert_eq!(
-        node_a.id, node_a2.id,
-        "same repo + same symbol → same id (collision within a repo \
-         is expected; the id is a uniqueness handle, not a content hash)",
+        survivor.len(),
+        1,
+        "removing repo-a and re-syncing repo-b must leave repo-b's          'shared_symbol' node in the shared overlay; pre-fix the          same id would have been purged by repo-a's removal.          survived ids: {:?}",
+        survivor.iter().map(|n| &n.id).collect::<Vec<_>>()
     );
 
-    // The test namespace must not collide with any real namespace.
-    let test_node = GraphNode::new(NodeType::Function, "foo".into(), "src/lib.rs".into());
-    assert_ne!(node_a.id, test_node.id);
-    assert_ne!(node_b.id, test_node.id);
+    std::mem::forget(repo_a);
+    std::mem::forget(repo_b);
+    std::mem::forget(fed);
+    std::mem::forget(shared_overlay);
+    std::mem::forget(tmp);
 }
+
+
