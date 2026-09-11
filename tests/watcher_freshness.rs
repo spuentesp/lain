@@ -6,6 +6,7 @@ mod common;
 use lain::federation::repo_id::RepoId;
 use lain::federation::repo_index::RepoIndex;
 use lain::federation::repo_source::WorkspaceDirSource;
+use lain::server::LainServer;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1207,6 +1208,36 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
 /// *visible sequence* of overlay entries could see one writer's id
 /// set in `overlay_paths` while another writer's node-set was
 /// inserted, briefly leaving bookkeeping with a stale view. The lock
+/// `build_lain_server_with_repo` is the single-workspace variant of
+/// `build_repo_index`: spins up a fresh git repo with one initial
+/// commit, returns a `LainServer` rooted at that repo, the repo
+/// path, and the `TempDir` guard. The caller is responsible for
+/// keeping `tmp` alive — dropping it tears the workspace down.
+async fn build_lain_server_with_repo() -> (Arc<LainServer>, PathBuf, tempfile::TempDir) {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().to_path_buf();
+    Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&repo_root).status().unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "config", "user.email", "t@t"])
+        .status().unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "config", "user.name", "t"])
+        .status().unwrap();
+    std::fs::write(repo_root.join("README.md"), "init\n").unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "add", "-A"])
+        .status().unwrap();
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "commit", "-q", "-m", "init"])
+        .status().unwrap();
+
+    let mem = tmp.path().join("graph.bin");
+    let server = LainServer::new(&repo_root, &mem, None).expect("LainServer::new");
+    let server = Arc::new(server);
+    (server, repo_root, tmp)
+}
+
 /// fixes that by serializing the whole function.
 #[tokio::test]
 async fn process_change_serializes_concurrent_calls_via_lock() {
