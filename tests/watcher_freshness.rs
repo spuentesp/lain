@@ -1284,3 +1284,64 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
 
     std::mem::forget(server);
 }
+
+/// With LSP unavailable (CI's default), `process_change` previously
+/// returned `Ok(())` with no overlay nodes — the single-server overlay
+/// went empty after every edit. The fix: `process_change` falls back
+/// to a tree-sitter pass when LSP fails or returns empty, so the
+/// overlay is populated from the same source-of-truth as the static
+/// graph (modulo the per-repo namespace).
+#[tokio::test]
+async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable() {
+    // Same skip as `tests/federation_overlay_no_lsp.rs`: with
+    // rust-analyzer present the tree-sitter fallback is bypassed.
+    if which::which("rust-analyzer").is_ok() {
+        eprintln!(
+            "[skip] rust-analyzer on PATH; cannot exercise no-LSP overlay fallback."
+        );
+        return;
+    }
+
+    let (server, repo_root, _tmp) = build_lain_server_with_repo().await;
+
+    // Pre-fix behavior: with no LSP the overlay was empty after
+    // `process_change`. Pin the contract: editing a file in the
+    // working tree must produce an overlay entry carrying the
+    // file's function symbol.
+    let target = repo_root.join("src").join("scratch.rs");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(
+        &target,
+        "pub fn scratch_symbol() -> u32 { 0 }\n",
+    )
+    .unwrap();
+
+    // `process_change` takes `&self` since the namespace-threading
+    // refactor; it can't mutate, so direct call is fine.
+    server
+        .process_change(&target)
+        .await
+        .expect("process_change should succeed via tree-sitter fallback");
+
+    // Assert: the overlay holds a node named `scratch_symbol` with a
+    // matching id namespace. The static-graph scan (build_core_memory
+    // is not run here, so we don't check that the id matches the
+    // static-graph id — that's covered by the cross_namespace test
+    // in PR #14. Here we just assert the overlay is non-empty after
+    // the tree-sitter fallback fires.)
+    let nodes = server.overlay.get_all_nodes();
+    let scratch = nodes
+        .iter()
+        .find(|n| n.name == "scratch_symbol")
+        .expect("process_change must populate the overlay via tree-sitter when LSP is unavailable");
+    assert_eq!(
+        scratch.path, "src/scratch.rs",
+        "the tree-sitter-derived overlay entry should keep the workspace-relative path"
+    );
+    assert!(
+        scratch.line_start.is_some() && scratch.line_end.is_some(),
+        "the tree-sitter path must populate line_start/line_end so \
+         get_node_at_location can resolve the symbol at a source line"
+    );
+    std::mem::forget(server);
+}
