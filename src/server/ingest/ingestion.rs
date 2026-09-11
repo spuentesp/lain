@@ -1,13 +1,14 @@
-use super::scan::{scan_file_batch, PatternRef, StaticFileRef};
-use super::LainServer;
 use crate::error::LainError;
 use crate::git::GitSensor;
-use crate::graph::GraphDatabase;
+use crate::graph::{graph_path, GraphDatabase};
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
-use crate::server::overlay::VolatileOverlay;
+use crate::server::overlay::{OverlayDiff, VolatileOverlay};
+use super::LainServer;
+use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 impl LainServer {
@@ -84,16 +85,7 @@ impl LainServer {
             let namespace = self.id_namespace;
 
             set.spawn(async move {
-                scan_file_batch(
-                    chunk,
-                    workspace,
-                    lsp,
-                    lsp_sync_time,
-                    git_time,
-                    commit_hash,
-                    &namespace,
-                )
-                .await
+                scan_file_batch(chunk, workspace, lsp, lsp_sync_time, git_time, commit_hash, &namespace).await
             });
         }
 
@@ -126,11 +118,8 @@ impl LainServer {
         while let Some(res) = set.join_next().await {
             // Check timeout - abort remaining tasks and break
             if scan_start.elapsed() >= scan_timeout {
-                warn!(
-                    "Scan phase timed out after {:?}, aborting {} remaining tasks",
-                    scan_timeout,
-                    set.len()
-                );
+                warn!("Scan phase timed out after {:?}, aborting {} remaining tasks",
+                      scan_timeout, set.len());
                 partial = true;
                 set.abort_all();
                 break;
@@ -154,18 +143,11 @@ impl LainServer {
                             }
                         }
                     }
-                    debug!(
-                        "Batch completed: {} files scanned, {} failed in batch",
-                        scanned, failed
-                    );
+                    debug!("Batch completed: {} files scanned, {} failed in batch", scanned, failed);
 
                     // Incremental flush every batch_size files
                     if batch_nodes.len() >= batch_size {
-                        info!(
-                            "Flush phase 1: writing {} nodes ({} files scanned)",
-                            batch_nodes.len(),
-                            scanned
-                        );
+                        info!("Flush phase 1: writing {} nodes ({} files scanned)", batch_nodes.len(), scanned);
                         // Replace rather than insert, so a re-scan drops the
                         // symbols a file no longer defines instead of layering
                         // new nodes on top of stale ones. Scan results arrive
@@ -222,35 +204,20 @@ impl LainServer {
               scanned, failed, all_external_refs.len(), all_static_refs.len(), all_pattern_refs.len());
 
         // 3. Resolve Phase: Link external references to internal nodes (CALLS/USES)
-        info!(
-            "Resolving topology: Linking {} external references...",
-            all_external_refs.len()
-        );
-        let call_edges = super::resolve::resolve_call_edges(
-            &self.graph,
-            &self.config.workspace,
-            &all_external_refs,
-            None,
-            None,
-        );
+        info!("Resolving topology: Linking {} external references...", all_external_refs.len());
+        let call_edges =
+            super::resolve::resolve_call_edges(&self.graph, &self.config.workspace, &all_external_refs, None, None);
         info!("Ingesting {} call edges", call_edges.len());
         insert_edges_reporting(&self.graph, &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
-        info!(
-            "Resolving {} tree-sitter static references...",
-            all_static_refs.len()
-        );
-        let static_edges =
-            super::resolve::resolve_static_edges(&self.graph, &all_static_refs, None, None);
+        info!("Resolving {} tree-sitter static references...", all_static_refs.len());
+        let static_edges = super::resolve::resolve_static_edges(&self.graph, &all_static_refs, None, None);
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
         insert_edges_reporting(&self.graph, &static_edges, "static")?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
-        info!(
-            "Resolving {} pattern references for cross-boundary detection...",
-            all_pattern_refs.len()
-        );
+        info!("Resolving {} pattern references for cross-boundary detection...", all_pattern_refs.len());
         let pattern_edges = super::resolve::resolve_pattern_edges(
             &self.graph,
             &all_pattern_refs,
@@ -259,10 +226,7 @@ impl LainServer {
                 super::resolve::PatternLimits::DEFAULT,
             ),
         );
-        info!(
-            "Ingesting {} cross-boundary pattern edges",
-            pattern_edges.len()
-        );
+        info!("Ingesting {} cross-boundary pattern edges", pattern_edges.len());
         insert_edges_reporting(&self.graph, &pattern_edges, "pattern")?;
 
         // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
@@ -286,11 +250,9 @@ impl LainServer {
                 self.tuning.ingestion.cochange_commit_window,
                 self.tuning.ingestion.cochange_min_pair_count,
                 self.tuning.ingestion.cochange_max_commit_files,
-            )
-            .unwrap_or_default()
+            ).unwrap_or_default()
         };
-        let co_change_tuples: Vec<_> = co_change_pairs
-            .into_iter()
+        let co_change_tuples: Vec<_> = co_change_pairs.into_iter()
             .map(|p| (p.file1, p.file2, p.co_change_count))
             .collect();
         self.graph.insert_co_change_edges(&co_change_tuples)?;
@@ -314,8 +276,7 @@ impl LainServer {
         tokio::spawn(async move {
             let all_nodes = graph_clone.get_all_nodes();
             // Top anchors get embedded first (pre-warm)
-            let mut anchors: Vec<_> = all_nodes
-                .iter()
+            let mut anchors: Vec<_> = all_nodes.iter()
                 .filter_map(|n| n.anchor_score.map(|s| (s, n.clone())))
                 .collect();
             anchors.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -356,18 +317,12 @@ impl LainServer {
                     }
                 }
             }
-            info!(
-                "NLP pre-warm complete ({} embedded). Queuing {} remaining nodes.",
-                count,
-                rest.len()
-            );
+            info!("NLP pre-warm complete ({} embedded). Queuing {} remaining nodes.", count, rest.len());
 
             // Background lazy enrichment with backpressure
             let mut budget = nlp_budget_per_pass;
             for chunk in rest.chunks(nlp_batch_size) {
-                if budget == 0 {
-                    break;
-                }
+                if budget == 0 { break; }
                 let to_embed: Vec<_> = chunk.iter().take(budget).cloned().collect();
                 let batch_len = to_embed.len();
                 for node in &to_embed {
@@ -389,9 +344,9 @@ impl LainServer {
                                             warn!("embedding not stored for {}: {e}", gn.name);
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!("embedding not serialised for {}: {e}", gn.name)
-                                    }
+                                    Err(e) => warn!(
+                                        "embedding not serialised for {}: {e}", gn.name
+                                    ),
                                 }
                             }
                         }
@@ -460,35 +415,102 @@ impl LainServer {
         Ok(())
     }
 
-    pub async fn sync_volatile_overlay(&mut self) -> Result<(), LainError> {
+    pub async fn sync_volatile_overlay(&self) -> Result<(), LainError> {
         // Sidecars populate their overlay from the owner's /overlay/subscribe
         // stream; they never re-scan the local working tree.
         if self.graph.is_read_only() {
             return Ok(());
         }
-        // Drop entries for THIS server's changed paths BEFORE scanning.
-        // Mirrors the federation-side fix in
-        // `RepoIndex::sync_overlay`: a blanket `overlay.clear()` wipes
-        // every entry in the overlay, which is correct today only
-        // because `LainServer` owns a single overlay and there is
-        // nothing else to clobber. Per-path removal is the safe
-        // default and matches the Federation's contract, so any
-        // future code that shares or merges overlays stays sound.
+        // Compute the set of workspace-relative paths currently
+        // uncommitted in the working tree. The federation side does
+        // the same in `RepoIndex::sync_overlay`; mirroring it here
+        // keeps the two implementations on a single mental model —
+        // every overlay owner tracks the workspace-relative paths it
+        // owns, and any path not in this cycle's changes is purged by
+        // id.
         let changes = self.git.lock().get_uncommitted_changes()?;
-        for change in &changes {
-            let removed = self
-                .overlay
-                .remove_nodes_for_path(&change.path.to_string_lossy());
-            if removed > 0 {
-                tracing::debug!(
-                    "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
-                    removed,
-                    change.path
-                );
+        let workspace_root = self.config.workspace.clone();
+        let current_paths: HashSet<String> = changes
+            .iter()
+            .map(|c| graph_path(&workspace_root, &c.path))
+            .collect();
+
+        // Staleness sweep: paths this server owned as of the last
+        // cycle that are no longer uncommitted (committed, reverted,
+        // deleted, or an uncommitted edit discarded). Removed *by id*
+        // using `overlay_paths` — the bookkeeping tracks every id
+        // this server inserted at each path, so we never touch an
+        // entry we didn't put there.
+        //
+        // Pre-fix had two bugs at once: the sweep only iterated the
+        // current `changes` list (so a path that dropped out of
+        // uncommitted state — committed, reverted, deleted — was
+        // never visited again), and `remove_nodes_for_path` was
+        // keyed by `change.path.to_string_lossy()` (absolute), while
+        // the overlay itself is keyed by workspace-relative paths.
+        // Both had to go. Mirroring the federation's `overlay_paths`
+        // discipline fixes both in one move.
+        //
+        // Two-tier purge condition: a stale path is purged only when
+        // (a) the file is genuinely gone from disk (deleted or fully
+        // reverted away — there's nothing live to preserve), or
+        // (b) the static graph's indexed commit matches HEAD (a real
+        // reindex pass landed and the symbol is now reachable through
+        // the static layer). The federation uses `indexed_current_commit`
+        // for (b); single-repo mode is the same code path. This
+        // matches the federation's contract and prevents a still-real
+        // symbol from vanishing between commit and the next reindex
+        // when those happen close together.
+        //
+        // Both sweep branches collect their removed ids into
+        // `removed_ids` and broadcast a single `OverlayDiff` at the
+        // end of the cycle, so sidecars consuming `/overlay/subscribe`
+        // see purges as well as inserts (URGENT FIXES #3 follow-up:
+        // pre-fix the broadcast only carried additions).
+        let mut removed_ids: Vec<String> = Vec::new();
+        {
+            let mut owned = self.overlay_paths.lock();
+            let head = self.git.lock().get_latest_commit_info().ok().map(|(h, _)| h);
+            let graph_caught_up = match head {
+                Some(h) => self.graph.get_last_commit()?.as_deref() == Some(h.as_str()),
+                None => false,
+            };
+            let stale: Vec<String> = owned
+                .keys()
+                .filter(|p| !current_paths.contains(*p))
+                .cloned()
+                .collect();
+            for path in stale {
+                let deleted_from_disk = !workspace_root.join(&path).is_file();
+                if graph_caught_up || deleted_from_disk {
+                    if let Some(ids) = owned.remove(&path) {
+                        for id in &ids {
+                            self.overlay.remove_node(id);
+                        }
+                        removed_ids.extend(ids);
+                    }
+                }
             }
         }
 
+        // Drop entries for THIS server's currently-changed paths
+        // BEFORE re-scanning, then re-scan fresh. Same pattern as
+        // `RepoIndex::sync_overlay`'s "drop entries for THIS repo's
+        // changed paths BEFORE scanning" step.
         for change in &changes {
+            let key = graph_path(&workspace_root, &change.path);
+            let old_ids = self.overlay_paths.lock().remove(&key);
+            if let Some(ids) = old_ids {
+                for id in &ids {
+                    self.overlay.remove_node(id);
+                }
+                removed_ids.extend(ids);
+                tracing::debug!(
+                    "sync_volatile_overlay: dropped {} stale overlay node(s) for {:?}",
+                    removed_ids.len(),
+                    change.path
+                );
+            }
             // Skip LSP re-scan for files that were deleted — there's
             // nothing to scan, and the entry removal above already
             // wiped them.
@@ -499,31 +521,104 @@ impl LainServer {
                 warn!("Failed to process change {:?}: {}", change.path, e);
             }
         }
+
+        // Broadcast the diff so any sidecar consuming
+        // `/overlay/subscribe` sees the same removals the local
+        // `VolatileOverlay` saw. `OverlayDiff.added` is empty here
+        // because the inserted ids went through `process_change` →
+        // `broadcast_overlay_insert` (which has its own broadcast).
+        if !removed_ids.is_empty() {
+            crate::server::overlay::broadcast_overlay_diff(OverlayDiff {
+                revision: self.next_revision(),
+                added: vec![],
+                removed: removed_ids,
+                updated: vec![],
+            });
+        }
+
         Ok(())
     }
 
-    async fn process_change(&mut self, path: &Path) -> Result<(), LainError> {
-        let symbols = {
+    /// `pub` so the integration test in `tests/watcher_freshness.rs`
+    /// can drive it directly with LSP unavailable. The watcher and
+    /// the `LainServer::sync_volatile_overlay` reconciliation loop
+    /// call this internally.
+    pub async fn process_change(&self, path: &Path) -> Result<(), LainError> {
+        // Serializes concurrent invocations. A watcher receiver firing
+        // on a save and `sync_volatile_overlay` running for the same
+        // file would otherwise race on the per-server overlay_paths
+        // bookkeeping. The work is short (LSP request + tree-sitter
+        // parse + overlay insert), so a single global lock per server
+        // is fine. The lock is released when this function returns, so
+        // concurrent calls on *different* files simply wait for the
+        // current call to finish. URGENT FIXES #3 follow-up.
+        let _process_change_guard = self.process_change_lock.lock();
+        // Try the LSP path first. With rust-analyzer unavailable (CI's
+        // default for this test env), the LSP request errors out —
+        // pre-fix, `process_change` returned `Ok(())` with no overlay
+        // nodes, leaving the single-server overlay empty after every
+        // edit. The federation equivalent has a tree-sitter fallback
+        // (`RepoIndex::process_overlay_change`); mirror it here so the
+        // single-server overlay actually receives symbols when LSP is
+        // unavailable. URGENT FIXES #3 follow-up.
+        use crate::server::lsp::HierarchicalSymbol;
+        let symbols: Option<Vec<HierarchicalSymbol>> = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
-            match lsp
-                .get_document_symbols_hierarchical(path, &self.config.workspace, &self.id_namespace)
-                .await
-            {
-                Ok(s) => s,
+            match lsp.get_document_symbols_hierarchical(path, &self.config.workspace, &self.id_namespace).await {
+                Ok(s) if !s.is_empty() => Some(s),
+                Ok(_) => None, // cold LSP / empty — fall through to tree-sitter
                 Err(e) => {
-                    debug!("No LSP symbols for changed file {:?}: {}", path, e);
-                    return Ok(());
+                    debug!("No LSP symbols for {:?}: {}; falling back to tree-sitter", path, e);
+                    None
                 }
             }
         };
+        // Tree-sitter fallback when LSP fails or returns empty.
+        // Mirrors `RepoIndex::process_overlay_change`: read the file,
+        // mint one `GraphNode` per `SymbolDef`, namespace-namespaced
+        // by `self.id_namespace` so the overlay id matches the
+        // static-graph id minted by `scan_file_structure`.
+        let symbols: Vec<HierarchicalSymbol> = match symbols {
+            Some(s) => s,
+            None => {
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    return Ok(());
+                };
+                let graph_key = graph_path(&self.config.workspace, path);
+                crate::treesitter::extract_definitions(path, &content)
+                    .into_iter()
+                    .map(|d| HierarchicalSymbol {
+                        node: crate::schema::GraphNode::new_in(
+                            d.kind,
+                            d.name.clone(),
+                            graph_key.clone(),
+                            &self.id_namespace,
+                        )
+                        .with_location_in(d.line_start, d.line_end, &self.id_namespace),
+                        children: vec![],
+                    })
+                    .collect()
+            }
+        };
+        if symbols.is_empty() {
+            return Ok(());
+        }
+        // Track the workspace-relative path + the ids we inserted
+        // there so the next `sync_volatile_overlay` cycle can purge
+        // by id if this path drops out of the changes list.
+        let workspace_root = self.config.workspace.clone();
+        let key = graph_path(&workspace_root, path);
+        let mut new_ids: Vec<String> = Vec::with_capacity(symbols.len());
         for symbol in symbols {
             self.overlay.insert_node(symbol.node.clone());
             // Broadcast the new node to any subscribed sidecar. The
             // read-only gate above (`is_read_only`) ensures this only
             // runs for owners.
-            self.broadcast_overlay_insert(symbol.node);
+            self.broadcast_overlay_insert(symbol.node.clone());
+            new_ids.push(symbol.node.id);
         }
+        self.overlay_paths.lock().insert(key, new_ids);
         Ok(())
     }
 }
@@ -598,10 +693,7 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
                 .map(|p| crate::graph::graph_path(path, p))
                 .collect();
             if tracked.is_empty() {
-                warn!(
-                    "[federation] Skipping orphan sweep for {:?}: no tracked files",
-                    path
-                );
+                warn!("[federation] Skipping orphan sweep for {:?}: no tracked files", path);
             } else {
                 match db.prune_orphans(&tracked) {
                     Ok(0) => info!("[federation] {:?}: orphan sweep found nothing", path),
@@ -648,10 +740,7 @@ pub async fn index_one_repo(
         }
     }
 
-    info!(
-        "[federation] Building core topology for {:?} at commit {}",
-        path, latest_commit
-    );
+    info!("[federation] Building core topology for {:?} at commit {}", path, latest_commit);
 
     // `force=true` means the caller has independent evidence the
     // worktree changed (a kernel `notify` event, an explicit reindex
@@ -665,10 +754,7 @@ pub async fn index_one_repo(
         info!("[federation] Forced full re-scan of worktree {:?}", path);
         git.get_all_tracked_files()?
     } else if let Some(ref last) = last_commit {
-        info!(
-            "[federation] Incremental update since {} for {:?}",
-            last, path
-        );
+        info!("[federation] Incremental update since {} for {:?}", last, path);
         git.get_changed_files_since(last)?
     } else {
         info!("[federation] Full repository scan for {:?}", path);
@@ -680,10 +766,7 @@ pub async fn index_one_repo(
         // commit lands here, because `get_changed_files_since` skips
         // paths that are gone from disk. Sweep before advancing the
         // marker, or those nodes are stranded permanently.
-        info!(
-            "[federation] No files to scan for {:?}; sweeping orphans.",
-            path
-        );
+        info!("[federation] No files to scan for {:?}; sweeping orphans.", path);
         sweep_orphans(path, db, git);
         db.set_last_commit(latest_commit)?;
         db.save_to_disk_sync()?;
@@ -718,20 +801,11 @@ pub async fn index_one_repo(
         let git_time = latest_time;
         // `RepoNamespace` is `Copy`; `index_one_repo` takes it by
         // reference, so the spawned task borrows from the captured
-        // value (which lives for the closure's lifetime). See
-        // `build_core_memory` for the full rationale.
+        // value (which lives for the closure's lifetime).
         let namespace = *namespace;
+
         set.spawn(async move {
-            scan_file_batch(
-                chunk,
-                workspace,
-                lsp_mux,
-                lsp_sync_time,
-                git_time,
-                commit_hash,
-                &namespace,
-            )
-            .await
+            scan_file_batch(chunk, workspace, lsp_mux, lsp_sync_time, git_time, commit_hash, &namespace).await
         });
     }
 
@@ -817,23 +891,24 @@ pub async fn index_one_repo(
     );
 
     // Resolve phase: link external references to internal nodes (CALLS)
-    let call_edges =
-        super::resolve::resolve_call_edges(db, path, &all_external_refs, resolver, source_repo);
-    info!(
-        "[federation] {:?}: ingesting {} call edges",
+    let call_edges = super::resolve::resolve_call_edges(
+        db,
         path,
-        call_edges.len()
+        &all_external_refs,
+        resolver,
+        source_repo,
     );
+    info!("[federation] {:?}: ingesting {} call edges", path, call_edges.len());
     insert_edges_reporting(db, &call_edges, "call")?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
-    let static_edges =
-        super::resolve::resolve_static_edges(db, &all_static_refs, resolver, source_repo);
-    info!(
-        "[federation] {:?}: ingesting {} static tree-sitter edges",
-        path,
-        static_edges.len()
+    let static_edges = super::resolve::resolve_static_edges(
+        db,
+        &all_static_refs,
+        resolver,
+        source_repo,
     );
+    info!("[federation] {:?}: ingesting {} static tree-sitter edges", path, static_edges.len());
     insert_edges_reporting(db, &static_edges, "static")?;
 
     // Pattern resolve: cross-boundary detection
@@ -842,11 +917,7 @@ pub async fn index_one_repo(
         &all_pattern_refs,
         super::resolve::PatternLimits::FEDERATION,
     );
-    info!(
-        "[federation] {:?}: ingesting {} cross-boundary pattern edges",
-        path,
-        pattern_edges.len()
-    );
+    info!("[federation] {:?}: ingesting {} cross-boundary pattern edges", path, pattern_edges.len());
     db.insert_edges_batch(&pattern_edges)?;
 
     // Refresh the federation's symbol index so the just-populated
@@ -860,10 +931,7 @@ pub async fn index_one_repo(
     // runs after symbol nodes exist so route->handler links resolve.
     let sensor_counts = crate::server::sensors::run_all(db, path);
     if sensor_counts.total() > 0 {
-        info!(
-            "[federation] {:?}: protocol sensors contributed {:?}",
-            path, sensor_counts
-        );
+        info!("[federation] {:?}: protocol sensors contributed {:?}", path, sensor_counts);
     }
 
     // Co-change analysis

@@ -421,6 +421,8 @@ fn build_federation_server(
         attribution: default_attribution_backend(),
         auth: Arc::new(AuthState::from_env()),
         events_log: events_log.clone(),
+        overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
     // when the file exists, and install a persist callback so every
@@ -550,6 +552,8 @@ impl LainServer {
             attribution: default_attribution_backend(),
             auth: Arc::new(AuthState::from_env()),
             events_log: events_log.clone(),
+            overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists. Idempotent: missing file is a no-op.

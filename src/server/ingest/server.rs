@@ -16,6 +16,7 @@ use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::git::GitSensor;
 use crate::server::graph::GraphDatabase;
 use crate::server::lsp::LspPool;
+use tokio::sync::Mutex as AsyncMutex;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::{broadcast_overlay_diff, OverlayDiff, RevisionId, VolatileOverlay};
 use crate::server::presence::{
@@ -51,14 +52,49 @@ pub struct LainServer {
     pub lsp_pool: Arc<LspPool>,
     pub tool_executor: ToolExecutor,
     pub tuning: Arc<TuningConfig>,
-    /// Per-server `RepoNamespace` used by `LspMultiplexer` when
-    /// minting overlay / graph nodes via the single-workspace path.
-    /// Mints one namespace at construction; stable for the lifetime
-    /// of the server. Single-workspace mode has only one repo, so one
-    /// namespace is sufficient. (PR #14 follow-up: the LSP path was
-    /// using `GraphNode::new` which falls back to the shared test
-    /// namespace; without a real per-server namespace, two servers
-    /// in a hypothetical cross-process federation would collide.)
+    /// Workspace-relative paths this server has overlay nodes for, with
+    /// the exact ids it inserted at each path. Mirrors
+    /// `RepoIndex::overlay_paths` in the federation so `sync_volatile_overlay`
+    /// can reconcile prior overlay ownership with the current uncommitted
+    /// changes — a path that drops out of `get_uncommitted_changes()`
+    /// (committed, reverted, deleted, or an uncommitted edit discarded)
+    /// is no longer swept at all without this bookkeeping. Removing by
+    /// id rather than by path is the same discipline the federation
+    /// side uses: it never touches an entry it didn't insert.
+    ///
+    /// Wrapped in `Arc` so `LainServer: Clone` (other fields are
+    /// already Arc-shared; `parking_lot::Mutex` itself isn't Clone).
+    /// The bookkeeping is logically per-server-instance but the
+    /// mutex is genuinely shared across clones since they're the
+    /// same Arc.
+    ///
+    /// `pub(crate)` because the reconciliation methods
+    /// (`sync_volatile_overlay`, `process_change`) live in
+    /// `ingestion.rs`, a sibling module. Mirrors the visibility on
+    /// `federation`, `federation_workspaces`, etc.
+    pub(crate) overlay_paths: Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    /// Serializes concurrent `process_change` calls (URGENT FIXES
+    /// #3 follow-up). The watcher receiver firing on a save can race
+    /// `sync_volatile_overlay` running for the same file: both read
+    /// the file, both query `overlay_paths.lock()` to record their
+    /// ids, and both eventually call `broadcast_overlay_insert`. The
+    /// data races themselves are internally locked (overlay nodes use
+    /// a parking_lot::RwLock; `overlay_paths` is its own Mutex), but the
+    /// *visible sequence* of overlay entries could see one writer's
+    /// id set in `overlay_paths` while another writer's node-set was
+    /// inserted, briefly leaving `process_change` callers with a
+    /// stale bookkeeping view. A coarse process_change_lock prevents
+    /// that. The work in `process_change` is short — LSP request +
+    /// tree-sitter parse + overlay insert — so contention is bounded
+    /// by the OS file event rate, not user throughput.
+    pub(crate) process_change_lock: Arc<AsyncMutex<()>>,
+    /// Per-server `RepoNamespace` for the LSP path. Mints one
+    /// namespace at construction; stable for the lifetime of the
+    /// server. Threaded through `LspMultiplexer` so every overlay
+    /// node minted by the single-workspace pipeline carries the same
+    /// namespace as the federation-side `RepoIndex`. PR #13
+    /// follow-up: the watcher and `process_change` paths use this
+    /// when minting new overlay nodes.
     pub(crate) id_namespace: crate::schema::RepoNamespace,
     /// Outcome of the most recent startup re-index. Written by the
     /// re-index spawn in `LainMcpServer::run_stdio` / `run_http`;
@@ -148,6 +184,17 @@ pub struct LainServer {
 }
 
 impl LainServer {
+    /// Test-only accessor: take the process-change lock without
+    /// running any work. Used by the concurrent-calls test in
+    /// `tests/watcher_freshness.rs` to verify that two concurrent
+    /// `process_change` invocations are serialized, not data-racing.
+    #[cfg(test)]
+    pub(crate) async fn process_change_lock(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, ()> {
+        self.process_change_lock.lock().await
+    }
+
     /// Federation accessor. Returns `None` for single-workspace servers.
     pub fn federation(&self) -> Option<&Arc<FederatedIndex>> {
         self.federation.as_ref()
@@ -342,6 +389,89 @@ impl LainServer {
             removed: vec![],
             updated: vec![],
         });
+    }
+
+    /// Serializes concurrent `process_change` calls. Without it, a
+    /// watcher receiver firing on a save can race `sync_volatile_overlay`
+    /// running for the same file: both read the file, both query
+    /// `overlay_paths.lock()` to record their ids, and both eventually
+    /// call `broadcast_overlay_insert`. The data races themselves are
+    /// internally locked (overlay nodes use a parking_lot::RwLock;
+    /// `overlay_paths` is its own Mutex), but the *visible sequence* of
+    /// overlay entries could see one writer's id set in `overlay_paths`
+    /// while another writer's node-set was inserted, briefly leaving
+    /// `process_change` callers with a stale bookkeeping view. A coarse
+    /// process_change_lock prevents that. The work in `process_change`
+    /// is short — LSP request + tree-sitter parse + overlay insert —
+    /// so contention is bounded by the OS file event rate, not user
+    /// throughput.
+
+    /// Test-only helper: insert `node` into the overlay and record
+    /// `node.id` under the workspace-relative `key` in `overlay_paths`
+    /// — the same bookkeeping `process_change` does when LSP
+    /// produces real symbols. Lets the integration tests exercise
+    /// `sync_volatile_overlay`'s staleness sweep without needing
+    /// rust-analyzer in the test environment. `pub` (not `#[cfg(test)]`)
+    /// because integration tests live in a separate crate that
+    /// doesn't see `#[cfg(test)]` items; the `test_` prefix flags it
+    /// as a non-production surface.
+    pub fn overlay_paths_test_insert(
+        &self,
+        key: String,
+        node: crate::server::schema::GraphNode,
+    ) {
+        self.overlay_paths
+            .lock()
+            .entry(key)
+            .or_default()
+            .push(node.id.clone());
+        self.overlay.insert_node(node);
+    }
+
+    /// Test-only helper: read the current `overlay_paths` snapshot.
+    /// Returns the workspace-relative paths this server has overlay
+    /// nodes tracked for, in arbitrary order. See
+    /// [`Self::overlay_paths_test_insert`] for the visibility rationale.
+    pub fn overlay_paths_test_keys(&self) -> Vec<String> {
+        self.overlay_paths
+            .lock()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Record that this server's watcher (or any other overlay writer
+    /// outside `process_change`) inserted a node at workspace-relative
+    /// `key` with the given `node_id`. Mirrors the bookkeeping
+    /// `process_change` does, so the next `sync_volatile_overlay`
+    /// cycle can purge by id if this path drops out of the changes
+    /// list. URGENT FIXES #3 follow-up: the watcher bypasses
+    /// `process_change` and was previously leaving its insertions
+    /// invisible to the staleness sweep.
+    pub fn overlay_paths_record_insert(
+        &self,
+        key: String,
+        node_id: String,
+    ) {
+        self.overlay_paths
+            .lock()
+            .entry(key)
+            .or_default()
+            .push(node_id);
+    }
+
+    /// Replace the bookkeeping entry for `key` with a fresh list of
+    /// `node_ids`. Used when a re-saved file should drop the previous
+    /// version's overlay entries from the same path before inserting
+    /// the new ones. The watcher calls this once per file event with
+    /// the freshly inserted ids; `process_change` does the equivalent
+    /// inline.
+    pub fn overlay_paths_replace(
+        &self,
+        key: String,
+        node_ids: Vec<String>,
+    ) {
+        self.overlay_paths.lock().insert(key, node_ids);
     }
     // (removed: had no caller and no test anywhere in the tree)
 
