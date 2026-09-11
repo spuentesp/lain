@@ -68,6 +68,14 @@ runs:
       shell: bash
       env:
         LAIN_REINDEX_TIMEOUT: ${{ inputs.reindex-timeout }}
+        # GITHUB_TOKEN is the GitHub-issued token for this run; we
+        # use it for the per-PR Pulls API call to enumerate the
+        # files changed in the PR. Without it, the per-PR section
+        # is skipped (no GITHUB_TOKEN → no API call).
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_EVENT_PATH: ${{ github.event_path }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
       run: bash "${{ github.action_path }}/health.sh"
 
     - name: Post commit status

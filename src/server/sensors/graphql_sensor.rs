@@ -165,8 +165,7 @@ pub fn enrich_with_graphql(
         let node_id = GraphNode::generate_id(
             &NodeType::Interface,
             &op.schema_path,
-            &format!("{}:{}", op.operation_type, op.field_name),
-            None,
+            &format!("{}:{}", op.operation_type, op.field_name), None, &crate::schema::RepoNamespace::for_test()
         );
 
         let mut node = GraphNode::new(

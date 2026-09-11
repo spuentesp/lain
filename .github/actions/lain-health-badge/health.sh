@@ -222,4 +222,80 @@ BODY=$(mktemp)
   echo '```'
 } > "$BODY"
 
+# Per-PR impact: when the action runs on a pull_request event, list
+# the files changed in the PR and, for each, the blast radius of
+# the top functions defined there. This is the "real value" the
+# badge gives reviewers: a one-line answer to "what does this PR
+# affect and how widely?".
+PR_IMPACT=""
+PR_NUMBER=""
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH}" ]; then
+  PR_NUMBER=$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null)
+fi
+if [ -n "$PR_NUMBER" ]; then
+  echo "::group::Per-PR impact (PR #${PR_NUMBER})"
+  # Pull the per-file metadata + diff patch in one API call. The
+  # patch is what tells us *which* symbols were actually changed
+  # in this PR — extracting top-level functions of the file would
+  # include symbols the PR never touched.
+  FILES_JSON=$(curl -fsS \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=50")
+  if [ -n "$FILES_JSON" ] && [ -d "$WORKSPACE" ]; then
+    PR_LINES=""
+    TOTAL_SYMBOLS=0
+    TOTAL_FILES=0
+    # For each file, only consider it a code file if the patch
+    # contains an added or modified function definition. Workflow
+    # YAML, lockfiles, generated code, etc. are skipped because
+    # they don't have meaningful blast-radius signals.
+    #
+    # The patch is multi-line, so we base64-encode it to make one
+    # TSV line per file. Without that, bash's `read` would split
+    # on the first newline of the patch and we'd silently lose
+    # everything after.
+    while IFS=$'\t' read -r filename patch_b64; do
+      [ -z "$filename" ] && continue
+      [ -z "$patch_b64" ] && continue
+      patch=$(printf '%s' "$patch_b64" | base64 -d 2>/dev/null)
+      [ -z "$patch" ] && continue
+      # Find added function/class definitions. `^\+[^+]` matches
+      # an added line that's not a `+++` file header. The regex
+      # captures the function keyword and the name.
+      ADDED_FNS=$(printf '%s\n' "$patch" \
+        | grep -E '^\+[^+]' \
+        | grep -oP '(async def|def|function|class|fn) +\K[a-zA-Z_][a-zA-Z0-9_]*' \
+        | sort -u)
+      [ -z "$ADDED_FNS" ] && continue
+      TOTAL_FILES=$((TOTAL_FILES + 1))
+      PR_LINES="$PR_LINES\n\n### \`$filename\`"
+      while IFS= read -r sym; do
+        [ -z "$sym" ] && continue
+        TOTAL_SYMBOLS=$((TOTAL_SYMBOLS + 1))
+        BR_BODY=$(jq -n --arg sym "$sym" --arg file "$filename" \
+          '{jsonrpc:"2.0",method:"tools/call",params:{name:"get_blast_radius",arguments:{symbol:$sym,file:$file}},id:99}')
+        BR_TEXT=$(curl -fsS --max-time 30 -X POST http://127.0.0.1:9999/mcp \
+          -H 'Content-Type: application/json' \
+          -d "$BR_BODY" 2>/dev/null \
+          | jq -r 'try (.result.content[0].text // .error.message) catch "(parse error)"' 2>/dev/null \
+          | head -10)
+        if [ -n "$BR_TEXT" ]; then
+          PR_LINES="$PR_LINES\n\n#### \`$sym\` (new)\n"
+          PR_LINES="$PR_LINES\n\`\`\`\n${BR_TEXT}\n\`\`\`"
+        fi
+      done <<< "$ADDED_FNS"
+    done < <(echo "$FILES_JSON" | jq -r '.[] | select(.patch != null) | [.filename, (.patch | @base64)] | @tsv')
+    if [ -n "$PR_LINES" ]; then
+      PR_IMPACT=$(printf "## PR impact\n\n_Blast radius for ${TOTAL_SYMBOLS} new symbol(s) across ${TOTAL_FILES} file(s)._\n%b" "$PR_LINES")
+    fi
+  fi
+  echo "::endgroup::"
+fi
+
+# Append the PR-impact section if any.
+if [ -n "$PR_IMPACT" ]; then
+  printf "\n\n%s" "$PR_IMPACT" >> "$BODY"
+fi
+
 emit_outputs "$LEVEL" "$SUMMARY" "$(cat "$BODY")"

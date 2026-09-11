@@ -51,6 +51,15 @@ pub struct LainServer {
     pub lsp_pool: Arc<LspPool>,
     pub tool_executor: ToolExecutor,
     pub tuning: Arc<TuningConfig>,
+    /// Per-server `RepoNamespace` used by `LspMultiplexer` when
+    /// minting overlay / graph nodes via the single-workspace path.
+    /// Mints one namespace at construction; stable for the lifetime
+    /// of the server. Single-workspace mode has only one repo, so one
+    /// namespace is sufficient. (PR #14 follow-up: the LSP path was
+    /// using `GraphNode::new` which falls back to the shared test
+    /// namespace; without a real per-server namespace, two servers
+    /// in a hypothetical cross-process federation would collide.)
+    pub(crate) id_namespace: crate::schema::RepoNamespace,
     /// Outcome of the most recent startup re-index. Written by the
     /// re-index spawn in `LainMcpServer::run_stdio` / `run_http`;
     /// read by `ToolExecutor::get_health` and (in step 3) by the tool
