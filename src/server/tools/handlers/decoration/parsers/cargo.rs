@@ -3,8 +3,8 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
-use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 use crate::server::tools::handlers::decoration::parsers::ErrorParser;
+use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 
 /// Parser for cargo JSON output (--message-format=json)
 pub struct CargoJsonParser;

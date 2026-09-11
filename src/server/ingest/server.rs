@@ -16,12 +16,11 @@ use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::git::GitSensor;
 use crate::server::graph::GraphDatabase;
 use crate::server::lsp::LspPool;
-use tokio::sync::Mutex as AsyncMutex;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::{broadcast_overlay_diff, OverlayDiff, RevisionId, VolatileOverlay};
 use crate::server::presence::{
-    load_pair as load_presence_pair, save_pair as save_presence_pair, OccupancyMap,
-    PresenceEvent, PresenceRegistry,
+    load_pair as load_presence_pair, save_pair as save_presence_pair, OccupancyMap, PresenceEvent,
+    PresenceRegistry,
 };
 use crate::server::refresh::RefreshResult;
 use crate::server::reload::ReloadBus;
@@ -34,6 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::info;
 
 #[derive(Clone)]
@@ -72,7 +72,8 @@ pub struct LainServer {
     /// (`sync_volatile_overlay`, `process_change`) live in
     /// `ingestion.rs`, a sibling module. Mirrors the visibility on
     /// `federation`, `federation_workspaces`, etc.
-    pub(crate) overlay_paths: Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    pub(crate) overlay_paths:
+        Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
     /// Serializes concurrent `process_change` calls (URGENT FIXES
     /// #3 follow-up). The watcher receiver firing on a save can race
     /// `sync_volatile_overlay` running for the same file: both read
@@ -189,9 +190,7 @@ impl LainServer {
     /// `tests/watcher_freshness.rs` to verify that two concurrent
     /// `process_change` invocations are serialized, not data-racing.
     #[cfg(test)]
-    pub(crate) async fn process_change_lock(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(crate) async fn process_change_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.process_change_lock.lock().await
     }
 
@@ -304,7 +303,10 @@ impl LainServer {
     /// Number of repos in the live federation, or 0 for single-workspace
     /// servers.
     pub fn repo_count(&self) -> usize {
-        self.federation.as_ref().map(|f| f.list_repos().len()).unwrap_or(0)
+        self.federation
+            .as_ref()
+            .map(|f| f.list_repos().len())
+            .unwrap_or(0)
     }
 
     /// Number of workspaces in the loaded `workspaces.yaml`, or 0 when
@@ -335,16 +337,23 @@ impl LainServer {
             )
         })?;
         let transport = self.federation_transport.ok_or_else(|| {
-            crate::server::error::LainError::Other("LainServer::serve(): missing transport (internal)".into())
+            crate::server::error::LainError::Other(
+                "LainServer::serve(): missing transport (internal)".into(),
+            )
         })?;
         let port = self.federation_port.unwrap_or(9999);
 
         let workspaces = self.federation_workspaces.as_ref().map(Arc::clone);
         let mcp = match workspaces {
             Some(ws) => crate::server::mcp::handler::LainMcpServer::with_federation_and_workspaces(
-                self.tool_executor, federation, ws,
+                self.tool_executor,
+                federation,
+                ws,
             ),
-            None => crate::server::mcp::handler::LainMcpServer::with_federation(self.tool_executor, federation),
+            None => crate::server::mcp::handler::LainMcpServer::with_federation(
+                self.tool_executor,
+                federation,
+            ),
         }
         .with_status(
             Some(transport),
@@ -415,11 +424,7 @@ impl LainServer {
     /// because integration tests live in a separate crate that
     /// doesn't see `#[cfg(test)]` items; the `test_` prefix flags it
     /// as a non-production surface.
-    pub fn overlay_paths_test_insert(
-        &self,
-        key: String,
-        node: crate::server::schema::GraphNode,
-    ) {
+    pub fn overlay_paths_test_insert(&self, key: String, node: crate::server::schema::GraphNode) {
         self.overlay_paths
             .lock()
             .entry(key)
@@ -433,11 +438,7 @@ impl LainServer {
     /// nodes tracked for, in arbitrary order. See
     /// [`Self::overlay_paths_test_insert`] for the visibility rationale.
     pub fn overlay_paths_test_keys(&self) -> Vec<String> {
-        self.overlay_paths
-            .lock()
-            .keys()
-            .cloned()
-            .collect()
+        self.overlay_paths.lock().keys().cloned().collect()
     }
 
     /// Record that this server's watcher (or any other overlay writer
@@ -448,11 +449,7 @@ impl LainServer {
     /// list. URGENT FIXES #3 follow-up: the watcher bypasses
     /// `process_change` and was previously leaving its insertions
     /// invisible to the staleness sweep.
-    pub fn overlay_paths_record_insert(
-        &self,
-        key: String,
-        node_id: String,
-    ) {
+    pub fn overlay_paths_record_insert(&self, key: String, node_id: String) {
         self.overlay_paths
             .lock()
             .entry(key)
@@ -466,11 +463,7 @@ impl LainServer {
     /// the new ones. The watcher calls this once per file event with
     /// the freshly inserted ids; `process_change` does the equivalent
     /// inline.
-    pub fn overlay_paths_replace(
-        &self,
-        key: String,
-        node_ids: Vec<String>,
-    ) {
+    pub fn overlay_paths_replace(&self, key: String, node_ids: Vec<String>) {
         self.overlay_paths.lock().insert(key, node_ids);
     }
     // (removed: had no caller and no test anywhere in the tree)
@@ -492,11 +485,18 @@ impl LainServer {
         data_dir: &Path,
     ) -> Result<(), crate::server::error::LainError> {
         let fed = self.federation.as_ref().ok_or_else(|| {
-            crate::server::error::LainError::Other("LainServer::add_repo called on a non-federation server".into())
+            crate::server::error::LainError::Other(
+                "LainServer::add_repo called on a non-federation server".into(),
+            )
         })?;
         let source = crate::server::federation::config::FederationConfig::default()
             .build_source_for(repo)
-            .map_err(|e| crate::server::error::LainError::Config(format!("build_source_for({}): {e}", repo.id)))?;
+            .map_err(|e| {
+                crate::server::error::LainError::Config(format!(
+                    "build_source_for({}): {e}",
+                    repo.id
+                ))
+            })?;
         // `WorkspaceDirSource::fetch` is a no-op; `LocalCloneSource` and
         // `ShallowCloneSource` actually clone. Hot-reload only sees
         // already-on-disk sources (`workspace_dir`), but we still call
@@ -514,10 +514,13 @@ impl LainServer {
     /// is `None` (single-workspace mode).
     pub fn remove_repo(&self, repo_id: &str) -> Result<(), crate::server::error::LainError> {
         let fed = self.federation.as_ref().ok_or_else(|| {
-            crate::server::error::LainError::Other("LainServer::remove_repo called on a non-federation server".into())
+            crate::server::error::LainError::Other(
+                "LainServer::remove_repo called on a non-federation server".into(),
+            )
         })?;
-        let rid = RepoId::new(repo_id)
-            .map_err(|e| crate::server::error::LainError::Config(format!("invalid repo id '{repo_id}': {e}")))?;
+        let rid = RepoId::new(repo_id).map_err(|e| {
+            crate::server::error::LainError::Config(format!("invalid repo id '{repo_id}': {e}"))
+        })?;
         fed.remove_repo(&rid)?;
         self.record_sync();
         Ok(())
@@ -631,7 +634,9 @@ impl LainServer {
         if !matches!(outcome.result, RefreshResult::Ok) {
             return None;
         }
-        outcome.started_at.duration_since(UNIX_EPOCH)
+        outcome
+            .started_at
+            .duration_since(UNIX_EPOCH)
             .ok()
             .map(|d| d.as_secs() as i64)
     }
@@ -643,8 +648,9 @@ impl LainServer {
     /// background ops can force a flush.
     pub fn save_state(&self) -> Result<(), crate::server::error::LainError> {
         let path = self.state_path();
-        save_presence_pair(&path, &self.presence, &self.occupancy)
-            .map_err(|e| crate::server::error::LainError::Other(format!("save_state({}): {e}", path.display())))
+        save_presence_pair(&path, &self.presence, &self.occupancy).map_err(|e| {
+            crate::server::error::LainError::Other(format!("save_state({}): {e}", path.display()))
+        })
     }
 
     /// Hydrate the live `PresenceRegistry` + `OccupancyMap` from the
@@ -653,8 +659,9 @@ impl LainServer {
     /// registries are built.
     pub fn load_state(&self) -> Result<(), crate::server::error::LainError> {
         let path = self.state_path();
-        load_presence_pair(&path, &self.presence, &self.occupancy)
-            .map_err(|e| crate::server::error::LainError::Other(format!("load_state({}): {e}", path.display())))
+        load_presence_pair(&path, &self.presence, &self.occupancy).map_err(|e| {
+            crate::server::error::LainError::Other(format!("load_state({}): {e}", path.display()))
+        })
     }
 
     /// Run `f` inside the cross-process presence critical section:
@@ -701,7 +708,9 @@ impl LainServer {
         // file has not changed since we last read it, there is nothing
         // to observe and parsing it again is wasted work on a path
         // every presence call goes through.
-        let current = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let current = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         {
             let seen = self.presence_state_seen.lock();
             if current.is_some() && *seen == current {

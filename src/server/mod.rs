@@ -11,24 +11,24 @@ pub mod tools;
 // Core
 pub mod auth;
 pub mod build_info;
+pub mod error;
 pub mod events_log;
-pub mod graph;
-pub mod schema;
 pub mod git;
+pub mod graph;
 pub mod lsp;
+pub mod schema;
+pub mod time;
 pub mod treesitter;
 pub mod tuning;
-pub mod error;
-pub mod time;
 
 // Analytical side
 pub mod nlp;
-pub mod toolchains;
-pub mod sensors;
-pub mod watcher;
 pub mod overlay;
 pub mod revision_log;
+pub mod sensors;
 pub mod sync_status;
+pub mod toolchains;
+pub mod watcher;
 
 pub mod ingest;
 pub mod query;
@@ -39,8 +39,8 @@ pub mod attribution;
 pub mod presence;
 pub mod presence_lock;
 pub mod sentinel;
-pub mod state_lock;
 pub mod sse;
+pub mod state_lock;
 
 // Audit log — append-only JSONL record of every edit that lands
 // on disk. See `crate::server::audit` for the storage model and
@@ -74,9 +74,9 @@ mod error_tests;
 #[cfg(test)]
 mod git_tests;
 #[cfg(test)]
-mod graph_tests;
-#[cfg(test)]
 mod graph_proptests;
+#[cfg(test)]
+mod graph_tests;
 #[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]

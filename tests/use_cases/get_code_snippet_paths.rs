@@ -96,10 +96,7 @@ fn get_code_snippet_resolves_relative_and_absolute_paths_and_rejects_missing() {
             "repo_id": "repo",
         }),
     );
-    let is_err = env
-        .pointer("/result/isError")
-        .and_then(|v| v.as_bool())
-        == Some(true);
+    let is_err = env.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true);
     assert!(
         is_err,
         "get_code_snippet(nonexistent path) must set isError=true; got: {env}"

@@ -50,10 +50,7 @@ impl EventsLog {
     pub fn open(state_dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(state_dir)?;
         let path = state_dir.join(EVENTS_LOG_FILENAME);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let next_id = read_max_event_id(&path).unwrap_or(0) + 1;
         Ok(EventsLog {
             state_dir: state_dir.to_path_buf(),
@@ -77,7 +74,7 @@ impl EventsLog {
         };
         let payload = match serde_json::to_string(event) {
             Ok(s) => s,
-            Err(_) => return id,  // skip persistence on serialize failure
+            Err(_) => return id, // skip persistence on serialize failure
         };
         let line = format!("{}\t{}\n", id, payload);
         let mut guard = self.file.lock();
@@ -115,7 +112,9 @@ impl EventsLog {
             if !path.exists() {
                 continue;
             }
-            let Ok(file) = File::open(&path) else { continue };
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
             // Collect all (id, payload) tuples up front so the borrow on
             // the file (and the lines iterator) doesn't extend across
             // the in-loop deserialize_json calls.
@@ -125,7 +124,9 @@ impl EventsLog {
                 .filter_map(|line| {
                     let (id_str, rest) = line.split_once('\t')?;
                     let id = id_str.parse::<u64>().ok()?;
-                    if id <= last_id { return None; }
+                    if id <= last_id {
+                        return None;
+                    }
                     Some((id, rest.to_string()))
                 })
                 .collect();
@@ -150,9 +151,13 @@ fn read_max_event_id(path: &Path) -> Option<u64> {
     let file = File::open(path).ok()?;
     let mut max: u64 = 0;
     for line in BufReader::new(file).lines().map_while(Result::ok) {
-        let Some((id, _)) = line.split_once('\t') else { continue };
+        let Some((id, _)) = line.split_once('\t') else {
+            continue;
+        };
         if let Ok(n) = id.parse::<u64>() {
-            if n > max { max = n; }
+            if n > max {
+                max = n;
+            }
         }
     }
     Some(max)
@@ -164,7 +169,9 @@ mod tests {
     use crate::server::presence::{AgentId, AgentKind, AgentMode};
     use std::path::PathBuf;
 
-    fn tmp() -> tempfile::TempDir { tempfile::tempdir().unwrap() }
+    fn tmp() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
 
     #[test]
     fn first_event_gets_id_1() {
@@ -204,7 +211,11 @@ mod tests {
         let id2 = log.append(&PresenceEvent::AgentLeft(AgentId("a".into())));
         let id3 = log.append(&PresenceEvent::AgentJoined(sess));
         let replayed: Vec<u64> = log.replay_after(id1).map(|(id, _)| id).collect();
-        assert_eq!(replayed, vec![id2, id3], "replay_after(id1) returns events with id > id1, in order");
+        assert_eq!(
+            replayed,
+            vec![id2, id3],
+            "replay_after(id1) returns events with id > id1, in order"
+        );
     }
 
     #[test]
@@ -241,7 +252,10 @@ mod tests {
             last_heartbeat: std::time::SystemTime::now(),
         };
         let id2 = log2.append(&PresenceEvent::AgentJoined(sess));
-        assert_eq!(id2, 2, "after restart, next_id resumes from the max in the file + 1");
-        let _ = PathBuf::new();  // silence unused-import warning if any
+        assert_eq!(
+            id2, 2,
+            "after restart, next_id resumes from the max in the file + 1"
+        );
+        let _ = PathBuf::new(); // silence unused-import warning if any
     }
 }

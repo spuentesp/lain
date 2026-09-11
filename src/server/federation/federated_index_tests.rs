@@ -297,8 +297,7 @@ async fn cross_repo_overlay_inserts_distinct_ids_for_identical_symbols() {
     // of the regression: identical symbols from two repos must
     // not collapse into one overlay entry.
     let shared_overlay = Arc::new(VolatileOverlay::new());
-    let backend: Arc<dyn GraphBackend> =
-        Arc::new(PetgraphBackend::new(&data_dir).unwrap());
+    let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(&data_dir).unwrap());
     let fed = Arc::new(FederatedIndex::new(backend));
     fed.install_overlay(shared_overlay.clone());
 
@@ -354,7 +353,10 @@ async fn cross_repo_overlay_inserts_distinct_ids_for_identical_symbols() {
     // its own entries.
     let repo_a_id = RepoId::new("repo-a").unwrap();
     fed.remove_repo(&repo_a_id).unwrap();
-    repo_b.sync_overlay().await.expect("sync_overlay repo-b after remove");
+    repo_b
+        .sync_overlay()
+        .await
+        .expect("sync_overlay repo-b after remove");
 
     let survivor: Vec<_> = shared_overlay
         .get_all_nodes()
@@ -374,7 +376,6 @@ async fn cross_repo_overlay_inserts_distinct_ids_for_identical_symbols() {
     std::mem::forget(shared_overlay);
     std::mem::forget(tmp);
 }
-
 
 // ── manifest persistence (issue #8) ────────────────────────────────
 //
@@ -739,9 +740,8 @@ async fn concurrent_add_same_id_collapse_to_one_manifest_row() {
         handles.push(tokio::spawn(async move {
             let src = tempfile::tempdir().unwrap();
             git2::Repository::init(src.path()).unwrap();
-            let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
-                WorkspaceDirSource::new(id, src.path().to_path_buf()).unwrap(),
-            );
+            let s: Box<dyn crate::federation::repo_source::RepoSource> =
+                Box::new(WorkspaceDirSource::new(id, src.path().to_path_buf()).unwrap());
             fed.add_repo(s, &data_dir).await.unwrap();
         }));
     }
@@ -803,11 +803,8 @@ async fn concurrent_mixed_mutations_persist_manifest_consistently() {
     let seed_dir = tempfile::tempdir().unwrap();
     git2::Repository::init(seed_dir.path()).unwrap();
     let seed_src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
-        WorkspaceDirSource::new(
-            RepoId::new("seed").unwrap(),
-            seed_dir.path().to_path_buf(),
-        )
-        .unwrap(),
+        WorkspaceDirSource::new(RepoId::new("seed").unwrap(), seed_dir.path().to_path_buf())
+            .unwrap(),
     );
     fed.add_repo(seed_src, tmp.path()).await.unwrap();
 
@@ -830,9 +827,8 @@ async fn concurrent_mixed_mutations_persist_manifest_consistently() {
         let id = RepoId::new(id_str.as_str()).unwrap();
         let src_path = d.path().to_path_buf();
         handles.push(tokio::spawn(async move {
-            let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
-                WorkspaceDirSource::new(id, src_path).unwrap(),
-            );
+            let s: Box<dyn crate::federation::repo_source::RepoSource> =
+                Box::new(WorkspaceDirSource::new(id, src_path).unwrap());
             fed.add_repo(s, &data_dir).await.unwrap();
         }));
     }

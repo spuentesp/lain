@@ -37,9 +37,7 @@ fn build_repo_index(tmp: &tempfile::TempDir) -> Arc<RepoIndex> {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir).unwrap(),
-    );
+    let source = Box::new(WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir).unwrap());
     Arc::new(RepoIndex::new(source, &data_dir).unwrap())
 }
 
@@ -350,7 +348,9 @@ async fn watcher_does_not_panic_on_edit() {
 
     // start_watcher must succeed (was sync, now async — this exercises
     // the new signature).
-    ri.start_watcher().await.expect("start_watcher should succeed");
+    ri.start_watcher()
+        .await
+        .expect("start_watcher should succeed");
 
     // Give the inotify backend a moment to register the watch.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -404,7 +404,10 @@ async fn watcher_does_not_panic_on_edit() {
     // ran). Pre-fix, the inotify thread panicked on the first event and
     // the overlay stayed at whatever it had before the test.
     let overlay = ri.server_overlay();
-    let before = poll_until(&overlay, std::time::Duration::from_secs(5), |n| !n.is_empty()).await;
+    let before = poll_until(&overlay, std::time::Duration::from_secs(5), |n| {
+        !n.is_empty()
+    })
+    .await;
     assert!(
         !before.is_empty(),
         "after the first edit, the receiver task should have refreshed \
@@ -423,7 +426,10 @@ async fn watcher_does_not_panic_on_edit() {
     // overlay (because no further `sync_overlay` runs) and the assertion
     // below fails — giving us a Rust-level signal that the watcher
     // panicked, not just a process-level "did the test crash".
-    let after = poll_until(&overlay, std::time::Duration::from_secs(5), |n| !n.is_empty()).await;
+    let after = poll_until(&overlay, std::time::Duration::from_secs(5), |n| {
+        !n.is_empty()
+    })
+    .await;
     assert!(
         !after.is_empty(),
         "after the second edit, the overlay should still be populated by \
@@ -467,9 +473,8 @@ async fn sync_state_refreshes_overlay_for_new_file() {
 
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap());
     let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
     ri.set_overlay(shared_overlay.clone());
 
@@ -485,9 +490,8 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     // Install BEFORE add_repo so the new RepoIndex picks up the shared
     // overlay in its constructor branch.
     fed.install_overlay(shared_overlay.clone());
-    let fed_source = Box::new(
-        WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap(),
-    );
+    let fed_source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("test").unwrap(), repo_dir.clone()).unwrap());
     fed.add_repo(fed_source, &fed_data_dir)
         .await
         .expect("add_repo");
@@ -527,15 +531,8 @@ async fn sync_state_refreshes_overlay_for_new_file() {
     // `parking_lot::Mutex`, so we can call it directly from the
     // `current_thread` runtime that `#[tokio::test]` defaults to — no
     // `spawn_blocking` hop required.
-    sync_state(
-        &graph,
-        &git,
-        &ingestion,
-        &jobs,
-        &last_outcome,
-        Some(&fed),
-    )
-    .expect("sync_state should not error");
+    sync_state(&graph, &git, &ingestion, &jobs, &last_outcome, Some(&fed))
+        .expect("sync_state should not error");
 
     // The spawned task is async; poll the overlay for up to ~15s.
     // Pre-fix, sync_state short-circuited on commit equality and the
@@ -676,15 +673,8 @@ async fn sync_state_refreshes_overlay_for_multiple_repos() {
         lain::server::refresh::RefreshOutcome::default(),
     ));
 
-    sync_state(
-        &graph,
-        &git,
-        &ingestion,
-        &jobs,
-        &last_outcome,
-        Some(&fed),
-    )
-    .expect("sync_state should not error");
+    sync_state(&graph, &git, &ingestion, &jobs, &last_outcome, Some(&fed))
+        .expect("sync_state should not error");
 
     // Poll the overlay for up to ~15s. Cold LSP startup can take a
     // couple of seconds on the first repo, and with two repos the
@@ -710,12 +700,20 @@ async fn sync_state_refreshes_overlay_for_multiple_repos() {
     assert!(
         populated_alpha,
         "shared overlay missing post_sync_alpha_symbol after sync_state over 2 repos; nodes: {:?}",
-        shared_overlay.get_all_nodes().iter().map(|n| (&n.name, &n.node_type)).collect::<Vec<_>>()
+        shared_overlay
+            .get_all_nodes()
+            .iter()
+            .map(|n| (&n.name, &n.node_type))
+            .collect::<Vec<_>>()
     );
     assert!(
         populated_beta,
         "shared overlay missing post_sync_beta_symbol after sync_state over 2 repos; nodes: {:?}",
-        shared_overlay.get_all_nodes().iter().map(|n| (&n.name, &n.node_type)).collect::<Vec<_>>()
+        shared_overlay
+            .get_all_nodes()
+            .iter()
+            .map(|n| (&n.name, &n.node_type))
+            .collect::<Vec<_>>()
     );
 
     // Hold handles alive so the spawned background task doesn't race
@@ -742,7 +740,9 @@ async fn watcher_survives_six_concurrent_agents() {
     let tmp = tempfile::tempdir().unwrap();
     let ri = build_repo_index(&tmp);
 
-    ri.start_watcher().await.expect("start_watcher should succeed");
+    ri.start_watcher()
+        .await
+        .expect("start_watcher should succeed");
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let overlay = ri.server_overlay();
@@ -810,8 +810,7 @@ async fn watcher_survives_six_concurrent_agents() {
         n.iter().any(|n| n.name.starts_with("agent_"))
     })
     .await;
-    let after_swarm_names: Vec<String> =
-        after_swarm.into_iter().map(|n| n.name).collect();
+    let after_swarm_names: Vec<String> = after_swarm.into_iter().map(|n| n.name).collect();
     assert!(
         after_swarm_names.iter().any(|n| n.starts_with("agent_")),
         "after six concurrent writes + receiver signal, the overlay \
@@ -834,8 +833,7 @@ async fn watcher_survives_six_concurrent_agents() {
         n.iter().any(|n| n.name.starts_with("agent_"))
     })
     .await;
-    let after_followup_names: Vec<String> =
-        after_followup.into_iter().map(|n| n.name).collect();
+    let after_followup_names: Vec<String> = after_followup.into_iter().map(|n| n.name).collect();
     assert!(
         after_followup_names.iter().any(|n| n.starts_with("agent_")),
         "after the follow-up edit + receiver signal, the overlay should \
@@ -1053,7 +1051,13 @@ async fn sync_overlay_purges_reverted_addition_after_revert() {
     // After `reset --hard`, the graph's `last_commit` is stale — set
     // it to the new HEAD so the purge signal fires. (In production
     // this happens via the next `index()` pass.)
-    let new_head = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+    let new_head = repo
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
     ri.db().set_last_commit(new_head).unwrap();
 
     ri.sync_overlay().await.expect("post-revert sync");
@@ -1095,9 +1099,9 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
         return;
     }
 
+    use lain::server::LainServer;
     use std::process::Command;
     use std::sync::Arc;
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_root = tmp.path().to_path_buf();
@@ -1108,19 +1112,46 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
     let target = src_dir.join("lib.rs");
     std::fs::write(&target, "pub fn shared_symbol() -> u32 { 0 }\n").expect("write lib");
 
-    Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&repo_root).status().expect("git init");
     Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap(), "config", "user.email", "t@t"])
-        .status().expect("git config");
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&repo_root)
+        .status()
+        .expect("git init");
     Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap(), "config", "user.name", "t"])
-        .status().expect("git config");
+        .args([
+            "-C",
+            repo_root.to_str().unwrap(),
+            "config",
+            "user.email",
+            "t@t",
+        ])
+        .status()
+        .expect("git config");
+    Command::new("git")
+        .args([
+            "-C",
+            repo_root.to_str().unwrap(),
+            "config",
+            "user.name",
+            "t",
+        ])
+        .status()
+        .expect("git config");
     Command::new("git")
         .args(["-C", repo_root.to_str().unwrap(), "add", "-A"])
-        .status().expect("git add");
+        .status()
+        .expect("git add");
     Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap(), "commit", "-q", "-m", "init"])
-        .status().expect("git commit");
+        .args([
+            "-C",
+            repo_root.to_str().unwrap(),
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ])
+        .status()
+        .expect("git commit");
 
     // Boot the server. The LainServer's `id_namespace` is the
     // canonical namespace; both the static-graph path
@@ -1128,9 +1159,7 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
     // path (`process_change` → tree-sitter fallback) thread it
     // through after PR #14's fix.
     let mem = repo_root.join(".lain/graph.bin");
-    let server = Arc::new(
-        LainServer::new(&repo_root, &mem, None).expect("LainServer::new"),
-    );
+    let server = Arc::new(LainServer::new(&repo_root, &mem, None).expect("LainServer::new"));
 
     // 1. Build the static graph. This scans `lib.rs` and mints
     // `shared_symbol` with an id derived from `&self.id_namespace`.
@@ -1153,7 +1182,8 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
     // `get_uncommitted_changes` returns it. `build_core_memory`
     // already committed; this is a second edit on top of the
     // initial commit.
-    std::fs::write(&target.clone(), "pub fn shared_symbol() -> u32 { 7 }\n").expect("rewrite lib again");
+    std::fs::write(&target.clone(), "pub fn shared_symbol() -> u32 { 7 }\n")
+        .expect("rewrite lib again");
 
     // 3. `sync_volatile_overlay` calls `process_change` per
     // uncommitted file, with the tree-sitter fallback when LSP is
@@ -1217,20 +1247,47 @@ async fn build_lain_server_with_repo() -> (Arc<LainServer>, PathBuf, tempfile::T
     use std::process::Command;
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().to_path_buf();
-    Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&repo_root).status().unwrap();
     Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap(), "config", "user.email", "t@t"])
-        .status().unwrap();
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap();
     Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap(), "config", "user.name", "t"])
-        .status().unwrap();
+        .args([
+            "-C",
+            repo_root.to_str().unwrap(),
+            "config",
+            "user.email",
+            "t@t",
+        ])
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "-C",
+            repo_root.to_str().unwrap(),
+            "config",
+            "user.name",
+            "t",
+        ])
+        .status()
+        .unwrap();
     std::fs::write(repo_root.join("README.md"), "init\n").unwrap();
     Command::new("git")
         .args(["-C", repo_root.to_str().unwrap(), "add", "-A"])
-        .status().unwrap();
+        .status()
+        .unwrap();
     Command::new("git")
-        .args(["-C", repo_root.to_str().unwrap(), "commit", "-q", "-m", "init"])
-        .status().unwrap();
+        .args([
+            "-C",
+            repo_root.to_str().unwrap(),
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ])
+        .status()
+        .unwrap();
 
     let mem = tmp.path().join("graph.bin");
     let server = LainServer::new(&repo_root, &mem, None).expect("LainServer::new");
@@ -1253,7 +1310,10 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
     std::fs::write(&target.clone(), "pub fn shared_symbol() -> u32 { 1 }\n").unwrap();
     server.sync_volatile_overlay().await.expect("initial sync");
     let initial_count = server.overlay.get_all_nodes().len();
-    assert!(initial_count >= 1, "initial sync should populate the overlay");
+    assert!(
+        initial_count >= 1,
+        "initial sync should populate the overlay"
+    );
 
     // Two concurrent writers race for the same lock. Without the
     // process_change_lock they'd both proceed; with it, the second
@@ -1300,10 +1360,7 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
         .into_iter()
         .map(|n| (n.name.clone(), n.id.clone()))
         .collect();
-    let shared: Vec<_> = names
-        .iter()
-        .filter(|(n, _)| n == "shared_symbol")
-        .collect();
+    let shared: Vec<_> = names.iter().filter(|(n, _)| n == "shared_symbol").collect();
     assert_eq!(
         shared.len(),
         1,
@@ -1327,9 +1384,7 @@ async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable()
     // Same skip as `tests/federation_overlay_no_lsp.rs`: with
     // rust-analyzer present the tree-sitter fallback is bypassed.
     if which::which("rust-analyzer").is_ok() {
-        eprintln!(
-            "[skip] rust-analyzer on PATH; cannot exercise no-LSP overlay fallback."
-        );
+        eprintln!("[skip] rust-analyzer on PATH; cannot exercise no-LSP overlay fallback.");
         return;
     }
 
@@ -1341,11 +1396,7 @@ async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable()
     // file's function symbol.
     let target = repo_root.join("src").join("scratch.rs");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-    std::fs::write(
-        &target,
-        "pub fn scratch_symbol() -> u32 { 0 }\n",
-    )
-    .unwrap();
+    std::fs::write(&target, "pub fn scratch_symbol() -> u32 { 0 }\n").unwrap();
 
     // `process_change` takes `&self` since the namespace-threading
     // refactor; it can't mutate, so direct call is fine.

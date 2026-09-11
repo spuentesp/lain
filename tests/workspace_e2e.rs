@@ -16,7 +16,7 @@
 //! Gated behind `--features test-utils` like the existing benchmark file.
 
 use lain::federation::loader::load_federation_with_workspace;
-use lain::federation::workspace::{WorkspacesFile, WorkspaceSpec};
+use lain::federation::workspace::{WorkspaceSpec, WorkspacesFile};
 use lain::mcp::federation_tools::get_active_workspace;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,7 +26,10 @@ use std::process::Command;
 /// `init_temp_git_repo` from `tests/federation_integration.rs:20`.
 fn init_git_repo_with_commit(dir: &Path) {
     let status = Command::new("git")
-        .arg("init").arg("--quiet").arg("--initial-branch=main").arg(dir)
+        .arg("init")
+        .arg("--quiet")
+        .arg("--initial-branch=main")
+        .arg(dir)
         .status()
         .expect("git init failed to start");
     assert!(status.success(), "git init failed: {status}");
@@ -83,7 +86,8 @@ pub fn auth(s: &str) -> bool {
         (&auth_svc, "auth-svc", auth_svc_lib),
     ] {
         std::fs::create_dir_all(sub.join("src")).unwrap();
-        let mut cargo = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        let mut cargo =
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
         if name != "shared" {
             cargo.push_str("[dependencies]\nshared = { path = \"../shared\" }\n");
         }
@@ -113,7 +117,11 @@ fn write_workspaces_yaml(root: &Path, ws_name: &str, members: &[&str]) -> PathBu
     let mut yaml = String::from("workspaces:\n");
     yaml.push_str(&format!(
         "  - name: {ws_name}\n    members: [{}]\n",
-        members.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", ")
+        members
+            .iter()
+            .map(|m| format!("\"{m}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
     std::fs::write(&path, yaml).unwrap();
     path
@@ -125,10 +133,7 @@ fn write_workspaces_yaml(root: &Path, ws_name: &str, members: &[&str]) -> PathBu
 fn write_workspace_with_zero_members() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("workspaces.yaml");
-    std::fs::write(
-        &path,
-        "workspaces:\n  - name: empty\n    members: []\n",
-    ).unwrap();
+    std::fs::write(&path, "workspaces:\n  - name: empty\n    members: []\n").unwrap();
     (tmp, path)
 }
 
@@ -165,7 +170,12 @@ async fn workspace_rejects_unknown_repo_id() {
     // repos.yaml only has shared + db-client; workspace references billing-svc.
     let repos_yaml = write_repos_yaml(tmp.path(), &["shared", "db-client"]);
     write_workspaces_yaml(tmp.path(), "backend-team", &["shared", "billing-svc"]);
-    let result = load_federation_with_workspace(&repos_yaml, tmp.path().join("workspaces.yaml").as_path(), "backend-team").await;
+    let result = load_federation_with_workspace(
+        &repos_yaml,
+        tmp.path().join("workspaces.yaml").as_path(),
+        "backend-team",
+    )
+    .await;
     let err = match result {
         Ok(_) => panic!("billing-svc not in repos.yaml; load should have errored"),
         Err(e) => e,
@@ -187,7 +197,8 @@ async fn workspace_filters_repos_to_members() {
         std::fs::write(
             sub.join("Cargo.toml"),
             format!("[package]\nname = \"r{i}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(sub.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
         init_git_repo_with_commit(&sub);
     }
@@ -197,8 +208,18 @@ async fn workspace_filters_repos_to_members() {
         s
     });
     write_workspaces_yaml(tmp.path(), "three", &["r0", "r1", "r2"]);
-    let fed = load_federation_with_workspace(&repos_yaml, tmp.path().join("workspaces.yaml").as_path(), "three").await.unwrap();
-    let loaded: Vec<String> = fed.list_repos().into_iter().map(|(id, _)| id.to_string()).collect();
+    let fed = load_federation_with_workspace(
+        &repos_yaml,
+        tmp.path().join("workspaces.yaml").as_path(),
+        "three",
+    )
+    .await
+    .unwrap();
+    let loaded: Vec<String> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
     assert_eq!(loaded.len(), 3, "expected 3 loaded repos, got {loaded:?}");
     for keep in &["r0", "r1", "r2"] {
         repo_ids.retain(|r| r != keep);
@@ -214,7 +235,13 @@ async fn workspace_mcp_get_active_workspace_returns_correct_subset() {
     write_three_dependent_crates(tmp.path());
     let repos_yaml = write_repos_yaml(tmp.path(), &["shared", "db-client"]);
     write_workspaces_yaml(tmp.path(), "auth-ws", &["shared", "db-client"]);
-    let fed = load_federation_with_workspace(&repos_yaml, tmp.path().join("workspaces.yaml").as_path(), "auth-ws").await.unwrap();
+    let fed = load_federation_with_workspace(
+        &repos_yaml,
+        tmp.path().join("workspaces.yaml").as_path(),
+        "auth-ws",
+    )
+    .await
+    .unwrap();
     let workspaces = WorkspacesFile::load(tmp.path().join("workspaces.yaml").as_path()).unwrap();
     let info = get_active_workspace(&fed, &workspaces).expect("active workspace should resolve");
     assert_eq!(info.name, "auth-ws");
@@ -228,13 +255,21 @@ async fn workspace_mcp_get_workspace_graph_filters_correctly() {
     write_three_dependent_crates(tmp.path());
     let repos_yaml = write_repos_yaml(tmp.path(), &["shared", "db-client", "auth-svc"]);
     write_workspaces_yaml(tmp.path(), "subset", &["shared", "db-client"]);
-    let fed = load_federation_with_workspace(&repos_yaml, tmp.path().join("workspaces.yaml").as_path(), "subset").await.unwrap();
+    let fed = load_federation_with_workspace(
+        &repos_yaml,
+        tmp.path().join("workspaces.yaml").as_path(),
+        "subset",
+    )
+    .await
+    .unwrap();
     let workspaces = WorkspacesFile::load(tmp.path().join("workspaces.yaml").as_path()).unwrap();
     let graph = get_workspace_graph(&fed, &workspaces, None).expect("graph should succeed");
     for n in &graph.nodes {
         assert!(
             n.repo_id == "shared" || n.repo_id == "db-client",
-            "node '{}' should be in workspace subset, got repo_id='{}'", n.name, n.repo_id
+            "node '{}' should be in workspace subset, got repo_id='{}'",
+            n.name,
+            n.repo_id
         );
     }
 }

@@ -1,6 +1,6 @@
-use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use std::time::Duration;
 
 /// Shared reqwest blocking client (2 s request, 500 ms connect).
 /// A wedged server can't hang the caller for the OS's full TCP
@@ -48,7 +48,10 @@ pub fn post_json_rpc(url: &str, method: &str, params: Value) -> Result<Value> {
     let endpoint = mcp_endpoint(url);
     let body = build_envelope(method, params);
     let client = mcp_http_client();
-    let resp = client.post(&endpoint).json(&body).send()
+    let resp = client
+        .post(&endpoint)
+        .json(&body)
+        .send()
         .context("HTTP send")?;
     if !resp.status().is_success() {
         return Err(anyhow!("HTTP {} from lain server", resp.status()));
@@ -57,7 +60,9 @@ pub fn post_json_rpc(url: &str, method: &str, params: Value) -> Result<Value> {
     if let Some(err) = value.get("error") {
         return Err(anyhow!("MCP error: {err}"));
     }
-    value.get("result").cloned()
+    value
+        .get("result")
+        .cloned()
         .ok_or_else(|| anyhow!("no result in MCP response"))
 }
 
@@ -73,14 +78,26 @@ mod tests {
 
     #[test]
     fn mcp_endpoint_appends_mcp_path() {
-        assert_eq!(mcp_endpoint("http://localhost:9999"), "http://localhost:9999/mcp");
-        assert_eq!(mcp_endpoint("http://localhost:9999/"), "http://localhost:9999/mcp");
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999"),
+            "http://localhost:9999/mcp"
+        );
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999/"),
+            "http://localhost:9999/mcp"
+        );
     }
 
     #[test]
     fn mcp_endpoint_strips_trailing_slash_on_full_url() {
-        assert_eq!(mcp_endpoint("http://localhost:9999/mcp"), "http://localhost:9999/mcp");
-        assert_eq!(mcp_endpoint("http://localhost:9999/mcp/"), "http://localhost:9999/mcp");
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999/mcp"),
+            "http://localhost:9999/mcp"
+        );
+        assert_eq!(
+            mcp_endpoint("http://localhost:9999/mcp/"),
+            "http://localhost:9999/mcp"
+        );
     }
 
     /// `build_envelope` must put the caller-supplied `method` in the

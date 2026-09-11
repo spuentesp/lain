@@ -1,5 +1,7 @@
 use lain::server::ingest::LainServer;
-use lain::server::presence::{save_pair, load_pair, AgentKind, AgentMode, ClaimIntent, ClaimRequest};
+use lain::server::presence::{
+    load_pair, save_pair, AgentKind, AgentMode, ClaimIntent, ClaimRequest,
+};
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -24,13 +26,16 @@ fn presence_and_occupancy_survive_lain_restart() {
         Some(99999),
         None,
     );
-    server1.occupancy.claim(&agent.id, vec![ClaimRequest {
-        path: tmp.path().join("foo.rs"),
-        symbols: vec!["bar".into()],
-        intent: ClaimIntent::Edit,
-        ttl_seconds: None,
-        plan_revision: None,
-    }]);
+    server1.occupancy.claim(
+        &agent.id,
+        vec![ClaimRequest {
+            path: tmp.path().join("foo.rs"),
+            symbols: vec!["bar".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
     save_pair(&state_path, &server1.presence, &server1.occupancy).expect("save");
 
     // Drop server1.

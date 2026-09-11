@@ -24,10 +24,7 @@ pub fn write_file_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()>
 /// Async counterpart to `write_file_atomic` for callers running
 /// inside a Tokio runtime. Currently consumed by
 /// `server::graph::save_to_disk`.
-pub async fn tokio_write_file_atomic(
-    path: &Path,
-    bytes: impl AsRef<[u8]>,
-) -> io::Result<()> {
+pub async fn tokio_write_file_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent).await?;
@@ -80,7 +77,9 @@ mod tests {
     async fn tokio_write_file_atomic_writes_and_renames() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("graph.bin");
-        tokio_write_file_atomic(&path, b"\x01\x02\x03").await.unwrap();
+        tokio_write_file_atomic(&path, b"\x01\x02\x03")
+            .await
+            .unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"\x01\x02\x03");
         assert!(!path.with_extension("tmp").exists());
     }

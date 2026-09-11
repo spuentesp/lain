@@ -12,7 +12,10 @@ impl LainServer {
         loop {
             tokio::time::sleep(interval).await;
             info!("Background sync: checking for updates...");
-            let commit = self.git.lock().get_latest_commit_info()
+            let commit = self
+                .git
+                .lock()
+                .get_latest_commit_info()
                 .map(|(commit, _)| commit)
                 .inspect_err(|e| warn!("Background sync: failed to get commit info: {}", e))
                 .ok();
@@ -40,5 +43,4 @@ impl LainServer {
     // the overlay from uncommitted work at startup, and
     // `run_background_sync` (above) re-indexes when the commit moves.
     // Keeping a fourth, unreachable copy of that job would only rot.
-
 }

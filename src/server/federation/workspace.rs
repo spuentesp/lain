@@ -60,8 +60,8 @@ impl WorkspacesFile {
     /// Load and validate a `workspaces.yaml` from disk.
     pub fn load(path: &Path) -> Result<Self, LainError> {
         let text = std::fs::read_to_string(path).map_err(|e| LainError::Io(e.to_string()))?;
-        let file: WorkspacesFile =
-            serde_yaml::from_str(&text).map_err(|e| LainError::Config(format!("workspaces.yaml: {e}")))?;
+        let file: WorkspacesFile = serde_yaml::from_str(&text)
+            .map_err(|e| LainError::Config(format!("workspaces.yaml: {e}")))?;
         file.validate()?;
         Ok(file)
     }
@@ -190,10 +190,14 @@ pub struct WorkspaceDirSource {
 impl WorkspaceDirSource {
     pub fn new(id: String, path: PathBuf) -> Result<Self, LainError> {
         if id.is_empty() {
-            return Err(LainError::Config("WorkspaceDirSource id cannot be empty".into()));
+            return Err(LainError::Config(
+                "WorkspaceDirSource id cannot be empty".into(),
+            ));
         }
         if path.as_os_str().is_empty() {
-            return Err(LainError::Config("WorkspaceDirSource path cannot be empty".into()));
+            return Err(LainError::Config(
+                "WorkspaceDirSource path cannot be empty".into(),
+            ));
         }
         // We don't require the path to exist at construction time — the
         // workspace may be defined in a workspaces.yaml that points at a
@@ -208,9 +212,15 @@ impl WorkspaceDirSource {
 
 #[async_trait]
 impl WorkspaceSource for WorkspaceDirSource {
-    fn id(&self) -> &str { &self.id }
-    fn local_path(&self) -> &Path { &self.path }
-    fn kind(&self) -> WorkspaceSourceKind { WorkspaceSourceKind::WorkspaceDir }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn local_path(&self) -> &Path {
+        &self.path
+    }
+    fn kind(&self) -> WorkspaceSourceKind {
+        WorkspaceSourceKind::WorkspaceDir
+    }
     async fn fetch(&self) -> Result<(), LainError> {
         if !self.path.is_dir() {
             return Err(LainError::Config(format!(
@@ -221,8 +231,12 @@ impl WorkspaceSource for WorkspaceDirSource {
         *self.last_refreshed.write() = SystemTime::now();
         Ok(())
     }
-    fn last_refreshed(&self) -> SystemTime { *self.last_refreshed.read() }
-    fn is_stale(&self, _max_age: Duration) -> bool { false }
+    fn last_refreshed(&self) -> SystemTime {
+        *self.last_refreshed.read()
+    }
+    fn is_stale(&self, _max_age: Duration) -> bool {
+        false
+    }
 }
 
 /// Git-backed source: clone (or refresh) a workspace definition repo.
@@ -245,10 +259,14 @@ impl WorkspaceCloneSource {
         local_root: PathBuf,
     ) -> Result<Self, LainError> {
         if id.is_empty() {
-            return Err(LainError::Config("WorkspaceCloneSource id cannot be empty".into()));
+            return Err(LainError::Config(
+                "WorkspaceCloneSource id cannot be empty".into(),
+            ));
         }
         if url.is_empty() {
-            return Err(LainError::Config("WorkspaceCloneSource url cannot be empty".into()));
+            return Err(LainError::Config(
+                "WorkspaceCloneSource url cannot be empty".into(),
+            ));
         }
         let git_ref = git_ref.unwrap_or_else(|| "main".to_string());
         let refresh_interval = Duration::from_secs(refresh_interval_secs.unwrap_or(300));
@@ -263,16 +281,28 @@ impl WorkspaceCloneSource {
         })
     }
 
-    pub fn refresh_interval(&self) -> Duration { self.refresh_interval }
-    pub fn url(&self) -> &str { &self.url }
-    pub fn git_ref(&self) -> &str { &self.git_ref }
+    pub fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
+    }
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
 }
 
 #[async_trait]
 impl WorkspaceSource for WorkspaceCloneSource {
-    fn id(&self) -> &str { &self.id }
-    fn local_path(&self) -> &Path { &self.local_path }
-    fn kind(&self) -> WorkspaceSourceKind { WorkspaceSourceKind::WorkspaceClone }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn local_path(&self) -> &Path {
+        &self.local_path
+    }
+    fn kind(&self) -> WorkspaceSourceKind {
+        WorkspaceSourceKind::WorkspaceClone
+    }
     async fn fetch(&self) -> Result<(), LainError> {
         use std::process::Command;
         let path = self.local_path.clone();
@@ -282,19 +312,38 @@ impl WorkspaceSource for WorkspaceCloneSource {
         let git_dir = path.join(".git");
         tokio::task::spawn_blocking(move || -> Result<(), LainError> {
             if !git_dir.exists() {
-                let parent = path.parent().ok_or_else(|| LainError::Config("workspace_clone local_path has no parent".into()))?;
+                let parent = path.parent().ok_or_else(|| {
+                    LainError::Config("workspace_clone local_path has no parent".into())
+                })?;
                 std::fs::create_dir_all(parent).map_err(|e| LainError::Io(e.to_string()))?;
                 let status = Command::new("git")
-                    .arg("clone").arg("--quiet").arg("--depth").arg("1").arg("--branch").arg(&git_ref).arg(&url).arg(&path)
+                    .arg("clone")
+                    .arg("--quiet")
+                    .arg("--depth")
+                    .arg("1")
+                    .arg("--branch")
+                    .arg(&git_ref)
+                    .arg(&url)
+                    .arg(&path)
                     .status()
-                    .map_err(|e| LainError::Git(format!("git clone --depth 1 failed to start: {e}")))?;
+                    .map_err(|e| {
+                        LainError::Git(format!("git clone --depth 1 failed to start: {e}"))
+                    })?;
                 if !status.success() {
-                    return Err(LainError::Git(format!("git clone --depth 1 {} failed", url)));
+                    return Err(LainError::Git(format!(
+                        "git clone --depth 1 {} failed",
+                        url
+                    )));
                 }
             } else {
                 let fetch = Command::new("git")
                     .current_dir(&path)
-                    .arg("fetch").arg("--quiet").arg("--depth").arg("1").arg("origin").arg(&git_ref)
+                    .arg("fetch")
+                    .arg("--quiet")
+                    .arg("--depth")
+                    .arg("1")
+                    .arg("origin")
+                    .arg(&git_ref)
                     .status()
                     .map_err(|e| LainError::Git(format!("git fetch --depth 1 failed: {e}")))?;
                 if !fetch.success() {
@@ -302,20 +351,32 @@ impl WorkspaceSource for WorkspaceCloneSource {
                 }
                 let reset = Command::new("git")
                     .current_dir(&path)
-                    .arg("reset").arg("--hard").arg(format!("origin/{}", git_ref))
+                    .arg("reset")
+                    .arg("--hard")
+                    .arg(format!("origin/{}", git_ref))
                     .status()
                     .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
                 if !reset.success() {
-                    return Err(LainError::Git(format!("git reset to origin/{} failed", git_ref)));
+                    return Err(LainError::Git(format!(
+                        "git reset to origin/{} failed",
+                        git_ref
+                    )));
                 }
             }
             *last_refreshed.write() = SystemTime::now();
             Ok(())
-        }).await.map_err(|e| LainError::Git(format!("join error: {e}")))?
+        })
+        .await
+        .map_err(|e| LainError::Git(format!("join error: {e}")))?
     }
-    fn last_refreshed(&self) -> SystemTime { *self.last_refreshed.read() }
+    fn last_refreshed(&self) -> SystemTime {
+        *self.last_refreshed.read()
+    }
     fn is_stale(&self, max_age: Duration) -> bool {
-        self.last_refreshed().elapsed().map(|e| e > max_age).unwrap_or(true)
+        self.last_refreshed()
+            .elapsed()
+            .map(|e| e > max_age)
+            .unwrap_or(true)
     }
 }
 
@@ -347,7 +408,10 @@ workspaces:
 ";
         let f: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(f.default.as_deref(), Some("backend-team"));
-        assert_eq!(f.workspaces[0].description.as_deref(), Some("Core backend services"));
+        assert_eq!(
+            f.workspaces[0].description.as_deref(),
+            Some("Core backend services")
+        );
         assert_eq!(f.workspaces[0].members.len(), 3);
     }
 
@@ -365,7 +429,11 @@ workspaces:
 ";
         let f: WorkspacesFile = serde_yaml::from_str(yaml).unwrap();
         match &f.workspaces[0].source {
-            Some(WorkspaceSourceConfig::WorkspaceClone { url, ref_, refresh_interval_secs }) => {
+            Some(WorkspaceSourceConfig::WorkspaceClone {
+                url,
+                ref_,
+                refresh_interval_secs,
+            }) => {
                 assert_eq!(url, "https://github.com/acme/payments-ws.git");
                 assert_eq!(ref_.as_deref(), Some("main"));
                 assert_eq!(*refresh_interval_secs, Some(600));
@@ -476,7 +544,9 @@ workspaces:
     async fn workspace_dir_source_fetch_succeeds_when_path_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let s = WorkspaceDirSource::new("team".into(), tmp.path().to_path_buf()).unwrap();
-        s.fetch().await.expect("fetch on existing dir should succeed");
+        s.fetch()
+            .await
+            .expect("fetch on existing dir should succeed");
     }
 
     #[tokio::test]
@@ -496,7 +566,8 @@ workspaces:
             None,
             None,
             PathBuf::from("/tmp"),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(s.git_ref(), "main");
         assert_eq!(s.refresh_interval(), Duration::from_secs(300));
         assert_eq!(format!("{}", s.kind()), "workspace_clone");
@@ -504,20 +575,17 @@ workspaces:
 
     #[test]
     fn workspace_clone_source_rejects_empty_url() {
-        let r = WorkspaceCloneSource::new(
-            "team".into(),
-            "".into(),
-            None,
-            None,
-            PathBuf::from("/tmp"),
-        );
+        let r =
+            WorkspaceCloneSource::new("team".into(), "".into(), None, None, PathBuf::from("/tmp"));
         assert!(r.is_err());
     }
 
     fn make_config_repo(id: &str) -> crate::federation::config::RepoConfig {
         crate::federation::config::RepoConfig {
             id: id.to_string(),
-            source: crate::federation::config::SourceConfig::WorkspaceDir { path: PathBuf::from("/tmp") },
+            source: crate::federation::config::SourceConfig::WorkspaceDir {
+                path: PathBuf::from("/tmp"),
+            },
         }
     }
 
@@ -563,6 +631,9 @@ workspaces:
         });
         let err = filter_repos_by_workspace(&all, &ws).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("ghost"), "expected missing id in error, got: {msg}");
+        assert!(
+            msg.contains("ghost"),
+            "expected missing id in error, got: {msg}"
+        );
     }
 }

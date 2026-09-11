@@ -50,7 +50,7 @@ fn auth_multiple_keys_accepted() {
 
 #[test]
 fn rate_limit_drains_bucket_then_refills() {
-    let rl = RateLimit::new(60);  // 60 rpm = 1 token / sec
+    let rl = RateLimit::new(60); // 60 rpm = 1 token / sec
     let k = "k1";
     for _ in 0..60 {
         assert!(rl.try_consume(k).is_ok(), "first 60 should be allowed");

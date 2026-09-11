@@ -30,7 +30,9 @@ fn claude_is_authed() -> bool {
     // presence of that file (non-empty) as the auth signal; the actual call
     // would still fail if the token is expired, but that surfaces as a real
     // assertion failure with a useful error rather than a silent skip.
-    let Some(home) = dirs::home_dir() else { return false };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
     let path = home.join(".claude/.credentials.json");
     std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)
 }
@@ -125,7 +127,11 @@ fn should_run() -> bool {
 /// referenced.
 fn test_workspace() -> Option<PathBuf> {
     let s = std::env::var("LAIN_TEST_WORKSPACE").ok()?;
-    if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
 }
 
 // ── Test 1: sanity — Claude can call get_health and get a real response ──
@@ -150,9 +156,8 @@ fn claude_calls_get_health_when_asked() {
         under the Lain MCP server in your tools). Print the raw response \
         body verbatim. Do not run any other tools. Do not write files.";
 
-    let ws = test_workspace().expect(
-        "LAIN_TEST_WORKSPACE not set; this live behavior test requires a workspace",
-    );
+    let ws = test_workspace()
+        .expect("LAIN_TEST_WORKSPACE not set; this live behavior test requires a workspace");
     let (stdout, stderr, ok) = run_claude_prompt(&ws, prompt);
     assert!(
         ok,

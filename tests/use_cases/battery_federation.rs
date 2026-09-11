@@ -8,12 +8,9 @@
 use lain::federation::loader::load_federation;
 use lain::federation::repo_id::RepoId;
 use lain::server::mcp::federation_tools::federation::{
-    get_cross_repo_blast_radius, get_federation_health, get_repo_info,
-    list_repos, search_org,
+    get_cross_repo_blast_radius, get_federation_health, get_repo_info, list_repos, search_org,
 };
-use lain::server::mcp::federation_tools::workspace::{
-    get_active_workspace, list_workspaces,
-};
+use lain::server::mcp::federation_tools::workspace::{get_active_workspace, list_workspaces};
 
 #[path = "../common/mod.rs"]
 #[allow(clippy::duplicate_mod)]
@@ -91,7 +88,9 @@ async fn boot_federation() -> (
             .await
             .expect("index timed out")
             .expect("index failed");
-        fed.project_repo(&RepoId::new(id_str).unwrap()).await.expect("project_repo");
+        fed.project_repo(&RepoId::new(id_str).unwrap())
+            .await
+            .expect("project_repo");
     }
     (project, repos_yaml, a, b, fed)
 }
@@ -102,7 +101,12 @@ async fn boot_federation() -> (
 async fn list_repos_returns_all_registered() {
     let (_project, _cfg, _a, _b, fed) = boot_federation().await;
     let repos = list_repos(&fed);
-    assert_eq!(repos.len(), 2, "two-repo federation; got {} repos", repos.len());
+    assert_eq!(
+        repos.len(),
+        2,
+        "two-repo federation; got {} repos",
+        repos.len()
+    );
 }
 
 #[tokio::test]
@@ -110,7 +114,9 @@ async fn list_repos_handles_empty_federation() {
     use lain::federation::federated_index::FederatedIndex;
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("repos.yaml"), "data_dir: /tmp\nrepos: []\n").unwrap();
-    let fed = load_federation(&dir.path().join("repos.yaml")).await.unwrap();
+    let fed = load_federation(&dir.path().join("repos.yaml"))
+        .await
+        .unwrap();
     let repos = list_repos(&fed);
     assert!(repos.is_empty(), "empty federation returns empty list");
 }
@@ -138,8 +144,11 @@ async fn get_federation_health_works() {
     let (_project, _cfg, _a, _b, fed) = boot_federation().await;
     let health = get_federation_health(&fed);
     // health is a struct; pin: total_repos == 2 after both index.
-    assert_eq!(health.total_repos, 2,
-               "federation has 2 repos; got {}", health.total_repos);
+    assert_eq!(
+        health.total_repos, 2,
+        "federation has 2 repos; got {}",
+        health.total_repos
+    );
 }
 
 // ─── search_org ──────────────────────────────────────────────────
@@ -155,9 +164,11 @@ async fn search_org_finds_indexed_symbol() {
 async fn search_org_returns_empty_for_unknown_query() {
     let (_project, _cfg, _a, _b, fed) = boot_federation().await;
     let matches = search_org(&fed, "definitely_not_a_real_symbol_xyz", 10);
-    assert!(matches.is_empty(),
-            "unknown query returns empty matches; got {}",
-            matches.len());
+    assert!(
+        matches.is_empty(),
+        "unknown query returns empty matches; got {}",
+        matches.len()
+    );
 }
 
 #[tokio::test]
@@ -177,8 +188,10 @@ async fn get_cross_repo_blast_radius_works_on_indexed_symbol() {
     let br = get_cross_repo_blast_radius(&fed, "shared_helper", 0..10);
     // Cross-repo blast radius is Ok if there are callers, Err otherwise;
     // either way, no panic. The contract: doesn't blow up on indexed input.
-    assert!(br.is_ok() || br.is_err(),
-            "cross-repo blast radius must return Result, not panic");
+    assert!(
+        br.is_ok() || br.is_err(),
+        "cross-repo blast radius must return Result, not panic"
+    );
 }
 
 #[tokio::test]

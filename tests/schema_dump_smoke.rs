@@ -41,59 +41,85 @@ fn lain_schema_dump_writes_tools_list_shape() {
 
     // Every tool must have the wire shape: {name, description, inputSchema}.
     for t in tools {
-        assert!(t.get("name").and_then(|n| n.as_str()).is_some(),
-                "tool missing `name`: {t}");
-        assert!(t.get("description").is_some(),
-                "tool missing `description`: {t}");
-        assert!(t.get("inputSchema").is_some(),
-                "tool missing `inputSchema`: {t}");
+        assert!(
+            t.get("name").and_then(|n| n.as_str()).is_some(),
+            "tool missing `name`: {t}"
+        );
+        assert!(
+            t.get("description").is_some(),
+            "tool missing `description`: {t}"
+        );
+        assert!(
+            t.get("inputSchema").is_some(),
+            "tool missing `inputSchema`: {t}"
+        );
     }
 
     // Spot-check: at least one tool from each subset must appear, so a
     // silent omission of one of the five sources shows up here.
-    let names: std::collections::HashSet<&str> =
-        tools.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str())).collect();
+    let names: std::collections::HashSet<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .collect();
     // From ToolRegistry (inventory-registered handlers): `query_graph` is
     // a long-stable member of this surface.
-    assert!(names.contains("query_graph"),
-            "ToolRegistry surface missing `query_graph`: {names:?}");
+    assert!(
+        names.contains("query_graph"),
+        "ToolRegistry surface missing `query_graph`: {names:?}"
+    );
     // From special_tool_definitions: `get_health`.
-    assert!(names.contains("get_health"),
-            "special surface missing `get_health`: {names:?}");
+    assert!(
+        names.contains("get_health"),
+        "special surface missing `get_health`: {names:?}"
+    );
     // From FEDERATION_TOOL_DEFS: `list_repos`.
-    assert!(names.contains("list_repos"),
-            "federation surface missing `list_repos`: {names:?}");
+    assert!(
+        names.contains("list_repos"),
+        "federation surface missing `list_repos`: {names:?}"
+    );
     // From WORKSPACE_TOOL_DEFS: `list_workspaces`.
-    assert!(names.contains("list_workspaces"),
-            "workspace surface missing `list_workspaces`: {names:?}");
+    assert!(
+        names.contains("list_workspaces"),
+        "workspace surface missing `list_workspaces`: {names:?}"
+    );
     // From SERVER_TOOL_DEFS: `get_server_status`.
-    assert!(names.contains("get_server_status"),
-            "server surface missing `get_server_status`: {names:?}");
+    assert!(
+        names.contains("get_server_status"),
+        "server surface missing `get_server_status`: {names:?}"
+    );
 
     // `claim_files` must declare `agent_id`, `session_token`, AND a
     // `files` arg typed as `array` — the wire-shape property that
     // caused the live e2e bug (D-H3). This locks both the surface and
     // the per-arg typing the doc promises.
-    let claim = tools.iter()
+    let claim = tools
+        .iter()
         .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("claim_files"))
         .expect("claim_files in schema");
-    let required = claim.get("inputSchema")
+    let required = claim
+        .get("inputSchema")
         .and_then(|s| s.get("required"))
         .and_then(|r| r.as_array())
         .expect("claim_files.inputSchema.required must be an array");
-    let required: std::collections::HashSet<&str> = required.iter()
-        .filter_map(|v| v.as_str()).collect();
+    let required: std::collections::HashSet<&str> =
+        required.iter().filter_map(|v| v.as_str()).collect();
     for arg in ["agent_id", "session_token", "files"] {
-        assert!(required.contains(arg),
-                "claim_files must require `{arg}`, got: {required:?}");
+        assert!(
+            required.contains(arg),
+            "claim_files must require `{arg}`, got: {required:?}"
+        );
     }
-    let files_type = claim.get("inputSchema")
+    let files_type = claim
+        .get("inputSchema")
         .and_then(|s| s.get("properties"))
         .and_then(|p| p.get("files"))
         .and_then(|f| f.get("type"))
         .and_then(|t| t.as_str());
-    assert_eq!(files_type, Some("array"),
-               "claim_files.files must be typed array, got: {claim}");
+    assert_eq!(
+        files_type,
+        Some("array"),
+        "claim_files.files must be typed array, got: {claim}"
+    );
 }
 
 /// Boot a real `lain server --transport http`, send a JSON-RPC
@@ -161,9 +187,12 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
     let mut server = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",
-            "--transport", "http",
-            "--port", &port.to_string(),
-            "--workspace", "auto",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--workspace",
+            "auto",
             "--config",
             project.path().join("repos.yaml").to_str().unwrap(),
         ])
@@ -204,7 +233,9 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
                 Err(std::io::Error::other(format!("not 200: {response}")))
             }
         })();
-        if attempt.is_ok() { break; }
+        if attempt.is_ok() {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -216,28 +247,32 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
         "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
     });
     let mut stream = TcpStream::connect(&host).expect("connect /mcp");
-    stream.write_all(
-        format!(
-            "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
              Content-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}",
-            host = host,
-            len = rpc_body.to_string().len(),
-            body = rpc_body,
+                host = host,
+                len = rpc_body.to_string().len(),
+                body = rpc_body,
+            )
+            .as_bytes(),
         )
-        .as_bytes(),
-    )
-    .expect("write rpc");
+        .expect("write rpc");
     let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read rpc response");
+    stream
+        .read_to_string(&mut response)
+        .expect("read rpc response");
 
     let _ = server.kill();
     let _ = server.wait();
 
     let body_start = response.find("\r\n\r\n").expect("http body") + 4;
     let body = &response[body_start..];
-    let rpc: serde_json::Value = serde_json::from_str(body)
-        .unwrap_or_else(|e| panic!("rpc response not JSON: {e}\n{body}"));
-    let live_tools = rpc.get("result")
+    let rpc: serde_json::Value =
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("rpc response not JSON: {e}\n{body}"));
+    let live_tools = rpc
+        .get("result")
         .and_then(|r| r.get("tools"))
         .cloned()
         .unwrap_or_else(|| panic!("rpc response missing result.tools: {rpc}"));
@@ -245,8 +280,10 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
     // Read the committed docs/tool-schema.json (regenerated by `make schema`).
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let on_disk_path = manifest_dir.join("docs/tool-schema.json");
-    assert!(on_disk_path.is_file(),
-            "docs/tool-schema.json missing — run `make schema` first: {on_disk_path:?}");
+    assert!(
+        on_disk_path.is_file(),
+        "docs/tool-schema.json missing — run `make schema` first: {on_disk_path:?}"
+    );
     let on_disk_raw = std::fs::read_to_string(&on_disk_path).expect("read docs/tool-schema.json");
     let on_disk: serde_json::Value =
         serde_json::from_str(&on_disk_raw).expect("parse docs/tool-schema.json");
@@ -257,7 +294,8 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
     let on_disk_canonical = serde_json::to_string(&on_disk).expect("canon disk");
 
     assert_eq!(
-        live_canonical, on_disk_canonical,
+        live_canonical,
+        on_disk_canonical,
         "tools/list and docs/tool-schema.json have drifted.\n\
          Re-run `make schema` and commit the result.\n\
          -- live:\n{live_tools}\n-- on-disk:\n{on_disk}",

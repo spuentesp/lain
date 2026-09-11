@@ -211,7 +211,8 @@ pub trait ToolHandler: Send + Sync {
     fn capability(&self) -> ToolCapability;
 
     /// Execute the tool. Returns a JSON-encoded string on success.
-    async fn call(&self, ctx: &ToolContext, args: &Map<String, Value>) -> Result<String, LainError>;
+    async fn call(&self, ctx: &ToolContext, args: &Map<String, Value>)
+        -> Result<String, LainError>;
 }
 
 // ─── Inventory registry ───────────────────────────────────────────────────────
@@ -223,7 +224,9 @@ pub struct ToolHandlerEntry(pub &'static dyn ToolHandler);
 
 impl std::fmt::Debug for ToolHandlerEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ToolHandlerEntry").field(&self.0.name()).finish()
+        f.debug_tuple("ToolHandlerEntry")
+            .field(&self.0.name())
+            .finish()
     }
 }
 
@@ -336,10 +339,10 @@ mod federation_binding_tests {
             crate::overlay::VolatileOverlay::new(),
             crate::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
             crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
-            Arc::new(Mutex::new(
-                GitSensor::new(&roots[0].1).expect("git sensor"),
-            )),
-            Arc::new(LspPool::new(&roots[0].1, 1, &crate::tuning::RuntimeConfig::default()).unwrap()),
+            Arc::new(Mutex::new(GitSensor::new(&roots[0].1).expect("git sensor"))),
+            Arc::new(
+                LspPool::new(&roots[0].1, 1, &crate::tuning::RuntimeConfig::default()).unwrap(),
+            ),
             Arc::new(TuningConfig::default()),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
@@ -357,7 +360,10 @@ mod federation_binding_tests {
         for (name, root, _) in &roots {
             let bound = ctx.for_repo(name).expect("repo should rebind");
             assert!(
-                bound.graph.find_node_by_name(&format!("{name}_only")).is_some(),
+                bound
+                    .graph
+                    .find_node_by_name(&format!("{name}_only"))
+                    .is_some(),
                 "{name}'s own symbol must resolve after rebinding"
             );
             let other = if *name == "alpha" { "beta" } else { "alpha" };

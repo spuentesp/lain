@@ -5,11 +5,13 @@
 //! `~/.config/lain/active_workspace` is read by `lain server --workspace
 //! auto` to pick which workspace the federation loads.
 
+use crate::error::LainError;
+use crate::federation::workspace::{
+    WorkspaceSource, WorkspaceSourceConfig, WorkspaceSpec, WorkspacesFile,
+};
+use crate::state::ActiveWorkspace;
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
-use crate::error::LainError;
-use crate::federation::workspace::{WorkspaceSource, WorkspaceSourceConfig, WorkspaceSpec, WorkspacesFile};
-use crate::state::ActiveWorkspace;
 use std::path::{Path, PathBuf};
 
 /// Subcommands for `lain workspaces`. Mirrors the actions available
@@ -54,19 +56,13 @@ pub enum WorkspacesAction {
     /// List all known workspaces.
     List,
     /// Show full spec of one workspace.
-    Show {
-        name: String,
-    },
+    Show { name: String },
     /// Set the active workspace (writes ~/.config/lain/active_workspace).
-    Use {
-        name: String,
-    },
+    Use { name: String },
     /// Print the active workspace.
     Current,
     /// Remove a workspace from workspaces.yaml.
-    Forget {
-        name: String,
-    },
+    Forget { name: String },
 }
 
 /// Dispatch a `lain workspaces <action>` invocation. `config` is the
@@ -76,15 +72,15 @@ pub enum WorkspacesAction {
 pub async fn run(action: WorkspacesAction, config: &Path) -> Result<()> {
     let config = Some(config);
     match action {
-        WorkspacesAction::Create { name, description, members } => {
-            run_create(&name, description, members, config)
-        }
+        WorkspacesAction::Create {
+            name,
+            description,
+            members,
+        } => run_create(&name, description, members, config),
         WorkspacesAction::Add { name, repo } => run_add(&name, &repo, config),
         WorkspacesAction::Remove { name, repo } => run_remove(&name, &repo, config),
         WorkspacesAction::Import { name, from } => run_import(&name, &from, config),
-        WorkspacesAction::Init { name, from, ref_ } => {
-            run_init(&name, &from, ref_, config).await
-        }
+        WorkspacesAction::Init { name, from, ref_ } => run_init(&name, &from, ref_, config).await,
         WorkspacesAction::List => run_list(config),
         WorkspacesAction::Show { name } => run_show(&name, config),
         WorkspacesAction::Use { name } => run_use(&name, config),
@@ -174,7 +170,11 @@ pub fn run_create(
 pub fn run_add(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
     let mut f = WorkspacesFile::load(&path).map_err(|e| anyhow!("load {}: {e}", path.display()))?;
-    let ws = f.workspaces.iter_mut().find(|w| w.name == name).ok_or_else(|| anyhow!("{}", err_not_found(name)))?;
+    let ws = f
+        .workspaces
+        .iter_mut()
+        .find(|w| w.name == name)
+        .ok_or_else(|| anyhow!("{}", err_not_found(name)))?;
     if !ws.members.iter().any(|m| m == repo) {
         ws.members.push(repo.to_string());
     }
@@ -190,7 +190,11 @@ pub fn run_add(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
 pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
     let mut f = WorkspacesFile::load(&path).map_err(|e| anyhow!("load {}: {e}", path.display()))?;
-    let ws = f.workspaces.iter_mut().find(|w| w.name == name).ok_or_else(|| anyhow!("{}", err_not_found(name)))?;
+    let ws = f
+        .workspaces
+        .iter_mut()
+        .find(|w| w.name == name)
+        .ok_or_else(|| anyhow!("{}", err_not_found(name)))?;
     ws.members.retain(|m| m != repo);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
@@ -204,8 +208,12 @@ pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
 pub fn run_import(name: &str, from: &Path, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
     let from_path = from.join("workspaces.yaml");
-    let from_file = WorkspacesFile::load(&from_path).map_err(|e| anyhow!("load {}: {e}", from_path.display()))?;
-    let imported = from_file.workspaces.iter().find(|w| w.name == name)
+    let from_file = WorkspacesFile::load(&from_path)
+        .map_err(|e| anyhow!("load {}: {e}", from_path.display()))?;
+    let imported = from_file
+        .workspaces
+        .iter()
+        .find(|w| w.name == name)
         .ok_or_else(|| anyhow!("workspace '{name}' not found in {}", from_path.display()))?
         .clone();
     let mut f = load_or_default(&path)?;
@@ -268,7 +276,7 @@ pub async fn run_init(
             ref_,
             refresh_interval_secs: None,
         }),
-        members: vec![],  // populate via `lain workspaces add` afterward
+        members: vec![], // populate via `lain workspaces add` afterward
     });
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
@@ -286,7 +294,11 @@ pub fn run_list(config: Option<&Path>) -> Result<()> {
         return Ok(());
     }
     for ws in &f.workspaces {
-        let marker = if active.as_deref() == Some(&ws.name) { "* " } else { "  " };
+        let marker = if active.as_deref() == Some(&ws.name) {
+            "* "
+        } else {
+            "  "
+        };
         println!("{}{:<24} {} repos", marker, ws.name, ws.members.len());
     }
     Ok(())
@@ -296,7 +308,10 @@ pub fn run_list(config: Option<&Path>) -> Result<()> {
 pub fn run_show(name: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
     let f = WorkspacesFile::load(&path).map_err(|e| anyhow!("load {}: {e}", path.display()))?;
-    let ws = f.workspaces.iter().find(|w| w.name == name)
+    let ws = f
+        .workspaces
+        .iter()
+        .find(|w| w.name == name)
         .ok_or_else(|| anyhow!("{}", err_not_found(name)))?;
     println!("name: {}", ws.name);
     if let Some(d) = &ws.description {
@@ -307,10 +322,18 @@ pub fn run_show(name: &str, config: Option<&Path>) -> Result<()> {
         println!("  - {m}");
     }
     match &ws.source {
-        Some(WorkspaceSourceConfig::WorkspaceDir { path }) => println!("source: workspace_dir ({})", path.display()),
-        Some(WorkspaceSourceConfig::WorkspaceClone { url, ref_, refresh_interval_secs }) => {
+        Some(WorkspaceSourceConfig::WorkspaceDir { path }) => {
+            println!("source: workspace_dir ({})", path.display())
+        }
+        Some(WorkspaceSourceConfig::WorkspaceClone {
+            url,
+            ref_,
+            refresh_interval_secs,
+        }) => {
             let r = ref_.clone().unwrap_or_else(|| "main".to_string());
-            let ri = refresh_interval_secs.map(|n| format!(" refresh={n}s")).unwrap_or_default();
+            let ri = refresh_interval_secs
+                .map(|n| format!(" refresh={n}s"))
+                .unwrap_or_default();
             println!("source: workspace_clone ({url} @ {r}{ri})");
         }
         None => println!("source: (none)"),
@@ -323,13 +346,25 @@ pub fn run_use(name: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
     let f = WorkspacesFile::load(&path).map_err(|e| anyhow!("load {}: {e}", path.display()))?;
     if !f.workspaces.iter().any(|w| w.name == name) {
-        return Err(anyhow!("{}", LainError::Config(format!(
-            "workspace '{name}' not found in {}", path.display()
-        ))).into());
+        return Err(anyhow!(
+            "{}",
+            LainError::Config(format!(
+                "workspace '{name}' not found in {}",
+                path.display()
+            ))
+        )
+        .into());
     }
-    ActiveWorkspace { name: name.to_string(), config_path: Some(path.clone()) }.save()
-        .map_err(|e| anyhow!("save active workspace: {e}"))?;
-    println!("Active workspace set to '{name}' (from {}). Restart `lain server` to pick it up.", path.display());
+    ActiveWorkspace {
+        name: name.to_string(),
+        config_path: Some(path.clone()),
+    }
+    .save()
+    .map_err(|e| anyhow!("save active workspace: {e}"))?;
+    println!(
+        "Active workspace set to '{name}' (from {}). Restart `lain server` to pick it up.",
+        path.display()
+    );
     Ok(())
 }
 

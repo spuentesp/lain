@@ -31,7 +31,9 @@ pub fn tool_text_result(
     static_graph_generation_unix: Option<i64>,
 ) -> CallToolResult {
     CallToolResult {
-        content: vec![ContentBlock::TextContent(TextContent::new(text, None, None))],
+        content: vec![ContentBlock::TextContent(TextContent::new(
+            text, None, None,
+        ))],
         is_error: Some(is_error),
         meta: revision_meta(overlay, static_graph_generation_unix),
         structured_content: None,
@@ -109,7 +111,10 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
         }
         "mode" => {
             p.insert("type".into(), "string".into());
-            p.insert("enum".into(), serde_json::json!(["interactive", "background"]));
+            p.insert(
+                "enum".into(),
+                serde_json::json!(["interactive", "background"]),
+            );
             p.insert("description".into(), "interactive or background".into());
         }
         "symbols" => {

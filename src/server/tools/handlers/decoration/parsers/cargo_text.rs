@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 use crate::server::tools::handlers::decoration::parsers::ErrorParser;
+use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 
 /// Regex-based fallback parser for human-readable cargo output
 pub struct CargoTextParser;
@@ -54,7 +54,11 @@ impl ErrorParser for CargoTextParser {
                 if parts.len() >= 2 {
                     let path = parts[parts.len() - 1].to_string();
                     let line_str = parts[parts.len() - 2];
-                    let col_str = if parts.len() >= 3 { Some(parts[0]) } else { None };
+                    let col_str = if parts.len() >= 3 {
+                        Some(parts[0])
+                    } else {
+                        None
+                    };
 
                     if let Ok(line_num) = line_str.parse::<u32>() {
                         let column: Option<u32> = col_str.and_then(|c| c.parse().ok());
@@ -79,7 +83,11 @@ impl ErrorParser for CargoTextParser {
 }
 
 /// Extract error code and message from header line
-fn extract_code_and_message(line: &str, prefix: &str, bare_prefix: &str) -> (Option<String>, String) {
+fn extract_code_and_message(
+    line: &str,
+    prefix: &str,
+    bare_prefix: &str,
+) -> (Option<String>, String) {
     if let Some(bracket_end) = line.find(']') {
         let code = &line[prefix.len()..bracket_end];
         let message = if bracket_end + 2 <= line.len() {

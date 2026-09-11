@@ -99,7 +99,9 @@ async fn sync_overlay_populates_volatile_overlay_from_tree_sitter_when_lsp_unava
     // Drives `process_overlay_change` per uncommitted change →
     // `ensure_server` errors on missing rust-analyzer → falls
     // back to `treesitter::extract_definitions` → `overlay.insert_node`.
-    ri.sync_overlay().await.expect("sync_overlay should succeed");
+    ri.sync_overlay()
+        .await
+        .expect("sync_overlay should succeed");
 
     // Assert (1): the federation actually walked the LSP-fail arm.
     // `sync_state` reads this counter into `RefreshOutcome`; an

@@ -12,8 +12,8 @@
 //!   the author happened to be looking at.
 
 use super::command_center_assets::{
-    APP_JS, BLAST_RADIUS_HTML, CALL_CHAIN_HTML, COUPLING_HTML, INDEX_HTML, STYLES_CSS, THEME_CSS,
-    dev_spa_dir, serve_bytes, serve_str,
+    dev_spa_dir, serve_bytes, serve_str, APP_JS, BLAST_RADIUS_HTML, CALL_CHAIN_HTML, COUPLING_HTML,
+    INDEX_HTML, STYLES_CSS, THEME_CSS,
 };
 
 /// Strip `/* … */` comments so documentation prose can mention colours
@@ -40,7 +40,9 @@ fn tokens_declared_in(css: &str, selector: &str) -> Vec<String> {
         .unwrap_or_else(|| panic!("theme.css is missing the `{selector}` block"));
     let body = &css[start..];
     let open = body.find('{').expect("selector block has no opening brace");
-    let end = body.find("\n}").expect("selector block has no closing brace");
+    let end = body
+        .find("\n}")
+        .expect("selector block has no closing brace");
     let mut names: Vec<String> = body[open..end]
         .lines()
         .filter_map(|line| {
@@ -354,14 +356,22 @@ fn with_dev_spa_dir<F: FnOnce() -> R, R>(dir: &std::path::Path, f: F) -> R {
 #[test]
 fn dev_spa_dir_returns_none_when_env_unset() {
     let result = with_cleared_dev_spa_dir(dev_spa_dir);
-    assert!(result.is_none(), "dev_spa_dir should be None when env var is unset");
+    assert!(
+        result.is_none(),
+        "dev_spa_dir should be None when env var is unset"
+    );
 }
 
 #[test]
 fn dev_spa_dir_returns_none_when_path_does_not_exist() {
-    std::env::set_var("LAIN_DEV_SPA_DIR", "/nonexistent/path/that/should/not/exist");
-    assert!(dev_spa_dir().is_none(),
-        "dev_spa_dir should be None when the path is not a directory");
+    std::env::set_var(
+        "LAIN_DEV_SPA_DIR",
+        "/nonexistent/path/that/should/not/exist",
+    );
+    assert!(
+        dev_spa_dir().is_none(),
+        "dev_spa_dir should be None when the path is not a directory"
+    );
     std::env::remove_var("LAIN_DEV_SPA_DIR");
 }
 
@@ -370,8 +380,10 @@ fn serve_bytes_returns_embedded_when_env_unset() {
     let bytes: &'static [u8] = b"<html>embedded</html>";
     let result = with_cleared_dev_spa_dir(|| {
         let cow = serve_bytes("index.html", bytes);
-        assert!(matches!(cow, Cow::Borrowed(_)),
-            "without dev override, serve_bytes must return the embedded slice");
+        assert!(
+            matches!(cow, Cow::Borrowed(_)),
+            "without dev override, serve_bytes must return the embedded slice"
+        );
         cow
     });
     assert_eq!(&*result, bytes);
@@ -384,8 +396,10 @@ fn serve_bytes_reads_from_disk_when_env_set_and_file_exists() {
     std::fs::write(&on_disk, b"<html>from disk</html>").expect("write");
     let bytes: &'static [u8] = b"<html>embedded</html>";
     let cow = with_dev_spa_dir(tmp.path(), || serve_bytes("index.html", bytes));
-    assert!(matches!(cow, Cow::Owned(_)),
-        "with dev override, serve_bytes must return Owned bytes from disk");
+    assert!(
+        matches!(cow, Cow::Owned(_)),
+        "with dev override, serve_bytes must return Owned bytes from disk"
+    );
     assert_eq!(&*cow, b"<html>from disk</html>");
 }
 
@@ -398,8 +412,10 @@ fn serve_bytes_falls_back_to_embedded_when_file_missing_on_disk() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let bytes: &'static [u8] = b"<html>embedded</html>";
     let cow = with_dev_spa_dir(tmp.path(), || serve_bytes("nonexistent.html", bytes));
-    assert!(matches!(cow, Cow::Borrowed(_)),
-        "missing file on disk must fall back to embedded, not error");
+    assert!(
+        matches!(cow, Cow::Borrowed(_)),
+        "missing file on disk must fall back to embedded, not error"
+    );
     assert_eq!(&*cow, bytes);
 }
 

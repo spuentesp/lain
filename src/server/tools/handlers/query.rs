@@ -50,7 +50,7 @@ fn occupancy_payload(presence: &PresenceRegistry, occupancy: &OccupancyMap) -> V
 /// When no agents have registered (the default for the sidecar /
 /// read-only executor), `active_agents` is an empty list.
 #[allow(clippy::too_many_arguments)] // one more than the lint's 7; the
-// alternative is a parameter struct used by exactly one call site.
+                                     // alternative is a parameter struct used by exactly one call site.
 pub fn query_graph(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
@@ -85,8 +85,7 @@ pub fn query_graph(
     // Round-trip the executor's `QueryResult` through `serde_json::Value`
     // so we can splice the occupancy summary into the same JSON object
     // (rather than wrapping the whole thing in another envelope).
-    let mut value: Value = serde_json::to_value(&result)
-        .map_err(|e| LainError::Json(e))?;
+    let mut value: Value = serde_json::to_value(&result).map_err(|e| LainError::Json(e))?;
     match value.as_object_mut() {
         Some(obj) => {
             obj.insert(

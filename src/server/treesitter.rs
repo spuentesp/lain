@@ -4,9 +4,9 @@
 //! Returns unresolved (line, name, edge_type) tuples; caller resolves to node IDs.
 
 use crate::schema::{EdgeType, NodeType};
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::Path;
-use parking_lot::Mutex;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
 thread_local! {
@@ -26,50 +26,163 @@ pub struct StaticRef {
 /// blocked since user code commonly defines these for domain-specific purposes.
 const BUILTIN_CALLS: &[&str] = &[
     // Constructors / Conversions
-    "new", "clone", "into", "from", "to_string", "to_owned", "as_ref", "as_mut",
+    "new",
+    "clone",
+    "into",
+    "from",
+    "to_string",
+    "to_owned",
+    "as_ref",
+    "as_mut",
     // Option/Result
-    "unwrap", "expect", "ok", "err", "unwrap_or", "unwrap_or_else", "unwrap_or_default",
-    "ok_or", "is_some", "is_none", "is_ok", "is_err",
+    "unwrap",
+    "expect",
+    "ok",
+    "err",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "ok_or",
+    "is_some",
+    "is_none",
+    "is_ok",
+    "is_err",
     // Error handling
-    "map_err", "and_then", "or_else", "flatten",
+    "map_err",
+    "and_then",
+    "or_else",
+    "flatten",
     // Iterators (canonical methods, not the closure-based std traits)
-    "iter", "iter_mut", "into_iter", "enumerate", "zip", "flat_map",
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "enumerate",
+    "zip",
+    "flat_map",
     // Boolean
-    "any", "all",
+    "any",
+    "all",
     // String
-    "trim", "split", "join",
+    "trim",
+    "split",
+    "join",
     // Async
-    "await", "spawn", "block_on",
+    "await",
+    "spawn",
+    "block_on",
     // I/O / Debug
-    "println", "print", "eprintln", "eprint", "format", "panic",
-    "assert", "assert_eq", "assert_ne", "debug_assert",
+    "println",
+    "print",
+    "eprintln",
+    "eprint",
+    "format",
+    "panic",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
     // Threading / I/O primitives
-    "lock", "write", "writeln", "read", "open", "close", "flush",
+    "lock",
+    "write",
+    "writeln",
+    "read",
+    "open",
+    "close",
+    "flush",
     // Keywords
-    "self", "super", "crate", "std",
+    "self",
+    "super",
+    "crate",
+    "std",
 ];
 
 /// Known-bUILTIN types — these are never user-defined types.
 const BUILTIN_TYPES: &[&str] = &[
     // Rust stdlib
-    "String", "Vec", "HashMap", "HashSet", "BTreeMap", "BTreeSet",
-    "Option", "Result", "Box", "Arc", "Rc", "Mutex", "RwLock",
-    "Ok", "Err", "Some", "None", "Self", "Send", "Sync",
-    "Clone", "Copy", "Debug", "Display", "Default", "Drop",
-    "Into", "From", "AsRef", "AsMut", "Iterator", "Future",
-    "Pin", "Path", "PathBuf", "Error", "Write", "Read",
+    "String",
+    "Vec",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    "Option",
+    "Result",
+    "Box",
+    "Arc",
+    "Rc",
+    "Mutex",
+    "RwLock",
+    "Ok",
+    "Err",
+    "Some",
+    "None",
+    "Self",
+    "Send",
+    "Sync",
+    "Clone",
+    "Copy",
+    "Debug",
+    "Display",
+    "Default",
+    "Drop",
+    "Into",
+    "From",
+    "AsRef",
+    "AsMut",
+    "Iterator",
+    "Future",
+    "Pin",
+    "Path",
+    "PathBuf",
+    "Error",
+    "Write",
+    "Read",
     // Python builtins
-    "True", "False", "NotImplementedError",
-    "TypeError", "ValueError", "KeyError", "IndexError",
-    "Exception", "RuntimeError", "StopIteration",
+    "True",
+    "False",
+    "NotImplementedError",
+    "TypeError",
+    "ValueError",
+    "KeyError",
+    "IndexError",
+    "Exception",
+    "RuntimeError",
+    "StopIteration",
     // JS builtins
-    "Promise", "Array", "Object", "Function", "Number",
-    "Boolean", "Symbol", "BigInt", "Date", "Map", "Set",
-    "WeakMap", "WeakSet", "Proxy", "Reflect", "JSON",
-    "Math", "RegExp", "RangeError",
+    "Promise",
+    "Array",
+    "Object",
+    "Function",
+    "Number",
+    "Boolean",
+    "Symbol",
+    "BigInt",
+    "Date",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "Proxy",
+    "Reflect",
+    "JSON",
+    "Math",
+    "RegExp",
+    "RangeError",
     // Rust primitive wrappers
-    "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64",
-    "F32", "F64", "Usize", "Isize", "Bool", "Char",
+    "I8",
+    "I16",
+    "I32",
+    "I64",
+    "U8",
+    "U16",
+    "U32",
+    "U64",
+    "F32",
+    "F64",
+    "Usize",
+    "Isize",
+    "Bool",
+    "Char",
 ];
 
 /// Extract all call and type-usage references from a source file.
@@ -368,7 +481,9 @@ fn extract_definitions_rust(source: &str) -> Vec<SymbolDef> {
 fn collect_rust_metadata(node: &tree_sitter::Node, src_bytes: &[u8]) -> (bool, Vec<String>) {
     let mut is_deprecated = false;
     let mut labels = Vec::new();
-    let Some(parent) = node.parent() else { return (false, labels) };
+    let Some(parent) = node.parent() else {
+        return (false, labels);
+    };
 
     // Walk the parent's children backwards starting from the node. Stop as
     // soon as we encounter a non-attribute sibling — anything beyond that is
@@ -447,7 +562,10 @@ fn collect_rust_metadata(node: &tree_sitter::Node, src_bytes: &[u8]) -> (bool, V
 fn extract_definitions_python(source: &str) -> Vec<SymbolDef> {
     PARSER.with(|parser| {
         let mut parser = parser.lock();
-        if parser.set_language(&tree_sitter_python::language()).is_err() {
+        if parser
+            .set_language(&tree_sitter_python::language())
+            .is_err()
+        {
             return vec![];
         }
         let Some(tree) = parser.parse(source, None) else {
@@ -500,7 +618,10 @@ fn python_def_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "identifier" {
-            return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+            return child
+                .utf8_text(source.as_bytes())
+                .ok()
+                .map(|s| s.to_string());
         }
     }
     None
@@ -564,7 +685,10 @@ fn js_function_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "identifier" {
-            return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+            return child
+                .utf8_text(source.as_bytes())
+                .ok()
+                .map(|s| s.to_string());
         }
     }
     None
@@ -574,7 +698,10 @@ fn js_class_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "identifier" {
-            return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+            return child
+                .utf8_text(source.as_bytes())
+                .ok()
+                .map(|s| s.to_string());
         }
     }
     None
@@ -632,7 +759,8 @@ fn is_semantic_candidate(s: &str) -> bool {
 
     // Named constants that look like topics/queues/endpoints
     if s.len() > 4
-        && s.chars().all(|c| c.is_uppercase() || c == '_' || c.is_numeric())
+        && s.chars()
+            .all(|c| c.is_uppercase() || c == '_' || c.is_numeric())
         && s.contains('_')
     {
         let upper = s.to_uppercase();
@@ -662,7 +790,9 @@ fn is_semantic_candidate(s: &str) -> bool {
     }
 
     // GraphQL or gRPC method names
-    if s.starts_with('/') && (s.contains("Mutation") || s.contains("Query") || s.contains("Subscription")) {
+    if s.starts_with('/')
+        && (s.contains("Mutation") || s.contains("Query") || s.contains("Subscription"))
+    {
         return true;
     }
 
@@ -685,7 +815,8 @@ fn main() {
 }
 "#;
         let refs = extract_refs(Path::new("main.rs"), source);
-        let calls: Vec<_> = refs.iter()
+        let calls: Vec<_> = refs
+            .iter()
             .filter(|r| matches!(r.edge_type, EdgeType::Calls))
             .map(|r| r.target_name.as_str())
             .collect();
@@ -700,7 +831,8 @@ fn build(db: GraphDatabase, err: LainError) -> Result<ToolExecutor, LainError> {
 }
 "#;
         let refs = extract_refs(Path::new("lib.rs"), source);
-        let types: Vec<_> = refs.iter()
+        let types: Vec<_> = refs
+            .iter()
             .filter(|r| matches!(r.edge_type, EdgeType::Uses))
             .map(|r| r.target_name.as_str())
             .collect();
@@ -822,10 +954,14 @@ fn main() {
 }
 "#;
         let refs = extract_refs_with_locals(Path::new("main.rs"), source, &locals);
-        let calls: Vec<_> = refs.iter()
+        let calls: Vec<_> = refs
+            .iter()
             .filter(|r| matches!(r.edge_type, EdgeType::Calls))
             .map(|r| r.target_name.as_str())
             .collect();
-        assert!(calls.contains(&"process"), "should find process even if in locals");
+        assert!(
+            calls.contains(&"process"),
+            "should find process even if in locals"
+        );
     }
 }

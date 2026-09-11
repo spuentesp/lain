@@ -3,11 +3,11 @@
 //! Follows SOLID and DRY principles by delegating logic to specialized handlers.
 
 pub mod definitions;
-pub mod utils;
 pub mod handlers;
-pub mod registry;
 #[cfg(test)]
 pub mod proptest_helpers;
+pub mod registry;
+pub mod utils;
 #[cfg(test)]
 pub mod utils_tests;
 
@@ -18,18 +18,18 @@ use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::server::tools::registry::{ToolContext, ToolRegistry};
-use crate::tuning::TuningConfig;
 use crate::server::tools::utils::get_str_arg;
-use serde_json::{Map, Value, json};
-use std::sync::Arc;
+use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
-use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, error};
-use uuid::Uuid;
-use tokio::task;
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::task;
+use tracing::{error, info};
+use uuid::Uuid;
 
 pub use definitions::ToolDefinition;
 // `use utils::*;` was only needed by `augment_knowledge`'s
@@ -38,7 +38,11 @@ pub use definitions::ToolDefinition;
 #[derive(Clone, Serialize, Deserialize)]
 pub enum JobState {
     Running,
-    Completed { success: bool, output: Option<String>, error: Option<String> },
+    Completed {
+        success: bool,
+        output: Option<String>,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -97,10 +101,18 @@ pub struct ToolExecutor {
 }
 
 impl ToolExecutor {
-    pub fn graph(&self) -> &GraphDatabase { &self.ctx.graph }
-    pub fn overlay(&self) -> &VolatileOverlay { &self.ctx.overlay }
-    pub fn embedder(&self) -> &NlpEmbedder { &self.ctx.embedder }
-    pub fn ui_sessions(&self) -> &AsyncMutex<HashMap<String, UiSession>> { &self.ctx.ui_sessions }
+    pub fn graph(&self) -> &GraphDatabase {
+        &self.ctx.graph
+    }
+    pub fn overlay(&self) -> &VolatileOverlay {
+        &self.ctx.overlay
+    }
+    pub fn embedder(&self) -> &NlpEmbedder {
+        &self.ctx.embedder
+    }
+    pub fn ui_sessions(&self) -> &AsyncMutex<HashMap<String, UiSession>> {
+        &self.ctx.ui_sessions
+    }
     /// Record the port the HTTP transport is actually listening on, so
     /// tool output can link to `/ui/...` sessions. 0 (the default) means
     /// "no UI server" (stdio mode) — handlers then skip the link instead
@@ -138,10 +150,12 @@ impl ToolExecutor {
             Arc::new(AsyncMutex::new(HashMap::new())),
             Arc::clone(&jobs_registry),
             Arc::clone(&webhooks),
-        ).with_workspace(workspace);
+        )
+        .with_workspace(workspace);
 
         // Snapshot persistence (optional, for resumeability)
-        let jobs_path = std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
+        let jobs_path =
+            std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         if let Ok(contents) = std::fs::read_to_string(&jobs_path) {
             let jobs_registry = Arc::clone(&jobs_registry);
             let jobs_path_for_log = jobs_path.clone();
@@ -243,7 +257,8 @@ impl ToolExecutor {
             Arc::new(AsyncMutex::new(HashMap::new())),
             Arc::clone(&jobs_registry),
             Arc::clone(&webhooks),
-        ).with_workspace(workspace);
+        )
+        .with_workspace(workspace);
 
         Self {
             ctx,
@@ -281,8 +296,8 @@ impl ToolExecutor {
     /// when the configured workspace is not a git repo (e.g. in tests) so
     /// that `GitSensor::new` always has a valid `.git` to open.
     fn ensure_stub_git_repo() -> Result<std::path::PathBuf, String> {
-        use std::sync::OnceLock;
         use std::sync::Mutex;
+        use std::sync::OnceLock;
 
         static STUB: OnceLock<Mutex<Result<std::path::PathBuf, String>>> = OnceLock::new();
         let cell = STUB.get_or_init(|| Mutex::new(Err("init pending".into())));
@@ -299,7 +314,11 @@ impl ToolExecutor {
     }
 
     /// Primary dispatcher for all MCP tools
-    pub async fn call(&self, name: &str, arguments: Option<&Map<String, Value>>) -> Result<String, LainError> {
+    pub async fn call(
+        &self,
+        name: &str,
+        arguments: Option<&Map<String, Value>>,
+    ) -> Result<String, LainError> {
         // Background execution support
         if let Some(args) = arguments {
             if let Some(bg) = args.get("background") {
@@ -312,14 +331,24 @@ impl ToolExecutor {
                     const MAX_CONCURRENT_JOBS: usize = 10;
                     {
                         let guard = self.jobs.lock();
-                        let running = guard.values().filter(|j| matches!(j.state, JobState::Running)).count();
+                        let running = guard
+                            .values()
+                            .filter(|j| matches!(j.state, JobState::Running))
+                            .count();
                         if running >= MAX_CONCURRENT_JOBS {
-                            return Err(LainError::Mcp(format!("Too many concurrent jobs (max {})", MAX_CONCURRENT_JOBS)));
+                            return Err(LainError::Mcp(format!(
+                                "Too many concurrent jobs (max {})",
+                                MAX_CONCURRENT_JOBS
+                            )));
                         }
                     }
 
                     let job_id = Uuid::new_v4().to_string();
-                    let job = JobInfo { id: job_id.clone(), created_at: std::time::SystemTime::now(), state: JobState::Running };
+                    let job = JobInfo {
+                        id: job_id.clone(),
+                        created_at: std::time::SystemTime::now(),
+                        state: JobState::Running,
+                    };
 
                     {
                         let mut guard = self.jobs.lock();
@@ -335,24 +364,45 @@ impl ToolExecutor {
                             let mut guard = jobs_registry.lock();
                             if let Some(j) = guard.get_mut(&job_id_clone) {
                                 match &res {
-                                    Ok(out) => j.state = JobState::Completed { success: true, output: Some(out.clone()), error: None },
-                                    Err(e) => j.state = JobState::Completed { success: false, output: None, error: Some(e.to_string()) },
+                                    Ok(out) => {
+                                        j.state = JobState::Completed {
+                                            success: true,
+                                            output: Some(out.clone()),
+                                            error: None,
+                                        }
+                                    }
+                                    Err(e) => {
+                                        j.state = JobState::Completed {
+                                            success: false,
+                                            output: None,
+                                            error: Some(e.to_string()),
+                                        }
+                                    }
                                 }
                             }
                         } // guard dropped here — must release before webhook/persist
 
-                        let hooks = { let h = webhooks.lock().await; h.clone() };
+                        let hooks = {
+                            let h = webhooks.lock().await;
+                            h.clone()
+                        };
                         if !hooks.is_empty() {
                             let client = Client::new();
                             let payload = match &res {
-                                Ok(out) => json!({ "job_id": job_id_clone, "state": "completed", "output": out }),
-                                Err(e) => json!({ "job_id": job_id_clone, "state": "failed", "error": e.to_string() }),
+                                Ok(out) => {
+                                    json!({ "job_id": job_id_clone, "state": "completed", "output": out })
+                                }
+                                Err(e) => {
+                                    json!({ "job_id": job_id_clone, "state": "failed", "error": e.to_string() })
+                                }
                             };
                             for url in hooks {
                                 let _ = client.post(&url).json(&payload).send().await;
                             }
                         }
-                        if let Err(e) = Self::persist_jobs_snapshot(Arc::clone(&jobs_registry)).await {
+                        if let Err(e) =
+                            Self::persist_jobs_snapshot(Arc::clone(&jobs_registry)).await
+                        {
                             tracing::warn!("job snapshot not persisted: {e}");
                         }
                     });
@@ -365,7 +415,11 @@ impl ToolExecutor {
         return self.call_inner(name, arguments).await;
     }
 
-    async fn call_inner(&self, name: &str, arguments: Option<&Map<String, Value>>) -> Result<String, LainError> {
+    async fn call_inner(
+        &self,
+        name: &str,
+        arguments: Option<&Map<String, Value>>,
+    ) -> Result<String, LainError> {
         let args = arguments.cloned().unwrap_or_default();
 
         // Special executor methods — not registered as ToolHandlers
@@ -406,7 +460,11 @@ impl ToolExecutor {
 
     pub async fn get_health(&self) -> Result<String, LainError> {
         let (nodes, edges) = self.ctx.graph.get_stats();
-        let last_commit = self.ctx.graph.get_last_commit()?.unwrap_or_else(|| "None".to_string());
+        let last_commit = self
+            .ctx
+            .graph
+            .get_last_commit()?
+            .unwrap_or_else(|| "None".to_string());
         let overlay_stats = self.ctx.overlay.stats();
 
         let embedder_status = if self.ctx.embedder.is_stub() {
@@ -534,12 +592,14 @@ impl ToolExecutor {
             let lsp_guard = lsp.lock().await;
             lsp_guard.get_supported_languages()
         };
-        
+
         let mut seen_binaries = std::collections::HashSet::new();
         for (_, binary, available) in langs {
-            if seen_binaries.contains(&binary) { continue; }
+            if seen_binaries.contains(&binary) {
+                continue;
+            }
             seen_binaries.insert(binary.clone());
-            
+
             let status = if available { "✅" } else { "❌ (Missing)" };
             output.push_str(&format!("- **{}**: {}\n", binary, status));
         }
@@ -578,19 +638,43 @@ impl ToolExecutor {
         let mut mutating = Vec::new();
 
         let excluded = [
-            "get_health", "get_agent_strategy", "install_language_server", "query_graph"
+            "get_health",
+            "get_agent_strategy",
+            "install_language_server",
+            "query_graph",
         ];
         let readonly_set = [
-            "explore_architecture", "list_entry_points", "compare_modules", "architectural_observations",
-            "trace_dependency", "get_call_chain", "navigate_to_anchor", "get_layered_map", "get_master_map",
-            "semantic_search", "find_anchors", "get_anchor_score", "get_context_depth",
-            "find_dead_code", "explain_symbol", "suggest_refactor_targets",
-            "get_context_for_prompt", "get_code_snippet", "get_call_sites",
-            "find_untested_functions", "get_test_template", "find_test_file", "get_coverage_summary",
-            "get_cross_runtime_callers", "describe_schema"
+            "explore_architecture",
+            "list_entry_points",
+            "compare_modules",
+            "architectural_observations",
+            "trace_dependency",
+            "get_call_chain",
+            "navigate_to_anchor",
+            "get_layered_map",
+            "get_master_map",
+            "semantic_search",
+            "find_anchors",
+            "get_anchor_score",
+            "get_context_depth",
+            "find_dead_code",
+            "explain_symbol",
+            "suggest_refactor_targets",
+            "get_context_for_prompt",
+            "get_code_snippet",
+            "get_call_sites",
+            "find_untested_functions",
+            "get_test_template",
+            "find_test_file",
+            "get_coverage_summary",
+            "get_cross_runtime_callers",
+            "describe_schema",
         ];
         let structural_set = [
-            "add_comment", "tag_node", "update_node_metadata", "insert_reference_edge"
+            "add_comment",
+            "tag_node",
+            "update_node_metadata",
+            "insert_reference_edge",
         ];
 
         for t in tools.iter().filter(|t| !excluded.contains(&t.name)) {
@@ -617,14 +701,31 @@ impl ToolExecutor {
         }
 
         sections.push("\n## Decision Flow\n\n".to_string());
-        sections.push("1. **Explore unknown area**: `get_layered_map` or `architectural_observations`\n".to_string());
-        sections.push("2. **Find specific symbol**: `trace_dependency` or `semantic_search`\n".to_string());
-        sections.push("3. **Assess change risk**: `get_blast_radius` before modifying\n".to_string());
-        sections.push("4. **Understand coupling**: `get_coupling_radar` for hidden co-change patterns\n".to_string());
-        sections.push("5. **Find anchors**: `find_anchors` to identify stable architectural roots\n".to_string());
-        sections.push("6. **Complex queries**: Use `query_graph` for multi-hop traversals\n".to_string());
+        sections.push(
+            "1. **Explore unknown area**: `get_layered_map` or `architectural_observations`\n"
+                .to_string(),
+        );
+        sections.push(
+            "2. **Find specific symbol**: `trace_dependency` or `semantic_search`\n".to_string(),
+        );
+        sections
+            .push("3. **Assess change risk**: `get_blast_radius` before modifying\n".to_string());
+        sections.push(
+            "4. **Understand coupling**: `get_coupling_radar` for hidden co-change patterns\n"
+                .to_string(),
+        );
+        sections.push(
+            "5. **Find anchors**: `find_anchors` to identify stable architectural roots\n"
+                .to_string(),
+        );
+        sections.push(
+            "6. **Complex queries**: Use `query_graph` for multi-hop traversals\n".to_string(),
+        );
 
-        sections.push("\n*Use tools incrementally (N+1 approach) to avoid context window overflow.*\n".to_string());
+        sections.push(
+            "\n*Use tools incrementally (N+1 approach) to avoid context window overflow.*\n"
+                .to_string(),
+        );
 
         sections.push("\n---\n\n## Federation Mode (for org-wide questions)\n".to_string());
         sections.push(
@@ -643,9 +744,13 @@ impl ToolExecutor {
 
         sections.push("\n### `repo_id` Resolution Rule\n".to_string());
         sections.push("1. If `repo_id` is explicit → use it.\n".to_string());
-        sections.push("2. If `symbol` is given and resolves to a unique repo → use that.\n".to_string());
+        sections.push(
+            "2. If `symbol` is given and resolves to a unique repo → use that.\n".to_string(),
+        );
         sections.push("3. If 1 repo is registered → use it.\n".to_string());
-        sections.push("4. Otherwise → `Config(\"multiple repos; specify repo_id or symbol\")`.\n".to_string());
+        sections.push(
+            "4. Otherwise → `Config(\"multiple repos; specify repo_id or symbol\")`.\n".to_string(),
+        );
 
         // Workspace mode: appends a section that explains the 4 new
         // workspace tools + the resolution rule when a workspace is
@@ -658,10 +763,16 @@ impl ToolExecutor {
              repos are loaded. Use these tools to learn the scope and reason about it:\n"
                 .to_string(),
         );
-        sections.push("- **list_workspaces**: list known workspaces + which is active\n".to_string());
-        sections.push("- **get_active_workspace**: which workspace the server holds right now\n".to_string());
+        sections
+            .push("- **list_workspaces**: list known workspaces + which is active\n".to_string());
+        sections.push(
+            "- **get_active_workspace**: which workspace the server holds right now\n".to_string(),
+        );
         sections.push("- **get_workspace(name)**: full detail on one workspace\n".to_string());
-        sections.push("- **get_workspace_graph(filter?)**: node + edge data for the dashboard view\n".to_string());
+        sections.push(
+            "- **get_workspace_graph(filter?)**: node + edge data for the dashboard view\n"
+                .to_string(),
+        );
         sections.push(
             "\nThe 6 federation tools (`list_repos`, `search_org`, `get_cross_repo_blast_radius`, etc.) \
              operate over the active workspace's repo subset. `get_repo_info(<repo_id>)` returns `NotFound` \
@@ -689,7 +800,6 @@ impl ToolExecutor {
     // indexing gap, and `find_dead_code` already reports it as one rather
     // than silently guessing. Fixing that belongs in the resolve phase,
     // not in a lazy side-channel that no code path reaches.
-
 }
 
 #[doc(hidden)]
@@ -708,7 +818,16 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
     );
     let tuning = Arc::new(crate::tuning::TuningConfig::default());
     let cross_encoder = crate::nlp::CrossEncoder::from_dir(Path::new("/nonexistent"));
-    ToolExecutor::new(graph, overlay, embedder, cross_encoder, git, lsp_pool, tuning, PathBuf::from("."))
+    ToolExecutor::new(
+        graph,
+        overlay,
+        embedder,
+        cross_encoder,
+        git,
+        lsp_pool,
+        tuning,
+        PathBuf::from("."),
+    )
 }
 
 #[cfg(test)]
@@ -751,6 +870,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let graph = crate::graph::GraphDatabase::new(&temp_dir.path().join("graph.bin")).unwrap();
         let exec = create_test_executor_with_graph(graph);
-        exec.get_agent_strategy().expect("get_agent_strategy should succeed")
+        exec.get_agent_strategy()
+            .expect("get_agent_strategy should succeed")
     }
 }

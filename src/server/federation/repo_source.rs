@@ -194,7 +194,9 @@ impl RepoSource for LocalCloneSource {
     fn content_hash(&self) -> Result<Option<String>, LainError> {
         git_head_hash(&self.local_path)
     }
-    fn id_namespace(&self) -> &crate::schema::RepoNamespace { &self.id_namespace }
+    fn id_namespace(&self) -> &crate::schema::RepoNamespace {
+        &self.id_namespace
+    }
     async fn fetch(&self) -> Result<(), LainError> {
         let path = self.local_path.clone();
         let url = self.url.clone();
@@ -320,7 +322,9 @@ impl RepoSource for ShallowCloneSource {
     fn content_hash(&self) -> Result<Option<String>, LainError> {
         self.inner.content_hash()
     }
-    fn id_namespace(&self) -> &crate::schema::RepoNamespace { self.inner.id_namespace() }
+    fn id_namespace(&self) -> &crate::schema::RepoNamespace {
+        self.inner.id_namespace()
+    }
     async fn fetch(&self) -> Result<(), LainError> {
         let path = self.inner.local_path.clone();
         let url = self.inner.url.clone();
@@ -451,7 +455,9 @@ impl RepoSource for WorkspaceDirSource {
     fn content_hash(&self) -> Result<Option<String>, LainError> {
         git_head_hash(&self.local_path)
     }
-    fn id_namespace(&self) -> &crate::schema::RepoNamespace { &self.id_namespace }
+    fn id_namespace(&self) -> &crate::schema::RepoNamespace {
+        &self.id_namespace
+    }
     async fn fetch(&self) -> Result<(), LainError> {
         Ok(())
     }

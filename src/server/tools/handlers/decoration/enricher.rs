@@ -97,8 +97,7 @@ fn compute_combined_blast_radius(
     symbols: &std::collections::HashSet<String>,
     graph: &GraphDatabase,
 ) -> Vec<String> {
-    let mut all_reachable: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut all_reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Build a name -> node mapping once (O(m) where m = total function nodes)
     let Ok(all_func_nodes) = graph.get_nodes_by_type(NodeType::Function) else {
@@ -141,8 +140,7 @@ fn compute_co_change_partners(
     files: &std::collections::HashSet<std::path::PathBuf>,
     graph: &GraphDatabase,
 ) -> Vec<(String, usize)> {
-    let mut partners: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut partners: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for file in files {
         if let Ok(pairs) = graph.get_co_change_partners(&file.to_string_lossy()) {
@@ -172,9 +170,7 @@ fn generate_architectural_note(
             }
         }
 
-        if let Some((most_repeated, count)) =
-            symbol_error_counts.iter().max_by_key(|(_, c)| *c)
-        {
+        if let Some((most_repeated, count)) = symbol_error_counts.iter().max_by_key(|(_, c)| *c) {
             if *count >= 2 && errors.len() > 1 {
                 return Some(format!(
                     "{} of {} failures are in `{}` — likely a single root cause",

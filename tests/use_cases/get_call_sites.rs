@@ -211,11 +211,19 @@ fn get_call_sites_for_unreferenced_symbol_returns_empty() {
     let db_path = project.path().join("graph.bin");
     let db = lain::graph::GraphDatabase::new(&db_path).unwrap();
     let overlay = lain::overlay::VolatileOverlay::new();
-    let mut n = GraphNode::new(NodeType::Function, "lonely_target".into(), "src/lib.rs".into());
-    n.line_start = Some(1); n.line_end = Some(3);
+    let mut n = GraphNode::new(
+        NodeType::Function,
+        "lonely_target".into(),
+        "src/lib.rs".into(),
+    );
+    n.line_start = Some(1);
+    n.line_end = Some(3);
     db.upsert_node(n).unwrap();
     let result = get_call_sites(project.path(), &db, &overlay, "lonely_target");
     assert!(result.is_ok(), "unreferenced symbol must succeed");
     let text = result.unwrap();
-    assert!(!text.is_empty(), "response must be non-empty (e.g. 'no call sites')");
+    assert!(
+        !text.is_empty(),
+        "response must be non-empty (e.g. 'no call sites')"
+    );
 }

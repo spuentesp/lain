@@ -1,9 +1,9 @@
 //! GitOps domain handlers - git operations for agent workflow
 
 use crate::error::LainError;
-use crate::git::{GitSensor, ChangeType};
-use std::sync::Arc;
+use crate::git::{ChangeType, GitSensor};
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 pub fn get_file_diff(
     git: &Arc<Mutex<GitSensor>>,
@@ -19,7 +19,10 @@ pub fn get_file_diff(
     let mut result = String::from("## Uncommitted Changes\n\n");
 
     let filtered: Vec<_> = if let Some(p) = path_filter {
-        changes.iter().filter(|c| c.path.to_string_lossy().contains(p)).collect()
+        changes
+            .iter()
+            .filter(|c| c.path.to_string_lossy().contains(p))
+            .collect()
     } else {
         changes.iter().collect()
     };
@@ -70,7 +73,12 @@ pub fn get_commit_history(
             "unknown".to_string()
         };
 
-        let first_line = commit.message.lines().next().unwrap_or("(no message)").trim();
+        let first_line = commit
+            .message
+            .lines()
+            .next()
+            .unwrap_or("(no message)")
+            .trim();
         result.push_str(&format!(
             "**{}** ({} ago)\n  {}\n\n",
             &commit.id[..7.min(commit.id.len())],
@@ -82,16 +90,21 @@ pub fn get_commit_history(
     Ok(result)
 }
 
-pub fn get_branch_status(
-    git: &Arc<Mutex<GitSensor>>,
-) -> Result<String, LainError> {
+pub fn get_branch_status(git: &Arc<Mutex<GitSensor>>) -> Result<String, LainError> {
     let git_guard = git.lock();
     let branch = git_guard.get_current_branch()?;
     let is_valid = git_guard.is_valid();
 
     let mut status = String::from("## Git Branch Status\n\n");
     status.push_str(&format!("**Branch:** `{}`\n", branch));
-    status.push_str(&format!("**Status:**{}\n", if is_valid { " ✅ Clean" } else { " ⚠️ Not a git repo" }));
+    status.push_str(&format!(
+        "**Status:**{}\n",
+        if is_valid {
+            " ✅ Clean"
+        } else {
+            " ⚠️ Not a git repo"
+        }
+    ));
 
     Ok(status)
 }

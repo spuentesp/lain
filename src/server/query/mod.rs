@@ -24,15 +24,15 @@
 //! }
 //! ```
 
-pub mod spec;
 pub mod executor;
 pub mod schema;
+pub mod spec;
 
-#[cfg(test)]
-mod spec_tests;
 #[cfg(test)]
 mod executor_tests;
+#[cfg(test)]
+mod spec_tests;
 
-pub use spec::{QuerySpec, GraphOp, QueryResult};
 pub use executor::Executor;
 pub use schema::describe_schema;
+pub use spec::{GraphOp, QueryResult, QuerySpec};

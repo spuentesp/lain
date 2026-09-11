@@ -45,9 +45,12 @@ fn run_hook(agent: &str, name: &str, args: &[&str], stdin: &[u8]) -> Output {
 /// Pin the fail-open contract: every hook must exit 0 even when the
 /// underlying `lain hooks claim` call fails (no server, bad path).
 fn assert_fail_open(out: &Output, hook: &str) {
-    assert!(out.status.success(),
-            "{hook} must exit 0 (fail open per wishlist #1); got {:?}\nstderr: {}",
-            out.status, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{hook} must exit 0 (fail open per wishlist #1); got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("panic"), "{hook} panicked: {stderr}");
 }
@@ -57,8 +60,12 @@ fn assert_fail_open(out: &Output, hook: &str) {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_exits_zero_with_path() {
-    let out = run_hook("claude-code", "pre-edit.sh",
-                       &["/tmp/no_such_file_xyz_unique.rs"], b"");
+    let out = run_hook(
+        "claude-code",
+        "pre-edit.sh",
+        &["/tmp/no_such_file_xyz_unique.rs"],
+        b"",
+    );
     assert_fail_open(&out, "claude-code/pre-edit.sh");
 }
 
@@ -72,16 +79,24 @@ fn claude_code_pre_edit_exits_zero_with_no_input() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_exits_zero_with_malformed_json() {
-    let out = run_hook("claude-code", "pre-edit.sh", &[],
-                       b"this is not valid JSON {{");
+    let out = run_hook(
+        "claude-code",
+        "pre-edit.sh",
+        &[],
+        b"this is not valid JSON {{",
+    );
     assert_fail_open(&out, "claude-code/pre-edit.sh");
 }
 
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_pre_edit_exits_zero_with_valid_json() {
-    let out = run_hook("claude-code", "pre-edit.sh", &[],
-                       br#"{"tool_name":"Edit","tool_input":{"file_path":"/tmp/foo.rs"}}"#);
+    let out = run_hook(
+        "claude-code",
+        "pre-edit.sh",
+        &[],
+        br#"{"tool_name":"Edit","tool_input":{"file_path":"/tmp/foo.rs"}}"#,
+    );
     assert_fail_open(&out, "claude-code/pre-edit.sh");
 }
 
@@ -90,8 +105,12 @@ fn claude_code_pre_edit_exits_zero_with_valid_json() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_code_post_edit_exits_zero_with_path() {
-    let out = run_hook("claude-code", "post-edit.sh",
-                       &["/tmp/no_such_file_xyz_unique.rs"], b"");
+    let out = run_hook(
+        "claude-code",
+        "post-edit.sh",
+        &["/tmp/no_such_file_xyz_unique.rs"],
+        b"",
+    );
     assert_fail_open(&out, "claude-code/post-edit.sh");
 }
 
@@ -116,8 +135,12 @@ fn claude_code_pre_commit_exits_zero() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn claude_lain_hook_exits_zero_with_path() {
-    let out = run_hook("claude", "lain-hook.sh",
-                       &["/tmp/no_such_file_xyz_unique.rs"], b"");
+    let out = run_hook(
+        "claude",
+        "lain-hook.sh",
+        &["/tmp/no_such_file_xyz_unique.rs"],
+        b"",
+    );
     assert_fail_open(&out, "claude/lain-hook.sh");
 }
 
@@ -133,8 +156,12 @@ fn claude_lain_hook_exits_zero_with_no_input() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn agy_pre_edit_exits_zero_with_path() {
-    let out = run_hook("agy", "pre-edit.sh",
-                       &["/tmp/no_such_file_xyz_unique.rs"], b"");
+    let out = run_hook(
+        "agy",
+        "pre-edit.sh",
+        &["/tmp/no_such_file_xyz_unique.rs"],
+        b"",
+    );
     assert_fail_open(&out, "agy/pre-edit.sh");
 }
 
@@ -150,8 +177,12 @@ fn agy_pre_edit_exits_zero_with_no_input() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn codex_pre_edit_exits_zero_with_path() {
-    let out = run_hook("codex", "pre-edit.sh",
-                       &["/tmp/no_such_file_xyz_unique.rs"], b"");
+    let out = run_hook(
+        "codex",
+        "pre-edit.sh",
+        &["/tmp/no_such_file_xyz_unique.rs"],
+        b"",
+    );
     assert_fail_open(&out, "codex/pre-edit.sh");
 }
 
@@ -167,8 +198,12 @@ fn codex_pre_edit_exits_zero_with_no_input() {
 #[cfg_attr(target_os = "windows", ignore)]
 #[test]
 fn kimi_pre_edit_exits_zero_with_path() {
-    let out = run_hook("kimi", "pre-edit.sh",
-                       &["/tmp/no_such_file_xyz_unique.rs"], b"");
+    let out = run_hook(
+        "kimi",
+        "pre-edit.sh",
+        &["/tmp/no_such_file_xyz_unique.rs"],
+        b"",
+    );
     assert_fail_open(&out, "kimi/pre-edit.sh");
 }
 

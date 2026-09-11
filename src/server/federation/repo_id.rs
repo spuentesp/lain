@@ -10,7 +10,9 @@ impl RepoId {
         }
         Ok(Self(s.to_string()))
     }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for RepoId {
@@ -26,7 +28,9 @@ impl GlobalId {
     pub fn new(repo: &RepoId, kind: NodeType, path: &str, name: &str) -> Self {
         Self(format!("{}:{:?}:{}:{}", repo.as_str(), kind, path, name))
     }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
     pub fn repo_id(&self) -> &str {
         self.0.split(':').next().unwrap_or("")
     }

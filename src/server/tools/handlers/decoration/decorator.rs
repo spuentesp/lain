@@ -3,9 +3,9 @@
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 
+use crate::server::tools::handlers::decoration::enricher::ErrorEnricher;
 use crate::server::tools::handlers::decoration::parsers::ErrorParser;
 use crate::server::tools::handlers::decoration::types::{EnrichedReport, ParsedError, Severity};
-use crate::server::tools::handlers::decoration::enricher::ErrorEnricher;
 
 /// Decorate command output by parsing errors and enriching with graph context
 pub fn decorate_output(

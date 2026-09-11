@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 use crate::server::tools::handlers::decoration::parsers::ErrorParser;
+use crate::server::tools::handlers::decoration::types::{ParsedError, Severity};
 
 /// Parser for cargo test output (human-readable format)
 pub struct TestOutputParser;
@@ -40,10 +40,11 @@ impl ErrorParser for TestOutputParser {
                         if let Some(path_end) = part.find(".rs:") {
                             let path = format!("{}{}", &part[..path_end], ".rs");
                             let after_rs = &part[path_end + 4..]; // skip ".rs:" (4 chars), e.g., "42:5"
-                            // Split by ':' to get line and column
+                                                                  // Split by ':' to get line and column
                             let line_parts: Vec<&str> = after_rs.splitn(2, ':').collect();
                             if let Ok(line_num) = line_parts[0].parse::<u32>() {
-                                let column: Option<u32> = line_parts.get(1).and_then(|c| c.parse().ok());
+                                let column: Option<u32> =
+                                    line_parts.get(1).and_then(|c| c.parse().ok());
                                 errors.push(ParsedError {
                                     path: PathBuf::from(path),
                                     line: line_num,

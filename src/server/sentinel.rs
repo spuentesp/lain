@@ -74,7 +74,9 @@ pub fn is_stale(sentinel_path: &Path, now: SystemTime, ttl: Duration) -> bool {
     let Ok(mtime) = meta.modified() else {
         return false;
     };
-    now.duration_since(mtime).map(|age| age > ttl).unwrap_or(false)
+    now.duration_since(mtime)
+        .map(|age| age > ttl)
+        .unwrap_or(false)
 }
 
 /// Age of the sentinel as of `now`, or `None` if it can't be stat'd.
@@ -102,8 +104,14 @@ mod tests {
     fn first_caller_acquires_second_sees_held() {
         let tmp = tempfile::tempdir().unwrap();
         let s = tmp.path().join("x.lock");
-        assert!(matches!(try_acquire(&s, Duration::from_secs(10)), Acquire::Acquired(_)));
-        assert!(matches!(try_acquire(&s, Duration::from_secs(10)), Acquire::Held));
+        assert!(matches!(
+            try_acquire(&s, Duration::from_secs(10)),
+            Acquire::Acquired(_)
+        ));
+        assert!(matches!(
+            try_acquire(&s, Duration::from_secs(10)),
+            Acquire::Held
+        ));
     }
 
     #[test]
@@ -112,7 +120,10 @@ mod tests {
         let s = tmp.path().join("x.lock");
         let _ = try_acquire(&s, Duration::from_secs(10));
         let ttl = Duration::from_secs(10);
-        assert!(!is_stale(&s, SystemTime::now(), ttl), "a fresh sentinel is a live holder");
+        assert!(
+            !is_stale(&s, SystemTime::now(), ttl),
+            "a fresh sentinel is a live holder"
+        );
         assert!(
             is_stale(&s, SystemTime::now() + ttl + Duration::from_secs(1), ttl),
             "a holder that died must not block its peers forever"
@@ -132,6 +143,10 @@ mod tests {
     #[test]
     fn a_missing_sentinel_is_not_stale() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(!is_stale(&tmp.path().join("nope.lock"), SystemTime::now(), Duration::from_secs(1)));
+        assert!(!is_stale(
+            &tmp.path().join("nope.lock"),
+            SystemTime::now(),
+            Duration::from_secs(1)
+        ));
     }
 }

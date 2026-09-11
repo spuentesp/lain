@@ -4,17 +4,17 @@ use crate::server::tools::handlers::decoration::types::ParsedError;
 
 pub mod cargo;
 pub mod cargo_text;
-pub mod test_output;
 pub mod go;
-pub mod python;
 pub mod jest;
+pub mod python;
+pub mod test_output;
 
 pub use cargo::CargoJsonParser;
 pub use cargo_text::CargoTextParser;
-pub use test_output::TestOutputParser;
 pub use go::{GoBuildParser, GoTestParser};
-pub use python::PytestParser;
 pub use jest::JestParser;
+pub use python::PytestParser;
+pub use test_output::TestOutputParser;
 
 /// Trait for parsing structured output into errors
 pub trait ErrorParser: Send + Sync {

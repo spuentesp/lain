@@ -4,7 +4,7 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::server::tools::utils::resolve_node;
-use crate::server::tools::{UiSession, UiSessionData, BlastRadiusNode};
+use crate::server::tools::{BlastRadiusNode, UiSession, UiSessionData};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -57,7 +57,11 @@ pub async fn get_blast_radius(
     overlay: &VolatileOverlay,
     symbol: &str,
     include_coupling: bool,
-    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16, std::time::Duration)>,
+    ui_sessions: Option<(
+        &Arc<AsyncMutex<HashMap<String, UiSession>>>,
+        u16,
+        std::time::Duration,
+    )>,
 ) -> Result<String, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
@@ -101,7 +105,9 @@ pub async fn get_blast_radius(
     let mut tree_sitter_fallback = 0u32;
 
     while let Some((id, depth)) = queue.pop_front() {
-        if visited.contains(&id) { continue; }
+        if visited.contains(&id) {
+            continue;
+        }
         visited.insert(id.clone());
 
         if let Ok(incoming) = graph.get_edges_to(&id) {
@@ -114,7 +120,10 @@ pub async fn get_blast_radius(
                 // exactly three callers reported 564 affected nodes,
                 // 16% of the graph, including symbols in files with no
                 // reference to it at all.
-                if !matches!(e.edge_type, crate::schema::EdgeType::Calls | crate::schema::EdgeType::Uses) {
+                if !matches!(
+                    e.edge_type,
+                    crate::schema::EdgeType::Calls | crate::schema::EdgeType::Uses
+                ) {
                     continue;
                 }
                 let source_id = e.source_id.clone();
@@ -123,10 +132,13 @@ pub async fn get_blast_radius(
                 }
                 if let Ok(Some(caller)) = graph.get_node(&source_id) {
                     let is_direct = depth == 0;
-                    affected_names.push((depth + 1, format!(
-                        "  - {} ({:?}) in {}",
-                        caller.name, caller.node_type, caller.path
-                    )));
+                    affected_names.push((
+                        depth + 1,
+                        format!(
+                            "  - {} ({:?}) in {}",
+                            caller.name, caller.node_type, caller.path
+                        ),
+                    ));
                     session_nodes.push(BlastRadiusNode {
                         id: caller.id.clone(),
                         name: caller.name.clone(),
@@ -206,8 +218,7 @@ pub async fn get_blast_radius(
             ));
         }
 
-        let indirect: Vec<&(u32, String)> =
-            affected_names.iter().filter(|(d, _)| *d > 1).collect();
+        let indirect: Vec<&(u32, String)> = affected_names.iter().filter(|(d, _)| *d > 1).collect();
         if !indirect.is_empty() {
             let deepest = by_depth.keys().next_back().copied().unwrap_or(1);
             output.push_str(&format!(
@@ -232,7 +243,10 @@ pub async fn get_blast_radius(
                 }
             }
         }
-        output.push_str(&format!("\n- Total transitively affected nodes: {}", total_affected));
+        output.push_str(&format!(
+            "\n- Total transitively affected nodes: {}",
+            total_affected
+        ));
     }
 
     if include_coupling {
@@ -251,8 +265,18 @@ pub async fn get_blast_radius(
             symbol: symbol.to_string(),
             nodes: session_nodes,
         };
-        store_ui_session_and_append_link(sessions, port, "blast-radius", data, "blast-radius", &mut output, ttl).await;
-        output.push_str("\nClick nodes to mark approved, then describe your selection to the agent.");
+        store_ui_session_and_append_link(
+            sessions,
+            port,
+            "blast-radius",
+            data,
+            "blast-radius",
+            &mut output,
+            ttl,
+        )
+        .await;
+        output
+            .push_str("\nClick nodes to mark approved, then describe your selection to the agent.");
     }
 
     Ok(output)
@@ -262,7 +286,11 @@ pub async fn get_coupling_radar(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
-    ui_sessions: Option<(&Arc<AsyncMutex<HashMap<String, UiSession>>>, u16, std::time::Duration)>,
+    ui_sessions: Option<(
+        &Arc<AsyncMutex<HashMap<String, UiSession>>>,
+        u16,
+        std::time::Duration,
+    )>,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
 
@@ -280,9 +308,13 @@ pub async fn get_coupling_radar(
         symbol,
         node.path,
         partners.len(),
-        partners.iter().take(10).enumerate().map(|(i, (p, c))| {
-            format!("{}. {} (changed together {} times)", i + 1, p, c)
-        }).collect::<Vec<_>>().join("\n")
+        partners
+            .iter()
+            .take(10)
+            .enumerate()
+            .map(|(i, (p, c))| { format!("{}. {} (changed together {} times)", i + 1, p, c) })
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // Store UI session if rich format requested
@@ -292,8 +324,19 @@ pub async fn get_coupling_radar(
             matrix: vec![],
             files: partners.iter().map(|(p, _)| p.clone()).take(20).collect(),
         };
-        store_ui_session_and_append_link(sessions, port, "coupling", data, "coupling", &mut output, ttl).await;
-        output.push_str("\nClick cells to see co-change details, then describe your selection to the agent.");
+        store_ui_session_and_append_link(
+            sessions,
+            port,
+            "coupling",
+            data,
+            "coupling",
+            &mut output,
+            ttl,
+        )
+        .await;
+        output.push_str(
+            "\nClick cells to see co-change details, then describe your selection to the agent.",
+        );
     }
 
     Ok(output)

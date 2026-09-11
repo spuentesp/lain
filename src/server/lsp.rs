@@ -5,7 +5,7 @@
 use crate::error::LainError;
 use crate::schema::{GraphNode, NodeType};
 use lsp_bridge::{LspBridge, LspServerConfig};
-use lsp_types::{DocumentSymbol, SymbolKind, SymbolTag, Position};
+use lsp_types::{DocumentSymbol, Position, SymbolKind, SymbolTag};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,25 +26,139 @@ const LSP_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 const LANGUAGE_MAP: &[(&str, LspConfig)] = &[
-    ("rs", LspConfig { binary: "rust-analyzer", install_cmd: Some("rustup component add rust-analyzer") }),
-    ("go", LspConfig { binary: "gopls", install_cmd: Some("go install golang.org/x/tools/gopls@latest") }),
-    ("ts", LspConfig { binary: "typescript-language-server", install_cmd: Some("npm install -g typescript typescript-language-server") }),
-    ("tsx", LspConfig { binary: "typescript-language-server", install_cmd: Some("npm install -g typescript typescript-language-server") }),
-    ("js", LspConfig { binary: "typescript-language-server", install_cmd: Some("npm install -g typescript typescript-language-server") }),
-    ("jsx", LspConfig { binary: "typescript-language-server", install_cmd: Some("npm install -g typescript typescript-language-server") }),
-    ("py", LspConfig { binary: "pylsp", install_cmd: Some("pip install python-lsp-server") }),
-    ("java", LspConfig { binary: "jdtls", install_cmd: None }),
-    ("c", LspConfig { binary: "clangd", install_cmd: Some("brew install llvm") }),
-    ("cpp", LspConfig { binary: "clangd", install_cmd: Some("brew install llvm") }),
-    ("h", LspConfig { binary: "clangd", install_cmd: Some("brew install llvm") }),
-    ("hpp", LspConfig { binary: "clangd", install_cmd: Some("brew install llvm") }),
-    ("cs", LspConfig { binary: "omnisharp", install_cmd: None }),
-    ("rb", LspConfig { binary: "solargraph", install_cmd: Some("gem install solargraph") }),
-    ("swift", LspConfig { binary: "sourcekit-lsp", install_cmd: None }),
-    ("kt", LspConfig { binary: "kotlin-language-server", install_cmd: None }),
-    ("scala", LspConfig { binary: "metals", install_cmd: None }),
-    ("vue", LspConfig { binary: "volar", install_cmd: Some("npm install -g @vue/language-server") }),
-    ("svelte", LspConfig { binary: "svelte-language-server", install_cmd: Some("npm install -g svelte-language-server") }),
+    (
+        "rs",
+        LspConfig {
+            binary: "rust-analyzer",
+            install_cmd: Some("rustup component add rust-analyzer"),
+        },
+    ),
+    (
+        "go",
+        LspConfig {
+            binary: "gopls",
+            install_cmd: Some("go install golang.org/x/tools/gopls@latest"),
+        },
+    ),
+    (
+        "ts",
+        LspConfig {
+            binary: "typescript-language-server",
+            install_cmd: Some("npm install -g typescript typescript-language-server"),
+        },
+    ),
+    (
+        "tsx",
+        LspConfig {
+            binary: "typescript-language-server",
+            install_cmd: Some("npm install -g typescript typescript-language-server"),
+        },
+    ),
+    (
+        "js",
+        LspConfig {
+            binary: "typescript-language-server",
+            install_cmd: Some("npm install -g typescript typescript-language-server"),
+        },
+    ),
+    (
+        "jsx",
+        LspConfig {
+            binary: "typescript-language-server",
+            install_cmd: Some("npm install -g typescript typescript-language-server"),
+        },
+    ),
+    (
+        "py",
+        LspConfig {
+            binary: "pylsp",
+            install_cmd: Some("pip install python-lsp-server"),
+        },
+    ),
+    (
+        "java",
+        LspConfig {
+            binary: "jdtls",
+            install_cmd: None,
+        },
+    ),
+    (
+        "c",
+        LspConfig {
+            binary: "clangd",
+            install_cmd: Some("brew install llvm"),
+        },
+    ),
+    (
+        "cpp",
+        LspConfig {
+            binary: "clangd",
+            install_cmd: Some("brew install llvm"),
+        },
+    ),
+    (
+        "h",
+        LspConfig {
+            binary: "clangd",
+            install_cmd: Some("brew install llvm"),
+        },
+    ),
+    (
+        "hpp",
+        LspConfig {
+            binary: "clangd",
+            install_cmd: Some("brew install llvm"),
+        },
+    ),
+    (
+        "cs",
+        LspConfig {
+            binary: "omnisharp",
+            install_cmd: None,
+        },
+    ),
+    (
+        "rb",
+        LspConfig {
+            binary: "solargraph",
+            install_cmd: Some("gem install solargraph"),
+        },
+    ),
+    (
+        "swift",
+        LspConfig {
+            binary: "sourcekit-lsp",
+            install_cmd: None,
+        },
+    ),
+    (
+        "kt",
+        LspConfig {
+            binary: "kotlin-language-server",
+            install_cmd: None,
+        },
+    ),
+    (
+        "scala",
+        LspConfig {
+            binary: "metals",
+            install_cmd: None,
+        },
+    ),
+    (
+        "vue",
+        LspConfig {
+            binary: "volar",
+            install_cmd: Some("npm install -g @vue/language-server"),
+        },
+    ),
+    (
+        "svelte",
+        LspConfig {
+            binary: "svelte-language-server",
+            install_cmd: Some("npm install -g svelte-language-server"),
+        },
+    ),
 ];
 
 /// A symbol with its children for recursive processing
@@ -76,7 +190,10 @@ pub struct LspMultiplexer {
 }
 
 impl LspMultiplexer {
-    pub fn new(workspace: &Path, runtime: &crate::tuning::RuntimeConfig) -> Result<Self, LainError> {
+    pub fn new(
+        workspace: &Path,
+        runtime: &crate::tuning::RuntimeConfig,
+    ) -> Result<Self, LainError> {
         let mut registry = HashMap::new();
         for (ext, config) in LANGUAGE_MAP {
             registry.insert(ext.to_string(), config);
@@ -106,13 +223,19 @@ impl LspMultiplexer {
         let binary = config.binary.to_string();
 
         if self.unavailable.contains(&binary) {
-            return Err(LainError::Lsp(format!("LSP server '{}' is missing.", binary)));
+            return Err(LainError::Lsp(format!(
+                "LSP server '{}' is missing.",
+                binary
+            )));
         }
 
         if !self.started.contains(&binary) {
             if which::which(&binary).is_err() {
                 self.unavailable.insert(binary.clone());
-                return Err(LainError::Lsp(format!("LSP server '{}' not found in PATH.", binary)));
+                return Err(LainError::Lsp(format!(
+                    "LSP server '{}' not found in PATH.",
+                    binary
+                )));
             }
 
             let lsp_config = LspServerConfig::new()
@@ -130,16 +253,28 @@ impl LspMultiplexer {
                     info!("Started LSP server: {}", binary);
                 }
                 Ok(Err(e)) => {
-                    warn!("LSP server '{}' failed to start: {}; marking unavailable", binary, e);
+                    warn!(
+                        "LSP server '{}' failed to start: {}; marking unavailable",
+                        binary, e
+                    );
                     // Do not call stop_server here: if the process is already
                     // defunct or unresponsive, stop_server can itself hang.
                     self.unavailable.insert(binary.clone());
-                    return Err(LainError::Lsp(format!("LSP server '{}' failed to start: {}", binary, e)));
+                    return Err(LainError::Lsp(format!(
+                        "LSP server '{}' failed to start: {}",
+                        binary, e
+                    )));
                 }
                 Err(_) => {
-                    warn!("LSP server '{}' startup timed out after {:?}; marking unavailable", binary, LSP_STARTUP_TIMEOUT);
+                    warn!(
+                        "LSP server '{}' startup timed out after {:?}; marking unavailable",
+                        binary, LSP_STARTUP_TIMEOUT
+                    );
                     self.unavailable.insert(binary.clone());
-                    return Err(LainError::Lsp(format!("LSP server '{}' startup timed out", binary)));
+                    return Err(LainError::Lsp(format!(
+                        "LSP server '{}' startup timed out",
+                        binary
+                    )));
                 }
             }
         }
@@ -166,7 +301,10 @@ impl LspMultiplexer {
         let uri = format!("file://{}", path.display());
 
         let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
-        self.bridge.open_document(&server_id, &uri, &content).await.map_err(|e| LainError::Lsp(e.to_string()))?;
+        self.bridge
+            .open_document(&server_id, &uri, &content)
+            .await
+            .map_err(|e| LainError::Lsp(e.to_string()))?;
 
         // Wait for LSP to analyze (intelligent polling)
         let mut symbols = Vec::new();
@@ -175,10 +313,20 @@ impl LspMultiplexer {
         let tick = self.poll_interval;
 
         while start.elapsed() < poll_timeout {
-            symbols = match tokio::time::timeout(LSP_REQUEST_TIMEOUT, self.bridge.get_document_symbols(&server_id, &uri)).await {
+            symbols = match tokio::time::timeout(
+                LSP_REQUEST_TIMEOUT,
+                self.bridge.get_document_symbols(&server_id, &uri),
+            )
+            .await
+            {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => return Err(LainError::Lsp(e.to_string())),
-                Err(_) => return Err(LainError::Lsp(format!("document symbols request timed out for {}", server_id))),
+                Err(_) => {
+                    return Err(LainError::Lsp(format!(
+                        "document symbols request timed out for {}",
+                        server_id
+                    )))
+                }
             };
 
             if !symbols.is_empty() {
@@ -236,15 +384,30 @@ impl LspMultiplexer {
     // (removed: had no caller and no test anywhere in the tree)
 
     /// Get all references to a symbol at a specific location
-    pub async fn get_references(&mut self, path: &Path, line: u32, col: u32) -> Result<Vec<ReferenceLocation>, LainError> {
+    pub async fn get_references(
+        &mut self,
+        path: &Path,
+        line: u32,
+        col: u32,
+    ) -> Result<Vec<ReferenceLocation>, LainError> {
         let server_id = self.ensure_server(path).await?;
         let uri = format!("file://{}", path.display());
         let position = Position::new(line, col);
 
-        let locations = match tokio::time::timeout(LSP_REQUEST_TIMEOUT, self.bridge.find_references(&server_id, &uri, position)).await {
+        let locations = match tokio::time::timeout(
+            LSP_REQUEST_TIMEOUT,
+            self.bridge.find_references(&server_id, &uri, position),
+        )
+        .await
+        {
             Ok(Ok(l)) => l,
             Ok(Err(e)) => return Err(LainError::Lsp(e.to_string())),
-            Err(_) => return Err(LainError::Lsp(format!("find references request timed out for {}", server_id))),
+            Err(_) => {
+                return Err(LainError::Lsp(format!(
+                    "find references request timed out for {}",
+                    server_id
+                )))
+            }
         };
 
         let mut results = Vec::new();
@@ -271,8 +434,12 @@ impl LspMultiplexer {
                 ext
             )))?;
 
-        let install_cmd = config.install_cmd
-            .ok_or_else(|| LainError::Lsp(format!("No automated install command available for {} ({})", ext, config.binary)))?;
+        let install_cmd = config.install_cmd.ok_or_else(|| {
+            LainError::Lsp(format!(
+                "No automated install command available for {} ({})",
+                ext, config.binary
+            ))
+        })?;
 
         // Platform-specific guard for brew
         if install_cmd.contains("brew install") && !cfg!(target_os = "macos") {
@@ -282,19 +449,30 @@ impl LspMultiplexer {
             )));
         }
 
-        info!("Attempting to install LSP server for '{}' using: {}", resolved_ext, install_cmd);
+        info!(
+            "Attempting to install LSP server for '{}' using: {}",
+            resolved_ext, install_cmd
+        );
 
         let parts: Vec<&str> = install_cmd.split_whitespace().collect();
         let mut cmd = tokio::process::Command::new(parts[0]);
-        if parts.len() > 1 { cmd.args(&parts[1..]); }
+        if parts.len() > 1 {
+            cmd.args(&parts[1..]);
+        }
 
-        let output = cmd.output().await.map_err(|e| LainError::Lsp(format!("Failed to execute install command: {}", e)))?;
+        let output = cmd
+            .output()
+            .await
+            .map_err(|e| LainError::Lsp(format!("Failed to execute install command: {}", e)))?;
 
         if output.status.success() {
             self.unavailable.remove(config.binary);
             Ok(format!("Successfully installed {}.", config.binary))
         } else {
-            Err(LainError::Lsp(format!("Installation failed: {}", String::from_utf8_lossy(&output.stderr))))
+            Err(LainError::Lsp(format!(
+                "Installation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )))
         }
     }
 
@@ -336,11 +514,7 @@ impl LspMultiplexer {
         // is unresponsive. A 5s budget is enough for a healthy process
         // (SIGKILL is synchronous) and short enough that one stuck
         // server can't block the rest of the federation shutdown.
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.bridge.shutdown(),
-        )
-        .await
+        match tokio::time::timeout(std::time::Duration::from_secs(5), self.bridge.shutdown()).await
         {
             Ok(Ok(())) => {}
             Ok(Err(e)) => warn!("LSP bridge shutdown error: {}", e),
@@ -382,7 +556,15 @@ fn resolve_language_to_ext(s: &str) -> Option<&'static str> {
 fn is_noisy_symbol(kind: &SymbolKind) -> bool {
     matches!(
         *kind,
-        SymbolKind::VARIABLE | SymbolKind::FIELD | SymbolKind::STRING | SymbolKind::NUMBER | SymbolKind::BOOLEAN | SymbolKind::ARRAY | SymbolKind::OBJECT | SymbolKind::KEY | SymbolKind::NULL
+        SymbolKind::VARIABLE
+            | SymbolKind::FIELD
+            | SymbolKind::STRING
+            | SymbolKind::NUMBER
+            | SymbolKind::BOOLEAN
+            | SymbolKind::ARRAY
+            | SymbolKind::OBJECT
+            | SymbolKind::KEY
+            | SymbolKind::NULL
     )
 }
 
@@ -457,7 +639,9 @@ impl LspPool {
     ) -> Result<Self, LainError> {
         let mut multiplexers = Vec::with_capacity(size);
         for _ in 0..size {
-            multiplexers.push(Arc::new(AsyncMutex::new(LspMultiplexer::new(workspace, runtime)?)));
+            multiplexers.push(Arc::new(AsyncMutex::new(LspMultiplexer::new(
+                workspace, runtime,
+            )?)));
         }
         Ok(Self {
             multiplexers,
@@ -489,7 +673,8 @@ mod availability_tests {
     /// as live on a machine that had none of them installed.
     #[test]
     fn availability_reflects_what_is_installed_not_an_empty_negative_cache() {
-        let m = LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
+        let m =
+            LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
         let langs = m.get_supported_languages();
         assert!(!langs.is_empty(), "registry should not be empty");
 
@@ -508,14 +693,18 @@ mod availability_tests {
     /// reported as available.
     #[test]
     fn a_binary_that_is_not_installed_is_never_reported_available() {
-        let mut m = LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
+        let mut m =
+            LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap();
         let bogus: &'static LspConfig = Box::leak(Box::new(LspConfig {
             binary: "definitely-not-a-real-language-server-xyz",
             install_cmd: None,
         }));
         m.registry.insert("zzz".to_string(), bogus);
 
-        assert!(m.unavailable.is_empty(), "fresh multiplexer has an empty negative cache");
+        assert!(
+            m.unavailable.is_empty(),
+            "fresh multiplexer has an empty negative cache"
+        );
 
         let reported = m
             .get_supported_languages()

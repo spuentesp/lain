@@ -87,7 +87,9 @@ pub fn prune_old_sessions(max_age: std::time::Duration) -> std::io::Result<usize
             Ok(t) => t,
             Err(_) => continue,
         };
-        let age = now.duration_since(modified).unwrap_or(std::time::Duration::ZERO);
+        let age = now
+            .duration_since(modified)
+            .unwrap_or(std::time::Duration::ZERO);
         if age >= max_age {
             if std::fs::remove_file(&path).is_ok() {
                 removed += 1;
@@ -195,10 +197,7 @@ mod tests {
     /// Backdate a file's mtime without depending on the `filetime`
     /// crate. Uses `std::fs::File::set_modified`, stable since 1.75.
     fn filetime_set(p: &std::path::Path, t: std::time::SystemTime) {
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(p)
-            .unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
         f.set_modified(t).unwrap();
     }
 }
@@ -215,7 +214,10 @@ pub fn state_dir() -> PathBuf {
         }
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local").join("lain").join("state")
+    PathBuf::from(home)
+        .join(".local")
+        .join("lain")
+        .join("state")
 }
 
 /// Resolve the persisted-state file for a given workspace. The

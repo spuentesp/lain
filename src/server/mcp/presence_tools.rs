@@ -7,18 +7,18 @@
 //! than live presence state, because it answers a commit-time question
 //! ("did two refs touch the same symbols?") rather than a live one.
 
+use crate::server::audit::{append_edit_event, AuditEvent};
 use crate::server::ingest::LainServer;
+use crate::server::path_util::posix_string;
 use crate::server::presence::{
     AgentId, AgentKind, AgentMode, AgentSession, ChangedKind, ChangedSymbol, ClaimIntent,
     ClaimRequest, OccupancyEntry, PresenceEvent, WorldState,
 };
 use crate::server::revision_log::{LookupResult, RevisionId};
 use crate::server::schema::NodeType;
-use crate::server::audit::{append_edit_event, AuditEvent};
-use crate::server::path_util::posix_string;
 use serde::Deserialize;
-use std::path::PathBuf;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 /// Resolve a session token to its session, refreshing the heartbeat as
 /// a side effect.
@@ -44,7 +44,10 @@ fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
 }
 
 fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
-    let session = server.presence.by_token(token).ok_or("unknown session token")?;
+    let session = server
+        .presence
+        .by_token(token)
+        .ok_or("unknown session token")?;
     // Best-effort: the session was just resolved, so this only fails on
     // a race with expiry, in which case the caller's own work still
     // proceeds on the session it already holds.
@@ -67,8 +70,16 @@ pub fn run_register_agent(server: &LainServer, args: Value) -> Result<Value, Str
 }
 
 fn run_register_agent_inner(server: &LainServer, a: RegisterAgentArgs) -> Result<Value, String> {
-    let kind = a.kind.as_deref().map(AgentKind::parse).unwrap_or(AgentKind::Other("unknown".into()));
-    let mode = a.mode.as_deref().map(AgentMode::parse).unwrap_or(AgentMode::Interactive);
+    let kind = a
+        .kind
+        .as_deref()
+        .map(AgentKind::parse)
+        .unwrap_or(AgentKind::Other("unknown".into()));
+    let mode = a
+        .mode
+        .as_deref()
+        .map(AgentMode::parse)
+        .unwrap_or(AgentMode::Interactive);
     let parent = a.parent_session_id.map(AgentId);
     let session = server.presence.register(a.name, kind, mode, a.pid, parent);
     server.emit_presence_event(PresenceEvent::AgentJoined(session.clone()));
@@ -98,7 +109,9 @@ pub fn run_heartbeat(server: &LainServer, args: Value) -> Result<Value, String> 
 
 fn run_heartbeat_inner(server: &LainServer, a: HeartbeatArgs) -> Result<Value, String> {
     let agent_id = AgentId(a.agent_id);
-    server.presence.heartbeat(&agent_id, &a.session_token)
+    server
+        .presence
+        .heartbeat(&agent_id, &a.session_token)
         .map_err(|e| e.to_string())?;
     // Wishlist #5 fix: refresh the staleness clock on every claim the
     // agent holds so `last_seen_unix` actually advances with heartbeats
@@ -119,20 +132,27 @@ pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value,
     // A listing that only sees this process's own memory is the
     // symptom that made the split invisible.
     server.refresh_shared_presence();
-    let a: ListActiveAgentsArgs = serde_json::from_value(args).unwrap_or(ListActiveAgentsArgs { include_background: None });
-    let sessions = server.presence.list_active(a.include_background.unwrap_or(false));
-    let out: Vec<Value> = sessions.into_iter().map(|s| {
-        let claims = server.occupancy.list_for_agent(&s.id);
-        json!({
-            "agent_id": s.id.as_str(),
-            "name": s.name,
-            "kind": s.kind.as_str(),
-            "mode": s.mode.as_str(),
-            "started_at": crate::server::time::unix_secs_u64(s.started_at),
-            "last_heartbeat": crate::server::time::unix_secs_u64(s.last_heartbeat),
-            "claims_count": claims.len(),
+    let a: ListActiveAgentsArgs = serde_json::from_value(args).unwrap_or(ListActiveAgentsArgs {
+        include_background: None,
+    });
+    let sessions = server
+        .presence
+        .list_active(a.include_background.unwrap_or(false));
+    let out: Vec<Value> = sessions
+        .into_iter()
+        .map(|s| {
+            let claims = server.occupancy.list_for_agent(&s.id);
+            json!({
+                "agent_id": s.id.as_str(),
+                "name": s.name,
+                "kind": s.kind.as_str(),
+                "mode": s.mode.as_str(),
+                "started_at": crate::server::time::unix_secs_u64(s.started_at),
+                "last_heartbeat": crate::server::time::unix_secs_u64(s.last_heartbeat),
+                "claims_count": claims.len(),
+            })
         })
-    }).collect();
+        .collect();
     Ok(json!(out))
 }
 
@@ -146,7 +166,10 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
     let claims = server.occupancy.list_for_agent(&session.id);
-    let parent_session_id = session.parent_session_id.as_ref().map(|p| p.as_str().to_string());
+    let parent_session_id = session
+        .parent_session_id
+        .as_ref()
+        .map(|p| p.as_str().to_string());
     Ok(json!({
         "agent_id": session.id.as_str(),
         "name": session.name,
@@ -279,13 +302,11 @@ pub struct GetWorldStateArgs {
     pub plan_revision: Option<crate::server::revision_log::RevisionId>,
 }
 
-pub fn run_get_world_state(
-    server: &LainServer,
-    args: Value,
-) -> Result<Value, String> {
-    let a: GetWorldStateArgs =
-        serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let plan = a.plan_revision.unwrap_or_else(|| server.overlay.current_revision());
+pub fn run_get_world_state(server: &LainServer, args: Value) -> Result<Value, String> {
+    let a: GetWorldStateArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    let plan = a
+        .plan_revision
+        .unwrap_or_else(|| server.overlay.current_revision());
     let ws = compute_world_state(server, plan, &a.symbols, &std::collections::HashSet::new());
     serde_json::to_value(ws).map_err(|e| e.to_string())
 }
@@ -320,16 +341,32 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     // contract. If no file carried a revision, the response stays
     // world_state-less for legacy callers.
     let plan_revision: Option<RevisionId> = a.files.iter().find_map(|f| f.plan_revision);
-    let requested_symbols: Vec<String> = a.files.iter()
+    let requested_symbols: Vec<String> = a
+        .files
+        .iter()
         .flat_map(|f| f.symbols.clone().unwrap_or_default())
         .collect();
-    let requests: Vec<ClaimRequest> = a.files.into_iter().map(|f| ClaimRequest {
-        path: std::path::PathBuf::from(f.path),
-        symbols: f.symbols.unwrap_or_default(),
-        intent: f.intent.as_deref().map(|s| if s == "read" { ClaimIntent::Read } else { ClaimIntent::Edit }).unwrap_or(ClaimIntent::Edit),
-        ttl_seconds: None,
-        plan_revision: f.plan_revision,
-    }).collect();
+    let requests: Vec<ClaimRequest> = a
+        .files
+        .into_iter()
+        .map(|f| ClaimRequest {
+            path: std::path::PathBuf::from(f.path),
+            symbols: f.symbols.unwrap_or_default(),
+            intent: f
+                .intent
+                .as_deref()
+                .map(|s| {
+                    if s == "read" {
+                        ClaimIntent::Read
+                    } else {
+                        ClaimIntent::Edit
+                    }
+                })
+                .unwrap_or(ClaimIntent::Edit),
+            ttl_seconds: None,
+            plan_revision: f.plan_revision,
+        })
+        .collect();
     // Snapshot the agent's held symbols *before* the claim lands.
     // Retract detection asks "was this symbol here when you last
     // looked?", and after the claim is applied every symbol in the
@@ -352,7 +389,12 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     //      → empty `changed_symbols` plus a `note` for the agent.
     //   3. Combine the two sources and emit `Some(WorldState)`.
     if let Some(plan) = plan_revision {
-        result.world_state = Some(compute_world_state(server, plan, &requested_symbols, &held_before));
+        result.world_state = Some(compute_world_state(
+            server,
+            plan,
+            &requested_symbols,
+            &held_before,
+        ));
     }
     if !result.granted.is_empty() {
         for g in &result.granted {
@@ -413,7 +455,9 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             // disk, so Command Center subscribers see the write the
             // instant it lands rather than waiting for a future
             // `get_audit_log` poll.
-            server.emit_presence_event(PresenceEvent::EditLanded { event: audit.clone() });
+            server.emit_presence_event(PresenceEvent::EditLanded {
+                event: audit.clone(),
+            });
         }
     }
     if !result.conflicts.is_empty() {
@@ -425,10 +469,21 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         });
     }
     let mut out = serde_json::Map::new();
-    out.insert("granted".into(), Value::Array(result.granted.iter().map(|g| json!({
-        "path": posix_string(&g.path),
-        "symbols": g.symbols,
-    })).collect()));
+    out.insert(
+        "granted".into(),
+        Value::Array(
+            result
+                .granted
+                .iter()
+                .map(|g| {
+                    json!({
+                        "path": posix_string(&g.path),
+                        "symbols": g.symbols,
+                    })
+                })
+                .collect(),
+        ),
+    );
     out.insert("conflicts".into(), Value::Array(result.conflicts.iter().map(|c| json!({
         "agent_id": c.agent_id.as_str(),
         "name": agent_name(server, &c.agent_id),
@@ -537,9 +592,7 @@ fn compute_world_state(
                     current,
                     plan,
                     changed_symbols: retracted,
-                    note: Some(
-                        "plan_revision beyond current — server may have restarted".into(),
-                    ),
+                    note: Some("plan_revision beyond current — server may have restarted".into()),
                 };
             }
             LookupResult::TooOld => {
@@ -664,7 +717,11 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
-    let paths: Vec<std::path::PathBuf> = a.files.into_iter().map(|f| std::path::PathBuf::from(f.path)).collect();
+    let paths: Vec<std::path::PathBuf> = a
+        .files
+        .into_iter()
+        .map(|f| std::path::PathBuf::from(f.path))
+        .collect();
     let released = server.occupancy.release(&session.id, &paths);
     for path in &released {
         server.emit_presence_event(PresenceEvent::ClaimReleased {
@@ -682,9 +739,14 @@ pub struct ListOccupancyArgs {
 
 pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, String> {
     server.refresh_shared_presence();
-    let a: ListOccupancyArgs = serde_json::from_value(args).unwrap_or(ListOccupancyArgs { path: None });
+    let a: ListOccupancyArgs =
+        serde_json::from_value(args).unwrap_or(ListOccupancyArgs { path: None });
     let entries: Vec<OccupancyEntry> = if let Some(p) = a.path.as_deref() {
-        server.occupancy.list_for_path(std::path::Path::new(p)).into_iter().collect()
+        server
+            .occupancy
+            .list_for_path(std::path::Path::new(p))
+            .into_iter()
+            .collect()
     } else {
         server.occupancy.list_all()
     };
@@ -735,13 +797,16 @@ pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> 
         return Err("agent_id does not match session token".into());
     }
     let claims = server.occupancy.list_for_agent(&session.id);
-    Ok(json!(claims.into_iter().map(|c| json!({
-        "path": posix_string(&c.path),
-        "symbols": c.symbols,
-        "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
-        "inferred": c.inferred,
-        "claimed_at": crate::server::time::unix_secs_u64(c.claimed_at),
-    })).collect::<Vec<_>>()))
+    Ok(json!(claims
+        .into_iter()
+        .map(|c| json!({
+            "path": posix_string(&c.path),
+            "symbols": c.symbols,
+            "intent": match c.intent { ClaimIntent::Read => "read", ClaimIntent::Edit => "edit" },
+            "inferred": c.inferred,
+            "claimed_at": crate::server::time::unix_secs_u64(c.claimed_at),
+        }))
+        .collect::<Vec<_>>()))
 }
 
 // ── detect_overlap ───────────────────────────────────────────────────────────
@@ -779,20 +844,16 @@ pub fn run_detect_overlap(server: &LainServer, args: Value) -> Result<Value, Str
     let a: DetectOverlapArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let head = a.head.clone().unwrap_or_else(|| "HEAD".to_string());
 
-    let fed = server
-        .federation()
-        .ok_or(
-            "detect_overlap needs federation mode: start the server with \
+    let fed = server.federation().ok_or(
+        "detect_overlap needs federation mode: start the server with \
              `lain server --config repos.yaml`. This process was started \
              without a federation config, so it has no repos to scan.",
-        )?;
-    let workspaces = server
-        .workspaces_snapshot()
-        .ok_or(
-            "detect_overlap needs a workspaces file, and this server has none \
+    )?;
+    let workspaces = server.workspaces_snapshot().ok_or(
+        "detect_overlap needs a workspaces file, and this server has none \
              loaded. Create one with `lain workspaces create <name> --members \
              <repo-ids>`, then restart the server or call `request_reload`.",
-        )?;
+    )?;
     let spec = workspaces
         .workspaces
         .iter()
@@ -899,7 +960,10 @@ fn runtime_conflict_severity(
                 .and_then(|nodes| nodes.into_iter().next())
                 .map(|node| node.node_type)
         } else {
-            server.graph.find_node_by_name(symbol).map(|node| node.node_type)
+            server
+                .graph
+                .find_node_by_name(symbol)
+                .map(|node| node.node_type)
         }
         // A live claim may name a symbol not yet indexed. Treat it as a member
         // rather than dropping it from the score: the conflict is still real.
@@ -931,14 +995,23 @@ fn symbol_weight(kind: &NodeType) -> u32 {
         // Behaviour: two refs editing the same body is the classic silent-drop.
         NodeType::Function | NodeType::Method => 4,
         // Type definitions: a shared shape usually means a shared contract.
-        NodeType::Struct | NodeType::Enum | NodeType::Trait | NodeType::Class
-        | NodeType::Interface | NodeType::Schema => 3,
+        NodeType::Struct
+        | NodeType::Enum
+        | NodeType::Trait
+        | NodeType::Class
+        | NodeType::Interface
+        | NodeType::Schema => 3,
         // Members: narrower blast radius than a whole type.
         NodeType::Property | NodeType::Variable => 2,
         // Containers, constants, imports and cross-runtime markers: usually
         // co-edited incidentally.
-        NodeType::File | NodeType::Namespace | NodeType::Module | NodeType::Package
-        | NodeType::Constant | NodeType::HttpRoute | NodeType::Topic
+        NodeType::File
+        | NodeType::Namespace
+        | NodeType::Module
+        | NodeType::Package
+        | NodeType::Constant
+        | NodeType::HttpRoute
+        | NodeType::Topic
         | NodeType::Resource => 1,
     }
 }
@@ -976,11 +1049,7 @@ fn overlap_severity(overlap: &[(String, NodeType)]) -> &'static str {
 /// `git diff --name-only <base> <head>` in `root`, one repo-relative path
 /// per line. The two-argument form (rather than `<base>..<head>`) is used
 /// so a ref containing `..` cannot be misparsed as a range.
-fn git_diff_names(
-    root: &std::path::Path,
-    base: &str,
-    head: &str,
-) -> Result<Vec<String>, String> {
+fn git_diff_names(root: &std::path::Path, base: &str, head: &str) -> Result<Vec<String>, String> {
     let out = std::process::Command::new("git")
         .current_dir(root)
         .args(["diff", "--name-only", base, head])
@@ -1005,11 +1074,7 @@ fn git_diff_names(
 /// more heavily than a shared module. De-duplication is by name only: two
 /// definitions sharing a name in one file (a `struct Foo` plus its `impl`-block
 /// helpers, say) collapse to the first kind seen after the sort.
-fn symbols_at_ref(
-    root: &std::path::Path,
-    git_ref: &str,
-    path: &str,
-) -> Vec<(String, NodeType)> {
+fn symbols_at_ref(root: &std::path::Path, git_ref: &str, path: &str) -> Vec<(String, NodeType)> {
     let Ok(out) = std::process::Command::new("git")
         .current_dir(root)
         .args(["show", &format!("{git_ref}:{path}")])

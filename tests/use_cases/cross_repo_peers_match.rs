@@ -29,9 +29,17 @@ fn cross_repo_peers_match_by_name_when_signature_missing() {
     // Two peer functions in different repos. Empty signature is the
     // bug condition: rust-analyzer didn't populate `detail`, so the
     // signature field is None.
-    let mut new_node = GraphNode::new(NodeType::Function, "shared_helper".into(), "src/lib.rs".into());
+    let mut new_node = GraphNode::new(
+        NodeType::Function,
+        "shared_helper".into(),
+        "src/lib.rs".into(),
+    );
     new_node.id = "11111111-1111-1111-1111-111111111111:Function:src/lib.rs:shared_helper".into();
-    let mut candidate = GraphNode::new(NodeType::Function, "shared_helper".into(), "src/lib.rs".into());
+    let mut candidate = GraphNode::new(
+        NodeType::Function,
+        "shared_helper".into(),
+        "src/lib.rs".into(),
+    );
     candidate.id = "22222222-2222-2222-2222-222222222222:Function:src/lib.rs:shared_helper".into();
 
     // Pre-fix: empty signature → empty tokens → similarity 0.0 → no
@@ -56,8 +64,13 @@ fn cross_repo_peers_match_by_name_when_signature_missing() {
     );
 
     // Sanity: functions with different names don't match.
-    let mut other_named = GraphNode::new(NodeType::Function, "different_name".into(), "src/lib.rs".into());
-    other_named.id = "33333333-3333-3333-3333-333333333333:Function:src/lib.rs:different_name".into();
+    let mut other_named = GraphNode::new(
+        NodeType::Function,
+        "different_name".into(),
+        "src/lib.rs".into(),
+    );
+    other_named.id =
+        "33333333-3333-3333-3333-333333333333:Function:src/lib.rs:different_name".into();
     let no_match = find_cross_repo_matches(&new_node, std::slice::from_ref(&other_named), 5, 0.5);
     assert!(
         no_match.is_empty(),
@@ -67,10 +80,18 @@ fn cross_repo_peers_match_by_name_when_signature_missing() {
     // Sanity: with a real signature, the original signature-similarity
     // path is still used. Two functions with the same signature in
     // different repos should also match.
-    let mut sig_a = GraphNode::new(NodeType::Function, "fn_with_sig".into(), "src/lib.rs".into());
+    let mut sig_a = GraphNode::new(
+        NodeType::Function,
+        "fn_with_sig".into(),
+        "src/lib.rs".into(),
+    );
     sig_a.id = "44444444-4444-4444-4444-444444444444:Function:src/lib.rs:fn_with_sig".into();
     sig_a.signature = Some("fn(a: u32) -> u32".into());
-    let mut sig_b = GraphNode::new(NodeType::Function, "fn_with_sig".into(), "src/lib.rs".into());
+    let mut sig_b = GraphNode::new(
+        NodeType::Function,
+        "fn_with_sig".into(),
+        "src/lib.rs".into(),
+    );
     sig_b.id = "55555555-5555-5555-5555-555555555555:Function:src/lib.rs:fn_with_sig".into();
     sig_b.signature = Some("fn(a: u32) -> u32".into());
     let sig_match = find_cross_repo_matches(&sig_a, std::slice::from_ref(&sig_b), 5, 0.5);

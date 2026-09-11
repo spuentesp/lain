@@ -15,7 +15,7 @@
 //! while this test stayed green.
 
 use lain::overlay::VolatileOverlay;
-use lain::schema::{GraphEdge, GraphNode, EdgeType, NodeType};
+use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use lain::server::tools::handlers::impact::get_blast_radius;
 
 fn graph(tag: &str) -> lain::graph::GraphDatabase {
@@ -77,11 +77,16 @@ async fn inserted_symbols_are_retained_and_counted() {
         3,
         "every inserted symbol must be retained"
     );
-    assert!(overlay.get_node(&GraphNode::new(
-        NodeType::Function,
-        "edited_fn_1".into(),
-        "/src/edited.rs".into(),
-    ).id).is_some());
+    assert!(overlay
+        .get_node(
+            &GraphNode::new(
+                NodeType::Function,
+                "edited_fn_1".into(),
+                "/src/edited.rs".into(),
+            )
+            .id
+        )
+        .is_some());
 }
 
 /// Freshness must track the last write, not the construction of the
@@ -96,8 +101,12 @@ async fn freshness_reflects_the_last_update_not_construction() {
     let caller = GraphNode::new(NodeType::Function, "main".into(), "/src/main.rs".into());
     g.upsert_node(node.clone()).unwrap();
     g.upsert_node(caller.clone()).unwrap();
-    g.insert_edge(&GraphEdge::new(EdgeType::Calls, caller.id.clone(), node.id.clone()))
-        .unwrap();
+    g.insert_edge(&GraphEdge::new(
+        EdgeType::Calls,
+        caller.id.clone(),
+        node.id.clone(),
+    ))
+    .unwrap();
 
     let before = overlay.last_update_age_secs();
     std::thread::sleep(std::time::Duration::from_millis(50));

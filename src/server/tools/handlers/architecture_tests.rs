@@ -1,24 +1,41 @@
 //! Tests for tools/handlers/architecture.rs
 
-use crate::server::tools::handlers::architecture::{explore_architecture, list_entry_points, compare_modules, get_master_map, architectural_observations};
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphNode, NodeType, EdgeType, GraphEdge};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::tools::handlers::architecture::{
+    architectural_observations, compare_modules, explore_architecture, get_master_map,
+    list_entry_points,
+};
 
 fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
     let tmp = std::env::temp_dir().join("test_arch_handlers");
     let _ = std::fs::remove_dir_all(&tmp);
     let graph = GraphDatabase::new(&tmp).unwrap();
 
-    let file1 = GraphNode::new(NodeType::File, "main.rs".to_string(), "/src/main.rs".to_string());
-    let file2 = GraphNode::new(NodeType::File, "lib.rs".to_string(), "/src/lib.rs".to_string());
+    let file1 = GraphNode::new(
+        NodeType::File,
+        "main.rs".to_string(),
+        "/src/main.rs".to_string(),
+    );
+    let file2 = GraphNode::new(
+        NodeType::File,
+        "lib.rs".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let ns = GraphNode::new(NodeType::Namespace, "src".to_string(), "/src".to_string());
 
     graph.upsert_node(file1.clone()).unwrap();
     graph.upsert_node(file2.clone()).unwrap();
     graph.upsert_node(ns.clone()).unwrap();
 
-    graph.insert_edge(&GraphEdge::new(EdgeType::Contains, ns.id.clone(), file1.id.clone())).unwrap();
+    graph
+        .insert_edge(&GraphEdge::new(
+            EdgeType::Contains,
+            ns.id.clone(),
+            file1.id.clone(),
+        ))
+        .unwrap();
 
     let overlay = VolatileOverlay::new();
     (graph, overlay)
@@ -61,7 +78,11 @@ fn test_list_entry_points_with_main() {
     let graph = GraphDatabase::new(&tmp).unwrap();
     let overlay = VolatileOverlay::new();
 
-    let main_node = GraphNode::new(NodeType::Function, "main".to_string(), "/src/main.rs".to_string());
+    let main_node = GraphNode::new(
+        NodeType::Function,
+        "main".to_string(),
+        "/src/main.rs".to_string(),
+    );
     graph.upsert_node(main_node).unwrap();
 
     let result = list_entry_points(&graph, &overlay);

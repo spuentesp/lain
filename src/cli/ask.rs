@@ -14,7 +14,8 @@ pub fn run_ask() -> Result<()> {
     };
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    let command = json.get("tool_input")
+    let command = json
+        .get("tool_input")
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str())
         .unwrap_or("");

@@ -14,9 +14,7 @@ use std::path::Path;
 fn counts_for_project(repos_yaml: &Path) -> (usize, usize) {
     let cfg = crate::federation::config::FederationConfig::load(repos_yaml).ok();
     let repo_count = cfg.as_ref().map(|c| c.repos.len()).unwrap_or(0);
-    let ws_path = repos_yaml
-        .parent()
-        .map(|p| p.join("workspaces.yaml"));
+    let ws_path = repos_yaml.parent().map(|p| p.join("workspaces.yaml"));
     let workspace_count = ws_path
         .as_ref()
         .and_then(|p| crate::federation::workspace::WorkspacesFile::load(p).ok())
@@ -40,14 +38,12 @@ pub fn list_recent_projects() -> Result<Vec<RecentProjectEntry>, LainError> {
         .into_iter()
         .map(|r| {
             let (workspace_count, repo_count) = counts_for_project(&r.path);
-            let active_workspace = active
-                .as_ref()
-                .and_then(|a| {
-                    a.config_path
-                        .as_ref()
-                        .filter(|p| **p == r.path)
-                        .map(|_| a.name.clone())
-                });
+            let active_workspace = active.as_ref().and_then(|a| {
+                a.config_path
+                    .as_ref()
+                    .filter(|p| **p == r.path)
+                    .map(|_| a.name.clone())
+            });
             RecentProjectEntry {
                 path: r.path,
                 last_used: r.last_used,
@@ -213,7 +209,13 @@ mod tests {
         assert_eq!(arr.len(), 2);
         for (i, item) in arr.iter().enumerate() {
             let obj = item.as_object().expect("each entry is a JSON object");
-            for field in ["path", "last_used", "workspace_count", "repo_count", "active_workspace"] {
+            for field in [
+                "path",
+                "last_used",
+                "workspace_count",
+                "repo_count",
+                "active_workspace",
+            ] {
                 assert!(
                     obj.contains_key(field),
                     "entry[{i}] missing required JSON field `{field}`; got keys {:?}",

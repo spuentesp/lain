@@ -195,11 +195,8 @@ pub async fn run_rebuild(
             .into_iter()
             .map(|(id, _)| id.to_string())
             .collect();
-        let new_ids: std::collections::HashSet<String> = repos_file
-            .repos
-            .iter()
-            .map(|r| r.id.clone())
-            .collect();
+        let new_ids: std::collections::HashSet<String> =
+            repos_file.repos.iter().map(|r| r.id.clone()).collect();
 
         // Additions: build the source and delegate to LainServer.
         let data_dir = repos_file.data_dir.clone();
@@ -359,10 +356,7 @@ mod tests {
         /// freshly-loaded federation, mirroring the production path
         /// through `load_federation`. Avoids `with_federation`'s
         /// process-id-based tempdir so tests are independent.
-        async fn build_server(
-            repos_yaml: &Path,
-            fed: Arc<FederatedIndex>,
-        ) -> LainServer {
+        async fn build_server(repos_yaml: &Path, fed: Arc<FederatedIndex>) -> LainServer {
             // `with_federation` builds a placeholder git repo under
             // the state dir and refuses to re-init one that's missing.
             // A prior test in the same process may have torn it down
@@ -372,8 +366,14 @@ mod tests {
                 .join("federation")
                 .join(format!("lain-federation-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&staging);
-            LainServer::with_federation(fed, Transport::Http, 9999, Some(repos_yaml.to_path_buf()), None)
-                .expect("LainServer::with_federation")
+            LainServer::with_federation(
+                fed,
+                Transport::Http,
+                9999,
+                Some(repos_yaml.to_path_buf()),
+                None,
+            )
+            .expect("LainServer::with_federation")
         }
 
         /// Build a federation + LainServer around a single
@@ -385,8 +385,8 @@ mod tests {
         ) -> (LainServer, std::path::PathBuf) {
             // Clean any stale staging dir so `with_federation` can
             // init it fresh.
-            let staging = std::env::temp_dir()
-                .join(format!("lain-federation-{}", std::process::id()));
+            let staging =
+                std::env::temp_dir().join(format!("lain-federation-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&staging);
             let repos_yaml = tmp.path().join("repos.yaml");
             let yaml = format!(
@@ -404,7 +404,9 @@ mod tests {
             // `load_federation`'s git-source quirks.
             let cfg: FederationConfig =
                 serde_yaml::from_str(&std::fs::read_to_string(&repos_yaml).unwrap()).unwrap();
-            let source = cfg.build_source_for(&cfg.repos[0]).expect("build_source_for");
+            let source = cfg
+                .build_source_for(&cfg.repos[0])
+                .expect("build_source_for");
             source.fetch().await.expect("fetch");
             let rid = source.id().clone();
             fed.add_repo(source, &cfg.data_dir).await.expect("add_repo");
@@ -418,11 +420,7 @@ mod tests {
         /// `workspace_dir` repos. The `data_dir` is fixed under
         /// `tmp/federation` to keep the federation state isolated per
         /// test.
-        fn write_repos_yaml(
-            tmp: &Path,
-            repos_yaml: &Path,
-            repos: &[(&str, &Path)],
-        ) {
+        fn write_repos_yaml(tmp: &Path, repos_yaml: &Path, repos: &[(&str, &Path)]) {
             let mut yaml = format!("data_dir: {}\nrepos:\n", tmp.join("federation").display());
             for (id, path) in repos {
                 yaml.push_str(&format!(
@@ -437,10 +435,7 @@ mod tests {
         /// Build a federation from a list of `(id, path)`
         /// `workspace_dir` repos without touching
         /// `load_federation` (avoids the tempdir collision).
-        async fn fed_for(
-            repos: &[(&str, &Path)],
-            data_dir: &Path,
-        ) -> Arc<FederatedIndex> {
+        async fn fed_for(repos: &[(&str, &Path)], data_dir: &Path) -> Arc<FederatedIndex> {
             let backend: Arc<dyn crate::server::federation::graph_backend::GraphBackend> =
                 Arc::new(PetgraphBackend::new(data_dir).expect("PetgraphBackend::new"));
             let fed = Arc::new(FederatedIndex::new(backend));
@@ -456,7 +451,9 @@ mod tests {
                         },
                     }],
                 };
-                let source = cfg.build_source_for(&cfg.repos[0]).expect("build_source_for");
+                let source = cfg
+                    .build_source_for(&cfg.repos[0])
+                    .expect("build_source_for");
                 source.fetch().await.expect("fetch");
                 let rid = source.id().clone();
                 fed.add_repo(source, &cfg.data_dir).await.expect("add_repo");
@@ -484,7 +481,9 @@ mod tests {
                 &[("repo-a", &repo_a), ("repo-b", &repo_b)],
             );
             let bus = server.reload_bus();
-            crate::server::reload::run_rebuild(&server, &bus).await.expect("run_rebuild");
+            crate::server::reload::run_rebuild(&server, &bus)
+                .await
+                .expect("run_rebuild");
             assert_eq!(server.repo_count(), 2);
             assert_eq!(bus.status().state, ReloadState::Idle);
         }
@@ -505,11 +504,7 @@ mod tests {
             );
             let data_dir = tmp.path().join("federation");
             std::fs::create_dir_all(&data_dir).unwrap();
-            let fed = fed_for(
-                &[("repo-a", &repo_a), ("repo-b", &repo_b)],
-                &data_dir,
-            )
-            .await;
+            let fed = fed_for(&[("repo-a", &repo_a), ("repo-b", &repo_b)], &data_dir).await;
             let server = build_server(tmp.path().join("repos.yaml").as_path(), fed).await;
             assert_eq!(server.repo_count(), 2);
 
@@ -520,7 +515,9 @@ mod tests {
                 &[("repo-a", &repo_a)],
             );
             let bus = server.reload_bus();
-            crate::server::reload::run_rebuild(&server, &bus).await.expect("run_rebuild");
+            crate::server::reload::run_rebuild(&server, &bus)
+                .await
+                .expect("run_rebuild");
             assert_eq!(server.repo_count(), 1);
             assert_eq!(bus.status().state, ReloadState::Idle);
         }
@@ -563,7 +560,9 @@ mod tests {
             )
             .unwrap();
             let bus = server.reload_bus();
-            crate::server::reload::run_rebuild(&server, &bus).await.expect("run_rebuild");
+            crate::server::reload::run_rebuild(&server, &bus)
+                .await
+                .expect("run_rebuild");
             assert_eq!(server.workspace_count(), 1);
             assert_eq!(bus.status().state, ReloadState::Idle);
             let ws = server.workspaces_snapshot().expect("workspaces");
@@ -582,12 +581,14 @@ mod tests {
             // fails `RepoId::new`.
             std::fs::write(&repos_yaml, "repos:\n  - id: bad/id\n").unwrap();
             let bus = server.reload_bus();
-            let result =
-                crate::server::reload::run_rebuild(&server, &bus).await;
+            let result = crate::server::reload::run_rebuild(&server, &bus).await;
             assert!(result.is_err());
             match bus.status().state {
                 ReloadState::Failed(msg) => {
-                    assert!(!msg.is_empty(), "Failed state should carry an error message");
+                    assert!(
+                        !msg.is_empty(),
+                        "Failed state should carry an error message"
+                    );
                 }
                 other => panic!("expected Failed state, got {:?}", other),
             }

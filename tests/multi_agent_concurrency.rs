@@ -42,10 +42,7 @@ use tempfile::TempDir;
 /// emits forward slashes (Linux) or backslashes (Windows). Matches
 /// the helper in `tests/feat_suite.rs`.
 fn path_components_eq(path: &str, expected: &[&str]) -> bool {
-    let actual: Vec<&str> = path
-        .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .collect();
+    let actual: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
     actual == expected
 }
 
@@ -224,11 +221,7 @@ impl AgentChild {
         );
     }
 
-    fn call_tool_raw(
-        &mut self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> serde_json::Value {
+    fn call_tool_raw(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
         self.send(
             "tools/call",
             serde_json::json!({"name": name, "arguments": arguments}),
@@ -238,11 +231,7 @@ impl AgentChild {
     /// Send a `tools/call` and parse
     /// `result.content[0].text` as JSON. Panics on
     /// `isError=true` — the body is included in the message.
-    fn call_tool_json(
-        &mut self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> serde_json::Value {
+    fn call_tool_json(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
         let resp = self.call_tool_raw(name, arguments);
         if resp.pointer("/error").is_some() {
             panic!("{name} returned JSON-RPC error: {resp}");
@@ -254,15 +243,12 @@ impl AgentChild {
         let text = resp
             .pointer("/result/content/0/text")
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                panic!("{name} missing result.content[0].text: {resp}")
-            })
+            .unwrap_or_else(|| panic!("{name} missing result.content[0].text: {resp}"))
             .to_string();
         if is_err {
             panic!("{name} signalled isError=true: {text}");
         }
-        serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("{name} text not JSON: {e}\n{text}"))
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name} text not JSON: {e}\n{text}"))
     }
 
     /// Same as `call_tool_json` but does NOT panic on
@@ -292,14 +278,10 @@ impl AgentChild {
             // JSON-RPC-style error message so callers can
             // assert against it uniformly.
             let synthetic = text.clone().unwrap_or_default();
-            let parsed = text
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok());
+            let parsed = text.as_deref().and_then(|s| serde_json::from_str(s).ok());
             return (resp, Some(format!("isError=true: {synthetic}")), parsed);
         }
-        let parsed = text
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok());
+        let parsed = text.as_deref().and_then(|s| serde_json::from_str(s).ok());
         (resp, err_msg, parsed)
     }
 
@@ -318,10 +300,7 @@ trait ChildWaitTimeout {
     fn wait_timeout(&mut self, dur: Duration) -> std::io::Result<Option<std::process::ExitStatus>>;
 }
 impl ChildWaitTimeout for std::process::Child {
-    fn wait_timeout(
-        &mut self,
-        dur: Duration,
-    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+    fn wait_timeout(&mut self, dur: Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
         let start = std::time::Instant::now();
         loop {
             match self.try_wait()? {
@@ -364,12 +343,7 @@ impl TestEnv {
 }
 
 /// Boot one `lain mcp` child and run its `initialize` handshake.
-fn spawn_agent(
-    bin: &Path,
-    env: &TestEnv,
-    pv: &str,
-    label: &str,
-) -> AgentChild {
+fn spawn_agent(bin: &Path, env: &TestEnv, pv: &str, label: &str) -> AgentChild {
     let mut child = AgentChild::spawn(bin, &env.workspace, &env.state_dir, pv, label);
     child.initialize();
     child
@@ -727,9 +701,9 @@ fn released_claim_becomes_available_again() {
         .and_then(|v| v.as_array())
         .expect("release_files must return `released` array");
     assert!(
-        released
-            .iter()
-            .any(|p| p.as_str().is_some_and(|x| path_components_eq(x, &["src", "x.rs"]))),
+        released.iter().any(|p| p
+            .as_str()
+            .is_some_and(|x| path_components_eq(x, &["src", "x.rs"]))),
         "release_files must report src/x.rs: {rel}"
     );
     alice.shutdown();

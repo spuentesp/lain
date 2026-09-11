@@ -58,7 +58,10 @@ pub struct FederationManifest {
 
 impl Default for FederationManifest {
     fn default() -> Self {
-        Self { version: CURRENT_VERSION, repos: Vec::new() }
+        Self {
+            version: CURRENT_VERSION,
+            repos: Vec::new(),
+        }
     }
 }
 
@@ -72,8 +75,8 @@ impl FederationManifest {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let bytes = std::fs::read(path)
-            .map_err(|e| LainError::Io(format!("read manifest: {e}")))?;
+        let bytes =
+            std::fs::read(path).map_err(|e| LainError::Io(format!("read manifest: {e}")))?;
         let m: Self = bincode::deserialize(&bytes)
             .map_err(|e| LainError::Serialization(format!("bincode: {e}")))?;
         if m.version > CURRENT_VERSION {
@@ -85,8 +88,7 @@ impl FederationManifest {
     /// Persist the manifest to `path`, creating parent directories as needed.
     pub fn save(&self, path: &Path) -> Result<(), LainError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| LainError::Io(format!("mkdir: {e}")))?;
+            std::fs::create_dir_all(parent).map_err(|e| LainError::Io(format!("mkdir: {e}")))?;
         }
         let bytes = bincode::serialize(self)
             .map_err(|e| LainError::Serialization(format!("bincode: {e}")))?;
@@ -153,6 +155,9 @@ mod atomic_save_tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "no temp file left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "no temp file left behind: {leftovers:?}"
+        );
     }
 }

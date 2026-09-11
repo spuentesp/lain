@@ -31,13 +31,17 @@ pub fn get_context_for_prompt(
     }
 
     // Relationships (callers and callees)
-    let callers = graph.get_edges_to(&node.id)?.into_iter()
+    let callers = graph
+        .get_edges_to(&node.id)?
+        .into_iter()
         .filter(|e| e.edge_type == crate::schema::EdgeType::Calls)
         .filter_map(|e| graph.get_node(&e.source_id).ok().flatten())
         .map(|n| n.name)
         .collect::<Vec<_>>();
 
-    let callees = graph.get_edges_from(&node.id)?.into_iter()
+    let callees = graph
+        .get_edges_from(&node.id)?
+        .into_iter()
         .filter(|e| e.edge_type == crate::schema::EdgeType::Calls)
         .filter_map(|e| graph.get_node(&e.target_id).ok().flatten())
         .map(|n| n.name)
@@ -51,8 +55,13 @@ pub fn get_context_for_prompt(
     }
 
     // Type context (for structs/enums)
-    if matches!(node.node_type, crate::schema::NodeType::Struct | crate::schema::NodeType::Enum) {
-        let uses = graph.get_edges_from(&node.id)?.into_iter()
+    if matches!(
+        node.node_type,
+        crate::schema::NodeType::Struct | crate::schema::NodeType::Enum
+    ) {
+        let uses = graph
+            .get_edges_from(&node.id)?
+            .into_iter()
             .filter(|e| e.edge_type == crate::schema::EdgeType::Uses)
             .filter_map(|e| graph.get_node(&e.target_id).ok().flatten())
             .map(|n| format!("{} ({:?})", n.name, n.node_type))
@@ -65,8 +74,15 @@ pub fn get_context_for_prompt(
     // Co-change partners
     let partners = graph.get_co_change_partners(&node.path)?;
     if !partners.is_empty() {
-        parts.push(format!("Frequently co-changes with: {}\n",
-            partners.iter().take(3).map(|(p, _)| p.clone()).collect::<Vec<_>>().join(", ")));
+        parts.push(format!(
+            "Frequently co-changes with: {}\n",
+            partners
+                .iter()
+                .take(3)
+                .map(|(p, _)| p.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // Join and truncate
@@ -74,7 +90,11 @@ pub fn get_context_for_prompt(
     let token_count = context.split_whitespace().count() * 2; // rough estimate
     if token_count > max_toks {
         let words: Vec<&str> = context.split_whitespace().collect();
-        let truncated = words.into_iter().take(max_toks / 2).collect::<Vec<_>>().join(" ");
+        let truncated = words
+            .into_iter()
+            .take(max_toks / 2)
+            .collect::<Vec<_>>()
+            .join(" ");
         context = format!("{}...\n[truncated - {} tokens]", truncated, token_count);
     }
 
@@ -132,7 +152,12 @@ pub fn get_code_snippet(
     }
 
     // Just read the file with context around the line
-    read_file_range(&disk_path, line_num.saturating_sub(ctx), line_num + ctx, ctx)
+    read_file_range(
+        &disk_path,
+        line_num.saturating_sub(ctx),
+        line_num + ctx,
+        ctx,
+    )
 }
 
 fn read_file_range(path: &str, start: usize, end: usize, _ctx: usize) -> Result<String, LainError> {
@@ -144,7 +169,11 @@ fn read_file_range(path: &str, start: usize, end: usize, _ctx: usize) -> Result<
     let end = end.min(lines.len());
 
     if start >= end {
-        return Err(LainError::NotFound(format!("Invalid range: {} to {}", start + 1, end)));
+        return Err(LainError::NotFound(format!(
+            "Invalid range: {} to {}",
+            start + 1,
+            end
+        )));
     }
 
     let snippet: Vec<String> = lines[start..end]
@@ -153,8 +182,13 @@ fn read_file_range(path: &str, start: usize, end: usize, _ctx: usize) -> Result<
         .map(|(i, l)| format!("{:4}: {}", start + i + 1, l))
         .collect();
 
-    Ok(format!("File: {}\nShowing lines {}-{}\n\n{}\n",
-        path, start + 1, end, snippet.join("\n")))
+    Ok(format!(
+        "File: {}\nShowing lines {}-{}\n\n{}\n",
+        path,
+        start + 1,
+        end,
+        snippet.join("\n")
+    ))
 }
 
 pub fn get_call_sites(
@@ -170,7 +204,9 @@ pub fn get_call_sites(
     let target_id = &node.id;
 
     // Find all callers (edges of type Calls pointing to this node)
-    let callers = graph.get_edges_to(target_id)?.into_iter()
+    let callers = graph
+        .get_edges_to(target_id)?
+        .into_iter()
         .filter(|e| e.edge_type == crate::schema::EdgeType::Calls)
         .filter_map(|e| graph.get_node(&e.source_id).ok().flatten())
         .collect::<Vec<_>>();
@@ -294,7 +330,8 @@ fn call_lines_in(
             }
         }
         // Skip the definition itself.
-        if found && !line.trim_start().starts_with("fn ") && !line.contains(&format!("fn {callee}")) {
+        if found && !line.trim_start().starts_with("fn ") && !line.contains(&format!("fn {callee}"))
+        {
             out.push(lineno);
         }
     }

@@ -356,7 +356,10 @@ mod wiring_tests {
         exec.ctx.cleanup_expired_sessions().await;
 
         let g = exec.ui_sessions().lock().await;
-        assert!(!g.contains_key("stale"), "an expired session must be dropped");
+        assert!(
+            !g.contains_key("stale"),
+            "an expired session must be dropped"
+        );
         assert!(g.contains_key("live"), "a live session must survive");
         assert_eq!(g.len(), 1);
     }
@@ -423,11 +426,7 @@ mod wiring_tests {
             cli.contains("pub async fn run_sidecar"),
             "the sidecar entry point must exist"
         );
-        for piece in [
-            "open_read_only",
-            "overlay::subscribe",
-            "new_read_only",
-        ] {
+        for piece in ["open_read_only", "overlay::subscribe", "new_read_only"] {
             assert!(
                 cli.contains(piece),
                 "run_sidecar must use `{piece}`; without it the read-only \

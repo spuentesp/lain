@@ -1,6 +1,6 @@
 //! Tests for schema types
 
-use crate::schema::{GraphNode, GraphEdge, NodeType, EdgeType};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 
 #[test]
 fn test_node_type_display() {
@@ -18,7 +18,11 @@ fn test_edge_type_display() {
 
 #[test]
 fn test_graph_node_new() {
-    let node = GraphNode::new(NodeType::Function, "test_func".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "test_func".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     assert_eq!(node.name, "test_func");
     assert_eq!(node.path, "/src/lib.rs");
     assert_eq!(node.node_type, NodeType::Function);
@@ -27,29 +31,61 @@ fn test_graph_node_new() {
 
 #[test]
 fn test_graph_node_id_deterministic() {
-    let node1 = GraphNode::new(NodeType::Function, "foo".to_string(), "/src/lib.rs".to_string());
-    let node2 = GraphNode::new(NodeType::Function, "foo".to_string(), "/src/lib.rs".to_string());
+    let node1 = GraphNode::new(
+        NodeType::Function,
+        "foo".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let node2 = GraphNode::new(
+        NodeType::Function,
+        "foo".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     assert_eq!(node1.id, node2.id);
 }
 
 #[test]
 fn test_graph_node_id_differs_by_name() {
-    let node1 = GraphNode::new(NodeType::Function, "foo".to_string(), "/src/lib.rs".to_string());
-    let node2 = GraphNode::new(NodeType::Function, "bar".to_string(), "/src/lib.rs".to_string());
+    let node1 = GraphNode::new(
+        NodeType::Function,
+        "foo".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let node2 = GraphNode::new(
+        NodeType::Function,
+        "bar".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     assert_ne!(node1.id, node2.id);
 }
 
 #[test]
 fn test_graph_node_id_differs_by_path() {
-    let node1 = GraphNode::new(NodeType::Function, "foo".to_string(), "/src/a.rs".to_string());
-    let node2 = GraphNode::new(NodeType::Function, "foo".to_string(), "/src/b.rs".to_string());
+    let node1 = GraphNode::new(
+        NodeType::Function,
+        "foo".to_string(),
+        "/src/a.rs".to_string(),
+    );
+    let node2 = GraphNode::new(
+        NodeType::Function,
+        "foo".to_string(),
+        "/src/b.rs".to_string(),
+    );
     assert_ne!(node1.id, node2.id);
 }
 
 #[test]
 fn test_graph_node_id_differs_by_type() {
-    let node1 = GraphNode::new(NodeType::Function, "foo".to_string(), "/src/lib.rs".to_string());
-    let node2 = GraphNode::new(NodeType::Struct, "foo".to_string(), "/src/lib.rs".to_string());
+    let node1 = GraphNode::new(
+        NodeType::Function,
+        "foo".to_string(),
+        "/src/lib.rs".to_string(),
+    );
+    let node2 = GraphNode::new(
+        NodeType::Struct,
+        "foo".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     assert_ne!(node1.id, node2.id);
 }
 
@@ -84,7 +120,11 @@ fn test_graph_node_all_node_types() {
 
 #[test]
 fn test_graph_node_with_line_range() {
-    let mut node = GraphNode::new(NodeType::Function, "range_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "range_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.line_start = Some(10);
     node.line_end = Some(25);
     assert_eq!(node.line_start, Some(10));
@@ -93,21 +133,33 @@ fn test_graph_node_with_line_range() {
 
 #[test]
 fn test_graph_node_with_signature() {
-    let mut node = GraphNode::new(NodeType::Function, "sig_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "sig_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.signature = Some("(a: i32, b: String) -> bool".to_string());
     assert!(node.signature.is_some());
 }
 
 #[test]
 fn test_graph_node_with_docstring() {
-    let mut node = GraphNode::new(NodeType::Function, "doc_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "doc_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.docstring = Some("This is a documentation string".to_string());
     assert!(node.docstring.is_some());
 }
 
 #[test]
 fn test_graph_node_with_metadata() {
-    let mut node = GraphNode::new(NodeType::Function, "meta_fn".to_string(), "/src/lib.rs".to_string());
+    let mut node = GraphNode::new(
+        NodeType::Function,
+        "meta_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     node.fan_in = Some(5);
     node.fan_out = Some(10);
     node.anchor_score = Some(0.75);
@@ -124,7 +176,11 @@ fn test_graph_node_with_metadata() {
 
 #[test]
 fn test_graph_node_clone() {
-    let node = GraphNode::new(NodeType::Function, "clone_fn".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "clone_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let cloned = node.clone();
     assert_eq!(cloned.id, node.id);
     assert_eq!(cloned.name, node.name);
@@ -172,7 +228,11 @@ fn test_graph_edge_clone() {
 
 #[test]
 fn test_graph_node_serialize() {
-    let node = GraphNode::new(NodeType::Function, "ser_fn".to_string(), "/src/lib.rs".to_string());
+    let node = GraphNode::new(
+        NodeType::Function,
+        "ser_fn".to_string(),
+        "/src/lib.rs".to_string(),
+    );
     let json = serde_json::to_string(&node).unwrap();
     assert!(json.contains("ser_fn"));
     assert!(json.contains("Function"));
@@ -193,8 +253,8 @@ fn test_graph_node_deserialize() {
 #[test]
 fn test_graph_node_deserialize_without_label_is_backward_compatible() {
     let old_json = r#"{"id":"old","node_type":"Function","name":"old_fn","path":"/src/lib.rs","line_start":null,"line_end":null,"signature":null,"docstring":null,"embedding":null,"fan_in":null,"fan_out":null,"anchor_score":null,"depth_from_main":null,"co_change_count":null,"is_deprecated":false,"last_lsp_sync":null,"last_git_sync":null,"commit_hash":null,"is_hydrated":true}"#;
-    let node: GraphNode = serde_json::from_str(old_json)
-        .expect("old-format JSON must still deserialize");
+    let node: GraphNode =
+        serde_json::from_str(old_json).expect("old-format JSON must still deserialize");
     assert_eq!(node.name, "old_fn");
     assert!(node.label.is_none());
 }
@@ -235,10 +295,18 @@ fn test_edge_type_equality() {
 /// ignored line_start, causing the second insert to overwrite the first.
 #[test]
 fn test_graph_node_id_differs_by_line_range() {
-    let top_level = GraphNode::new(NodeType::Function, "add".to_string(), "/src/lib.rs".to_string())
-        .with_location(1, 1);
-    let impl_method = GraphNode::new(NodeType::Function, "add".to_string(), "/src/lib.rs".to_string())
-        .with_location(7, 7);
+    let top_level = GraphNode::new(
+        NodeType::Function,
+        "add".to_string(),
+        "/src/lib.rs".to_string(),
+    )
+    .with_location(1, 1);
+    let impl_method = GraphNode::new(
+        NodeType::Function,
+        "add".to_string(),
+        "/src/lib.rs".to_string(),
+    )
+    .with_location(7, 7);
     assert_ne!(
         top_level.id, impl_method.id,
         "Functions named 'add' at different lines must have distinct IDs (got {} vs {})",

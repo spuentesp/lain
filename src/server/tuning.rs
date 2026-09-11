@@ -134,7 +134,6 @@ impl Default for IngestionConfig {
     }
 }
 
-
 /// Multiplayer tuning — session lifetimes and the locks around shared
 /// presence state.
 ///
@@ -264,7 +263,10 @@ mod partial_config_tests {
     fn an_empty_file_is_the_default_config() {
         let cfg: TuningConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.presence.interactive_session_ttl_secs, 600);
-        assert_eq!(cfg.ingestion.lsp_pool_size, IngestionConfig::default().lsp_pool_size);
+        assert_eq!(
+            cfg.ingestion.lsp_pool_size,
+            IngestionConfig::default().lsp_pool_size
+        );
         assert_eq!(
             cfg.runtime.default_test_timeout_secs,
             RuntimeConfig::default().default_test_timeout_secs
@@ -292,7 +294,9 @@ mod knob_reachability_tests {
     /// round-trip test is still dead in production.
     fn production_sources() -> Vec<(String, String)> {
         fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             for e in entries.flatten() {
                 let p = e.path();
                 if p.is_dir() {
@@ -308,7 +312,9 @@ mod knob_reachability_tests {
             while let Some(rel) = src[i..].find("#[cfg(test)]") {
                 let start = i + rel;
                 out.push_str(&src[i..start]);
-                let Some(open) = src[start..].find('{').map(|o| start + o) else { break };
+                let Some(open) = src[start..].find('{').map(|o| start + o) else {
+                    break;
+                };
                 let (mut depth, mut k) = (0usize, open);
                 for (idx, ch) in src[open..].char_indices() {
                     match ch {

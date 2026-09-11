@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 /// Resolve the workspace root for `lain mcp`'s no-arg case, by
 /// preferring the parent process's cwd (the agent harness's cwd,
@@ -117,9 +117,7 @@ pub fn parent_process_cwd() -> Option<PathBuf> {
 /// or 16 levels are exhausted. Pure — no env, no /proc. Public so
 /// tests and the resolver helper can call it directly.
 pub fn walk_up_for_git(start: &Path) -> Result<Option<PathBuf>> {
-    let mut current = start
-        .canonicalize()
-        .unwrap_or_else(|_| start.to_path_buf());
+    let mut current = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
     for _ in 0..16 {
         if current.join(".git").exists() {
             return Ok(Some(current));
@@ -183,11 +181,7 @@ mod tests {
         // helper must pick the parent, not the process cwd.
         let agent_dir = mk_repo();
         let bare_dir = tempfile::tempdir().unwrap(); // no .git
-        let result = find_git_workspace_root_resolved(
-            None,
-            Some(agent_dir.path()),
-        )
-        .unwrap();
+        let result = find_git_workspace_root_resolved(None, Some(agent_dir.path())).unwrap();
         let resolved = result.expect("should find .git via parent cwd");
         assert!(resolved.join(".git").exists());
         assert_ne!(resolved, bare_dir.path().canonicalize().unwrap());
@@ -207,12 +201,10 @@ mod tests {
         // Explicit --workspace PATH beats whatever the parent cwd says.
         let explicit = mk_repo();
         let agent_dir = mk_repo();
-        let result = find_git_workspace_root_resolved(
-            Some(explicit.path()),
-            Some(agent_dir.path()),
-        )
-        .unwrap()
-        .expect("explicit start must resolve");
+        let result =
+            find_git_workspace_root_resolved(Some(explicit.path()), Some(agent_dir.path()))
+                .unwrap()
+                .expect("explicit start must resolve");
         // Compare canonicalized paths — the tmpdir can be a symlink on macOS.
         let resolved = result.canonicalize().unwrap();
         let expected = explicit.path().canonicalize().unwrap();
@@ -226,11 +218,7 @@ mod tests {
         // a synthetic parent and assert the function doesn't blow up
         // when both candidates are git-less at the synthetic level.
         let agent_dir = tempfile::tempdir().unwrap(); // no .git
-        let result = find_git_workspace_root_resolved(
-            None,
-            Some(agent_dir.path()),
-        )
-        .unwrap();
+        let result = find_git_workspace_root_resolved(None, Some(agent_dir.path())).unwrap();
         // Process cwd has .git (we're inside this repo); resolution
         // will find it. What we're really asserting is "doesn't crash,
         // doesn't use the synthetic git-less parent".
@@ -284,8 +272,7 @@ mod tests {
         );
         // Now resolve with parent_cwd set to the project root. The
         // helper must skip it and fall through to process_cwd.
-        let result =
-            find_git_workspace_root_resolved(None, Some(&project_root)).unwrap();
+        let result = find_git_workspace_root_resolved(None, Some(&project_root)).unwrap();
         match result {
             Some(found) => {
                 let found = found.canonicalize().unwrap();

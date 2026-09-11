@@ -30,8 +30,10 @@ fn register_assigns_unique_id_and_token() {
     let reg = fresh_registry();
     let s = register_one(&reg, "agent-a");
     assert!(!s.id.as_str().is_empty());
-    assert!(!s.session_token.is_empty(),
-            "register must assign a session token");
+    assert!(
+        !s.session_token.is_empty(),
+        "register must assign a session token"
+    );
 }
 
 #[test]
@@ -45,10 +47,20 @@ fn register_assigns_kind_and_mode() {
 #[test]
 fn register_distinguishes_foreground_and_background() {
     let reg = fresh_registry();
-    let fg = reg.register("fg".into(), AgentKind::ClaudeCode,
-                         AgentMode::Interactive, None, None);
-    let bg = reg.register("bg".into(), AgentKind::ClaudeCode,
-                         AgentMode::Background, None, None);
+    let fg = reg.register(
+        "fg".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    let bg = reg.register(
+        "bg".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Background,
+        None,
+        None,
+    );
     assert!(matches!(fg.mode, AgentMode::Interactive));
     assert!(matches!(bg.mode, AgentMode::Background));
 }
@@ -57,16 +69,20 @@ fn register_distinguishes_foreground_and_background() {
 fn heartbeat_with_correct_token_refreshes() {
     let reg = fresh_registry();
     let s = register_one(&reg, "agent-a");
-    assert!(reg.heartbeat(&s.id, &s.session_token).is_ok(),
-            "heartbeat with correct token must succeed");
+    assert!(
+        reg.heartbeat(&s.id, &s.session_token).is_ok(),
+        "heartbeat with correct token must succeed"
+    );
 }
 
 #[test]
 fn heartbeat_with_wrong_token_errors() {
     let reg = fresh_registry();
     let s = register_one(&reg, "agent-a");
-    assert!(reg.heartbeat(&s.id, "definitely_wrong_token_xyz").is_err(),
-            "heartbeat with wrong token must error");
+    assert!(
+        reg.heartbeat(&s.id, "definitely_wrong_token_xyz").is_err(),
+        "heartbeat with wrong token must error"
+    );
 }
 
 #[test]
@@ -74,8 +90,10 @@ fn heartbeat_for_unknown_agent_errors() {
     let reg = fresh_registry();
     let s = register_one(&reg, "agent-a");
     let unknown = AgentId("00000000-0000-0000-0000-000000000000".into());
-    assert!(reg.heartbeat(&unknown, &s.session_token).is_err(),
-            "heartbeat for unknown agent must error");
+    assert!(
+        reg.heartbeat(&unknown, &s.session_token).is_err(),
+        "heartbeat for unknown agent must error"
+    );
 }
 
 #[test]
@@ -95,17 +113,30 @@ fn list_active_returns_all_registered_interactive() {
     register_one(&reg, "agent-a");
     register_one(&reg, "agent-b");
     let active = reg.list_active(false);
-    assert_eq!(active.len(), 2, "two interactive agents; got {}", active.len());
+    assert_eq!(
+        active.len(),
+        2,
+        "two interactive agents; got {}",
+        active.len()
+    );
 }
 
 #[test]
 fn list_active_excludes_background_by_default() {
     let reg = fresh_registry();
-    reg.register("bg".into(), AgentKind::ClaudeCode, AgentMode::Background, None, None);
+    reg.register(
+        "bg".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Background,
+        None,
+        None,
+    );
     let active = reg.list_active(false);
-    assert!(active.is_empty(),
-            "list_active(false) must exclude background agents; got {}",
-            active.len());
+    assert!(
+        active.is_empty(),
+        "list_active(false) must exclude background agents; got {}",
+        active.len()
+    );
     let all = reg.list_active(true);
     assert_eq!(all.len(), 1, "list_active(true) includes background");
 }
@@ -133,8 +164,11 @@ fn register_twice_with_same_name_still_distinct() {
     let reg = fresh_registry();
     let s1 = register_one(&reg, "agent-a");
     let s2 = register_one(&reg, "agent-a");
-    assert_ne!(s1.id.as_str(), s2.id.as_str(),
-               "two registrations get distinct ids even with same name");
+    assert_ne!(
+        s1.id.as_str(),
+        s2.id.as_str(),
+        "two registrations get distinct ids even with same name"
+    );
 }
 
 // ─── Pointer comments to OccupancyMap coverage ───────────────────
@@ -169,4 +203,5 @@ fn register_twice_with_same_name_still_distinct() {
 //   - multi_file_grant_emits_one_audit_line_per_path
 //   - audit_append_failure_does_not_block_claim
 #[allow(dead_code)]
-const OCCUPANCY_AUDIT_POINTERS: &str = "see tests/presence.rs + tests/audit_integration.rs + tests/federation_integration.rs";
+const OCCUPANCY_AUDIT_POINTERS: &str =
+    "see tests/presence.rs + tests/audit_integration.rs + tests/federation_integration.rs";

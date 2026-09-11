@@ -4,8 +4,8 @@
 //! whether the server is running in federation mode.
 
 use crate::error::LainError;
-use crate::server::LainServer;
 use crate::server::reload::ReloadBus;
+use crate::server::LainServer;
 use std::time::SystemTime;
 
 /// Render the per-process server status payload consumed by the
@@ -149,7 +149,10 @@ mod tests {
         assert!(v.get("last_sync_at").is_some(), "missing last_sync_at");
         assert!(v.get("last_error").is_some(), "missing last_error");
         assert!(v.get("repo_count").is_some(), "missing repo_count");
-        assert!(v.get("workspace_count").is_some(), "missing workspace_count");
+        assert!(
+            v.get("workspace_count").is_some(),
+            "missing workspace_count"
+        );
 
         // Build identity: an agent bound to a long-lived stdio server
         // has no other way to learn that its server predates the fix
@@ -164,7 +167,10 @@ mod tests {
             Some(crate::server::build_info::GIT_SHA),
             "missing or wrong git_sha"
         );
-        assert!(v.get("binary_mtime_unix").is_some(), "missing binary_mtime_unix");
+        assert!(
+            v.get("binary_mtime_unix").is_some(),
+            "missing binary_mtime_unix"
+        );
         assert_eq!(
             v.get("binary_is_stale").and_then(|x| x.as_bool()),
             Some(false),

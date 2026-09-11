@@ -31,9 +31,7 @@ impl http_body::Body for OverlaySubscribeBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<std::io::Result<Frame<Self::Data>>>> {
         match Pin::new(&mut self.rx).poll_recv(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                Poll::Ready(Some(Ok(Frame::data(bytes))))
-            }
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(Frame::data(bytes)))),
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,

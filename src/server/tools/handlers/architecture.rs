@@ -8,25 +8,26 @@ use crate::server::tools::utils::resolve_node;
 use std::collections::HashSet;
 
 pub fn explore_architecture(
-    graph: &GraphDatabase, 
+    graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    max_depth: usize
+    max_depth: usize,
 ) -> Result<String, LainError> {
     // Collect files from both using optimized merge (HashSet)
     let mut files = graph.get_nodes_by_type(NodeType::File)?;
     let overlay_files = overlay.find_nodes_by_type(&NodeType::File);
-    
+
     let mut seen_ids: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
-    
+
     for of in overlay_files {
         if seen_ids.insert(of.id.clone()) {
             files.push(of);
         }
     }
-    
+
     // Importance Sorting: Sort by anchor_score descending
     files.sort_by(|a, b| {
-        b.anchor_score.unwrap_or(0.0)
+        b.anchor_score
+            .unwrap_or(0.0)
             .partial_cmp(&a.anchor_score.unwrap_or(0.0))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -36,7 +37,8 @@ pub fn explore_architecture(
     // `max_depth: 2` and `max_depth: 3` produced byte-identical output
     // and the parameter looked broken. Say so instead of pretending.
     let depths_computed = files.iter().any(|f| f.depth_from_main.is_some());
-    let in_depth: Vec<_> = files.iter()
+    let in_depth: Vec<_> = files
+        .iter()
         .filter(|f| {
             if depths_computed {
                 f.depth_from_main.unwrap_or(u32::MAX) as usize <= max_depth
@@ -63,22 +65,33 @@ pub fn explore_architecture(
         by_dir.entry(dir).or_default().push(f);
     }
 
-    let body = by_dir.iter()
+    let body = by_dir
+        .iter()
         .map(|(dir, fs)| {
             // "N shown" — not "N files". The group is built from the
             // truncated top-20, so printing `### src/ (1 files)` for a
             // directory holding 144 of them is the first thing an
             // onboarding agent reads, and it is false.
             let header = format!("### {}/ ({} shown)\n", dir, fs.len());
-            let entries = fs.iter().map(|f| {
-                let depth = f.depth_from_main.map(|d| format!(" (depth: {})", d)).unwrap_or_default();
-                let anchor = f.anchor_score.map(|s| format!(" — anchor {:.2}", s)).unwrap_or_default();
-                // Path, not bare name: grouping is by top-level
-                // directory only, so several `pre-edit.sh` under
-                // different `hooks/*` subdirectories rendered as three
-                // identical, unnavigable rows.
-                format!("- {}{}{}", f.path, depth, anchor)
-            }).collect::<Vec<_>>().join("\n");
+            let entries = fs
+                .iter()
+                .map(|f| {
+                    let depth = f
+                        .depth_from_main
+                        .map(|d| format!(" (depth: {})", d))
+                        .unwrap_or_default();
+                    let anchor = f
+                        .anchor_score
+                        .map(|s| format!(" — anchor {:.2}", s))
+                        .unwrap_or_default();
+                    // Path, not bare name: grouping is by top-level
+                    // directory only, so several `pre-edit.sh` under
+                    // different `hooks/*` subdirectories rendered as three
+                    // identical, unnavigable rows.
+                    format!("- {}{}{}", f.path, depth, anchor)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             format!("{}\n{}", header, entries)
         })
         .collect::<Vec<_>>()
@@ -103,11 +116,16 @@ pub fn explore_architecture(
     ))
 }
 
-pub fn list_entry_points(graph: &GraphDatabase, overlay: &VolatileOverlay) -> Result<String, LainError> {
+pub fn list_entry_points(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+) -> Result<String, LainError> {
     let mut entries = graph.find_entry_points()?;
-    
+
     // Entry points might be in overlay if recently added
-    let overlay_entries = overlay.get_all_nodes().into_iter()
+    let overlay_entries = overlay
+        .get_all_nodes()
+        .into_iter()
         .filter(|n| n.name == "main" || n.name == "App")
         .collect::<Vec<_>>();
 
@@ -122,23 +140,28 @@ pub fn list_entry_points(graph: &GraphDatabase, overlay: &VolatileOverlay) -> Re
         return Ok("No explicit entry points (main, App) found in Merged Brain.".to_string());
     }
 
-    Ok(format!("## Entry Points\n\n{}",
-        entries.iter().map(|n| format!("- {} ({})", n.name, n.path)).collect::<Vec<_>>().join("\n")
+    Ok(format!(
+        "## Entry Points\n\n{}",
+        entries
+            .iter()
+            .map(|n| format!("- {} ({})", n.name, n.path))
+            .collect::<Vec<_>>()
+            .join("\n")
     ))
 }
 
 pub fn compare_modules(
-    graph: &GraphDatabase, 
+    graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    module_a: &str, 
-    module_b: &str
+    module_a: &str,
+    module_b: &str,
 ) -> Result<String, LainError> {
     let node_a = resolve_node(graph, overlay, module_a)?;
     let node_b = resolve_node(graph, overlay, module_b)?;
 
     // Edge Masking: When calculating edges, we should prefer the overlay's view
     // of a node's relationships if it exists there.
-    
+
     let get_edge_count = |node_id: &str| -> usize {
         let overlay_edges = overlay.get_outgoing_edges(node_id);
         if !overlay_edges.is_empty() {
@@ -155,21 +178,33 @@ pub fn compare_modules(
     let mut output = format!("## Comparison: {} vs {}\n\n", node_a.name, node_b.name);
 
     output.push_str("### Interface Overview\n");
-    output.push_str(&format!("- **{}** has {} internal symbols.\n", node_a.name, count_a));
-    output.push_str(&format!("- **{}** has {} internal symbols.\n", node_b.name, count_b));
+    output.push_str(&format!(
+        "- **{}** has {} internal symbols.\n",
+        node_a.name, count_a
+    ));
+    output.push_str(&format!(
+        "- **{}** has {} internal symbols.\n",
+        node_b.name, count_b
+    ));
 
     // Metrics comparison
     let anchor_a = node_a.anchor_score.unwrap_or(0.0);
     let anchor_b = node_b.anchor_score.unwrap_or(0.0);
     output.push_str("\n### Architectural Metrics\n");
-    output.push_str(&format!("- **Anchor Score (Stability):** {:.3} vs {:.3}\n", anchor_a, anchor_b));
+    output.push_str(&format!(
+        "- **Anchor Score (Stability):** {:.3} vs {:.3}\n",
+        anchor_a, anchor_b
+    ));
 
     // Shared co-change partners
     let partners_a = graph.get_co_change_partners(&node_a.path)?;
     let partners_b = graph.get_co_change_partners(&node_b.path)?;
-    
+
     let set_b: HashSet<_> = partners_b.iter().map(|(p, _)| p).collect();
-    let shared: Vec<_> = partners_a.iter().filter(|(p, _)| set_b.contains(p)).collect();
+    let shared: Vec<_> = partners_a
+        .iter()
+        .filter(|(p, _)| set_b.contains(p))
+        .collect();
 
     if !shared.is_empty() {
         output.push_str("\n### Shared Temporal Coupling\n");
@@ -182,19 +217,26 @@ pub fn compare_modules(
     Ok(output)
 }
 
-pub fn get_master_map(graph: &GraphDatabase, overlay: &VolatileOverlay) -> Result<String, LainError> {
+pub fn get_master_map(
+    graph: &GraphDatabase,
+    overlay: &VolatileOverlay,
+) -> Result<String, LainError> {
     let mut modules = graph.get_nodes_by_type(NodeType::Namespace)?;
     let mut files = graph.get_nodes_by_type(NodeType::File)?;
 
     // Optimized Merge
     let mut seen_mod_ids: HashSet<String> = modules.iter().map(|m| m.id.clone()).collect();
     for n in overlay.find_nodes_by_type(&NodeType::Namespace) {
-        if seen_mod_ids.insert(n.id.clone()) { modules.push(n); }
+        if seen_mod_ids.insert(n.id.clone()) {
+            modules.push(n);
+        }
     }
 
     let mut seen_file_ids: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
     for f in overlay.find_nodes_by_type(&NodeType::File) {
-        if seen_file_ids.insert(f.id.clone()) { files.push(f); }
+        if seen_file_ids.insert(f.id.clone()) {
+            files.push(f);
+        }
     }
 
     let mut output = "## Master Map: Staleness Report\n\n".to_string();
@@ -216,63 +258,87 @@ pub fn get_master_map(graph: &GraphDatabase, overlay: &VolatileOverlay) -> Resul
             format!("{}/", m.path)
         };
 
-        let module_files: Vec<_> = files.iter()
+        let module_files: Vec<_> = files
+            .iter()
             .filter(|f| f.path == m.path || f.path.starts_with(&module_path_with_sep))
             .collect();
-        
-        let volatile_nodes: Vec<_> = module_files.iter()
+
+        let volatile_nodes: Vec<_> = module_files
+            .iter()
             .filter_map(|f| overlay.get_node(&f.id))
             .collect();
-        
+
         let volatile_count = volatile_nodes.len();
-        
+
         // Table Bloat Prevention: Cap names and add suffix
-        let volatile_names: Vec<_> = volatile_nodes.iter()
+        let volatile_names: Vec<_> = volatile_nodes
+            .iter()
             .map(|n| n.name.clone())
             .take(3)
             .collect();
-            
+
         let volatile_str = if volatile_count > 3 {
-            format!("{} ({}, ...+{} more)", volatile_count, volatile_names.join(", "), volatile_count - 3)
+            format!(
+                "{} ({}, ...+{} more)",
+                volatile_count,
+                volatile_names.join(", "),
+                volatile_count - 3
+            )
         } else if volatile_count > 0 {
             format!("{} ({})", volatile_count, volatile_names.join(", "))
         } else {
             "0".to_string()
         };
 
-        let last_lsp = module_files.iter()
-            .filter_map(|f| f.last_lsp_sync)
-            .max();
-        
-        let last_git = module_files.iter()
-            .filter_map(|f| f.last_git_sync)
-            .max();
+        let last_lsp = module_files.iter().filter_map(|f| f.last_lsp_sync).max();
 
-        let lsp_time = last_lsp.map(|t| format_duration(now - t)).unwrap_or_else(|| "Never".to_string());
-        let git_time = last_git.map(|t| format_duration(now - t)).unwrap_or_else(|| "Never".to_string());
+        let last_git = module_files.iter().filter_map(|f| f.last_git_sync).max();
+
+        let lsp_time = last_lsp
+            .map(|t| format_duration(now - t))
+            .unwrap_or_else(|| "Never".to_string());
+        let git_time = last_git
+            .map(|t| format_duration(now - t))
+            .unwrap_or_else(|| "Never".to_string());
 
         let status = match (last_lsp, last_git) {
             (Some(lsp), Some(git)) => {
                 let staleness = (now - lsp).max(now - git);
-                if staleness < 3600 { "🟢 Fresh" }
-                else if staleness < 86400 { "🟡 Stale" }
-                else { "🔴 Outdated" }
+                if staleness < 3600 {
+                    "🟢 Fresh"
+                } else if staleness < 86400 {
+                    "🟡 Stale"
+                } else {
+                    "🔴 Outdated"
+                }
             }
-            _ => "⚪ Unknown"
+            _ => "⚪ Unknown",
         };
 
-        output.push_str(&format!("| {} | {} | {} | {} | {} | {} |\n", 
-            m.name, module_files.len(), volatile_str, lsp_time, git_time, status));
+        output.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            m.name,
+            module_files.len(),
+            volatile_str,
+            lsp_time,
+            git_time,
+            status
+        ));
     }
 
     Ok(output)
 }
 
 fn format_duration(seconds: i64) -> String {
-    if seconds < 60 { format!("{}s ago", seconds) }
-    else if seconds < 3600 { format!("{}m ago", seconds / 60) }
-    else if seconds < 86400 { format!("{}h ago", seconds / 3600) }
-    else { format!("{}d ago", seconds / 86400) }
+    if seconds < 60 {
+        format!("{}s ago", seconds)
+    } else if seconds < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86400)
+    }
 }
 
 /// Analyzes the codebase for architectural observations:
@@ -293,11 +359,13 @@ pub fn architectural_observations(
 
     // ── High Fan-Out Modules ────────────────────────────────────────────────
     let files = graph.get_nodes_by_type(NodeType::File)?;
-    let mut file_fan_outs: Vec<_> = files.iter()
+    let mut file_fan_outs: Vec<_> = files
+        .iter()
         .filter_map(|f| {
             let edges = graph.get_edges_from(&f.id).unwrap_or_default();
             // Count all non-Contains edges (Calls, Uses, Imports, etc.)
-            let outgoing = edges.iter()
+            let outgoing = edges
+                .iter()
                 .filter(|e| !matches!(e.edge_type, crate::schema::EdgeType::Contains))
                 .count();
             if outgoing >= min_fan_out {
@@ -311,7 +379,10 @@ pub fn architectural_observations(
     file_fan_outs.sort_by(|a, b| b.1.cmp(&a.1));
 
     output.push_str("### High Fan-Out Modules\n\n");
-    output.push_str(&format!("*Modules referencing {} or more other modules*\n\n", min_fan_out));
+    output.push_str(&format!(
+        "*Modules referencing {} or more other modules*\n\n",
+        min_fan_out
+    ));
 
     if file_fan_outs.is_empty() {
         output.push_str("No modules found exceeding fan-out threshold.\n");
@@ -334,9 +405,7 @@ pub fn architectural_observations(
             let dir_count = dirs.len();
             output.push_str(&format!(
                 "| `{}` | {} | {} |\n",
-                file.name,
-                count,
-                dir_count
+                file.name, count, dir_count
             ));
         }
         output.push_str("\n");
@@ -356,10 +425,12 @@ pub fn architectural_observations(
                         if let Some(t) = target {
                             let boundary_key = format!(
                                 "{} <-> {}",
-                                std::path::Path::new(&file.path).parent()
+                                std::path::Path::new(&file.path)
+                                    .parent()
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_default(),
-                                std::path::Path::new(&t.path).parent()
+                                std::path::Path::new(&t.path)
+                                    .parent()
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_default()
                             );
@@ -375,7 +446,8 @@ pub fn architectural_observations(
     }
 
     // Find cross-boundary patterns with highest fan-out
-    let mut cross_boundary: Vec<_> = pattern_boundaries.iter()
+    let mut cross_boundary: Vec<_> = pattern_boundaries
+        .iter()
         .filter(|(_, files)| files.len() >= 2)
         .collect();
     cross_boundary.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
@@ -393,10 +465,7 @@ pub fn architectural_observations(
 
     // ── Observations Summary ───────────────────────────────────────────────
     output.push_str("### Summary\n\n");
-    output.push_str(&format!(
-        "- **{}** files analyzed\n",
-        files.len()
-    ));
+    output.push_str(&format!("- **{}** files analyzed\n", files.len()));
     output.push_str(&format!(
         "- **{}** high fan-out modules detected\n",
         file_fan_outs.len()

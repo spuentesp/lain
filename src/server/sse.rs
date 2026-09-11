@@ -155,8 +155,7 @@ mod tests {
             plan_revision: Some(7),
             landed_revision: 42,
         };
-        let json =
-            serde_json::to_value(&PresenceEvent::EditLanded { event }).unwrap();
+        let json = serde_json::to_value(&PresenceEvent::EditLanded { event }).unwrap();
 
         // Wire-contract checks: every AuditEvent field lives under
         // the `EditLanded` variant tag and inside the `event` field

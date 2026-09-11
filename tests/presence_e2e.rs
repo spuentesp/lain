@@ -1,5 +1,5 @@
-use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
 use lain::server::attribution::AttributionWatcher;
+use lain::server::presence::{AgentKind, AgentMode, OccupancyMap, PresenceRegistry};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,18 +17,26 @@ fn e2e_attribution_via_real_child_pid() {
     // Spawn a child that sleeps 500ms then writes to the file.
     let mut child = Command::new("sh")
         .arg("-c")
-        .arg(format!("sleep 0.3 && echo 'fn login() {{ changed }}' > {}", target.display()))
+        .arg(format!(
+            "sleep 0.3 && echo 'fn login() {{ changed }}' > {}",
+            target.display()
+        ))
         .spawn()
         .expect("spawn");
 
     let pid = child.id();
     let presence = Arc::new(PresenceRegistry::new());
     let occupancy = Arc::new(OccupancyMap::new());
-    let _ = presence.register("e2e-child".into(), AgentKind::Other("e2e".into()), AgentMode::Interactive, Some(pid), None);
-    let (tx, _rx) = tokio::sync::broadcast::channel(8);
-    let events_log = Arc::new(
-        lain::server::events_log::EventsLog::open(&tmp.path().join("events")).unwrap(),
+    let _ = presence.register(
+        "e2e-child".into(),
+        AgentKind::Other("e2e".into()),
+        AgentMode::Interactive,
+        Some(pid),
+        None,
     );
+    let (tx, _rx) = tokio::sync::broadcast::channel(8);
+    let events_log =
+        Arc::new(lain::server::events_log::EventsLog::open(&tmp.path().join("events")).unwrap());
     let watcher = AttributionWatcher::new(
         presence.clone(),
         occupancy.clone(),
@@ -46,5 +54,8 @@ fn e2e_attribution_via_real_child_pid() {
     let sessions = presence.list_active(true);
     assert_eq!(sessions.len(), 1);
     let claims = occupancy.list_for_agent(&sessions[0].id);
-    assert!(!claims.is_empty(), "expected auto-claim after child write; got: {claims:?}");
+    assert!(
+        !claims.is_empty(),
+        "expected auto-claim after child write; got: {claims:?}"
+    );
 }

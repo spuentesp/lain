@@ -17,8 +17,7 @@ use std::process::{Command, Output};
 fn lain_bin() -> PathBuf {
     // CARGO_BIN_EXE_<name> is set by cargo for integration tests.
     // For `lain` itself, look in target/debug.
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .unwrap_or_else(|_| "target".to_string());
+    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
     let candidate = PathBuf::from(&target_dir).join("debug").join("lain");
     if candidate.exists() {
         candidate
@@ -41,7 +40,11 @@ fn run(args: &[&str]) -> Output {
 fn lain_version_works() {
     let out = run(&["--version"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "--version must exit 0; got {:?}", out.status);
+    assert!(
+        out.status.success(),
+        "--version must exit 0; got {:?}",
+        out.status
+    );
     assert!(stdout.contains("lain"), "--version must mention 'lain'");
 }
 
@@ -50,15 +53,20 @@ fn lain_help_works() {
     let out = run(&["--help"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "--help must exit 0");
-    assert!(stdout.contains("server") && stdout.contains("mcp"),
-            "--help must list the headline subcommands");
+    assert!(
+        stdout.contains("server") && stdout.contains("mcp"),
+        "--help must list the headline subcommands"
+    );
 }
 
 #[test]
 fn lain_unknown_subcommand_errors() {
     let out = run(&["totally_not_a_real_subcommand"]);
-    assert!(!out.status.success(),
-            "unknown subcommand must exit non-zero; got {:?}", out.status);
+    assert!(
+        !out.status.success(),
+        "unknown subcommand must exit non-zero; got {:?}",
+        out.status
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     // clap's default "unrecognized subcommand" error is fine.
     assert!(!stderr.is_empty() || !String::from_utf8_lossy(&out.stdout).is_empty());
@@ -68,8 +76,10 @@ fn lain_unknown_subcommand_errors() {
 fn lain_no_args_shows_help() {
     let out = run(&[]);
     // clap default is to print help on no args.
-    assert!(out.status.success() || !out.status.success(),
-            "no-args is allowed to either print help or error");
+    assert!(
+        out.status.success() || !out.status.success(),
+        "no-args is allowed to either print help or error"
+    );
 }
 
 // ─── doctor ──────────────────────────────────────────────────────
@@ -81,8 +91,10 @@ fn lain_doctor_runs() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     // doctor may exit non-zero on a partial install; we pin
     // "runs without panic" and "produces output".
-    assert!(!stdout.is_empty() || !stderr.is_empty(),
-            "doctor must produce some output");
+    assert!(
+        !stdout.is_empty() || !stderr.is_empty(),
+        "doctor must produce some output"
+    );
 }
 
 #[test]
@@ -96,13 +108,21 @@ fn lain_doctor_unknown_flag_errors() {
 #[test]
 fn lain_schema_dump_writes_default_path() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run(&["schema", "dump", "--out",
-                    dir.path().join("schema.json").to_str().unwrap()]);
-    assert!(out.status.success(),
-            "schema dump must succeed; stderr: {}",
-            String::from_utf8_lossy(&out.stderr));
-    assert!(dir.path().join("schema.json").exists(),
-            "schema.json must be written");
+    let out = run(&[
+        "schema",
+        "dump",
+        "--out",
+        dir.path().join("schema.json").to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "schema dump must succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.path().join("schema.json").exists(),
+        "schema.json must be written"
+    );
 }
 
 #[test]
@@ -118,8 +138,10 @@ fn lain_server_help_works() {
     let out = run(&["server", "--help"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "server --help must exit 0");
-    assert!(stdout.contains("--config") && stdout.contains("--transport"),
-            "server --help must document --config and --transport");
+    assert!(
+        stdout.contains("--config") && stdout.contains("--transport"),
+        "server --help must document --config and --transport"
+    );
 }
 
 #[test]
@@ -156,8 +178,10 @@ fn lain_init_help_works() {
 fn lain_hooks_help_works() {
     let out = run(&["hooks", "--help"]);
     assert!(out.status.success(), "hooks --help must exit 0");
-    assert!(String::from_utf8_lossy(&out.stdout).contains("claim"),
-            "hooks --help must list `claim` subcommand");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("claim"),
+        "hooks --help must list `claim` subcommand"
+    );
 }
 
 #[test]
@@ -219,8 +243,10 @@ fn lain_repos_list_handles_missing_config() {
         .output()
         .expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("panic"),
-            "repos list without config must not panic; stderr: {stderr}");
+    assert!(
+        !stderr.contains("panic"),
+        "repos list without config must not panic; stderr: {stderr}"
+    );
 }
 
 // ─── oneshot / ask / query ───────────────────────────────────────

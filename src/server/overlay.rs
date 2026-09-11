@@ -8,16 +8,16 @@
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 
 pub mod stream;
-pub use stream::{
-    broadcast_overlay_diff, subscribe_apply, subscribe_channel, OverlayDiff, RevisionId,
-};
 use crate::server::revision_log::{LookupResult, RevisionLog};
+use parking_lot::{Mutex, RwLock};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::{Mutex, RwLock};
+pub use stream::{
+    broadcast_overlay_diff, subscribe_apply, subscribe_channel, OverlayDiff, RevisionId,
+};
 use tracing::{debug, info, warn};
 
 /// Volatile overlay graph using petgraph
@@ -203,9 +203,7 @@ impl VolatileOverlay {
                 if graph.remove_node(idx).is_some() {
                     *self.last_updated.write() = Instant::now();
                     if idx != last_index {
-                        if let Some(moved_idx) = index_map
-                            .values_mut()
-                            .find(|v| **v == last_index)
+                        if let Some(moved_idx) = index_map.values_mut().find(|v| **v == last_index)
                         {
                             *moved_idx = idx;
                         }
@@ -227,9 +225,11 @@ impl VolatileOverlay {
         let index_map = self.node_index_map.read();
 
         // Copy indices out since they borrow from index_map
-        let source_idx = *index_map.get(&edge.source_id)
+        let source_idx = *index_map
+            .get(&edge.source_id)
             .ok_or_else(|| format!("Source node not found: {}", edge.source_id))?;
-        let target_idx = *index_map.get(&edge.target_id)
+        let target_idx = *index_map
+            .get(&edge.target_id)
             .ok_or_else(|| format!("Target node not found: {}", edge.target_id))?;
 
         // Release index_map lock before acquiring graph lock
@@ -265,18 +265,25 @@ impl VolatileOverlay {
             });
         }
 
-        debug!("Inserted edge into volatile overlay: {} -> {}", edge.source_id, edge.target_id);
+        debug!(
+            "Inserted edge into volatile overlay: {} -> {}",
+            edge.source_id, edge.target_id
+        );
         Ok(())
     }
 
     /// Get a node by ID
     pub fn get_node(&self, id: &str) -> Option<GraphNode> {
-        if !self.check_bloom(id) { return None; }
+        if !self.check_bloom(id) {
+            return None;
+        }
 
         let graph = self.graph.read();
         let index_map = self.node_index_map.read();
 
-        index_map.get(id).and_then(|idx| graph.node_weight(*idx).cloned())
+        index_map
+            .get(id)
+            .and_then(|idx| graph.node_weight(*idx).cloned())
     }
 
     /// Remove every overlay node whose `path` equals the given path.
@@ -324,7 +331,8 @@ impl VolatileOverlay {
     /// Get all nodes
     pub fn get_all_nodes(&self) -> Vec<GraphNode> {
         let graph = self.graph.read();
-        graph.node_indices()
+        graph
+            .node_indices()
             .filter_map(|idx| graph.node_weight(idx).cloned())
             .collect()
     }
@@ -333,7 +341,8 @@ impl VolatileOverlay {
     pub fn get_all_edges(&self) -> Vec<(GraphNode, GraphNode, EdgeType)> {
         let graph = self.graph.read();
 
-        graph.edge_indices()
+        graph
+            .edge_indices()
             .filter_map(|idx| {
                 let (source, target) = graph.edge_endpoints(idx)?;
                 let source_node = graph.node_weight(source)?.clone();
@@ -347,8 +356,9 @@ impl VolatileOverlay {
     /// Find nodes by name (fuzzy match)
     pub fn find_nodes_by_name(&self, name: &str) -> Vec<GraphNode> {
         let graph = self.graph.read();
-        
-        graph.node_indices()
+
+        graph
+            .node_indices()
             .filter_map(|idx| {
                 let node = graph.node_weight(idx)?;
                 if node.name.to_lowercase().contains(&name.to_lowercase()) {
@@ -363,8 +373,9 @@ impl VolatileOverlay {
     /// Find nodes by type
     pub fn find_nodes_by_type(&self, node_type: &NodeType) -> Vec<GraphNode> {
         let graph = self.graph.read();
-        
-        graph.node_indices()
+
+        graph
+            .node_indices()
             .filter_map(|idx| {
                 let node = graph.node_weight(idx)?;
                 if &node.node_type == node_type {
@@ -378,8 +389,9 @@ impl VolatileOverlay {
 
     pub fn find_nodes_by_path(&self, path: &str) -> Vec<GraphNode> {
         let graph = self.graph.read();
-        
-        graph.node_indices()
+
+        graph
+            .node_indices()
             .filter_map(|idx| {
                 let node = graph.node_weight(idx)?;
                 if node.path == path {
@@ -395,13 +407,14 @@ impl VolatileOverlay {
     pub fn get_outgoing_edges(&self, node_id: &str) -> Vec<(GraphNode, EdgeType)> {
         let graph = self.graph.read();
         let index_map = self.node_index_map.read();
-        
+
         let idx = match index_map.get(node_id) {
             Some(idx) => *idx,
             None => return vec![],
         };
-        
-        graph.edges(idx)
+
+        graph
+            .edges(idx)
             .filter_map(|e| {
                 let target_node = graph.node_weight(e.target())?.clone();
                 Some((target_node, e.weight().clone()))
@@ -413,14 +426,15 @@ impl VolatileOverlay {
     pub fn get_incoming_edges(&self, node_id: &str) -> Vec<(GraphNode, EdgeType)> {
         let graph = self.graph.read();
         let index_map = self.node_index_map.read();
-        
+
         let idx = match index_map.get(node_id) {
             Some(idx) => *idx,
             None => return vec![],
         };
-        
+
         // Need to iterate all edges to find incoming
-        graph.edge_indices()
+        graph
+            .edge_indices()
             .filter_map(|eid| {
                 let (source, target) = graph.edge_endpoints(eid)?;
                 if target == idx {
@@ -451,7 +465,7 @@ impl VolatileOverlay {
     /// Get statistics
     pub fn stats(&self) -> OverlayStats {
         let graph = self.graph.read();
-        
+
         OverlayStats {
             node_count: graph.node_count(),
             edge_count: graph.edge_count(),
@@ -463,7 +477,7 @@ impl VolatileOverlay {
         let other_graph = other.graph.read();
         let mut graph = self.graph.write();
         let mut index_map = self.node_index_map.write();
-        
+
         // Copy nodes
         for idx in other_graph.node_indices() {
             if let Some(node) = other_graph.node_weight(idx) {
@@ -472,7 +486,7 @@ impl VolatileOverlay {
                 self.update_bloom(&node.id);
             }
         }
-        
+
         // Copy edges
         for idx in other_graph.edge_indices() {
             if let Some((source, target)) = other_graph.edge_endpoints(idx) {
@@ -542,10 +556,7 @@ pub async fn subscribe(owner_url: String, overlay: VolatileOverlay) -> ! {
         //    non-fatal: if the owner is up but only the streaming
         //    endpoint is live (or vice-versa), we still try to stream.
         if let Err(e) = hydrate_snapshot(&owner_url, &overlay).await {
-            warn!(
-                "overlay snapshot hydrate from {} failed: {}",
-                owner_url, e
-            );
+            warn!("overlay snapshot hydrate from {} failed: {}", owner_url, e);
         }
 
         // 2) Drain the NDJSON stream until the connection closes or
@@ -589,10 +600,7 @@ fn owner_base_url(owner_url: &str) -> String {
 /// JSON array. We upsert each node by id, so the merge is idempotent —
 /// re-running on reconnect converges to the owner's current state even
 /// if a few nodes were already present from the streaming session.
-async fn hydrate_snapshot(
-    owner_url: &str,
-    overlay: &VolatileOverlay,
-) -> Result<(), String> {
+async fn hydrate_snapshot(owner_url: &str, overlay: &VolatileOverlay) -> Result<(), String> {
     let url = format!("{}/overlay/get_snapshot", owner_base_url(owner_url));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -610,8 +618,8 @@ async fn hydrate_snapshot(
         .bytes()
         .await
         .map_err(|e| format!("read snapshot body: {e}"))?;
-    let nodes: Vec<GraphNode> = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("decode snapshot: {e}"))?;
+    let nodes: Vec<GraphNode> =
+        serde_json::from_slice(&bytes).map_err(|e| format!("decode snapshot: {e}"))?;
     debug!(
         "overlay snapshot hydrated {} node(s) from {}",
         nodes.len(),
@@ -654,11 +662,7 @@ async fn stream_diffs(
 
     let mut buf: Vec<u8> = Vec::new();
     let mut sse_data = String::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("read chunk: {e}"))?
-    {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read chunk: {e}"))? {
         buf.extend_from_slice(&chunk);
         // Split out every complete line and parse it. The remainder stays in
         // `buf` for the next chunk.
@@ -718,20 +722,14 @@ fn process_stream_line(
     send_diff_payload(text, tx);
 }
 
-fn flush_sse_data(
-    sse_data: &mut String,
-    tx: &tokio::sync::broadcast::Sender<stream::OverlayDiff>,
-) {
+fn flush_sse_data(sse_data: &mut String, tx: &tokio::sync::broadcast::Sender<stream::OverlayDiff>) {
     if !sse_data.is_empty() {
         send_diff_payload(sse_data, tx);
         sse_data.clear();
     }
 }
 
-fn send_diff_payload(
-    payload: &str,
-    tx: &tokio::sync::broadcast::Sender<stream::OverlayDiff>,
-) {
+fn send_diff_payload(payload: &str, tx: &tokio::sync::broadcast::Sender<stream::OverlayDiff>) {
     let payload = payload.trim();
     if payload.is_empty() {
         return;
@@ -752,4 +750,3 @@ fn send_diff_payload(
         }
     }
 }
-

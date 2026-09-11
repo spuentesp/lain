@@ -3,10 +3,10 @@
 //! Finds callers at the protocol level: HTTP routes, gRPC services,
 //! GraphQL resolvers that reference a given handler.
 
+use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::EdgeType;
-use crate::error::LainError;
 
 /// Find protocol-level callers (HTTP routes, gRPC services, etc.) for a symbol
 /// `node_id` accepts a symbol *name* as well as a raw graph id.
@@ -26,19 +26,22 @@ pub fn get_cross_runtime_callers(
     let mut output = format!("## Cross-Runtime Callers for: {}\n\n", node.name);
 
     // Find incoming CallsHttp edges (HTTP routes calling this handler)
-    let http_incoming: Vec<_> = graph.get_edges_to(node_id)?
+    let http_incoming: Vec<_> = graph
+        .get_edges_to(node_id)?
         .into_iter()
         .filter(|e| matches!(e.edge_type, EdgeType::CallsHttp))
         .collect();
 
     // Find incoming Implements edges (gRPC service methods implemented by this handler)
-    let grpc_incoming: Vec<_> = graph.get_edges_to(node_id)?
+    let grpc_incoming: Vec<_> = graph
+        .get_edges_to(node_id)?
         .into_iter()
         .filter(|e| matches!(e.edge_type, EdgeType::Implements))
         .collect();
 
     // Find incoming Uses edges from GraphQL nodes
-    let gql_incoming: Vec<_> = graph.get_edges_to(node_id)?
+    let gql_incoming: Vec<_> = graph
+        .get_edges_to(node_id)?
         .into_iter()
         .filter(|e| matches!(e.edge_type, EdgeType::Uses))
         .collect();

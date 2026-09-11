@@ -4,7 +4,9 @@
 
 use crate::git::GitSensor;
 use crate::LainServer;
-use notify::{event::CreateKind, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    event::CreateKind, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -44,9 +46,7 @@ pub fn spawn_config_watcher(
 ) -> std::thread::JoinHandle<()> {
     use crate::server::reload::ReloadBus;
 
-    let targets: HashSet<PathBuf> = watch_paths_for_config(repos_yaml)
-        .into_iter()
-        .collect();
+    let targets: HashSet<PathBuf> = watch_paths_for_config(repos_yaml).into_iter().collect();
 
     std::thread::spawn(move || {
         let bus_clone: Arc<ReloadBus> = Arc::clone(&bus);
@@ -58,14 +58,9 @@ pub fn spawn_config_watcher(
                     for path in &event.paths {
                         if targets_clone.contains(path) {
                             if let Err(e) = bus_clone.request_reload() {
-                                warn!(
-                                    "FileWatcher (config): bus.request_reload() failed: {e}"
-                                );
+                                warn!("FileWatcher (config): bus.request_reload() failed: {e}");
                             } else {
-                                debug!(
-                                    "FileWatcher (config): reload requested for {:?}",
-                                    path
-                                );
+                                debug!("FileWatcher (config): reload requested for {:?}", path);
                             }
                         }
                     }
@@ -120,8 +115,8 @@ pub fn spawn_config_watcher(
 
 /// File extensions to watch (source code files)
 const WATCHED_EXTENSIONS: &[&str] = &[
-    "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h", "hpp",
-    "cs", "rb", "swift", "kt", "scala", "vue", "svelte",
+    "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb",
+    "swift", "kt", "scala", "vue", "svelte",
 ];
 
 /// Debounce window for rapid file changes
@@ -240,7 +235,10 @@ impl FileWatcher {
                 // and a freshly-inserted file's path is *not* in
                 // `current_paths` only when the user just committed it.
                 if let Err(e) = server.sync_volatile_overlay().await {
-                    warn!("FileWatcher: post-batch sync_volatile_overlay failed: {}", e);
+                    warn!(
+                        "FileWatcher: post-batch sync_volatile_overlay failed: {}",
+                        e
+                    );
                 }
             }
         });
@@ -292,7 +290,10 @@ fn discover_watch_directories(workspace: &Path) -> Vec<PathBuf> {
         match entry {
             Ok(entry) => {
                 let path = entry.path();
-                if !entry.file_type().is_some_and(|file_type| file_type.is_dir()) {
+                if !entry
+                    .file_type()
+                    .is_some_and(|file_type| file_type.is_dir())
+                {
                     continue;
                 }
                 if is_readable_directory(path) {
@@ -459,24 +460,22 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
         let cb_git = Arc::clone(&git);
 
         let mut watcher = RecommendedWatcher::new(
-            move |res: Result<Event, notify::Error>| {
-                match res {
-                    Ok(event) => {
-                        for path in &event.paths {
-                            if is_created_directory_event(&event, path) {
-                                let _ = cb_command_sender
-                                    .send(WatchCommand::AddDirectory(path.clone()));
-                            }
-                        }
-                        if let Some(file) = filter_event(&event, &cb_git) {
-                            if let Err(error) = file_sender.blocking_send(file) {
-                                debug!("FileWatcher: failed to send path: {}", error);
-                            }
+            move |res: Result<Event, notify::Error>| match res {
+                Ok(event) => {
+                    for path in &event.paths {
+                        if is_created_directory_event(&event, path) {
+                            let _ =
+                                cb_command_sender.send(WatchCommand::AddDirectory(path.clone()));
                         }
                     }
-                    Err(error) => {
-                        warn!("FileWatcher: notify callback error: {}", error);
+                    if let Some(file) = filter_event(&event, &cb_git) {
+                        if let Err(error) = file_sender.blocking_send(file) {
+                            debug!("FileWatcher: failed to send path: {}", error);
+                        }
                     }
+                }
+                Err(error) => {
+                    warn!("FileWatcher: notify callback error: {}", error);
                 }
             },
             Config::default(),
@@ -656,7 +655,10 @@ fn is_watched_file(path: &Path) -> bool {
 }
 
 /// Process a single file change and update the overlay
-async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn process_file(
+    server: &LainServer,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -665,7 +667,10 @@ async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn st
     let symbols = {
         let lsp = server.lsp_pool.next();
         let mut lsp = lsp.lock().await;
-        match lsp.get_document_symbols_hierarchical(path, &server.config.workspace, &server.id_namespace).await {
+        match lsp
+            .get_document_symbols_hierarchical(path, &server.config.workspace, &server.id_namespace)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 debug!("FileWatcher: No LSP symbols for {:?}: {}", path, e);
@@ -683,7 +688,10 @@ async fn process_file(server: &LainServer, path: &Path) -> Result<(), Box<dyn st
         server.broadcast_overlay_insert(node);
     }
 
-    debug!("FileWatcher: updated overlay with {} symbols from {:?}", count, path);
+    debug!(
+        "FileWatcher: updated overlay with {} symbols from {:?}",
+        count, path
+    );
     Ok(())
 }
 
@@ -710,7 +718,9 @@ mod tests {
     #[cfg(unix)]
     impl PermissionGuard {
         fn new(path: &Path) -> Self {
-            Self { path: path.to_path_buf() }
+            Self {
+                path: path.to_path_buf(),
+            }
         }
     }
 
@@ -719,10 +729,7 @@ mod tests {
         fn drop(&mut self) {
             use std::os::unix::fs::PermissionsExt;
             // Best-effort: if the directory was already removed, ignore.
-            let _ = fs::set_permissions(
-                &self.path,
-                fs::Permissions::from_mode(0o755),
-            );
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o755));
         }
     }
 
@@ -805,7 +812,9 @@ mod tests {
     #[test]
     fn take_batch_drains_everything_when_under_the_limit() {
         let mut pending: HashSet<PathBuf> =
-            [PathBuf::from("/src/a.rs"), PathBuf::from("/src/b.rs")].into_iter().collect();
+            [PathBuf::from("/src/a.rs"), PathBuf::from("/src/b.rs")]
+                .into_iter()
+                .collect();
         let batch = super::take_batch(&mut pending, 20);
         assert_eq!(batch.len(), 2);
         assert!(pending.is_empty());
@@ -843,8 +852,7 @@ mod tests {
 
         // Make `blocked` unreadable. RAII guard restores mode to `0o755`
         // on drop (including panic-unwind), so cleanup remains reliable.
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
-            .expect("chmod 000");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("chmod 000");
         let _guard = PermissionGuard::new(&blocked);
 
         // chmod 000 is not a reliable EACCES signal under root or with
@@ -964,8 +972,7 @@ mod tests {
 
         let (_tmp, repo) = build_repo_layout();
         let blocked = repo.join("blocked");
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
-            .expect("chmod 000");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).expect("chmod 000");
         let _guard = PermissionGuard::new(&blocked);
 
         if fs::read_dir(&blocked).is_ok() {
@@ -977,9 +984,7 @@ mod tests {
             return;
         }
 
-        let git = Arc::new(Mutex::new(
-            GitSensor::new(&repo).expect("GitSensor::new"),
-        ));
+        let git = Arc::new(Mutex::new(GitSensor::new(&repo).expect("GitSensor::new")));
 
         // Production-shape channels:
         // - file events flow through a Tokio mpsc (same type as the
@@ -995,7 +1000,10 @@ mod tests {
             file_tx.clone(),
             git.clone(),
             (cmd_tx.clone(), cmd_rx),
-            WatcherTestHooks { ready_signal: Some(ready_tx), command_done: None },
+            WatcherTestHooks {
+                ready_signal: Some(ready_tx),
+                command_done: None,
+            },
         ));
 
         // Wait for the watcher thread's startup registration to
@@ -1105,7 +1113,10 @@ mod tests {
             }
         })
         .await;
-        assert!(result.unwrap_or(false), "expected reload request within 30s");
+        assert!(
+            result.unwrap_or(false),
+            "expected reload request within 30s"
+        );
     }
 
     /// Step 6: `spawn_config_watcher` also reacts to `workspaces.yaml`
@@ -1144,7 +1155,10 @@ mod tests {
             }
         })
         .await;
-        assert!(result.unwrap_or(false), "expected reload request within 30s");
+        assert!(
+            result.unwrap_or(false),
+            "expected reload request within 30s"
+        );
     }
 
     /// Step 5: a directory created after startup must trigger the
@@ -1170,9 +1184,7 @@ mod tests {
     async fn newly_created_directory_is_registered() {
         let (_tmp, repo) = build_repo_layout();
 
-        let git = Arc::new(Mutex::new(
-            GitSensor::new(&repo).expect("GitSensor::new"),
-        ));
+        let git = Arc::new(Mutex::new(GitSensor::new(&repo).expect("GitSensor::new")));
 
         let (file_tx, mut file_rx) = tokio::sync::mpsc::channel::<PathBuf>(16);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
@@ -1184,7 +1196,10 @@ mod tests {
             file_tx.clone(),
             git.clone(),
             (cmd_tx.clone(), cmd_rx),
-            WatcherTestHooks { ready_signal: Some(ready_tx), command_done: Some(cmd_done_tx) },
+            WatcherTestHooks {
+                ready_signal: Some(ready_tx),
+                command_done: Some(cmd_done_tx),
+            },
         ));
 
         // Gate on the startup registration completing.

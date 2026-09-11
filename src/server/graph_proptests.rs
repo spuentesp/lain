@@ -68,10 +68,7 @@ fn build_graph_at(
 /// Build a graph at a unique temp path (used by tests that don't care
 /// about persistence).
 fn build_graph(nodes: &[GraphNode], edges: &[(usize, usize)]) -> GraphDatabase {
-    let tmp = std::env::temp_dir().join(format!(
-        "lain_proptest_{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let tmp = std::env::temp_dir().join(format!("lain_proptest_{}", uuid::Uuid::new_v4().simple()));
     build_graph_at(nodes, edges, &tmp)
 }
 

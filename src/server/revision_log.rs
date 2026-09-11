@@ -117,7 +117,12 @@ impl RevisionLog {
         if !self.diffs.is_empty() && rev < self.floor_revision() {
             return Err(LookupResult::TooOld);
         }
-        Ok(self.diffs.iter().filter(|d| d.revision > rev).cloned().collect())
+        Ok(self
+            .diffs
+            .iter()
+            .filter(|d| d.revision > rev)
+            .cloned()
+            .collect())
     }
 }
 
@@ -135,8 +140,13 @@ mod tests {
     fn fake_diff(rev: u64) -> OverlayDiff {
         OverlayDiff {
             revision: rev,
-            added: vec![GraphNode::new(NodeType::Function, format!("f{rev}"), "/p.rs".into())],
-            removed: vec![], updated: vec![],
+            added: vec![GraphNode::new(
+                NodeType::Function,
+                format!("f{rev}"),
+                "/p.rs".into(),
+            )],
+            removed: vec![],
+            updated: vec![],
         }
     }
 
@@ -171,13 +181,18 @@ mod tests {
     fn diffs_since_beyond_current_returns_beyond_current() {
         let mut log = RevisionLog::with_capacity(8);
         log.enqueue(fake_diff(0)); // → rev 1
-        assert!(matches!(log.diffs_since(99), Err(LookupResult::BeyondCurrent)));
+        assert!(matches!(
+            log.diffs_since(99),
+            Err(LookupResult::BeyondCurrent)
+        ));
     }
 
     #[test]
     fn ring_evicts_too_old() {
         let mut log = RevisionLog::with_capacity(4);
-        for _ in 0..10 { log.enqueue(fake_diff(0)); } // 10 enqueues, cap 4
+        for _ in 0..10 {
+            log.enqueue(fake_diff(0));
+        } // 10 enqueues, cap 4
         assert_eq!(log.current_revision(), 10);
         assert_eq!(log.floor_revision(), 7);
         assert!(matches!(log.diffs_since(5), Err(LookupResult::TooOld)));

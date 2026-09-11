@@ -14,7 +14,10 @@ pub struct HashMapBackend {
 
 impl HashMapBackend {
     pub fn new() -> Self {
-        Self { nodes: RwLock::new(HashMap::new()), edges: RwLock::new(Vec::new()) }
+        Self {
+            nodes: RwLock::new(HashMap::new()),
+            edges: RwLock::new(Vec::new()),
+        }
     }
 }
 
@@ -96,11 +99,19 @@ impl GraphBackend for HashMapBackend {
     fn find_path(&self, _from: &str, _to: &str) -> Result<Vec<GraphNode>, LainError> {
         Ok(Vec::new())
     }
-    fn subgraph_around(&self, _center: &str, _radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError> {
+    fn subgraph_around(
+        &self,
+        _center: &str,
+        _radius: u32,
+    ) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError> {
         Ok(Vec::new())
     }
-    fn node_count(&self) -> usize { self.nodes.read().unwrap().len() }
-    fn edge_count(&self) -> usize { self.edges.read().unwrap().len() }
+    fn node_count(&self) -> usize {
+        self.nodes.read().unwrap().len()
+    }
+    fn edge_count(&self) -> usize {
+        self.edges.read().unwrap().len()
+    }
 }
 
 #[test]
@@ -119,7 +130,12 @@ fn contract_upsert_edge_increments_count() {
     let n2 = GraphNode::new(NodeType::Function, "b".into(), "src/lib.rs".into());
     b.upsert_node(n1.clone()).unwrap();
     b.upsert_node(n2.clone()).unwrap();
-    b.upsert_edge(GraphEdge::new(EdgeType::Calls, n1.id.clone(), n2.id.clone())).unwrap();
+    b.upsert_edge(GraphEdge::new(
+        EdgeType::Calls,
+        n1.id.clone(),
+        n2.id.clone(),
+    ))
+    .unwrap();
     assert_eq!(b.node_count(), 2);
     assert_eq!(b.edge_count(), 1);
 }

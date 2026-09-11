@@ -101,7 +101,10 @@ async fn granted_claim_appends_audit_event() {
     let ev = &events[0];
     assert_eq!(ev.agent_id.as_str(), agent_id);
     assert_eq!(ev.path, "auth.rs");
-    assert!(ev.plan_revision.is_none(), "legacy caller must not set plan_revision");
+    assert!(
+        ev.plan_revision.is_none(),
+        "legacy caller must not set plan_revision"
+    );
     // landed_revision is deliberately left unasserted: it is whatever the
     // overlay reports at audit time — the floor value 0 for a fresh server,
     // higher once any overlay mutation lands (see the post-bump case in the
@@ -114,7 +117,10 @@ async fn granted_claim_appends_audit_event() {
     assert_eq!(ev.claim_set[0].path.to_string_lossy(), "auth.rs");
     assert_eq!(ev.claim_set[0].symbols, vec!["login"]);
     // No racers: alice was alone on this file.
-    assert!(ev.racers.is_empty(), "uncontested claim must record no racers");
+    assert!(
+        ev.racers.is_empty(),
+        "uncontested claim must record no racers"
+    );
 }
 
 /// A claim that the occupancy map rejects (already-claimed Edit) is
@@ -243,7 +249,11 @@ async fn multi_file_grant_emits_one_audit_line_per_path() {
     assert_eq!(paths, vec!["auth.rs".to_string(), "db.rs".to_string()]);
     for ev in &events {
         assert_eq!(ev.agent_id.as_str(), agent_id);
-        assert_eq!(ev.claim_set.len(), 1, "claim_set should match the per-file grant");
+        assert_eq!(
+            ev.claim_set.len(),
+            1,
+            "claim_set should match the per-file grant"
+        );
     }
 }
 
@@ -263,7 +273,10 @@ async fn audit_append_failure_does_not_block_claim() {
     // will then fail with `NotADirectory`.
     let blocker_file = blocker.path().join("lain");
     std::fs::write(&blocker_file, b"not a directory").unwrap();
-    std::env::set_var("XDG_STATE_HOME", blocker.path().to_string_lossy().to_string());
+    std::env::set_var(
+        "XDG_STATE_HOME",
+        blocker.path().to_string_lossy().to_string(),
+    );
 
     let ws = tempfile::tempdir().unwrap();
     git2::Repository::init(ws.path()).unwrap();

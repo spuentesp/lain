@@ -4,8 +4,8 @@
 //! `FederatedIndex`.
 
 use super::dto::{
-    ActiveWorkspaceInfo, GraphEdge, GraphNode, WorkspaceDetail, WorkspaceGraph,
-    WorkspaceInfo, WorkspaceRepoInfo,
+    ActiveWorkspaceInfo, GraphEdge, GraphNode, WorkspaceDetail, WorkspaceGraph, WorkspaceInfo,
+    WorkspaceRepoInfo,
 };
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
@@ -23,16 +23,20 @@ pub fn list_workspaces(
     workspaces: &WorkspacesFile,
     active: Option<&ActiveWorkspace>,
 ) -> Vec<WorkspaceInfo> {
-    workspaces.workspaces.iter().map(|ws| {
-        let is_active = active.as_ref().map(|a| a.name == ws.name).unwrap_or(false);
-        WorkspaceInfo {
-            name: ws.name.clone(),
-            description: ws.description.clone(),
-            source: source_label(&ws.source),
-            member_count: ws.members.len(),
-            is_active,
-        }
-    }).collect()
+    workspaces
+        .workspaces
+        .iter()
+        .map(|ws| {
+            let is_active = active.as_ref().map(|a| a.name == ws.name).unwrap_or(false);
+            WorkspaceInfo {
+                name: ws.name.clone(),
+                description: ws.description.clone(),
+                source: source_label(&ws.source),
+                member_count: ws.members.len(),
+                is_active,
+            }
+        })
+        .collect()
 }
 
 /// Identify the workspace whose member set exactly matches the loaded repo
@@ -43,23 +47,30 @@ pub fn get_active_workspace(
     fed: &FederatedIndex,
     workspaces: &WorkspacesFile,
 ) -> Result<ActiveWorkspaceInfo, LainError> {
-    let loaded: std::collections::HashSet<String> =
-        fed.list_repos().into_iter().map(|(id, _)| id.to_string()).collect();
+    let loaded: std::collections::HashSet<String> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
     if loaded.is_empty() {
         return Err(LainError::Workspace(
             "no repos loaded; no active workspace".into(),
         ));
     }
-    let active = workspaces.workspaces.iter()
+    let active = workspaces
+        .workspaces
+        .iter()
         .find(|ws| {
             let ws_set: std::collections::HashSet<&String> = ws.members.iter().collect();
             ws_set.len() == loaded.len()
                 && ws_set.iter().all(|m| loaded.contains(*m))
                 && loaded.iter().all(|l| ws_set.contains(l))
         })
-        .ok_or_else(|| LainError::Workspace(
-            "federation loaded but no workspace matches the loaded repos".into(),
-        ))?;
+        .ok_or_else(|| {
+            LainError::Workspace(
+                "federation loaded but no workspace matches the loaded repos".into(),
+            )
+        })?;
     Ok(ActiveWorkspaceInfo {
         name: active.name.clone(),
         members: active.members.clone(),
@@ -72,7 +83,10 @@ pub fn get_workspace(
     workspaces: &WorkspacesFile,
     name: &str,
 ) -> Result<WorkspaceDetail, LainError> {
-    let ws = workspaces.workspaces.iter().find(|w| w.name == name)
+    let ws = workspaces
+        .workspaces
+        .iter()
+        .find(|w| w.name == name)
         .ok_or_else(|| LainError::NotFound(format!("workspace {name}")))?;
     // Resolve path + health for each member from the federation, if loaded.
     let loaded = fed.list_repos();
@@ -82,7 +96,9 @@ pub fn get_workspace(
         let (path, health) = match info {
             Some((id, h)) => {
                 let repo = fed.get_repo(id);
-                let path = repo.map(|r| r.source().local_path().display().to_string()).unwrap_or_default();
+                let path = repo
+                    .map(|r| r.source().local_path().display().to_string())
+                    .unwrap_or_default();
                 (path, h.to_string())
             }
             None => (String::new(), "not_loaded".to_string()),
@@ -128,18 +144,25 @@ pub fn get_workspace_graph(
 ) -> Result<WorkspaceGraph, LainError> {
     // Identify the active workspace by intersecting loaded repos with
     // each workspace's member set. Errors if no match.
-    let loaded: std::collections::HashSet<String> =
-        fed.list_repos().into_iter().map(|(id, _)| id.to_string()).collect();
-    let active = workspaces.workspaces.iter()
+    let loaded: std::collections::HashSet<String> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let active = workspaces
+        .workspaces
+        .iter()
         .find(|ws| {
             let ws_set: std::collections::HashSet<&String> = ws.members.iter().collect();
             ws_set.len() == loaded.len()
                 && ws_set.iter().all(|m| loaded.contains(*m))
                 && loaded.iter().all(|l| ws_set.contains(l))
         })
-        .ok_or_else(|| LainError::Workspace(
-            "federation loaded but no workspace matches the loaded repos".into(),
-        ))?;
+        .ok_or_else(|| {
+            LainError::Workspace(
+                "federation loaded but no workspace matches the loaded repos".into(),
+            )
+        })?;
     let members: std::collections::HashSet<String> = active.members.iter().cloned().collect();
 
     let all_nodes = fed.backend().list_nodes().map_err(LainError::from)?;
@@ -147,12 +170,21 @@ pub fn get_workspace_graph(
     let mut truncated = false;
     for n in all_nodes {
         let kind = format!("{:?}", n.node_type);
-        if !node_kind_str(&kind) { continue; }
+        if !node_kind_str(&kind) {
+            continue;
+        }
         let gid = crate::federation::repo_id::GlobalId::parse(&n.id).ok();
-        let repo_id = gid.as_ref().map(|g| g.repo_id().to_string()).unwrap_or_default();
-        if !members.contains(&repo_id) { continue; }
+        let repo_id = gid
+            .as_ref()
+            .map(|g| g.repo_id().to_string())
+            .unwrap_or_default();
+        if !members.contains(&repo_id) {
+            continue;
+        }
         if let Some(f) = filter {
-            if !n.name.contains(f) && !n.path.contains(f) { continue; }
+            if !n.name.contains(f) && !n.path.contains(f) {
+                continue;
+            }
         }
         if nodes.len() >= GRAPH_NODE_CAP {
             truncated = true;
@@ -171,9 +203,13 @@ pub fn get_workspace_graph(
     let mut edges: Vec<GraphEdge> = Vec::new();
     let all_edges = fed.backend().all_edges().map_err(LainError::from)?;
     for e in all_edges {
-        if !node_ids.contains(e.source_id.as_str()) || !node_ids.contains(e.target_id.as_str()) { continue; }
+        if !node_ids.contains(e.source_id.as_str()) || !node_ids.contains(e.target_id.as_str()) {
+            continue;
+        }
         let kind = format!("{:?}", e.edge_type);
-        if !edge_kind_str(&kind) { continue; }
+        if !edge_kind_str(&kind) {
+            continue;
+        }
         if edges.len() >= GRAPH_EDGE_CAP {
             truncated = true;
             break;
@@ -192,5 +228,9 @@ pub fn get_workspace_graph(
         });
     }
 
-    Ok(WorkspaceGraph { nodes, edges, truncated })
+    Ok(WorkspaceGraph {
+        nodes,
+        edges,
+        truncated,
+    })
 }

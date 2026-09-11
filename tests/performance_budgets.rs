@@ -232,9 +232,7 @@ fn boot_and_time(
     loop {
         if boot_start.elapsed() > Duration::from_secs(60) {
             let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-            panic!(
-                "server did not become healthy within 60s on {host}; last stderr:\n{log}"
-            );
+            panic!("server did not become healthy within 60s on {host}; last stderr:\n{log}");
         }
         let attempt = (|| -> std::io::Result<(u16, String)> {
             let mut stream = TcpStream::connect(&host)?;
@@ -289,8 +287,7 @@ fn boot_default() -> (ServerGuard, String, tempfile::TempDir) {
     build_perf_fixture(&repo_dir);
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let (guard, _boot_elapsed, host) =
-        boot_and_time(project.path(), &repo_dir, &data_dir, port);
+    let (guard, _boot_elapsed, host) = boot_and_time(project.path(), &repo_dir, &data_dir, port);
     (guard, host, project)
 }
 
@@ -299,9 +296,7 @@ fn boot_default() -> (ServerGuard, String, tempfile::TempDir) {
 fn http_request(host: &str, raw: &str) -> (u16, String, Duration) {
     let start = Instant::now();
     let mut stream = TcpStream::connect(host).expect("connect");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.write_all(raw.as_bytes()).expect("write");
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("read");
@@ -354,8 +349,7 @@ fn server_boot_under_5_seconds() {
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let (guard, elapsed, host) =
-        boot_and_time(project.path(), &repo_dir, &data_dir, port);
+    let (guard, elapsed, host) = boot_and_time(project.path(), &repo_dir, &data_dir, port);
     println!("server_boot_under_5_seconds: host={host} elapsed={elapsed:?}");
 
     let cap = relaxed(budget);
@@ -505,7 +499,8 @@ fn get_workspace_graph_under_500ms() {
     for _ in 0..ITERS {
         let (status, resp, elapsed) = jsonrpc(&host, &body);
         assert_eq!(
-            status, 200,
+            status,
+            200,
             "get_workspace_graph HTTP {status}: {}",
             &resp[..resp.len().min(200)]
         );
@@ -547,11 +542,8 @@ fn small_repo_index_under_10_seconds() {
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let (guard, elapsed, host) =
-        boot_and_time(project.path(), &repo_dir, &data_dir, port);
-    println!(
-        "small_repo_index_under_10_seconds: host={host} elapsed={elapsed:?}"
-    );
+    let (guard, elapsed, host) = boot_and_time(project.path(), &repo_dir, &data_dir, port);
+    println!("small_repo_index_under_10_seconds: host={host} elapsed={elapsed:?}");
 
     let cap = relaxed(budget);
     assert!(
@@ -565,8 +557,8 @@ fn small_repo_index_under_10_seconds() {
     let req = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     let (status, body, _) = http_request(&host, &req);
     assert_eq!(status, 200, "/health HTTP {status}: {body}");
-    let parsed: serde_json::Value = serde_json::from_str(&body)
-        .unwrap_or_else(|e| panic!("/health not JSON: {e}\n{body}"));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("/health not JSON: {e}\n{body}"));
     let graph_nodes = parsed["graph_nodes"].as_u64().unwrap_or(0);
     assert!(
         graph_nodes > 0,

@@ -50,8 +50,7 @@ use common::{free_port, jsonrpc, tools_call_text, ServerGuard};
 /// actionable detail without `-c` flags.
 fn git_init_committed(path: &Path) {
     let mut init = Command::new("git");
-    init.args(["init", "-q", "-b", "main"])
-        .current_dir(path);
+    init.args(["init", "-q", "-b", "main"]).current_dir(path);
     let init_out = init.output().expect("git init");
     assert!(
         init_out.status.success(),
@@ -61,9 +60,12 @@ fn git_init_committed(path: &Path) {
 
     let add = Command::new("git")
         .args([
-            "-c", "user.email=federation-e2e@lain",
-            "-c", "user.name=federation-e2e",
-            "add", "-A",
+            "-c",
+            "user.email=federation-e2e@lain",
+            "-c",
+            "user.name=federation-e2e",
+            "add",
+            "-A",
         ])
         .current_dir(path)
         .output()
@@ -76,9 +78,14 @@ fn git_init_committed(path: &Path) {
 
     let commit = Command::new("git")
         .args([
-            "-c", "user.email=federation-e2e@lain",
-            "-c", "user.name=federation-e2e",
-            "commit", "-q", "-m", "init",
+            "-c",
+            "user.email=federation-e2e@lain",
+            "-c",
+            "user.name=federation-e2e",
+            "commit",
+            "-q",
+            "-m",
+            "init",
         ])
         .current_dir(path)
         .output()
@@ -99,9 +106,7 @@ fn write_rust_crate(path: &Path, crate_name: &str, body: &str) {
     std::fs::create_dir_all(path.join("src")).unwrap();
     std::fs::write(
         path.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        ),
+        format!("[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",),
     )
     .unwrap();
     std::fs::write(path.join("src/lib.rs"), body).unwrap();
@@ -243,7 +248,9 @@ impl FederationFixture {
         Self { root }
     }
 
-    fn repos_yaml(&self) -> PathBuf { self.root.join("repos.yaml") }
+    fn repos_yaml(&self) -> PathBuf {
+        self.root.join("repos.yaml")
+    }
 }
 
 /// Boot `lain server --transport http --port <port> --workspace auto
@@ -256,8 +263,7 @@ fn boot_federation(fixture: &FederationFixture, port: u16) -> ServerGuard {
     let state = tempfile::tempdir().unwrap();
     let xdg_config = tempfile::tempdir().unwrap();
 
-    let stderr_path =
-        std::env::temp_dir().join(format!("federation-e2e-stderr-{port}.log"));
+    let stderr_path = std::env::temp_dir().join(format!("federation-e2e-stderr-{port}.log"));
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
 
     // We can't use `common::boot_server` directly here because the
@@ -268,9 +274,12 @@ fn boot_federation(fixture: &FederationFixture, port: u16) -> ServerGuard {
     let child = Command::new(env!("CARGO_BIN_EXE_lain"))
         .args([
             "server",
-            "--transport", "http",
-            "--port", &port.to_string(),
-            "--workspace", "auto",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--workspace",
+            "auto",
             "--config",
             fixture.repos_yaml().to_str().unwrap(),
         ])
@@ -305,10 +314,8 @@ fn boot_federation(fixture: &FederationFixture, port: u16) -> ServerGuard {
             let mut stream = TcpStream::connect(&host)?;
             stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
             stream.write_all(
-                format!(
-                    "GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-                )
-                .as_bytes(),
+                format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
             )?;
             let mut response = String::new();
             stream.read_to_string(&mut response)?;
@@ -375,17 +382,14 @@ fn federation_health_lists_all_repos() {
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON: {e}\n{text}"));
 
     assert_eq!(
-        v.get("total_repos")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0),
+        v.get("total_repos").and_then(|x| x.as_u64()).unwrap_or(0),
         3,
         "total_repos should be 3 (a, b, c); got {v}"
     );
     assert!(v.get("ready").is_some(), "missing `ready` count: {v}");
     assert!(v.get("indexing").is_some(), "missing `indexing` count: {v}");
     assert!(
-        v.get("ready").and_then(|x| x.as_u64()).unwrap_or(0)
-            >= 1,
+        v.get("ready").and_then(|x| x.as_u64()).unwrap_or(0) >= 1,
         "at least one repo should be `ready` after federation boot; got {v}"
     );
 }
@@ -433,11 +437,7 @@ fn get_repo_info_per_repo() {
     let _server = boot_federation(&fixture, port);
 
     for id in ["a", "b", "c"] {
-        let text = tools_call_text(
-            &host,
-            "get_repo_info",
-            serde_json::json!({"repo_id": id}),
-        );
+        let text = tools_call_text(&host, "get_repo_info", serde_json::json!({"repo_id": id}));
         let v: serde_json::Value = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("not JSON for {id}: {e}\n{text}"));
         assert_eq!(
@@ -452,7 +452,10 @@ fn get_repo_info_per_repo() {
         );
         // `edges` may legitimately be 0 for a single function with
         // no intra-repo calls; we still require it to be a number.
-        assert!(v.get("edge_count").is_some(), "missing edge_count for `{id}`");
+        assert!(
+            v.get("edge_count").is_some(),
+            "missing edge_count for `{id}`"
+        );
 
         let health = v
             .get("health")
@@ -491,9 +494,11 @@ fn search_org_finds_symbols_across_repos() {
         "search_org",
         serde_json::json!({"query": "gamma", "limit": 20}),
     );
-    let hits: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("not JSON: {e}\n{text}"));
-    let arr = hits.as_array().unwrap_or_else(|| panic!("not array: {hits}"));
+    let hits: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON: {e}\n{text}"));
+    let arr = hits
+        .as_array()
+        .unwrap_or_else(|| panic!("not array: {hits}"));
     let repos: std::collections::HashSet<String> = arr
         .iter()
         .filter_map(|h| h.get("repo_id").and_then(|r| r.as_str()))
@@ -511,9 +516,11 @@ fn search_org_finds_symbols_across_repos() {
         "search_org",
         serde_json::json!({"query": "alpha", "limit": 20}),
     );
-    let hits2: serde_json::Value = serde_json::from_str(&text2)
-        .unwrap_or_else(|e| panic!("not JSON: {e}\n{text2}"));
-    let arr2 = hits2.as_array().unwrap_or_else(|| panic!("not array: {hits2}"));
+    let hits2: serde_json::Value =
+        serde_json::from_str(&text2).unwrap_or_else(|e| panic!("not JSON: {e}\n{text2}"));
+    let arr2 = hits2
+        .as_array()
+        .unwrap_or_else(|| panic!("not array: {hits2}"));
     let repos2: std::collections::HashSet<String> = arr2
         .iter()
         .filter_map(|h| h.get("repo_id").and_then(|r| r.as_str()))
@@ -551,8 +558,8 @@ fn get_cross_repo_blast_radius_traverses_boundaries() {
     // resolves the symbol via `resolve_symbol`, which requires at
     // least one indexed definition somewhere.
     let list_text = tools_call_text(&host, "list_repos", serde_json::json!({}));
-    let list: serde_json::Value = serde_json::from_str(&list_text)
-        .unwrap_or_else(|e| panic!("list_repos: {e}\n{list_text}"));
+    let list: serde_json::Value =
+        serde_json::from_str(&list_text).unwrap_or_else(|e| panic!("list_repos: {e}\n{list_text}"));
     assert_eq!(
         list.as_array().map(|a| a.len()).unwrap_or(0),
         3,
@@ -576,10 +583,7 @@ fn get_cross_repo_blast_radius_traverses_boundaries() {
         v.get("by_repo").map(|x| x.is_object()).unwrap_or(false),
         "missing or non-object `by_repo`: {v}"
     );
-    let total = v
-        .get("total_count")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(99);
+    let total = v.get("total_count").and_then(|x| x.as_u64()).unwrap_or(99);
     let truncated = v
         .get("truncated")
         .and_then(|x| x.as_bool())
@@ -599,7 +603,11 @@ fn get_cross_repo_blast_radius_traverses_boundaries() {
     // Shape pin: well-formed `by_repo` object. With the fix in place,
     // repo b is the expected non-seed owner; if it ever stops showing
     // up alongside a non-zero `total`, that's a separate shape bug.
-    let by_repo = v.get("by_repo").and_then(|x| x.as_object()).cloned().unwrap_or_default();
+    let by_repo = v
+        .get("by_repo")
+        .and_then(|x| x.as_object())
+        .cloned()
+        .unwrap_or_default();
     let by_repo_keys: Vec<&str> = by_repo.keys().map(|s| s.as_str()).collect();
     eprintln!(
         "[federation_e2e] blast radius by_repo={by_repo_keys:?} total_count={total} truncated={truncated}"
@@ -635,10 +643,7 @@ fn get_cross_repo_blast_radius_for_repo_scoped() {
         v.get("by_repo").map(|x| x.is_object()).unwrap_or(false),
         "missing by_repo: {v}"
     );
-    let total = v
-        .get("total_count")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(99);
+    let total = v.get("total_count").and_then(|x| x.as_u64()).unwrap_or(99);
     let truncated = v
         .get("truncated")
         .and_then(|x| x.as_bool())
@@ -652,7 +657,11 @@ fn get_cross_repo_blast_radius_for_repo_scoped() {
     // visible as the seed, but we don't pin the opposite — we only
     // fail if a third repo (e.g. `c`) shows up, which would mean
     // `repo_id` was ignored.
-    let by_repo = v.get("by_repo").and_then(|x| x.as_object()).cloned().unwrap_or_default();
+    let by_repo = v
+        .get("by_repo")
+        .and_then(|x| x.as_object())
+        .cloned()
+        .unwrap_or_default();
     let by_repo_keys: std::collections::HashSet<String> =
         by_repo.keys().map(|s| s.to_string()).collect();
     assert!(
@@ -695,11 +704,7 @@ fn request_reload_rebuilds_state() {
     // repo so the indexer can read it).
     let extra = fixture.root.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
-    write_rust_crate(
-        &extra,
-        "fed_extra",
-        "pub fn extra_symbol() -> u32 { 99 }\n",
-    );
+    write_rust_crate(&extra, "fed_extra", "pub fn extra_symbol() -> u32 { 99 }\n");
     git_init_committed(&extra);
 
     // Append the new repo entry to the existing YAML. The fixture
@@ -732,17 +737,15 @@ fn request_reload_rebuilds_state() {
         .get("last_reload_at_unix")
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
-    eprintln!(
-        "[federation_e2e] before request_reload: last_reload_at_unix={initial_reload_at}"
-    );
+    eprintln!("[federation_e2e] before request_reload: last_reload_at_unix={initial_reload_at}");
 
     // Call request_reload — the MCP tool returns immediately after
     // queueing the signal. The actual rebuild runs on the
     // federation's reload bus; get_reload_status tells us when it's
     // done (state == `idle` AND last_reload_at_unix > the initial).
     let accepted = tools_call_text(&host, "request_reload", serde_json::json!({}));
-    let accepted_v: serde_json::Value = serde_json::from_str(&accepted)
-        .unwrap_or_else(|e| panic!("not JSON: {e}\n{accepted}"));
+    let accepted_v: serde_json::Value =
+        serde_json::from_str(&accepted).unwrap_or_else(|e| panic!("not JSON: {e}\n{accepted}"));
     assert_eq!(
         accepted_v
             .get("accepted")
@@ -809,9 +812,11 @@ fn request_reload_rebuilds_state() {
 
     // The federation now has 4 repos. list_repos must show it.
     let after_text = tools_call_text(&host, "list_repos", serde_json::json!({}));
-    let after: serde_json::Value = serde_json::from_str(&after_text)
-        .unwrap_or_else(|e| panic!("not JSON: {e}\n{after_text}"));
-    let arr = after.as_array().unwrap_or_else(|| panic!("not array: {after}"));
+    let after: serde_json::Value =
+        serde_json::from_str(&after_text).unwrap_or_else(|e| panic!("not JSON: {e}\n{after_text}"));
+    let arr = after
+        .as_array()
+        .unwrap_or_else(|| panic!("not array: {after}"));
     let ids: std::collections::HashSet<String> = arr
         .iter()
         .filter_map(|r| r.get("id").and_then(|i| i.as_str()))

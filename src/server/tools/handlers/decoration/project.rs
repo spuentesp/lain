@@ -4,26 +4,26 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toolchain {
     // Top 10 TIOBE
-    Python,    // pyproject.toml, setup.py, requirements.txt
-    C,         // Makefile, CMakeLists.txt
-    Cpp,       // CMakeLists.txt, Makefile
-    Java,      // pom.xml, build.gradle
-    CSharp,    // .csproj, .sln
+    Python,     // pyproject.toml, setup.py, requirements.txt
+    C,          // Makefile, CMakeLists.txt
+    Cpp,        // CMakeLists.txt, Makefile
+    Java,       // pom.xml, build.gradle
+    CSharp,     // .csproj, .sln
     JavaScript, // package.json (Node/JS)
-    Go,        // go.mod
-    Rust,      // Cargo.toml
-    Ruby,      // Gemfile, Rakefile
-    Php,       // composer.json
+    Go,         // go.mod
+    Rust,       // Cargo.toml
+    Ruby,       // Gemfile, Rakefile
+    Php,        // composer.json
     // Additional
     TypeScript, // tsconfig.json, package.json with typescript
-    Swift,     // Package.swift
-    Kotlin,    // build.gradle.kts
-    Scala,     // build.sbt
+    Swift,      // Package.swift
+    Kotlin,     // build.gradle.kts
+    Scala,      // build.sbt
     // Emerging / Niche
-    Zig,       // build.zig, zig.mod
-    R,         // DESCRIPTION, NAMESPACE (R packages)
-    Perl,      // Makefile.PL, cpanfile, *.pm
-    Matlab,    // *.prj, MATLAB project files
+    Zig,    // build.zig, zig.mod
+    R,      // DESCRIPTION, NAMESPACE (R packages)
+    Perl,   // Makefile.PL, cpanfile, *.pm
+    Matlab, // *.prj, MATLAB project files
 }
 
 impl Toolchain {
@@ -50,7 +50,6 @@ impl Toolchain {
         }
     }
     // (removed: had no caller and no test anywhere in the tree)
-
 }
 
 /// Project profile containing detected toolchains and metadata
@@ -80,7 +79,6 @@ impl ProjectProfile {
     }
 
     // (removed: had no caller and no test anywhere in the tree)
-
 }
 
 /// Priority order for heuristic: Rust > Go > Python > Node > Java > C# > Ruby > PHP > C/C++

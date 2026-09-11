@@ -20,12 +20,10 @@
 /// Whitelisted SPA assets under `/assets/`. Each entry is
 /// `(route, body)`. New assets are added here by appending a row;
 /// the HTTP request handler iterates this list.
-pub const SPA_ASSETS: &[(&str, &str)] = &[
-    (
-        "/assets/d3.v7.min.js",
-        include_str!("command_center/assets/d3.v7.min.js"),
-    ),
-];
+pub const SPA_ASSETS: &[(&str, &str)] = &[(
+    "/assets/d3.v7.min.js",
+    include_str!("command_center/assets/d3.v7.min.js"),
+)];
 
 pub const INDEX_HTML: &[u8] = include_bytes!("command_center/index.html");
 pub const APP_JS: &[u8] = include_bytes!("command_center/app.js");

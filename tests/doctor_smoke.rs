@@ -22,10 +22,7 @@ fn lain_doctor_runs_and_exits_zero() {
         out.status.code()
     );
     // Header should appear at the top.
-    assert!(
-        stdout.contains("lain doctor"),
-        "missing header: {stdout}"
-    );
+    assert!(stdout.contains("lain doctor"), "missing header: {stdout}");
     // Check 1: binary version + git sha.
     assert!(
         stdout.contains("binary") && stdout.contains("version"),

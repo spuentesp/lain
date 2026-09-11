@@ -3,19 +3,19 @@
 //! Scans spec files to enrich existing graph nodes with cross-runtime
 //! API surface information (gRPC, HTTP, GraphQL, WebSocket, etc.).
 
-pub mod http_sensor;
-pub mod proto_sensor;
-pub mod openapi_sensor;
 pub mod graphql_sensor;
+pub mod http_sensor;
+pub mod openapi_sensor;
+pub mod proto_sensor;
 pub mod websocket_sensor;
 
-pub use http_sensor::HttpRoute;
-pub use proto_sensor::ProtoService;
-pub use openapi_sensor::OpenApiOperation;
-pub use graphql_sensor::GraphQlOperation;
-pub use websocket_sensor::WebSocketEndpoint;
 use crate::graph::GraphDatabase;
+pub use graphql_sensor::GraphQlOperation;
+pub use http_sensor::HttpRoute;
+pub use openapi_sensor::OpenApiOperation;
+pub use proto_sensor::ProtoService;
 use std::path::Path;
+pub use websocket_sensor::WebSocketEndpoint;
 
 /// Run every protocol sensor over `root`, returning how many nodes/edges
 /// each contributed.

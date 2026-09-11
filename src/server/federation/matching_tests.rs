@@ -33,9 +33,17 @@ fn signature_similarity_disjoint_is_zero() {
 
 #[test]
 fn find_cross_repo_matches_above_threshold() {
-    let new_node = node("repo1", "verify_token", "fn verify_token(user: &User) -> Result<Token>");
+    let new_node = node(
+        "repo1",
+        "verify_token",
+        "fn verify_token(user: &User) -> Result<Token>",
+    );
     let candidates = vec![
-        node("repo2", "verify_token", "fn verify_token(u: &User) -> Result<Token>"),
+        node(
+            "repo2",
+            "verify_token",
+            "fn verify_token(u: &User) -> Result<Token>",
+        ),
         node("repo3", "validate", "fn validate(x: i32) -> bool"),
         node("repo4", "verify_token", "fn totally_different() -> String"),
     ];
@@ -49,11 +57,13 @@ fn find_cross_repo_matches_above_threshold() {
 #[test]
 fn find_cross_repo_matches_caps_at_top_k() {
     let new_node = node("repo1", "f", "fn f(x: i32)");
-    let candidates: Vec<GraphNode> = (0..20).map(|i| {
-        let mut n = node(&format!("repo{i}"), "f", "fn f(x: i32)");
-        n.signature = Some("fn f(x: i32)".into());
-        n
-    }).collect();
+    let candidates: Vec<GraphNode> = (0..20)
+        .map(|i| {
+            let mut n = node(&format!("repo{i}"), "f", "fn f(x: i32)");
+            n.signature = Some("fn f(x: i32)".into());
+            n
+        })
+        .collect();
     let matches = find_cross_repo_matches(&new_node, &candidates, 5, 0.0);
     assert_eq!(matches.len(), 5);
 }

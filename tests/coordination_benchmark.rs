@@ -69,13 +69,19 @@ fn fresh_server(n_files: usize) -> (tempfile::TempDir, Arc<LainServer>, String, 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     for i in 0..n_files {
-        std::fs::write(tmp.path().join(format!("f{i}.rs")), format!("pub fn f{i}() {{}}\n"))
-            .unwrap();
+        std::fs::write(
+            tmp.path().join(format!("f{i}.rs")),
+            format!("pub fn f{i}() {{}}\n"),
+        )
+        .unwrap();
     }
     let mem = tmp.path().join(".lain/graph.bin");
     let server = Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
-    let v = run_register_agent(&server, serde_json::json!({"name": "bench", "kind": "kimi"}))
-        .unwrap();
+    let v = run_register_agent(
+        &server,
+        serde_json::json!({"name": "bench", "kind": "kimi"}),
+    )
+    .unwrap();
     let agent_id = v["agent_id"].as_str().unwrap().to_string();
     let token = v["session_token"].as_str().unwrap().to_string();
     (tmp, server, agent_id, token)
@@ -114,8 +120,11 @@ fn tool_latency_benchmark() {
         claim.push(t.elapsed());
 
         let t = Instant::now();
-        run_my_claims(&server, serde_json::json!({"agent_id": agent_id, "session_token": token}))
-            .unwrap();
+        run_my_claims(
+            &server,
+            serde_json::json!({"agent_id": agent_id, "session_token": token}),
+        )
+        .unwrap();
         my_claims.push(t.elapsed());
 
         let t = Instant::now();
@@ -168,7 +177,11 @@ async fn blast_radius_latency_benchmark() {
     let graph = GraphDatabase::new(&tmp).unwrap();
     let overlay = VolatileOverlay::new();
 
-    let file = GraphNode::new(NodeType::File, "mod.rs".to_string(), "/src/mod.rs".to_string());
+    let file = GraphNode::new(
+        NodeType::File,
+        "mod.rs".to_string(),
+        "/src/mod.rs".to_string(),
+    );
     graph.upsert_node(file.clone()).unwrap();
     let mut ids = Vec::new();
     for i in 0..10_000 {
@@ -180,7 +193,11 @@ async fn blast_radius_latency_benchmark() {
         ids.push(f.id.clone());
         graph.upsert_node(f.clone()).unwrap();
         graph
-            .insert_edge(&GraphEdge::new(EdgeType::Contains, file.id.clone(), f.id.clone()))
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Contains,
+                file.id.clone(),
+                f.id.clone(),
+            ))
             .unwrap();
     }
     for w in ids.windows(2) {
@@ -231,15 +248,15 @@ async fn blast_radius_latency_benchmark() {
 }
 
 /// Windows-only flake: "occupancy must be empty after all agents
-    /// released; left: 1, right: 0". The benchmark runs in the same
-    /// test process as several other occupancy-touching tests; under
-    /// Windows' file-locking semantics the `list_occupancy` map
-    /// occasionally carries a stale entry from a prior test. The
-    /// occupancy assertion itself is correct on Linux. Tracked as a
-    /// flake; the proper fix is to split this benchmark into its own
-    /// test target so cargo runs it in a fresh process.
-    #[cfg_attr(target_os = "windows", ignore)]
-    #[test]
+/// released; left: 1, right: 0". The benchmark runs in the same
+/// test process as several other occupancy-touching tests; under
+/// Windows' file-locking semantics the `list_occupancy` map
+/// occasionally carries a stale entry from a prior test. The
+/// occupancy assertion itself is correct on Linux. Tracked as a
+/// flake; the proper fix is to split this benchmark into its own
+/// test target so cargo runs it in a fresh process.
+#[cfg_attr(target_os = "windows", ignore)]
+#[test]
 fn concurrent_agents_contention_benchmark() {
     const AGENTS: usize = 8;
     const CYCLES: usize = 30;

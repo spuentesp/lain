@@ -40,9 +40,14 @@ pub fn describe_schema() -> SchemaDescription {
         examples: vec![
             ExampleQuery {
                 name: "blast_radius".into(),
-                description: "Find all functions that call or are called by foo, within 2 hops".into(),
+                description: "Find all functions that call or are called by foo, within 2 hops"
+                    .into(),
                 query: QuerySpec::new(vec![
-                    crate::query::spec::GraphOp::Find(crate::query::spec::FindOp::new().r#type("Function").name("foo")),
+                    crate::query::spec::GraphOp::Find(
+                        crate::query::spec::FindOp::new()
+                            .r#type("Function")
+                            .name("foo"),
+                    ),
                     crate::query::spec::GraphOp::Connect(crate::query::spec::ConnectOp {
                         edge: crate::query::spec::EdgeSelector::Single("Calls".into()),
                         direction: crate::query::spec::Direction::Outgoing,
@@ -55,7 +60,11 @@ pub fn describe_schema() -> SchemaDescription {
                 name: "call_chain".into(),
                 description: "Trace all functions called by foo".into(),
                 query: QuerySpec::new(vec![
-                    crate::query::spec::GraphOp::Find(crate::query::spec::FindOp::new().r#type("Function").name("foo")),
+                    crate::query::spec::GraphOp::Find(
+                        crate::query::spec::FindOp::new()
+                            .r#type("Function")
+                            .name("foo"),
+                    ),
                     crate::query::spec::GraphOp::Connect(crate::query::spec::ConnectOp {
                         edge: crate::query::spec::EdgeSelector::Single("Calls".into()),
                         direction: crate::query::spec::Direction::Outgoing,
@@ -68,7 +77,11 @@ pub fn describe_schema() -> SchemaDescription {
                 name: "callers".into(),
                 description: "Find all functions that call foo".into(),
                 query: QuerySpec::new(vec![
-                    crate::query::spec::GraphOp::Find(crate::query::spec::FindOp::new().r#type("Function").name("foo")),
+                    crate::query::spec::GraphOp::Find(
+                        crate::query::spec::FindOp::new()
+                            .r#type("Function")
+                            .name("foo"),
+                    ),
                     crate::query::spec::GraphOp::Connect(crate::query::spec::ConnectOp {
                         edge: crate::query::spec::EdgeSelector::Single("Calls".into()),
                         direction: crate::query::spec::Direction::Incoming,
@@ -81,7 +94,11 @@ pub fn describe_schema() -> SchemaDescription {
                 name: "file_functions".into(),
                 description: "List all functions defined in a file".into(),
                 query: QuerySpec::new(vec![
-                    crate::query::spec::GraphOp::Find(crate::query::spec::FindOp::new().r#type("File").name("src/main.rs")),
+                    crate::query::spec::GraphOp::Find(
+                        crate::query::spec::FindOp::new()
+                            .r#type("File")
+                            .name("src/main.rs"),
+                    ),
                     crate::query::spec::GraphOp::Connect(crate::query::spec::ConnectOp {
                         // `Defines` is not an EdgeType and never was. The
                         // node and edge lists above were rebuilt from the
@@ -93,16 +110,20 @@ pub fn describe_schema() -> SchemaDescription {
                         edge: crate::query::spec::EdgeSelector::Single("Contains".into()),
                         direction: crate::query::spec::Direction::Outgoing,
                         depth: crate::query::spec::DepthSpec::Single(1),
-                        target: Some(Box::new(crate::query::spec::FindOp::new().r#type("Function"))),
+                        target: Some(Box::new(
+                            crate::query::spec::FindOp::new().r#type("Function"),
+                        )),
                     }),
                 ]),
             },
             ExampleQuery {
                 name: "deprecated_functions".into(),
                 description: "Find all deprecated functions".into(),
-                query: QuerySpec::new(vec![
-                    crate::query::spec::GraphOp::Find(crate::query::spec::FindOp::new().r#type("Function").label("deprecated")),
-                ]),
+                query: QuerySpec::new(vec![crate::query::spec::GraphOp::Find(
+                    crate::query::spec::FindOp::new()
+                        .r#type("Function")
+                        .label("deprecated"),
+                )]),
             },
         ],
     }
@@ -327,7 +348,9 @@ mod indexed_flag_tests {
     /// of every one of them and tells you nothing.
     fn sensors_are_wired_into_ingestion() -> bool {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             for e in entries.flatten() {
                 let p = e.path();
                 if p.is_dir() {

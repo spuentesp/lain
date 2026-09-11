@@ -11,7 +11,6 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-
 use crate::server::path_util::posix_string;
 use crate::server::revision_log::RevisionId;
 
@@ -20,7 +19,9 @@ use crate::server::revision_log::RevisionId;
 pub struct AgentId(pub String);
 
 impl AgentId {
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 pub fn new_agent_id() -> AgentId {
@@ -167,7 +168,9 @@ mod unix_secs {
 
 /// `serde(default)` companion for [`unix_secs`], for snapshots written
 /// before the timestamps were persisted.
-fn epoch_secs() -> SystemTime { SystemTime::UNIX_EPOCH }
+fn epoch_secs() -> SystemTime {
+    SystemTime::UNIX_EPOCH
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
@@ -444,16 +447,22 @@ impl PresenceRegistry {
         let session = AgentSession::new(id.clone(), name, kind, mode, pid, parent_session_id);
         {
             let mut s = self.inner.lock();
-            s.by_token.insert(session.session_token.clone(), session.id.clone());
+            s.by_token
+                .insert(session.session_token.clone(), session.id.clone());
             s.sessions.insert(session.id.clone(), session.clone());
         }
-        if let Some(cb) = self.cloned_persist_cb() { cb(); }
+        if let Some(cb) = self.cloned_persist_cb() {
+            cb();
+        }
         session
     }
 
     pub fn heartbeat(&self, agent_id: &AgentId, session_token: &str) -> Result<(), HeartbeatError> {
         let mut s = self.inner.lock();
-        let session = s.sessions.get_mut(agent_id).ok_or(HeartbeatError::UnknownAgent)?;
+        let session = s
+            .sessions
+            .get_mut(agent_id)
+            .ok_or(HeartbeatError::UnknownAgent)?;
         if session.session_token != session_token {
             return Err(HeartbeatError::WrongToken);
         }
@@ -484,7 +493,9 @@ impl PresenceRegistry {
         let expires_after = self.inner.lock().expires_after;
         let stale: Vec<AgentId> = {
             let mut s = self.inner.lock();
-            let stale: Vec<AgentId> = s.sessions.iter()
+            let stale: Vec<AgentId> = s
+                .sessions
+                .iter()
                 .filter(|(_, sess)| {
                     let ttl = match sess.mode {
                         AgentMode::Background => Duration::from_secs(
@@ -505,14 +516,17 @@ impl PresenceRegistry {
             stale
         };
         if !stale.is_empty() {
-            if let Some(cb) = self.cloned_persist_cb() { cb(); }
+            if let Some(cb) = self.cloned_persist_cb() {
+                cb();
+            }
         }
         stale
     }
 
     pub fn list_active(&self, include_background: bool) -> Vec<AgentSession> {
         let s = self.inner.lock();
-        s.sessions.values()
+        s.sessions
+            .values()
             .filter(|sess| include_background || sess.mode == AgentMode::Interactive)
             .cloned()
             .collect()
@@ -532,19 +546,25 @@ impl PresenceRegistry {
             removed
         };
         if removed.is_some() {
-            if let Some(cb) = self.cloned_persist_cb() { cb(); }
+            if let Some(cb) = self.cloned_persist_cb() {
+                cb();
+            }
         }
         removed
     }
 
     pub fn by_token(&self, token: &str) -> Option<AgentSession> {
         let s = self.inner.lock();
-        s.by_token.get(token).and_then(|id| s.sessions.get(id).cloned())
+        s.by_token
+            .get(token)
+            .and_then(|id| s.sessions.get(id).cloned())
     }
 }
 
 impl Default for PresenceRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 use std::collections::HashSet;
@@ -665,7 +685,10 @@ impl FileOccupancy {
     /// turn this directly into a `ConflictEntry.last_seen_unix`
     /// via `Option::unwrap_or_default()`-style plumbing.
     fn last_touched_for(&self, agent: &AgentId, sym: &str) -> Option<SystemTime> {
-        self.last_touched.get(sym).and_then(|m| m.get(agent)).copied()
+        self.last_touched
+            .get(sym)
+            .and_then(|m| m.get(agent))
+            .copied()
     }
 
     /// Most recent `last_touched` timestamp for `agent` on this file
@@ -755,7 +778,11 @@ fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
             .iter()
             .map(|root| lexical_normalize(&root.join(path)))
             .find(|candidate| candidate.exists());
-        match anchored.or_else(|| roots.first().map(|root| lexical_normalize(&root.join(path)))) {
+        match anchored.or_else(|| {
+            roots
+                .first()
+                .map(|root| lexical_normalize(&root.join(path)))
+        }) {
             Some(p) => p,
             None => return PathBuf::from(posix_string(path)),
         }
@@ -1053,8 +1080,15 @@ impl OccupancyMap {
                         // is non-conflicting just like a symbol-level
                         // Read.
                         if let Some(file_level_agents) = entry.symbols.get("__file_level__") {
-                            for other in file_level_agents.iter().filter(|a| *a != agent_id).cloned().collect::<Vec<_>>() {
-                                if entry.intent_for(&other, "__file_level__") == Some(ClaimIntent::Edit) {
+                            for other in file_level_agents
+                                .iter()
+                                .filter(|a| *a != agent_id)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                            {
+                                if entry.intent_for(&other, "__file_level__")
+                                    == Some(ClaimIntent::Edit)
+                                {
                                     req_conflicts.push(ConflictEntry {
                                         agent_id: other.clone(),
                                         inferred: entry.inferred.contains(&other),
@@ -1092,14 +1126,38 @@ impl OccupancyMap {
                     // `s.by_agent`.
                     let claim_is_inferred = entry.inferred.contains(agent_id);
                     if req.symbols.is_empty() {
-                        entry.symbols.entry("__file_level__".into()).or_default().insert(agent_id.clone());
-                        entry.intents.entry("__file_level__".into()).or_default().insert(agent_id.clone(), req.intent.clone());
-                        entry.last_touched.entry("__file_level__".into()).or_default().insert(agent_id.clone(), now);
+                        entry
+                            .symbols
+                            .entry("__file_level__".into())
+                            .or_default()
+                            .insert(agent_id.clone());
+                        entry
+                            .intents
+                            .entry("__file_level__".into())
+                            .or_default()
+                            .insert(agent_id.clone(), req.intent.clone());
+                        entry
+                            .last_touched
+                            .entry("__file_level__".into())
+                            .or_default()
+                            .insert(agent_id.clone(), now);
                     } else {
                         for sym in &req.symbols {
-                            entry.symbols.entry(sym.clone()).or_default().insert(agent_id.clone());
-                            entry.intents.entry(sym.clone()).or_default().insert(agent_id.clone(), req.intent.clone());
-                            entry.last_touched.entry(sym.clone()).or_default().insert(agent_id.clone(), now);
+                            entry
+                                .symbols
+                                .entry(sym.clone())
+                                .or_default()
+                                .insert(agent_id.clone());
+                            entry
+                                .intents
+                                .entry(sym.clone())
+                                .or_default()
+                                .insert(agent_id.clone(), req.intent.clone());
+                            entry
+                                .last_touched
+                                .entry(sym.clone())
+                                .or_default()
+                                .insert(agent_id.clone(), now);
                         }
                     }
                     // File-level claim (no specific symbols) carries no
@@ -1113,14 +1171,14 @@ impl OccupancyMap {
                         None
                     } else {
                         let sym = req.symbols.first().map(|s| s.as_str()).unwrap_or("");
-                        compute_symbol_hash(&req.path, sym)
-                            .or_else(|| Some(SymbolHash::zero()))
+                        compute_symbol_hash(&req.path, sym).or_else(|| Some(SymbolHash::zero()))
                     };
                     // Translate the request's optional TTL into an absolute
                     // expiry timestamp. `None` means "no expiry set" and the
                     // claim is only released explicitly or when the agent's
                     // session expires.
-                    let expires_at = req.ttl_seconds
+                    let expires_at = req
+                        .ttl_seconds
                         .map(|s| now + std::time::Duration::from_secs(s));
                     // Re-claiming a scope replaces the previous entry
                     // rather than appending beside it. Without this,
@@ -1153,9 +1211,16 @@ impl OccupancyMap {
             (granted, conflicts, advisories)
         };
         if !granted.is_empty() {
-            if let Some(cb) = self.cloned_persist_cb() { cb(); }
+            if let Some(cb) = self.cloned_persist_cb() {
+                cb();
+            }
         }
-        ClaimResult { granted, conflicts, advisories, world_state: None }
+        ClaimResult {
+            granted,
+            conflicts,
+            advisories,
+            world_state: None,
+        }
     }
 
     /// Refresh the `last_touched` timestamp on every claim this agent
@@ -1194,14 +1259,18 @@ impl OccupancyMap {
                 if let Some(entry) = s.by_file.get_mut(path) {
                     entry.agents.remove(agent_id);
                     entry.inferred.remove(agent_id);
-                    let syms_to_remove: Vec<String> = entry.symbols.iter()
+                    let syms_to_remove: Vec<String> = entry
+                        .symbols
+                        .iter()
                         .filter(|(_, agents)| agents.contains(agent_id))
                         .map(|(s, _)| s.clone())
                         .collect();
                     for s in syms_to_remove {
                         if let Some(set) = entry.symbols.get_mut(&s) {
                             set.remove(agent_id);
-                            if set.is_empty() { entry.symbols.remove(&s); }
+                            if set.is_empty() {
+                                entry.symbols.remove(&s);
+                            }
                         }
                         // Mirror the same key into the parallel
                         // intent / timestamp tracks so they don't
@@ -1211,11 +1280,15 @@ impl OccupancyMap {
                         // agent no longer holds.
                         if let Some(m) = entry.intents.get_mut(&s) {
                             m.remove(agent_id);
-                            if m.is_empty() { entry.intents.remove(&s); }
+                            if m.is_empty() {
+                                entry.intents.remove(&s);
+                            }
                         }
                         if let Some(m) = entry.last_touched.get_mut(&s) {
                             m.remove(agent_id);
-                            if m.is_empty() { entry.last_touched.remove(&s); }
+                            if m.is_empty() {
+                                entry.last_touched.remove(&s);
+                            }
                         }
                     }
                     if entry.agents.is_empty() && entry.symbols.is_empty() {
@@ -1230,7 +1303,9 @@ impl OccupancyMap {
             released
         };
         if !released.is_empty() {
-            if let Some(cb) = self.cloned_persist_cb() { cb(); }
+            if let Some(cb) = self.cloned_persist_cb() {
+                cb();
+            }
         }
         released
     }
@@ -1238,7 +1313,10 @@ impl OccupancyMap {
     pub fn release_all_for(&self, agent_id: &AgentId) -> Vec<PathBuf> {
         let paths: Vec<PathBuf> = {
             let s = self.inner.lock();
-            s.by_agent.get(agent_id).map(|cs| cs.iter().map(|c| c.path.clone()).collect()).unwrap_or_default()
+            s.by_agent
+                .get(agent_id)
+                .map(|cs| cs.iter().map(|c| c.path.clone()).collect())
+                .unwrap_or_default()
         };
         let released = self.release(agent_id, &paths);
         // `self.release` already fired the persist callback when
@@ -1294,7 +1372,9 @@ impl OccupancyMap {
                     for sym in &symbol_keys {
                         if let Some(set) = entry.symbols.get_mut(sym) {
                             set.remove(agent_id);
-                            if set.is_empty() { entry.symbols.remove(sym); }
+                            if set.is_empty() {
+                                entry.symbols.remove(sym);
+                            }
                         }
                         // Same shadow cleanup as in `release`: the
                         // intent / timestamp tracks must agree with
@@ -1303,11 +1383,15 @@ impl OccupancyMap {
                         // `intent_for` / `last_touched_for`.
                         if let Some(m) = entry.intents.get_mut(sym) {
                             m.remove(agent_id);
-                            if m.is_empty() { entry.intents.remove(sym); }
+                            if m.is_empty() {
+                                entry.intents.remove(sym);
+                            }
                         }
                         if let Some(m) = entry.last_touched.get_mut(sym) {
                             m.remove(agent_id);
-                            if m.is_empty() { entry.last_touched.remove(sym); }
+                            if m.is_empty() {
+                                entry.last_touched.remove(sym);
+                            }
                         }
                     }
                     if entry.agents.is_empty() && entry.symbols.is_empty() {
@@ -1315,7 +1399,9 @@ impl OccupancyMap {
                     }
                 }
                 if let Some(claims) = s.by_agent.get_mut(agent_id) {
-                    claims.retain(|c| !(c.path == *path && c.expires_at.map(|e| e <= now).unwrap_or(false)));
+                    claims.retain(|c| {
+                        !(c.path == *path && c.expires_at.map(|e| e <= now).unwrap_or(false))
+                    });
                     if claims.is_empty() {
                         s.by_agent.remove(agent_id);
                     }
@@ -1326,7 +1412,9 @@ impl OccupancyMap {
             released
         };
         if !released.is_empty() {
-            if let Some(cb) = self.cloned_persist_cb() { cb(); }
+            if let Some(cb) = self.cloned_persist_cb() {
+                cb();
+            }
         }
         released
     }
@@ -1376,9 +1464,14 @@ impl OccupancyMap {
         let path = &canonical_claim_path(&self.claim_roots_snapshot(), path);
         let s = self.inner.lock();
         s.by_file.get(path).map(|entry| {
-            let mut symbols: Vec<SymbolOccupancy> = entry.symbols.iter()
+            let mut symbols: Vec<SymbolOccupancy> = entry
+                .symbols
+                .iter()
                 .filter(|(s, _)| s.as_str() != "__file_level__")
-                .map(|(sym, agents)| SymbolOccupancy { symbol: sym.clone(), agents: agents.iter().cloned().collect() })
+                .map(|(sym, agents)| SymbolOccupancy {
+                    symbol: sym.clone(),
+                    agents: agents.iter().cloned().collect(),
+                })
                 .collect();
             symbols.sort_by(|a, b| a.symbol.cmp(&b.symbol));
             let mut holders: Vec<Holder> = entry
@@ -1424,7 +1517,9 @@ impl OccupancyMap {
 }
 
 impl Default for OccupancyMap {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Broadcast events emitted by the presence layer. `LainServer` owns the
@@ -1450,8 +1545,14 @@ pub enum PresenceEvent {
     AgentJoined(AgentSession),
     AgentLeft(AgentId),
     HeartbeatExpired(AgentId),
-    ClaimGranted { agent_id: AgentId, path: PathBuf },
-    ClaimReleased { agent_id: AgentId, path: PathBuf },
+    ClaimGranted {
+        agent_id: AgentId,
+        path: PathBuf,
+    },
+    ClaimReleased {
+        agent_id: AgentId,
+        path: PathBuf,
+    },
     /// A claim taken away from an agent that did not ask to give it up:
     /// its session expired, or the claim's own TTL ran out. Distinct
     /// from `ClaimReleased` (a voluntary `release_files`) because the
@@ -1549,11 +1650,7 @@ struct PersistedState {
 /// filename with no parent (which `LainServer::state_path` never
 /// produces, but tests might) falls back to the current dir, which
 /// at worst yields a `0` offset for a missing audit log.
-pub fn save_pair(
-    path: &Path,
-    reg: &PresenceRegistry,
-    occ: &OccupancyMap,
-) -> Result<(), String> {
+pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Result<(), String> {
     // Task 2.6 — read the live audit log size now so the value
     // persisted on this save reflects "how much audit data was on
     // disk at the moment of this write," not a placeholder. The
@@ -1570,35 +1667,54 @@ pub fn save_pair(
         let s = reg.inner.lock();
         let o = occ.inner.lock();
         PersistedState {
-            sessions: s.sessions.iter()
+            sessions: s
+                .sessions
+                .iter()
                 .map(|(k, v)| (k.0.clone(), v.clone()))
                 .collect(),
-            occupancy_by_file: o.by_file.iter().map(|(p, fo)| {
-                let agents: Vec<String> = fo.agents.iter().map(|a| a.0.clone()).collect();
-                let symbols: Vec<(String, Vec<String>)> = fo.symbols.iter()
-                    .filter(|(sym, _)| sym.as_str() != "__file_level__")
-                    .map(|(sym, agents)| (sym.clone(), agents.iter().map(|a| a.0.clone()).collect()))
-                    .collect();
-                (p.clone(), agents, symbols)
-            }).collect(),
+            occupancy_by_file: o
+                .by_file
+                .iter()
+                .map(|(p, fo)| {
+                    let agents: Vec<String> = fo.agents.iter().map(|a| a.0.clone()).collect();
+                    let symbols: Vec<(String, Vec<String>)> = fo
+                        .symbols
+                        .iter()
+                        .filter(|(sym, _)| sym.as_str() != "__file_level__")
+                        .map(|(sym, agents)| {
+                            (sym.clone(), agents.iter().map(|a| a.0.clone()).collect())
+                        })
+                        .collect();
+                    (p.clone(), agents, symbols)
+                })
+                .collect(),
             // Save file-level intents. `__file_level__` is the only
             // sentinel key on `intents`; symbol-level entries are
             // reconstructed on demand from the `(sym, agents)`
             // entries above and the agents' recorded `claim_set`
             // (see `load_pair`). Mirrors the comment on
             // `PersistedState::occupancy_file_intents`.
-            occupancy_file_intents: o.by_file.iter().map(|(p, fo)| {
-                let entries: Vec<(String, ClaimIntent)> = fo.intents
-                    .get("__file_level__")
-                    .map(|per_agent| {
-                        per_agent.iter()
-                            .map(|(a, i)| (a.0.clone(), i.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (p.clone(), entries)
-            }).filter(|(_, entries)| !entries.is_empty()).collect(),
-            occupancy_by_agent: o.by_agent.iter()
+            occupancy_file_intents: o
+                .by_file
+                .iter()
+                .map(|(p, fo)| {
+                    let entries: Vec<(String, ClaimIntent)> = fo
+                        .intents
+                        .get("__file_level__")
+                        .map(|per_agent| {
+                            per_agent
+                                .iter()
+                                .map(|(a, i)| (a.0.clone(), i.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (p.clone(), entries)
+                })
+                .filter(|(_, entries)| !entries.is_empty())
+                .collect(),
+            occupancy_by_agent: o
+                .by_agent
+                .iter()
                 .map(|(k, v)| (k.0.clone(), v.clone()))
                 .collect(),
             // Task 2.6 — these fields are now driven by the audit
@@ -1636,18 +1752,14 @@ pub fn save_pair(
 /// in the server log. The next `save_pair` then persists the reset
 /// timestamp out to the world; subsequent restarts see the marker
 /// and don't re-warn.
-pub fn load_pair(
-    path: &Path,
-    reg: &PresenceRegistry,
-    occ: &OccupancyMap,
-) -> Result<(), String> {
+pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    let json = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut state: PersistedState = serde_json::from_str(&json)
-        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let json =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut state: PersistedState =
+        serde_json::from_str(&json).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
     // Task 2.6 — audit log present-or-not check + reset rewrite,
     // before we start consuming `state`'s `Vec` fields below. The
@@ -1714,7 +1826,10 @@ pub fn load_pair(
     for (path_str, intents) in state.occupancy_file_intents {
         let pb = PathBuf::from(path_str);
         let entry = o.by_file.entry(pb).or_default();
-        let per_agent = entry.intents.entry("__file_level__".to_string()).or_default();
+        let per_agent = entry
+            .intents
+            .entry("__file_level__".to_string())
+            .or_default();
         for (agent_id, intent) in intents {
             per_agent.insert(AgentId(agent_id), intent);
         }
@@ -1881,13 +1996,21 @@ mod world_state_tests {
         let diffs = vec![
             OverlayDiff {
                 revision: 6,
-                added: vec![GraphNode::new(NodeType::Function, "f".into(), "/x.rs".into())],
+                added: vec![GraphNode::new(
+                    NodeType::Function,
+                    "f".into(),
+                    "/x.rs".into(),
+                )],
                 removed: vec![],
                 updated: vec![],
             },
             OverlayDiff {
                 revision: 7,
-                added: vec![GraphNode::new(NodeType::Function, "f".into(), "/x.rs".into())],
+                added: vec![GraphNode::new(
+                    NodeType::Function,
+                    "f".into(),
+                    "/x.rs".into(),
+                )],
                 removed: vec![],
                 updated: vec![],
             },
@@ -1924,8 +2047,8 @@ mod audit_persistence_tests {
             "audit_offset_bytes": 12345,
             "audit_reset_at_unix": 1700000000.5
         }"#;
-        let state: PersistedState = serde_json::from_str(json)
-            .expect("PersistedState should accept audit fields");
+        let state: PersistedState =
+            serde_json::from_str(json).expect("PersistedState should accept audit fields");
         assert_eq!(state.audit_offset_bytes, 12345);
         assert_eq!(state.audit_reset_at_unix, Some(1700000000.5));
     }
@@ -1960,8 +2083,14 @@ mod audit_persistence_tests {
         let occ = OccupancyMap::new();
         save_pair(&path, &reg, &occ).expect("save_pair");
         let written = fs::read_to_string(&path).unwrap();
-        assert!(written.contains("\"audit_offset_bytes\""), "save_pair must emit audit_offset_bytes; got:\n{written}");
-        assert!(written.contains("\"audit_reset_at_unix\""), "save_pair must emit audit_reset_at_unix; got:\n{written}");
+        assert!(
+            written.contains("\"audit_offset_bytes\""),
+            "save_pair must emit audit_offset_bytes; got:\n{written}"
+        );
+        assert!(
+            written.contains("\"audit_reset_at_unix\""),
+            "save_pair must emit audit_reset_at_unix; got:\n{written}"
+        );
 
         // Round-trip back through `load_pair` -> PersistedState with no
         // parse error, then double-check we read what we wrote.
@@ -1993,8 +2122,8 @@ mod audit_persistence_tests {
         save_pair(&state_path, &reg, &occ).expect("save_pair");
 
         let written = fs::read_to_string(&state_path).unwrap();
-        let parsed: PersistedState = serde_json::from_str(&written)
-            .expect("state file must round-trip after save");
+        let parsed: PersistedState =
+            serde_json::from_str(&written).expect("state file must round-trip after save");
         assert_eq!(
             parsed.audit_offset_bytes, EXPECTED,
             "save_pair must read audit.jsonl size and emit it as audit_offset_bytes; \
@@ -2016,7 +2145,10 @@ mod audit_persistence_tests {
         let state_path = dir.path().join("state.json");
         // No `audit.jsonl` is created — the missing-file case is
         // the entire point of the test.
-        assert!(!dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME).exists());
+        assert!(!dir
+            .path()
+            .join(crate::server::audit::AUDIT_LOG_FILENAME)
+            .exists());
 
         // Seed a state file with a prior offset and no reset marker
         // (the "pre-reset" state: we thought we had an audit log

@@ -5,7 +5,9 @@ use crate::graph::GraphDatabase;
 use crate::nlp::{CrossEncoder, NlpEmbedder};
 use crate::overlay::VolatileOverlay;
 use crate::schema::{GraphNode, NodeType};
-use crate::server::tools::utils::{build_enriched_text, cosine_similarity, read_body_summary, token_recall};
+use crate::server::tools::utils::{
+    build_enriched_text, cosine_similarity, read_body_summary, token_recall,
+};
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -43,21 +45,22 @@ pub fn semantic_search(
             // and "graph storage" can hit Module/Constant nodes too.
             // Cross-runtime nodes (HttpRoute, Topic, Resource, Schema) are
             // excluded — they're document-shaped, not code-shaped.
-            if matches!(sn.node_type,
+            if matches!(
+                sn.node_type,
                 NodeType::File
-                | NodeType::Namespace
-                | NodeType::Module
-                | NodeType::Package
-                | NodeType::Class
-                | NodeType::Interface
-                | NodeType::Struct
-                | NodeType::Enum
-                | NodeType::Trait
-                | NodeType::Function
-                | NodeType::Method
-                | NodeType::Property
-                | NodeType::Variable
-                | NodeType::Constant
+                    | NodeType::Namespace
+                    | NodeType::Module
+                    | NodeType::Package
+                    | NodeType::Class
+                    | NodeType::Interface
+                    | NodeType::Struct
+                    | NodeType::Enum
+                    | NodeType::Trait
+                    | NodeType::Function
+                    | NodeType::Method
+                    | NodeType::Property
+                    | NodeType::Variable
+                    | NodeType::Constant
             ) {
                 all_nodes.push(sn);
             }
@@ -65,7 +68,10 @@ pub fn semantic_search(
     }
 
     if all_nodes.is_empty() {
-        return Ok("No nodes found for semantic search in Merged Brain. Run 'run_enrichment' first.".to_string());
+        return Ok(
+            "No nodes found for semantic search in Merged Brain. Run 'run_enrichment' first."
+                .to_string(),
+        );
     }
 
     // 2. Compute query embedding once. `embed_query` applies the
@@ -162,7 +168,9 @@ pub fn semantic_search(
         // Hybrid: similarity + anchor_weight * normalized_anchor_score
         let hybrid_a = a.1 + tuning.anchor_weight * anchor_a;
         let hybrid_b = b.1 + tuning.anchor_weight * anchor_b;
-        hybrid_b.partial_cmp(&hybrid_a).unwrap_or(std::cmp::Ordering::Equal)
+        hybrid_b
+            .partial_cmp(&hybrid_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // 5. Optional cross-encoder reranking on the top-K bi-encoder candidates.
@@ -174,12 +182,15 @@ pub fn semantic_search(
     // (used for ordering) and the original bi-encoder sim+lex hybrid
     // (used for the response label and threshold check).
     #[derive(Clone, Copy)]
-    enum ScoreKind { BiHybrid, CrossLogit }
+    enum ScoreKind {
+        BiHybrid,
+        CrossLogit,
+    }
     #[derive(Clone, Copy)]
     struct Scored<'a> {
         node: &'a crate::schema::GraphNode,
-        hybrid: f32,             // always bi-encoder sim+lex hybrid
-        score: f32,              // the value used for ranking
+        hybrid: f32, // always bi-encoder sim+lex hybrid
+        score: f32,  // the value used for ranking
         kind: ScoreKind,
     }
     let results: Vec<Scored> = if tuning.cross_encoder_top_k > 0 && cross_encoder.is_active() {
@@ -188,43 +199,90 @@ pub fn semantic_search(
         for (node, hybrid) in scored.iter().take(k) {
             let text = build_enriched_text(node, workspace);
             let ce_score = cross_encoder.score(query, &text).unwrap_or(0.0);
-            reranked.push(Scored { node, hybrid: *hybrid, score: ce_score, kind: ScoreKind::CrossLogit });
+            reranked.push(Scored {
+                node,
+                hybrid: *hybrid,
+                score: ce_score,
+                kind: ScoreKind::CrossLogit,
+            });
         }
-        reranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         // Anything beyond the top-K keeps its bi-encoder score
-        let mut tail: Vec<Scored> = scored.iter().skip(k).map(|(n, h)| Scored {
-            node: n, hybrid: *h, score: *h, kind: ScoreKind::BiHybrid,
-        }).collect();
+        let mut tail: Vec<Scored> = scored
+            .iter()
+            .skip(k)
+            .map(|(n, h)| Scored {
+                node: n,
+                hybrid: *h,
+                score: *h,
+                kind: ScoreKind::BiHybrid,
+            })
+            .collect();
         let mut combined = reranked;
         combined.append(&mut tail);
         combined.into_iter().take(limit).collect()
     } else {
-        scored.iter().take(limit).map(|(n, h)| Scored {
-            node: n, hybrid: *h, score: *h, kind: ScoreKind::BiHybrid,
-        }).collect()
+        scored
+            .iter()
+            .take(limit)
+            .map(|(n, h)| Scored {
+                node: n,
+                hybrid: *h,
+                score: *h,
+                kind: ScoreKind::BiHybrid,
+            })
+            .collect()
     };
 
-    Ok(format!("Found {} semantic results in Merged Brain for '{}' (using Shadow Masking):\n{}",
+    Ok(format!(
+        "Found {} semantic results in Merged Brain for '{}' (using Shadow Masking):\n{}",
         results.len(),
         query,
-        results.iter().enumerate().map(|(i, s)| {
-            let anchor = s.node.anchor_score.map(|x| format!("{:.2}", x)).unwrap_or_else(|| "N/A".to_string());
-            let sig = s.node.signature.as_ref().map(|x| format!(" | {}", x)).unwrap_or_default();
-            // Short body excerpt so behavior-shaped terms (e.g. `bincode`
-            // in GraphDatabase::save_to_disk) appear in the response text.
-            let body = read_body_summary(s.node, 80, workspace)
-                .map(|b| format!(" | {}", b))
-                .unwrap_or_default();
-            // Label depends on which score drives the ranking. Cross-encoder
-            // logits are unbounded (often -10..+10) and only meaningful for
-            // relative ordering — they don't reflect "similarity" in any
-            // user-facing sense, so we label them differently.
-            let (label, value) = match s.kind {
-                ScoreKind::BiHybrid => ("sim", s.hybrid),
-                ScoreKind::CrossLogit => ("rerank", s.score),
-            };
-            format!("{}. {} ({:?}){}{} — {}: {:.3}, anchor: {}",
-                i + 1, s.node.name, s.node.node_type, sig, body, label, value, anchor)
-        }).collect::<Vec<_>>().join("\n")
+        results
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let anchor = s
+                    .node
+                    .anchor_score
+                    .map(|x| format!("{:.2}", x))
+                    .unwrap_or_else(|| "N/A".to_string());
+                let sig = s
+                    .node
+                    .signature
+                    .as_ref()
+                    .map(|x| format!(" | {}", x))
+                    .unwrap_or_default();
+                // Short body excerpt so behavior-shaped terms (e.g. `bincode`
+                // in GraphDatabase::save_to_disk) appear in the response text.
+                let body = read_body_summary(s.node, 80, workspace)
+                    .map(|b| format!(" | {}", b))
+                    .unwrap_or_default();
+                // Label depends on which score drives the ranking. Cross-encoder
+                // logits are unbounded (often -10..+10) and only meaningful for
+                // relative ordering — they don't reflect "similarity" in any
+                // user-facing sense, so we label them differently.
+                let (label, value) = match s.kind {
+                    ScoreKind::BiHybrid => ("sim", s.hybrid),
+                    ScoreKind::CrossLogit => ("rerank", s.score),
+                };
+                format!(
+                    "{}. {} ({:?}){}{} — {}: {:.3}, anchor: {}",
+                    i + 1,
+                    s.node.name,
+                    s.node.node_type,
+                    sig,
+                    body,
+                    label,
+                    value,
+                    anchor
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     ))
 }

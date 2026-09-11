@@ -26,11 +26,23 @@ async fn project_repo_is_idempotent() {
                 .expect("git failed");
             assert!(status.success(), "git {args:?} failed: {status}");
         };
-        run(&["-c", "user.email=test@lain", "-c", "user.name=test", "add", "-A"]);
         run(&[
-            "-c", "user.email=test@lain",
-            "-c", "user.name=test",
-            "commit", "-q", "-m", "fixture",
+            "-c",
+            "user.email=test@lain",
+            "-c",
+            "user.name=test",
+            "add",
+            "-A",
+        ]);
+        run(&[
+            "-c",
+            "user.email=test@lain",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
         ]);
     }
 

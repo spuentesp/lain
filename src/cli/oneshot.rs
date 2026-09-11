@@ -29,12 +29,12 @@
 //!    a silent server blocks `read()` forever and the deadline never
 //!    fires.
 
+use crate::cli::workspace::find_git_workspace_root;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use crate::cli::workspace::find_git_workspace_root;
 
 /// JSON-RPC id of the `tools/call` request (initialize is id 1).
 const ID_CALL: i64 = 2;
@@ -42,21 +42,18 @@ const ID_CALL: i64 = 2;
 /// Run `lain mcp` as a subprocess, send one `tools/call`, print the
 /// result, and exit. Returns an error if the tool name is unknown
 /// or the subprocess fails to start.
-pub fn run_oneshot(
-    workspace: Option<&Path>,
-    tool: &str,
-    args: &[String],
-) -> Result<()> {
+pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Result<()> {
     // Walk up for `.git` if --workspace wasn't given — same as
     // `lain mcp` does. The walk lives in `cli::mcp` but we
     // re-implement it inline to keep this module dependency-free.
     let workspace = match workspace {
         Some(p) => p.to_path_buf(),
-        None => find_git_workspace_root(None)?
-            .ok_or_else(|| anyhow!(
+        None => find_git_workspace_root(None)?.ok_or_else(|| {
+            anyhow!(
                 "no `.git` found in any parent directory and no --workspace given; \
                  pass --workspace PATH or run from inside a clone"
-            ))?,
+            )
+        })?,
     };
     if !workspace.join(".git").exists() {
         return Err(anyhow!(
@@ -182,7 +179,11 @@ pub fn run_oneshot(
             return Err(anyhow!(
                 "no tools/call response from `lain mcp` within {timeout_secs}s \
                  (server stderr: {})",
-                if stderr_text.trim().is_empty() { "<empty>".into() } else { stderr_text }
+                if stderr_text.trim().is_empty() {
+                    "<empty>".into()
+                } else {
+                    stderr_text
+                }
             ));
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -194,7 +195,11 @@ pub fn run_oneshot(
             return Err(anyhow!(
                 "`lain mcp` exited without answering tools/call \
                  (server stderr: {})",
-                if stderr_text.trim().is_empty() { "<empty>".into() } else { stderr_text }
+                if stderr_text.trim().is_empty() {
+                    "<empty>".into()
+                } else {
+                    stderr_text
+                }
             ));
         }
     };
@@ -213,7 +218,10 @@ pub fn run_oneshot(
         .unwrap_or("");
 
     match serde_json::from_str::<Value>(raw_text) {
-        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw_text.into())),
+        Ok(v) => println!(
+            "{}",
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw_text.into())
+        ),
         Err(_) => println!("{}", raw_text),
     }
     Ok(())

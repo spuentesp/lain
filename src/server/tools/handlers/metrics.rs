@@ -8,14 +8,14 @@ use crate::schema::NodeType;
 use crate::server::presence::OccupancyMap;
 use crate::server::tools::utils::read_body_summary;
 use crate::server::tools::utils::{build_enriched_text, cosine_similarity, resolve_node};
-use std::sync::Arc;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub fn find_anchors(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    limit: usize
+    limit: usize,
 ) -> Result<String, LainError> {
     let mut anchors = graph.find_anchors(limit)?;
 
@@ -32,7 +32,9 @@ pub fn find_anchors(
         )
     });
 
-    let overlay_anchors = overlay.get_all_nodes().into_iter()
+    let overlay_anchors = overlay
+        .get_all_nodes()
+        .into_iter()
         .filter(|n| n.anchor_score.is_some())
         .filter(|n| {
             matches!(
@@ -42,7 +44,8 @@ pub fn find_anchors(
         })
         .collect::<Vec<_>>();
 
-    let mut seen_ids: std::collections::HashSet<String> = anchors.iter().map(|a| a.id.clone()).collect();
+    let mut seen_ids: std::collections::HashSet<String> =
+        anchors.iter().map(|a| a.id.clone()).collect();
     for oa in overlay_anchors {
         if seen_ids.insert(oa.id.clone()) {
             anchors.push(oa);
@@ -66,19 +69,36 @@ pub fn find_anchors(
     // listed `as_str (score: 100.000)` while `get_anchor_score as_str`
     // answered `0.000`: two tools, same name, different nodes, flatly
     // contradictory answers with nothing on screen to explain it.
-    Ok(format!("Top {} anchors (Merged Brain):\n{}",
+    Ok(format!(
+        "Top {} anchors (Merged Brain):\n{}",
         anchors.len().min(limit),
-        anchors.iter().enumerate().take(limit).map(|(i, n)| {
-            let score = n.anchor_score.map(|s| format!("{:.3}", s)).unwrap_or_else(|| "N/A".to_string());
-            format!("{}. {} ({:?}) in {} (score: {})", i + 1, n.name, n.node_type, n.path, score)
-        }).collect::<Vec<_>>().join("\n")
+        anchors
+            .iter()
+            .enumerate()
+            .take(limit)
+            .map(|(i, n)| {
+                let score = n
+                    .anchor_score
+                    .map(|s| format!("{:.3}", s))
+                    .unwrap_or_else(|| "N/A".to_string());
+                format!(
+                    "{}. {} ({:?}) in {} (score: {})",
+                    i + 1,
+                    n.name,
+                    n.node_type,
+                    n.path,
+                    score
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     ))
 }
 
 pub fn get_anchor_score(
-    graph: &GraphDatabase, 
+    graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    symbol: &str
+    symbol: &str,
 ) -> Result<String, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
@@ -101,27 +121,50 @@ pub fn get_anchor_score(
 }
 
 pub fn get_context_depth(
-    graph: &GraphDatabase, 
+    graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    symbol: &str
+    symbol: &str,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
     match node.depth_from_main {
-        Some(d) => Ok(format!("Context depth for '{}': {} layers from entry", symbol, d)),
-        None => Ok(format!("Symbol '{}' has no depth score in Merged Brain.", symbol)),
+        Some(d) => Ok(format!(
+            "Context depth for '{}': {} layers from entry",
+            symbol, d
+        )),
+        None => Ok(format!(
+            "Symbol '{}' has no depth score in Merged Brain.",
+            symbol
+        )),
     }
 }
 
 /// Names that commonly indicate a false positive (trait defaults, constructors, etc.)
 const FALSE_POSITIVE_PATTERNS: &[&str] = &[
-    "default", "new", "clone", "from", "into", "as_ref", "as_mut",
-    "to_string", "to_owned", "debug", "display", "fmt", "format",
-    "from_str", "parse", "try_from", "try_into", "borrowed",
+    "default",
+    "new",
+    "clone",
+    "from",
+    "into",
+    "as_ref",
+    "as_mut",
+    "to_string",
+    "to_owned",
+    "debug",
+    "display",
+    "fmt",
+    "format",
+    "from_str",
+    "parse",
+    "try_from",
+    "try_into",
+    "borrowed",
 ];
 
 /// Check if a function name matches known false-positive patterns
 pub(crate) fn is_false_positive_name(name: &str) -> bool {
-    FALSE_POSITIVE_PATTERNS.iter().any(|p| name == *p || name.ends_with(p))
+    FALSE_POSITIVE_PATTERNS
+        .iter()
+        .any(|p| name == *p || name.ends_with(p))
 }
 
 /// Check if function appears in a trait definition (heuristic: path contains "trait")
@@ -167,7 +210,6 @@ pub(crate) fn is_test_symbol(node: &crate::schema::GraphNode) -> bool {
         || path.starts_with("tests/")
         || TEST_FILE_CONVENTIONS.iter().any(|c| path.ends_with(c))
 }
-
 
 /// Minimum function count before a file with zero outgoing call edges
 /// is treated as unindexed rather than dead.
@@ -334,7 +376,11 @@ fn names_referenced_anywhere(
             }
             // In the defining file the definition is one legitimate
             // occurrence, so a second is needed; elsewhere one is enough.
-            let threshold = if own_file.get(name) == Some(&rel.as_str()) { 1 } else { 0 };
+            let threshold = if own_file.get(name) == Some(&rel.as_str()) {
+                1
+            } else {
+                0
+            };
             if whole_word_hits(&text, name) > threshold {
                 referenced.insert(name.to_string());
             }
@@ -552,7 +598,7 @@ pub fn explain_symbol(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     occupancy: &OccupancyMap,
-    symbol: &str
+    symbol: &str,
 ) -> Result<String, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
@@ -562,7 +608,10 @@ pub fn explain_symbol(
     if !amb.is_empty() {
         lines.push(amb.trim_end().to_string());
     }
-    lines.push(format!("## Explanation for '{}' ({:?})", symbol, node.node_type));
+    lines.push(format!(
+        "## Explanation for '{}' ({:?})",
+        symbol, node.node_type
+    ));
     // Scoped to the file this answer is about. The index is commit-driven, so
     // a file edited and not yet committed is invisible to it — the reader needs
     // to know that here, not from a separate health call they will not make.
@@ -593,11 +642,23 @@ pub fn explain_symbol(
     lines.push(String::new());
     lines.push("### Structural Context".to_string());
 
-    let depth = node.depth_from_main.map(|d| d.to_string()).unwrap_or_else(|| "N/A".to_string());
-    let anchor = node.anchor_score.map(|s| format!("{:.3}", s)).unwrap_or_else(|| "N/A".to_string());
+    let depth = node
+        .depth_from_main
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "N/A".to_string());
+    let anchor = node
+        .anchor_score
+        .map(|s| format!("{:.3}", s))
+        .unwrap_or_else(|| "N/A".to_string());
 
-    lines.push(format!("- **Context Depth:** {} (Lower is closer to entry point)", depth));
-    lines.push(format!("- **Anchor Score:** {} (Higher means more foundational)", anchor));
+    lines.push(format!(
+        "- **Context Depth:** {} (Lower is closer to entry point)",
+        depth
+    ));
+    lines.push(format!(
+        "- **Anchor Score:** {} (Higher means more foundational)",
+        anchor
+    ));
 
     let partners = graph.get_co_change_partners(&node.path)?;
     if !partners.is_empty() {
@@ -642,7 +703,8 @@ pub fn explain_symbol(
                 .iter()
                 .take(8)
                 .map(|e| {
-                    graph.get_node(&e.target_id)
+                    graph
+                        .get_node(&e.target_id)
                         .ok()
                         .flatten()
                         .map(|n| n.name.clone())
@@ -660,7 +722,8 @@ pub fn explain_symbol(
                 .iter()
                 .take(8)
                 .map(|e| {
-                    graph.get_node(&e.source_id)
+                    graph
+                        .get_node(&e.source_id)
                         .ok()
                         .flatten()
                         .map(|n| n.name.clone())
@@ -726,7 +789,7 @@ pub fn explain_symbol(
 pub fn suggest_refactor_targets(
     graph: &GraphDatabase,
     _overlay: &VolatileOverlay,
-    limit: usize
+    limit: usize,
 ) -> Result<String, LainError> {
     // `Method` belongs here: in impl-heavy languages most logic lives
     // in methods, and leaving them out meant the real God Objects were
@@ -744,26 +807,36 @@ pub fn suggest_refactor_targets(
     let all_nodes = graph.get_nodes_by_types(&node_types)?;
 
     if all_nodes.is_empty() {
-        return Ok("No nodes found in Static Backbone to analyze. Run enrichment first.".to_string());
+        return Ok(
+            "No nodes found in Static Backbone to analyze. Run enrichment first.".to_string(),
+        );
     }
 
-    let mut targets: Vec<_> = all_nodes.into_iter().map(|n| {
-        let fan_in = n.fan_in.unwrap_or(0);
-        let fan_out = n.fan_out.unwrap_or(0);
-        let co_change = n.co_change_count.unwrap_or(0);
-        let anchor = n.anchor_score.unwrap_or(0.0);
+    let mut targets: Vec<_> = all_nodes
+        .into_iter()
+        .map(|n| {
+            let fan_in = n.fan_in.unwrap_or(0);
+            let fan_out = n.fan_out.unwrap_or(0);
+            let co_change = n.co_change_count.unwrap_or(0);
+            let anchor = n.anchor_score.unwrap_or(0.0);
 
-        let debt_score = (fan_in as f32 * fan_out as f32) + (co_change as f32 / (anchor + 0.1));
-        
-        let mut reasons = Vec::new();
-        if fan_in > 10 && fan_out > 10 { reasons.push("Potential 'God Object' (high fan-in/fan-out)"); }
-        if co_change > 5 && anchor < 0.2 { reasons.push("Fragile/Spaghetti logic (high coupling, low stability)"); }
-        if fan_out > 20 { reasons.push("High complexity/fan-out"); }
+            let debt_score = (fan_in as f32 * fan_out as f32) + (co_change as f32 / (anchor + 0.1));
 
-        (n, debt_score, reasons)
-    })
-    .filter(|(_, _, reasons)| !reasons.is_empty())
-    .collect();
+            let mut reasons = Vec::new();
+            if fan_in > 10 && fan_out > 10 {
+                reasons.push("Potential 'God Object' (high fan-in/fan-out)");
+            }
+            if co_change > 5 && anchor < 0.2 {
+                reasons.push("Fragile/Spaghetti logic (high coupling, low stability)");
+            }
+            if fan_out > 20 {
+                reasons.push("High complexity/fan-out");
+            }
+
+            (n, debt_score, reasons)
+        })
+        .filter(|(_, _, reasons)| !reasons.is_empty())
+        .collect();
 
     targets.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 

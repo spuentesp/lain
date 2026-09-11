@@ -49,11 +49,8 @@ async fn add_repo_to_workspace_is_visible_to_list_repos() {
         loop {
             match sub.try_recv() {
                 Ok(()) => {
-                    let _ = lain::server::reload::run_rebuild(
-                        &server_for_loop,
-                        &bus_for_loop,
-                    )
-                    .await;
+                    let _ =
+                        lain::server::reload::run_rebuild(&server_for_loop, &bus_for_loop).await;
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -108,10 +105,8 @@ async fn build_federation(
     use lain::server::federation::federated_index::FederatedIndex;
     use lain::server::federation::graph_backend::PetgraphBackend;
 
-    let cfg: FederationConfig = serde_yaml::from_str(
-        &std::fs::read_to_string(repos_yaml).unwrap(),
-    )
-    .unwrap();
+    let cfg: FederationConfig =
+        serde_yaml::from_str(&std::fs::read_to_string(repos_yaml).unwrap()).unwrap();
     let backend: Arc<dyn lain::server::federation::graph_backend::GraphBackend> =
         Arc::new(PetgraphBackend::new(&cfg.data_dir).expect("PetgraphBackend::new"));
     let fed = Arc::new(FederatedIndex::new(backend));
@@ -325,7 +320,8 @@ async fn set_workspace_stress_visible_to_shared_lock() {
                 count >= last_count,
                 "reader regressed: count dropped from {} to {} \
                  (the writer and reader are observing different cells)",
-                last_count, count,
+                last_count,
+                count,
             );
             last_count = count;
             if count >= NUM_WRITES {
@@ -475,8 +471,7 @@ async fn set_workspace_publishes_to_shared_workspaces_handle() {
             .expect("workspaces_handle must remain Some");
         let guard = handle.read();
         assert_eq!(
-            guard.workspaces[0].name,
-            "beta",
+            guard.workspaces[0].name, "beta",
             "set_workspace did not publish through the shared lock — \
              the LainMcpServer would still serve the construction-time snapshot",
         );

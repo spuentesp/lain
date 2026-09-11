@@ -42,8 +42,7 @@ impl ActiveWorkspace {
         if !path.exists() {
             return Ok(None);
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| LainError::Io(e.to_string()))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| LainError::Io(e.to_string()))?;
         let mut lines = text.lines();
         let first = match lines.next() {
             Some(s) => s,
@@ -64,7 +63,9 @@ impl ActiveWorkspace {
     /// Save this pointer to disk atomically (write to .tmp, rename).
     pub fn save(&self) -> Result<(), LainError> {
         if self.name.is_empty() {
-            return Err(LainError::Config("active workspace name cannot be empty".into()));
+            return Err(LainError::Config(
+                "active workspace name cannot be empty".into(),
+            ));
         }
         let text = match &self.config_path {
             Some(p) => format!("{}\n{}\n", p.display(), self.name),
@@ -92,11 +93,12 @@ pub fn resolve_active_workspace<'a>(
     spec: &'a crate::federation::workspace::WorkspacesFile,
     name: &str,
 ) -> Result<&'a crate::federation::workspace::WorkspaceSpec, LainError> {
-    spec.workspaces.iter()
+    spec.workspaces
+        .iter()
         .find(|w| w.name == name)
-        .ok_or_else(|| LainError::Config(format!(
-            "workspace '{name}' not found in workspaces.yaml"
-        )))
+        .ok_or_else(|| {
+            LainError::Config(format!("workspace '{name}' not found in workspaces.yaml"))
+        })
 }
 
 // Test-only mutex shared by all `mod tests` and `mod active_workspace_tests`
@@ -117,7 +119,9 @@ mod active_workspace_tests {
     /// Run a closure with XDG_CONFIG_HOME pointed at a tempdir, restoring
     /// the original env var on drop. Used so tests don't touch the user's
     /// real `~/.config/lain/active_workspace`.
-    struct XdgGuard { prev: Option<String> }
+    struct XdgGuard {
+        prev: Option<String>,
+    }
     impl XdgGuard {
         fn new(dir: &Path) -> Self {
             let prev = std::env::var("XDG_CONFIG_HOME").ok();
@@ -161,7 +165,9 @@ mod active_workspace_tests {
         let tmp = tempfile::tempdir().unwrap();
         let _xdg = XdgGuard::new(tmp.path());
         write_active_workspace(tmp.path(), "/srv/workspaces.yaml\nbackend-team\n");
-        let aw = ActiveWorkspace::load().unwrap().expect("load should return Some");
+        let aw = ActiveWorkspace::load()
+            .unwrap()
+            .expect("load should return Some");
         assert_eq!(aw.name, "backend-team");
         assert_eq!(aw.config_path, Some(PathBuf::from("/srv/workspaces.yaml")));
     }
@@ -173,7 +179,9 @@ mod active_workspace_tests {
         let tmp = tempfile::tempdir().unwrap();
         let _xdg = XdgGuard::new(tmp.path());
         write_active_workspace(tmp.path(), "just-a-name\n");
-        let aw = ActiveWorkspace::load().unwrap().expect("load should return Some");
+        let aw = ActiveWorkspace::load()
+            .unwrap()
+            .expect("load should return Some");
         assert_eq!(aw.name, "just-a-name");
         assert_eq!(aw.config_path, None);
     }
@@ -188,7 +196,9 @@ mod active_workspace_tests {
             config_path: Some(PathBuf::from("/srv/workspaces.yaml")),
         };
         aw.save().expect("save should succeed");
-        let loaded = ActiveWorkspace::load().unwrap().expect("load should return Some");
+        let loaded = ActiveWorkspace::load()
+            .unwrap()
+            .expect("load should return Some");
         assert_eq!(loaded, aw);
     }
 

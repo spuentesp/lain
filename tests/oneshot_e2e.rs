@@ -47,7 +47,15 @@ fn make_repo(files: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     };
     git(&["init", "-q"]);
     git(&["add", "-A"]);
-    git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "init",
+    ]);
     (tmp, root)
 }
 
@@ -77,13 +85,16 @@ fn run_oneshot(workspace: &std::path::Path, budget: Duration) -> (bool, String, 
         if start.elapsed() > budget {
             let _ = child.kill();
             let _ = child.wait();
-            return (false, String::from("<killed: exceeded budget>"), start.elapsed());
+            return (
+                false,
+                String::from("<killed: exceeded budget>"),
+                start.elapsed(),
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     let mut out = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut out)
-        .unwrap();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut out).unwrap();
     (status.success(), out, start.elapsed())
 }
 

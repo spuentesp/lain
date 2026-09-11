@@ -61,7 +61,11 @@ pub trait GraphBackend: Send + Sync {
         direction: petgraph::Direction,
     ) -> Result<Vec<GraphNode>, LainError>;
     fn find_path(&self, from: &str, to: &str) -> Result<Vec<GraphNode>, LainError>;
-    fn subgraph_around(&self, center: &str, radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError>;
+    fn subgraph_around(
+        &self,
+        center: &str,
+        radius: u32,
+    ) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError>;
     fn node_count(&self) -> usize;
     fn edge_count(&self) -> usize;
 }
@@ -206,7 +210,11 @@ impl GraphBackend for PetgraphBackend {
         self.db.find_path(from, to)
     }
 
-    fn subgraph_around(&self, center: &str, radius: u32) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError> {
+    fn subgraph_around(
+        &self,
+        center: &str,
+        radius: u32,
+    ) -> Result<Vec<(GraphNode, Vec<GraphEdge>)>, LainError> {
         self.db.subgraph_around(center, radius)
     }
 

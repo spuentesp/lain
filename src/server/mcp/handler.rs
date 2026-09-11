@@ -9,27 +9,27 @@ use crate::server::LainServer;
 use crate::state::ActiveWorkspace;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
-use rust_mcp_sdk::{
-    mcp_server::{server_runtime, McpServerOptions, ServerHandler, ToMcpServerHandler},
-    schema::{
-        CallToolRequestParams, CallToolResult,
-        InitializeResult, ListToolsResult, PaginatedRequestParams,
-        ProtocolVersion, RpcError, ServerCapabilities, ServerCapabilitiesTools, Tool, ToolInputSchema, Implementation,
-    },
-    error::SdkResult,
-    McpServer, StdioTransport, TransportOptions,
-};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
+use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
 use parking_lot::RwLock;
+use rust_mcp_sdk::{
+    error::SdkResult,
+    mcp_server::{server_runtime, McpServerOptions, ServerHandler, ToMcpServerHandler},
+    schema::{
+        CallToolRequestParams, CallToolResult, Implementation, InitializeResult, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, RpcError, ServerCapabilities,
+        ServerCapabilitiesTools, Tool, ToolInputSchema,
+    },
+    McpServer, StdioTransport, TransportOptions,
+};
 use serde_json::Map;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 /// Response body used by the HTTP handler. Most responses are a single
@@ -65,8 +65,7 @@ fn cow_to_bytes(cow: std::borrow::Cow<'static, [u8]>) -> Bytes {
     }
 }
 use crate::server::mcp::definitions::{
-    defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS,
-    WORKSPACE_TOOL_DEFS,
+    defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
 };
 use crate::server::mcp::envelope::tool_text_result;
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
@@ -75,15 +74,17 @@ use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 /// error on malformed input. Used by both stdio and HTTP dispatch arms for
 /// `get_cross_repo_blast_radius*`.
 fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
-    let (start_s, end_s) = s.split_once("..").ok_or_else(|| {
-        format!("Invalid depth: expected \"<start>..<end>\", got {s:?}")
-    })?;
-    let start: u32 = start_s.trim().parse().map_err(|e| {
-        format!("Invalid depth start: {e}")
-    })?;
-    let end: u32 = end_s.trim().parse().map_err(|e| {
-        format!("Invalid depth end: {e}")
-    })?;
+    let (start_s, end_s) = s
+        .split_once("..")
+        .ok_or_else(|| format!("Invalid depth: expected \"<start>..<end>\", got {s:?}"))?;
+    let start: u32 = start_s
+        .trim()
+        .parse()
+        .map_err(|e| format!("Invalid depth start: {e}"))?;
+    let end: u32 = end_s
+        .trim()
+        .parse()
+        .map_err(|e| format!("Invalid depth end: {e}"))?;
     Ok(start..end)
 }
 
@@ -229,8 +230,8 @@ where
     let value = serde_json::Value::Object(args.clone().into_iter().collect());
     match runner(server, value) {
         Ok(v) => {
-            let text = serde_json::to_string(&v)
-                .unwrap_or_else(|e| format!("serialization error: {e}"));
+            let text =
+                serde_json::to_string(&v).unwrap_or_else(|e| format!("serialization error: {e}"));
             tool_text_result(text, false, overlay, static_graph_generation_unix)
         }
         Err(e) => tool_text_result(
@@ -272,8 +273,7 @@ where
     // path appends `_meta.static_graph_generation`; the error path
     // already wraps the message in a `result: { content, isError }`
     // shape and we mirror the same field there.
-    let static_graph_generation_unix: Option<i64> =
-        server.static_graph_generation_unix();
+    let static_graph_generation_unix: Option<i64> = server.static_graph_generation_unix();
     let render_error = |msg: String| -> Response<OverlayHttpBody> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -306,11 +306,7 @@ where
             let mut payload = match serde_json::to_value(&v) {
                 Ok(val) => val,
                 Err(e) => {
-                    return jsonrpc_tool_result(
-                        id,
-                        &format!("serialization error: {e}"),
-                        true,
-                    );
+                    return jsonrpc_tool_result(id, &format!("serialization error: {e}"), true);
                 }
             };
             if let serde_json::Value::Object(ref mut map) = payload {
@@ -383,7 +379,9 @@ struct LainHandler {
 /// without the NLP model: it refuses the `like` argument and answers
 /// normally otherwise, so it stays advertised and rejects that one
 /// argument with a message naming the cause.
-pub(crate) fn inert_tool_names(embedder: &crate::server::nlp::NlpEmbedder) -> &'static [&'static str] {
+pub(crate) fn inert_tool_names(
+    embedder: &crate::server::nlp::NlpEmbedder,
+) -> &'static [&'static str] {
     if embedder.is_stub() {
         // `semantic_search` is the whole tool, not one argument: with a
         // stub embedder every call returns `Unavailable`.
@@ -449,17 +447,24 @@ impl ServerHandler for LainHandler {
         // Server-status and recent-projects tools are always available.
         tools.extend(defs_to_tools(SERVER_TOOL_DEFS));
 
-        Ok(ListToolsResult { tools, meta: None, next_cursor: None })
+        Ok(ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
     }
 
     async fn handle_call_tool_request(
         &self,
         params: CallToolRequestParams,
         _runtime: Arc<dyn McpServer>,
-    ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError> {
+    ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError>
+    {
         // P1 #1: capture static-graph generation once per dispatch.
-        let static_graph_generation_unix: Option<i64> =
-            self.server.as_deref().and_then(|s| s.static_graph_generation_unix());
+        let static_graph_generation_unix: Option<i64> = self
+            .server
+            .as_deref()
+            .and_then(|s| s.static_graph_generation_unix());
         let empty: Map<String, serde_json::Value> = Map::new();
         let args_ref = params.arguments.as_ref().unwrap_or(&empty);
         // Clone the args so we can inject the resolved `repo_id` in
@@ -493,12 +498,24 @@ impl ServerHandler for LainHandler {
                         .unwrap_or(0),
                 };
                 let payload = handler_status.render();
-                return Ok(tool_text_result(payload.to_string(), false, &self.executor.overlay(), static_graph_generation_unix));
+                return Ok(tool_text_result(
+                    payload.to_string(),
+                    false,
+                    &self.executor.overlay(),
+                    static_graph_generation_unix,
+                ));
             }
             "list_recent_projects" => {
                 let list = match crate::server::mcp::federation_tools::list_recent_projects() {
                     Ok(l) => l,
-                    Err(e) => return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
+                    Err(e) => {
+                        return Ok(tool_text_result(
+                            format!("{e}"),
+                            true,
+                            &self.executor.overlay(),
+                            static_graph_generation_unix,
+                        ))
+                    }
                 };
                 let text = match serde_json::to_string(&list) {
                     Ok(s) => s,
@@ -507,11 +524,16 @@ impl ServerHandler for LainHandler {
                             format!("serialization error: {e}"),
                             true,
                             &self.executor.overlay(),
-                        static_graph_generation_unix,
+                            static_graph_generation_unix,
                         ));
                     }
                 };
-                return Ok(tool_text_result(text, false, &self.executor.overlay(), static_graph_generation_unix));
+                return Ok(tool_text_result(
+                    text,
+                    false,
+                    &self.executor.overlay(),
+                    static_graph_generation_unix,
+                ));
             }
             "get_reload_status" => {
                 let bus = match self.reload_bus.as_ref() {
@@ -521,16 +543,19 @@ impl ServerHandler for LainHandler {
                             "reload bus not configured on this server".to_string(),
                             true,
                             &self.executor.overlay(),
-                        static_graph_generation_unix,
+                            static_graph_generation_unix,
                         ));
                     }
                 };
-                let payload =
-                    crate::server::mcp::federation_tools::get_reload_status(bus);
-                let text = serde_json::to_string(&payload).unwrap_or_else(|e| {
-                    format!("serialization error: {e}")
-                });
-                return Ok(tool_text_result(text, false, &self.executor.overlay(), static_graph_generation_unix));
+                let payload = crate::server::mcp::federation_tools::get_reload_status(bus);
+                let text = serde_json::to_string(&payload)
+                    .unwrap_or_else(|e| format!("serialization error: {e}"));
+                return Ok(tool_text_result(
+                    text,
+                    false,
+                    &self.executor.overlay(),
+                    static_graph_generation_unix,
+                ));
             }
             "request_reload" => {
                 let bus = match self.reload_bus.as_ref() {
@@ -540,20 +565,24 @@ impl ServerHandler for LainHandler {
                             "reload bus not configured on this server".to_string(),
                             true,
                             &self.executor.overlay(),
-                        static_graph_generation_unix,
+                            static_graph_generation_unix,
                         ));
                     }
                 };
                 return match crate::server::mcp::federation_tools::request_reload(bus) {
                     Ok(payload) => Ok(tool_text_result(
-                        serde_json::to_string(&payload).unwrap_or_else(|e| {
-                            format!("serialization error: {e}")
-                        }),
+                        serde_json::to_string(&payload)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
                         false,
                         &self.executor.overlay(),
                         static_graph_generation_unix,
                     )),
-                    Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
+                    Err(e) => Ok(tool_text_result(
+                        format!("{e}"),
+                        true,
+                        &self.executor.overlay(),
+                        static_graph_generation_unix,
+                    )),
                 };
             }
             "register_agent" => {
@@ -696,14 +725,19 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: repo_id".to_string(),
                                 true,
                                 &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                static_graph_generation_unix,
                             ));
                         }
                     };
                     let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
                         Ok(r) => r,
                         Err(e) => {
-                            return Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix));
+                            return Ok(tool_text_result(
+                                format!("{e}"),
+                                true,
+                                &self.executor.overlay(),
+                                static_graph_generation_unix,
+                            ));
                         }
                     };
                     return match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
@@ -747,10 +781,16 @@ impl ServerHandler for LainHandler {
                                 serde_json::to_string(&value)
                                     .unwrap_or_else(|e| format!("serialization error: {e}")),
                                 false,
-                                &self.executor.overlay(), static_graph_generation_unix
+                                &self.executor.overlay(),
+                                static_graph_generation_unix,
                             ))
                         }
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
+                        Err(e) => Ok(tool_text_result(
+                            format!("{e}"),
+                            true,
+                            &self.executor.overlay(),
+                            static_graph_generation_unix,
+                        )),
                     };
                 }
                 "get_federation_health" => {
@@ -771,7 +811,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: query".to_string(),
                                 true,
                                 &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                static_graph_generation_unix,
                             ));
                         }
                     };
@@ -784,7 +824,7 @@ impl ServerHandler for LainHandler {
                                         .to_string(),
                                     true,
                                     &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                    static_graph_generation_unix,
                                 ));
                             }
                         },
@@ -796,7 +836,7 @@ impl ServerHandler for LainHandler {
                                         .to_string(),
                                     true,
                                     &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                    static_graph_generation_unix,
                                 ));
                             }
                         },
@@ -805,7 +845,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: limit".to_string(),
                                 true,
                                 &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                static_graph_generation_unix,
                             ));
                         }
                     };
@@ -826,7 +866,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: symbol".to_string(),
                                 true,
                                 &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                static_graph_generation_unix,
                             ));
                         }
                     };
@@ -834,33 +874,45 @@ impl ServerHandler for LainHandler {
                     // "present but a number" into one message, and `depth: 2`
                     // is the mistake callers actually make (it is a string
                     // range like "1..3").
-                    let depth_owned = match crate::server::tools::utils::required_str_arg(
-                        &args_owned,
-                        "depth",
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return Ok(tool_text_result(
-                                e.to_string(),
-                                true,
-                                &self.executor.overlay(),
-                        static_graph_generation_unix,
-                            ));
-                        }
-                    };
+                    let depth_owned =
+                        match crate::server::tools::utils::required_str_arg(&args_owned, "depth") {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return Ok(tool_text_result(
+                                    e.to_string(),
+                                    true,
+                                    &self.executor.overlay(),
+                                    static_graph_generation_unix,
+                                ));
+                            }
+                        };
                     let depth = match parse_depth_range(&depth_owned) {
                         Ok(r) => r,
-                        Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay(), static_graph_generation_unix)),
+                        Err(e) => {
+                            return Ok(tool_text_result(
+                                e,
+                                true,
+                                &self.executor.overlay(),
+                                static_graph_generation_unix,
+                            ))
+                        }
                     };
-                    return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
+                    return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(
+                        fed, symbol, depth,
+                    ) {
                         Ok(r) => Ok(tool_text_result(
                             serde_json::to_string(&r)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
                             &self.executor.overlay(),
-                        static_graph_generation_unix,
+                            static_graph_generation_unix,
                         )),
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
+                        Err(e) => Ok(tool_text_result(
+                            format!("{e}"),
+                            true,
+                            &self.executor.overlay(),
+                            static_graph_generation_unix,
+                        )),
                     };
                 }
                 "get_cross_repo_blast_radius_for_repo" => {
@@ -871,7 +923,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: repo_id".to_string(),
                                 true,
                                 &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                static_graph_generation_unix,
                             ));
                         }
                     };
@@ -882,27 +934,32 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: symbol".to_string(),
                                 true,
                                 &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                static_graph_generation_unix,
                             ));
                         }
                     };
-                    let depth_owned = match crate::server::tools::utils::required_str_arg(
-                        &args_owned,
-                        "depth",
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return Ok(tool_text_result(
-                                e.to_string(),
-                                true,
-                                &self.executor.overlay(),
-                        static_graph_generation_unix,
-                            ));
-                        }
-                    };
+                    let depth_owned =
+                        match crate::server::tools::utils::required_str_arg(&args_owned, "depth") {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return Ok(tool_text_result(
+                                    e.to_string(),
+                                    true,
+                                    &self.executor.overlay(),
+                                    static_graph_generation_unix,
+                                ));
+                            }
+                        };
                     let depth = match parse_depth_range(&depth_owned) {
                         Ok(r) => r,
-                        Err(e) => return Ok(tool_text_result(e, true, &self.executor.overlay(), static_graph_generation_unix)),
+                        Err(e) => {
+                            return Ok(tool_text_result(
+                                e,
+                                true,
+                                &self.executor.overlay(),
+                                static_graph_generation_unix,
+                            ))
+                        }
                     };
                     return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
                         Ok(r) => Ok(tool_text_result(
@@ -932,11 +989,15 @@ impl ServerHandler for LainHandler {
         // call. The synchronous helpers below complete in microseconds,
         // so the read guard never blocks the writers in `set_workspace`.
         if let Some(workspaces_lock) = &self.workspaces {
-            let workspaces: &crate::federation::workspace::WorkspacesFile = &*workspaces_lock.read();
+            let workspaces: &crate::federation::workspace::WorkspacesFile =
+                &*workspaces_lock.read();
             match params.name.as_str() {
                 "list_workspaces" => {
                     let active = ActiveWorkspace::load().ok().flatten();
-                    let infos = crate::server::mcp::federation_tools::list_workspaces(workspaces, active.as_ref());
+                    let infos = crate::server::mcp::federation_tools::list_workspaces(
+                        workspaces,
+                        active.as_ref(),
+                    );
                     return Ok(tool_text_result(
                         serde_json::to_string(&infos)
                             .unwrap_or_else(|e| format!("serialization error: {e}")),
@@ -948,21 +1009,33 @@ impl ServerHandler for LainHandler {
                 "get_active_workspace" => {
                     let fed = self.federation.as_deref();
                     return match fed {
-                        Some(fed) => match crate::server::mcp::federation_tools::get_active_workspace(fed, workspaces) {
-                            Ok(info) => Ok(tool_text_result(
-                                serde_json::to_string(&info)
-                                    .unwrap_or_else(|e| format!("serialization error: {e}")),
-                                false,
-                                &self.executor.overlay(),
-                        static_graph_generation_unix,
-                            )),
-                            Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
-                        },
+                        Some(fed) => {
+                            match crate::server::mcp::federation_tools::get_active_workspace(
+                                fed, workspaces,
+                            ) {
+                                Ok(info) => Ok(tool_text_result(
+                                    serde_json::to_string(&info)
+                                        .unwrap_or_else(|e| format!("serialization error: {e}")),
+                                    false,
+                                    &self.executor.overlay(),
+                                    static_graph_generation_unix,
+                                )),
+                                Err(e) => Ok(tool_text_result(
+                                    format!("{e}"),
+                                    true,
+                                    &self.executor.overlay(),
+                                    static_graph_generation_unix,
+                                )),
+                            }
+                        }
                         None => Ok(tool_text_result(
-                            LainError::Workspace("get_active_workspace requires federation mode".into()).to_string(),
+                            LainError::Workspace(
+                                "get_active_workspace requires federation mode".into(),
+                            )
+                            .to_string(),
                             true,
                             &self.executor.overlay(),
-                        static_graph_generation_unix,
+                            static_graph_generation_unix,
                         )),
                     };
                 }
@@ -974,7 +1047,7 @@ impl ServerHandler for LainHandler {
                                 "Missing required argument: name".to_string(),
                                 true,
                                 &self.executor.overlay(),
-                        static_graph_generation_unix,
+                                static_graph_generation_unix,
                             ));
                         }
                     };
@@ -985,54 +1058,79 @@ impl ServerHandler for LainHandler {
                     // a federation), we fall back to "not_loaded" health
                     // for each member. The source field is dropped in
                     // this fallback path.
-                    let detail_res: Result<crate::server::mcp::federation_tools::WorkspaceDetail, LainError> =
-                        match self.federation.as_deref() {
-                            Some(fed) => crate::server::mcp::federation_tools::get_workspace(fed, workspaces, name),
-                            None => {
-                                match workspaces.workspaces.iter().find(|w| w.name == name) {
-                                    Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
-                                        name: ws.name.clone(),
-                                        description: ws.description.clone(),
-                                        source: None,
-                                        members: ws.members.iter().map(|m| crate::server::mcp::federation_tools::WorkspaceRepoInfo {
+                    let detail_res: Result<
+                        crate::server::mcp::federation_tools::WorkspaceDetail,
+                        LainError,
+                    > = match self.federation.as_deref() {
+                        Some(fed) => crate::server::mcp::federation_tools::get_workspace(
+                            fed, workspaces, name,
+                        ),
+                        None => match workspaces.workspaces.iter().find(|w| w.name == name) {
+                            Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
+                                name: ws.name.clone(),
+                                description: ws.description.clone(),
+                                source: None,
+                                members: ws
+                                    .members
+                                    .iter()
+                                    .map(|m| {
+                                        crate::server::mcp::federation_tools::WorkspaceRepoInfo {
                                             repo_id: m.clone(),
                                             path: String::new(),
                                             health: "not_loaded".into(),
-                                        }).collect(),
-                                    }),
-                                    None => Err(LainError::NotFound(format!("workspace {name}"))),
-                                }
-                            }
-                        };
+                                        }
+                                    })
+                                    .collect(),
+                            }),
+                            None => Err(LainError::NotFound(format!("workspace {name}"))),
+                        },
+                    };
                     return match detail_res {
                         Ok(d) => Ok(tool_text_result(
                             serde_json::to_string(&d)
                                 .unwrap_or_else(|e| format!("serialization error: {e}")),
                             false,
                             &self.executor.overlay(),
-                        static_graph_generation_unix,
+                            static_graph_generation_unix,
                         )),
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
+                        Err(e) => Ok(tool_text_result(
+                            format!("{e}"),
+                            true,
+                            &self.executor.overlay(),
+                            static_graph_generation_unix,
+                        )),
                     };
                 }
                 "get_workspace_graph" => {
                     let filter = args_owned.get("filter").and_then(|v| v.as_str());
                     return match self.federation.as_deref() {
-                        Some(fed) => match crate::server::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
-                            Ok(graph) => Ok(tool_text_result(
-                                serde_json::to_string(&graph)
-                                    .unwrap_or_else(|e| format!("serialization error: {e}")),
-                                false,
-                                &self.executor.overlay(),
-                        static_graph_generation_unix,
-                            )),
-                            Err(e) => Ok(tool_text_result(format!("{e}"), true, &self.executor.overlay(), static_graph_generation_unix)),
-                        },
+                        Some(fed) => {
+                            match crate::server::mcp::federation_tools::get_workspace_graph(
+                                fed, workspaces, filter,
+                            ) {
+                                Ok(graph) => Ok(tool_text_result(
+                                    serde_json::to_string(&graph)
+                                        .unwrap_or_else(|e| format!("serialization error: {e}")),
+                                    false,
+                                    &self.executor.overlay(),
+                                    static_graph_generation_unix,
+                                )),
+                                Err(e) => Ok(tool_text_result(
+                                    format!("{e}"),
+                                    true,
+                                    &self.executor.overlay(),
+                                    static_graph_generation_unix,
+                                )),
+                            }
+                        }
                         None => Ok(tool_text_result(
-                            LainError::Workspace("get_workspace_graph requires federation mode".into()).to_string(),
+                            LainError::Workspace(
+                                "get_workspace_graph requires federation mode".into(),
+                            )
+                            .to_string(),
                             true,
                             &self.executor.overlay(),
-                        static_graph_generation_unix,
+                            static_graph_generation_unix,
                         )),
                     };
                 }
@@ -1056,7 +1154,14 @@ impl ServerHandler for LainHandler {
                             serde_json::Value::String(rid.as_str().to_string()),
                         );
                     }
-                    Err(text) => return Ok(tool_text_result(text, true, &self.executor.overlay(), static_graph_generation_unix)),
+                    Err(text) => {
+                        return Ok(tool_text_result(
+                            text,
+                            true,
+                            &self.executor.overlay(),
+                            static_graph_generation_unix,
+                        ))
+                    }
                 }
             }
         }
@@ -1067,8 +1172,18 @@ impl ServerHandler for LainHandler {
         // contract — every tool response carries `_meta.revision` at the
         // `CallToolResult` outer level, never inside `content[0].text`.
         let raw = match self.executor.call(&params.name, Some(&args_owned)).await {
-            Ok(text) => tool_text_result(text, false, &self.executor.overlay(), static_graph_generation_unix),
-            Err(e) => tool_text_result(format!("Error: {e}"), true, &self.executor.overlay(), static_graph_generation_unix),
+            Ok(text) => tool_text_result(
+                text,
+                false,
+                &self.executor.overlay(),
+                static_graph_generation_unix,
+            ),
+            Err(e) => tool_text_result(
+                format!("Error: {e}"),
+                true,
+                &self.executor.overlay(),
+                static_graph_generation_unix,
+            ),
         };
         Ok(raw)
     }
@@ -1128,9 +1243,7 @@ pub(crate) async fn await_startup_reindex(
         return;
     };
     let started = std::time::SystemTime::now();
-    let timeout = reindex_timeout.unwrap_or_else(
-        crate::server::refresh::parse_reindex_timeout,
-    );
+    let timeout = reindex_timeout.unwrap_or_else(crate::server::refresh::parse_reindex_timeout);
     let last_outcome = server.last_outcome.clone();
     let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
         Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
@@ -1224,10 +1337,7 @@ impl LainMcpServer {
     /// `get_reload_status` and `request_reload` MCP tools return real
     /// values. The server constructs the bus; this is just the wiring
     /// hook.
-    pub fn with_reload_bus(
-        mut self,
-        reload_bus: Arc<crate::server::reload::ReloadBus>,
-    ) -> Self {
+    pub fn with_reload_bus(mut self, reload_bus: Arc<crate::server::reload::ReloadBus>) -> Self {
         self.reload_bus = Some(reload_bus);
         self
     }
@@ -1332,10 +1442,7 @@ impl LainMcpServer {
                             let status = status.clone();
                             handle_request(req, executor, None, None, status, None, None)
                         });
-                        if let Err(e) = http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
+                        if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
                             tracing::debug!("Connection error: {}", e);
                         }
                     });
@@ -1475,10 +1582,7 @@ impl LainMcpServer {
                                 server.clone(),
                             )
                         });
-                        if let Err(e) = http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
+                        if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
                             tracing::debug!("Connection error: {}", e);
                         }
                     });
@@ -1501,7 +1605,9 @@ impl LainMcpServer {
                 website_url: None,
             },
             capabilities: ServerCapabilities {
-                tools: Some(ServerCapabilitiesTools { list_changed: Some(false) }),
+                tools: Some(ServerCapabilitiesTools {
+                    list_changed: Some(false),
+                }),
                 ..Default::default()
             },
             meta: None,
@@ -1666,7 +1772,9 @@ async fn handle_request(
     // `/events` — require a valid `Authorization: Bearer <key>` and
     // respect the per-key rate limit. Stdio callers bypass this entirely.
     if !(method == Method::GET && path == "/health") {
-        let auth_header = req.headers().get("authorization")
+        let auth_header = req
+            .headers()
+            .get("authorization")
             .and_then(|v| v.to_str().ok());
         // Pick the bucket key: validated bearer token when present,
         // else the raw header (so an attacker can't share a bucket by
@@ -1679,7 +1787,8 @@ async fn handle_request(
                     "jsonrpc": "2.0",
                     "error": {"code": -32001, "message": reason.message()},
                     "id": null
-                })).unwrap_or_default();
+                }))
+                .unwrap_or_default();
                 return Ok(Response::builder()
                     .status(StatusCode::from_u16(reason.http_status()).unwrap())
                     .body(full_body(Bytes::from(body_bytes)))
@@ -1690,7 +1799,8 @@ async fn handle_request(
                     "jsonrpc": "2.0",
                     "error": {"code": -32002, "message": "rate limit exceeded"},
                     "id": null
-                })).unwrap_or_default();
+                }))
+                .unwrap_or_default();
                 return Ok(Response::builder()
                     .status(StatusCode::from_u16(429).unwrap())
                     .header("Retry-After", retry_after.to_string())
@@ -1902,13 +2012,27 @@ async fn handle_request(
                                 return Ok(jsonrpc_tool_result(id, &payload, false));
                             }
                             "list_recent_projects" => {
-                                let list = match crate::server::mcp::federation_tools::list_recent_projects() {
-                                    Ok(l) => l,
-                                    Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
-                                };
+                                let list =
+                                    match crate::server::mcp::federation_tools::list_recent_projects(
+                                    ) {
+                                        Ok(l) => l,
+                                        Err(e) => {
+                                            return Ok(jsonrpc_tool_result(
+                                                id,
+                                                &format!("{e}"),
+                                                true,
+                                            ))
+                                        }
+                                    };
                                 let text = match serde_json::to_string(&list) {
                                     Ok(s) => s,
-                                    Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    Err(e) => {
+                                        return Ok(jsonrpc_error(
+                                            id,
+                                            -32000,
+                                            format!("serialization: {e}"),
+                                        ))
+                                    }
                                 };
                                 return Ok(jsonrpc_tool_result(id, &text, false));
                             }
@@ -1927,7 +2051,13 @@ async fn handle_request(
                                     crate::server::mcp::federation_tools::get_reload_status(bus);
                                 let text = match serde_json::to_string(&payload) {
                                     Ok(s) => s,
-                                    Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                    Err(e) => {
+                                        return Ok(jsonrpc_error(
+                                            id,
+                                            -32000,
+                                            format!("serialization: {e}"),
+                                        ))
+                                    }
                                 };
                                 return Ok(jsonrpc_tool_result(id, &text, false));
                             }
@@ -1946,7 +2076,13 @@ async fn handle_request(
                                     Ok(payload) => {
                                         let text = match serde_json::to_string(&payload) {
                                             Ok(s) => s,
-                                            Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                            Err(e) => {
+                                                return Ok(jsonrpc_error(
+                                                    id,
+                                                    -32000,
+                                                    format!("serialization: {e}"),
+                                                ))
+                                            }
                                         };
                                         return Ok(jsonrpc_tool_result(id, &text, false));
                                     }
@@ -1961,92 +2097,144 @@ async fn handle_request(
                             // a clean error.
                             "register_agent" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_register_agent,
                                 ));
                             }
                             "heartbeat" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_heartbeat,
                                 ));
                             }
                             "list_active_agents" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_list_active_agents,
                                 ));
                             }
                             "who_am_i" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_who_am_i,
                                 ));
                             }
                             "list_subagents" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_list_subagents,
                                 ));
                             }
                             "claim_files" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_claim_files,
                                 ));
                             }
                             "release_files" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_release_files,
                                 ));
                             }
                             "list_occupancy" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_list_occupancy,
                                 ));
                             }
                             "my_claims" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_my_claims,
                                 ));
                             }
                             "detect_overlap" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_detect_overlap,
                                 ));
                             }
                             "get_audit_log" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::audit_tools::run_get_audit_log,
                                 ));
                             }
                             "get_world_state" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::presence_tools::run_get_world_state,
                                 ));
                             }
                             "get_recent_activity" => {
                                 return Ok(jsonrpc_presence_tool(
-                                    &jsonrpc_tool_result, &jsonrpc_error,
-                                    id, name, &args_map, server.as_deref(),
+                                    &jsonrpc_tool_result,
+                                    &jsonrpc_error,
+                                    id,
+                                    name,
+                                    &args_map,
+                                    server.as_deref(),
                                     crate::server::mcp::audit_tools::run_get_recent_activity,
                                 ));
                             }
@@ -2056,30 +2244,55 @@ async fn handle_request(
                         if let Some(fed) = &federation {
                             match name {
                                 "list_repos" => {
-                                    let repos = crate::server::mcp::federation_tools::list_repos(fed);
+                                    let repos =
+                                        crate::server::mcp::federation_tools::list_repos(fed);
                                     let text = match serde_json::to_string(&repos) {
                                         Ok(s) => s,
-                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                        Err(e) => {
+                                            return Ok(jsonrpc_error(
+                                                id,
+                                                -32000,
+                                                format!("serialization: {e}"),
+                                            ))
+                                        }
                                     };
                                     return Ok(jsonrpc_tool_result(id, &text, false));
                                 }
                                 "get_repo_info" => {
-                                    let repo_id_str = match args_map.get("repo_id").and_then(|v| v.as_str()) {
-                                        Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: repo_id", true)),
-                                    };
-                                    let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
+                                    let repo_id_str =
+                                        match args_map.get("repo_id").and_then(|v| v.as_str()) {
+                                            Some(s) => s,
+                                            None => {
+                                                return Ok(jsonrpc_tool_result(
+                                                    id,
+                                                    "Missing required argument: repo_id",
+                                                    true,
+                                                ))
+                                            }
+                                        };
+                                    let rid = match crate::federation::repo_id::RepoId::new(
+                                        repo_id_str,
+                                    ) {
                                         Ok(r) => r,
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                        Err(e) => {
+                                            return Ok(jsonrpc_tool_result(
+                                                id,
+                                                &format!("{e}"),
+                                                true,
+                                            ))
+                                        }
                                     };
-                                    match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
+                                    match crate::server::mcp::federation_tools::get_repo_info(
+                                        fed, &rid,
+                                    ) {
                                         Ok(info) => {
                                             // Mirror the stdio dispatch:
                                             // count interactive agents with
                                             // at least one claim and inject
                                             // the number as `active_edits`.
                                             let mut value: serde_json::Value =
-                                                serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
+                                                serde_json::to_value(&info)
+                                                    .unwrap_or(serde_json::Value::Null);
                                             let active_edits = server
                                                 .as_ref()
                                                 .map(|s| {
@@ -2088,7 +2301,9 @@ async fn handle_request(
                                                     active
                                                         .iter()
                                                         .filter(|sess| {
-                                                            !occupancy.list_for_agent(&sess.id).is_empty()
+                                                            !occupancy
+                                                                .list_for_agent(&sess.id)
+                                                                .is_empty()
                                                         })
                                                         .count()
                                                 })
@@ -2101,25 +2316,53 @@ async fn handle_request(
                                             }
                                             let text = match serde_json::to_string(&value) {
                                                 Ok(s) => s,
-                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                                Err(e) => {
+                                                    return Ok(jsonrpc_error(
+                                                        id,
+                                                        -32000,
+                                                        format!("serialization: {e}"),
+                                                    ))
+                                                }
                                             };
                                             return Ok(jsonrpc_tool_result(id, &text, false));
                                         }
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                        Err(e) => {
+                                            return Ok(jsonrpc_tool_result(
+                                                id,
+                                                &format!("{e}"),
+                                                true,
+                                            ))
+                                        }
                                     }
                                 }
                                 "get_federation_health" => {
-                                    let health = crate::server::mcp::federation_tools::get_federation_health(fed);
+                                    let health =
+                                        crate::server::mcp::federation_tools::get_federation_health(
+                                            fed,
+                                        );
                                     let text = match serde_json::to_string(&health) {
                                         Ok(s) => s,
-                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                        Err(e) => {
+                                            return Ok(jsonrpc_error(
+                                                id,
+                                                -32000,
+                                                format!("serialization: {e}"),
+                                            ))
+                                        }
                                     };
                                     return Ok(jsonrpc_tool_result(id, &text, false));
                                 }
                                 "search_org" => {
-                                    let query = match args_map.get("query").and_then(|v| v.as_str()) {
+                                    let query = match args_map.get("query").and_then(|v| v.as_str())
+                                    {
                                         Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: query", true)),
+                                        None => {
+                                            return Ok(jsonrpc_tool_result(
+                                                id,
+                                                "Missing required argument: query",
+                                                true,
+                                            ))
+                                        }
                                     };
                                     let limit: usize = match args_map.get("limit") {
                                         Some(serde_json::Value::Number(n)) => match n.as_u64() {
@@ -2132,26 +2375,48 @@ async fn handle_request(
                                         },
                                         _ => return Ok(jsonrpc_tool_result(id, "Missing required argument: limit", true)),
                                     };
-                                    let hits = crate::server::mcp::federation_tools::search_org(fed, query, limit);
+                                    let hits = crate::server::mcp::federation_tools::search_org(
+                                        fed, query, limit,
+                                    );
                                     let text = match serde_json::to_string(&hits) {
                                         Ok(s) => s,
-                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                        Err(e) => {
+                                            return Ok(jsonrpc_error(
+                                                id,
+                                                -32000,
+                                                format!("serialization: {e}"),
+                                            ))
+                                        }
                                     };
                                     return Ok(jsonrpc_tool_result(id, &text, false));
                                 }
                                 "get_cross_repo_blast_radius" => {
-                                    let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
-                                        Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
-                                    };
+                                    let symbol =
+                                        match args_map.get("symbol").and_then(|v| v.as_str()) {
+                                            Some(s) => s,
+                                            None => {
+                                                return Ok(jsonrpc_tool_result(
+                                                    id,
+                                                    "Missing required argument: symbol",
+                                                    true,
+                                                ))
+                                            }
+                                        };
                                     // Same reasoning as the stdio path: `depth: 2`
                                     // must not be reported as a missing argument.
-                                    let depth_owned = match crate::server::tools::utils::required_str_arg(
-                                        &args_map, "depth",
-                                    ) {
-                                        Ok(s) => s,
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e.to_string(), true)),
-                                    };
+                                    let depth_owned =
+                                        match crate::server::tools::utils::required_str_arg(
+                                            &args_map, "depth",
+                                        ) {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                return Ok(jsonrpc_tool_result(
+                                                    id,
+                                                    &e.to_string(),
+                                                    true,
+                                                ))
+                                            }
+                                        };
                                     let depth = match parse_depth_range(&depth_owned) {
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
@@ -2168,22 +2433,43 @@ async fn handle_request(
                                     }
                                 }
                                 "get_cross_repo_blast_radius_for_repo" => {
-                                    let repo_id = match args_map.get("repo_id").and_then(|v| v.as_str()) {
-                                        Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: repo_id", true)),
-                                    };
-                                    let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
-                                        Some(s) => s,
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: symbol", true)),
-                                    };
+                                    let repo_id =
+                                        match args_map.get("repo_id").and_then(|v| v.as_str()) {
+                                            Some(s) => s,
+                                            None => {
+                                                return Ok(jsonrpc_tool_result(
+                                                    id,
+                                                    "Missing required argument: repo_id",
+                                                    true,
+                                                ))
+                                            }
+                                        };
+                                    let symbol =
+                                        match args_map.get("symbol").and_then(|v| v.as_str()) {
+                                            Some(s) => s,
+                                            None => {
+                                                return Ok(jsonrpc_tool_result(
+                                                    id,
+                                                    "Missing required argument: symbol",
+                                                    true,
+                                                ))
+                                            }
+                                        };
                                     // Same reasoning as the stdio path: `depth: 2`
                                     // must not be reported as a missing argument.
-                                    let depth_owned = match crate::server::tools::utils::required_str_arg(
-                                        &args_map, "depth",
-                                    ) {
-                                        Ok(s) => s,
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e.to_string(), true)),
-                                    };
+                                    let depth_owned =
+                                        match crate::server::tools::utils::required_str_arg(
+                                            &args_map, "depth",
+                                        ) {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                return Ok(jsonrpc_tool_result(
+                                                    id,
+                                                    &e.to_string(),
+                                                    true,
+                                                ))
+                                            }
+                                        };
                                     let depth = match parse_depth_range(&depth_owned) {
                                         Ok(r) => r,
                                         Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
@@ -2213,14 +2499,26 @@ async fn handle_request(
                         // loop is reflected on the very next request
                         // hitting this connection.
                         if let Some(workspaces_lock) = &workspaces {
-                            let workspaces: &crate::federation::workspace::WorkspacesFile = &*workspaces_lock.read();
+                            let workspaces: &crate::federation::workspace::WorkspacesFile =
+                                &*workspaces_lock.read();
                             match name {
                                 "list_workspaces" => {
-                                    let active = crate::state::ActiveWorkspace::load().ok().flatten();
-                                    let infos = crate::server::mcp::federation_tools::list_workspaces(workspaces, active.as_ref());
+                                    let active =
+                                        crate::state::ActiveWorkspace::load().ok().flatten();
+                                    let infos =
+                                        crate::server::mcp::federation_tools::list_workspaces(
+                                            workspaces,
+                                            active.as_ref(),
+                                        );
                                     let text = match serde_json::to_string(&infos) {
                                         Ok(s) => s,
-                                        Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                        Err(e) => {
+                                            return Ok(jsonrpc_error(
+                                                id,
+                                                -32000,
+                                                format!("serialization: {e}"),
+                                            ))
+                                        }
                                     };
                                     return Ok(jsonrpc_tool_result(id, &text, false));
                                 }
@@ -2256,10 +2554,20 @@ async fn handle_request(
                                     let name_arg = args_map.get("name").and_then(|v| v.as_str());
                                     let name_str = match name_arg {
                                         Some(s) => s.to_string(),
-                                        None => return Ok(jsonrpc_tool_result(id, "Missing required argument: name", true)),
+                                        None => {
+                                            return Ok(jsonrpc_tool_result(
+                                                id,
+                                                "Missing required argument: name",
+                                                true,
+                                            ))
+                                        }
                                     };
                                     let detail = match federation.as_deref() {
-                                        Some(fed) => crate::server::mcp::federation_tools::get_workspace(fed, workspaces, &name_str),
+                                        Some(fed) => {
+                                            crate::server::mcp::federation_tools::get_workspace(
+                                                fed, workspaces, &name_str,
+                                            )
+                                        }
                                         None => {
                                             // Defensive fallback: no federation
                                             // means the workspace tools shouldn't
@@ -2284,11 +2592,19 @@ async fn handle_request(
                                         Ok(d) => {
                                             let text = match serde_json::to_string(&d) {
                                                 Ok(s) => s,
-                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
+                                                Err(e) => {
+                                                    return Ok(jsonrpc_error(
+                                                        id,
+                                                        -32000,
+                                                        format!("serialization: {e}"),
+                                                    ))
+                                                }
                                             };
                                             Ok(jsonrpc_tool_result(id, &text, false))
                                         }
-                                        Err(e) => Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
+                                        Err(e) => {
+                                            Ok(jsonrpc_tool_result(id, &format!("{e}"), true))
+                                        }
                                     };
                                 }
                                 "get_workspace_graph" => {
@@ -2340,7 +2656,11 @@ async fn handle_request(
                         // `args_map` (which would have produced
                         // `args = None`) now flows as `Some(&args_map)`.
                         let args: Option<&serde_json::Map<String, serde_json::Value>> =
-                            if args_map.is_empty() { None } else { Some(&args_map) };
+                            if args_map.is_empty() {
+                                None
+                            } else {
+                                Some(&args_map)
+                            };
 
                         match executor.call(name, args).await {
                             Ok(text) => {
@@ -2395,18 +2715,30 @@ async fn handle_request(
     if method == Method::GET && path.starts_with("/ui/blast-radius/") {
         let session_id = match path.strip_prefix("/ui/blast-radius/") {
             Some(s) => s,
-            None => return Ok(Response::builder().status(StatusCode::BAD_REQUEST)
-                .body(full_body(Bytes::from("Invalid path"))).unwrap()),
+            None => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(full_body(Bytes::from("Invalid path")))
+                    .unwrap())
+            }
         };
         let sessions = executor.ui_sessions().lock().await;
         if let Some(session) = sessions.get(session_id) {
             let (symbol, nodes) = match &session.data {
                 crate::tools::UiSessionData::BlastRadius { symbol, nodes } => (symbol, nodes),
-                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
+                _ => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(full_body(Bytes::from("Invalid session type")))
+                        .unwrap())
+                }
             };
             let mut html = BLAST_RADIUS_HTML.to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", &symbol);
-            html = html.replace("NODES_PLACEHOLDER", &serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()));
+            html = html.replace(
+                "NODES_PLACEHOLDER",
+                &serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),
+            );
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "text/html")
@@ -2424,18 +2756,30 @@ async fn handle_request(
     if method == Method::GET && path.starts_with("/ui/coupling/") {
         let session_id = match path.strip_prefix("/ui/coupling/") {
             Some(s) => s,
-            None => return Ok(Response::builder().status(StatusCode::BAD_REQUEST)
-                .body(full_body(Bytes::from("Invalid path"))).unwrap()),
+            None => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(full_body(Bytes::from("Invalid path")))
+                    .unwrap())
+            }
         };
         let sessions = executor.ui_sessions().lock().await;
         if let Some(session) = sessions.get(session_id) {
             let (symbol, files, _) = match &session.data {
                 crate::tools::UiSessionData::Coupling { symbol, files, .. } => (symbol, files, &()),
-                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
+                _ => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(full_body(Bytes::from("Invalid session type")))
+                        .unwrap())
+                }
             };
             let mut html = COUPLING_HTML.to_string();
             html = html.replace("SYMBOL_PLACEHOLDER", symbol);
-            html = html.replace("FILES_PLACEHOLDER", &serde_json::to_string(files).unwrap_or_else(|_| "[]".to_string()));
+            html = html.replace(
+                "FILES_PLACEHOLDER",
+                &serde_json::to_string(files).unwrap_or_else(|_| "[]".to_string()),
+            );
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "text/html")
@@ -2453,20 +2797,31 @@ async fn handle_request(
     if method == Method::GET && path.starts_with("/ui/call-chain/") {
         let session_id = match path.strip_prefix("/ui/call-chain/") {
             Some(s) => s,
-            None => return Ok(Response::builder().status(StatusCode::BAD_REQUEST)
-                .body(full_body(Bytes::from("Invalid path")))
-                .unwrap()),
+            None => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(full_body(Bytes::from("Invalid path")))
+                    .unwrap())
+            }
         };
         let sessions = executor.ui_sessions().lock().await;
         if let Some(session) = sessions.get(session_id) {
             let (from, to, path) = match &session.data {
                 crate::tools::UiSessionData::CallChain { from, to, path } => (from, to, path),
-                _ => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(full_body(Bytes::from("Invalid session type"))).unwrap()),
+                _ => {
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(full_body(Bytes::from("Invalid session type")))
+                        .unwrap())
+                }
             };
             let mut html = CALL_CHAIN_HTML.to_string();
             html = html.replace("FROM_PLACEHOLDER", from);
             html = html.replace("TO_PLACEHOLDER", to);
-            html = html.replace("PATH_PLACEHOLDER", &serde_json::to_string(path).unwrap_or_else(|_| "[]".to_string()));
+            html = html.replace(
+                "PATH_PLACEHOLDER",
+                &serde_json::to_string(path).unwrap_or_else(|_| "[]".to_string()),
+            );
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("Content-Type", "text/html")
@@ -2495,10 +2850,7 @@ async fn handle_request(
                         let json = match serde_json::to_vec(&diff) {
                             Ok(v) => v,
                             Err(e) => {
-                                debug!(
-                                    "overlay subscribe: failed to serialize diff: {}",
-                                    e
-                                );
+                                debug!("overlay subscribe: failed to serialize diff: {}", e);
                                 continue;
                             }
                         };
@@ -2544,9 +2896,10 @@ async fn handle_request(
                 return Ok(Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .header("Content-Type", "application/json")
-                    .body(full_body(Bytes::from(
-                        format!("snapshot encode failed: {}", e),
-                    )))
+                    .body(full_body(Bytes::from(format!(
+                        "snapshot encode failed: {}",
+                        e
+                    ))))
                     .unwrap())
             }
         };
@@ -2570,28 +2923,39 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/html; charset=utf-8")
-            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("index.html", INDEX_HTML))))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes(
+                "index.html",
+                INDEX_HTML,
+            ))))
             .unwrap());
     }
     if method == Method::GET && path == "/app.js" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/javascript; charset=utf-8")
-            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("app.js", APP_JS))))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes(
+                "app.js", APP_JS,
+            ))))
             .unwrap());
     }
     if method == Method::GET && path == "/theme.css" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/css; charset=utf-8")
-            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("theme.css", THEME_CSS))))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes(
+                "theme.css",
+                THEME_CSS,
+            ))))
             .unwrap());
     }
     if method == Method::GET && path == "/styles.css" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/css; charset=utf-8")
-            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes("styles.css", STYLES_CSS))))
+            .body(full_body(cow_to_bytes(command_center_assets::serve_bytes(
+                "styles.css",
+                STYLES_CSS,
+            ))))
             .unwrap());
     }
     if method == Method::GET && path.starts_with("/assets/") {
@@ -2604,9 +2968,9 @@ async fn handle_request(
                 return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Type", "text/javascript; charset=utf-8")
-                    .body(full_body(cow_to_bytes(
-                        command_center_assets::serve_str(name, body),
-                    )))
+                    .body(full_body(cow_to_bytes(command_center_assets::serve_str(
+                        name, body,
+                    ))))
                     .unwrap());
             }
         }
@@ -2681,10 +3045,10 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::mcp::envelope::arg_property_schema;
+    use crate::error::LainError;
     use crate::federation::federated_index::FederatedIndex;
     use crate::federation::graph_backend::PetgraphBackend;
-    use crate::error::LainError;
+    use crate::server::mcp::envelope::arg_property_schema;
     use std::sync::Arc;
 
     /// Pins the fix for the live e2e finding: the advertised schema for
@@ -2700,7 +3064,9 @@ mod tests {
             .map(|t| (t.name, t.required_args))
             .collect();
         for tool in ["claim_files", "release_files"] {
-            let required = defs.get(tool).unwrap_or_else(|| panic!("{tool} not in SERVER_TOOL_DEFS"));
+            let required = defs
+                .get(tool)
+                .unwrap_or_else(|| panic!("{tool} not in SERVER_TOOL_DEFS"));
             for arg in ["agent_id", "session_token", "files"] {
                 assert!(
                     required.contains(&arg),
@@ -2716,7 +3082,9 @@ mod tests {
         }
         // The generic fallback stays a string for scalar args.
         assert_eq!(
-            arg_property_schema("agent_id").get("type").and_then(|v| v.as_str()),
+            arg_property_schema("agent_id")
+                .get("type")
+                .and_then(|v| v.as_str()),
             Some("string")
         );
     }
@@ -2795,13 +3163,9 @@ mod tests {
         fed.add_repo(src, tmp.path()).await.unwrap();
 
         // A node id, not a name — nothing the symbol index can match.
-        let rid = resolve_repo_for_tool(
-            &fed,
-            "",
-            Some("3d139b4e-688d-51a9-af69-0c164e9aea92"),
-            None,
-        )
-        .expect("a single-repo federation must dispatch regardless of the hint");
+        let rid =
+            resolve_repo_for_tool(&fed, "", Some("3d139b4e-688d-51a9-af69-0c164e9aea92"), None)
+                .expect("a single-repo federation must dispatch regardless of the hint");
         assert_eq!(rid.as_str(), "only-repo");
     }
 
@@ -2809,7 +3173,10 @@ mod tests {
     fn no_symbol_no_explicit_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
-        assert!(matches!(resolve_repo_for_tool(&fed, "", None, None), Err(LainError::Config(_))));
+        assert!(matches!(
+            resolve_repo_for_tool(&fed, "", None, None),
+            Err(LainError::Config(_))
+        ));
     }
 
     /// Verifies the round-1 fix: when `resolve_repo_or_error` resolves a
@@ -3075,8 +3442,14 @@ mod tests {
                     .expect("each repo entry has an id string")
             })
             .collect();
-        assert!(ids.contains(&"repo-a"), "repo-a missing from federation blob: {ids:?}");
-        assert!(ids.contains(&"repo-b"), "repo-b missing from federation blob: {ids:?}");
+        assert!(
+            ids.contains(&"repo-a"),
+            "repo-a missing from federation blob: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"repo-b"),
+            "repo-b missing from federation blob: {ids:?}"
+        );
         for r in repos {
             assert_eq!(
                 r.get("health").and_then(|v| v.as_str()),
@@ -3113,9 +3486,7 @@ mod tests {
     fn health_response_has_null_federation_when_unset() {
         let body = build_health_body(0, 0, None);
         assert!(
-            body.get("federation")
-                .map(|v| v.is_null())
-                .unwrap_or(false),
+            body.get("federation").map(|v| v.is_null()).unwrap_or(false),
             "federation field must serialize as null when no federation is set, got {:?}",
             body.get("federation"),
         );
@@ -3166,8 +3537,8 @@ mod tests {
         // First response.
         let payload_text = r#"{"name":"alpha","active":true}"#;
         let result_a = tool_text_result(payload_text.to_string(), false, &overlay, None);
-        let json_a: serde_json::Value = serde_json::to_value(&result_a)
-            .expect("CallToolResult must serialize to JSON");
+        let json_a: serde_json::Value =
+            serde_json::to_value(&result_a).expect("CallToolResult must serialize to JSON");
         let rev_a = json_a["_meta"]["revision"]
             .as_u64()
             .expect("envelope must carry _meta.revision on every result");
@@ -3187,8 +3558,8 @@ mod tests {
         // Second response — revision must be >= the first.
         let second_payload = r#"{"name":"beta","status":"ready"}"#;
         let result_b = tool_text_result(second_payload.to_string(), false, &overlay, None);
-        let json_b: serde_json::Value = serde_json::to_value(&result_b)
-            .expect("CallToolResult must serialize to JSON");
+        let json_b: serde_json::Value =
+            serde_json::to_value(&result_b).expect("CallToolResult must serialize to JSON");
         let rev_b = json_b["_meta"]["revision"]
             .as_u64()
             .expect("envelope must carry _meta.revision on every result");
@@ -3286,26 +3657,23 @@ mod tests {
         // `contains`): a future tool that silently adds a new required
         // arg must update this test, which forces a thoughtful review.
         let expected: &[(&str, &[&str])] = &[
-            ("heartbeat",      &["agent_id", "session_token"]),
-            ("who_am_i",       &["session_token"]),
+            ("heartbeat", &["agent_id", "session_token"]),
+            ("who_am_i", &["session_token"]),
             ("list_subagents", &["session_token"]),
-            ("claim_files",    &["agent_id", "session_token", "files"]),
-            ("release_files",  &["agent_id", "session_token", "files"]),
-            ("my_claims",      &["agent_id", "session_token"]),
+            ("claim_files", &["agent_id", "session_token", "files"]),
+            ("release_files", &["agent_id", "session_token", "files"]),
+            ("my_claims", &["agent_id", "session_token"]),
             // (D-H3) The single non-agent identifier arg on the
             // server/federation surface. Renamed from `id` → `repo_id` in
             // Task 3; pinned here so a future change does not bring back
             // the generic `id`.
-            ("get_repo_info",  &["repo_id"]),
+            ("get_repo_info", &["repo_id"]),
         ];
         for (tool, want) in expected {
-            let got = by_name.get(tool).unwrap_or_else(|| {
-                panic!("{tool} missing from SERVER/FEDERATION TOOL_DEFS")
-            });
-            assert_eq!(
-                want, got,
-                "{tool} required args mismatch"
-            );
+            let got = by_name
+                .get(tool)
+                .unwrap_or_else(|| panic!("{tool} missing from SERVER/FEDERATION TOOL_DEFS"));
+            assert_eq!(want, got, "{tool} required args mismatch");
         }
 
         // `register_agent` is the deliberate exception: the caller picks a
@@ -3432,11 +3800,8 @@ mod tests {
             let src_dir = tempfile::tempdir().unwrap();
             git2::Repository::init(src_dir.path()).unwrap();
             let src: Box<dyn RepoSource> = Box::new(
-                WorkspaceDirSource::new(
-                    RepoId::new(name).unwrap(),
-                    src_dir.path().to_path_buf(),
-                )
-                .unwrap(),
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
             );
             fed.add_repo(src, tmp.path()).await.unwrap();
         }
