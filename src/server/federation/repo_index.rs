@@ -349,6 +349,7 @@ impl RepoIndex {
                 &overlay,
                 resolver_ref,
                 Some(source_repo),
+                &self.id_namespace,
                 false,
             )
             .await
@@ -423,6 +424,7 @@ impl RepoIndex {
                 &overlay,
                 resolver_ref,
                 Some(source_repo),
+                &self.id_namespace,
                 true,
             )
             .await

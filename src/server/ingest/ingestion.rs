@@ -77,9 +77,14 @@ impl LainServer {
             let workspace = self.config.workspace.clone();
             let commit_hash = latest_commit.clone();
             let git_time = latest_time;
+            // `RepoNamespace` is `Copy`; capturing by value gives the
+            // spawned task an owned `RepoNamespace` to borrow from, instead
+            // of borrowing `&self.id_namespace` which would dangle past
+            // `self`'s lifetime.
+            let namespace = self.id_namespace;
 
             set.spawn(async move {
-                scan_file_batch(chunk, workspace, lsp, lsp_sync_time, git_time, commit_hash).await
+                scan_file_batch(chunk, workspace, lsp, lsp_sync_time, git_time, commit_hash, &namespace).await
             });
         }
 
@@ -565,6 +570,7 @@ pub async fn index_one_repo(
     overlay: &VolatileOverlay,
     resolver: Option<&dyn crate::federation::cross_repo::CrossRepoResolver>,
     source_repo: Option<&crate::federation::repo_id::RepoId>,
+    namespace: &crate::schema::RepoNamespace,
     force: bool,
 ) -> Result<(), LainError> {
     let scan_start = std::time::Instant::now();
@@ -649,9 +655,13 @@ pub async fn index_one_repo(
         let workspace = path.to_path_buf();
         let commit_hash = latest_commit.clone();
         let git_time = latest_time;
-
+        // `RepoNamespace` is `Copy`; `index_one_repo` takes it by
+        // reference, so the spawned task borrows from the captured
+        // value (which lives for the closure's lifetime). See
+        // `build_core_memory` for the full rationale.
+        let namespace = *namespace;
         set.spawn(async move {
-            scan_file_batch(chunk, workspace, lsp_mux, lsp_sync_time, git_time, commit_hash).await
+            scan_file_batch(chunk, workspace, lsp_mux, lsp_sync_time, git_time, commit_hash, &namespace).await
         });
     }
 

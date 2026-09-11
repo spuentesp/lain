@@ -38,6 +38,7 @@ pub async fn scan_file_structure(
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Result<FileScanResult, LainError> {
     // The canonical graph key for this file. Every node minted below and
     // every ref emitted for the resolve phase uses this exact string — if a
@@ -57,10 +58,11 @@ pub async fn scan_file_structure(
             components.push(component.as_os_str().to_string_lossy().to_string());
             let current_module_path = components.join("/");
             
-            let mut module_node = GraphNode::new(
+            let mut module_node = GraphNode::new_in(
                 NodeType::Namespace,
                 component.as_os_str().to_string_lossy().to_string(),
                 current_module_path.clone(),
+                namespace,
             );
             module_node.last_lsp_sync = Some(lsp_sync);
             module_node.last_git_sync = Some(git_sync);
@@ -77,10 +79,11 @@ pub async fn scan_file_structure(
     }
 
     // 2. File node
-    let mut file_node = GraphNode::new(
+    let mut file_node = GraphNode::new_in(
         NodeType::File,
         path.file_name().unwrap_or_default().to_string_lossy().to_string(),
         relative_path.clone(),
+        namespace,
     );
     file_node.last_lsp_sync = Some(lsp_sync);
     file_node.last_git_sync = Some(git_sync);
@@ -124,6 +127,7 @@ pub async fn scan_file_structure(
                     lsp_sync,
                     git_sync,
                     commit_hash.clone(),
+                    namespace,
                 );
             } else {
                 for symbol in symbols {
@@ -152,6 +156,7 @@ pub async fn scan_file_structure(
                 lsp_sync,
                 git_sync,
                 commit_hash.clone(),
+                &crate::schema::RepoNamespace::for_test(),
             );
         }
     }
@@ -203,6 +208,7 @@ pub async fn scan_file_batch(
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Vec<Result<FileScanResult, LainError>> {
     let mut results = Vec::with_capacity(paths.len());
     for path in paths {
@@ -213,6 +219,7 @@ pub async fn scan_file_batch(
             lsp_sync,
             git_sync,
             commit_hash.clone(),
+            namespace,
         ).await;
         results.push(result);
     }
@@ -347,14 +354,15 @@ fn add_tree_sitter_definitions(
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
+    namespace: &crate::schema::RepoNamespace,
 ) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
     let defs = crate::treesitter::extract_definitions(path, &content);
     for def in defs {
-        let mut node = GraphNode::new(def.kind, def.name.clone(), graph_key.to_string())
-            .with_location(def.line_start, def.line_end);
+        let mut node = GraphNode::new_in(def.kind, def.name.clone(), graph_key.to_string(), namespace)
+            .with_location_in(def.line_start, def.line_end, namespace);
         node.last_lsp_sync = Some(lsp_sync);
         node.last_git_sync = Some(git_sync);
         node.commit_hash = Some(commit_hash.clone());
@@ -409,6 +417,7 @@ mod tests {
             0,
             0,
             "abc".to_string(),
+            &crate::schema::RepoNamespace::for_test(),
         )
         .await
         .expect("scan ok");
@@ -471,6 +480,7 @@ mod tests {
             0,
             0,
             "abc".to_string(),
+            &crate::schema::RepoNamespace::for_test(),
         )
         .await
         .expect("scan ok");
