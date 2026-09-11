@@ -400,21 +400,6 @@ impl LainServer {
         });
     }
 
-    /// Serializes concurrent `process_change` calls. Without it, a
-    /// watcher receiver firing on a save can race `sync_volatile_overlay`
-    /// running for the same file: both read the file, both query
-    /// `overlay_paths.lock()` to record their ids, and both eventually
-    /// call `broadcast_overlay_insert`. The data races themselves are
-    /// internally locked (overlay nodes use a parking_lot::RwLock;
-    /// `overlay_paths` is its own Mutex), but the *visible sequence* of
-    /// overlay entries could see one writer's id set in `overlay_paths`
-    /// while another writer's node-set was inserted, briefly leaving
-    /// `process_change` callers with a stale bookkeeping view. A coarse
-    /// process_change_lock prevents that. The work in `process_change`
-    /// is short — LSP request + tree-sitter parse + overlay insert —
-    /// so contention is bounded by the OS file event rate, not user
-    /// throughput.
-
     /// Test-only helper: insert `node` into the overlay and record
     /// `node.id` under the workspace-relative `key` in `overlay_paths`
     /// — the same bookkeeping `process_change` does when LSP
