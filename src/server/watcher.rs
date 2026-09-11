@@ -225,6 +225,23 @@ impl FileWatcher {
                         warn!("FileWatcher: failed to process {:?}: {}", path, e);
                     }
                 }
+
+                // Reconcile the volatile overlay with the working
+                // tree after each batch. `process_file` inserts
+                // overlay nodes for the freshly-changed files, but
+                // it doesn't sweep the overlay for paths that just
+                // dropped out of the uncommitted set (committed,
+                // reverted, deleted) — that's `sync_volatile_overlay`'s
+                // job. Without this call the overlay state diverges
+                // from the working tree after every commit/revert/delete
+                // until the next process restart. Per-batch is cheap
+                // because the sweep walks `overlay_paths` (a single
+                // `HashMap` entry per path this server has touched)
+                // and a freshly-inserted file's path is *not* in
+                // `current_paths` only when the user just committed it.
+                if let Err(e) = server.sync_volatile_overlay().await {
+                    warn!("FileWatcher: post-batch sync_volatile_overlay failed: {}", e);
+                }
             }
         });
     }
