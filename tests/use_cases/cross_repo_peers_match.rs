@@ -19,6 +19,7 @@
 //! calculation directly is the precise fix-pin.
 
 #[path = "../common/mod.rs"]
+#[allow(clippy::duplicate_mod)]
 mod common;
 use lain::federation::matching::find_cross_repo_matches;
 use lain::schema::{EdgeType, GraphNode, NodeType};
