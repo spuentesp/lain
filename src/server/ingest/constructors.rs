@@ -24,7 +24,7 @@ use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::VolatileOverlay;
 use crate::server::presence::{OccupancyMap, PresenceRegistry};
 use crate::server::reload::ReloadBus;
-use crate::server::tools::ToolExecutor;
+use crate::server::tools::{ToolExecutor, ToolExecutorConfig};
 use crate::server::tuning::{load_tuning_config, TuningConfig};
 use parking_lot::{Mutex, RwLock};
 use std::path::{Path, PathBuf};
@@ -333,19 +333,19 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     let git = Arc::new(Mutex::new(GitSensor::new(&git_root)?));
     let lsp_pool = Arc::new(LspPool::new(&ws, 1, &tuning.runtime)?);
 
-    let tool_executor = ToolExecutor::new(
-        graph.clone(),
-        overlay.clone(),
-        embedder.clone(),
-        cross_encoder.clone(),
-        Arc::clone(&git),
-        Arc::clone(&lsp_pool),
-        Arc::clone(&tuning),
+    let tool_executor = ToolExecutor::new(ToolExecutorConfig {
+        graph: graph.clone(),
+        overlay: overlay.clone(),
+        embedder: embedder.clone(),
+        cross_encoder: cross_encoder.clone(),
+        git: Arc::clone(&git),
+        lsp_pool: Arc::clone(&lsp_pool),
+        tuning: Arc::clone(&tuning),
         // Tools resolve repo-relative paths against this, so hand them
         // the real checkout when there is one rather than the staging
         // placeholder.
-        single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf()),
-    );
+        workspace: single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf()),
+    });
     // Hand the executor the federation so `ToolRegistry::dispatch` can
     // rebind `graph` / `workspace` to whichever repo the caller
     // resolved. The bindings above stay as the default for calls that
@@ -533,16 +533,16 @@ impl LainServer {
             &tuning.runtime,
         )?);
 
-        let tool_executor = ToolExecutor::new(
-            graph.clone(),
-            overlay.clone(),
-            embedder.clone(),
-            cross_encoder.clone(),
-            Arc::clone(&git),
-            Arc::clone(&lsp_pool),
-            Arc::clone(&tuning),
-            workspace.to_path_buf(),
-        );
+        let tool_executor = ToolExecutor::new(ToolExecutorConfig {
+            graph: graph.clone(),
+            overlay: overlay.clone(),
+            embedder: embedder.clone(),
+            cross_encoder: cross_encoder.clone(),
+            git: Arc::clone(&git),
+            lsp_pool: Arc::clone(&lsp_pool),
+            tuning: Arc::clone(&tuning),
+            workspace: workspace.to_path_buf(),
+        });
 
         info!("Lain server initialized");
         let now = SystemTime::now();

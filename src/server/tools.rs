@@ -106,6 +106,21 @@ pub struct ToolExecutor {
     pub tuning: Arc<TuningConfig>,
 }
 
+/// Dependencies needed to construct a full tool executor.
+///
+/// Keeping these inputs together makes the construction contract explicit and
+/// leaves room for adding a subsystem without another positional argument.
+pub struct ToolExecutorConfig {
+    pub graph: GraphDatabase,
+    pub overlay: VolatileOverlay,
+    pub embedder: NlpEmbedder,
+    pub cross_encoder: crate::nlp::CrossEncoder,
+    pub git: Arc<Mutex<GitSensor>>,
+    pub lsp_pool: Arc<LspPool>,
+    pub tuning: Arc<TuningConfig>,
+    pub workspace: std::path::PathBuf,
+}
+
 impl ToolExecutor {
     pub fn graph(&self) -> &GraphDatabase {
         &self.ctx.graph
@@ -131,16 +146,17 @@ impl ToolExecutor {
 }
 
 impl ToolExecutor {
-    pub fn new(
-        graph: GraphDatabase,
-        overlay: VolatileOverlay,
-        embedder: NlpEmbedder,
-        cross_encoder: crate::nlp::CrossEncoder,
-        git: Arc<Mutex<GitSensor>>,
-        lsp_pool: Arc<LspPool>,
-        tuning: Arc<TuningConfig>,
-        workspace: std::path::PathBuf,
-    ) -> Self {
+    pub fn new(config: ToolExecutorConfig) -> Self {
+        let ToolExecutorConfig {
+            graph,
+            overlay,
+            embedder,
+            cross_encoder,
+            git,
+            lsp_pool,
+            tuning,
+            workspace,
+        } = config;
         let jobs_registry = Arc::new(Mutex::new(HashMap::<String, JobInfo>::new()));
         let webhooks = Arc::new(AsyncMutex::new(Vec::new()));
 
@@ -824,7 +840,7 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
     );
     let tuning = Arc::new(crate::tuning::TuningConfig::default());
     let cross_encoder = crate::nlp::CrossEncoder::from_dir(Path::new("/nonexistent"));
-    ToolExecutor::new(
+    ToolExecutor::new(ToolExecutorConfig {
         graph,
         overlay,
         embedder,
@@ -832,8 +848,8 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
         git,
         lsp_pool,
         tuning,
-        PathBuf::from("."),
-    )
+        workspace: PathBuf::from("."),
+    })
 }
 
 #[cfg(test)]

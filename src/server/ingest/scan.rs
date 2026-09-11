@@ -132,14 +132,16 @@ pub async fn scan_file_structure(
                 // Fall back to tree-sitter so the graph isn't empty.
                 add_tree_sitter_definitions(
                     &path,
-                    &relative_path,
-                    &mut nodes,
-                    &mut edges,
-                    &file_id,
-                    lsp_sync,
-                    git_sync,
-                    commit_hash.clone(),
-                    namespace,
+                    ScanContext {
+                        graph_key: &relative_path,
+                        nodes: &mut nodes,
+                        edges: &mut edges,
+                        file_id: &file_id,
+                        lsp_sync,
+                        git_sync,
+                        commit_hash: commit_hash.clone(),
+                        namespace,
+                    },
                 );
             } else {
                 for symbol in symbols {
@@ -162,14 +164,16 @@ pub async fn scan_file_structure(
             // Fall back to tree-sitter so `find Function` etc. still works.
             add_tree_sitter_definitions(
                 &path,
-                &relative_path,
-                &mut nodes,
-                &mut edges,
-                &file_id,
-                lsp_sync,
-                git_sync,
-                commit_hash.clone(),
-                &crate::schema::RepoNamespace::for_test(),
+                ScanContext {
+                    graph_key: &relative_path,
+                    nodes: &mut nodes,
+                    edges: &mut edges,
+                    file_id: &file_id,
+                    lsp_sync,
+                    git_sync,
+                    commit_hash: commit_hash.clone(),
+                    namespace,
+                },
             );
         }
     }
@@ -376,28 +380,33 @@ async fn process_symbol_recursive_inner(
 /// Tree-sitter fallback: when LSP is unavailable, parse the source directly
 /// and create Function/Struct/Trait/Enum/Class nodes with line ranges so that
 /// `get_node_at_location(file, line)` can resolve tree-sitter refs back to them.
-fn add_tree_sitter_definitions(
-    path: &Path,
-    graph_key: &str,
-    nodes: &mut Vec<GraphNode>,
-    edges: &mut Vec<GraphEdge>,
-    file_id: &str,
+struct ScanContext<'a> {
+    graph_key: &'a str,
+    nodes: &'a mut Vec<GraphNode>,
+    edges: &'a mut Vec<GraphEdge>,
+    file_id: &'a str,
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
-    namespace: &crate::schema::RepoNamespace,
-) {
+    namespace: &'a crate::schema::RepoNamespace,
+}
+
+fn add_tree_sitter_definitions(path: &Path, context: ScanContext<'_>) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
     let defs = crate::treesitter::extract_definitions(path, &content);
     for def in defs {
-        let mut node =
-            GraphNode::new_in(def.kind, def.name.clone(), graph_key.to_string(), namespace)
-                .with_location_in(def.line_start, def.line_end, namespace);
-        node.last_lsp_sync = Some(lsp_sync);
-        node.last_git_sync = Some(git_sync);
-        node.commit_hash = Some(commit_hash.clone());
+        let mut node = GraphNode::new_in(
+            def.kind,
+            def.name.clone(),
+            context.graph_key.to_string(),
+            context.namespace,
+        )
+        .with_location_in(def.line_start, def.line_end, context.namespace);
+        node.last_lsp_sync = Some(context.lsp_sync);
+        node.last_git_sync = Some(context.git_sync);
+        node.commit_hash = Some(context.commit_hash.clone());
         node.is_deprecated = def.is_deprecated;
         // Populate `label` so `find ... | filter label X` works.
         // `is_deprecated` is exposed as the "deprecated" label so users can
@@ -408,10 +417,10 @@ fn add_tree_sitter_definitions(
             node.label = Some(first.clone());
         }
         let node_id = node.id.clone();
-        nodes.push(node);
-        edges.push(GraphEdge::new(
+        context.nodes.push(node);
+        context.edges.push(GraphEdge::new(
             EdgeType::Contains,
-            file_id.to_string(),
+            context.file_id.to_string(),
             node_id,
         ));
     }

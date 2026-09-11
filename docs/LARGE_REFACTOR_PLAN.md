@@ -9,18 +9,18 @@ identity, and lifecycle boundaries visible in the types.
 - Remove the remaining `too_many_arguments` warnings through meaningful domain
   objects.
 - Replace repeated nested generic types with named aliases or structs.
-- Preserve MCP behavior, serialized formats, and public compatibility during
-  migration.
+- Preserve MCP behavior and serialized formats. This migration intentionally
+  does not retain compatibility wrappers for replaced internal APIs.
 - Keep each change small enough to review and revert independently.
 
 ## Phase 1: name the shared dependencies
 
-Introduce `ToolContextDeps` in `server/tools/registry.rs`. It will contain the
+**Status: complete.** Introduced `ToolContextDeps` in `server/tools/registry.rs`. It contains the
 graph, overlay, embedder, cross-encoder, Git sensor, LSP pool, tuning config,
 caches, sessions, jobs, webhooks, and refresh state currently passed through
 `ToolContext::new` and `ToolExecutor::new`.
 
-Replace `ToolContext::new` with `ToolContext::from_deps`. There will be no
+Replaced `ToolContext::new` with `ToolContext::from_deps`. There is no
 compatibility constructor; all callers and tests move to the explicit
 dependency object in this refactor.
 
@@ -30,7 +30,7 @@ disconnect live presence, job, or refresh state from the server.
 
 ## Phase 2: group federation-server configuration
 
-Introduce `FederationServerConfig` for the inputs to
+**Status: complete.** Introduced `FederationServerConfig` for the inputs to
 `build_federation_server`:
 
 - transport and port
@@ -46,7 +46,7 @@ preserved behind a wrapper.
 
 ## Phase 3: group indexing inputs
 
-Introduce `IndexRequest` for `index_one_repo`:
+**Status: complete.** Introduced `IndexRequest` for `index_one_repo`:
 
 - repository path
 - graph
@@ -58,10 +58,10 @@ Introduce `IndexRequest` for `index_one_repo`:
 - repository namespace
 - force mode
 
-Introduce `ScanContext` for the per-file scanner. It should carry the
-workspace, sync timestamps, commit hash, namespace, and LSP handle. The scan
-functions should receive the context plus the file batch, rather than a long
-sequence of unrelated scalar arguments.
+Introduced `ScanContext` for the tree-sitter per-file fallback. It carries the
+graph key, output collections, file identity, sync timestamps, commit hash,
+and repository namespace. The fallback now receives one context object instead
+of a long sequence of unrelated scalar arguments.
 
 The constructors should enforce these invariants:
 
@@ -72,7 +72,8 @@ The constructors should enforce these invariants:
 
 ## Phase 4: remove transitional code
 
-Once all internal callers and integration tests use the new types:
+**Status: complete for the migrated constructors.** All internal callers now
+use the typed dependency/config/request objects:
 
 - remove the old high-argument functions;
 - make the canonical constructors private where possible;
@@ -83,7 +84,7 @@ the behavior-preserving transition before cleanup removes the old path.
 
 ## Phase 5: test-fixture cleanup
 
-The unused test helpers in `tests/common/mod.rs` should be handled after the
+**Status: pending.** The unused test helpers in `tests/common/mod.rs` should be handled after the
 production migration. First split helpers into purpose-specific modules:
 
 - process and HTTP server fixtures;
