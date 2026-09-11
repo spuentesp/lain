@@ -4,7 +4,7 @@
 //! bincode for high-performance binary persistence.
 
 use crate::error::LainError;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType, RepoNamespace};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -71,6 +71,16 @@ pub struct GraphDatabase {
     /// used by sidecar processes that subscribe to an owner's overlay
     /// stream and never mutate the static graph on disk.
     read_only: bool,
+    /// Namespace used by `insert_co_change_edges` and
+    /// `get_co_change_partners` when minting/looking up the File-node
+    /// ids the co-change edges reference. Must match the namespace
+    /// the File nodes were inserted under, otherwise the edge endpoints
+    /// don't resolve in `index_map` and the edges are silently dropped
+    /// by `insert_edges_batch`. Defaults to `RepoNamespace::for_test()`
+    /// (stable, test-only); production call sites set it to the owning
+    /// repo's namespace via [`Self::set_namespace`] before the first
+    /// co-change write.
+    namespace: RepoNamespace,
     /// Edges the resolve phase wrote whose target id is not local
     /// (wishlist #13 — cross-repo `Calls`). The petgraph cannot store
     /// an edge to a node that isn't in `index_map`, so instead of
@@ -141,6 +151,13 @@ impl GraphDatabase {
             last_commit: Arc::new(RwLock::new(None)),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
+            // Default to the test namespace so existing callers
+            // (which all happen to write File nodes under that
+            // namespace too) keep working. Production call sites that
+            // write File nodes under a per-repo namespace must call
+            // `set_namespace` after `new` and before the first
+            // `insert_co_change_edges`.
+            namespace: RepoNamespace::for_test(),
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
         };
 
@@ -148,6 +165,21 @@ impl GraphDatabase {
             db.load_from_disk()?;
         }
         Ok(db)
+    }
+
+    /// Set the namespace used by `insert_co_change_edges` and
+    /// `get_co_change_partners` when minting/looking up the File-node
+    /// ids the co-change edges reference. Must match the namespace
+    /// the File nodes were inserted under; see the field's doc
+    /// comment for the failure mode when it doesn't.
+    pub fn set_namespace(&mut self, namespace: RepoNamespace) {
+        self.namespace = namespace;
+    }
+
+    /// Current namespace used by co-change id minting. Tests use this
+    /// to assert against the same id space the graph will use.
+    pub fn namespace(&self) -> &RepoNamespace {
+        &self.namespace
     }
 
     /// Open an existing on-disk graph as immutable.
@@ -1257,8 +1289,8 @@ impl GraphDatabase {
             let filename1 = Path::new(p1).file_name().unwrap_or_default().to_string_lossy().to_string();
             let filename2 = Path::new(p2).file_name().unwrap_or_default().to_string_lossy().to_string();
             
-            let id1 = GraphNode::generate_id(&NodeType::File, p1, &filename1, None, &crate::schema::RepoNamespace::for_test());
-            let id2 = GraphNode::generate_id(&NodeType::File, p2, &filename2, None, &crate::schema::RepoNamespace::for_test());
+            let id1 = GraphNode::generate_id(&NodeType::File, p1, &filename1, None, &self.namespace);
+            let id2 = GraphNode::generate_id(&NodeType::File, p2, &filename2, None, &self.namespace);
             
             let mut edge = GraphEdge::new(EdgeType::CoChangedWith, id1, id2);
             edge.weight = Some(*count as f32);
@@ -1272,7 +1304,7 @@ impl GraphDatabase {
         let graph = self.graph.read();
 
         let filename = Path::new(file_path).file_name().unwrap_or_default().to_string_lossy().to_string();
-        let id = GraphNode::generate_id(&NodeType::File, file_path, &filename, None, &crate::schema::RepoNamespace::for_test());
+        let id = GraphNode::generate_id(&NodeType::File, file_path, &filename, None, &self.namespace);
         let Some(idx) = self.index_map.get(&id).map(|r| *r.value()) else { return Ok(Vec::new()); };
 
         // Fold by target path before returning. The graph can hold more

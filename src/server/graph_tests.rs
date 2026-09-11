@@ -1,7 +1,7 @@
 //! Tests for graph.rs
 
 use crate::graph::GraphDatabase;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
+use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType, RepoNamespace};
 use std::collections::HashSet;
 
 fn make_test_graph() -> GraphDatabase {
@@ -424,4 +424,81 @@ fn co_change_partners_are_deduped_by_path() {
     // Max, not sum: repeats are the same relationship seen twice.
     let count = partners.iter().find(|(p, _)| p == partner).unwrap().1;
     assert_eq!(count, 2, "repeated edges must not inflate the count");
+}
+
+/// `insert_co_change_edges` and `get_co_change_partners` must mint and
+/// look up File-node ids under the SAME namespace the static-graph
+/// scanner used when inserting the File nodes. URGENT FIXES #14
+/// follow-up: `scan_file_batch` was being passed `self.id_namespace`
+/// (a per-server random UUID) while the co-change functions hardcoded
+/// `RepoNamespace::for_test()`. The endpoint ids never collided, so
+/// `insert_edges_batch` silently dropped every co-change edge as an
+/// orphan and `get_coupling_radar` reported "No co-change coupling
+/// found" for every file — the demo fixture's
+/// `core.rs`+`helpers.rs` touch was the regression canary.
+///
+/// This test pins the contract directly: insert File nodes under one
+/// namespace, set the graph's namespace to something else, write a
+/// co-change edge, and assert `get_co_change_partners` returns
+/// nothing (the wrong-namespace case, which the pre-fix production
+/// code hit). Then set the namespace to match and assert the edge
+/// is now visible.
+#[test]
+fn co_change_namespace_mismatch_drops_edges() {
+    let tmp = std::env::temp_dir().join("test_co_change_namespace");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mut graph = GraphDatabase::new(&tmp).unwrap();
+
+    let core = "src/core.rs";
+    let helpers = "src/helpers.rs";
+
+    // Insert File nodes under one namespace (simulating `scan_file_batch`
+    // using `self.id_namespace`, the random per-server UUID).
+    let production_ns = RepoNamespace::from_repo_id(
+        &crate::federation::repo_id::RepoId::new("subject").unwrap(),
+    );
+    graph.upsert_node(GraphNode::new_in(
+        NodeType::File,
+        "core.rs".to_string(),
+        core.to_string(),
+        &production_ns,
+    )).unwrap();
+    graph.upsert_node(GraphNode::new_in(
+        NodeType::File,
+        "helpers.rs".to_string(),
+        helpers.to_string(),
+        &production_ns,
+    )).unwrap();
+
+    // Graph's namespace is left at the default (`for_test()`) — the
+    // pre-fix production state. The co-change edge's endpoint ids
+    // will be derived from `for_test()`, the File nodes' ids are
+    // derived from `production_ns`, so the endpoints don't resolve
+    // in `index_map` and `insert_edges_batch` drops the edge.
+    graph.insert_co_change_edges(&[(core.to_string(), helpers.to_string(), 2)]).unwrap();
+
+    let partners = graph.get_co_change_partners(core).unwrap();
+    assert!(
+        partners.is_empty(),
+        "with mismatched namespaces the co-change edge must be invisible; \
+         pre-fix production hit this state. got {partners:?}",
+    );
+
+    // Fix the namespace and confirm the edge becomes visible. This
+    // is the post-fix production state: `RepoIndex::new` calls
+    // `db.set_namespace(id_namespace)` so the graph's namespace
+    // matches what `scan_file_batch` used for the File nodes.
+    graph.set_namespace(production_ns);
+    // `insert_co_change_edges` is idempotent on (source, target,
+    // edge_type); re-inserting with the right namespace rewrites the
+    // edge endpoint ids under the new key, and `index_map` resolves
+    // them this time.
+    graph.insert_co_change_edges(&[(core.to_string(), helpers.to_string(), 2)]).unwrap();
+
+    let partners = graph.get_co_change_partners(core).unwrap();
+    assert_eq!(
+        partners,
+        vec![(helpers.to_string(), 2)],
+        "with matching namespaces the co-change edge must resolve; got {partners:?}",
+    );
 }

@@ -189,7 +189,7 @@ pub struct RepoIndex {
 impl RepoIndex {
     pub fn new(source: Box<dyn RepoSource>, data_dir: &Path) -> Result<Self, LainError> {
         let local_path = source.local_path().to_path_buf();
-        let db = GraphDatabase::new(&data_dir.join("graph.bin"))?;
+        let mut db = GraphDatabase::new(&data_dir.join("graph.bin"))?;
         // Read the repo's own `.lain/tuning.toml` (falling back to
         // defaults when absent) rather than hard-coding. The LSP poll
         // settings in particular were documented knobs that nothing read.
@@ -203,6 +203,16 @@ impl RepoIndex {
         // so identical `(type, path, name, line)` across repos
         // doesn't collapse into one overlay entry.
         let id_namespace = *source.id_namespace();
+        // Pin the per-repo DB's co-change id space to the same
+        // namespace the static-graph scanner writes File nodes
+        // under. Without this match, `insert_co_change_edges`
+        // mints endpoint ids with a different namespace than the
+        // File nodes carry, `index_map.get(...)` for the endpoint
+        // returns None, `insert_edges_batch` drops every co-change
+        // edge as an orphan, and `get_coupling_radar` reports "No
+        // co-change coupling found" for every file. URGENT FIXES
+        // #14 follow-up.
+        db.set_namespace(id_namespace);
         Ok(Self {
             source,
             db,
