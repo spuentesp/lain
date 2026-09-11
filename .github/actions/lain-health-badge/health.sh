@@ -265,7 +265,7 @@ if [ -n "$PR_NUMBER" ]; then
       # captures the function keyword and the name.
       ADDED_FNS=$(printf '%s\n' "$patch" \
         | grep -E '^\+[^+]' \
-        | grep -oE '(function|def|async def|class|fn) [a-zA-Z_][a-zA-Z0-9_]*' \
+        | grep -oP '(async def|def|function|class|fn) +\K[a-zA-Z_][a-zA-Z0-9_]*' \
         | awk '{print $2}' \
         | sort -u)
       [ -z "$ADDED_FNS" ] && continue
@@ -274,7 +274,8 @@ if [ -n "$PR_NUMBER" ]; then
       while IFS= read -r sym; do
         [ -z "$sym" ] && continue
         TOTAL_SYMBOLS=$((TOTAL_SYMBOLS + 1))
-        BR_BODY=$(jq -n --arg sym "$sym" '{jsonrpc:"2.0",method:"tools/call",params:{name:"get_blast_radius",arguments:{symbol:$sym}},id:99}')
+        BR_BODY=$(jq -n --arg sym "$sym" --arg file "$filename" \
+          '{jsonrpc:"2.0",method:"tools/call",params:{name:"get_blast_radius",arguments:{symbol:$sym,file:$file}},id:99}')
         BR_TEXT=$(curl -fsS --max-time 30 -X POST http://127.0.0.1:9999/mcp \
           -H 'Content-Type: application/json' \
           -d "$BR_BODY" 2>/dev/null \
