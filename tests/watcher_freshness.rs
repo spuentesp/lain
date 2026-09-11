@@ -843,7 +843,7 @@ use lain::server::LainServer;
 /// Build a `LainServer` rooted at a real git repo with one tracked
 /// file. Returns `(server, repo_root, tmp)`. The caller is responsible
 /// for keeping `tmp` alive — dropping it tears the workspace down.
-async fn build_lain_server_with_repo(repo_id: &str) -> (Arc<LainServer>, PathBuf, tempfile::TempDir) {
+async fn build_lain_server_with_repo() -> (Arc<LainServer>, PathBuf, tempfile::TempDir) {
     use std::process::Command;
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().to_path_buf();
@@ -905,7 +905,7 @@ fn make_node(path: &str, name: &str, id: &str) -> lain::schema::GraphNode {
 /// `changes` list, which no longer contained the reverted file.
 #[tokio::test]
 async fn sync_volatile_overlay_purges_reverted_path() {
-    let (server, repo_root, _tmp) = build_lain_server_with_repo("test").await;
+    let (server, repo_root, _tmp) = build_lain_server_with_repo().await;
 
     // Make a baseline commit so `reset_to_parent` has a parent to
     // land on (the builder only commits once).
@@ -957,7 +957,7 @@ async fn sync_volatile_overlay_purges_reverted_path() {
 /// for the lookup key.
 #[tokio::test]
 async fn sync_volatile_overlay_purges_deleted_path() {
-    let (server, repo_root, _tmp) = build_lain_server_with_repo("test").await;
+    let (server, repo_root, _tmp) = build_lain_server_with_repo().await;
 
     // Seed the overlay bookkeeping for `src/scratch.rs`.
     server.overlay_paths_test_insert(
@@ -1011,7 +1011,7 @@ async fn sync_volatile_overlay_purges_deleted_path() {
 /// without a paired reindex.
 #[tokio::test]
 async fn sync_volatile_overlay_keeps_committed_path_until_reindex() {
-    let (server, repo_root, _tmp) = build_lain_server_with_repo("test").await;
+    let (server, repo_root, _tmp) = build_lain_server_with_repo().await;
 
     // Seed the overlay bookkeeping for `src/lib.rs`.
     server.overlay_paths_test_insert(
