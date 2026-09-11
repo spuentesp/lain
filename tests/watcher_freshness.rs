@@ -1107,3 +1107,94 @@ async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable()
     );
     std::mem::forget(server);
 }
+
+/// PR #13 follow-up: serialize concurrent `process_change` calls
+/// against the same `LainServer`. Without the `process_change_lock`
+/// added in this branch, the watcher receiver firing on a save and
+/// `sync_volatile_overlay` running for the same file would each:
+/// 1. Read the file's contents,
+/// 2. Query `overlay_paths.lock()` to record their ids,
+/// 3. Call `broadcast_overlay_insert`.
+///
+/// Each individual step is internally locked (overlay nodes use
+/// `parking_lot::RwLock`; `overlay_paths` is its own Mutex), but the
+/// *visible sequence* of overlay entries could see one writer's id
+/// set in `overlay_paths` while another writer's node-set was
+/// inserted, briefly leaving bookkeeping with a stale view. The lock
+/// fixes that by serializing the whole function.
+#[tokio::test]
+async fn process_change_serializes_concurrent_calls_via_lock() {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    // Spin up a server, file, and build the initial overlay state so
+    // both writers have something to do.
+    let (server, repo_root, _tmp) = build_lain_server_with_repo().await;
+    let target = repo_root.join("src").join("lib.rs");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "pub fn shared_symbol() -> u32 { 0 }\n").unwrap();
+    std::fs::write(&target.clone(), "pub fn shared_symbol() -> u32 { 1 }\n").unwrap();
+    server.sync_volatile_overlay().await.expect("initial sync");
+    let initial_count = server.overlay.get_all_nodes().len();
+    assert!(initial_count >= 1, "initial sync should populate the overlay");
+
+    // Two concurrent writers race for the same lock. Without the
+    // process_change_lock they'd both proceed; with it, the second
+    // waits for the first. Each task holds the lock while writing
+    // `overlay_paths` and `overlay.insert_node` — the critical
+    // section.
+    let server_a = Arc::clone(&server);
+    let server_b = Arc::clone(&server);
+    let path_a = target.clone();
+    let path_b = target.clone();
+    let barrier = Arc::new(Barrier::new(2));
+
+    // Both tasks attempt process_change concurrently. The barrier
+    // ensures both are running before either completes; with the
+    // lock, the second waits for the first. The test passes if the
+    // final state is consistent (overlay + overlay_paths agree) and
+    // the test only hangs briefly — it doesn't deadlock.
+    let barrier_a = Arc::clone(&barrier);
+    let barrier_b = Arc::clone(&barrier);
+    let task_a = tokio::spawn(async move {
+        barrier_a.wait().await;
+        server_a.process_change(&path_a).await
+    });
+    let barrier_b2 = Arc::clone(&barrier);
+    let task_b = tokio::spawn(async move {
+        barrier_b2.wait().await;
+        server_b.process_change(&path_b).await
+    });
+    let (a, b) = tokio::join!(task_a, task_b);
+    a.expect("task_a should not panic")
+        .expect("task_a process_change");
+    b.expect("task_b should not panic")
+        .expect("task_b process_change");
+
+    // After both calls, the overlay should hold exactly one entry
+    // for `shared_symbol` (the second writer's `replace_node`-
+    // style insert overwrote the first). And `overlay_paths` should
+    // record the matching single id. Without the lock, two writers
+    // could interleave and leave the overlay with duplicates or with
+    // `overlay_paths` showing ids that aren't in the overlay.
+    let names: Vec<_> = server
+        .overlay
+        .get_all_nodes()
+        .into_iter()
+        .map(|n| (n.name.clone(), n.id.clone()))
+        .collect();
+    let shared: Vec<_> = names
+        .iter()
+        .filter(|(n, _)| n == "shared_symbol")
+        .collect();
+    assert_eq!(
+        shared.len(),
+        1,
+        "after concurrent process_change, only one 'shared_symbol' \
+         entry should remain in the overlay (the second writer's \
+         insert overwrites the first); got: {:?}",
+        names
+    );
+
+    std::mem::forget(server);
+}

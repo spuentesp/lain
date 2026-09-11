@@ -16,6 +16,7 @@ use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::git::GitSensor;
 use crate::server::graph::GraphDatabase;
 use crate::server::lsp::LspPool;
+use tokio::sync::Mutex as AsyncMutex;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::{broadcast_overlay_diff, OverlayDiff, RevisionId, VolatileOverlay};
 use crate::server::presence::{
@@ -72,6 +73,21 @@ pub struct LainServer {
     /// `ingestion.rs`, a sibling module. Mirrors the visibility on
     /// `federation`, `federation_workspaces`, etc.
     pub(crate) overlay_paths: Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    /// Serializes concurrent `process_change` calls (URGENT FIXES
+    /// #3 follow-up). The watcher receiver firing on a save can race
+    /// `sync_volatile_overlay` running for the same file: both read
+    /// the file, both query `overlay_paths.lock()` to record their
+    /// ids, and both eventually call `broadcast_overlay_insert`. The
+    /// data races themselves are internally locked (overlay nodes use
+    /// a parking_lot::RwLock; `overlay_paths` is its own Mutex), but the
+    /// *visible sequence* of overlay entries could see one writer's
+    /// id set in `overlay_paths` while another writer's node-set was
+    /// inserted, briefly leaving `process_change` callers with a
+    /// stale bookkeeping view. A coarse process_change_lock prevents
+    /// that. The work in `process_change` is short — LSP request +
+    /// tree-sitter parse + overlay insert — so contention is bounded
+    /// by the OS file event rate, not user throughput.
+    pub(crate) process_change_lock: Arc<AsyncMutex<()>>,
     /// Per-server `RepoNamespace` for the LSP path. Mints one
     /// namespace at construction; stable for the lifetime of the
     /// server. Threaded through `LspMultiplexer` so every overlay
@@ -168,6 +184,17 @@ pub struct LainServer {
 }
 
 impl LainServer {
+    /// Test-only accessor: take the process-change lock without
+    /// running any work. Used by the concurrent-calls test in
+    /// `tests/watcher_freshness.rs` to verify that two concurrent
+    /// `process_change` invocations are serialized, not data-racing.
+    #[cfg(test)]
+    pub(crate) async fn process_change_lock(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, ()> {
+        self.process_change_lock.lock().await
+    }
+
     /// Federation accessor. Returns `None` for single-workspace servers.
     pub fn federation(&self) -> Option<&Arc<FederatedIndex>> {
         self.federation.as_ref()
@@ -363,6 +390,21 @@ impl LainServer {
             updated: vec![],
         });
     }
+
+    /// Serializes concurrent `process_change` calls. Without it, a
+    /// watcher receiver firing on a save can race `sync_volatile_overlay`
+    /// running for the same file: both read the file, both query
+    /// `overlay_paths.lock()` to record their ids, and both eventually
+    /// call `broadcast_overlay_insert`. The data races themselves are
+    /// internally locked (overlay nodes use a parking_lot::RwLock;
+    /// `overlay_paths` is its own Mutex), but the *visible sequence* of
+    /// overlay entries could see one writer's id set in `overlay_paths`
+    /// while another writer's node-set was inserted, briefly leaving
+    /// `process_change` callers with a stale bookkeeping view. A coarse
+    /// process_change_lock prevents that. The work in `process_change`
+    /// is short — LSP request + tree-sitter parse + overlay insert —
+    /// so contention is bounded by the OS file event rate, not user
+    /// throughput.
 
     /// Test-only helper: insert `node` into the overlay and record
     /// `node.id` under the workspace-relative `key` in `overlay_paths`

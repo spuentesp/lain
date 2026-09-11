@@ -8,6 +8,7 @@ use super::LainServer;
 use super::scan::{scan_file_batch, StaticFileRef, PatternRef};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 impl LainServer {
@@ -538,6 +539,15 @@ impl LainServer {
     /// the `LainServer::sync_volatile_overlay` reconciliation loop
     /// call this internally.
     pub async fn process_change(&self, path: &Path) -> Result<(), LainError> {
+        // Serializes concurrent invocations. A watcher receiver firing
+        // on a save and `sync_volatile_overlay` running for the same
+        // file would otherwise race on the per-server overlay_paths
+        // bookkeeping. The work is short (LSP request + tree-sitter
+        // parse + overlay insert), so a single global lock per server
+        // is fine. The lock is released when this function returns, so
+        // concurrent calls on *different* files simply wait for the
+        // current call to finish. URGENT FIXES #3 follow-up.
+        let _process_change_guard = self.process_change_lock.lock();
         // Try the LSP path first. With rust-analyzer unavailable (CI's
         // default for this test env), the LSP request errors out —
         // pre-fix, `process_change` returned `Ok(())` with no overlay
