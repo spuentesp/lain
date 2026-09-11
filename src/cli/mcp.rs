@@ -193,7 +193,7 @@ pub async fn run_mcp(
         .with_context(|| format!("create_dir_all({})", mem_dir.display()))?;
     let mem_path = mem_dir.join("graph.bin");
 
-    let mut server = crate::server::LainServer::new(&workspace, &mem_path, embedding_model)
+    let server = crate::server::LainServer::new(&workspace, &mem_path, embedding_model)
         .with_context(|| format!("build LainServer for {}", workspace.display()))?;
 
     // Seed the overlay from what is already uncommitted in the working

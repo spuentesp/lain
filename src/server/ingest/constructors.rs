@@ -402,6 +402,7 @@ fn build_federation_server(
         lsp_pool,
         tool_executor,
         tuning,
+        overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         overlay_revision: Arc::new(AtomicU64::new(0)),
         id_namespace: crate::schema::RepoNamespace::fresh(),
         federation: Some(federation),
@@ -421,7 +422,6 @@ fn build_federation_server(
         attribution: default_attribution_backend(),
         auth: Arc::new(AuthState::from_env()),
         events_log: events_log.clone(),
-        overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
@@ -534,6 +534,7 @@ impl LainServer {
             lsp_pool,
             tool_executor,
             tuning,
+            overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             overlay_revision: Arc::new(AtomicU64::new(0)),
         id_namespace: crate::schema::RepoNamespace::fresh(),
             federation: None,
@@ -552,7 +553,6 @@ impl LainServer {
             attribution: default_attribution_backend(),
             auth: Arc::new(AuthState::from_env()),
             events_log: events_log.clone(),
-            overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
