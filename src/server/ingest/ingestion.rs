@@ -533,16 +533,57 @@ impl LainServer {
         Ok(())
     }
 
-    async fn process_change(&self, path: &Path) -> Result<(), LainError> {
-        let symbols = {
+    /// `pub` so the integration test in `tests/watcher_freshness.rs`
+    /// can drive it directly with LSP unavailable. The watcher and
+    /// the `LainServer::sync_volatile_overlay` reconciliation loop
+    /// call this internally.
+    pub async fn process_change(&self, path: &Path) -> Result<(), LainError> {
+        // Try the LSP path first. With rust-analyzer unavailable (CI's
+        // default for this test env), the LSP request errors out —
+        // pre-fix, `process_change` returned `Ok(())` with no overlay
+        // nodes, leaving the single-server overlay empty after every
+        // edit. The federation equivalent has a tree-sitter fallback
+        // (`RepoIndex::process_overlay_change`); mirror it here so the
+        // single-server overlay actually receives symbols when LSP is
+        // unavailable. URGENT FIXES #3 follow-up.
+        use crate::server::lsp::HierarchicalSymbol;
+        let symbols: Option<Vec<HierarchicalSymbol>> = {
             let lsp = self.lsp_pool.next();
             let mut lsp = lsp.lock().await;
             match lsp.get_document_symbols_hierarchical(path, &self.config.workspace, &self.id_namespace).await {
-                Ok(s) => s,
+                Ok(s) if !s.is_empty() => Some(s),
+                Ok(_) => None, // cold LSP / empty — fall through to tree-sitter
                 Err(e) => {
-                    debug!("No LSP symbols for changed file {:?}: {}", path, e);
-                    return Ok(());
+                    debug!("No LSP symbols for {:?}: {}; falling back to tree-sitter", path, e);
+                    None
                 }
+            }
+        };
+        // Tree-sitter fallback when LSP fails or returns empty.
+        // Mirrors `RepoIndex::process_overlay_change`: read the file,
+        // mint one `GraphNode` per `SymbolDef`, namespace-namespaced
+        // by `self.id_namespace` so the overlay id matches the
+        // static-graph id minted by `scan_file_structure`.
+        let symbols: Vec<HierarchicalSymbol> = match symbols {
+            Some(s) => s,
+            None => {
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    return Ok(());
+                };
+                let graph_key = graph_path(&self.config.workspace, path);
+                crate::treesitter::extract_definitions(path, &content)
+                    .into_iter()
+                    .map(|d| HierarchicalSymbol {
+                        node: crate::schema::GraphNode::new_in(
+                            d.kind,
+                            d.name.clone(),
+                            graph_key.clone(),
+                            &self.id_namespace,
+                        )
+                        .with_location_in(d.line_start, d.line_end, &self.id_namespace),
+                        children: vec![],
+                    })
+                    .collect()
             }
         };
         if symbols.is_empty() {
