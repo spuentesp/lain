@@ -68,6 +68,16 @@ pub struct FederatedIndex {
     /// a mutation error. The manifest is observability today — losing
     /// one save shouldn't tear down a successful federation load.
     manifest_path: RwLock<Option<std::path::PathBuf>>,
+    /// Serializes the read-modify-write cycle of `persist_manifest`.
+    /// Without it, two concurrent writers can each build a manifest
+    /// snapshot from `list_repos` (which is itself consistent), then
+    /// race to write the temp file + rename. The rename is atomic,
+    /// but the content can be stale — whichever write commits last
+    /// wins, and it might not be the one matching the latest
+    /// membership. Holding the lock across the whole cycle forces
+    /// the second writer to observe the first writer's snapshot
+    /// (and its post-mutation state) before building its own.
+    persist_lock: parking_lot::Mutex<()>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -99,6 +109,7 @@ impl FederatedIndex {
             federation_overlay: RwLock::new(None),
             ready_threshold: RwLock::new(crate::federation::config::DEFAULT_READY_THRESHOLD),
             manifest_path: RwLock::new(None),
+            persist_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -116,7 +127,14 @@ impl FederatedIndex {
     /// callers should treat the result as a hint — a save failure
     /// doesn't tear down the caller, but the warning is logged so
     /// operators see it.
+    ///
+    /// The read-modify-write cycle holds `persist_lock` so two
+    /// concurrent callers (e.g. `add_repo` and `remove_repo` racing
+    /// on a hot-reload) don't snapshot the same membership at
+    /// slightly different moments and overwrite each other. See
+    /// `persist_lock` for the failure mode without the lock.
     fn persist_manifest(&self) {
+        let _guard = self.persist_lock.lock();
         let Some(path) = self.manifest_path.read().clone() else {
             return;
         };
