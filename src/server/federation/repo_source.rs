@@ -16,6 +16,11 @@ pub trait RepoSource: Send + Sync {
     /// new source type must add a new label here AND a new `SourceConfig`
     /// variant in `config.rs` so the YAML schema stays in sync.
     fn kind(&self) -> &'static str;
+    /// Per-repo UUID namespace used to derive `GraphNode::id`s for
+    /// every node this source produces. Two sources in the same
+    /// federation with identical `(type, path, name, line)` therefore
+    /// produce distinct ids. URGENT FIXES #2.
+    fn id_namespace(&self) -> &crate::schema::RepoNamespace;
     async fn fetch(&self) -> Result<(), LainError>;
     fn last_refreshed(&self) -> SystemTime;
     fn is_stale(&self, max_age: Duration) -> bool;
@@ -27,6 +32,7 @@ pub struct LocalCloneSource {
     git_ref: String,
     local_path: PathBuf,
     last_refreshed: Arc<RwLock<SystemTime>>,
+    id_namespace: crate::schema::RepoNamespace,
 }
 
 impl LocalCloneSource {
@@ -34,12 +40,14 @@ impl LocalCloneSource {
         if url.is_empty() {
             return Err(LainError::Config("RepoSource url cannot be empty".into()));
         }
+        let id_namespace = crate::schema::RepoNamespace::from_repo_id(&repo_id);
         Ok(Self {
             repo_id,
             url: url.to_string(),
             git_ref: git_ref.to_string(),
             local_path,
             last_refreshed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
+            id_namespace,
         })
     }
     pub fn mark_refreshed(&self, t: SystemTime) {
@@ -54,6 +62,7 @@ impl RepoSource for LocalCloneSource {
     fn id(&self) -> &RepoId { &self.repo_id }
     fn local_path(&self) -> &Path { &self.local_path }
     fn kind(&self) -> &'static str { "local_clone" }
+    fn id_namespace(&self) -> &crate::schema::RepoNamespace { &self.id_namespace }
     async fn fetch(&self) -> Result<(), LainError> {
         use std::process::Command;
         let path = self.local_path.clone();
@@ -114,6 +123,7 @@ impl RepoSource for ShallowCloneSource {
     fn id(&self) -> &RepoId { self.inner.id() }
     fn local_path(&self) -> &Path { self.inner.local_path() }
     fn kind(&self) -> &'static str { "shallow_clone" }
+    fn id_namespace(&self) -> &crate::schema::RepoNamespace { self.inner.id_namespace() }
     async fn fetch(&self) -> Result<(), LainError> {
         use std::process::Command;
         let path = self.inner.local_path.clone();
@@ -163,6 +173,7 @@ impl RepoSource for ShallowCloneSource {
 pub struct WorkspaceDirSource {
     repo_id: RepoId,
     local_path: PathBuf,
+    id_namespace: crate::schema::RepoNamespace,
 }
 
 impl WorkspaceDirSource {
@@ -170,7 +181,12 @@ impl WorkspaceDirSource {
         if local_path.as_os_str().is_empty() {
             return Err(LainError::Config("WorkspaceDirSource path cannot be empty".into()));
         }
-        Ok(Self { repo_id, local_path })
+        let id_namespace = crate::schema::RepoNamespace::from_repo_id(&repo_id);
+        Ok(Self {
+            repo_id,
+            local_path,
+            id_namespace,
+        })
     }
 }
 
@@ -179,6 +195,7 @@ impl RepoSource for WorkspaceDirSource {
     fn id(&self) -> &RepoId { &self.repo_id }
     fn local_path(&self) -> &Path { &self.local_path }
     fn kind(&self) -> &'static str { "workspace_dir" }
+    fn id_namespace(&self) -> &crate::schema::RepoNamespace { &self.id_namespace }
     async fn fetch(&self) -> Result<(), LainError> { Ok(()) }
     fn last_refreshed(&self) -> SystemTime { SystemTime::now() }
     fn is_stale(&self, _max_age: Duration) -> bool { false }
