@@ -266,7 +266,6 @@ if [ -n "$PR_NUMBER" ]; then
       ADDED_FNS=$(printf '%s\n' "$patch" \
         | grep -E '^\+[^+]' \
         | grep -oP '(async def|def|function|class|fn) +\K[a-zA-Z_][a-zA-Z0-9_]*' \
-        | awk '{print $2}' \
         | sort -u)
       [ -z "$ADDED_FNS" ] && continue
       TOTAL_FILES=$((TOTAL_FILES + 1))
