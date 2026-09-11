@@ -134,7 +134,10 @@ impl LocalCloneSource {
             url,
             git_ref,
             local_path,
-            SourceConfig::LocalClone { url: url.to_string(), r#ref: git_ref.to_string() },
+            SourceConfig::LocalClone {
+                url: url.to_string(),
+                r#ref: git_ref.to_string(),
+            },
         )
     }
 
@@ -166,16 +169,28 @@ impl LocalCloneSource {
     pub fn mark_refreshed(&self, t: SystemTime) {
         *self.last_refreshed.write() = t;
     }
-    pub fn url(&self) -> &str { &self.url }
-    pub fn git_ref(&self) -> &str { &self.git_ref }
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
 }
 
 #[async_trait]
 impl RepoSource for LocalCloneSource {
-    fn id(&self) -> &RepoId { &self.repo_id }
-    fn local_path(&self) -> &Path { &self.local_path }
-    fn kind(&self) -> &'static str { "local_clone" }
-    fn source_config(&self) -> &SourceConfig { &self.source_config }
+    fn id(&self) -> &RepoId {
+        &self.repo_id
+    }
+    fn local_path(&self) -> &Path {
+        &self.local_path
+    }
+    fn kind(&self) -> &'static str {
+        "local_clone"
+    }
+    fn source_config(&self) -> &SourceConfig {
+        &self.source_config
+    }
     fn content_hash(&self) -> Result<Option<String>, LainError> {
         git_head_hash(&self.local_path)
     }
@@ -188,7 +203,10 @@ impl RepoSource for LocalCloneSource {
         tokio::task::spawn_blocking(move || -> Result<(), LainError> {
             if !path.exists() {
                 let status = Command::new("git")
-                    .arg("clone").arg("--quiet").arg(&url).arg(&path)
+                    .arg("clone")
+                    .arg("--quiet")
+                    .arg(&url)
+                    .arg(&path)
                     .status()
                     .map_err(|e| LainError::Git(format!("git clone failed to start: {e}")))?;
                 if !status.success() {
@@ -197,7 +215,9 @@ impl RepoSource for LocalCloneSource {
             }
             let fetch = Command::new("git")
                 .current_dir(&path)
-                .arg("fetch").arg("--quiet").arg("--all")
+                .arg("fetch")
+                .arg("--quiet")
+                .arg("--all")
                 .status()
                 .map_err(|e| LainError::Git(format!("git fetch failed: {e}")))?;
             if !fetch.success() {
@@ -205,19 +225,31 @@ impl RepoSource for LocalCloneSource {
             }
             let reset = Command::new("git")
                 .current_dir(&path)
-                .arg("reset").arg("--hard").arg(format!("origin/{}", git_ref))
+                .arg("reset")
+                .arg("--hard")
+                .arg(format!("origin/{}", git_ref))
                 .status()
                 .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
             if !reset.success() {
-                return Err(LainError::Git(format!("git reset to origin/{} failed", git_ref)));
+                return Err(LainError::Git(format!(
+                    "git reset to origin/{} failed",
+                    git_ref
+                )));
             }
             *last_refreshed.write() = SystemTime::now();
             Ok(())
-        }).await.map_err(|e| LainError::Git(format!("join error: {e}")))?
+        })
+        .await
+        .map_err(|e| LainError::Git(format!("join error: {e}")))?
     }
-    fn last_refreshed(&self) -> SystemTime { *self.last_refreshed.read() }
+    fn last_refreshed(&self) -> SystemTime {
+        *self.last_refreshed.read()
+    }
     fn is_stale(&self, max_age: Duration) -> bool {
-        self.last_refreshed().elapsed().map(|e| e > max_age).unwrap_or(true)
+        self.last_refreshed()
+            .elapsed()
+            .map(|e| e > max_age)
+            .unwrap_or(true)
     }
 }
 
@@ -259,18 +291,32 @@ impl ShallowCloneSource {
         refresh_interval: Duration,
         source_config: SourceConfig,
     ) -> Result<Self, LainError> {
-        let inner = LocalCloneSource::with_config(repo_id, url, git_ref, local_path, source_config)?;
-        Ok(Self { inner, refresh_interval })
+        let inner =
+            LocalCloneSource::with_config(repo_id, url, git_ref, local_path, source_config)?;
+        Ok(Self {
+            inner,
+            refresh_interval,
+        })
     }
-    pub fn refresh_interval(&self) -> Duration { self.refresh_interval }
+    pub fn refresh_interval(&self) -> Duration {
+        self.refresh_interval
+    }
 }
 
 #[async_trait]
 impl RepoSource for ShallowCloneSource {
-    fn id(&self) -> &RepoId { self.inner.id() }
-    fn local_path(&self) -> &Path { self.inner.local_path() }
-    fn kind(&self) -> &'static str { "shallow_clone" }
-    fn source_config(&self) -> &SourceConfig { self.inner.source_config() }
+    fn id(&self) -> &RepoId {
+        self.inner.id()
+    }
+    fn local_path(&self) -> &Path {
+        self.inner.local_path()
+    }
+    fn kind(&self) -> &'static str {
+        "shallow_clone"
+    }
+    fn source_config(&self) -> &SourceConfig {
+        self.inner.source_config()
+    }
     fn content_hash(&self) -> Result<Option<String>, LainError> {
         self.inner.content_hash()
     }
@@ -283,16 +329,33 @@ impl RepoSource for ShallowCloneSource {
         tokio::task::spawn_blocking(move || -> Result<(), LainError> {
             if !path.exists() {
                 let status = Command::new("git")
-                    .arg("clone").arg("--quiet").arg("--depth").arg("1").arg("--branch").arg(&git_ref).arg(&url).arg(&path)
+                    .arg("clone")
+                    .arg("--quiet")
+                    .arg("--depth")
+                    .arg("1")
+                    .arg("--branch")
+                    .arg(&git_ref)
+                    .arg(&url)
+                    .arg(&path)
                     .status()
-                    .map_err(|e| LainError::Git(format!("git clone --depth 1 failed to start: {e}")))?;
+                    .map_err(|e| {
+                        LainError::Git(format!("git clone --depth 1 failed to start: {e}"))
+                    })?;
                 if !status.success() {
-                    return Err(LainError::Git(format!("git clone --depth 1 {} failed", url)));
+                    return Err(LainError::Git(format!(
+                        "git clone --depth 1 {} failed",
+                        url
+                    )));
                 }
             } else {
                 let fetch = Command::new("git")
                     .current_dir(&path)
-                    .arg("fetch").arg("--quiet").arg("--depth").arg("1").arg("origin").arg(&git_ref)
+                    .arg("fetch")
+                    .arg("--quiet")
+                    .arg("--depth")
+                    .arg("1")
+                    .arg("origin")
+                    .arg(&git_ref)
                     .status()
                     .map_err(|e| LainError::Git(format!("git fetch --depth 1 failed: {e}")))?;
                 if !fetch.success() {
@@ -300,18 +363,27 @@ impl RepoSource for ShallowCloneSource {
                 }
                 let reset = Command::new("git")
                     .current_dir(&path)
-                    .arg("reset").arg("--hard").arg(format!("origin/{}", git_ref))
+                    .arg("reset")
+                    .arg("--hard")
+                    .arg(format!("origin/{}", git_ref))
                     .status()
                     .map_err(|e| LainError::Git(format!("git reset failed: {e}")))?;
                 if !reset.success() {
-                    return Err(LainError::Git(format!("git reset to origin/{} failed", git_ref)));
+                    return Err(LainError::Git(format!(
+                        "git reset to origin/{} failed",
+                        git_ref
+                    )));
                 }
             }
             *last_refreshed.write() = SystemTime::now();
             Ok(())
-        }).await.map_err(|e| LainError::Git(format!("join error: {e}")))?
+        })
+        .await
+        .map_err(|e| LainError::Git(format!("join error: {e}")))?
     }
-    fn last_refreshed(&self) -> SystemTime { self.inner.last_refreshed() }
+    fn last_refreshed(&self) -> SystemTime {
+        self.inner.last_refreshed()
+    }
     fn is_stale(&self, max_age: Duration) -> bool {
         self.inner.is_stale(max_age)
     }
@@ -348,29 +420,54 @@ impl WorkspaceDirSource {
         source_config: SourceConfig,
     ) -> Result<Self, LainError> {
         if local_path.as_os_str().is_empty() {
-            return Err(LainError::Config("WorkspaceDirSource path cannot be empty".into()));
+            return Err(LainError::Config(
+                "WorkspaceDirSource path cannot be empty".into(),
+            ));
         }
         let id_namespace = crate::schema::RepoNamespace::from_repo_id(&repo_id);
         Ok(Self {
             repo_id,
             local_path,
             source_config,
+<<<<<<< HEAD
             id_namespace,
+=======
+>>>>>>> 43a7faf (style: cargo fmt --all baseline (URGENT FIXES #6 follow-up))
         })
     }
 }
 
 #[async_trait]
 impl RepoSource for WorkspaceDirSource {
-    fn id(&self) -> &RepoId { &self.repo_id }
-    fn local_path(&self) -> &Path { &self.local_path }
-    fn kind(&self) -> &'static str { "workspace_dir" }
-    fn source_config(&self) -> &SourceConfig { &self.source_config }
+    fn id(&self) -> &RepoId {
+        &self.repo_id
+    }
+    fn local_path(&self) -> &Path {
+        &self.local_path
+    }
+    fn kind(&self) -> &'static str {
+        "workspace_dir"
+    }
+    fn source_config(&self) -> &SourceConfig {
+        &self.source_config
+    }
     fn content_hash(&self) -> Result<Option<String>, LainError> {
         git_head_hash(&self.local_path)
     }
+<<<<<<< HEAD
     fn id_namespace(&self) -> &crate::schema::RepoNamespace { &self.id_namespace }
     async fn fetch(&self) -> Result<(), LainError> { Ok(()) }
     fn last_refreshed(&self) -> SystemTime { SystemTime::now() }
     fn is_stale(&self, _max_age: Duration) -> bool { false }
+=======
+    async fn fetch(&self) -> Result<(), LainError> {
+        Ok(())
+    }
+    fn last_refreshed(&self) -> SystemTime {
+        SystemTime::now()
+    }
+    fn is_stale(&self, _max_age: Duration) -> bool {
+        false
+    }
+>>>>>>> 43a7faf (style: cargo fmt --all baseline (URGENT FIXES #6 follow-up))
 }

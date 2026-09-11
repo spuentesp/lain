@@ -430,13 +430,21 @@ async fn add_repo_persists_source_config() {
     );
     fed.add_repo(src, tmp.path()).await.unwrap();
 
-    assert!(manifest_path.exists(), "manifest must be written on add_repo");
+    assert!(
+        manifest_path.exists(),
+        "manifest must be written on add_repo"
+    );
     let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
     assert_eq!(loaded.repos.len(), 1);
     assert_eq!(loaded.repos[0].id.as_str(), "a");
     assert_eq!(loaded.repos[0].source_kind, "workspace_dir");
-    let expected = SourceConfig::WorkspaceDir { path: src_dir.path().to_path_buf() };
-    assert_eq!(loaded.repos[0].source_config, serde_yaml::to_value(&expected).unwrap());
+    let expected = SourceConfig::WorkspaceDir {
+        path: src_dir.path().to_path_buf(),
+    };
+    assert_eq!(
+        loaded.repos[0].source_config,
+        serde_yaml::to_value(&expected).unwrap()
+    );
 }
 
 /// `add_repo` populates `content_hash` with the HEAD hash of the
@@ -465,7 +473,10 @@ async fn add_repo_persists_content_hash() {
     let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
     assert_eq!(loaded.repos.len(), 1);
     let hash = &loaded.repos[0].content_hash;
-    assert!(!hash.is_empty(), "git repo HEAD must yield a non-empty hash");
+    assert!(
+        !hash.is_empty(),
+        "git repo HEAD must yield a non-empty hash"
+    );
     assert_eq!(hash.len(), 40, "SHA-1 hex is 40 chars, got {hash:?}");
 }
 
@@ -490,7 +501,10 @@ async fn remove_repo_persists_membership_change() {
 
     fed.remove_repo(&RepoId::new("a").unwrap()).unwrap();
     let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
-    assert!(loaded.repos.is_empty(), "remove_repo must rewrite the manifest");
+    assert!(
+        loaded.repos.is_empty(),
+        "remove_repo must rewrite the manifest"
+    );
 }
 
 /// A `git commit` on the source repo changes HEAD; a second
@@ -510,7 +524,9 @@ async fn content_hash_changes_after_git_commit() {
     let repo = git2::Repository::init(src_dir.path()).unwrap();
     // First commit so HEAD is well-defined.
     {
-        let sig = repo.signature().unwrap_or_else(|_| git2::Signature::now("test", "test@lain").unwrap());
+        let sig = repo
+            .signature()
+            .unwrap_or_else(|_| git2::Signature::now("test", "test@lain").unwrap());
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let _ = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]);
@@ -519,7 +535,11 @@ async fn content_hash_changes_after_git_commit() {
         WorkspaceDirSource::new(RepoId::new("a").unwrap(), src_dir.path().to_path_buf()).unwrap(),
     );
     fed.add_repo(src, tmp.path()).await.unwrap();
-    let first = FederationManifest::load_or_default(&manifest_path).unwrap().repos[0].content_hash.clone();
+    let first = FederationManifest::load_or_default(&manifest_path)
+        .unwrap()
+        .repos[0]
+        .content_hash
+        .clone();
 
     // Second commit on the same repo — HEAD moves forward.
     {
@@ -544,14 +564,23 @@ async fn content_hash_changes_after_git_commit() {
     );
     fed.add_repo(src2, tmp.path()).await.unwrap();
 
-    let second = FederationManifest::load_or_default(&manifest_path).unwrap().repos[0].content_hash.clone();
+    let second = FederationManifest::load_or_default(&manifest_path)
+        .unwrap()
+        .repos[0]
+        .content_hash
+        .clone();
     assert_ne!(first, second, "content_hash must change after a git commit");
 
     // Touch unrelated: the manifest also keeps `source_config`
     // round-trippable after the re-add.
-    let expected = SourceConfig::WorkspaceDir { path: src_dir.path().to_path_buf() };
+    let expected = SourceConfig::WorkspaceDir {
+        path: src_dir.path().to_path_buf(),
+    };
     let loaded = FederationManifest::load_or_default(&manifest_path).unwrap();
-    assert_eq!(loaded.repos[0].source_config, serde_yaml::to_value(&expected).unwrap());
+    assert_eq!(
+        loaded.repos[0].source_config,
+        serde_yaml::to_value(&expected).unwrap()
+    );
 }
 
 /// A repo registered against a freshly-init'd git repo with no commits
@@ -620,7 +649,8 @@ async fn concurrent_add_and_remove_serialize_persist_manifest() {
     let src_dir = tempfile::tempdir().unwrap();
     git2::Repository::init(src_dir.path()).unwrap();
     let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
-        WorkspaceDirSource::new(RepoId::new("seed").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+        WorkspaceDirSource::new(RepoId::new("seed").unwrap(), src_dir.path().to_path_buf())
+            .unwrap(),
     );
     fed.add_repo(src, tmp.path()).await.unwrap();
 
@@ -636,9 +666,8 @@ async fn concurrent_add_and_remove_serialize_persist_manifest() {
     let add_task = tokio::spawn(async move {
         let src = tempfile::tempdir().unwrap();
         git2::Repository::init(src.path()).unwrap();
-        let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
-            WorkspaceDirSource::new(added, src.path().to_path_buf()).unwrap(),
-        );
+        let s: Box<dyn crate::federation::repo_source::RepoSource> =
+            Box::new(WorkspaceDirSource::new(added, src.path().to_path_buf()).unwrap());
         fed_for_add.add_repo(s, &data_dir).await.unwrap();
     });
     let rm_task = tokio::spawn(async move {
