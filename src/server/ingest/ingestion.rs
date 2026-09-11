@@ -769,17 +769,32 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
     }
 }
 
-pub async fn index_one_repo(
-    path: &Path,
-    db: &GraphDatabase,
-    lsp: &LspPool,
-    git: &GitSensor,
-    overlay: &VolatileOverlay,
-    resolver: Option<&dyn crate::federation::cross_repo::CrossRepoResolver>,
-    source_repo: Option<&crate::federation::repo_id::RepoId>,
-    namespace: &crate::schema::RepoNamespace,
-    force: bool,
-) -> Result<(), LainError> {
+/// Inputs for one repository indexing pass. The references deliberately tie
+/// the graph, overlay, sensors, and namespace to the same call lifetime.
+pub struct IndexRequest<'a> {
+    pub path: &'a Path,
+    pub db: &'a GraphDatabase,
+    pub lsp: &'a LspPool,
+    pub git: &'a GitSensor,
+    pub overlay: &'a VolatileOverlay,
+    pub resolver: Option<&'a dyn crate::federation::cross_repo::CrossRepoResolver>,
+    pub source_repo: Option<&'a crate::federation::repo_id::RepoId>,
+    pub namespace: &'a crate::schema::RepoNamespace,
+    pub force: bool,
+}
+
+pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> {
+    let IndexRequest {
+        path,
+        db,
+        lsp,
+        git,
+        overlay,
+        resolver,
+        source_repo,
+        namespace,
+        force,
+    } = request;
     let scan_start = std::time::Instant::now();
     let (latest_commit, latest_time) = git.get_latest_commit_info()?;
     let last_commit = db.get_last_commit()?;

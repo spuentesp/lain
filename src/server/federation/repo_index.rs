@@ -351,17 +351,17 @@ impl RepoIndex {
             let resolver_ref: Option<&dyn crate::federation::cross_repo::CrossRepoResolver> =
                 resolver.as_deref();
             let source_repo = self.source.id();
-            index_one_repo(
-                &path,
+            index_one_repo(crate::server::ingest::ingestion::IndexRequest {
+                path: &path,
                 db,
-                &lsp,
-                &git_guard,
-                &overlay,
-                resolver_ref,
-                Some(source_repo),
-                &self.id_namespace,
-                false,
-            )
+                lsp: &lsp,
+                git: &git_guard,
+                overlay: &overlay,
+                resolver: resolver_ref,
+                source_repo: Some(source_repo),
+                namespace: &self.id_namespace,
+                force: false,
+            })
             .await
         };
         let result = match tokio::time::timeout(index_timeout(), pipeline).await {
@@ -426,17 +426,17 @@ impl RepoIndex {
             let resolver_ref: Option<&dyn crate::federation::cross_repo::CrossRepoResolver> =
                 resolver.as_deref();
             let source_repo = self.source.id();
-            index_one_repo(
-                &path,
+            index_one_repo(crate::server::ingest::ingestion::IndexRequest {
+                path: &path,
                 db,
-                &lsp,
-                &git_guard,
-                &overlay,
-                resolver_ref,
-                Some(source_repo),
-                &self.id_namespace,
-                true,
-            )
+                lsp: &lsp,
+                git: &git_guard,
+                overlay: &overlay,
+                resolver: resolver_ref,
+                source_repo: Some(source_repo),
+                namespace: &self.id_namespace,
+                force: true,
+            })
             .await
         };
         let result = match tokio::time::timeout(index_timeout(), pipeline).await {

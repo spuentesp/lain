@@ -31,6 +31,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
+
+/// Complete configuration for constructing a federation-backed server.
+/// Keeping these values together prevents new lifecycle options from being
+/// added as another positional argument to the internal builder.
+struct FederationServerConfig {
+    federation: Arc<FederatedIndex>,
+    transport: Transport,
+    port: u16,
+    repos_yaml: Option<PathBuf>,
+    attribution: Arc<dyn AttributionBackend>,
+    embedding_model: Option<PathBuf>,
+    workspaces: Option<Arc<WorkspacesFile>>,
+    reindex_timeout: Option<std::time::Duration>,
+}
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -284,16 +298,17 @@ fn build_embedder_pair(
 /// adds the workspace MCP tool surface) or `None` (all-repos mode).
 /// The 4 thin public wrappers above are kept for backwards compat
 /// with the public API; the real work is here.
-fn build_federation_server(
-    federation: Arc<FederatedIndex>,
-    transport: Transport,
-    port: u16,
-    repos_yaml: Option<PathBuf>,
-    attribution: Arc<dyn AttributionBackend>,
-    embedding_model: Option<&Path>,
-    workspaces: Option<Arc<WorkspacesFile>>,
-    reindex_timeout: Option<std::time::Duration>,
-) -> Result<LainServer, LainError> {
+fn build_federation_server(config: FederationServerConfig) -> Result<LainServer, LainError> {
+    let FederationServerConfig {
+        federation,
+        transport,
+        port,
+        repos_yaml,
+        attribution,
+        embedding_model,
+        workspaces,
+        reindex_timeout,
+    } = config;
     // Staging workspace: a throwaway git repo under /tmp. The counter
     // ensures parallel tests in the same process don't race.
     let ws = allocate_staging_dir()?;
@@ -307,7 +322,7 @@ fn build_federation_server(
 
     let overlay = VolatileOverlay::new();
     let tuning = Arc::new(load_tuning_config(&ws));
-    let (embedder, cross_encoder) = build_embedder_pair(embedding_model, &tuning)?;
+    let (embedder, cross_encoder) = build_embedder_pair(embedding_model.as_deref(), &tuning)?;
     // Bind git to the real checkout, for the same reason the graph and
     // the workspace are bound to it: in federation mode `ws` is the
     // staging placeholder, which is its own git repo holding no code.
@@ -632,16 +647,16 @@ impl LainServer {
         attribution: Arc<dyn AttributionBackend>,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
-        build_federation_server(
+        build_federation_server(FederationServerConfig {
             federation,
             transport,
             port,
             repos_yaml,
             attribution,
-            embedding_model,
-            None,
-            None,
-        )
+            embedding_model: embedding_model.map(Path::to_path_buf),
+            workspaces: None,
+            reindex_timeout: None,
+        })
     }
 
     /// Same as `with_federation` but also registers the workspace MCP
@@ -685,15 +700,15 @@ impl LainServer {
         attribution: Arc<dyn AttributionBackend>,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
-        build_federation_server(
+        build_federation_server(FederationServerConfig {
             federation,
             transport,
             port,
             repos_yaml,
             attribution,
-            embedding_model,
-            Some(workspaces),
-            None,
-        )
+            embedding_model: embedding_model.map(Path::to_path_buf),
+            workspaces: Some(workspaces),
+            reindex_timeout: None,
+        })
     }
 }
