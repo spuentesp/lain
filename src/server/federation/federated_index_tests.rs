@@ -705,3 +705,174 @@ async fn concurrent_add_and_remove_serialize_persist_manifest() {
         on_disk_ids, in_mem_ids
     );
 }
+
+/// Two concurrent `add_repo` calls for the same `RepoId`. The
+/// in-memory `repos` map is keyed by id so the second `insert`
+/// overwrites the first; the manifest's `add_repo` is also a
+/// single-entry write so the on-disk manifest must end up with
+/// exactly one row for that id, not two. Pre-fix `persist_lock`,
+/// both writers would snapshot the membership *after their own
+/// insert* but before the other's — depending on lock timing the
+/// on-disk manifest could end up with a torn entry (a row whose
+/// source_config was from one RepoIndex and whose
+/// `last_indexed_unix` was from the other), or two rows for the
+/// same id if a non-membership-keyed manifest format ever slipped
+/// in. Post-fix the lock holds the snapshot against the final
+/// in-memory state and the HashMap-keyed insert means duplicates
+/// collapse to one row.
+#[tokio::test]
+async fn concurrent_add_same_id_collapse_to_one_manifest_row() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = std::sync::Arc::new(FederatedIndex::new(petgraph_backend(&tmp)));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    let id = RepoId::new("dup").unwrap();
+    let data_dir = tmp.path().to_path_buf();
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let fed = fed.clone();
+        let id = id.clone();
+        let data_dir = data_dir.clone();
+        handles.push(tokio::spawn(async move {
+            let src = tempfile::tempdir().unwrap();
+            git2::Repository::init(src.path()).unwrap();
+            let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(id, src.path().to_path_buf()).unwrap(),
+            );
+            fed.add_repo(s, &data_dir).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let on_disk = FederationManifest::load_or_default(&manifest_path).unwrap();
+    let dup_rows: Vec<_> = on_disk
+        .repos
+        .iter()
+        .filter(|e| e.id.as_str() == "dup")
+        .collect();
+    assert_eq!(
+        dup_rows.len(),
+        1,
+        "two concurrent add_repo for the same id must collapse to one \
+         on-disk row, not two; got {} rows",
+        dup_rows.len(),
+    );
+    assert_eq!(
+        fed.list_repos().len(),
+        1,
+        "in-memory membership must also collapse to one entry for the \
+         duplicated id, not two",
+    );
+}
+
+/// Mixed-type concurrent mutations exercise the same lock with a
+/// broader call mix than the `add`/`remove` race above. Three adds
+/// for distinct ids fire at once — the same shape as the real-world
+/// trigger, where a YAML reload can issue a burst of adds without
+/// interleaved removes. The post-state must contain every
+/// successfully-added id and the seed, and the on-disk manifest
+/// must match the final in-memory membership.
+///
+/// Implementation note: the src `tempfile::tempdir()` for each
+/// racer is created in the *outer* scope and only borrowed by the
+/// task, not owned by it. If the tempdir were owned by the task
+/// closure, it would be dropped when the task returns — at which
+/// point the next racer's `persist_manifest` iteration would call
+/// `git rev-parse HEAD` against a deleted dir and `content_hash()`
+/// would error out with `cannot change to '/tmp/.tmpXXX': No such
+/// file`, causing the snapshot to drop the prior racer's row. The
+/// bug is in the *fixture*, not the production lock; the
+/// pre-existing `concurrent_add_and_remove_serialize_persist_manifest`
+/// doesn't trip over it because the lone add-task owns its src
+/// tempdir and the rm-task owns no src.
+#[tokio::test]
+async fn concurrent_mixed_mutations_persist_manifest_consistently() {
+    use crate::federation::manifest::FederationManifest;
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("federation_manifest.bin");
+    let fed = std::sync::Arc::new(FederatedIndex::new(petgraph_backend(&tmp)));
+    fed.set_manifest_path(Some(manifest_path.clone()));
+
+    // Pre-seed one repo so the in-memory map is non-empty at the
+    // start; the mixed racers all see the same baseline.
+    let seed_dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(seed_dir.path()).unwrap();
+    let seed_src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(
+            RepoId::new("seed").unwrap(),
+            seed_dir.path().to_path_buf(),
+        )
+        .unwrap(),
+    );
+    fed.add_repo(seed_src, tmp.path()).await.unwrap();
+
+    let ids = ["alpha", "beta", "gamma"];
+    let data_dir = tmp.path().to_path_buf();
+
+    // Outer-scope tempdirs: kept alive for the whole test so the
+    // post-join persist snapshots can still `git rev-parse` them.
+    let mut src_dirs = Vec::new();
+    for id_str in ids {
+        let d = tempfile::tempdir().unwrap();
+        git2::Repository::init(d.path()).unwrap();
+        src_dirs.push((id_str.to_string(), d));
+    }
+
+    let mut handles = Vec::new();
+    for (id_str, d) in &src_dirs {
+        let fed = fed.clone();
+        let data_dir = data_dir.clone();
+        let id = RepoId::new(id_str.as_str()).unwrap();
+        let src_path = d.path().to_path_buf();
+        handles.push(tokio::spawn(async move {
+            let s: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(id, src_path).unwrap(),
+            );
+            fed.add_repo(s, &data_dir).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let on_disk = FederationManifest::load_or_default(&manifest_path).unwrap();
+    let on_disk_ids: std::collections::BTreeSet<_> = on_disk
+        .repos
+        .iter()
+        .map(|e| e.id.as_str().to_string())
+        .collect();
+    let in_mem_ids: std::collections::BTreeSet<_> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let mut expected = std::collections::BTreeSet::new();
+    expected.insert("seed".to_string());
+    for id in ids {
+        expected.insert(id.to_string());
+    }
+    assert_eq!(
+        on_disk_ids, expected,
+        "on-disk manifest must contain every successfully-added id and the \
+         seed; pre-fix `persist_lock` could let one writer's snapshot miss \
+         a concurrent insert. on_disk={:?} expected={:?}",
+        on_disk_ids, expected,
+    );
+    assert_eq!(
+        in_mem_ids, expected,
+        "in-memory membership must match the expected set after the mixed \
+         race; got {:?}",
+        in_mem_ids,
+    );
+    assert_eq!(
+        on_disk_ids, in_mem_ids,
+        "the lock must keep the on-disk snapshot consistent with the \
+         final in-memory state; on_disk={:?} in_mem={:?}",
+        on_disk_ids, in_mem_ids,
+    );
+}
