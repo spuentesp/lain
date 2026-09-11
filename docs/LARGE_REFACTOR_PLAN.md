@@ -84,8 +84,14 @@ the behavior-preserving transition before cleanup removes the old path.
 
 ## Phase 5: test-fixture cleanup
 
-**Status: pending.** The unused test helpers in `tests/common/mod.rs` should be handled after the
-production migration. First split helpers into purpose-specific modules:
+**Status: complete.** The shared fixture module now documents its intentional
+cross-binary API boundary with a module-level `dead_code` allowance. Every
+integration-test binary compiles `tests/common/mod.rs` independently, so
+per-target unused-helper warnings are expected and are no longer emitted.
+The helpers remain available to future tests rather than being deleted based
+on one target's usage.
+
+The fixture surface remains organized into purpose-specific sections:
 
 - process and HTTP server fixtures;
 - federation fixtures;

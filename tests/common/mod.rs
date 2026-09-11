@@ -22,6 +22,11 @@
 //! and `performance_budgets.rs`. Extracting them here gives one
 //! place to change the harness and one place to test it.
 
+// Every integration-test binary compiles this shared module independently.
+// A helper used by one binary is therefore unused in the others; keep the
+// complete fixture API available without emitting duplicate dead-code noise.
+#![allow(dead_code)]
+
 use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
 use std::io::{Read, Write};
