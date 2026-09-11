@@ -20,8 +20,25 @@ use async_trait::async_trait;
 use inventory::iter;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
+
+/// Construction dependencies for the tool runtime. Grouping these values
+/// prevents the constructor from becoming a positional list as services grow.
+pub struct ToolContextDeps {
+    pub graph: GraphDatabase,
+    pub overlay: VolatileOverlay,
+    pub embedder: NlpEmbedder,
+    pub cross_encoder: crate::nlp::CrossEncoder,
+    pub git: Arc<Mutex<GitSensor>>,
+    pub lsp_pool: Arc<LspPool>,
+    pub tuning: Arc<TuningConfig>,
+    pub embedding_cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    pub ui_sessions: crate::server::tools::UiSessionStore,
+    pub jobs: Arc<Mutex<HashMap<String, crate::server::tools::JobInfo>>>,
+    pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
+}
 
 /// All dependencies a tool handler needs to do its work.
 #[derive(Clone)]
@@ -81,19 +98,20 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
-    pub fn new(
-        graph: GraphDatabase,
-        overlay: VolatileOverlay,
-        embedder: NlpEmbedder,
-        cross_encoder: crate::nlp::CrossEncoder,
-        git: Arc<Mutex<GitSensor>>,
-        lsp_pool: Arc<LspPool>,
-        tuning: Arc<TuningConfig>,
-        embedding_cache: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
-        ui_sessions: Arc<AsyncMutex<std::collections::HashMap<String, UiSession>>>,
-        jobs: Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
-        job_webhooks: Arc<AsyncMutex<Vec<String>>>,
-    ) -> Self {
+    pub fn from_deps(deps: ToolContextDeps) -> Self {
+        let ToolContextDeps {
+            graph,
+            overlay,
+            embedder,
+            cross_encoder,
+            git,
+            lsp_pool,
+            tuning,
+            embedding_cache,
+            ui_sessions,
+            jobs,
+            job_webhooks,
+        } = deps;
         Self {
             graph,
             overlay,
@@ -334,21 +352,21 @@ mod federation_binding_tests {
         // A context bound to an empty placeholder graph, as the
         // multi-repo constructor leaves it.
         let placeholder = tempfile::tempdir().unwrap();
-        let ctx = ToolContext::new(
-            crate::graph::GraphDatabase::new(&placeholder.path().join("graph.bin")).unwrap(),
-            crate::overlay::VolatileOverlay::new(),
-            crate::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
-            crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
-            Arc::new(Mutex::new(GitSensor::new(&roots[0].1).expect("git sensor"))),
-            Arc::new(
+        let ctx = ToolContext::from_deps(ToolContextDeps {
+            graph: crate::graph::GraphDatabase::new(&placeholder.path().join("graph.bin")).unwrap(),
+            overlay: crate::overlay::VolatileOverlay::new(),
+            embedder: crate::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
+            cross_encoder: crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
+            git: Arc::new(Mutex::new(GitSensor::new(&roots[0].1).expect("git sensor"))),
+            lsp_pool: Arc::new(
                 LspPool::new(&roots[0].1, 1, &crate::tuning::RuntimeConfig::default()).unwrap(),
             ),
-            Arc::new(TuningConfig::default()),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            Arc::new(AsyncMutex::new(Vec::new())),
-        )
+            tuning: Arc::new(TuningConfig::default()),
+            embedding_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            ui_sessions: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+            jobs: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            job_webhooks: Arc::new(AsyncMutex::new(Vec::new())),
+        })
         .with_federation(Arc::clone(&fed));
 
         assert_eq!(

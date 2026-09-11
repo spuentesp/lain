@@ -17,7 +17,7 @@ use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
-use crate::server::tools::registry::{ToolContext, ToolRegistry};
+use crate::server::tools::registry::{ToolContext, ToolContextDeps, ToolRegistry};
 use crate::server::tools::utils::get_str_arg;
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
@@ -144,19 +144,19 @@ impl ToolExecutor {
         let jobs_registry = Arc::new(Mutex::new(HashMap::<String, JobInfo>::new()));
         let webhooks = Arc::new(AsyncMutex::new(Vec::new()));
 
-        let ctx = ToolContext::new(
+        let ctx = ToolContext::from_deps(ToolContextDeps {
             graph,
             overlay,
             embedder,
             cross_encoder,
             git,
             lsp_pool,
-            Arc::clone(&tuning),
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(AsyncMutex::new(HashMap::new())),
-            Arc::clone(&jobs_registry),
-            Arc::clone(&webhooks),
-        )
+            tuning: Arc::clone(&tuning),
+            embedding_cache: Arc::new(Mutex::new(HashMap::new())),
+            ui_sessions: Arc::new(AsyncMutex::new(HashMap::new())),
+            jobs: Arc::clone(&jobs_registry),
+            job_webhooks: Arc::clone(&webhooks),
+        })
         .with_workspace(workspace);
 
         // Snapshot persistence (optional, for resumeability)
@@ -251,19 +251,19 @@ impl ToolExecutor {
         };
         let lsp_pool = Arc::new(lsp_root);
 
-        let ctx = ToolContext::new(
+        let ctx = ToolContext::from_deps(ToolContextDeps {
             graph,
             overlay,
-            NlpEmbedder::new_stub(),
-            crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
+            embedder: NlpEmbedder::new_stub(),
+            cross_encoder: crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
             git,
             lsp_pool,
-            Arc::clone(&tuning),
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(AsyncMutex::new(HashMap::new())),
-            Arc::clone(&jobs_registry),
-            Arc::clone(&webhooks),
-        )
+            tuning: Arc::clone(&tuning),
+            embedding_cache: Arc::new(Mutex::new(HashMap::new())),
+            ui_sessions: Arc::new(AsyncMutex::new(HashMap::new())),
+            jobs: Arc::clone(&jobs_registry),
+            job_webhooks: Arc::clone(&webhooks),
+        })
         .with_workspace(workspace);
 
         Self {
