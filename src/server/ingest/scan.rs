@@ -1,6 +1,6 @@
 use crate::error::LainError;
-use crate::schema::{GraphEdge, GraphNode, NodeType, EdgeType};
-use crate::lsp::{LspMultiplexer, HierarchicalSymbol, ReferenceLocation};
+use crate::lsp::{HierarchicalSymbol, LspMultiplexer, ReferenceLocation};
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -38,6 +38,7 @@ pub async fn scan_file_structure(
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Result<FileScanResult, LainError> {
     // The canonical graph key for this file. Every node minted below and
     // every ref emitted for the resolve phase uses this exact string — if a
@@ -56,19 +57,20 @@ pub async fn scan_file_structure(
         for component in parent_dir.components() {
             components.push(component.as_os_str().to_string_lossy().to_string());
             let current_module_path = components.join("/");
-            
-            let mut module_node = GraphNode::new(
+
+            let mut module_node = GraphNode::new_in(
                 NodeType::Namespace,
                 component.as_os_str().to_string_lossy().to_string(),
                 current_module_path.clone(),
+                namespace,
             );
             module_node.last_lsp_sync = Some(lsp_sync);
             module_node.last_git_sync = Some(git_sync);
             module_node.commit_hash = Some(commit_hash.clone());
-            
+
             let node_id = module_node.id.clone();
             nodes.push(module_node);
-            
+
             if let Some(prev_id) = current_parent_id {
                 edges.push(GraphEdge::new(EdgeType::Contains, prev_id, node_id.clone()));
             }
@@ -77,20 +79,28 @@ pub async fn scan_file_structure(
     }
 
     // 2. File node
-    let mut file_node = GraphNode::new(
+    let mut file_node = GraphNode::new_in(
         NodeType::File,
-        path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
         relative_path.clone(),
+        namespace,
     );
     file_node.last_lsp_sync = Some(lsp_sync);
     file_node.last_git_sync = Some(git_sync);
     file_node.commit_hash = Some(commit_hash.clone());
-    
+
     let file_id = file_node.id.clone();
     nodes.push(file_node);
 
     if let Some(parent_id) = current_parent_id {
-        edges.push(GraphEdge::new(EdgeType::Contains, parent_id, file_id.clone()));
+        edges.push(GraphEdge::new(
+            EdgeType::Contains,
+            parent_id,
+            file_id.clone(),
+        ));
     }
 
     // 3. Fetch all references for this file while we hold the lock (prevents nested-lock deadlock)
@@ -107,7 +117,12 @@ pub async fn scan_file_structure(
     // 4. Recursive symbols (no more per-symbol lock acquisition)
     let symbols_result = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_document_symbols_hierarchical(&path, &workspace).await
+        lsp.get_document_symbols_hierarchical(
+            &path,
+            &workspace,
+            &crate::schema::RepoNamespace::for_test(),
+        )
+        .await
     };
 
     match symbols_result {
@@ -124,6 +139,7 @@ pub async fn scan_file_structure(
                     lsp_sync,
                     git_sync,
                     commit_hash.clone(),
+                    namespace,
                 );
             } else {
                 for symbol in symbols {
@@ -134,11 +150,12 @@ pub async fn scan_file_structure(
                         symbol,
                         lsp_sync,
                         git_sync,
-                        commit_hash.clone()
-                    ).await;
+                        commit_hash.clone(),
+                    )
+                    .await;
                 }
             }
-        },
+        }
         Err(e) => {
             debug!("No LSP symbols for {:?}: {}", path, e);
             // LSP unavailable (binary missing, language unsupported, etc.).
@@ -152,6 +169,7 @@ pub async fn scan_file_structure(
                 lsp_sync,
                 git_sync,
                 commit_hash.clone(),
+                &crate::schema::RepoNamespace::for_test(),
             );
         }
     }
@@ -192,7 +210,13 @@ pub async fn scan_file_structure(
         (vec![], vec![])
     };
 
-    Ok(FileScanResult { nodes, edges, external_references, static_refs, pattern_refs })
+    Ok(FileScanResult {
+        nodes,
+        edges,
+        external_references,
+        static_refs,
+        pattern_refs,
+    })
 }
 
 /// Scan multiple files in a single task (batch processing for reduced task overhead)
@@ -203,6 +227,7 @@ pub async fn scan_file_batch(
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Vec<Result<FileScanResult, LainError>> {
     let mut results = Vec::with_capacity(paths.len());
     for path in paths {
@@ -213,7 +238,9 @@ pub async fn scan_file_batch(
             lsp_sync,
             git_sync,
             commit_hash.clone(),
-        ).await;
+            namespace,
+        )
+        .await;
         results.push(result);
     }
     results
@@ -235,13 +262,13 @@ fn apply_attribute_labels(path: &Path, content: &str, nodes: &mut [GraphNode]) {
             continue;
         }
         // Prefer a definition whose span contains the node's start.
-        let hit = defs
-            .iter()
-            .filter(|d| d.name == node.name)
-            .min_by_key(|d| match node.line_start {
-                Some(l) => (d.line_start as i64 - l as i64).abs(),
-                None => 0,
-            });
+        let hit =
+            defs.iter()
+                .filter(|d| d.name == node.name)
+                .min_by_key(|d| match node.line_start {
+                    Some(l) => (d.line_start as i64 - l as i64).abs(),
+                    None => 0,
+                });
         if let Some(def) = hit {
             if def.is_deprecated {
                 node.is_deprecated = true;
@@ -286,7 +313,14 @@ pub async fn process_symbol_recursive_enriched(
     commit_hash: String,
 ) {
     process_symbol_recursive_inner(
-        nodes, edges, parent_id, symbol, lsp_sync, git_sync, commit_hash, false,
+        nodes,
+        edges,
+        parent_id,
+        symbol,
+        lsp_sync,
+        git_sync,
+        commit_hash,
+        false,
     )
     .await
 }
@@ -318,7 +352,11 @@ async fn process_symbol_recursive_inner(
     // file_refs filtering happens there via (source_id, ref_loc) tuples
 
     nodes.push(node);
-    edges.push(GraphEdge::new(EdgeType::Contains, parent_id.to_string(), node_id.clone()));
+    edges.push(GraphEdge::new(
+        EdgeType::Contains,
+        parent_id.to_string(),
+        node_id.clone(),
+    ));
 
     for child in symbol.children {
         process_symbol_recursive_inner(
@@ -347,14 +385,16 @@ fn add_tree_sitter_definitions(
     lsp_sync: i64,
     git_sync: i64,
     commit_hash: String,
+    namespace: &crate::schema::RepoNamespace,
 ) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
     let defs = crate::treesitter::extract_definitions(path, &content);
     for def in defs {
-        let mut node = GraphNode::new(def.kind, def.name.clone(), graph_key.to_string())
-            .with_location(def.line_start, def.line_end);
+        let mut node =
+            GraphNode::new_in(def.kind, def.name.clone(), graph_key.to_string(), namespace)
+                .with_location_in(def.line_start, def.line_end, namespace);
         node.last_lsp_sync = Some(lsp_sync);
         node.last_git_sync = Some(git_sync);
         node.commit_hash = Some(commit_hash.clone());
@@ -369,7 +409,11 @@ fn add_tree_sitter_definitions(
         }
         let node_id = node.id.clone();
         nodes.push(node);
-        edges.push(GraphEdge::new(EdgeType::Contains, file_id.to_string(), node_id));
+        edges.push(GraphEdge::new(
+            EdgeType::Contains,
+            file_id.to_string(),
+            node_id,
+        ));
     }
 }
 
@@ -387,14 +431,12 @@ mod tests {
     async fn scan_produces_symbol_nodes_without_lsp() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("lib.rs");
-        std::fs::write(
-            &file,
-            "pub fn hello() {}\npub struct Calc { pub v: i32 }\n",
-        )
-        .expect("write");
+        std::fs::write(&file, "pub fn hello() {}\npub struct Calc { pub v: i32 }\n")
+            .expect("write");
 
         let lsp = Arc::new(AsyncMutex::new(
-            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default()).expect("lsp mux"),
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default())
+                .expect("lsp mux"),
         ));
         // These tests verify the tree-sitter fallback, not a real LSP server.
         // Mark rust-analyzer unavailable so no child process is spawned; the
@@ -409,6 +451,7 @@ mod tests {
             0,
             0,
             "abc".to_string(),
+            &crate::schema::RepoNamespace::for_test(),
         )
         .await
         .expect("scan ok");
@@ -446,7 +489,10 @@ mod tests {
         );
 
         // Sanity: File node should still be there.
-        assert!(result.nodes.iter().any(|n| matches!(n.node_type, NodeType::File)));
+        assert!(result
+            .nodes
+            .iter()
+            .any(|n| matches!(n.node_type, NodeType::File)));
     }
 
     #[tokio::test]
@@ -456,7 +502,8 @@ mod tests {
         std::fs::write(&file, "pub fn hello() {}\n").expect("write");
 
         let lsp = Arc::new(AsyncMutex::new(
-            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default()).expect("lsp mux"),
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default())
+                .expect("lsp mux"),
         ));
         // These tests verify the tree-sitter fallback, not a real LSP server.
         // Mark rust-analyzer unavailable so no child process is spawned; the
@@ -471,6 +518,7 @@ mod tests {
             0,
             0,
             "abc".to_string(),
+            &crate::schema::RepoNamespace::for_test(),
         )
         .await
         .expect("scan ok");
@@ -531,14 +579,16 @@ mod attribute_label_tests {
         // Nodes as the LSP would hand them over: no labels at all.
         let mut nodes = vec![
             GraphNode::new(NodeType::Function, "prod".into(), "thing.rs".into()),
-            GraphNode::new(NodeType::Function, "checks_a_thing".into(), "thing.rs".into()),
+            GraphNode::new(
+                NodeType::Function,
+                "checks_a_thing".into(),
+                "thing.rs".into(),
+            ),
             GraphNode::new(NodeType::Function, "checks_async".into(), "thing.rs".into()),
         ];
         apply_attribute_labels(&f, src, &mut nodes);
 
-        let label = |n: &str| {
-            nodes.iter().find(|x| x.name == n).unwrap().label.clone()
-        };
+        let label = |n: &str| nodes.iter().find(|x| x.name == n).unwrap().label.clone();
         assert_eq!(label("checks_a_thing").as_deref(), Some("test"));
         assert_eq!(
             label("checks_async").as_deref(),
@@ -554,7 +604,11 @@ mod attribute_label_tests {
         let f = tmp.path().join("thing.rs");
         let src = "#[test]\nfn t() {}\n";
         std::fs::write(&f, src).unwrap();
-        let mut nodes = vec![GraphNode::new(NodeType::Function, "t".into(), "thing.rs".into())];
+        let mut nodes = vec![GraphNode::new(
+            NodeType::Function,
+            "t".into(),
+            "thing.rs".into(),
+        )];
         nodes[0].label = Some("preset".into());
         apply_attribute_labels(&f, src, &mut nodes);
         assert_eq!(nodes[0].label.as_deref(), Some("preset"));

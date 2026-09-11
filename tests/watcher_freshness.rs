@@ -1056,3 +1056,130 @@ async fn sync_overlay_purges_reverted_addition_after_revert() {
 
     std::mem::forget(ri);
 }
+
+/// End-to-end repro of the cross-repo-id-collision review comment.
+/// The reviewer's specific reproduction: "with LSP unavailable,
+/// editing a symbol without changing its name/path/line gives it a
+/// different ID from its static-index counterpart. Graph handlers
+/// resolve the overlay symbol, then use that incompatible ID to
+/// look up static edges."
+///
+/// This test exercises the full `LainServer` (single-repo) path:
+/// 1. `build_core_memory` scans the file → mints static-graph nodes
+///    via `scan_file_structure` with `&self.id_namespace`.
+/// 2. Edit the file (no name/path/line change) → `process_change`
+///    runs the tree-sitter fallback (LSP unavailable) and mints
+///    overlay nodes with `&self.id_namespace`.
+/// 3. The same `(name, path, line)` symbol must produce the same id
+///    in both layers — that's the contract the namespace threading
+///    in PR #14 is supposed to deliver.
+#[tokio::test]
+async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
+    if which::which("rust-analyzer").is_ok() {
+        eprintln!(
+            "[skip] rust-analyzer on PATH; this test exercises the no-LSP \
+             tree-sitter fallback. Run on a CI runner without \
+             rust-analyzer to verify."
+        );
+        return;
+    }
+
+    use std::process::Command;
+    use std::sync::Arc;
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_root = tmp.path().to_path_buf();
+    let src_dir = repo_root.join("src");
+    std::fs::create_dir_all(&src_dir).expect("mkdir src");
+
+    // Seed: a single function `shared_symbol` at line 1.
+    let target = src_dir.join("lib.rs");
+    std::fs::write(&target, "pub fn shared_symbol() -> u32 { 0 }\n").expect("write lib");
+
+    Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&repo_root).status().expect("git init");
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "config", "user.email", "t@t"])
+        .status().expect("git config");
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "config", "user.name", "t"])
+        .status().expect("git config");
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "add", "-A"])
+        .status().expect("git add");
+    Command::new("git")
+        .args(["-C", repo_root.to_str().unwrap(), "commit", "-q", "-m", "init"])
+        .status().expect("git commit");
+
+    // Boot the server. The LainServer's `id_namespace` is the
+    // canonical namespace; both the static-graph path
+    // (`build_core_memory` → `scan_file_structure`) and the overlay
+    // path (`process_change` → tree-sitter fallback) thread it
+    // through after PR #14's fix.
+    let mem = repo_root.join(".lain/graph.bin");
+    let server = Arc::new(
+        LainServer::new(&repo_root, &mem, None).expect("LainServer::new"),
+    );
+
+    // 1. Build the static graph. This scans `lib.rs` and mints
+    // `shared_symbol` with an id derived from `&self.id_namespace`.
+    server.build_core_memory().await.expect("build_core_memory");
+
+    let static_id = server
+        .graph
+        .find_node_by_name("shared_symbol")
+        .expect("static graph should contain shared_symbol after build_core_memory")
+        .id
+        .clone();
+    eprintln!("[namespace-repro] static id: {static_id}");
+
+    // 2. Edit the file. Same name (`shared_symbol`), same path
+    // (`src/lib.rs`), same start line (1). The only change is a
+    // different return expression — the symbol's `(type, path, name,
+    // line)` tuple is identical to before.
+    std::fs::write(&target, "pub fn shared_symbol() -> u32 { 42 }\n").expect("rewrite lib");
+    // Mark the file as an uncommitted working-tree change so
+    // `get_uncommitted_changes` returns it. `build_core_memory`
+    // already committed; this is a second edit on top of the
+    // initial commit.
+    std::fs::write(&target.clone(), "pub fn shared_symbol() -> u32 { 7 }\n").expect("rewrite lib again");
+
+    // 3. `sync_volatile_overlay` calls `process_change` per
+    // uncommitted file, with the tree-sitter fallback when LSP is
+    // unavailable. The overlay node should be minted with the
+    // same `&self.id_namespace`.
+    Arc::get_mut(&mut Arc::clone(&server))
+        .unwrap()
+        .sync_volatile_overlay()
+        .await
+        .expect("sync_volatile_overlay");
+
+    let overlay_id = server
+        .overlay
+        .get_all_nodes()
+        .into_iter()
+        .find(|n| n.name == "shared_symbol")
+        .expect("overlay should contain shared_symbol after sync_volatile_overlay")
+        .id
+        .clone();
+    eprintln!("[namespace-repro] overlay id: {overlay_id}");
+
+    // 4. The contract: same `(name, path, line)` symbol, same
+    // namespace, same id. Graph handlers resolve the overlay
+    // symbol, then use that id to look up static edges — if the
+    // ids differ, the edge lookup fails. Pre-fix, the static id
+    // hashed only `(type, path, name, line)` and the overlay id
+    // hashed the same payload against `RepoNamespace::for_test()`,
+    // so they never matched. Post-fix, both thread
+    // `&self.id_namespace`, so the hash inputs differ only in the
+    // `(type, path, name, line)` portion that they share.
+    assert_eq!(
+        static_id, overlay_id,
+        "static and overlay ids must match for the same symbol so \
+         graph edges resolved via the overlay hit the static-graph \
+         node; pre-PR-#14 the namespaces differed. static={static_id} \
+         overlay={overlay_id}"
+    );
+
+    std::mem::forget(server);
+}
