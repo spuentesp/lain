@@ -1599,6 +1599,8 @@ pub enum PresenceEvent {
 /// `Vec<(K, V)>` rather than maps because serde-json's `HashMap`
 /// representation is non-deterministic across runs; with tuples the
 /// emitted file is stable to hand-inspection.
+type OccupancySnapshot = Vec<(PathBuf, Vec<String>, Vec<(String, Vec<String>)>)>;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedState {
     /// `(agent_id_string, session)`.
@@ -1607,7 +1609,7 @@ struct PersistedState {
     /// `__file_level__` sentinel that lives in the in-memory symbol
     /// map is filtered out before serialization; the file-level agents
     /// list is derived directly from `FileOccupancy::agents`.
-    occupancy_by_file: Vec<(PathBuf, Vec<String>, Vec<(String, Vec<String>)>)>,
+    occupancy_by_file: OccupancySnapshot,
     /// `(path, [(agent_id, intent)])`. File-level `ClaimIntent`
     /// records — the only intents that survive a save/load round-trip.
     /// Symbol-level intents (`claims` whose `symbols` field names a

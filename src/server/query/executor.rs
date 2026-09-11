@@ -16,11 +16,17 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// The three collections produced by a graph traversal. A named result keeps
+/// traversal APIs readable and gives callers one stable shape to extend.
+pub type TraversalResult = (Vec<GraphNodeRef>, Vec<GraphEdgeRef>, Vec<GraphPath>);
+pub type EmbeddingCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+type TraversalQueueItem = (String, Vec<String>, Vec<(String, String)>);
+
 /// Executor for running queries against the graph
 pub struct Executor<'a> {
     graph: &'a GraphDatabase,
     embedder: &'a NlpEmbedder,
-    embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &'a EmbeddingCache,
     /// Workspace root. Node paths are workspace-relative graph keys, so
     /// on-demand embedding needs this to read a symbol's body off disk.
     workspace: &'a std::path::Path,
@@ -34,7 +40,7 @@ impl<'a> Executor<'a> {
     pub fn new(
         graph: &'a GraphDatabase,
         embedder: &'a NlpEmbedder,
-        embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
+        embedding_cache: &'a EmbeddingCache,
         workspace: &'a std::path::Path,
     ) -> Self {
         Self::with_default_limit(
@@ -52,7 +58,7 @@ impl<'a> Executor<'a> {
     pub fn with_default_limit(
         graph: &'a GraphDatabase,
         embedder: &'a NlpEmbedder,
-        embedding_cache: &'a Arc<Mutex<HashMap<String, Vec<f32>>>>,
+        embedding_cache: &'a EmbeddingCache,
         workspace: &'a std::path::Path,
         default_limit: usize,
     ) -> Self {
@@ -225,7 +231,7 @@ impl<'a> Executor<'a> {
         &mut self,
         start_nodes: &[GraphNodeRef],
         connect: &ConnectOp,
-    ) -> Result<(Vec<GraphNodeRef>, Vec<GraphEdgeRef>, Vec<GraphPath>), LainError> {
+    ) -> Result<TraversalResult, LainError> {
         if start_nodes.is_empty() {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
@@ -271,7 +277,7 @@ impl<'a> Executor<'a> {
         edge_selector: &EdgeSelector,
         depth_range: RangeInclusive<u32>,
         direction: PetDirection,
-    ) -> Result<(Vec<GraphNodeRef>, Vec<GraphEdgeRef>, Vec<GraphPath>), LainError> {
+    ) -> Result<TraversalResult, LainError> {
         // Reject an edge name that is not a real EdgeType rather than
         // traversing and returning nothing. A silent empty answer reads
         // as "no such relationship in this codebase" when it actually
@@ -293,7 +299,7 @@ impl<'a> Executor<'a> {
         let mut found_nodes = Vec::new();
 
         let mut visited = HashMap::new();
-        let mut queue: Vec<(String, Vec<String>, Vec<(String, String)>)> =
+        let mut queue: Vec<TraversalQueueItem> =
             vec![(start_id.into(), vec![start_id.into()], vec![])];
 
         while let Some((current_id, path_ids, path_edges)) = queue.pop() {

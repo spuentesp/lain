@@ -31,6 +31,12 @@ use tokio::task;
 use tracing::{error, info};
 use uuid::Uuid;
 
+/// Shared registry types used by interactive tool responses. Keeping these
+/// aliases in the tools module gives handlers a stable vocabulary and avoids
+/// repeating the implementation details of the session store in every API.
+pub type UiSessionStore = Arc<AsyncMutex<HashMap<String, UiSession>>>;
+pub type UiLink<'a> = Option<(&'a UiSessionStore, u16, std::time::Duration)>;
+
 pub use definitions::ToolDefinition;
 // `use utils::*;` was only needed by `augment_knowledge`'s
 // `resolve_node_at_location` call, which was removed with it.

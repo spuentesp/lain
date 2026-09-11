@@ -185,15 +185,6 @@ pub struct LainServer {
 }
 
 impl LainServer {
-    /// Test-only accessor: take the process-change lock without
-    /// running any work. Used by the concurrent-calls test in
-    /// `tests/watcher_freshness.rs` to verify that two concurrent
-    /// `process_change` invocations are serialized, not data-racing.
-    #[cfg(test)]
-    pub(crate) async fn process_change_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.process_change_lock.lock().await
-    }
-
     /// Federation accessor. Returns `None` for single-workspace servers.
     pub fn federation(&self) -> Option<&Arc<FederatedIndex>> {
         self.federation.as_ref()

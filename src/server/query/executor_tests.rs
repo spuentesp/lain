@@ -9,6 +9,8 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type EmbedderCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+
 fn make_test_graph() -> GraphDatabase {
     let tmp = std::env::temp_dir().join("test_executor_graph");
     let _ = std::fs::remove_dir_all(&tmp);
@@ -78,7 +80,7 @@ fn make_test_graph() -> GraphDatabase {
     graph
 }
 
-fn make_test_executor_params() -> (NlpEmbedder, Arc<Mutex<HashMap<String, Vec<f32>>>>) {
+fn make_test_executor_params() -> (NlpEmbedder, EmbedderCache) {
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
     (embedder, cache)

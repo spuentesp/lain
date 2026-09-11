@@ -10,6 +10,8 @@ use serde_json::Map;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type EmbedderCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+
 fn make_test_graph() -> GraphDatabase {
     let tmp = std::env::temp_dir().join("test_query_handler");
     let _ = std::fs::remove_dir_all(&tmp);
@@ -40,7 +42,7 @@ fn make_test_graph() -> GraphDatabase {
     graph
 }
 
-fn test_embedder_and_cache() -> (NlpEmbedder, Arc<Mutex<HashMap<String, Vec<f32>>>>) {
+fn test_embedder_and_cache() -> (NlpEmbedder, EmbedderCache) {
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
     (embedder, cache)

@@ -7,8 +7,6 @@ use crate::schema::{GraphNode, NodeType};
 use crate::server::tools::utils::resolve_node;
 use crate::server::tools::{UiSession, UiSessionData};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 pub fn trace_dependency(
@@ -72,11 +70,7 @@ pub async fn get_call_chain(
     overlay: &VolatileOverlay,
     from: &str,
     to: &str,
-    ui_sessions: Option<(
-        &Arc<AsyncMutex<HashMap<String, UiSession>>>,
-        u16,
-        std::time::Duration,
-    )>,
+    ui_sessions: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
     let start = resolve_node(graph, overlay, from)?;
     let end = resolve_node(graph, overlay, to)?;

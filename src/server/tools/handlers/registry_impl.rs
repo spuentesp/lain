@@ -21,15 +21,7 @@ use serde_json::{Map, Value};
 /// The TTL rides along because the handlers have no other route to the
 /// tuning config; it was a literal `600` in two places while
 /// `ingestion.ui_session_ttl_secs` carried the same default and no reader.
-fn ui_link(
-    ctx: &ToolContext,
-) -> Option<(
-    &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<String, crate::server::tools::UiSession>>,
-    >,
-    u16,
-    std::time::Duration,
-)> {
+fn ui_link(ctx: &ToolContext) -> crate::server::tools::UiLink<'_> {
     let port = ctx
         .diagnostics_port
         .load(std::sync::atomic::Ordering::Relaxed);

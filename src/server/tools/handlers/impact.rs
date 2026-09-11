@@ -57,11 +57,7 @@ pub async fn get_blast_radius(
     overlay: &VolatileOverlay,
     symbol: &str,
     include_coupling: bool,
-    ui_sessions: Option<(
-        &Arc<AsyncMutex<HashMap<String, UiSession>>>,
-        u16,
-        std::time::Duration,
-    )>,
+    ui_sessions: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
     let (node, other_defs) =
         crate::server::tools::utils::resolve_node_ambiguous(graph, overlay, symbol)?;
@@ -286,11 +282,7 @@ pub async fn get_coupling_radar(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
-    ui_sessions: Option<(
-        &Arc<AsyncMutex<HashMap<String, UiSession>>>,
-        u16,
-        std::time::Duration,
-    )>,
+    ui_sessions: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
 
