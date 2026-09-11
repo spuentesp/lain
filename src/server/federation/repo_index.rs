@@ -161,7 +161,8 @@ pub struct RepoIndex {
     /// don't need it (tests, single-repo mode). The federation
     /// loader sets this right after `add_repo` so a subsequent
     /// `index()` can use it to materialize cross-repo `Calls` edges.
-    cross_repo_resolver: parking_lot::Mutex<Option<Arc<dyn crate::federation::cross_repo::CrossRepoResolver>>>,
+    cross_repo_resolver:
+        parking_lot::Mutex<Option<Arc<dyn crate::federation::cross_repo::CrossRepoResolver>>>,
     /// Per-repo UUID namespace used to derive `GraphNode::id`s for
     /// every node this `RepoIndex` produces. Two repos in the same
     /// federation with identical `(type, path, name, line)` therefore
@@ -253,7 +254,6 @@ impl RepoIndex {
     pub fn health(&self) -> RepoHealth {
         *self.health.read()
     }
-
 
     /// Install the federation's shared `VolatileOverlay`. Called by
     /// [`crate::server::federation::federated_index::FederatedIndex::install_overlay`]
@@ -645,7 +645,8 @@ impl RepoIndex {
         // `change.path` (from `get_uncommitted_changes`) is absolute
         // (`self.workspace.join(path)` in `git.rs`).
         let workspace_root = self.source.local_path();
-        let current_paths: HashSet<String> = changes.iter()
+        let current_paths: HashSet<String> = changes
+            .iter()
             .map(|c| crate::graph::graph_path(workspace_root, &c.path))
             .collect();
 
@@ -781,7 +782,11 @@ impl RepoIndex {
             let lsp = self.lsp.next();
             let mut lsp = lsp.lock().await;
             match lsp
-                .get_document_symbols_hierarchical(path, self.source.local_path(), &self.id_namespace)
+                .get_document_symbols_hierarchical(
+                    path,
+                    self.source.local_path(),
+                    &self.id_namespace,
+                )
                 .await
             {
                 Ok(syms) if !syms.is_empty() => Some(syms),
@@ -811,8 +816,7 @@ impl RepoIndex {
                 let Ok(content) = std::fs::read_to_string(path) else {
                     return Ok(Vec::new());
                 };
-                let graph_key =
-                    crate::graph::graph_path(self.source.local_path(), path);
+                let graph_key = crate::graph::graph_path(self.source.local_path(), path);
                 crate::treesitter::extract_definitions(path, &content)
                     .into_iter()
                     .map(|d| HierarchicalSymbol {
@@ -822,7 +826,11 @@ impl RepoIndex {
                             graph_key.clone(),
                             &self.id_namespace,
                         )
-                        .with_location_in(d.line_start, d.line_end, &self.id_namespace),
+                        .with_location_in(
+                            d.line_start,
+                            d.line_end,
+                            &self.id_namespace,
+                        ),
                         children: vec![],
                     })
                     .collect()
