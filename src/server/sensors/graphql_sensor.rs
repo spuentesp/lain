@@ -180,6 +180,7 @@ pub fn enrich_with_graphql(
     graph: &GraphDatabase,
     schema_path: &Path,
     root: &Path,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
@@ -201,7 +202,7 @@ pub fn enrich_with_graphql(
             &op.schema_path,
             &format!("{}:{}", op.operation_type, op.field_name),
             None,
-            &crate::schema::RepoNamespace::for_test(),
+            namespace,
         );
 
         let mut node = GraphNode::new(
@@ -224,7 +225,11 @@ pub fn enrich_with_graphql(
 }
 
 /// Scan workspace for GraphQL schemas
-pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainError> {
+pub fn scan_workspace(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &crate::schema::RepoNamespace,
+) -> Result<usize, LainError> {
     let mut count = 0;
 
     let walker = ignore::WalkBuilder::new(root)
@@ -239,7 +244,7 @@ pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainE
             // extension, so every `.gql` file was skipped. Nothing caught it
             // because `scan_workspace` had no caller.
             if ext == "graphql" || ext == "gql" {
-                match enrich_with_graphql(graph, path, root) {
+                match enrich_with_graphql(graph, path, root, namespace) {
                     Ok(n) => count += n,
                     Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
                 }

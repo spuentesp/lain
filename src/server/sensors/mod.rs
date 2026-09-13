@@ -31,26 +31,38 @@ pub use websocket_sensor::WebSocketEndpoint;
 /// Each sensor is independent: one failing is logged and skipped rather
 /// than aborting ingestion, because a malformed `.proto` in a corner of
 /// the tree must not cost the caller their call graph.
-pub fn run_all(graph: &GraphDatabase, root: &Path) -> SensorCounts {
+///
+/// `namespace` is threaded through to every `GraphNode::generate_id`
+/// call so two federation repos with identical `(type, path, name)`
+/// route entries (e.g. `GET /health`) mint distinct ids and don't
+/// silently overwrite each other on merge. Pre-fix every sensor
+/// hardcoded `RepoNamespace::for_test()` here, which made the
+/// per-repo namespace plumbing moot for the protocol-sensor layer
+/// (URGENT FIXES #2 follow-up).
+pub fn run_all(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &crate::schema::RepoNamespace,
+) -> SensorCounts {
     let mut counts = SensorCounts::default();
 
-    match http_sensor::scan_workspace_routes(graph, root) {
+    match http_sensor::scan_workspace_routes(graph, root, namespace) {
         Ok(n) => counts.http_routes = n,
         Err(e) => tracing::warn!("http sensor failed for {:?}: {e}", root),
     }
-    match openapi_sensor::scan_workspace(graph, root) {
+    match openapi_sensor::scan_workspace(graph, root, namespace) {
         Ok(n) => counts.openapi = n,
         Err(e) => tracing::warn!("openapi sensor failed for {:?}: {e}", root),
     }
-    match proto_sensor::scan_workspace(graph, root) {
+    match proto_sensor::scan_workspace(graph, root, namespace) {
         Ok(n) => counts.proto = n,
         Err(e) => tracing::warn!("proto sensor failed for {:?}: {e}", root),
     }
-    match graphql_sensor::scan_workspace(graph, root) {
+    match graphql_sensor::scan_workspace(graph, root, namespace) {
         Ok(n) => counts.graphql = n,
         Err(e) => tracing::warn!("graphql sensor failed for {:?}: {e}", root),
     }
-    match websocket_sensor::scan_workspace(graph, root) {
+    match websocket_sensor::scan_workspace(graph, root, namespace) {
         Ok(n) => counts.websocket = n,
         Err(e) => tracing::warn!("websocket sensor failed for {:?}: {e}", root),
     }
@@ -100,7 +112,7 @@ mod run_all_tests {
             ))
             .unwrap();
 
-        let counts = run_all(&graph, &dir);
+        let counts = run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test());
         assert_eq!(counts.http_routes, 1, "the Go route must be picked up");
 
         let routes = graph
@@ -130,6 +142,9 @@ mod run_all_tests {
         let _ = std::fs::remove_dir_all(&db);
         let graph = GraphDatabase::new(&db).unwrap();
 
-        assert_eq!(run_all(&graph, &dir).total(), 0);
+        assert_eq!(
+            run_all(&graph, &dir, &crate::schema::RepoNamespace::for_test()).total(),
+            0
+        );
     }
 }

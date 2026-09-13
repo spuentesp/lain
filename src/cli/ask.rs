@@ -1,16 +1,53 @@
 use anyhow::Result;
+use std::io::IsTerminal;
 
 pub fn run_ask() -> Result<()> {
     use std::io::Read;
 
+    // Pre-fix this called `stdin.read_to_string` unconditionally.
+    // When a user ran `lain ask` from a terminal (no JSON hook piped
+    // on stdin), `read_to_string` blocked until the user typed
+    // Ctrl+D — the only way out of the wait was EOF, after which the
+    // process silently exited with status 0. A TTY interactive
+    // `lain ask` invocation was effectively a no-op that hung
+    // forever. The MCP wire protocol expects this command to be
+    // a PreToolUse hook handler, not a user-facing CLI: stdin
+    // either carries the hook JSON or is empty. Distinguish:
+    //
+    //   - stdin is a TTY → no hook JSON will arrive, exit cleanly
+    //     with a hint that `lain ask` is a hook handler, not a CLI
+    //   - stdin is a pipe (e.g. a closed pipe or a JSON payload) →
+    //     read whatever's there; on EOF, exit 0 like before
+    //   - stdin is a JSON object/array → parse and dispatch
+    //
+    // The "is TTY" check uses `stdin().is_terminal()` from
+    // `std::io::IsTerminal`, which is the canonical stdlib check on
+    // every Rust target (Unix, Windows, WASI-without-term).
+    if std::io::stdin().is_terminal() {
+        eprintln!(
+            "lain ask is a PreToolUse hook handler, not an interactive \
+             CLI. Pipe a JSON request on stdin, e.g.:\n  \
+             echo '{{\"tool_name\":\"...\",\"tool_input\":{{...}}}}' | lain ask"
+        );
+        return Ok(());
+    }
+
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
-        std::process::exit(0);
+        return Ok(());
+    }
+    // Empty stdin (e.g. `echo -n | lain ask`) is a no-op, not an
+    // error. Pre-fix this silently exited 0; preserve that.
+    if input.trim().is_empty() {
+        return Ok(());
     }
 
     let json: serde_json::Value = match serde_json::from_str(&input) {
         Ok(v) => v,
-        Err(_) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("lain ask: invalid JSON on stdin: {e}");
+            return Ok(());
+        }
     };
 
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");

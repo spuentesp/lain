@@ -69,6 +69,7 @@ pub fn enrich_with_websocket(
     graph: &GraphDatabase,
     file_path: &Path,
     root: &Path,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
@@ -99,7 +100,7 @@ pub fn enrich_with_websocket(
             &node_path,
             &display_name,
             None,
-            &crate::schema::RepoNamespace::for_test(),
+            namespace,
         );
 
         let mut node = GraphNode::new(NodeType::Variable, display_name, node_path.clone());
@@ -127,7 +128,11 @@ pub fn enrich_with_websocket(
 }
 
 /// Scan workspace for WebSocket patterns
-pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainError> {
+pub fn scan_workspace(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &crate::schema::RepoNamespace,
+) -> Result<usize, LainError> {
     let mut count = 0;
 
     let walker = ignore::WalkBuilder::new(root)
@@ -139,7 +144,7 @@ pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainE
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ["js", "ts", "jsx", "tsx", "py", "go", "rs"].contains(&ext) {
-            match enrich_with_websocket(graph, path, root) {
+            match enrich_with_websocket(graph, path, root, namespace) {
                 Ok(n) => count += n,
                 Err(e) => tracing::warn!("Failed to scan {:?}: {}", path, e),
             }

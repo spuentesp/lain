@@ -275,7 +275,11 @@ impl LainServer {
         // edge types it produces — `HttpRoute`, `CallsHttp`, `Implements`
         // — could never appear in a graph, while `describe_schema`
         // advertised them and `get_cross_runtime_callers` read them.
-        let sensor_counts = crate::server::sensors::run_all(&self.graph, &self.config.workspace);
+        let sensor_counts = crate::server::sensors::run_all(
+            &self.graph,
+            &self.config.workspace,
+            &self.id_namespace,
+        );
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
         }
@@ -953,7 +957,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
 
     // Protocol sensors — same rationale as the single-workspace pipeline;
     // runs after symbol nodes exist so route->handler links resolve.
-    let sensor_counts = crate::server::sensors::run_all(graph, path);
+    let sensor_counts = crate::server::sensors::run_all(graph, path, namespace);
     if sensor_counts.total() > 0 {
         info!(
             "[federation] {:?}: protocol sensors contributed {:?}",

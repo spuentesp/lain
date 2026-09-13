@@ -134,6 +134,7 @@ pub fn enrich_with_openapi(
     graph: &GraphDatabase,
     spec_path: &Path,
     root: &Path,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
@@ -155,7 +156,7 @@ pub fn enrich_with_openapi(
             &op.spec_path,
             &format!("{}:{}", op.method, op.path),
             None,
-            &crate::schema::RepoNamespace::for_test(),
+            namespace,
         );
 
         let mut route_node = GraphNode::new(
@@ -202,7 +203,11 @@ fn sniff_is_openapi(path: &Path) -> bool {
     head.contains("openapi") || head.contains("swagger")
 }
 
-pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainError> {
+pub fn scan_workspace(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &crate::schema::RepoNamespace,
+) -> Result<usize, LainError> {
     let mut count = 0;
 
     let walker = ignore::WalkBuilder::new(root)
@@ -233,7 +238,7 @@ pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainE
         if !sniff_is_openapi(path) {
             continue;
         }
-        match enrich_with_openapi(graph, path, root) {
+        match enrich_with_openapi(graph, path, root, namespace) {
             Ok(n) => count += n,
             Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
         }

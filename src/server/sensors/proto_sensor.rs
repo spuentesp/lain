@@ -126,6 +126,7 @@ pub fn enrich_with_proto(
     graph: &GraphDatabase,
     proto_path: &Path,
     root: &Path,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
@@ -148,7 +149,7 @@ pub fn enrich_with_proto(
             &svc.proto_path,
             &service_key,
             None,
-            &crate::schema::RepoNamespace::for_test(),
+            namespace,
         );
 
         let mut service_node = GraphNode::new(
@@ -172,7 +173,11 @@ pub fn enrich_with_proto(
 }
 
 /// Scan workspace for .proto files and enrich graph
-pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainError> {
+pub fn scan_workspace(
+    graph: &GraphDatabase,
+    root: &Path,
+    namespace: &crate::schema::RepoNamespace,
+) -> Result<usize, LainError> {
     let mut count = 0;
 
     let walker = ignore::WalkBuilder::new(root)
@@ -183,7 +188,7 @@ pub fn scan_workspace(graph: &GraphDatabase, root: &Path) -> Result<usize, LainE
     for entry in walker.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("proto") {
-            match enrich_with_proto(graph, path, root) {
+            match enrich_with_proto(graph, path, root, namespace) {
                 Ok(n) => count += n,
                 Err(e) => tracing::warn!("Failed to parse {:?}: {}", path, e),
             }

@@ -269,6 +269,7 @@ pub fn scan_file_for_routes(path: &std::path::Path, content: &str) -> Vec<HttpRo
 pub fn routes_to_graph(
     graph: &GraphDatabase,
     routes: &[HttpRoute],
+    namespace: &crate::schema::RepoNamespace,
 ) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -279,7 +280,7 @@ pub fn routes_to_graph(
             &route.handler_path,
             &format!("{}:{}", route.method, route.path),
             None,
-            &crate::schema::RepoNamespace::for_test(),
+            namespace,
         );
 
         let mut node = GraphNode::new(
@@ -320,6 +321,7 @@ pub fn routes_to_graph(
 pub fn scan_workspace_routes(
     graph: &GraphDatabase,
     root: &std::path::Path,
+    namespace: &crate::schema::RepoNamespace,
 ) -> Result<usize, LainError> {
     if graph.is_read_only() {
         return Ok(0);
@@ -364,7 +366,7 @@ pub fn scan_workspace_routes(
             // `routes_to_graph` on both the node name (`"GET:/x"` vs
             // `"GET /x"`) and the id, so the two paths produced different
             // nodes for the same route.
-            let (nodes, edges) = routes_to_graph(graph, &routes);
+            let (nodes, edges) = routes_to_graph(graph, &routes, namespace);
             for node in nodes {
                 graph.upsert_node(node)?;
                 count += 1;
@@ -541,7 +543,8 @@ mod tests {
             std::path::Path::new("routes.go"),
             r#"r.GET("/api/users", listUsers)"#,
         );
-        let (nodes, edges) = routes_to_graph(&graph, &routes);
+        let (nodes, edges) =
+            routes_to_graph(&graph, &routes, &crate::schema::RepoNamespace::for_test());
 
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_type, NodeType::HttpRoute);
@@ -574,7 +577,8 @@ mod tests {
             ))
             .unwrap();
 
-        let count = scan_workspace_routes(&graph, &dir).unwrap();
+        let count =
+            scan_workspace_routes(&graph, &dir, &crate::schema::RepoNamespace::for_test()).unwrap();
         assert_eq!(count, 1, "one route node created");
 
         let http_nodes: Vec<_> = graph
@@ -618,7 +622,8 @@ mod tests {
             std::path::Path::new("routes.go"),
             r#"r.GET("/api/users", listUsers)"#,
         );
-        let (_, edges) = routes_to_graph(&graph, &routes);
+        let (_, edges) =
+            routes_to_graph(&graph, &routes, &crate::schema::RepoNamespace::for_test());
 
         assert_eq!(edges.len(), 1);
         assert_eq!(

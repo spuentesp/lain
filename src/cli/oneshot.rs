@@ -63,16 +63,47 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
     }
 
     // Build the tool's `arguments` object from the trailing positional
-    // args. Heuristic: parse each arg as JSON if possible (so
-    // numbers/bools/strings all work), fall back to string. The 90%
-    // case is `lain oneshot <tool> <symbol>` so we wrap the first bare
-    // arg as `{"symbol": "<arg>"}`. Tools that take more than one
-    // arg can be invoked with explicit `key=value` syntax in future
-    // iterations; for now the single-symbol shortcut covers
-    // `get_blast_radius`, `explain_symbol`, etc.
+    // args. Three forms are supported, in priority order:
+    //
+    //  1. `key=value` pairs: `lain oneshot get_call_chain from=main to=foo`
+    //     inserts `{"from": "main", "to": "foo"}` verbatim.
+    //  2. JSON objects: `lain oneshot '{"symbol":"foo","limit":2}'`
+    //     parses as a single object. Lets a caller pass nested args.
+    //  3. Bare positional: `lain oneshot <tool> <symbol>` wraps the
+    //     first bare arg as `{"symbol": "<arg>"}` — the 90% case.
+    //
+    // Pre-fix, only form 3 worked (and only `args[0]` was kept, with
+    // `args[1..]` silently dropped). Tools requiring `from`+`to`,
+    // `path`+`limit`, or any other multi-arg combination failed
+    // immediately. The new form-1 path covers the common
+    // human-invoked case; form 2 covers the JSON-scripted case.
     let args_obj: Value = if args.is_empty() {
         Value::Object(Default::default())
+    } else if !args.is_empty() && args.iter().all(|a| a.contains('=')) {
+        // Form 1: every arg is `key=value`. Each pair is split on the
+        // first `=` so values can contain `=` (rare but possible
+        // for base64 or paths). Values are parsed as JSON where
+        // possible (so `limit=5` lands as a number, `active=true`
+        // as a bool); otherwise left as strings. This mirrors the
+        // behavior callers get from a JSON object.
+        let mut map = serde_json::Map::new();
+        for arg in args {
+            if let Some((k, v)) = arg.split_once('=') {
+                let parsed = serde_json::from_str(v).unwrap_or_else(|_| json!(v));
+                map.insert(k.to_string(), parsed);
+            }
+        }
+        Value::Object(map)
+    } else if args.len() == 1 && (args[0].trim_start().starts_with('{') || args[0].starts_with('['))
+    {
+        // Form 2: a single JSON object/array. Pass through verbatim
+        // (after a parse check so we surface a clear error rather
+        // than a tool-side failure deep inside the MCP server).
+        serde_json::from_str(&args[0])
+            .with_context(|| format!("parse JSON object from oneshot arg: {}", args[0]))?
     } else {
+        // Form 3: bare positional. Wrap the first bare arg as
+        // `{"symbol": <arg>}` for the common single-symbol tools.
         let first = &args[0];
         let parsed = serde_json::from_str(first).unwrap_or_else(|_| json!(first));
         let mut map = serde_json::Map::new();

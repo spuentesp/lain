@@ -234,7 +234,17 @@ impl GraphDatabase {
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();
 
-        // Collect work for parallel DashMap updates: (node_id, path, idx)
+        // Collect work: also update the indexes inline (still holding
+        // the graph write lock). The previous code released the graph
+        // lock before inserting into `self.index_map`, which left a
+        // window where a concurrent `insert_edges_batch` (looking up
+        // the endpoint via `index_map.get(...)`) would find no entry
+        // for nodes that were just added to petgraph, silently dropping
+        // edges. Doing the DashMap updates under the same write lock
+        // is the same approach the comment in the lone-correct version
+        // at graph.rs:401-409 describes (kept serialized with the
+        // graph write). The DashMap is sharded internally; a single
+        // writer thread doesn't contend on its shards.
         let dash_work: Vec<(String, String, NodeIndex)> = new_nodes
             .iter()
             .filter_map(|node| {
@@ -248,19 +258,27 @@ impl GraphDatabase {
                 } else {
                     let path = node.path.clone();
                     let idx = graph.add_node(node.clone());
+                    // Pre-fix this was deferred to Phase 2 (after
+                    // `drop(graph)`), creating the race window. Move
+                    // it into Phase 1 — still under the same write
+                    // lock as the petgraph insert.
+                    self.index_map.insert(node.id.clone(), idx);
+                    self.path_index.entry(path.clone()).or_default().push(idx);
                     Some((node.id.clone(), path, idx))
                 }
             })
             .collect();
 
-        // Release graph lock before parallel DashMap updates
+        // Drop the graph lock now that the indexes are in sync with
+        // the petgraph inserts.
         drop(graph);
 
-        // Phase 2: Parallel DashMap updates (sharded internally, no contention)
-        dash_work.into_par_iter().for_each(|(id, path, idx)| {
-            self.index_map.insert(id, idx);
-            self.path_index.entry(path).or_default().push(idx);
-        });
+        // Phase 2 (no-op): the previous parallel DashMap update moved
+        // into Phase 1 to keep index updates atomic with the graph
+        // write. `dash_work` is still returned for any future caller
+        // that wants to do post-insert bookkeeping on the assigned
+        // indices, but the inserts themselves are already done.
+        let _ = dash_work;
 
         Ok(())
     }
