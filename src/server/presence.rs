@@ -771,25 +771,31 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// it came in; it still collides with itself, which is the best
 /// available answer.
 fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        lexical_normalize(path)
+    let (absolute, matched_root) = if path.is_absolute() {
+        (lexical_normalize(path), None)
     } else {
+        // Find the root that actually anchored this relative path.
+        // Pre-fix this only tried `roots.first()`, so a file in
+        // `roots[1..]` was anchored under the first root's join
+        // (often non-existent) and the strip_prefix below would fall
+        // through to the absolute path. Files in the primary root
+        // were saved as relative; files in secondary roots were saved
+        // as absolute, breaking claim lookups between processes.
         let anchored = roots
             .iter()
-            .map(|root| lexical_normalize(&root.join(path)))
-            .find(|candidate| candidate.exists());
-        match anchored.or_else(|| {
-            roots
-                .first()
-                .map(|root| lexical_normalize(&root.join(path)))
-        }) {
-            Some(p) => p,
-            None => return PathBuf::from(posix_string(path)),
+            .map(|root| (root, lexical_normalize(&root.join(path))))
+            .find(|(_, candidate)| candidate.exists());
+        match anchored {
+            Some((root, p)) => (p, Some(root.clone())),
+            None => match roots.first() {
+                Some(root) => (lexical_normalize(&root.join(path)), Some(root.clone())),
+                None => return PathBuf::from(posix_string(path)),
+            },
         }
     };
 
-    let relative = match roots.first() {
-        Some(primary) => match absolute.strip_prefix(primary) {
+    let relative = match matched_root {
+        Some(primary) => match absolute.strip_prefix(&primary) {
             Ok(rel) => rel.to_path_buf(),
             Err(_) => absolute,
         },

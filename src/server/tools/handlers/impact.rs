@@ -106,6 +106,56 @@ pub async fn get_blast_radius(
         }
         visited.insert(id.clone());
 
+        // Walk the static-graph incoming edges (build-time callers) AND
+        // the volatile-overlay incoming edges (live, uncommitted
+        // callers). Pre-fix this loop only walked the static graph, so
+        // a brand-new caller added in an uncommitted edit was invisible
+        // to blast radius — a new symbol that calls `foo` would not
+        // appear in `foo`'s blast-radius report until the next commit
+        // and reindex. The overlay is the source of truth for "what
+        // does the working tree currently have" — see `navigation.rs`
+        // for the same dual-walk pattern.
+        let mut enqueue_caller = |source_id: String, caller: Option<&crate::schema::GraphNode>| {
+            if visited.contains(&source_id) || !queued.insert(source_id.clone()) {
+                return;
+            }
+            let Some(caller) = caller else {
+                queue.push_back((source_id, depth + 1));
+                return;
+            };
+            let is_direct = depth == 0;
+            affected_names.push((
+                depth + 1,
+                format!(
+                    "  - {} ({:?}) in {}",
+                    caller.name, caller.node_type, caller.path
+                ),
+            ));
+            session_nodes.push(BlastRadiusNode {
+                id: caller.id.clone(),
+                name: caller.name.clone(),
+                node_type: format!("{:?}", caller.node_type),
+                path: caller.path.clone(),
+                // The caller sits one hop past the node we
+                // popped, so its depth is `depth + 1`. Emitting
+                // the parent's depth put every direct caller at
+                // 0, the seed's own level, and disagreed with
+                // the `[depth N]` tags in the text report.
+                depth: depth + 1,
+                is_direct,
+            });
+
+            // Confidence: LSP sync = high confidence, tree-sitter only = fallback
+            // Count each unique caller node once (first visit)
+            let node_sync_time = caller.last_lsp_sync.unwrap_or(0);
+            if node_sync_time > 0 {
+                lsp_resolved += 1;
+            } else {
+                tree_sitter_fallback += 1;
+            }
+            queue.push_back((source_id, depth + 1));
+        };
+
         if let Ok(incoming) = graph.get_edges_to(&id) {
             for e in incoming {
                 // Only dependency edges. "What breaks if I change this?"
@@ -122,44 +172,25 @@ pub async fn get_blast_radius(
                 ) {
                     continue;
                 }
+                // Static graph only stores the node id, not the node
+                // struct. Look up the node for the format fields.
                 let source_id = e.source_id.clone();
-                if visited.contains(&source_id) || !queued.insert(source_id.clone()) {
-                    continue;
-                }
-                if let Ok(Some(caller)) = graph.get_node(&source_id) {
-                    let is_direct = depth == 0;
-                    affected_names.push((
-                        depth + 1,
-                        format!(
-                            "  - {} ({:?}) in {}",
-                            caller.name, caller.node_type, caller.path
-                        ),
-                    ));
-                    session_nodes.push(BlastRadiusNode {
-                        id: caller.id.clone(),
-                        name: caller.name.clone(),
-                        node_type: format!("{:?}", caller.node_type),
-                        path: caller.path.clone(),
-                        // The caller sits one hop past the node we
-                        // popped, so its depth is `depth + 1`. Emitting
-                        // the parent's depth put every direct caller at
-                        // 0, the seed's own level, and disagreed with
-                        // the `[depth N]` tags in the text report.
-                        depth: depth + 1,
-                        is_direct,
-                    });
-
-                    // Confidence: LSP sync = high confidence, tree-sitter only = fallback
-                    // Count each unique caller node once (first visit)
-                    let node_sync_time = caller.last_lsp_sync.unwrap_or(0);
-                    if node_sync_time > 0 {
-                        lsp_resolved += 1;
-                    } else {
-                        tree_sitter_fallback += 1;
-                    }
-                }
-                queue.push_back((source_id, depth + 1));
+                let caller_opt = graph.get_node(&source_id).ok().flatten();
+                enqueue_caller(source_id, caller_opt.as_ref());
             }
+        }
+
+        // Overlay: live, uncommitted callers. `get_incoming_edges`
+        // returns `(GraphNode, EdgeType)` directly so we don't need a
+        // second node-id lookup. Filter to dependency edges here too.
+        for (caller, edge_type) in overlay.get_incoming_edges(&id) {
+            if !matches!(
+                edge_type,
+                crate::schema::EdgeType::Calls | crate::schema::EdgeType::Uses
+            ) {
+                continue;
+            }
+            enqueue_caller(caller.id.clone(), Some(&caller));
         }
     }
 

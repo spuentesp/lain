@@ -118,9 +118,15 @@ fn parse_query_string(expr: &str) -> QuerySpec {
                     if depth_str.contains("..=") || depth_str.contains("..") {
                         let parts: Vec<&str> = depth_str.split("..").collect();
                         let min: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+                        // `depth_str` like `1..=5` splits to `["1", "=5"]`.
+                        // `=5` has `=` at the START, not the end, so
+                        // `trim_end_matches('=')` is a no-op and the
+                        // `parse()` fails — silently degrading `..=`
+                        // to single-depth. Strip the leading `=` (and
+                        // any trailing whitespace) instead.
                         let max: u32 = parts
                             .last()
-                            .and_then(|s| s.trim_end_matches('=').parse().ok())
+                            .and_then(|s| s.trim_start_matches('=').parse().ok())
                             .unwrap_or(min);
                         connect_depth = DepthSpec::Range { min, max };
                     } else if let Ok(d) = depth_str.parse() {
