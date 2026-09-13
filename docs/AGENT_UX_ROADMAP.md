@@ -9,7 +9,7 @@
 The target experience is intentionally boring:
 
 ```bash
-npx @spuentesp/lain-mcp
+npx @spuentesp/lain-mcp mcp
 ```
 
 or, after installation:
@@ -105,7 +105,7 @@ There can be multiple installation mechanisms, but the docs should recommend one
 Preferred:
 
 ```bash
-npx @spuentesp/lain-mcp
+npx @spuentesp/lain-mcp mcp
 ```
 
 Installed form:
@@ -142,18 +142,18 @@ npx
 
 ### Release artifacts
 
-Publish deterministic native assets from GitHub Releases:
+Preserve the existing versioned `.tar.gz` archive contract on GitHub Releases (`{version}` excludes the leading `v`):
 
 ```text
-lain-linux-x64
-lain-linux-arm64
-lain-darwin-x64
-lain-darwin-arm64
-lain-windows-x64.exe
+lain-{version}-x86_64-unknown-linux-gnu.tar.gz
+lain-{version}-aarch64-apple-darwin.tar.gz
+lain-{version}-x86_64-pc-windows-msvc.tar.gz
 SHA256SUMS
 ```
 
-Add other targets only when CI actually validates them.
+Archives contain `lain` at the root, or `lain.exe` on Windows. Add `SHA256SUMS` covering the exact published archives. The initial supported targets are Linux x64, macOS arm64, and Windows x64. Linux arm64 and macOS x64 remain deferred until release builds, launcher mappings, and clean-room installation/MCP tests exist.
+
+Keep the npm installer and Homebrew formula aligned with these filenames. Any future naming or archive-format change must update release packaging, both consumers, and installation tests together before publication.
 
 ### Launcher behavior
 
@@ -162,14 +162,17 @@ Cache binaries under an OS-appropriate per-user cache directory. The launcher sh
 - never require administrator privileges;
 - verify SHA-256 before execution;
 - use an atomic download/rename flow;
-- support `LAIN_VERSION` for pinning;
+- support `LAIN_VERSION` for pinning: an explicit value takes precedence over the npm package version; otherwise use the exact npm package version, never an implicit latest-release lookup;
 - support offline reuse of an already cached binary;
 - print download progress only when attached to a TTY;
 - keep MCP stdout protocol-clean by sending diagnostics to stderr.
 
+Forward explicit CLI arguments unchanged; the canonical MCP invocation includes `mcp`. Bare invocation may retain native help behavior. Cache entries must include version and target. Require tag, Cargo metadata, package metadata, archive name, and executable `--version` to agree for each release; the explicit version override selects a separately verified release.
+
 ## Acceptance criteria
 
-- Clean Linux, macOS, and Windows runners can execute `npx @spuentesp/lain-mcp --version`.
+- Clean Linux x64, macOS arm64, and Windows x64 runners can execute `npx @spuentesp/lain-mcp --version`.
+- The exact command `npx @spuentesp/lain-mcp mcp` passes an MCP initialize/tools-list round trip with protocol-clean stdout.
 - No Rust toolchain is required.
 - A second invocation uses the cache and performs no network download.
 - Corrupt or mismatched checksums fail closed with a useful error.
@@ -313,6 +316,8 @@ Suggested schema:
 
 ```json
 {
+  "schema_version": 1,
+  "server_version": "0.x.x",
   "agent_ready": true,
   "repository": {
     "root": "/repo",
@@ -321,10 +326,10 @@ Suggested schema:
     "working_tree_overlay": true
   },
   "capabilities": {
-    "symbols": "ready",
-    "call_graph": "ready",
-    "git_history": "ready",
-    "semantic_search": "unavailable_optional"
+    "symbols": { "state": "ready", "optional": false },
+    "call_graph": { "state": "ready", "optional": false },
+    "git_history": { "state": "ready", "optional": false },
+    "semantic_search": { "state": "unavailable_optional", "optional": true }
   },
   "integrations": {
     "claude_code": "configured"
@@ -353,7 +358,7 @@ Never silently install unrelated system packages or mutate source files.
 
 ## Acceptance criteria
 
-- `doctor --json` is versioned as a compatibility surface.
+- `doctor --json` includes integer `schema_version` independently of `server_version`; incompatible schema changes increment it. Additive fields are permitted and consumers ignore unknown fields.
 - Exit codes distinguish ready, degraded-but-usable, and unusable.
 - Every reported problem includes a remediation action where possible.
 - MCP stdout remains clean when doctor logic is reused during startup.
@@ -400,7 +405,17 @@ unavailable_optional
 unavailable_error
 ```
 
-An agent can therefore decide whether to wait, fall back, or continue.
+Doctor, bootstrap, discovery, and CLI status share the same capability keys (`symbols`, `call_graph`, `git_history`, `semantic_search`) and objects with required `state` and `optional` fields. Optional diagnostic fields may provide a reason, remediation, and retry delay.
+
+| State | Available behavior | Agent action |
+|---|---|---|
+| `ready` | Capability can answer from current data. | Call normally. |
+| `warming_up` | Capability cannot answer yet; other ready capabilities remain usable. | Use a ready alternative or retry after initialization. |
+| `stale_usable` | Capability can answer from a stale snapshot with explicit freshness metadata. | Use when freshness permits; request refresh otherwise. |
+| `unavailable_optional` | An optional dependency is absent or disabled; this capability cannot answer. | Fall back or request optional setup. |
+| `unavailable_error` | A failure prevents this capability from answering. | Use an alternative and follow remediation. |
+
+`agent_ready` is true when required capabilities (`optional: false`) are all `ready` or `stale_usable` and MCP transport is healthy. Doctor exits 0 when required capabilities are current and no capability has an error or is warming/stale; absent optional dependencies alone do not change that. It exits 1 for usable but degraded state and 2 when required capabilities or transport are unusable. Test all states, transitions, and aggregate/exit-code mappings.
 
 ### Startup rules
 
@@ -436,6 +451,8 @@ Example response:
 
 ```json
 {
+  "schema_version": 1,
+  "server_version": "0.x.x",
   "repository": {
     "name": "lain",
     "languages": ["Rust", "JavaScript"],
@@ -445,12 +462,13 @@ Example response:
   "architecture": {
     "entry_points": ["src/main.rs"],
     "anchors": ["Server", "GraphDatabase", "Indexer"],
-    "important_paths": ["src/server", "src/graph", "tests/use_cases"]
+    "important_paths": ["src/server", "src/server/graph.rs", "tests/use_cases"]
   },
   "capabilities": {
-    "structural": "ready",
-    "semantic": "warming_up",
-    "git_history": "ready"
+    "symbols": { "state": "ready", "optional": false },
+    "call_graph": { "state": "ready", "optional": false },
+    "git_history": { "state": "ready", "optional": false },
+    "semantic_search": { "state": "warming_up", "optional": true }
   },
   "recommended_actions": [
     {
@@ -551,12 +569,13 @@ Introduce a cheap capability endpoint/tool that an agent can call before plannin
 
 ```json
 {
+  "schema_version": 1,
   "server_version": "0.x.x",
   "repository": "my-project",
   "capabilities": {
-    "symbols": { "state": "ready" },
-    "call_graph": { "state": "ready" },
-    "git_history": { "state": "ready" },
+    "symbols": { "state": "ready", "optional": false },
+    "call_graph": { "state": "ready", "optional": false },
+    "git_history": { "state": "ready", "optional": false },
     "semantic_search": {
       "state": "warming_up",
       "optional": true
@@ -570,7 +589,7 @@ Introduce a cheap capability endpoint/tool that an agent can call before plannin
 }
 ```
 
-This should be substantially cheaper than a full health diagnostic and safe to call frequently.
+This should be substantially cheaper than a full health diagnostic and safe to call frequently. Expose the same capability model through `lain capabilities --json`; expose repository freshness, indexing progress, and aggregate readiness through `lain status --json`. Both CLI responses include `schema_version` and `server_version` and reuse the core state computation. These are proposed commands, not existing CLI guarantees.
 
 ## Acceptance criteria
 
@@ -578,6 +597,7 @@ This should be substantially cheaper than a full health diagnostic and safe to c
 - Capability state transitions are testable.
 - Freshness is explicit.
 - Optional capability absence is distinguishable from failure.
+- CLI capability and status fixtures cover ready, warming, stale, absent optional dependency, and failed required dependency states. Validate JSON without ANSI escapes, shared schema fields, and doctor-compatible readiness exit codes.
 
 ---
 
@@ -624,16 +644,18 @@ Windows x64
 For each target:
 
 1. install only Node where required for the npx path;
-2. run the public install command;
+2. run the public install command with `CI` and `LAIN_FORCE_INSTALL` unset in that subprocess, exercising the normal user path;
 3. verify `lain --version`;
 4. create/clone a tiny fixture repository;
 5. run `lain doctor --json`;
-6. launch MCP stdio;
+6. launch MCP stdio using exactly `npx @spuentesp/lain-mcp mcp`;
 7. perform `initialize`;
 8. list tools;
 9. call capability discovery;
 10. call one structural query;
 11. assert protocol-clean stdout.
+
+The current npm installer skips downloads when `CI` is set unless `LAIN_FORCE_INSTALL=1`. Add a separate automation lane with both `CI=true` and `LAIN_FORCE_INSTALL=1`; retain the unforced user lane above. Use fresh cache directories in both lanes, require an actual downloaded binary, and then verify offline cache reuse. Do not treat a skipped postinstall as a successful installation.
 
 Add a separate release-gate job that downloads exactly the published release artifacts rather than workspace-built binaries.
 
@@ -712,7 +734,7 @@ Avoid stack traces by default. Offer `--verbose` / `RUST_LOG` for diagnostics.
 ## Phase B — Trust and onboarding
 
 4. Normalize structured capability/readiness state.
-5. modernize `doctor` around that state.
+5. modernize `doctor` and implement `capabilities --json` / `status --json` around that state.
 6. implement `setup` core and generic MCP adapter.
 7. add client adapters incrementally.
 
@@ -756,6 +778,8 @@ Keep implementation PRs small and independently shippable.
 14. **Bench: agent tool-selection benchmark suite**
 15. **CI: end-to-end MCP distribution acceptance matrix**
 16. **Docs: replace install-first quickstart with setup-first onboarding**
+17. **CLI: implement `lain capabilities --json` using the shared capability schema** — test all capability states, schema version, exit codes, and protocol-free JSON.
+18. **CLI: implement `lain status --json` for freshness and aggregate readiness** — test current/stale/missing graphs, indexing progress, required failures, and agreement with doctor.
 
 Each issue should define UX screenshots/transcripts, implementation constraints, and acceptance tests before coding.
 
