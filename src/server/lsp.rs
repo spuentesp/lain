@@ -502,7 +502,6 @@ impl LspMultiplexer {
     /// Mark a language server binary as unavailable. Used by tests that want
     /// to exercise the tree-sitter fallback path without spawning real LSP
     /// processes that may hang during cleanup.
-    #[cfg(test)]
     pub fn mark_unavailable(&mut self, binary: &str) {
         self.unavailable.insert(binary.to_string());
     }

@@ -78,6 +78,8 @@ pub struct FederatedIndex {
     /// the second writer to observe the first writer's snapshot
     /// (and its post-mutation state) before building its own.
     persist_lock: parking_lot::Mutex<()>,
+    /// Serializes membership changes with complete backend projections.
+    projection_lock: parking_lot::Mutex<()>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -110,6 +112,7 @@ impl FederatedIndex {
             ready_threshold: RwLock::new(crate::federation::config::DEFAULT_READY_THRESHOLD),
             manifest_path: RwLock::new(None),
             persist_lock: parking_lot::Mutex::new(()),
+            projection_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -216,8 +219,13 @@ impl FederatedIndex {
         if let Some(overlay) = self.federation_overlay.read().clone() {
             index.set_overlay(overlay);
         }
-        self.repos.write().insert(id, index);
-        self.rebuild_symbol_index();
+        {
+            let _guard = self.projection_lock.lock();
+            if let Some(previous) = self.repos.write().insert(id, index) {
+                previous.deactivate();
+            }
+            self.rebuild_symbol_index();
+        }
         // Refresh the on-disk manifest so a runtime add survives a
         // restart. Best-effort; a save failure doesn't fail the add.
         self.persist_manifest();
@@ -225,8 +233,22 @@ impl FederatedIndex {
     }
 
     pub fn remove_repo(&self, id: &RepoId) -> Result<(), LainError> {
-        self.repos.write().remove(id);
-        self.rebuild_symbol_index();
+        {
+            let _guard = self.projection_lock.lock();
+            let prefix = format!("{}:", id.as_str());
+            let ids: Vec<_> = self
+                .backend
+                .list_nodes()?
+                .into_iter()
+                .map(|node| node.id)
+                .filter(|id| id.starts_with(&prefix))
+                .collect();
+            self.backend.remove_nodes(&ids)?;
+            if let Some(repo) = self.repos.write().remove(id) {
+                repo.deactivate();
+            }
+            self.rebuild_symbol_index();
+        }
         // Mirror `add_repo`: keep the manifest in sync with live
         // membership. See `persist_manifest` for the failure semantics.
         self.persist_manifest();
@@ -270,6 +292,8 @@ impl FederatedIndex {
     }
 
     pub async fn project_repo(&self, id: &RepoId) -> Result<(), LainError> {
+        // No await points below: this guard cannot cross an async suspension.
+        let _guard = self.projection_lock.lock();
         let repo = self
             .get_repo(id)
             .ok_or_else(|| LainError::NotFound(format!("repo {id}")))?;
@@ -367,6 +391,14 @@ impl FederatedIndex {
                 // identifiers, no colons — confirmed in
                 // `src/server/schema.rs:9-29`).
                 if let Ok(gid) = GlobalId::parse(&edge.target_id) {
+                    if !self
+                        .repos
+                        .read()
+                        .keys()
+                        .any(|id| id.as_str() == gid.repo_id())
+                    {
+                        continue;
+                    }
                     if let Some(kind_str) = gid.node_kind_str() {
                         // Parse the kind string into `NodeType`; the
                         // placeholder gets overwritten when the real
@@ -392,6 +424,9 @@ impl FederatedIndex {
                 }
             }
             for edge in external {
+                if !placeholder_ids.contains(&edge.target_id) {
+                    continue;
+                }
                 let Some(src) = local_to_global.get(&edge.source_id) else {
                     // Caller vanished from this repo between the
                     // resolve phase and now — drop and move on.

@@ -74,20 +74,8 @@ pub struct LainServer {
     /// `federation`, `federation_workspaces`, etc.
     pub(crate) overlay_paths:
         Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<String>>>>,
-    /// Serializes concurrent `process_change` calls (URGENT FIXES
-    /// #3 follow-up). The watcher receiver firing on a save can race
-    /// `sync_volatile_overlay` running for the same file: both read
-    /// the file, both query `overlay_paths.lock()` to record their
-    /// ids, and both eventually call `broadcast_overlay_insert`. The
-    /// data races themselves are internally locked (overlay nodes use
-    /// a parking_lot::RwLock; `overlay_paths` is its own Mutex), but the
-    /// *visible sequence* of overlay entries could see one writer's
-    /// id set in `overlay_paths` while another writer's node-set was
-    /// inserted, briefly leaving `process_change` callers with a
-    /// stale bookkeeping view. A coarse process_change_lock prevents
-    /// that. The work in `process_change` is short — LSP request +
-    /// tree-sitter parse + overlay insert — so contention is bounded
-    /// by the OS file event rate, not user throughput.
+    /// Serializes complete overlay reconciliations and direct file changes,
+    /// including their ownership bookkeeping and ordered subscriber diffs.
     pub(crate) process_change_lock: Arc<AsyncMutex<()>>,
     /// Per-server `RepoNamespace` for the LSP path. Mints one
     /// namespace at construction; stable for the lifetime of the

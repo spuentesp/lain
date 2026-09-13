@@ -872,3 +872,68 @@ async fn concurrent_mixed_mutations_persist_manifest_consistently() {
         on_disk_ids, in_mem_ids,
     );
 }
+
+#[tokio::test]
+async fn removing_repo_retracts_backend_edges_and_survives_other_projection() {
+    use crate::schema::{EdgeType, GraphEdge, GraphNode};
+    let state = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(petgraph_backend(&state));
+    let a = RepoId::new("a").unwrap();
+    let b = RepoId::new("b").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    git2::Repository::init(root.path()).unwrap();
+    for id in [&a, &b] {
+        fed.add_repo(
+            Box::new(WorkspaceDirSource::new(id.clone(), root.path().to_owned()).unwrap()),
+            state.path(),
+        )
+        .await
+        .unwrap();
+        let repo = fed.get_repo(id).unwrap();
+        repo.db()
+            .insert_node(&GraphNode::new_in(
+                NodeType::Function,
+                format!("only_{id}"),
+                "lib.rs".into(),
+                repo.source().id_namespace(),
+            ))
+            .unwrap();
+        fed.project_repo(id).await.unwrap();
+    }
+    let a_node = fed
+        .backend()
+        .find_nodes_by_name("only_a")
+        .unwrap()
+        .pop()
+        .unwrap();
+    let b_node = fed
+        .backend()
+        .find_nodes_by_name("only_b")
+        .unwrap()
+        .pop()
+        .unwrap();
+    fed.backend()
+        .upsert_edge(GraphEdge::new(
+            EdgeType::Calls,
+            b_node.id.clone(),
+            a_node.id.clone(),
+        ))
+        .unwrap();
+    let stale_handle = fed.get_repo(&a).unwrap();
+    fed.remove_repo(&a).unwrap();
+    assert!(fed.resolve_symbol("only_a").is_err());
+    assert_eq!(fed.backend().node_count(), 1);
+    assert!(fed.backend().all_edges().unwrap().is_empty());
+    // A surviving repo may have queued an external edge before removal.
+    let survivor = fed.get_repo(&b).unwrap();
+    let local = survivor.nodes().pop().unwrap();
+    survivor
+        .db()
+        .insert_edges_batch(&[GraphEdge::new(EdgeType::Calls, local.id, a_node.id)])
+        .unwrap();
+    fed.project_repo(&b).await.unwrap();
+    assert_eq!(fed.backend().node_count(), 1);
+    assert!(fed.project_repo(&a).await.is_err());
+    stale_handle.sync_overlay().await.unwrap();
+    assert_eq!(PetgraphBackend::new(state.path()).unwrap().node_count(), 1);
+}

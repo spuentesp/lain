@@ -1090,15 +1090,6 @@ async fn sync_overlay_purges_reverted_addition_after_revert() {
 ///    in PR #14 is supposed to deliver.
 #[tokio::test]
 async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
-    if which::which("rust-analyzer").is_ok() {
-        eprintln!(
-            "[skip] rust-analyzer on PATH; this test exercises the no-LSP \
-             tree-sitter fallback. Run on a CI runner without \
-             rust-analyzer to verify."
-        );
-        return;
-    }
-
     use lain::server::LainServer;
     use std::process::Command;
     use std::sync::Arc;
@@ -1161,6 +1152,8 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
     let mem = repo_root.join(".lain/graph.bin");
     let server = Arc::new(LainServer::new(&repo_root, &mem, None).expect("LainServer::new"));
 
+    disable_rust_lsp(&server).await;
+
     // 1. Build the static graph. This scans `lib.rs` and mints
     // `shared_symbol` with an id derived from `&self.id_namespace`.
     server.build_core_memory().await.expect("build_core_memory");
@@ -1189,8 +1182,7 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
     // uncommitted file, with the tree-sitter fallback when LSP is
     // unavailable. The overlay node should be minted with the
     // same `&self.id_namespace`.
-    Arc::get_mut(&mut Arc::clone(&server))
-        .unwrap()
+    server
         .sync_volatile_overlay()
         .await
         .expect("sync_volatile_overlay");
@@ -1381,14 +1373,8 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
 /// graph (modulo the per-repo namespace).
 #[tokio::test]
 async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable() {
-    // Same skip as `tests/federation_overlay_no_lsp.rs`: with
-    // rust-analyzer present the tree-sitter fallback is bypassed.
-    if which::which("rust-analyzer").is_ok() {
-        eprintln!("[skip] rust-analyzer on PATH; cannot exercise no-LSP overlay fallback.");
-        return;
-    }
-
     let (server, repo_root, _tmp) = build_lain_server_with_repo().await;
+    disable_rust_lsp(&server).await;
 
     // Pre-fix behavior: with no LSP the overlay was empty after
     // `process_change`. Pin the contract: editing a file in the
@@ -1426,4 +1412,155 @@ async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable()
          get_node_at_location can resolve the symbol at a source line"
     );
     std::mem::forget(server);
+}
+
+// Mark each multiplexer unavailable without mutating process-wide PATH.
+async fn disable_rust_lsp(server: &LainServer) {
+    for _ in 0..server.tuning.ingestion.lsp_pool_size {
+        server
+            .lsp_pool
+            .next()
+            .lock()
+            .await
+            .mark_unavailable("rust-analyzer");
+    }
+}
+
+#[tokio::test]
+async fn repeated_refresh_keeps_sidecar_equal_to_owner() {
+    use lain::overlay::{subscribe_channel, VolatileOverlay};
+    let (server, root, _tmp) = build_lain_server_with_repo().await;
+    disable_rust_lsp(&server).await;
+    let path = root.join("refresh.rs");
+    let sidecar = VolatileOverlay::new();
+    let mut rx = subscribe_channel();
+    for contents in [
+        "pub fn cycle2_first() {}",
+        "pub fn cycle2_first() {}",
+        "pub fn cycle2_replacement() {}",
+        "// no symbols",
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        server.sync_volatile_overlay().await.unwrap();
+        while let Ok(diff) = rx.try_recv() {
+            for node in diff.added {
+                sidecar.insert_node(node);
+            }
+            for id in diff.removed {
+                sidecar.remove_node(&id);
+            }
+            for node in diff.updated {
+                sidecar.upsert_node(node);
+            }
+        }
+        let ids = |overlay: &VolatileOverlay| {
+            let mut ids: Vec<_> = overlay
+                .get_all_nodes()
+                .into_iter()
+                .filter(|n| n.name.starts_with("cycle2_"))
+                .map(|n| n.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(&sidecar), ids(&server.overlay), "contents: {contents}");
+    }
+}
+
+#[tokio::test]
+async fn direct_changes_replace_renamed_empty_and_deleted_symbols() {
+    let (server, root, _tmp) = build_lain_server_with_repo().await;
+    disable_rust_lsp(&server).await;
+    let path = root.join("replacement.rs");
+    for name in ["before", "after"] {
+        std::fs::write(&path, format!("pub fn {name}() {{}}\n")).unwrap();
+        server.process_change(&path).await.unwrap();
+        let nodes = server.overlay.get_all_nodes();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, name);
+    }
+    std::fs::write(&path, "// empty").unwrap();
+    server.process_change(&path).await.unwrap();
+    assert!(server.overlay.get_all_nodes().is_empty());
+    std::fs::write(&path, "pub fn deleted() {}\n").unwrap();
+    server.process_change(&path).await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+    server.process_change(&path).await.unwrap();
+    assert!(server.overlay.get_all_nodes().is_empty());
+}
+
+#[tokio::test]
+async fn overlapping_reconciliations_retract_previous_symbol_ids() {
+    let (server, root, _tmp) = build_lain_server_with_repo().await;
+    disable_rust_lsp(&server).await;
+    let path = root.join("concurrent.rs");
+    std::fs::write(&path, "pub fn old_name() {}\n").unwrap();
+    server.process_change(&path).await.unwrap();
+    std::fs::write(&path, "pub fn current_name() {}\n").unwrap();
+    let (a, b) = tokio::join!(server.sync_volatile_overlay(), server.process_change(&path));
+    a.unwrap();
+    b.unwrap();
+    let nodes = server.overlay.get_all_nodes();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].name, "current_name");
+    std::fs::remove_file(path).unwrap();
+    server.sync_volatile_overlay().await.unwrap();
+    assert!(server.overlay.get_all_nodes().is_empty());
+}
+
+#[tokio::test]
+async fn deleting_last_tracked_file_prunes_and_persists_both_pipelines() {
+    use lain::graph::GraphDatabase;
+    use std::process::Command;
+    for federated in [false, true] {
+        let (server, root, _tmp) = build_lain_server_with_repo().await;
+        disable_rust_lsp(&server).await;
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["rm", "-q", "README.md"]);
+        std::fs::write(root.join("lib.rs"), "pub fn original() {}\n").unwrap();
+        git(&["add", "lib.rs"]);
+        git(&["commit", "-qm", "one tracked file"]);
+        let state = tempfile::tempdir().unwrap();
+        let repo = Arc::new(
+            RepoIndex::new(
+                Box::new(
+                    WorkspaceDirSource::new(RepoId::new("cleanup").unwrap(), root.clone()).unwrap(),
+                ),
+                state.path(),
+            )
+            .unwrap(),
+        );
+        if federated {
+            repo.index().await.unwrap();
+            assert!(!repo.nodes().is_empty());
+        } else {
+            server.build_core_memory().await.unwrap();
+            assert!(!server.graph.get_all_nodes().is_empty());
+        }
+        git(&["rm", "-q", "lib.rs"]);
+        git(&["commit", "-qm", "empty repo"]);
+        if federated {
+            repo.index().await.unwrap();
+            assert!(repo.nodes().is_empty());
+            assert!(GraphDatabase::new(&state.path().join("graph.bin"))
+                .unwrap()
+                .get_all_nodes()
+                .is_empty());
+        } else {
+            server.build_core_memory().await.unwrap();
+            assert!(server.graph.get_all_nodes().is_empty());
+            assert!(GraphDatabase::new(&root.join("graph.bin"))
+                .unwrap()
+                .get_all_nodes()
+                .is_empty());
+        }
+    }
 }

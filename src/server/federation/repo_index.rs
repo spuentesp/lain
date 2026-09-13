@@ -141,6 +141,9 @@ pub struct RepoIndex {
     /// `start_watcher` is called. The watcher is dropped (and the
     /// background thread stops) when the `RepoIndex` is dropped.
     watcher: parking_lot::Mutex<Option<notify::RecommendedWatcher>>,
+    watcher_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Gates overlay publication against removal from the federation.
+    active: parking_lot::Mutex<bool>,
     /// Fires after every receiver-task iteration completes
     /// (`me.index().await` + `me.sync_overlay().await`). Tests await
     /// this with a timeout instead of `tokio::time::sleep`, so they
@@ -187,6 +190,23 @@ pub struct RepoIndex {
 // verify the auto-traits. A test in `mod tests` asserts this statically.
 
 impl RepoIndex {
+    /// Stop publishing shared state, including from already-started scans.
+    pub(crate) fn deactivate(&self) {
+        let mut active = self.active.lock();
+        *active = false;
+        self.watcher.lock().take();
+        if let Some(task) = self.watcher_task.lock().take() {
+            task.abort();
+        }
+        let overlay = self.server_overlay.lock().clone();
+        for ids in self.overlay_paths.lock().drain().map(|(_, ids)| ids) {
+            for id in ids {
+                overlay.remove_node(&id);
+            }
+        }
+        self.cross_repo_resolver.lock().take();
+    }
+
     pub fn new(source: Box<dyn RepoSource>, data_dir: &Path) -> Result<Self, LainError> {
         let local_path = source.local_path().to_path_buf();
         let mut db = GraphDatabase::new(&data_dir.join("graph.bin"))?;
@@ -224,6 +244,8 @@ impl RepoIndex {
             overlay_paths: parking_lot::Mutex::new(HashMap::new()),
             sync_overlay_lock: AsyncMutex::new(()),
             watcher: parking_lot::Mutex::new(None),
+            watcher_task: parking_lot::Mutex::new(None),
+            active: parking_lot::Mutex::new(true),
             overlay_updated: Arc::new(tokio::sync::Notify::new()),
             last_overlay_lsp_failures: std::sync::atomic::AtomicU32::new(0),
             cross_repo_resolver: parking_lot::Mutex::new(None),
@@ -474,47 +496,21 @@ impl RepoIndex {
         Ok(())
     }
 
-    /// Attach a `notify::RecommendedWatcher` to this repo's local path.
-    ///
-    /// The watcher callback runs on notify's inotify thread and pushes the
-    /// raw `notify::Result<notify::Event>` into a bounded
-    /// (`WATCHER_CHANNEL_DEPTH = 1024`) `tokio::sync::mpsc::Sender` via
-    /// `try_send`. A Tokio-spawned receiver task owns the matching
-    /// `Receiver` and an `Arc<RepoIndex>`; per event it runs
-    /// `me.index().await` (commit-based pipeline) followed by
-    /// `me.sync_overlay().await` (working-tree refresh). Failures from
-    /// either call are logged via `tracing::debug!` and do not propagate.
-    ///
-    /// The channel handoff keeps `tokio::spawn` and `.await` off the
-    /// inotify thread, which is not a Tokio runtime context — calling
-    /// either from the watcher closure directly would panic.
-    ///
-    /// The watcher is moved into `self.watcher` so it stays alive for
-    /// the lifetime of the `RepoIndex`. When the `RepoIndex` is dropped
-    /// the receiver task exits on the next `rx.recv()` returning `None`,
-    /// the inotify watch is released by `RecommendedWatcher::drop`, and
-    /// any events that arrive on a now-dropped channel are silently
-    /// dropped (the closure uses `tx.try_send` and ignores `Full`).
-    ///
-    /// The mpsc channel is **bounded at 1024 events**. `index()` is
-    /// itself bounded at [`Self::index_timeout`] (60s by default,
-    /// overridable via `LAIN_REINDEX_TIMEOUT`); a stuck LSP child process
-    /// or a slow-to-warm LSP could let a `git checkout` storm (hundreds
-    /// of files in seconds) **block the receiver task** while it
-    /// processes one event at a time. An unbounded queue would let the
-    /// inotify-side sender grow without bound until the receiver
-    /// unblocked — a memory bomb under pathological workloads. The
-    /// bounded queue caps worst-case memory at ~1024 serialized events;
-    /// when full, the sender drops the event at `tracing::debug!` level
-    /// and the next event from `notify` retries shortly (cooperative
-    /// backpressure).
+    /// Watch the checkout through a bounded event channel. The receiver holds
+    /// only a Weak reference while idle, so it cannot keep a removed repo alive.
+    /// Deactivation drops the watcher and aborts its receiver task; an in-flight
+    /// overlay scan must pass the active gate before publishing any nodes.
     pub async fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
+        let active = self.active.lock();
+        if !*active || self.watcher.lock().is_some() {
+            return Ok(());
+        }
         use notify::{RecommendedWatcher, RecursiveMode, Watcher};
         use std::time::Duration;
         use tokio::sync::mpsc;
 
         let path = self.source.local_path().to_path_buf();
-        let me_for_task = Arc::clone(self);
+        let weak = Arc::downgrade(self);
 
         // Bounded channel to hand events from notify's inotify thread to
         // a Tokio task. The closure no longer calls `tokio::spawn`
@@ -536,8 +532,11 @@ impl RepoIndex {
         // because tests hold their own clone of the `Arc<Notify>`
         // and call `notified().await` once per event they want to
         // observe.
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             while let Some(res) = rx.recv().await {
+                let Some(me_for_task) = weak.upgrade() else {
+                    break;
+                };
                 if res.is_ok() {
                     // `index_forced` (not `index`) — the watcher fires
                     // on a kernel `notify` event, which is independent
@@ -615,6 +614,7 @@ impl RepoIndex {
             .map_err(|e| LainError::Other(format!("watcher.watch({:?}): {e}", path)))?;
 
         *self.watcher.lock() = Some(watcher);
+        *self.watcher_task.lock() = Some(task);
         Ok(())
     }
 
@@ -636,6 +636,9 @@ impl RepoIndex {
         // `overlay_paths` bookkeeping below is never read-modified by
         // two overlapping cycles.
         let _sync_guard = self.sync_overlay_lock.lock().await;
+        if !*self.active.lock() {
+            return Ok(());
+        }
         let overlay = self.server_overlay.lock().clone();
 
         // Reset the per-cycle LSP-failure counter at the start so a
@@ -755,11 +758,20 @@ impl RepoIndex {
                 continue;
             }
             match self
-                .process_overlay_change(&change.path, &overlay, &self.last_overlay_lsp_failures)
+                .process_overlay_change(&change.path, &self.last_overlay_lsp_failures)
                 .await
             {
-                Ok(new_ids) => {
-                    self.overlay_paths.lock().insert(key, new_ids);
+                Ok(nodes) => {
+                    let active = self.active.lock();
+                    if !*active {
+                        return Ok(());
+                    }
+                    let mut ids = Vec::with_capacity(nodes.len());
+                    for node in nodes {
+                        ids.push(node.id.clone());
+                        overlay.insert_node(node);
+                    }
+                    self.overlay_paths.lock().insert(key, ids);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -785,9 +797,8 @@ impl RepoIndex {
 
     /// LSP-then-overlay-insert flow for a single file. Mirrors
     /// `LainServer::process_change` (in `src/server/ingest/ingestion.rs:429`)
-    /// but takes the overlay as a parameter and uses `self.source.local_path()`
-    /// as the workspace root. The federation has no `LainServer` reference,
-    /// so we re-implement the flow here.
+    /// and uses `self.source.local_path()` as the workspace root. Returns
+    /// parsed nodes; the caller publishes them under the lifecycle gate.
     ///
     /// `lsp_failures` is incremented when the LSP lookup errors out (cold
     /// server, missing language server for this file type, etc.). The caller
@@ -795,9 +806,8 @@ impl RepoIndex {
     async fn process_overlay_change(
         self: &Arc<Self>,
         path: &Path,
-        overlay: &Arc<crate::server::overlay::VolatileOverlay>,
         lsp_failures: &std::sync::atomic::AtomicU32,
-    ) -> Result<Vec<String>, LainError> {
+    ) -> Result<Vec<GraphNode>, LainError> {
         // 1. Try the LSP path first. A successful but empty response (cold
         // LSP that hasn't analyzed the file yet) falls through to
         // tree-sitter; only a true `Err` counts as an LSP failure for the
@@ -869,12 +879,7 @@ impl RepoIndex {
             }
         };
 
-        let mut ids = Vec::with_capacity(symbols.len());
-        for symbol in symbols {
-            ids.push(symbol.node.id.clone());
-            overlay.insert_node(symbol.node.clone());
-        }
-        Ok(ids)
+        Ok(symbols.into_iter().map(|symbol| symbol.node).collect())
     }
 }
 
@@ -922,6 +927,7 @@ const LSP_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
 impl Drop for RepoIndex {
     fn drop(&mut self) {
+        self.deactivate();
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
@@ -993,5 +999,67 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<RepoIndex>();
         assert_send_sync::<Arc<RepoIndex>>();
+    }
+    #[tokio::test]
+    async fn deactivation_clears_owned_overlay_and_stops_watcher() {
+        let root = tempfile::tempdir().unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        std::fs::write(root.path().join("lib.rs"), "pub fn edited() {}\n").unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let repo = Arc::new(
+            RepoIndex::new(
+                Box::new(
+                    WorkspaceDirSource::new(
+                        RepoId::new("removed").unwrap(),
+                        root.path().to_owned(),
+                    )
+                    .unwrap(),
+                ),
+                state.path(),
+            )
+            .unwrap(),
+        );
+        for _ in 0..4 {
+            repo.lsp
+                .next()
+                .lock()
+                .await
+                .mark_unavailable("rust-analyzer");
+        }
+        repo.sync_overlay().await.unwrap();
+        let overlay = repo.server_overlay.lock().clone();
+        assert_eq!(overlay.get_all_nodes().len(), 1);
+        let unrelated = GraphNode::new(
+            crate::schema::NodeType::Function,
+            "other".into(),
+            "lib.rs".into(),
+        );
+        overlay.insert_node(unrelated.clone());
+        repo.start_watcher().await.unwrap();
+        let mut lsp_guards = Vec::new();
+        for _ in 0..4 {
+            lsp_guards.push(repo.lsp.next().lock_owned().await);
+        }
+        let scanning = repo.clone();
+        let mut in_flight = tokio::spawn(async move { scanning.sync_overlay().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut in_flight)
+                .await
+                .is_err()
+        );
+        repo.deactivate();
+        drop(lsp_guards);
+        tokio::time::timeout(Duration::from_secs(2), in_flight)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(repo.watcher.lock().is_none());
+        assert!(repo.watcher_task.lock().is_none());
+        repo.sync_overlay().await.unwrap();
+        repo.start_watcher().await.unwrap();
+        assert!(repo.watcher.lock().is_none());
+        assert_eq!(overlay.get_all_nodes().len(), 1);
+        assert!(overlay.get_node(&unrelated.id).is_some());
     }
 }
