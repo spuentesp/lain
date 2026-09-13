@@ -39,16 +39,16 @@ class ActionTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
-    def download_fixture(self, binary_version):
+    def download_fixture(self, binary_version, platform="Linux", arch="x86_64", binary="lain"):
         archive = self.root / "fixture.tar.gz"
         content = f'#!/bin/sh\necho "lain {binary_version}"\n'.encode()
         with tarfile.open(archive, "w:gz") as tar:
-            member = tarfile.TarInfo("lain")
+            member = tarfile.TarInfo(binary)
             member.size = len(content)
             member.mode = 0o755
             tar.addfile(member, io.BytesIO(content))
         self.env["REVIEW_ARCHIVE"] = str(archive)
-        self.stub("uname", 'import sys\nprint("Linux" if sys.argv[1] == "-s" else "x86_64")\n')
+        self.stub("uname", f'import sys\nprint({platform!r} if sys.argv[1] == "-s" else {arch!r})\n')
         self.stub("curl", '''import os, sys, shutil
 from pathlib import Path
 args = sys.argv[1:]
@@ -65,6 +65,24 @@ shutil.copyfile(os.environ["REVIEW_ARCHIVE"], args[args.index("-o")+1])
         self.assertIn("/v0.7.2/lain-0.7.2-", (self.root / "calls").read_text())
         self.assertTrue((self.root / "installed/lain").exists())
         self.assertEqual((self.root / "github-path").read_text().strip(), self.env["LAIN_INSTALL_DIR"])
+
+    def test_other_platform_archives(self):
+        for platform, arch, target, binary in [
+            ("Darwin", "arm64", "aarch64-apple-darwin", "lain"),
+            ("MINGW64_NT", "x86_64", "x86_64-pc-windows-msvc", "lain.exe"),
+        ]:
+            with self.subTest(platform=platform):
+                self.download_fixture("0.7.3", platform, arch, binary)
+                self.env["LAIN_VERSION"] = "v0.7.3"
+                self.run_script("install-binary.sh")
+                self.assertIn(target, (self.root / "calls").read_text())
+                self.assertTrue((self.root / "installed" / binary).exists())
+
+    def test_composite_forwards_health_inputs(self):
+        action = (ACTION / "action.yml").read_text()
+        step = action.split("- name: Compute architecture health", 1)[1].split("- name:", 1)[0]
+        self.assertIn("INPUT_MIN_FAN_OUT: ${{ inputs.min-fan-out }}", step)
+        self.assertIn("INPUT_LSP_LANGUAGES: ${{ inputs.lsp-languages }}", step)
 
     def test_wrong_binary_version_fails_before_install(self):
         self.download_fixture("0.7.3")
@@ -103,6 +121,13 @@ else: print(response)
         self.env.update(INPUT_LSP_LANGUAGES="", REVIEW_MCP_ERROR="1")
         self.run_script("health.sh", success=False)
         self.assertIn("level=error", (self.root / "outputs").read_text())
+        self.assertNotIn("level=success", (self.root / "outputs").read_text())
+
+    def test_failed_language_install_does_not_publish_success(self):
+        self.health_fixture()
+        self.env.update(INPUT_LSP_LANGUAGES="python", REVIEW_MCP_ERROR="1")
+        self.run_script("health.sh", success=False)
+        self.assertIn("Language-server installation failed", (self.root / "outputs").read_text())
         self.assertNotIn("level=success", (self.root / "outputs").read_text())
 
     def test_comma_separated_languages_are_individual_requests(self):

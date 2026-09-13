@@ -29,8 +29,7 @@ def check(root, tag=None, binary=None):
         collect(json.loads((root / name).read_text()), name)
     formula = (root / "Formula/lain.rb").read_text()
     versions["Formula/lain.rb"] = re.search(r'^\s*version "([^"]+)"', formula, re.M)[1]
-    action = (root / ".github/actions/lain-health-badge/action.yml").read_text()
-    versions["badge default"] = re.search(r"  lain-version:.*?default: ['\"]v([^'\"]+)", action, re.S)[1]
+    # The badge pins a published binary, which can lag release-preparation metadata.
     if tag is not None:
         if tag != f"v{version}":
             raise ValueError(f"tag {tag!r} does not match Cargo version v{version}")

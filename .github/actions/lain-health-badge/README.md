@@ -16,11 +16,7 @@ On every pull request, the action:
 4. Posts a sticky PR comment with both results.
 5. Posts a `lain/health-badge` commit status (pass/fail).
 
-The pass/fail rule in v0.1 is intentionally narrow: the badge fails only when
-`get_health` reports a degraded graph (stale index, failed re-index). This is
-the only condition where the badge output would be *actively misleading*.
-Thresholds for warn-level rules are reserved for a v0.2 when they are worth
-fighting over.
+The badge fails on a degraded graph, invalid configuration, or failed MCP health or language-server installation calls. Architecture thresholds remain informational.
 
 ## Inputs
 
@@ -30,7 +26,9 @@ fighting over.
 | `min-fan-out` | no | `15` | Threshold passed to `architectural_observations` |
 | `fail-on-warn` | no | `false` | Reserved for v0.2 |
 | `comment-header` | no | `lain-health` | Sticky-comment key (change to reset the comment thread) |
-| `lain-version` | no | `v0.7.2` | Lain release tag to install |
+| `lain-version` | no | `v0.7.3` | Exact published Lain release tag to install |
+| `lsp-languages` | no | `auto` | Detect from project files; comma-separated names to select languages; empty string to skip |
+| `reindex-timeout` | no | `300` | Reindex timeout in seconds |
 
 ## Usage
 
@@ -43,6 +41,10 @@ on:
 jobs:
   lain-health:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: spuentesp/lain/.github/actions/lain-health-badge@v0.7.3
@@ -59,6 +61,8 @@ match your codebase:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           min-fan-out: '25'
 ```
+
+Keep `lain-version` pinned to an existing release while preparing a new Cargo version. Update the default after the new assets are published; the main-branch version-drift check compares this pin with the latest release. The behavior described here is from the current source; use a release containing these fixes when adopting the new inputs.
 
 ## Requirements
 

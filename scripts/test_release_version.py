@@ -26,6 +26,24 @@ class ReleaseGateTests(unittest.TestCase):
     def test_current_metadata_passes(self):
         release_check.check(self.root)
 
+    def test_badge_can_pin_previous_published_release(self):
+        path = self.root / ".github/actions/lain-health-badge/action.yml"
+        path.write_text(path.read_text().replace("default: 'v0.7.3'", "default: 'v0.7.2'"))
+        release_check.check(self.root)
+
+    def test_binary_version_is_verified(self):
+        import os
+        if os.name == "nt":
+            self.skipTest("shell executable fixture runs in Linux contract CI")
+        version = tomllib.loads((self.root / "Cargo.toml").read_text())["package"]["version"]
+        binary = self.root / "lain"
+        binary.write_text(f'#!/bin/sh\necho "lain {version}"\n')
+        binary.chmod(0o755)
+        release_check.check(self.root, binary=binary)
+        binary.write_text('#!/bin/sh\necho "lain 0.0.0"\n')
+        with self.assertRaisesRegex(ValueError, "binary version mismatch"):
+            release_check.check(self.root, binary=binary)
+
     def test_wrong_tag_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "tag"):
             release_check.check(self.root, tag="v0.0.0")

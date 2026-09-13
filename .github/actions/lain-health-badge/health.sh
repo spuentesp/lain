@@ -170,15 +170,15 @@ if [ -n "$LSP_LANGUAGES" ]; then
     RESP=$(mktemp)
     # Build the request body with jq to avoid shell-escaping bugs.
     BODY=$(jq -n --arg lang "$lang" '{jsonrpc:"2.0",method:"tools/call",params:{name:"install_language_server",arguments:{language:$lang}},id:99}')
-    HTTP_CODE=$(curl -sS --max-time 600 -o "$RESP" -w "%{http_code}" -X POST http://127.0.0.1:9999/mcp \
-      -H 'Content-Type: application/json' \
-      -d "$BODY")
-    RESP_LEN=$(wc -c < "$RESP")
-    echo "  HTTP $HTTP_CODE, body ${RESP_LEN} bytes"
-    MSG=$(jq -r 'try (.result.content[0].text // .error.message // .message) catch "(parse error: " + .message + ")"' < "$RESP" 2>/dev/null)
-    if [ -n "$MSG" ] && [ "$MSG" != "null" ]; then
-      echo "  → $MSG"
+    if ! curl -fsS --max-time 600 -o "$RESP" -X POST http://127.0.0.1:9999/mcp \
+      -H 'Content-Type: application/json' -d "$BODY" \
+      || ! jq -e 'select(.error == null and .result.isError != true) |
+                    .result.content[0].text | select(type == "string" and length > 0)' "$RESP" >/dev/null; then
+      rm -f "$RESP"
+      emit_outputs "error" "Language-server installation failed" "Unable to install requested language server: $lang"
+      exit 1
     fi
+    jq -r '.result.content[0].text' "$RESP"
     rm -f "$RESP"
   done
   echo "::endgroup::"
