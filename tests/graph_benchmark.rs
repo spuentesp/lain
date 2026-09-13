@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-type EmbedderCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+type EmbeddingCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
 
-fn make_test_executor_params() -> (NlpEmbedder, EmbedderCache) {
+fn make_test_executor_params() -> (NlpEmbedder, EmbeddingCache) {
     let embedder = NlpEmbedder::new_stub();
     let cache = Arc::new(Mutex::new(HashMap::new()));
     (embedder, cache)

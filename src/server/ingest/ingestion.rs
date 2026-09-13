@@ -691,10 +691,15 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
 
 /// Inputs for one repository indexing pass. The references deliberately tie
 /// the graph, overlay, sensors, and namespace to the same call lifetime.
+///
+/// Field names match the per-subsystem config structs in this crate
+/// (`ToolContextDeps`, `ToolExecutorConfig`): `graph`, `lsp_pool`,
+/// `git`, `overlay`, `namespace`. The shorter `db`/`lsp` would have
+/// been a footgun for anyone matching the two-struct pattern.
 pub struct IndexRequest<'a> {
     pub path: &'a Path,
-    pub db: &'a GraphDatabase,
-    pub lsp: &'a LspPool,
+    pub graph: &'a GraphDatabase,
+    pub lsp_pool: &'a LspPool,
     pub git: &'a GitSensor,
     pub overlay: &'a VolatileOverlay,
     pub resolver: Option<&'a dyn crate::federation::cross_repo::CrossRepoResolver>,
@@ -706,8 +711,8 @@ pub struct IndexRequest<'a> {
 pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> {
     let IndexRequest {
         path,
-        db,
-        lsp,
+        graph,
+        lsp_pool,
         git,
         overlay,
         resolver,
@@ -717,7 +722,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     } = request;
     let scan_start = std::time::Instant::now();
     let (latest_commit, latest_time) = git.get_latest_commit_info()?;
-    let last_commit = db.get_last_commit()?;
+    let last_commit = graph.get_last_commit()?;
 
     // The commit-hash short-circuit exists to skip an expensive full
     // re-scan when nothing has changed on disk. The file-watcher path
@@ -774,9 +779,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
             "[federation] No files to scan for {:?}; sweeping orphans.",
             path
         );
-        sweep_orphans(path, db, git);
-        db.set_last_commit(latest_commit)?;
-        db.save_to_disk_sync()?;
+        sweep_orphans(path, graph, git);
+        graph.set_last_commit(latest_commit)?;
+        graph.save_to_disk_sync()?;
         return Ok(());
     }
 
@@ -802,7 +807,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
 
     let mut set = tokio::task::JoinSet::new();
     for chunk in file_chunks {
-        let lsp_mux = lsp.next();
+        let lsp_mux = lsp_pool.next();
         let workspace = path.to_path_buf();
         let commit_hash = latest_commit.clone();
         let git_time = latest_time;
@@ -868,10 +873,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
                         .collect::<HashSet<_>>()
                         .into_iter()
                         .collect();
-                    if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
+                    if let Err(e) = graph.replace_nodes_for_paths(&paths, &batch_nodes) {
                         warn!("[federation] Batch node write error: {}", e);
                     }
-                    insert_edges_best_effort(db, &batch_edges, "batch");
+                    insert_edges_best_effort(graph, &batch_edges, "batch");
                     batch_nodes.clear();
                     batch_edges.clear();
                 }
@@ -890,10 +895,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        if let Err(e) = db.replace_nodes_for_paths(&paths, &batch_nodes) {
+        if let Err(e) = graph.replace_nodes_for_paths(&paths, &batch_nodes) {
             warn!("[federation] Final batch node write error: {}", e);
         }
-        insert_edges_best_effort(db, &batch_edges, "final batch");
+        insert_edges_best_effort(graph, &batch_edges, "final batch");
     }
 
     info!(
@@ -908,27 +913,27 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
 
     // Resolve phase: link external references to internal nodes (CALLS)
     let call_edges =
-        super::resolve::resolve_call_edges(db, path, &all_external_refs, resolver, source_repo);
+        super::resolve::resolve_call_edges(graph, path, &all_external_refs, resolver, source_repo);
     info!(
         "[federation] {:?}: ingesting {} call edges",
         path,
         call_edges.len()
     );
-    insert_edges_reporting(db, &call_edges, "call")?;
+    insert_edges_reporting(graph, &call_edges, "call")?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
     let static_edges =
-        super::resolve::resolve_static_edges(db, &all_static_refs, resolver, source_repo);
+        super::resolve::resolve_static_edges(graph, &all_static_refs, resolver, source_repo);
     info!(
         "[federation] {:?}: ingesting {} static tree-sitter edges",
         path,
         static_edges.len()
     );
-    insert_edges_reporting(db, &static_edges, "static")?;
+    insert_edges_reporting(graph, &static_edges, "static")?;
 
     // Pattern resolve: cross-boundary detection
     let pattern_edges = super::resolve::resolve_pattern_edges(
-        db,
+        graph,
         &all_pattern_refs,
         super::resolve::PatternLimits::FEDERATION,
     );
@@ -937,7 +942,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         path,
         pattern_edges.len()
     );
-    db.insert_edges_batch(&pattern_edges)?;
+    graph.insert_edges_batch(&pattern_edges)?;
 
     // Refresh the federation's symbol index so the just-populated
     // per-repo DB is visible to subsequent cross-repo lookups in
@@ -948,7 +953,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
 
     // Protocol sensors — same rationale as the single-workspace pipeline;
     // runs after symbol nodes exist so route->handler links resolve.
-    let sensor_counts = crate::server::sensors::run_all(db, path);
+    let sensor_counts = crate::server::sensors::run_all(graph, path);
     if sensor_counts.total() > 0 {
         info!(
             "[federation] {:?}: protocol sensors contributed {:?}",
@@ -968,21 +973,21 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         .into_iter()
         .map(|p| (p.file1, p.file2, p.co_change_count))
         .collect();
-    db.insert_co_change_edges(&co_change_tuples)?;
+    graph.insert_co_change_edges(&co_change_tuples)?;
 
     // Enrichment: anchor scores + depths
-    db.calculate_anchor_scores()?;
-    db.calculate_depths()?;
+    graph.calculate_anchor_scores()?;
+    graph.calculate_depths()?;
 
     // Orphan sweep. This function has no scan-phase timeout and no
     // max-files cap, and the reduce loop always drains the JoinSet, so
     // reaching this point means the pass covered every changed file —
     // there is no partial case to gate on here, unlike the
     // single-workspace pipeline.
-    sweep_orphans(path, db, git);
+    sweep_orphans(path, graph, git);
 
-    db.set_last_commit(latest_commit)?;
-    db.save_to_disk_sync()?;
+    graph.set_last_commit(latest_commit)?;
+    graph.save_to_disk_sync()?;
 
     info!(
         "[federation] {:?}: fully indexed in {:?}",

@@ -561,8 +561,8 @@ impl GraphDatabase {
     /// sweep would delete the entire graph. Routing both sides through one
     /// helper makes the mismatch unrepresentable.
     ///
-    /// Callers must skip the sweep when `tracked` is empty (git failed) and
-    /// when the index pass was partial (files simply not visited yet).
+    /// A successfully enumerated empty tracked set removes all obsolete nodes.
+    /// Skip the sweep if Git enumeration failed or the tracked set is partial.
     /// Deliberately has no "refuses to delete more than N%" tripwire: the first
     /// sweep against a graph built by an older lain legitimately drops about
     /// half of it, so a ratio guard would block exactly the cleanup wanted.
@@ -1731,6 +1731,26 @@ mod remove_by_id_tests {
             g.get_node(&b_id).unwrap().is_some(),
             "survivor still resolves by id"
         );
+    }
+
+    #[test]
+    fn batch_removal_preserves_stable_indices_and_survivor_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GraphDatabase::new(&tmp.path().join("graph.bin")).unwrap();
+        let nodes: Vec<_> = (0..6)
+            .map(|i| GraphNode::new(NodeType::Function, format!("f{i}"), format!("src/{i}.rs")))
+            .collect();
+        g.insert_nodes_batch(&nodes).unwrap();
+        let ids = vec![
+            nodes[0].id.clone(),
+            nodes[4].id.clone(),
+            nodes[2].id.clone(),
+        ];
+        assert_eq!(g.remove_nodes_by_ids(&ids).unwrap(), 3);
+        for (i, node) in nodes.iter().enumerate() {
+            assert_eq!(g.get_node(&node.id).unwrap().is_some(), i % 2 == 1);
+            assert_eq!(g.find_node_by_path(&node.path).is_some(), i % 2 == 1);
+        }
     }
 
     /// Removing the last node for a path must clear the path entry too, or a

@@ -642,8 +642,8 @@ fn is_watched_file(path: &Path) -> bool {
         return false;
     }
 
-    // Skip non-files
-    if !path.is_file() {
+    // Deleted source paths must still reach reconciliation.
+    if path.is_dir() {
         return false;
     }
 
@@ -659,39 +659,7 @@ async fn process_file(
     server: &LainServer,
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let symbols = {
-        let lsp = server.lsp_pool.next();
-        let mut lsp = lsp.lock().await;
-        match lsp
-            .get_document_symbols_hierarchical(path, &server.config.workspace, &server.id_namespace)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("FileWatcher: No LSP symbols for {:?}: {}", path, e);
-                return Ok(()); // Not an error - file might not have LSP support
-            }
-        }
-    };
-
-    let count = symbols.len();
-    for mut symbol in symbols {
-        symbol.node.last_lsp_sync = Some(now);
-        let node = symbol.node.clone();
-        server.overlay.insert_node(symbol.node);
-        // Broadcast the new node to any subscribed sidecar.
-        server.broadcast_overlay_insert(node);
-    }
-
-    debug!(
-        "FileWatcher: updated overlay with {} symbols from {:?}",
-        count, path
-    );
+    server.process_change(path).await?;
     Ok(())
 }
 
@@ -707,6 +675,38 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn watcher_replacements_and_deletions_retract_owned_ids() {
+        let root = tempfile::Builder::new()
+            .prefix("lain-watcher-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        for _ in 0..4 {
+            server
+                .lsp_pool
+                .next()
+                .lock()
+                .await
+                .mark_unavailable("rust-analyzer");
+        }
+        let path = root.path().join("lib.rs");
+        fs::write(&path, "pub fn old_name() {}\n").unwrap();
+        process_file(&server, &path).await.unwrap();
+        let old = server.overlay.get_all_nodes();
+        assert_eq!(old.len(), 1);
+        fs::write(&path, "pub fn new_name() {}\n").unwrap();
+        process_file(&server, &path).await.unwrap();
+        assert!(server.overlay.get_node(&old[0].id).is_none());
+        assert_eq!(server.overlay.get_all_nodes().len(), 1);
+        fs::remove_file(&path).unwrap();
+        assert!(is_watched_file(&path));
+        process_file(&server, &path).await.unwrap();
+        assert!(server.overlay.get_all_nodes().is_empty());
+    }
 
     /// RAII guard that restores a directory's mode to `0o755` on drop, so the
     /// `TempDir` cleanup can recurse into it even if a test body panics.

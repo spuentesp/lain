@@ -38,7 +38,13 @@ static BUS: Lazy<broadcast::Sender<OverlayDiff>> =
 
 /// Publish a diff to every subscriber. Drops on the floor if there are
 /// no subscribers or the channel is full — broadcast is best-effort.
-pub fn broadcast_overlay_diff(diff: OverlayDiff) {
+pub fn broadcast_overlay_diff(mut diff: OverlayDiff) {
+    // Assign at publication, under one lock, so federation and server producers
+    // share a strictly ordered revision sequence even when writes overlap.
+    static REVISION: parking_lot::Mutex<RevisionId> = parking_lot::Mutex::new(0);
+    let mut revision = REVISION.lock();
+    *revision += 1;
+    diff.revision = *revision;
     let _ = BUS.send(diff);
 }
 
@@ -236,7 +242,7 @@ mod tests {
             updated: vec![],
         });
         match rx.recv().await {
-            Ok(diff) => assert_eq!(diff.revision, 7),
+            Ok(diff) => assert!(diff.revision > 0),
             Err(_) => panic!("expected Ok diff"),
         }
     }

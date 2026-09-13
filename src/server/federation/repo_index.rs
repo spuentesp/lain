@@ -199,10 +199,22 @@ impl RepoIndex {
             task.abort();
         }
         let overlay = self.server_overlay.lock().clone();
-        for ids in self.overlay_paths.lock().drain().map(|(_, ids)| ids) {
-            for id in ids {
-                overlay.remove_node(&id);
-            }
+        let ids: Vec<_> = self
+            .overlay_paths
+            .lock()
+            .drain()
+            .flat_map(|(_, ids)| ids)
+            .collect();
+        for id in &ids {
+            overlay.remove_node(id);
+        }
+        if !ids.is_empty() {
+            crate::server::overlay::broadcast_overlay_diff(crate::server::overlay::OverlayDiff {
+                revision: 0, // assigned by the process-wide publisher
+                added: vec![],
+                removed: ids,
+                updated: vec![],
+            });
         }
         self.cross_repo_resolver.lock().take();
     }
@@ -375,8 +387,8 @@ impl RepoIndex {
             let source_repo = self.source.id();
             index_one_repo(crate::server::ingest::ingestion::IndexRequest {
                 path: &path,
-                db,
-                lsp: &lsp,
+                graph: db,
+                lsp_pool: &lsp,
                 git: &git_guard,
                 overlay: &overlay,
                 resolver: resolver_ref,
@@ -450,8 +462,8 @@ impl RepoIndex {
             let source_repo = self.source.id();
             index_one_repo(crate::server::ingest::ingestion::IndexRequest {
                 path: &path,
-                db,
-                lsp: &lsp,
+                graph: db,
+                lsp_pool: &lsp,
                 git: &git_guard,
                 overlay: &overlay,
                 resolver: resolver_ref,
@@ -1047,7 +1059,29 @@ mod tests {
                 .await
                 .is_err()
         );
+        let mut receiver = crate::server::overlay::subscribe_channel();
+        // Seed an owned node because the blocked refresh has removed the old one.
+        let owned = GraphNode::new(
+            crate::schema::NodeType::Function,
+            "owned_at_removal".into(),
+            "lib.rs".into(),
+        );
+        overlay.insert_node(owned.clone());
+        repo.overlay_paths
+            .lock()
+            .insert("lib.rs".into(), vec![owned.id.clone()]);
+        let revision = overlay.current_revision();
         repo.deactivate();
+        let mut saw_removal = false;
+        while let Ok(diff) = receiver.try_recv() {
+            saw_removal |= diff.removed.contains(&owned.id);
+        }
+        assert!(saw_removal);
+        assert!(overlay
+            .diffs_since(revision)
+            .unwrap()
+            .iter()
+            .any(|d| d.removed.contains(&owned.id)));
         drop(lsp_guards);
         tokio::time::timeout(Duration::from_secs(2), in_flight)
             .await

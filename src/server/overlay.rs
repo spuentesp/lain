@@ -208,6 +208,12 @@ impl VolatileOverlay {
                             *moved_idx = idx;
                         }
                     }
+                    self.log.lock().enqueue(OverlayDiff {
+                        revision: 0,
+                        added: vec![],
+                        removed: vec![id.to_string()],
+                        updated: vec![],
+                    });
                     debug!("Removed node from volatile overlay: {}", id);
                     true
                 } else {

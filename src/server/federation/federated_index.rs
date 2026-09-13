@@ -383,7 +383,7 @@ impl FederatedIndex {
         if !external.is_empty() {
             let mut external_batch: Vec<crate::schema::GraphEdge> =
                 Vec::with_capacity(external.len());
-            let mut placeholder_ids: Vec<String> = Vec::new();
+            let mut placeholder_ids = std::collections::HashSet::new();
             for edge in &external {
                 // Ensure the target node exists in the backend. The
                 // global id is `repo:Kind:path:name`; reconstruct the
@@ -419,7 +419,7 @@ impl FederatedIndex {
                         let _ = self
                             .backend
                             .upsert_node_global(gid.as_str(), kind, path, name);
-                        placeholder_ids.push(gid.as_str().to_string());
+                        placeholder_ids.insert(gid.as_str().to_string());
                     }
                 }
             }
