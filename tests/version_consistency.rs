@@ -64,7 +64,8 @@ fn assert_all_json_versions_match(path: &str, expected: &str) {
 fn all_versions_match() {
     let files = ["server.json", "npm-shim/package.json", "Formula/lain.rb"];
     let versions: Vec<(&str, String)> = files.iter().map(|f| (*f, read_version(f))).collect();
-    let first = &versions[0].1;
+    let expected = env!("CARGO_PKG_VERSION").to_string();
+    let first = &expected;
     for (name, v) in &versions {
         assert_eq!(v, first, "{} has version {}, expected {}", name, v, first);
     }

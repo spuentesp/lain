@@ -3,7 +3,7 @@
   "scripts": {
     "test:e2e": "node ./spa_e2e.test.js",
     "record-demo": "node ./record_spa_demo.js",
-    "test": "node --test ./graph_tab.test.js"
+    "test": "node --test ./graph_tab.test.js ./styles.test.js ./recorder_cli.test.js"
   },
   "devDependencies": {
     "playwright": "^1.62.1"

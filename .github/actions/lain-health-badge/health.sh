@@ -30,6 +30,11 @@ emit_outputs() {
   } >> "$GITHUB_OUTPUT"
 }
 
+if [[ ! "$MIN_FAN_OUT" =~ ^(0|[1-9][0-9]*)$ ]]; then
+  emit_outputs "error" "Invalid min-fan-out" "min-fan-out must be a non-negative integer."
+  exit 1
+fi
+
 if ! command -v lain >/dev/null 2>&1; then
   BODY=$(mktemp)
   {
@@ -143,7 +148,7 @@ fi
 # binary and triggers a re-index that uses it. Default: 'auto'
 # detects from project files at the workspace root. Pass an
 # explicit comma-separated list to force, or '' to skip.
-LSP_LANGUAGES="${INPUT_LSP_LANGUAGES:-auto}"
+LSP_LANGUAGES="${INPUT_LSP_LANGUAGES-auto}"
 if [ "$LSP_LANGUAGES" = "auto" ]; then
   LSP_LANGUAGES=""
   [ -f "$WORKSPACE/Cargo.toml" ] && LSP_LANGUAGES="$LSP_LANGUAGES rust"
@@ -157,6 +162,7 @@ if [ "$LSP_LANGUAGES" = "auto" ]; then
   [ -f "$WORKSPACE/Gemfile" ] && LSP_LANGUAGES="$LSP_LANGUAGES ruby"
   LSP_LANGUAGES="$(echo "$LSP_LANGUAGES" | xargs)"
 fi
+LSP_LANGUAGES="${LSP_LANGUAGES//,/ }"
 if [ -n "$LSP_LANGUAGES" ]; then
   echo "::group::Installing LSPs: $LSP_LANGUAGES"
   for lang in $LSP_LANGUAGES; do
@@ -178,18 +184,21 @@ if [ -n "$LSP_LANGUAGES" ]; then
   echo "::endgroup::"
 fi
 
-# Tool 1: get_health (no args). The call itself blocks until the
-# cold re-index is done; --max-time bounds the wait at 900s.
-HEALTH=$(curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_health","arguments":{}},"id":2}' \
-  | jq -r '.result.content[0].text // "error: empty result"')
-
-# Tool 2: architectural_observations (with threshold).
-ARCH=$(curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
-  -H 'Content-Type: application/json' \
-  -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"architectural_observations\",\"arguments\":{\"min_fan_out\":${MIN_FAN_OUT}}},\"id\":3}" \
-  | jq -r '.result.content[0].text // "error: empty result"')
+# Treat transport errors and MCP error envelopes as failed health computation.
+call_tool_text() {
+  curl -fsS --max-time 900 -X POST http://127.0.0.1:9999/mcp \
+    -H 'Content-Type: application/json' -d "$1" \
+    | jq -er 'select(.error == null and .result.isError != true) |
+              .result.content[0].text | select(type == "string" and length > 0)'
+}
+if ! HEALTH=$(call_tool_text '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_health","arguments":{}},"id":2}'); then
+  emit_outputs "error" "get_health failed" "Unable to compute architecture health: get_health failed."
+  exit 1
+fi
+if ! ARCH=$(call_tool_text "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"architectural_observations\",\"arguments\":{\"min_fan_out\":${MIN_FAN_OUT}}},\"id\":3}"); then
+  emit_outputs "error" "architectural_observations failed" "Unable to compute architecture health: architectural_observations failed."
+  exit 1
+fi
 
 # Decide level from the prose output. A single rule: fail if the graph
 # is degraded. Everything else is success. See the plan doc for the

@@ -9,7 +9,18 @@ permissions:
   contents: write
 
 jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify release tag and package metadata
+        run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME"
+
   build-linux:
+    needs: version-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +33,12 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - name: Build
         run: cargo build --release --target x86_64-unknown-linux-gnu
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify built version before publishing
+        shell: bash
+        run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-unknown-linux-gnu/release/lain
       - name: Package
         run: |
           mkdir -p release
@@ -36,6 +53,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-macos-arm64:
+    needs: version-check
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +66,12 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify built version before publishing
+        shell: bash
+        run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/aarch64-apple-darwin/release/lain
       - name: Package
         run: |
           mkdir -p release
@@ -62,6 +86,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-windows:
+    needs: version-check
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +100,12 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-msvc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify built version before publishing
+        shell: bash
+        run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-pc-windows-msvc/release/lain.exe
       - name: Package
         shell: bash
         run: |
