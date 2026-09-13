@@ -1,0 +1,87 @@
+name: SafeSkill scoring
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safeskill-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # owner/repo uses npm pack in this CLI and fails without a root package.json.
+      # Scan the checkout so PR results describe the proposed changes.
+      - name: Scan checkout
+        run: npx --yes skillsafe@0.2.9 scan . --json > "$RUNNER_TEMP/safeskill.json"
+      - name: Summarize score
+        if: always()
+        env:
+          REPORT: ${{ runner.temp }}/safeskill.json
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ['REPORT']) as report:
+              result = json.load(report)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"SafeSkill score: **{result['overallScore']}/100**\n\n")
+              summary.write('Scanner: skillsafe 0.2.9. Full findings are in the scan artifact.\n\n')
+              summary.write('This checks supported JavaScript/TypeScript and text content; it does not replace Rust security checks.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: safeskill-${{ github.sha }}
+          path: ${{ runner.temp }}/safeskill.json
+          if-no-files-found: error
+
+  refresh-public-score:
+    if: github.repository == 'spuentesp/lain' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Refresh the public default-branch report
+        run: |
+          python3 - <<'PY'
+          import json, os, time
+          from urllib.request import Request, urlopen
+          from urllib.parse import quote
+
+          base = 'https://safeskill.dev'
+          def request(path, payload=None):
+              data = json.dumps(payload).encode() if payload is not None else None
+              req = Request(base + path, data=data, headers={'Content-Type': 'application/json'})
+              with urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          job = request('/api/scan', {'package': 'spuentesp/lain', 'rescan': True})
+          job_id = job.get('jobId')
+          deadline = time.monotonic() + 300
+          while job.get('status') in ('queued', 'scanning'):
+              if not job_id or time.monotonic() >= deadline:
+                  raise RuntimeError('Public scan did not complete within five minutes')
+              time.sleep(10)
+              job = request('/api/scan-status/' + quote(job_id, safe=''))
+          if job.get('status') != 'completed':
+              raise RuntimeError(f'Public scan failed: {job}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Public rescan completed: [SafeSkill report](https://safeskill.dev/scan/spuentesp-lain).\n\n')
+              summary.write('The hosted scanner scans the current default branch using its own ruleset; its score may differ from the pinned CI scanner.\n')
+          PY
