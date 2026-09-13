@@ -181,21 +181,42 @@ fn try_lock_once(
     }
 }
 
-/// `<workspace_root>/.lain/locks/<sanitized>.json`. Pure path
-/// computation; no I/O. Public so the `lain hooks lock|unlock` CLI
-/// subcommands can compute the same path without keeping a `FileLock`
-/// handle around between invocations.
+/// Canonical workspace-relative key for lock path derivation.
+/// Both relative and absolute paths pointing to the same file produce
+/// the same canonical key, avoiding disjoint lock paths across different callers.
+pub fn canonical_lock_key(workspace_root: &Path, path: &Path) -> String {
+    let normalized_root = crate::server::presence::lexical_normalize(workspace_root);
+    let normalized_path = crate::server::presence::lexical_normalize(path);
+    let rel = if normalized_path.is_absolute() {
+        match normalized_path.strip_prefix(&normalized_root) {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => normalized_path,
+        }
+    } else {
+        normalized_path
+    };
+    crate::server::path_util::posix_string(&rel)
+}
+
+/// `<workspace_root>/.lain/locks/<hash>.json`. Pure path
+/// computation; no I/O.
+/// Derives a stable 16-hex BLAKE3 hash from the canonical workspace-relative key,
+/// preventing lossy filename collisions between dots, underscores, and slashes.
 pub fn lock_path_for(workspace_root: &Path, path: &Path) -> PathBuf {
+    let key = canonical_lock_key(workspace_root, path);
+    let hash = blake3::hash(key.as_bytes()).to_hex();
     workspace_root
         .join(".lain")
         .join("locks")
-        .join(format!("{}.json", sanitize(path)))
+        .join(format!("{}.json", &hash[..16]))
 }
 
 /// Read the existing lock file at `lock_path` and parse the holder's
 /// metadata. Returns placeholder fields on any error so the caller can
 /// still report a best-effort conflict instead of panicking.
-fn read_current_holder(lock_path: &Path) -> (AgentId, AgentKind, ClaimIntent, SystemTime) {
+pub(crate) fn read_current_holder(
+    lock_path: &Path,
+) -> (AgentId, AgentKind, ClaimIntent, SystemTime) {
     let mtime = std::fs::metadata(lock_path)
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::now());
@@ -219,13 +240,57 @@ fn read_current_holder(lock_path: &Path) -> (AgentId, AgentKind, ClaimIntent, Sy
     (holder, kind, intent, mtime)
 }
 
-/// Replace path separators with a sentinel so the lock path is a
-/// single-component filename. Dots become underscores too so `.rs`
-/// doesn't survive as a hidden filename in editor listings. The
-/// result is not designed to be reversible — it only needs to be
-/// unique per input path within a single workspace.
-fn sanitize(path: &Path) -> String {
-    path.to_string_lossy().replace('/', "__").replace('.', "_")
+/// Outcome of attempting to refresh an advisory filesystem lock lease.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// Lock file exists and is held by the caller; mtime was successfully bumped.
+    Refreshed,
+    /// Lock file is missing on disk.
+    Missing,
+    /// Lock file was acquired/stolen by another agent after TTL expiry.
+    StolenBy(AgentId),
+    /// I/O error occurred while refreshing.
+    Error(String),
+}
+
+/// Touch the lock file's mtime if and only if `agent_id` is the current recorded holder.
+pub fn refresh_lock_if_owned(lock_path: &Path, agent_id: &AgentId) -> RefreshOutcome {
+    if !lock_path.exists() {
+        return RefreshOutcome::Missing;
+    }
+    let (holder, _, _, _) = read_current_holder(lock_path);
+    if holder != *agent_id {
+        return RefreshOutcome::StolenBy(holder);
+    }
+    let now = SystemTime::now();
+    let f = match std::fs::OpenOptions::new().write(true).open(lock_path) {
+        Ok(f) => f,
+        Err(e) => return RefreshOutcome::Error(e.to_string()),
+    };
+    if let Err(e) = f.set_modified(now) {
+        return RefreshOutcome::Error(e.to_string());
+    }
+    RefreshOutcome::Refreshed
+}
+
+/// Remove the lock file at `lock_path` only if `agent_id` is the recorded holder.
+/// Prevents a delayed or lagged release from deleting a lock that has already been
+/// stolen by another agent after TTL expiration.
+/// Returns `Ok(true)` if deleted, `Ok(false)` if not owned or already missing.
+pub fn release_lock_if_owned(lock_path: &Path, agent_id: &AgentId) -> Result<bool, std::io::Error> {
+    if !lock_path.exists() {
+        return Ok(false);
+    }
+    let (holder, _, _, _) = read_current_holder(lock_path);
+    if holder == *agent_id {
+        match std::fs::remove_file(lock_path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    } else {
+        Ok(false)
+    }
 }
 
 impl FileLock {

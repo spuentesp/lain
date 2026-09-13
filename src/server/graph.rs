@@ -228,8 +228,6 @@ impl GraphDatabase {
     }
 
     pub fn insert_nodes_batch(&self, new_nodes: &[GraphNode]) -> Result<(), LainError> {
-        use rayon::prelude::*;
-
         self.check_writable()?;
         // Phase 1: Collect indices and path entries under graph lock
         let mut graph = self.graph.write();

@@ -722,7 +722,7 @@ struct OccupancyState {
 /// Lexical on purpose: a claim may name a file the agent is about to
 /// *create*, so `fs::canonicalize` would fail on exactly the paths that
 /// matter most.
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for comp in path.components() {
@@ -834,6 +834,8 @@ pub struct OccupancyMap {
     /// is a staging placeholder and the real files live under the repo
     /// roots. Read by `canonical_claim_path`.
     claim_roots: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
+    /// Active advisory filesystem lock leases: (AgentId, CanonicalClaimPath) -> LockFilePath.
+    lock_leases: std::sync::Arc<parking_lot::Mutex<HashMap<(AgentId, PathBuf), PathBuf>>>,
 }
 
 impl std::fmt::Debug for OccupancyMap {
@@ -854,7 +856,22 @@ impl OccupancyMap {
             persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             workspace_root: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             claim_roots: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            lock_leases: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lock_leases_count(&self) -> usize {
+        self.lock_leases.lock().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_lock_lease(&self, agent_id: &AgentId, path: &Path) -> bool {
+        let roots = self.claim_roots_snapshot();
+        let canonical = canonical_claim_path(&roots, path);
+        self.lock_leases
+            .lock()
+            .contains_key(&(agent_id.clone(), canonical))
     }
 
     /// Install a callback fired on every mutation that should be
@@ -1240,11 +1257,57 @@ impl OccupancyMap {
     /// calls both under a single `Arc<LainServer>` coordination.
     pub fn touch(&self, agent_id: &AgentId) {
         let now = SystemTime::now();
-        let mut s = self.inner.lock();
-        for entry in s.by_file.values_mut() {
-            for per_agent in entry.last_touched.values_mut() {
-                if per_agent.contains_key(agent_id) {
-                    per_agent.insert(agent_id.clone(), now);
+        {
+            let mut s = self.inner.lock();
+            for entry in s.by_file.values_mut() {
+                for per_agent in entry.last_touched.values_mut() {
+                    if per_agent.contains_key(agent_id) {
+                        per_agent.insert(agent_id.clone(), now);
+                    }
+                }
+            }
+        }
+        self.refresh_locks_for_agent(agent_id);
+    }
+
+    pub(crate) fn refresh_locks_for_agent(&self, agent_id: &AgentId) {
+        let locks: Vec<(PathBuf, PathBuf)> = {
+            let leases = self.lock_leases.lock();
+            leases
+                .iter()
+                .filter(|((a, _), _)| a == agent_id)
+                .map(|((_, claim_path), lock_path)| (claim_path.clone(), lock_path.clone()))
+                .collect()
+        };
+        for (claim_path, lock_path) in locks {
+            match crate::server::presence_lock::refresh_lock_if_owned(&lock_path, agent_id) {
+                crate::server::presence_lock::RefreshOutcome::Refreshed => {}
+                crate::server::presence_lock::RefreshOutcome::Missing => {
+                    tracing::warn!(
+                        "advisory lock file {} was missing during heartbeat refresh for {}",
+                        lock_path.display(),
+                        agent_id.as_str(),
+                    );
+                    self.lock_leases
+                        .lock()
+                        .remove(&(agent_id.clone(), claim_path));
+                }
+                crate::server::presence_lock::RefreshOutcome::StolenBy(other) => {
+                    tracing::warn!(
+                        "advisory lock file {} was stolen by {} during heartbeat refresh for {}",
+                        lock_path.display(),
+                        other.as_str(),
+                        agent_id.as_str(),
+                    );
+                    self.lock_leases
+                        .lock()
+                        .remove(&(agent_id.clone(), claim_path));
+                }
+                crate::server::presence_lock::RefreshOutcome::Error(e) => {
+                    tracing::warn!(
+                        "error refreshing advisory lock file {}: {e}",
+                        lock_path.display(),
+                    );
                 }
             }
         }
@@ -1308,6 +1371,19 @@ impl OccupancyMap {
             }
             released
         };
+        for path in &paths {
+            let maybe_lock = self
+                .lock_leases
+                .lock()
+                .remove(&(agent_id.clone(), path.clone()));
+            if let Some(lock_path) = maybe_lock {
+                if let Err(e) =
+                    crate::server::presence_lock::release_lock_if_owned(&lock_path, agent_id)
+                {
+                    tracing::warn!("failed to release lock file {}: {e}", lock_path.display());
+                }
+            }
+        }
         if !released.is_empty() {
             if let Some(cb) = self.cloned_persist_cb() {
                 cb();
@@ -1325,6 +1401,22 @@ impl OccupancyMap {
                 .unwrap_or_default()
         };
         let released = self.release(agent_id, &paths);
+        let remaining_locks: Vec<PathBuf> = {
+            let mut leases = self.lock_leases.lock();
+            let keys: Vec<(AgentId, PathBuf)> = leases
+                .keys()
+                .filter(|(a, _)| a == agent_id)
+                .cloned()
+                .collect();
+            keys.into_iter().filter_map(|k| leases.remove(&k)).collect()
+        };
+        for lock_path in remaining_locks {
+            if let Err(e) =
+                crate::server::presence_lock::release_lock_if_owned(&lock_path, agent_id)
+            {
+                tracing::warn!("failed to release lock file {}: {e}", lock_path.display());
+            }
+        }
         // `self.release` already fired the persist callback when
         // `released` is non-empty, so we don't double-fire here.
         let _ = paths;
@@ -1417,6 +1509,19 @@ impl OccupancyMap {
 
             released
         };
+        for (agent_id, path) in &released {
+            let maybe_lock = self
+                .lock_leases
+                .lock()
+                .remove(&(agent_id.clone(), path.clone()));
+            if let Some(lock_path) = maybe_lock {
+                if let Err(e) =
+                    crate::server::presence_lock::release_lock_if_owned(&lock_path, agent_id)
+                {
+                    tracing::warn!("failed to release lock file {}: {e}", lock_path.display());
+                }
+            }
+        }
         if !released.is_empty() {
             if let Some(cb) = self.cloned_persist_cb() {
                 cb();
@@ -1425,24 +1530,34 @@ impl OccupancyMap {
         released
     }
 
-    /// Best-effort write of `<workspace>/.lain/locks/<file>.json` for
-    /// each path that was just granted. Called by
+    /// Best-effort write of `<workspace>/.lain/locks/<hash>.json` for
+    /// each path that was just granted with `ClaimIntent::Edit`. Called by
     /// `claim_with_session` after the in-memory bookkeeping settles.
     /// No-op when no workspace root is configured (unit tests,
     /// federation paths).
     ///
     /// The in-memory state is *not* rolled back if `try_lock` reports
     /// a conflict or an I/O error — both are logged via `tracing::warn`
-    /// and the claim stands. Operators reading the lock file directly
-    /// see the holder; readers going through `lain` see the in-memory
-    /// state. PR 17 does not track `FileLock` handles for release on
-    /// `release()` — stale locks age out via the 5s TTL on the next
-    /// `try_lock` from another agent (see `presence_lock::LOCK_TTL`).
+    /// and the claim stands. Granted edit locks are registered in
+    /// `lock_leases` and cleaned up on `release`, `release_all_for`,
+    /// or `expire_by_ttl`.
     fn write_lock_files(&self, session: &AgentSession, granted: &[ClaimRequest]) {
         let Some(workspace) = self.workspace_root_snapshot() else {
             return;
         };
         for req in granted {
+            if req.intent != ClaimIntent::Edit {
+                continue;
+            }
+            let key = (session.id.clone(), req.path.clone());
+            let existing_lock = self.lock_leases.lock().get(&key).cloned();
+            if let Some(lp) = existing_lock {
+                if let crate::server::presence_lock::RefreshOutcome::Refreshed =
+                    crate::server::presence_lock::refresh_lock_if_owned(&lp, &session.id)
+                {
+                    continue;
+                }
+            }
             match crate::server::presence_lock::try_lock(
                 &workspace,
                 &req.path,
@@ -1450,8 +1565,19 @@ impl OccupancyMap {
                 session.kind.clone(),
                 req.intent.clone(),
             ) {
-                Ok(_lock) => {}
+                Ok(lock) => {
+                    self.lock_leases.lock().insert(key, lock.path);
+                }
                 Err(conflict) => {
+                    if conflict.agent_id() == session.id {
+                        let lp = crate::server::presence_lock::lock_path_for(&workspace, &req.path);
+                        if let crate::server::presence_lock::RefreshOutcome::Refreshed =
+                            crate::server::presence_lock::refresh_lock_if_owned(&lp, &session.id)
+                        {
+                            self.lock_leases.lock().insert(key, lp);
+                            continue;
+                        }
+                    }
                     tracing::warn!(
                         "filesystem lock for {:?} already held by {} (k={:?}); in-memory claim stands",
                         req.path,
@@ -1745,12 +1871,13 @@ pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
 }
 
 /// Hydrate `reg` and `occ` from a JSON file previously written by
-/// `save_pair`. When `path` does not exist this is a no-op (idempotent
-/// loader: the registries stay as constructed).
+/// `save_pair`. When `path` does not exist this is a no-op (the
+/// registries stay untouched).
 ///
-/// On a successful read, prior contents of `reg` / `occ` are **not**
-/// wiped before merge — callers should pass freshly-constructed
-/// registries. Same string-error convention as `save_pair`.
+/// On a successful read, prior contents of `reg` / `occ` are replaced
+/// with the persisted snapshot, ensuring ghost sessions and stale
+/// claims do not survive across reloads. If reading or parsing fails,
+/// live state remains untouched.
 ///
 /// Task 2.6: after a successful parse, if the live `audit.jsonl` is
 /// missing or unreadable in the state directory (`path.parent()`),
@@ -1805,15 +1932,19 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
             .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
 
-    let mut s = reg.inner.lock();
-    let mut o = occ.inner.lock();
+    // Stage parsed snapshot into temporary collections before locking
+    // or mutating live state. If parsing or validation fails, live state
+    // remains untouched.
+    let mut new_sessions = HashMap::new();
+    let mut new_by_token = HashMap::new();
     for (k, sess) in state.sessions {
-        s.sessions.insert(AgentId(k.clone()), sess.clone());
-        s.by_token.insert(sess.session_token, AgentId(k));
+        new_sessions.insert(AgentId(k.clone()), sess.clone());
+        new_by_token.insert(sess.session_token, AgentId(k));
     }
+    let mut new_by_file: HashMap<PathBuf, FileOccupancy> = HashMap::new();
     for (path_str, agents, symbols) in state.occupancy_by_file {
         let pb = path_str;
-        let entry = o.by_file.entry(pb).or_default();
+        let entry = new_by_file.entry(pb).or_default();
         for a in agents {
             entry.agents.insert(AgentId(a));
         }
@@ -1825,15 +1956,10 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
         }
     }
     // Restore file-level intents so a peer's edit claim is visible
-    // as Edit (not as "no intent recorded") after a load. The
-    // advisory branch of `claim_in_memory` only fires for
-    // `Some(Edit)`; without this round-trip a freshly-loaded
-    // entry has no intent for `__file_level__`, the holder
-    // looks read-only, and the read-vs-edit advisory is
-    // silently dropped.
+    // as Edit (not as "no intent recorded") after a load.
     for (path_str, intents) in state.occupancy_file_intents {
         let pb = path_str;
-        let entry = o.by_file.entry(pb).or_default();
+        let entry = new_by_file.entry(pb).or_default();
         let per_agent = entry
             .intents
             .entry("__file_level__".to_string())
@@ -1842,9 +1968,52 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
             per_agent.insert(AgentId(agent_id), intent);
         }
     }
+    let mut new_by_agent = HashMap::new();
     for (k, claims) in state.occupancy_by_agent {
-        o.by_agent.insert(AgentId(k), claims);
+        let agent_id = AgentId(k.clone());
+        for claim in &claims {
+            let entry = new_by_file.entry(claim.path.clone()).or_default();
+            if claim.symbols.is_empty() {
+                entry
+                    .intents
+                    .entry("__file_level__".to_string())
+                    .or_default()
+                    .insert(agent_id.clone(), claim.intent.clone());
+                entry
+                    .last_touched
+                    .entry("__file_level__".to_string())
+                    .or_default()
+                    .insert(agent_id.clone(), claim.last_touched_unix);
+            } else {
+                for sym in &claim.symbols {
+                    entry
+                        .intents
+                        .entry(sym.clone())
+                        .or_default()
+                        .insert(agent_id.clone(), claim.intent.clone());
+                    entry
+                        .last_touched
+                        .entry(sym.clone())
+                        .or_default()
+                        .insert(agent_id.clone(), claim.last_touched_unix);
+                }
+            }
+        }
+        new_by_agent.insert(agent_id, claims);
     }
+
+    let mut s = reg.inner.lock();
+    let mut o = occ.inner.lock();
+    s.sessions = new_sessions;
+    s.by_token = new_by_token;
+    o.by_file = new_by_file;
+    o.by_agent = new_by_agent;
+    occ.lock_leases.lock().retain(|(agent, path), _| {
+        o.by_agent
+            .get(agent)
+            .map(|cs| cs.iter().any(|c| &c.path == path))
+            .unwrap_or(false)
+    });
 
     Ok(())
 }
@@ -2230,6 +2399,362 @@ mod audit_persistence_tests {
         assert!(
             parsed.audit_reset_at_unix.is_none(),
             "load_pair must not stamp a reset when audit.jsonl is present",
+        );
+    }
+
+    #[test]
+    fn load_pair_restores_snapshot_and_drops_unpersisted_sessions_and_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+        std::fs::write(&audit_path, vec![b'a'; 10]).unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+
+        // 1. Initial live state: alice has a session and claim on foo.rs
+        let alice_sess = reg.register(
+            "alice".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+        let alice_id = alice_sess.id.clone();
+        occ.claim(
+            &alice_id,
+            vec![ClaimRequest {
+                path: PathBuf::from("foo.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            }],
+        );
+        assert!(reg.get(&alice_id).is_some());
+        assert!(occ.list_for_path(Path::new("foo.rs")).is_some());
+
+        // 2. Prepare state on disk representing another snapshot: only bob has a session and claim on bar.rs
+        let bob_sess = AgentSession::new(
+            AgentId("bob-123".into()),
+            "bob".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+        let disk_reg = PresenceRegistry::new();
+        let disk_occ = OccupancyMap::new();
+        {
+            let mut s = disk_reg.inner.lock();
+            s.sessions.insert(bob_sess.id.clone(), bob_sess.clone());
+            s.by_token
+                .insert(bob_sess.session_token.clone(), bob_sess.id.clone());
+        }
+        disk_occ.claim(
+            &bob_sess.id,
+            vec![ClaimRequest {
+                path: PathBuf::from("bar.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            }],
+        );
+        save_pair(&state_path, &disk_reg, &disk_occ).expect("save_pair");
+
+        // 3. Load snapshot into live reg & occ
+        load_pair(&state_path, &reg, &occ).expect("load_pair");
+
+        // Stale session and claim for alice must be GONE (restored snapshot, not additive merge)
+        assert!(
+            reg.get(&alice_id).is_none(),
+            "alice should have disappeared after loading snapshot"
+        );
+        assert!(
+            occ.list_for_path(Path::new("foo.rs")).is_none(),
+            "foo.rs claim should have disappeared"
+        );
+
+        // Bob's session and claim must be present
+        assert!(reg.get(&bob_sess.id).is_some(), "bob should be restored");
+        assert!(
+            occ.list_for_path(Path::new("bar.rs")).is_some(),
+            "bar.rs claim should be restored"
+        );
+    }
+
+    #[test]
+    fn load_pair_preserves_live_state_on_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        std::fs::write(&state_path, b"{ not valid json").unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        let alice_sess = reg.register(
+            "alice".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+        let alice_id = alice_sess.id.clone();
+        occ.claim(
+            &alice_id,
+            vec![ClaimRequest {
+                path: PathBuf::from("foo.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            }],
+        );
+
+        let res = load_pair(&state_path, &reg, &occ);
+        assert!(res.is_err(), "load_pair must error on invalid json");
+
+        // Live state must be completely untouched
+        assert!(reg.get(&alice_id).is_some());
+        assert!(occ.list_for_path(Path::new("foo.rs")).is_some());
+    }
+
+    #[test]
+    fn load_pair_preserves_live_state_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().join("does_not_exist.json");
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        let alice_sess = reg.register(
+            "alice".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+        let alice_id = alice_sess.id.clone();
+        occ.claim(
+            &alice_id,
+            vec![ClaimRequest {
+                path: PathBuf::from("foo.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            }],
+        );
+
+        let res = load_pair(&missing_path, &reg, &occ);
+        assert!(
+            res.is_ok(),
+            "load_pair on missing file must be a no-op Ok(())"
+        );
+
+        // Live state must be completely untouched
+        assert!(reg.get(&alice_id).is_some());
+        assert!(occ.list_for_path(Path::new("foo.rs")).is_some());
+    }
+
+    #[test]
+    fn cross_process_refresh_removes_stale_local_ghosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+        std::fs::write(&audit_path, b"audit").unwrap();
+
+        // Process 1 and Process 2 registries
+        let reg1 = PresenceRegistry::new();
+        let occ1 = OccupancyMap::new();
+        let reg2 = PresenceRegistry::new();
+        let occ2 = OccupancyMap::new();
+
+        // Process 1 creates a session and claims a file, then persists
+        let sess1 = reg1.register(
+            "worker-1".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+        occ1.claim(
+            &sess1.id,
+            vec![ClaimRequest {
+                path: PathBuf::from("job.rs"),
+                symbols: vec![],
+                intent: ClaimIntent::Edit,
+                ttl_seconds: None,
+                plan_revision: None,
+            }],
+        );
+        save_pair(&state_path, &reg1, &occ1).unwrap();
+
+        // Process 2 reloads and sees Process 1's work
+        load_pair(&state_path, &reg2, &occ2).unwrap();
+        assert!(reg2.get(&sess1.id).is_some());
+        assert!(occ2.list_for_path(Path::new("job.rs")).is_some());
+
+        // Process 1 finishes work: releases claim and session, then persists
+        occ1.release(&sess1.id, &[PathBuf::from("job.rs")]);
+        reg1.remove(&sess1.id);
+        save_pair(&state_path, &reg1, &occ1).unwrap();
+
+        // Process 2 refreshes from disk: ghost session and ghost claim must be gone
+        load_pair(&state_path, &reg2, &occ2).unwrap();
+        assert!(
+            reg2.get(&sess1.id).is_none(),
+            "ghost session should not survive cross-process refresh"
+        );
+        assert!(
+            occ2.list_for_path(Path::new("job.rs")).is_none(),
+            "ghost claim should not survive cross-process refresh"
+        );
+    }
+
+    #[test]
+    fn lease_ledger_tracks_edit_claims_and_cleans_up_on_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let occ = OccupancyMap::new();
+        occ.set_workspace_root(ws);
+
+        let sess = AgentSession::new(
+            AgentId("alice-edit".into()),
+            "alice".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+
+        // 1. Claim Edit creates lease and file
+        let edit_req = ClaimRequest {
+            path: PathBuf::from("src/main.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        occ.claim_with_session(&sess, vec![edit_req]);
+        assert_eq!(occ.lock_leases_count(), 1);
+        assert!(occ.has_lock_lease(&sess.id, Path::new("src/main.rs")));
+        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/main.rs"));
+        assert!(
+            lock_path.exists(),
+            "filesystem lock file must be written for Edit claim"
+        );
+
+        // 2. Claim Read does NOT create lease or lock file
+        let read_req = ClaimRequest {
+            path: PathBuf::from("src/lib.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Read,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        occ.claim_with_session(&sess, vec![read_req]);
+        assert_eq!(occ.lock_leases_count(), 1);
+        assert!(!occ.has_lock_lease(&sess.id, Path::new("src/lib.rs")));
+        let read_lock_path =
+            crate::server::presence_lock::lock_path_for(ws, Path::new("src/lib.rs"));
+        assert!(
+            !read_lock_path.exists(),
+            "filesystem lock must NOT be written for Read claim"
+        );
+
+        // 3. Release removes lease and lock file
+        occ.release(&sess.id, &[PathBuf::from("src/main.rs")]);
+        assert_eq!(occ.lock_leases_count(), 0);
+        assert!(
+            !lock_path.exists(),
+            "filesystem lock must be deleted on release"
+        );
+    }
+
+    #[test]
+    fn lease_ledger_cleans_up_on_expire_by_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let occ = OccupancyMap::new();
+        occ.set_workspace_root(ws);
+
+        let sess = AgentSession::new(
+            AgentId("alice-ttl".into()),
+            "alice".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+
+        let req = ClaimRequest {
+            path: PathBuf::from("src/temp.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: Some(0),
+            plan_revision: None,
+        };
+        occ.claim_with_session(&sess, vec![req]);
+        assert_eq!(occ.lock_leases_count(), 1);
+        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/temp.rs"));
+        assert!(lock_path.exists());
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let expired = occ.expire_by_ttl();
+        assert!(!expired.is_empty());
+        assert_eq!(occ.lock_leases_count(), 0);
+        assert!(
+            !lock_path.exists(),
+            "expired lease lock file must be removed"
+        );
+    }
+
+    #[test]
+    fn touch_refreshes_active_leases() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let occ = OccupancyMap::new();
+        occ.set_workspace_root(ws);
+
+        let sess = AgentSession::new(
+            AgentId("alice-touch".into()),
+            "alice".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+
+        let req = ClaimRequest {
+            path: PathBuf::from("src/touched.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        occ.claim_with_session(&sess, vec![req]);
+        let lock_path =
+            crate::server::presence_lock::lock_path_for(ws, Path::new("src/touched.rs"));
+        assert!(lock_path.exists());
+
+        // Backdate mtime
+        let past = SystemTime::now() - std::time::Duration::from_secs(2);
+        {
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            f.set_modified(past).unwrap();
+        }
+        let mtime_past = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        occ.touch(&sess.id);
+
+        let mtime_refreshed = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
+        assert!(
+            mtime_refreshed > mtime_past,
+            "touch must refresh lock file mtime"
         );
     }
 }

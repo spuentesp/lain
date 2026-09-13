@@ -180,3 +180,88 @@ fn zero_daemon_claim_and_release_work_without_a_server() {
     )
     .expect("agent-b must be able to claim after agent-a released");
 }
+
+/// Absolute and relative paths to the same file must generate the identical lock path.
+#[test]
+fn lock_path_for_normalizes_absolute_and_relative() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    let rel = std::path::Path::new("src/server/presence.rs");
+    let abs = ws.join(rel);
+
+    let key_rel = lain::server::presence_lock::canonical_lock_key(ws, rel);
+    let key_abs = lain::server::presence_lock::canonical_lock_key(ws, &abs);
+    assert_eq!(key_rel, "src/server/presence.rs");
+    assert_eq!(key_abs, "src/server/presence.rs");
+
+    let lock_rel = lain::server::presence_lock::lock_path_for(ws, rel);
+    let lock_abs = lain::server::presence_lock::lock_path_for(ws, &abs);
+    assert_eq!(lock_rel, lock_abs);
+}
+
+/// `release_lock_if_owned` deletes the lock file if owned by the caller,
+/// but preserves the lock file if another agent has acquired/stolen it.
+#[test]
+fn release_lock_if_owned_protects_stolen_locks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    let path = ws.join("foo.rs");
+    let alice = make_agent("alice");
+    let bob = make_agent("bob");
+
+    let lock =
+        try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("alice lock");
+    assert!(lock.path.exists());
+
+    // Bob attempts to release Alice's lock -> must return Ok(false) and preserve file
+    let res_bob = lain::server::presence_lock::release_lock_if_owned(&lock.path, &bob).unwrap();
+    assert!(!res_bob, "bob must not be able to delete alice's lock");
+    assert!(lock.path.exists(), "lock must still exist on disk");
+
+    // Alice releases her own lock -> returns Ok(true) and deletes file
+    let res_alice = lain::server::presence_lock::release_lock_if_owned(&lock.path, &alice).unwrap();
+    assert!(res_alice, "alice must be able to delete her own lock");
+    assert!(!lock.path.exists(), "lock must be deleted on disk");
+
+    // Subsequent release is idempotent -> Ok(false)
+    let res_again = lain::server::presence_lock::release_lock_if_owned(&lock.path, &alice).unwrap();
+    assert!(!res_again, "release of missing lock returns Ok(false)");
+}
+
+/// `refresh_lock_if_owned` bumps the mtime when owned, but rejects with StolenBy
+/// when another agent is the holder.
+#[test]
+fn refresh_lock_if_owned_verifies_ownership() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    let path = ws.join("foo.rs");
+    let alice = make_agent("alice");
+    let bob = make_agent("bob");
+
+    let lock =
+        try_lock(ws, &path, &alice, AgentKind::ClaudeCode, ClaimIntent::Edit).expect("alice lock");
+    let mtime_before = std::fs::metadata(&lock.path).unwrap().modified().unwrap();
+
+    // Bob attempts to refresh Alice's lock -> StolenBy(alice)
+    let bob_outcome = lain::server::presence_lock::refresh_lock_if_owned(&lock.path, &bob);
+    assert_eq!(
+        bob_outcome,
+        lain::server::presence_lock::RefreshOutcome::StolenBy(alice.clone())
+    );
+
+    // Alice refreshes her own lock -> Refreshed
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let alice_outcome = lain::server::presence_lock::refresh_lock_if_owned(&lock.path, &alice);
+    assert_eq!(
+        alice_outcome,
+        lain::server::presence_lock::RefreshOutcome::Refreshed
+    );
+
+    let mtime_after = std::fs::metadata(&lock.path).unwrap().modified().unwrap();
+    assert!(
+        mtime_after > mtime_before,
+        "mtime must be bumped on successful refresh"
+    );
+
+    lain::server::presence_lock::release_lock_if_owned(&lock.path, &alice).unwrap();
+}
