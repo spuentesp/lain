@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Notify;
 use tracing::info;
 
 #[derive(Clone)]
@@ -77,6 +78,16 @@ pub struct LainServer {
     /// Serializes complete overlay reconciliations and direct file changes,
     /// including their ownership bookkeeping and ordered subscriber diffs.
     pub(crate) process_change_lock: Arc<AsyncMutex<()>>,
+    /// Fired once per watcher batch, after the post-batch
+    /// `sync_volatile_overlay` call. Lets tests wait deterministically
+    /// for a batch to drain instead of guessing a wall-clock budget —
+    /// `tokio::time::sleep(5s).await` is what made
+    /// `watcher_does_not_panic_on_edit` flaky on every CI platform
+    /// because ReadDirectoryChangesW coalesces on Windows and
+    /// FSEvents coalesces on macOS. `notify_one` (not
+    /// `notify_waiters`) so a test that needs to observe N batches
+    /// calls `.notified().await` N times.
+    pub overlay_updated: Arc<Notify>,
     /// Per-server `RepoNamespace` for the LSP path. Mints one
     /// namespace at construction; stable for the lifetime of the
     /// server. Threaded through `LspMultiplexer` so every overlay
@@ -184,6 +195,13 @@ impl LainServer {
     /// construct it eagerly today but the accessor is the contract).
     pub fn reload_bus(&self) -> Arc<ReloadBus> {
         Arc::clone(&self.reload_bus)
+    }
+
+    /// Notification handle for watcher-batch completion. The watcher
+    /// fires this after each batch's `sync_volatile_overlay` runs.
+    /// Tests wait on it instead of guessing a wall-clock budget.
+    pub fn overlay_updated(&self) -> Arc<Notify> {
+        Arc::clone(&self.overlay_updated)
     }
 
     /// Borrowed handle to the presence registry. The field itself is

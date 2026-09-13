@@ -46,6 +46,7 @@ struct FederationServerConfig {
     reindex_timeout: Option<std::time::Duration>,
 }
 use tokio::sync::broadcast;
+use tokio::sync::Notify;
 use tracing::info;
 
 /// Remove staging dirs left behind by processes that are gone.
@@ -450,6 +451,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         auth: Arc::new(AuthState::from_env()),
         events_log: events_log.clone(),
         process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
+        overlay_updated: Arc::new(Notify::new()),
     };
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
     // when the file exists, and install a persist callback so every
@@ -584,6 +586,7 @@ impl LainServer {
             auth: Arc::new(AuthState::from_env()),
             events_log: events_log.clone(),
             process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
+            overlay_updated: Arc::new(Notify::new()),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists. Idempotent: missing file is a no-op.

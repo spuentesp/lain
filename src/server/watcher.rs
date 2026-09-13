@@ -240,6 +240,11 @@ impl FileWatcher {
                         e
                     );
                 }
+                // Wake any test waiting for this batch to drain.
+                // `notify_one` (not `notify_waiters`): a test that
+                // needs to observe N batches calls `.notified().await`
+                // N times.
+                server.overlay_updated().notify_one();
             }
         });
     }
