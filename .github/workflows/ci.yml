@@ -257,3 +257,22 @@ jobs:
       - name: Run tests
         run: npm test
 
+
+  action-contracts:
+    name: Badge and release contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Release metadata consistency
+        run: python scripts/check-release-version.py
+      - name: Release gate regression tests
+        run: python scripts/test_release_version.py
+      - name: Action configuration and version pinning
+        run: python .github/actions/lain-health-badge/tests/test_action.py
+      - name: Badge extraction
+        run: bash .github/actions/lain-health-badge/tests/test_extract_added_fns.sh
+      - name: Installer checks
+        run: bash tests/install-test.sh

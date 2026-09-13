@@ -1,11 +1,7 @@
 name: 'Lain Architecture Health Badge'
 description: 'Runs lain on the workspace and posts a markdown architecture-health summary as a sticky PR comment plus a pass/fail commit status.'
 
-# The action writes commit statuses and PR comments. The default
-# GITHUB_TOKEN is read-only; grant the scopes the steps need.
-permissions:
-  statuses: write
-  pull-requests: write
+# Callers must grant statuses: write and pull-requests: write in their workflow.
 
 inputs:
   github-token:
@@ -55,19 +51,16 @@ runs:
     - name: Install lain
       shell: bash
       env:
-        LAIN_REINDEX_TIMEOUT: ${{ inputs.reindex-timeout }}
-      run: |
-        set -euo pipefail
-        curl -fsSL https://raw.githubusercontent.com/spuentesp/lain/${{ inputs.lain-version }}/install.sh \
-          | bash -s -- -y
-        # install.sh puts the binary at $HOME/.local/lain/lain (no bin/).
-        echo "$HOME/.local/lain" >> "$GITHUB_PATH"
+        LAIN_VERSION: ${{ inputs.lain-version }}
+      run: bash "${{ github.action_path }}/install-binary.sh"
 
     - name: Compute architecture health
       id: health
       shell: bash
       env:
         LAIN_REINDEX_TIMEOUT: ${{ inputs.reindex-timeout }}
+        INPUT_MIN_FAN_OUT: ${{ inputs.min-fan-out }}
+        INPUT_LSP_LANGUAGES: ${{ inputs.lsp-languages }}
         # GITHUB_TOKEN is the GitHub-issued token for this run; we
         # use it for the per-PR Pulls API call to enumerate the
         # files changed in the PR. Without it, the per-PR section
@@ -82,6 +75,7 @@ runs:
       if: always()
       uses: actions/github-script@v7
       with:
+        github-token: ${{ inputs.github-token }}
         script: |
           const level = '${{ steps.health.outputs.level }}' || 'error';
           const summary = ('${{ steps.health.outputs.summary }}' || 'lain-health-badge failed').slice(0, 140);
@@ -98,6 +92,7 @@ runs:
       if: github.event_name == 'pull_request' && steps.health.outputs.body != ''
       uses: marocchino/sticky-pull-request-comment@v2
       with:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
         header: ${{ inputs.comment-header }}
         message: ${{ steps.health.outputs.body }}
 
