@@ -331,16 +331,23 @@ async fn sync_overlay_purges_stale_entry_for_a_deleted_file_immediately() {
     std::mem::forget(ri);
 }
 
-/// `notify` delivers events within the 5-second budget on Linux runners
-/// but not reliably on Windows (ReadDirectoryChangesW coalesces +
-/// ci-runner I/O contention) or macOS (FSEvents coalesces edits made
-/// in the same tick). The test fails on these platforms with
-/// "after the first edit, the receiver task should have refreshed the
-/// overlay with at least one node" — not a real regression, the
-/// receiver task IS firing, the poll budget is just too tight for the
-/// affected runners. Tracked as a flake; a follow-up should drain
-/// the receiver via `Notify` rather than a 5s sleep.
-#[cfg_attr(any(target_os = "windows", target_os = "macos"), ignore)]
+/// The test waits on `ri.overlay_updated().notified()` (a `Notify`
+/// fired by the receiver after each `sync_overlay` cycle) rather
+/// than guessing a wall-clock budget. The previous `ignore` gate
+/// for Windows/macOS was for an older version of this test that used
+/// `tokio::time::sleep(5s).await` — that budget was too tight for
+/// ReadDirectoryChangesW's coalescing on Windows and FSEvents'
+/// coalescing on macOS. The `notify_one` mechanism (added in 3c41d16)
+/// is OS-independent: it fires when the receiver actually completes
+/// a cycle, so a slow notify backend just means a longer `notified().await`
+/// before the test times out. The `wait_for_refresh` helper uses a
+/// 15 s ceiling which is more than enough headroom for any realistic
+/// CI runner.
+///
+/// If this test still flakes on Windows/macOS after removing the gate,
+/// the cause is the underlying notify-event-delivery latency, not the
+/// wait mechanism, and the fix is to investigate why the receiver
+/// task is slow to fire (not to widen the budget further).
 #[tokio::test]
 async fn watcher_does_not_panic_on_edit() {
     let tmp = tempfile::tempdir().unwrap();
