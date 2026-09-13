@@ -3,6 +3,7 @@
 | Want | Read |
 |------|------|
 | Get running in five minutes | [QUICKSTART.md](QUICKSTART.md) |
+| Plan agent-first install/onboarding UX | [AGENT_UX_ROADMAP.md](AGENT_UX_ROADMAP.md) |
 | Pick a deployment mode and ship a recipe | [COOKBOOK.md](COOKBOOK.md) |
 | Operate / troubleshoot | [USER_MANUAL.md](USER_MANUAL.md) |
 | Understand design choices | [ARCHITECTURE.md](ARCHITECTURE.md) |
@@ -22,6 +23,7 @@
 flowchart LR
     Q[QUICKSTART] --> U[USER_MANUAL]
     Q --> A[ARCHITECTURE]
+    Q --> UX[AGENT_UX_ROADMAP]
     U --> A
     A --> T[TECHNICAL]
     U --> F[FEDERATION]
