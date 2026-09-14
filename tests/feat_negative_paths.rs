@@ -187,6 +187,16 @@ fn feat_negative_paths_end_to_end() {
     let host = format!("127.0.0.1:{port}");
     let _server = boot_server(port);
 
+    // The fixture defines `orchestrate`, `entrypoint`, `helper_a`,
+    // and `helper_b` and commits them. `wait_for_health` only waits
+    // for /health to come up — the per-repo indexer keeps walking
+    // files in the background after that. Without this wait the
+    // real-path assertions below race the indexer and intermittently
+    // see "Node not found for handle: entrypoint" on slow CI
+    // runners; locally this race never wins because the indexer
+    // finishes before the test reaches the first query.
+    common::wait_for_repo_index(&host, &["orchestrate", "entrypoint"]);
+
     // Sanity: confirm the fixture has the symbol we use for "real"
     // calls and that a normal tools/call envelope round-trips. If
     // this fails, every assertion below is meaningless.

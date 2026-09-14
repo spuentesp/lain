@@ -369,7 +369,7 @@ fn boot_and_wait_impl(repos_yaml_path: &Path, cwd: Option<&Path>) -> (String, Se
 /// Poll `list_repos` until the per-repo `node_count` is non-zero, then
 /// poll `search_org` for each symbol in `wait_for_symbol` until it's
 /// visible. Shared by [`boot_single_repo`] and [`boot_single_repo_in_dir`].
-fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
+pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
     // The federation boot is fast, but the indexer may not have
     // walked the files yet. Poll `list_repos` for non-zero count,
     // then poll `search_org` for each symbol the caller named.
