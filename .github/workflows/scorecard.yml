@@ -33,6 +33,8 @@ jobs:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
+          # The main branch ruleset exposes protection settings to the
+          # default token, so no separate administrative PAT is needed.
 
       - name: Upload SARIF to Security tab
         if: always()

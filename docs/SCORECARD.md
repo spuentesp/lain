@@ -127,3 +127,39 @@ The `dev` branch requires:
 
 Both rules were applied 2026-09-14 via the GitHub API. See
 [`docs/BRANCHING.md`](BRANCHING.md) for the workflow.
+
+## Maintenance update (September 14, 2026)
+
+The `main protection (Scorecard visible)` GitHub repository ruleset mirrors
+the classic protection on `main`: one approval, stale-review dismissal,
+the `lain/agent-contract` check, an up-to-date branch, and restrictions on
+deletion and force pushes. It retains the existing administrator bypass.
+Keep these settings consistent when changing branch protection.
+
+Scorecard can read the ruleset with its default token. No `SCORECARD_TOKEN`
+secret is required. Private vulnerability reporting is enabled; the
+reporting link is in [SECURITY.md](../SECURITY.md).
+
+### Dependency pinning
+
+Both JavaScript CI jobs use `npm ci` with committed lockfiles. Update the
+appropriate lockfile when changing a package manifest; don't fall back to
+`npm install` in CI.
+
+The September 14, 2026 scan at commit `49e96b0` reported nine
+`downloadThenRun` findings in these scripts:
+
+| File | Reported lines | Input being parsed |
+| --- | --- | --- |
+| `scripts/demo.sh` | 232, 579, 647, 772, 805 | MCP JSON responses |
+| `tests/e2e/federation_dashboard_e2e.sh` | 92 | Health JSON response |
+| `tests/e2e/multiplayer-hooks.sh` | 67, 81 | MCP JSON responses |
+| `tests/e2e/real-bench.sh` | 59 | Health JSON response |
+
+These pipelines pass response data to fixed `python3 -c` code that parses
+JSON. They don't execute the response as Python code. Scorecard's shell
+scanner treats the download-to-interpreter pipeline as execution, so these
+findings remain false positives. This note doesn't suppress the check.
+
+Run the OpenSSF Scorecard workflow after merging changes to refresh the
+published results; the viewer may take additional time to update.
