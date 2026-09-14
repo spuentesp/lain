@@ -436,7 +436,11 @@ async fn watcher_does_not_panic_on_edit() {
     // ran). Pre-fix, the inotify thread panicked on the first event and
     // the overlay stayed at whatever it had before the test.
     let overlay = ri.server_overlay();
-    let before = poll_until(&overlay, std::time::Duration::from_secs(5), |n| {
+    // 15s window (was 5s): Windows runners under load can take ~10s
+    // for the inotify-equivalent watcher to deliver the first event.
+    // The test's intent is a panic-regression check, not a timing
+    // assertion — making the window generous preserves that.
+    let before = poll_until(&overlay, std::time::Duration::from_secs(15), |n| {
         !n.is_empty()
     })
     .await;
@@ -458,7 +462,9 @@ async fn watcher_does_not_panic_on_edit() {
     // overlay (because no further `sync_overlay` runs) and the assertion
     // below fails — giving us a Rust-level signal that the watcher
     // panicked, not just a process-level "did the test crash".
-    let after = poll_until(&overlay, std::time::Duration::from_secs(5), |n| {
+    // 15s window matches the first-edit poll above; both polls share
+    // the same Windows-under-load rationale.
+    let after = poll_until(&overlay, std::time::Duration::from_secs(15), |n| {
         !n.is_empty()
     })
     .await;

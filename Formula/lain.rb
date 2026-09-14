@@ -4,7 +4,7 @@
 class Lain < Formula
   desc "Structural code intelligence for AI agents"
   homepage "https://github.com/spuentesp/lain"
-  version "0.7.3"
+  version "0.7.4-rc1"
 
   on_macos do
     on_arm do

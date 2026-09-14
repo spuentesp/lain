@@ -378,4 +378,15 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
       - name: Publish to npm
         working-directory: npm-shim
-        run: npm publish --provenance --access public
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # npm defaults to the `latest` dist-tag for every publish, which
+          # would silently make a 0.7.4-rc1 the recommended install for
+          # `npm install @spuentesp/lain-mcp`. Detect a prerelease suffix
+          # (anything after a `-` in the version) and route the publish
+          # to the `next` tag instead, leaving `latest` for stable cuts.
+          case "$VERSION" in
+            *-*) TAG_FLAG="--tag next" ;;
+            *)    TAG_FLAG="" ;;
+          esac
+          npm publish --provenance --access public $TAG_FLAG
