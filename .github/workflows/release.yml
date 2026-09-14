@@ -327,3 +327,55 @@ jobs:
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish the npm shim to the @spuentesp/lain-mcp package on the
+  # public npm registry. This is the check that flips the OpenSSF
+  # Scorecard `Packaging` check from -1 to 10 — the existing release
+  # workflow uploads binaries via softprops/action-gh-release, but
+  # scorecard only recognises `npm publish` / `cargo publish` /
+  # `gem push` as a "packaging workflow".
+  #
+  # Authentication uses npm Trusted Publishing (OIDC), not a long-lived
+  # token. The job's `id-token: write` permission is what makes this
+  # work — npm picks up `ACTIONS_ID_TOKEN_REQUEST_TOKEN` /
+  # `ACTIONS_ID_TOKEN_REQUEST_URL` from the runner env automatically.
+  # The trusted-publisher is configured once at
+  # https://www.npmjs.com/package/@spuentesp/lain-mcp/access
+  # (Repository: spuentesp/lain, Workflow filename: release.yml).
+  # This means no NPM_TOKEN secret to manage, rotate, or leak, and
+  # the resulting `--provenance` attestation carries a verifiable
+  # repo + workflow identity instead of a generic npm provenance.
+  #
+  # The postinstall downloads the binary from this repo's GitHub
+  # release, so this job must run *after* the release assets are
+  # uploaded.
+  publish-npm:
+    needs: [publish-server-json]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        id: version
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Sync npm-shim version to release tag
+        working-directory: npm-shim
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = "package.json";
+            const pkg = JSON.parse(fs.readFileSync(path));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          '
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+      - name: Publish to npm
+        working-directory: npm-shim
+        run: npm publish --provenance --access public
