@@ -63,6 +63,7 @@ jobs:
           import json, os, time
           from urllib.request import Request, urlopen
           from urllib.parse import quote
+          from urllib.error import URLError, HTTPError
 
           base = 'https://safeskill.dev'
           def request(path, payload=None):
@@ -71,17 +72,26 @@ jobs:
               with urlopen(req, timeout=30) as response:
                   return json.load(response)
 
-          job = request('/api/scan', {'package': 'spuentesp/lain', 'rescan': True})
-          job_id = job.get('jobId')
-          deadline = time.monotonic() + 300
-          while job.get('status') in ('queued', 'scanning'):
-              if not job_id or time.monotonic() >= deadline:
-                  raise RuntimeError('Public scan did not complete within five minutes')
-              time.sleep(10)
-              job = request('/api/scan-status/' + quote(job_id, safe=''))
-          if job.get('status') != 'completed':
-              raise RuntimeError(f'Public scan failed: {job}')
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write('Public rescan completed: [SafeSkill report](https://safeskill.dev/scan/spuentesp-lain).\n\n')
-              summary.write('The hosted scanner scans the current default branch using its own ruleset; its score may differ from the pinned CI scanner.\n')
+          # The public rescan is a convenience for the default-branch
+          # badge; the official SafeSkill score that gates merges is
+          # the pinned `scan` job above. If the third-party API is
+          # rate-limiting, 403ing, or otherwise down, do NOT block the
+          # workflow — log a note in the step summary and continue.
+          try:
+              job = request('/api/scan', {'package': 'spuentesp/lain', 'rescan': True})
+              job_id = job.get('jobId')
+              deadline = time.monotonic() + 300
+              while job.get('status') in ('queued', 'scanning'):
+                  if not job_id or time.monotonic() >= deadline:
+                      raise RuntimeError('Public scan did not complete within five minutes')
+                  time.sleep(10)
+                  job = request('/api/scan-status/' + quote(job_id, safe=''))
+              if job.get('status') != 'completed':
+                  raise RuntimeError(f'Public scan failed: {job}')
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write('Public rescan completed: [SafeSkill report](https://safeskill.dev/scan/spuentesp-lain).\n\n')
+                  summary.write('The hosted scanner scans the current default branch using its own ruleset; its score may differ from the pinned CI scanner.\n')
+          except (HTTPError, URLError, RuntimeError, TimeoutError) as e:
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write(f'Public rescan skipped: {e!r}. The pinned CI scanner still gates merges.\n')
           PY
