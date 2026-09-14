@@ -1555,8 +1555,28 @@ async fn get_recent_activity_tool_groups_by_path() {
     // Use a unique per-run path so the test is hermetic even if the
     // underlying state dir already contains audit events from prior
     // runs (the audit log persists across server restarts).
+    //
+    // The prefix is intentionally a sibling of the tempdir (one
+    // directory up), not a child of it:
+    //
+    //   1. `canonical_claim_path` strips the workspace_root prefix
+    //      and stores paths inside the workspace as relative keys.
+    //      A child-of-tempdir prefix would land as `hermetic-…/…`
+    //      (relative), and the absolute glob pattern would not
+    //      match.
+    //
+    //   2. The sibling path is run through `fs::canonicalize` so it
+    //      carries the same prefix canonical_form produces. On
+    //      macOS, `tempfile::tempdir()` returns `/var/folders/…/T/…`
+    //      which canonicalizes to `/private/var/folders/…/T/…` —
+    //      using the resolved form keeps the claimed paths and the
+    //      glob pattern aligned on every platform.
     let run_id = uuid::Uuid::new_v4().to_string();
-    let prefix = format!("/tmp/hermetic-{}/", run_id);
+    let sibling = std::fs::canonicalize(tmp.path())
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| tmp.path().to_path_buf());
+    let prefix = format!("{}/hermetic-{}/", sibling.display(), run_id);
     let p1 = format!("{}alpha.rs", prefix);
     let p2 = format!("{}beta.rs", prefix);
     let p3 = format!("{}gamma.rs", prefix);
