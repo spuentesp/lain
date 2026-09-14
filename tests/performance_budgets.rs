@@ -224,7 +224,10 @@ fn boot_and_time(
             )
         });
 
-    let guard = ServerGuard(child);
+    let guard = ServerGuard {
+        child,
+        stderr_path: std::path::PathBuf::from(""),
+    };
     let host = format!("127.0.0.1:{port}");
 
     // Poll /health until 200. The first successful response marks

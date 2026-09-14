@@ -148,7 +148,10 @@ fn boot_server(port: u16) -> ServerGuard {
             )
         });
 
-    let guard = ServerGuard(child);
+    let guard = ServerGuard {
+        child,
+        stderr_path: stderr_path.clone(),
+    };
 
     let host = format!("127.0.0.1:{port}");
     let start = Instant::now();
@@ -375,10 +378,25 @@ fn server_handles_concurrent_overloaded_clients() {
     }
 
     // Server still alive after the storm.
-    assert!(
-        server.is_alive(),
-        "server PID died after concurrent load test"
-    );
+    //
+    // exit_diag() returns Err((ExitStatus, captured_stderr)) when the
+    // child has died. The captured stderr is the *entire* stderr of
+    // the run, captured via the spawn-time redirect, so a failure
+    // panic message here carries the real reason: OOM kill, panic,
+    // port collision, etc. Without this, Windows failures have
+    // historically been silent — the test fails with no clue what
+    // happened.
+    if let Err((status, stderr)) = server.exit_diag() {
+        panic!(
+            "server PID died after concurrent load test.\n\
+             status: {status}\n\
+             exit_code: {}\n\
+             captured stderr ({} bytes):\n{}",
+            status.code().unwrap_or(-1),
+            stderr.len(),
+            stderr
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -650,7 +668,10 @@ fn request_reload_handles_corrupt_yaml() {
         .stderr(Stdio::from(stderr_file))
         .spawn()
         .expect("spawn second server");
-    let mut server = ServerGuard(child);
+    let mut server = ServerGuard {
+        child,
+        stderr_path: stderr_path.clone(),
+    };
 
     // Wait for /health to come up.
     let start = Instant::now();

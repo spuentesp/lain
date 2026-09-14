@@ -783,7 +783,7 @@ impl RepoIndex {
                         ids.push(node.id.clone());
                         overlay.insert_node(node);
                     }
-                    self.overlay_paths.lock().insert(key, ids);
+                    self.overlay_paths.lock().insert(key.clone(), ids);
                 }
                 Err(e) => {
                     tracing::warn!(

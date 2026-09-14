@@ -206,8 +206,15 @@ impl ToolHandler for GetCallChainHandler {
     ) -> Result<String, LainError> {
         let from = required_str_arg(args, "from")?;
         let to = required_str_arg(args, "to")?;
-        handlers::navigation::get_call_chain(&ctx.graph, &ctx.overlay, &from, &to, ui_link(ctx))
-            .await
+        handlers::navigation::get_call_chain(
+            &ctx.graph,
+            &ctx.overlay,
+            ctx.federation.as_deref(),
+            &from,
+            &to,
+            ui_link(ctx),
+        )
+        .await
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCallChainHandler));

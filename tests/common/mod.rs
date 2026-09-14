@@ -190,11 +190,17 @@ pub fn tools_call_envelope(
 /// RAII guard that kills the spawned server on drop, regardless of
 /// how the test exits. Prevents orphan `lain server` processes when
 /// the test panics.
-pub struct ServerGuard(pub Child);
+pub struct ServerGuard {
+    pub child: Child,
+    /// Path to the file that received the child's stderr while it
+    /// ran. `exit_diag` reads this on demand so a failing test can
+    /// see *why* the child died without having to know the path.
+    pub stderr_path: std::path::PathBuf,
+}
 impl Drop for ServerGuard {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 impl ServerGuard {
@@ -202,7 +208,54 @@ impl ServerGuard {
     /// value of `false` means the process exited — either it crashed
     /// (the failure mode we're testing for) or `Drop` already ran.
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// If the child has exited, return `(exit_status, captured_stderr)`
+    /// so the caller can include both in a failure message. If the
+    /// child is still running, returns `Ok(())`. The stderr content
+    /// is read from `self.stderr_path` (which the constructor wrote
+    /// the child's stderr to while it ran).
+    pub fn exit_diag(&mut self) -> Result<(), (std::process::ExitStatus, String)> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_else(|e| {
+                    format!("<could not read {}: {}>", self.stderr_path.display(), e)
+                });
+                Err((status, stderr))
+            }
+            Ok(None) => Ok(()),
+            Err(e) => {
+                // try_wait itself failed (rare — usually a waitpid
+                // race). Stderr content is still useful. ExitStatus
+                // is not constructible here, so encode the OS error
+                // into the diagnostic string and return a status
+                // reflecting "we couldn't determine".
+                let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_default();
+                Err((
+                    Self::synthetic_exit_status_for_unrecoverable_try_wait(),
+                    format!("try_wait failed: {e}\nstderr:\n{stderr}"),
+                ))
+            }
+        }
+    }
+
+    /// Rust's std does not expose a constructor for `ExitStatus`,
+    /// so for the unrecoverable `try_wait` error path we report
+    /// the situation with a distinct, recognizable dummy. Using
+    /// the per-platform raw exit code `127` ("command not found")
+    /// is conventional; the surrounding message carries the real
+    /// diagnostic. The caller should treat this as "unknown exit".
+    #[cfg(unix)]
+    fn synthetic_exit_status_for_unrecoverable_try_wait() -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(127 << 8)
+    }
+    #[cfg(windows)]
+    fn synthetic_exit_status_for_unrecoverable_try_wait() -> std::process::ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        // 127 expressed as a Windows u32 exit code.
+        std::process::ExitStatus::from_raw(127)
     }
 }
 
@@ -257,7 +310,7 @@ fn boot_server_impl(port: u16, repos_yaml_path: &Path, cwd: Option<&Path>) -> Se
         )
     });
 
-    ServerGuard(child)
+    ServerGuard { child, stderr_path }
 }
 
 /// Wait until `/health` returns 200, or panic with the captured
@@ -314,9 +367,15 @@ fn boot_and_wait_impl(repos_yaml_path: &Path, cwd: Option<&Path>) -> (String, Se
 }
 
 /// Poll `list_repos` until the per-repo `node_count` is non-zero, then
-/// poll `search_org` for each symbol in `wait_for_symbol` until it's
-/// visible. Shared by [`boot_single_repo`] and [`boot_single_repo_in_dir`].
-fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
+/// Poll `list_repos` and `search_org` until the per-repo index is
+/// populated AND each requested symbol resolves through `explain_symbol`.
+///
+/// `search_org` is federation-scoped; it can return matches before
+/// the active repo's per-repo graph has them, so a tool call routed
+/// through the per-repo resolver still races the indexer. Polling
+/// `explain_symbol` with the same handle the test will use forces
+/// the per-repo graph to catch up before the test proceeds.
+pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
     // The federation boot is fast, but the indexer may not have
     // walked the files yet. Poll `list_repos` for non-zero count,
     // then poll `search_org` for each symbol the caller named.
@@ -333,24 +392,29 @@ fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
         break;
     }
     if !wait_for_symbol.is_empty() {
-        // `search_org` only returns matches, so we issue one query per
-        // symbol and require each to be visible. A simpler "ping any
-        // symbol" loop would race the indexer.
+        // `search_org` is federation-scoped and may show a symbol
+        // before the per-repo graph does. For tools that resolve
+        // through the active repo's resolver (get_call_chain,
+        // get_blast_radius, etc.), that gap matters. Poll
+        // `explain_symbol` with each requested handle so we wait for
+        // the per-repo graph specifically — the same path the
+        // failing tools will use.
         let start = std::time::Instant::now();
         for &name in wait_for_symbol {
             loop {
                 if start.elapsed() > Duration::from_secs(30) {
-                    panic!("symbol `{name}` never appeared in search_org within 30s on {host}");
+                    panic!("symbol `{name}` never resolved through per-repo resolver within 30s on {host}");
                 }
-                let resp = tools_call_text(
-                    host,
-                    "search_org",
-                    serde_json::json!({"query": name, "limit": 50}),
-                );
-                if resp.contains(name) {
+                let resp =
+                    tools_call_text(host, "explain_symbol", serde_json::json!({"symbol": name}));
+                // `explain_symbol` returns isError=true with
+                // "Node not found for handle" before the indexer
+                // catches up. Anything else means the per-repo
+                // resolver found it.
+                if !resp.contains("\"isError\":true") || !resp.contains("Node not found") {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
