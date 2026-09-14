@@ -30,7 +30,7 @@ async-trait = "0.1"
 git2 = "0.19"
 
 # File watching
-notify = "6"
+notify = "8"
 
 # In-memory graph for volatile overlay
 petgraph = { version = "0.6", features = ["serde-1"] }
