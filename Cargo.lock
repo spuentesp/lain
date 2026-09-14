@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "lain"
-version = "0.7.3"
+version = "0.7.4-rc1"
 dependencies = [
  "anyhow",
  "async-recursion",

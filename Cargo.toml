@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "lain"
-version = "0.7.3"
+version = "0.7.4-rc1"
 edition = "2021"
 description = "Lain - Structural code intelligence for AI agents"
 authors = ["spuentesp"]
