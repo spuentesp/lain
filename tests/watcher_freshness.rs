@@ -381,7 +381,6 @@ async fn watcher_does_not_panic_on_edit() {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    eprintln!("[watcher-test-setup] diag_path = {:?}", diag_path);
     let prev_diag = std::env::var_os("LAIN_WATCHER_DIAG_FILE");
     // SAFETY: see comment above.
     unsafe {
@@ -470,34 +469,9 @@ async fn watcher_does_not_panic_on_edit() {
          stopped processing events after the first one"
     );
 
-    // [DIAG-WATCHER-FRESHNESS] Echo the diag trace to stdout so it
-    // shows up in CI logs whether the test passed (and stdout would
-    // normally be discarded by `cargo test`) or failed. Then restore
-    // the env var so we don't leak it to the next test in this
-    // process.
-    //
-    // cargo test on Windows discards per-test stdout/stderr on PASS
-    // (same as Linux), so a plain eprintln of the trace is invisible
-    // in CI when the test passes — which is exactly the case we most
-    // need visibility into (intermittent pass on Windows is the
-    // signal that the watcher test is actually fine). To force the
-    // trace into CI logs while the diagnostics are in flight, we
-    // embed the trace contents in a panic message and re-raise a
-    // synthetic assertion that explicitly says "this is for
-    // diagnostics, not a real failure". When the real fix lands and
-    // the diag helpers are removed, this whole block goes away.
-    let trace_block = std::fs::read_to_string(&diag_path).unwrap_or_default();
-    if !trace_block.is_empty() {
-        let mut msg = String::from(
-            "[DIAG-WATCHER-FRESHNESS] sync_overlay trace on this run:\n",
-        );
-        for line in trace_block.lines() {
-            msg.push_str("    ");
-            msg.push_str(line);
-            msg.push('\n');
-        }
-        panic!("{msg}");
-    }
+    // Restore the env var so we don't leak it to the next test in
+    // this process. The diag file we wrote (if any) is in the OS
+    // temp dir and will be reaped on its own.
     // SAFETY: see the matching comment where we set the env var.
     unsafe {
         match prev_diag {

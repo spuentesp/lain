@@ -9,7 +9,6 @@ use crate::server::ingest::ingestion::index_one_repo;
 use crate::server::overlay::VolatileOverlay;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -81,27 +80,6 @@ where
     // On timeout: drop `handle` without joining. The thread runs to
     // completion in the background; the OS reaps it when it exits.
     completed
-}
-
-/// [DIAG-WATCHER-FRESHNESS] Helper for the watcher-does-not-panic
-/// Windows-flake hunt. If the env var `LAIN_WATCHER_DIAG_FILE` is
-/// set, append the message to that file. Tests can set the env var
-/// to a tempdir path so the trace survives both pass and fail
-/// `cargo test` runs (which discards stdout for passing tests by
-/// default). The same message is also eprintln'd so local runs
-/// without the env var still see the trace.
-fn diag_emit(prefix: &str, body: &str) {
-    let formatted = format!("[{}] {}", prefix, body);
-    eprintln!("{}", formatted);
-    if let Some(path) = std::env::var_os("LAIN_WATCHER_DIAG_FILE") {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "{}", formatted);
-        }
-    }
 }
 
 pub struct RepoIndex {
@@ -721,31 +699,6 @@ impl RepoIndex {
             .map(|c| crate::graph::graph_path(workspace_root, &c.path))
             .collect();
 
-        // [DIAG-WATCHER-FRESHNESS] Temporary diagnostics for the
-        // watcher_does_not_panic_on_edit Windows flake. Print what
-        // git2 actually reports as changed so we can tell whether
-        // Windows sees the file edit at all. Remove once CI proves
-        // the root cause.
-        diag_emit(
-            "diag-sync-overlay",
-            &format!(
-                "ns={:?} workspace={:?} changes.len()={} indexed_current_commit={}",
-                self.id_namespace,
-                workspace_root,
-                changes.len(),
-                indexed_current_commit
-            ),
-        );
-        for (i, c) in changes.iter().enumerate() {
-            diag_emit(
-                "diag-sync-overlay",
-                &format!(
-                    "  change[{}]: path={:?} type={:?}",
-                    i, c.path, c.change_type
-                ),
-            );
-        }
-
         // Staleness sweep: paths this repo owned as of the last cycle
         // that are no longer uncommitted (committed, or the uncommitted
         // change was discarded). Removed *by id*, not by
@@ -821,18 +774,6 @@ impl RepoIndex {
                 .await
             {
                 Ok(nodes) => {
-                    // [DIAG-WATCHER-FRESHNESS] Temporary: log how many
-                    // nodes process_overlay_change returned for each
-                    // changed path so we can tell on Windows whether
-                    // the insert path actually has anything to insert.
-                    diag_emit(
-                        "diag-sync-overlay",
-                        &format!(
-                            "  process_overlay_change OK for key={:?} nodes={}",
-                            key,
-                            nodes.len()
-                        ),
-                    );
                     let active = self.active.lock();
                     if !*active {
                         return Ok(());
@@ -842,12 +783,7 @@ impl RepoIndex {
                         ids.push(node.id.clone());
                         overlay.insert_node(node);
                     }
-                    let inserted_count = ids.len();
                     self.overlay_paths.lock().insert(key.clone(), ids);
-                    diag_emit(
-                        "diag-sync-overlay",
-                        &format!("  inserted {} ids for key={:?}", inserted_count, key),
-                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -899,13 +835,6 @@ impl RepoIndex {
         let lsp_symbols: Option<Vec<HierarchicalSymbol>> = {
             let lsp = self.lsp.next();
             let mut lsp = lsp.lock().await;
-            // [DIAG-WATCHER-FRESHNESS] Temporary: log path + workspace
-            // going into LSP so we can corroborate what we wrote in
-            // sync_overlay on Windows.
-            diag_emit(
-                "diag-process-overlay",
-                &format!("path={:?} workspace={:?}", path, self.source.local_path()),
-            );
             match lsp
                 .get_document_symbols_hierarchical(
                     path,
@@ -914,25 +843,14 @@ impl RepoIndex {
                 )
                 .await
             {
-                Ok(syms) if !syms.is_empty() => {
-                    diag_emit(
-                        "diag-process-overlay",
-                        &format!("  LSP returned {} symbols", syms.len()),
-                    );
-                    Some(syms)
-                }
-                Ok(_) => {
-                    diag_emit(
-                        "diag-process-overlay",
-                        "  LSP returned 0 symbols -> tree-sitter fallback",
-                    );
-                    None
-                }
+                Ok(syms) if !syms.is_empty() => Some(syms),
+                Ok(_) => None, // cold LSP returned 0 symbols — fall through silently
                 Err(e) => {
                     lsp_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    diag_emit(
-                        "diag-process-overlay",
-                        &format!("  LSP error: {} -> tree-sitter fallback", e),
+                    tracing::warn!(
+                        "[federation] no LSP symbols for {:?}: {}; falling back to tree-sitter",
+                        path,
+                        e
                     );
                     None
                 }
@@ -949,21 +867,7 @@ impl RepoIndex {
         let symbols = match lsp_symbols {
             Some(s) => s,
             None => {
-                let read_result = std::fs::read_to_string(path);
-                // [DIAG-WATCHER-FRESHNESS] Temporary: confirm tree-sitter
-                // sees the file content on Windows. Empty read or Err
-                // would explain the empty overlay symptom.
-                match &read_result {
-                    Ok(content) => diag_emit(
-                        "diag-process-overlay",
-                        &format!("  tree-sitter read {} bytes from {:?}", content.len(), path),
-                    ),
-                    Err(e) => diag_emit(
-                        "diag-process-overlay",
-                        &format!("  tree-sitter read FAILED for {:?}: {}", path, e),
-                    ),
-                }
-                let Ok(content) = read_result else {
+                let Ok(content) = std::fs::read_to_string(path) else {
                     return Ok(Vec::new());
                 };
                 let graph_key = crate::graph::graph_path(self.source.local_path(), path);
