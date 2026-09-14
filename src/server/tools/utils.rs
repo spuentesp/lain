@@ -130,6 +130,24 @@ pub fn resolve_node_federation_fallback(
             return Some(n);
         }
     }
+    // search_org() (in src/server/mcp/federation_tools/federation.rs)
+    // also falls back to the federation backend graph when the
+    // per-repo indexes don't have the symbol yet. Mirror that here:
+    // the federation backend is the unified graph that catches symbols
+    // in the cold-boot window where per-repo graphs are still being
+    // populated by index_forced(). A symbol the backend has but
+    // no per-repo db does yet is exactly what search_org returns and
+    // what resolve_node should also see.
+    if let Ok(backend_nodes) = federation.backend().list_nodes() {
+        for n in backend_nodes {
+            if n.name == handle {
+                return Some(n);
+            }
+            if n.path == handle || n.path == canonical_handle {
+                return Some(n);
+            }
+        }
+    }
     None
 }
 
