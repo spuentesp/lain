@@ -289,6 +289,11 @@ jobs:
         run: python scripts/check-release-version.py
       - name: Release gate regression tests
         run: python scripts/test_release_version.py
+      # METADATA.toml / server.json / sync-server-json.py drift gate.
+      # Added in PR #2; the smoke test catches drift the version check
+      # ignores (description / homepage / keywords / repository.url).
+      - name: Canonical metadata sync gate
+        run: python scripts/test_sync_metadata.py
       - name: Action configuration and version pinning
         run: python .github/actions/lain-health-badge/tests/test_action.py
       - name: Badge extraction

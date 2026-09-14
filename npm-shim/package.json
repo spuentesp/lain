@@ -2,12 +2,16 @@
   "name": "@spuentesp/lain-mcp",
   "version": "0.7.3",
   "mcpName": "io.github.spuentesp/lain",
-  "description": "Wird - Architectural code intelligence for AI coding agents",
+  "description": "High-performance knowledge graph MCP server for AI coding agents with semantic search.",
   "keywords": [
     "mcp",
-    "code-intelligence",
-    "architectural-analysis",
-    "lain"
+    "model-context-protocol",
+    "ai",
+    "coding",
+    "knowledge-graph",
+    "rust",
+    "semantic-search",
+    "code-analysis"
   ],
   "license": "MIT",
   "homepage": "https://github.com/spuentesp/lain",
