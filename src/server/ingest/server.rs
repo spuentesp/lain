@@ -19,8 +19,8 @@ use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::{broadcast_overlay_diff, OverlayDiff, RevisionId, VolatileOverlay};
 use crate::server::presence::{
-    load_pair as load_presence_pair, save_pair as save_presence_pair, OccupancyMap, PresenceEvent,
-    PresenceRegistry,
+    load_pair as load_presence_pair, save_pair as save_presence_pair, AgentId, OccupancyMap,
+    PresenceEvent, PresenceRegistry,
 };
 use crate::server::refresh::RefreshResult;
 use crate::server::reload::ReloadBus;
@@ -235,6 +235,30 @@ impl LainServer {
     pub fn emit_presence_event(&self, event: PresenceEvent) {
         let id = self.events_log.append(&event);
         let _ = self.presence_event_tx.send((id, event));
+    }
+
+    /// Unregister an agent session by its ID, removing it from the presence
+    /// registry and releasing all its occupancy claims and advisory lock leases.
+    /// Emits `ClaimRevoked` presence events for any released claims.
+    /// Returns the paths that were released.
+    pub fn unregister_agent(&self, agent_id: &AgentId) -> Vec<PathBuf> {
+        self.with_shared_presence(|| {
+            let released = self.occupancy.release_all_for(agent_id);
+            for path in &released {
+                self.emit_presence_event(PresenceEvent::ClaimRevoked {
+                    agent_id: agent_id.clone(),
+                    path: path.clone(),
+                    reason: "unregistered".to_string(),
+                });
+            }
+            self.presence.remove(agent_id);
+            released
+        })
+    }
+
+    /// Alias for [`Self::unregister_agent`].
+    pub fn unregister_session(&self, agent_id: &AgentId) -> Vec<PathBuf> {
+        self.unregister_agent(agent_id)
     }
 
     /// Borrowed handle to the [`AttributionBackend`] this server was
@@ -733,6 +757,11 @@ impl LainServer {
             }
         };
         self.occupancy.set_persist_callback(cb2);
+        // Wire session removal to automatic occupancy and advisory lock cleanup.
+        let occupancy_for_remove = Arc::clone(&self.occupancy);
+        self.presence.set_on_remove_callback(move |id| {
+            occupancy_for_remove.release_all_for(id);
+        });
         // Filesystem-as-lock side-effect: anchor the occupancy map to
         // the workspace so `claim_with_session` can write
         // `<workspace>/.lain/locks/<file>.json`. Mirrors the persist

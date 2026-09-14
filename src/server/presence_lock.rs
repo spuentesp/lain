@@ -214,9 +214,7 @@ pub fn lock_path_for(workspace_root: &Path, path: &Path) -> PathBuf {
 /// Read the existing lock file at `lock_path` and parse the holder's
 /// metadata. Returns placeholder fields on any error so the caller can
 /// still report a best-effort conflict instead of panicking.
-pub(crate) fn read_current_holder(
-    lock_path: &Path,
-) -> (AgentId, AgentKind, ClaimIntent, SystemTime) {
+pub fn read_current_holder(lock_path: &Path) -> (AgentId, AgentKind, ClaimIntent, SystemTime) {
     let mtime = std::fs::metadata(lock_path)
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::now());
@@ -273,16 +271,22 @@ pub fn refresh_lock_if_owned(lock_path: &Path, agent_id: &AgentId) -> RefreshOut
     RefreshOutcome::Refreshed
 }
 
-/// Remove the lock file at `lock_path` only if `agent_id` is the recorded holder.
+/// Remove the lock file at `lock_path` only if the recorded holder satisfies `matches`.
 /// Prevents a delayed or lagged release from deleting a lock that has already been
 /// stolen by another agent after TTL expiration.
 /// Returns `Ok(true)` if deleted, `Ok(false)` if not owned or already missing.
-pub fn release_lock_if_owned(lock_path: &Path, agent_id: &AgentId) -> Result<bool, std::io::Error> {
+pub fn release_lock_if_holder_matches<F>(
+    lock_path: &Path,
+    matches: F,
+) -> Result<bool, std::io::Error>
+where
+    F: FnOnce(&AgentId) -> bool,
+{
     if !lock_path.exists() {
         return Ok(false);
     }
     let (holder, _, _, _) = read_current_holder(lock_path);
-    if holder == *agent_id {
+    if matches(&holder) {
         match std::fs::remove_file(lock_path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -291,6 +295,25 @@ pub fn release_lock_if_owned(lock_path: &Path, agent_id: &AgentId) -> Result<boo
     } else {
         Ok(false)
     }
+}
+
+/// Remove the lock file at `lock_path` only if `agent_id` is the recorded holder.
+pub fn release_lock_if_owned(lock_path: &Path, agent_id: &AgentId) -> Result<bool, std::io::Error> {
+    release_lock_if_holder_matches(lock_path, |holder| holder == agent_id)
+}
+
+/// Remove the lock file at `lock_path` if the recorded holder matches `agent_name`.
+/// Matches if the holder's string equals `agent_name` or starts with `<agent_name>@`.
+/// This accommodates zero-daemon CLI hooks where the claim process PID differs from
+/// the release process PID, while still ensuring another agent's stolen lock is not deleted.
+pub fn release_lock_if_agent_matches(
+    lock_path: &Path,
+    agent_name: &str,
+) -> Result<bool, std::io::Error> {
+    release_lock_if_holder_matches(lock_path, |holder| {
+        let h = holder.as_str();
+        h == agent_name || h.starts_with(&format!("{agent_name}@"))
+    })
 }
 
 impl FileLock {

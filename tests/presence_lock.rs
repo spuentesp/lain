@@ -265,3 +265,143 @@ fn refresh_lock_if_owned_verifies_ownership() {
 
     lain::server::presence_lock::release_lock_if_owned(&lock.path, &alice).unwrap();
 }
+
+/// A zero-daemon release must not delete a lock that was stolen by another agent
+/// after TTL expiration.
+#[test]
+fn zero_daemon_release_cannot_delete_stolen_lock() {
+    use lain::cli::hooks::{claim, release};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    let file_path = ws.join("critical.rs");
+    std::fs::write(&file_path, "fn critical() {}").unwrap();
+    let dead_url = "http://127.0.0.1:1";
+
+    // Alice claims file in zero-daemon mode
+    claim(
+        dead_url,
+        &[file_path.to_string_lossy().to_string()],
+        "",
+        "edit",
+        "alice",
+        "claude-code",
+        "",
+    )
+    .expect("alice claim must succeed");
+
+    let lock_path = lain::server::presence_lock::lock_path_for(ws, &file_path);
+    assert!(lock_path.exists());
+    let (holder1, _, _, _) = lain::server::presence_lock::read_current_holder(&lock_path);
+    assert!(holder1.as_str().starts_with("alice@"));
+
+    // Backdate mtime to simulate stale lock past TTL
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        f.set_modified(past).unwrap();
+    }
+
+    // Bob steals the stale lock
+    claim(
+        dead_url,
+        &[file_path.to_string_lossy().to_string()],
+        "",
+        "edit",
+        "bob",
+        "kimi",
+        "",
+    )
+    .expect("bob claim should succeed by taking stale lock");
+
+    let (holder2, _, _, _) = lain::server::presence_lock::read_current_holder(&lock_path);
+    assert!(holder2.as_str().starts_with("bob@"));
+
+    // Alice delayed release runs: must NOT delete Bob's lock!
+    release(
+        dead_url,
+        file_path.to_str().unwrap(),
+        "",
+        "alice",
+        "claude-code",
+        "",
+    )
+    .expect("alice release should return Ok without deleting bob's lock");
+
+    assert!(
+        lock_path.exists(),
+        "bob's stolen lock must not be deleted by alice's delayed release"
+    );
+    let (holder3, _, _, _) = lain::server::presence_lock::read_current_holder(&lock_path);
+    assert!(holder3.as_str().starts_with("bob@"));
+
+    // Bob releases his lock: must succeed and remove lock
+    release(dead_url, file_path.to_str().unwrap(), "", "bob", "kimi", "")
+        .expect("bob release should succeed");
+
+    assert!(!lock_path.exists(), "bob's lock must now be removed");
+}
+
+/// `lain hooks unlock` checks ownership when `--agent-name` is provided,
+/// and unconditionally force-unlocks when `--agent-name` is empty.
+#[test]
+fn hooks_unlock_with_agent_name_checks_ownership_and_empty_force_unlocks() {
+    use lain::cli::hooks::{claim, unlock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    let file_path = ws.join("target.rs");
+    std::fs::write(&file_path, "fn target() {}").unwrap();
+    let dead_url = "http://127.0.0.1:1";
+
+    // Alice claims file
+    claim(
+        dead_url,
+        &[file_path.to_string_lossy().to_string()],
+        "",
+        "edit",
+        "alice",
+        "claude-code",
+        "",
+    )
+    .expect("alice claim");
+
+    let lock_path = lain::server::presence_lock::lock_path_for(ws, &file_path);
+    assert!(lock_path.exists());
+
+    // Bob tries to unlock Alice's lock with --agent-name bob -> must not delete
+    unlock(ws.to_str().unwrap(), file_path.to_str().unwrap(), "bob").expect("unlock call succeeds");
+    assert!(
+        lock_path.exists(),
+        "bob must not be able to unlock alice's lock"
+    );
+
+    // Alice unlocks her own lock with --agent-name alice -> deleted
+    unlock(ws.to_str().unwrap(), file_path.to_str().unwrap(), "alice")
+        .expect("alice unlock call succeeds");
+    assert!(!lock_path.exists(), "alice must be able to unlock her lock");
+
+    // Re-acquire lock by Alice
+    claim(
+        dead_url,
+        &[file_path.to_string_lossy().to_string()],
+        "",
+        "edit",
+        "alice",
+        "claude-code",
+        "",
+    )
+    .expect("alice re-claim");
+    assert!(lock_path.exists());
+
+    // Administrative force unlock with empty agent_name -> deleted regardless of holder
+    unlock(ws.to_str().unwrap(), file_path.to_str().unwrap(), "")
+        .expect("force unlock call succeeds");
+    assert!(
+        !lock_path.exists(),
+        "force unlock must delete lock regardless of holder"
+    );
+}

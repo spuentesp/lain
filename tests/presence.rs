@@ -2055,6 +2055,48 @@ fn read_over_another_read_carries_no_advisory() {
 #[tokio::test]
 async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
     use lain::server::mcp::presence_tools::run_claim_files;
+    use lain::server::presence::{AgentId, ClaimIntent, ClaimRequest};
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+
+    let bob = run_register_agent_for_test(&server, "bob");
+
+    // An unresolvable holder has a claim in occupancy without a live session in presence
+    let departed = AgentId("departed-uuid".into());
+    server.occupancy.claim(
+        &departed,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("auth.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+
+    let v = run_claim_files(
+        &server,
+        serde_json::json!({
+            "agent_id": bob.0, "session_token": bob.1,
+            "files": [{"path": "auth.rs", "intent": "edit"}],
+        }),
+    )
+    .unwrap();
+    let c = &v["conflicts"].as_array().unwrap()[0];
+    assert!(
+        c["name"].is_null(),
+        "an unresolvable holder must be null, not a fabricated name: {c}"
+    );
+}
+
+#[tokio::test]
+async fn session_removal_cleans_up_claims_and_locks() {
+    use lain::server::mcp::presence_tools::run_claim_files;
+    use lain::server::presence::AgentId;
     use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -2073,9 +2115,21 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
     )
     .unwrap();
 
-    // Alice's session goes away while her claim is still on the file.
+    assert!(server
+        .occupancy
+        .list_for_path(std::path::Path::new("auth.rs"))
+        .is_some());
+
+    // Alice's session goes away via presence.remove: must release claims and lock leases
     server.presence.remove(&AgentId(alice.0.clone()));
 
+    // Occupancy map must have no claims for auth.rs
+    assert!(server
+        .occupancy
+        .list_for_path(std::path::Path::new("auth.rs"))
+        .is_none());
+
+    // Bob can now claim auth.rs with 0 conflicts
     let v = run_claim_files(
         &server,
         serde_json::json!({
@@ -2084,11 +2138,59 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
         }),
     )
     .unwrap();
-    let c = &v["conflicts"].as_array().unwrap()[0];
-    assert!(
-        c["name"].is_null(),
-        "an unresolvable holder must be null, not a fabricated name: {c}"
-    );
+    assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
+    assert_eq!(v["granted"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unregister_agent_cleans_up_claims_and_emits_event() {
+    use lain::server::mcp::presence_tools::run_claim_files;
+    use lain::server::presence::{AgentId, PresenceEvent};
+    use lain::server::LainServer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let mut rx = server.presence_event_tx().subscribe();
+
+    let alice = run_register_agent_for_test(&server, "alice");
+    let alice_id = AgentId(alice.0.clone());
+    run_claim_files(
+        &server,
+        serde_json::json!({
+            "agent_id": alice.0, "session_token": alice.1,
+            "files": [{"path": "src/lib.rs", "intent": "edit"}],
+        }),
+    )
+    .unwrap();
+
+    let released = server.unregister_agent(&alice_id);
+    assert_eq!(released, vec![std::path::PathBuf::from("src/lib.rs")]);
+    assert!(server.presence.get(&alice_id).is_none());
+    assert!(server
+        .occupancy
+        .list_for_path(std::path::Path::new("src/lib.rs"))
+        .is_none());
+
+    // Verify ClaimRevoked event was emitted
+    let mut saw_revoked = false;
+    while let Ok((_, ev)) = rx.try_recv() {
+        if let PresenceEvent::ClaimRevoked {
+            agent_id,
+            path,
+            reason,
+        } = ev
+        {
+            if agent_id == alice_id
+                && path == std::path::Path::new("src/lib.rs")
+                && reason == "unregistered"
+            {
+                saw_revoked = true;
+            }
+        }
+    }
+    assert!(saw_revoked, "unregister_agent must emit ClaimRevoked event");
 }
 
 /// `claim_files` mirrors `release_files`: it accepts `files: ["src/a.rs"]`

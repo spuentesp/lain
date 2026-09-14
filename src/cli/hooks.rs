@@ -140,9 +140,10 @@ pub enum HooksAction {
         /// Absolute path of the file being released.
         #[arg(long)]
         path: String,
-        /// Stable agent name (informational; the sentinel is removed
-        /// regardless of holder).
-        #[arg(long)]
+        /// Stable agent name. When provided, checks that the recorded
+        /// holder matches before removing the sentinel; when omitted or empty,
+        /// removes regardless of holder (force unlock).
+        #[arg(long, default_value = "")]
         agent_name: String,
     },
 }
@@ -389,7 +390,7 @@ pub fn release(
 ) -> Result<()> {
     let url = &resolve_url(url)?;
     if !server_reachable(url, Duration::from_millis(200)) {
-        return release_filesystem(path);
+        return release_filesystem(path, agent_name);
     }
     let parent = if parent_session_id.is_empty() {
         None
@@ -536,10 +537,11 @@ fn claim_filesystem(
 }
 
 /// Filesystem-only counterpart to the in-memory `release_files` MCP
-/// tool. Idempotent — ENOENT is treated as success. No-op if the
-/// sentinel path doesn't resolve to anything on disk (e.g. the file
-/// wasn't claimed via the filesystem layer in the first place).
-fn release_filesystem(path: &str) -> Result<()> {
+/// tool. Idempotent — ENOENT is treated as success. Verifies that the
+/// recorded holder matches `agent_name` before removing the sentinel,
+/// preventing a delayed release from deleting a lock stolen by another
+/// agent after TTL expiry.
+fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
     let file_path = Path::new(path);
     // Walk up from `file_path` for `.git`; if none is found within 16
     // levels (or the walk itself errors), fall back to the file's parent
@@ -554,9 +556,19 @@ fn release_filesystem(path: &str) -> Result<()> {
                 .unwrap_or_else(|| file_path.to_path_buf())
         });
     let lock_path = presence_lock::lock_path_for(&workspace_root, file_path);
-    presence_lock::release_lock_at(&lock_path)
+    let deleted = presence_lock::release_lock_if_agent_matches(&lock_path, agent_name)
         .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
-    println!("released {}", lock_path.display());
+    if deleted || !lock_path.exists() {
+        println!("released {}", lock_path.display());
+    } else {
+        let (holder, _, _, _) = presence_lock::read_current_holder(&lock_path);
+        println!(
+            "lock at {} held by {}, not released for agent {}",
+            lock_path.display(),
+            holder.as_str(),
+            agent_name
+        );
+    }
     Ok(())
 }
 
@@ -674,18 +686,32 @@ pub fn lock(
     }
 }
 
-/// `lain hooks unlock --workspace-root … --path … --agent-name …`
-/// Removes the filesystem sentinel for `path` regardless of holder.
-/// Idempotent — ENOENT is treated as success. We compute the sentinel
-/// path via `presence_lock::lock_path_for` and remove it via
-/// `presence_lock::release_lock_at`, both of which are path-only
-/// entry points designed for callers (like this CLI) that don't hold
-/// a `FileLock` handle from the matching `lock` invocation.
-pub fn unlock(workspace_root: &str, path: &str, _agent_name: &str) -> Result<()> {
+/// `lain hooks unlock --workspace-root … --path … [--agent-name …]`
+/// Removes the filesystem sentinel for `path`.
+/// If `agent_name` is non-empty, checks ownership before removing, preventing a delayed
+/// unlock from releasing a lock that has been acquired by a different agent.
+/// If `agent_name` is empty, acts as an administrative force-unlock and removes the sentinel unconditionally.
+pub fn unlock(workspace_root: &str, path: &str, agent_name: &str) -> Result<()> {
     let lock_path = presence_lock::lock_path_for(Path::new(workspace_root), Path::new(path));
-    presence_lock::release_lock_at(&lock_path)
-        .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
-    println!("released {}", lock_path.display());
+    if agent_name.is_empty() {
+        presence_lock::release_lock_at(&lock_path)
+            .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
+        println!("released {}", lock_path.display());
+    } else {
+        let deleted = presence_lock::release_lock_if_agent_matches(&lock_path, agent_name)
+            .map_err(|e| anyhow::anyhow!("remove {}: {e}", lock_path.display()))?;
+        if deleted || !lock_path.exists() {
+            println!("released {}", lock_path.display());
+        } else {
+            let (holder, _, _, _) = presence_lock::read_current_holder(&lock_path);
+            println!(
+                "lock at {} held by {}, not released for agent {}",
+                lock_path.display(),
+                holder.as_str(),
+                agent_name
+            );
+        }
+    }
     Ok(())
 }
 

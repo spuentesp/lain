@@ -380,22 +380,65 @@ MCP process starts
 find nearest .git root
       │
       ▼
-load existing graph ───────────────┐
-      │                            │
-      ├─ graph current → ready     │
-      │                            │
-      └─ graph stale/missing       │
-                │                  │
-                ├─ expose safe     │
-                │  capabilities    │
-                └─ refresh async ──┘
+start MCP transport
+      │
+      ├─ initialize + tools/list → available immediately
+      │
+      ▼
+inspect existing graph
+      │
+      ├─ graph current → graph tools ready
+      │
+      └─ graph stale/missing
+                │
+                ├─ graph tools return structured warming_up
+                ├─ health/capability tools remain available
+                └─ refresh in background → ready
 ```
 
-The first useful tool call should not require a separate `lain init` step.
+The MCP handshake must not wait for repository indexing. A client can initialize,
+list tools, and inspect health/readiness while LAIN builds the graph. The first
+successful graph query must not require a separate `lain init` step.
+
+Repository-root resolution is the only pre-transport prerequisite. If no repository
+can be resolved, LAIN writes one remediation message to stderr, writes nothing to
+stdout, and exits with code 2. `doctor --json` and `status --json` represent the same
+condition with problem code `repository_not_found`; an MCP tool cannot report it
+because no repository-scoped server is constructed.
+
+### Loading behavior
+
+Starting the protocol early does **not** authorize tools to query a graph while it
+is being rebuilt. Until a complete index is ready, graph-dependent tools return a
+stable structured loading result instead of hanging, returning partial answers, or
+failing with an opaque error:
+
+```json
+{
+  "state": "warming_up",
+  "message": "LAIN is indexing this repository.",
+  "progress": {
+    "files_completed": 420,
+    "files_total": 1100
+  },
+  "retry_after_ms": 3000,
+  "available_tools": ["get_health", "get_capabilities"]
+}
+```
+
+The MCP dispatcher enforces this gate centrally. Health, capability,
+server-status, and other explicitly graph-independent operations remain callable;
+graph-dependent operations become callable only after the indexing state transitions
+to `ready`. Tool descriptions must tell agents that a `warming_up` response is
+retryable and point them to the capability tool for current progress.
+
+The initial implementation gates graph tools for both missing and stale indexes.
+Serving an old graph while a new graph is built is explicitly outside this
+milestone.
 
 ### Readiness model
 
-Capabilities should have explicit states:
+Capabilities have these explicit states:
 
 ```text
 ready
@@ -405,13 +448,13 @@ unavailable_optional
 unavailable_error
 ```
 
-Doctor, bootstrap, discovery, and CLI status share the same capability keys (`symbols`, `call_graph`, `git_history`, `semantic_search`) and objects with required `state` and `optional` fields. Optional diagnostic fields may provide a reason, remediation, and retry delay.
+Doctor, bootstrap, discovery, and CLI status share the same capability keys (`symbols`, `call_graph`, `git_history`, `semantic_search`) and objects with required `state` and `optional` fields. The only optional diagnostic fields in schema version 1 are `reason`, `remediation`, and `retry_after_ms`; omit them when they do not apply.
 
 | State | Available behavior | Agent action |
 |---|---|---|
 | `ready` | Capability can answer from current data. | Call normally. |
-| `warming_up` | Capability cannot answer yet; other ready capabilities remain usable. | Use a ready alternative or retry after initialization. |
-| `stale_usable` | Capability can answer from a stale snapshot with explicit freshness metadata. | Use when freshness permits; request refresh otherwise. |
+| `warming_up` | Capability cannot answer yet; the MCP protocol and other ready capabilities remain usable. | Use a ready alternative or retry after the suggested delay. |
+| `stale_usable` | Capability can answer from an intact, immutable stale snapshot with explicit freshness metadata. A graph being rebuilt in place never qualifies. | Use when freshness permits; request refresh otherwise. |
 | `unavailable_optional` | An optional dependency is absent or disabled; this capability cannot answer. | Fall back or request optional setup. |
 | `unavailable_error` | A failure prevents this capability from answering. | Use an alternative and follow remediation. |
 
@@ -420,18 +463,425 @@ Doctor, bootstrap, discovery, and CLI status share the same capability keys (`sy
 ### Startup rules
 
 - Find the nearest Git root by walking upward.
-- Prefer a usable cached graph immediately.
+- Start the MCP transport before waiting for repository indexing.
+- Keep `initialize`, `tools/list`, and graph-independent health/readiness operations responsive while indexing runs.
+- Gate graph-dependent tools centrally until a complete usable graph is available.
+- Return a structured `warming_up` result with progress and retry guidance; never expose a partially rebuilt graph.
+- Use a current cached graph immediately when one is available.
+- Treat stale serving as optional: only serve a stale graph when it remains an intact snapshot isolated from the graph being rebuilt.
 - Apply the working-tree overlay before claiming freshness.
-- Reindex in the background when possible.
+- Reindex stale or missing graphs in the background after the MCP transport starts.
 - Never block structural tools on optional semantic initialization.
 - Emit readiness notifications/events when capabilities transition to ready.
+
+### Authoritative startup state
+
+Startup state has one owner and one snapshot type. Do not derive a second startup
+state independently inside `doctor`, individual tools, or transport code. The Rust
+type is `IndexLifecycleSnapshot` in `src/server/readiness.rs` and contains:
+
+```text
+IndexLifecycleSnapshot
+├─ sequence: u64                  monotonically increases on every transition
+├─ attempt_id: u64                monotonically increases for each new index attempt
+├─ state: warming_up | ready | unavailable_error
+├─ phase: discovering | scanning | resolving | enriching | persisting | overlay
+├─ started_at_unix_ms: integer
+├─ completed_at_unix_ms: integer or null
+├─ target_commit: string or null
+├─ indexed_commit: string or null
+├─ files_total: integer or null
+├─ files_completed: integer
+├─ files_failed: integer
+├─ retry_after_ms: integer or null
+├─ problem: Problem or null        blocking terminal problem only
+└─ warnings: array of Problem      sorted by code, then message
+
+Problem
+├─ code: stable machine-readable string
+├─ message: human-readable string
+├─ remediation: human-readable next action
+└─ retryable: boolean
+```
+
+Store the snapshot behind one shared synchronization boundary so readers cannot
+combine fields from different transitions. The server, tool executor, capability
+projection, status output, and health output all receive the same shared handle.
+Progress updates increment `sequence`; timestamps use UTC Unix milliseconds; absent
+or not-yet-known values serialize as `null`, never as invented zero values.
+
+Allowed state transitions are:
+
+```text
+process start
+    → warming_up/discovering
+    → warming_up/scanning
+    → warming_up/resolving
+    → warming_up/enriching
+    → warming_up/persisting
+    → warming_up/overlay
+    → ready
+
+any warming_up phase
+    → unavailable_error
+
+warming_up/*
+    → warming_up/discovering with attempt_id + 1
+      only when HEAD changes before ready is published
+```
+
+Phases follow the displayed order. The coordinator skips a phase only when its
+planned work count is zero. It may not move backward within an attempt. A `HEAD` change starts a new
+attempt instead of moving the current attempt back to `scanning`.
+
+`ready` and `unavailable_error` are terminal for the startup attempt. A later
+explicit refresh creates a new attempt with a higher `attempt_id` and `sequence`
+and transitions back to `warming_up`; it never mutates the old attempt's identity
+in place. Invalid transitions fail tests and log an internal error. Only the
+indexing coordinator may change lifecycle state. Workers report progress to the coordinator but do not write
+the shared snapshot directly.
+
+For capability projection during startup:
+
+- MCP transport becomes healthy when the stdio loop or HTTP listener is serving.
+  A successful `initialize` records client-specific handshake health but does not
+  mutate repository readiness for other clients.
+- `git_history` is `ready` after the repository opens and `HEAD` is readable.
+- `symbols` and `call_graph` remain `warming_up` until base indexing, persistence,
+  and initial working-tree overlay reconciliation all succeed.
+- `semantic_search` is `warming_up` only when a model is configured and its required
+  index work is in progress. Without a configured model it is
+  `unavailable_optional`, never `unavailable_error`.
+- `agent_ready` remains false while either required structural capability is
+  `warming_up` or `unavailable_error`.
+
+### MCP method and tool behavior
+
+Protocol methods are never subject to the graph gate:
+
+- `initialize`;
+- `notifications/initialized`;
+- `ping`;
+- `tools/list`.
+
+`tools/list` always returns the stable advertised surface. Tools do not disappear
+and reappear as readiness changes because many MCP clients cache this response.
+
+Every advertised tool must declare exactly one readiness requirement in its
+canonical definition:
+
+```text
+protocol_only       no tools use this; reserved for MCP methods
+graph_independent   callable during startup
+graph_required      requires symbols/call graph readiness
+semantic_required   requires semantic readiness and graph readiness
+```
+
+There is no implicit permissive default. Schema generation and tests fail when a
+tool lacks a classification or names an unknown requirement. The initial
+`graph_independent` set is deliberately small: capability discovery, `get_health`,
+and `get_server_status`. A graph-independent diagnostic may read synchronized
+counters or metadata from a graph under construction, but it must label them as
+intermediate and must not return repository-intelligence conclusions from them.
+Additional tools may join this set only with a test proving they do not depend on a
+complete graph or overlay to produce a correct answer.
+
+The central MCP `tools/call` dispatcher evaluates the declared requirement before
+calling any handler. Individual handlers must not implement their own startup
+checks. During warm-up:
+
+- `graph_independent` tools dispatch normally;
+- `graph_required` and `semantic_required` tools return the loading result without
+  entering their handlers;
+- semantic tools return `unavailable_optional` instead when no model is configured;
+- unknown tools continue to use the normal unknown-tool error path.
+
+The loading result is a successful MCP tool result (`isError: false`) because
+warm-up is an expected retryable state, not a failed request. Return the object in
+`structuredContent` and mirror the same JSON in a text content item for clients
+that do not render structured content:
+
+```json
+{
+  "schema_version": 1,
+  "attempt_id": 1,
+  "sequence": 7,
+  "state": "warming_up",
+  "capability": "symbols",
+  "message": "LAIN is indexing this repository.",
+  "progress": {
+    "phase": "scanning",
+    "files_completed": 420,
+    "files_total": 1100,
+    "files_failed": 0
+  },
+  "retry_after_ms": 3000,
+  "next_action": {
+    "tool": "get_capabilities",
+    "arguments": {}
+  }
+}
+```
+
+Fields and ordering in the mirrored JSON are deterministic. In schema version 1,
+`retry_after_ms` is always 3000; changing that contract requires an explicit schema
+decision rather than an undocumented environment knob. Agents may poll more slowly;
+the server does not require a call to acknowledge the transition.
+
+Gated calls return immediately. The server does not queue, hold, or replay the
+original tool call after readiness changes; the client must issue a new call. This
+prevents abandoned client requests from accumulating during a long index.
+
+When startup ends in `unavailable_error`, gated tools return `isError: true` with
+the same stable envelope plus `problem`. The response must say what still works and
+provide a concrete remediation. It must not include a Rust debug representation or
+backtrace unless verbose diagnostics were explicitly requested.
+
+Startup uses these stable problem codes:
+
+| Code | Trigger | Retryable | Required remediation |
+|---|---|---:|---|
+| `repository_not_found` | No Git root can be resolved. | no | Run inside a Git repository or pass `--workspace`. |
+| `graph_corrupt` | Persisted graph cannot be decoded or validated. | no | Run `lain doctor --fix` to quarantine it and rebuild. |
+| `index_startup_timeout` | One attempt exceeds the configured startup timeout. | yes | Retry or increase `--reindex-timeout`. |
+| `index_no_usable_files` | Eligible source files exist but every scheduled file fails all supported parsers. | yes | Inspect verbose diagnostics, repair the parser/toolchain issue, and retry. |
+| `index_failed` | Scan, resolve, or enrichment returns a non-file-specific failure. | yes | Inspect verbose diagnostics and retry. |
+| `persistence_failed` | The complete graph cannot be written atomically. | yes | Check `.lain` permissions/free space and retry. |
+| `overlay_reconciliation_failed` | Initial dirty-worktree reconciliation fails. | yes | Check language tooling or use verbose diagnostics, then retry. |
+| `watcher_start_failed` | Source watcher cannot establish its readiness barrier. | yes | Check OS watcher limits/permissions and retry. |
+
+Unsupported and intentionally ignored files are excluded before `files_total` is
+fixed. A scheduled file that fails all supported parsing paths increments
+`files_failed`. Some failed files do not disable the whole repository: when at least
+one eligible file indexes successfully and graph invariants pass, structural
+capabilities may become `ready` with an `index_files_failed` warning containing the
+exact failed count. When eligible files exist and none index successfully, startup
+ends with `index_no_usable_files`. A repository with zero eligible source files is a
+valid empty index and may become `ready`. Optional semantic-model failure affects
+only `semantic_search` and does not use a required structural problem code.
+
+For `graph_corrupt`, `lain doctor --fix` renames the unreadable file to
+`graph.bin.corrupt-<UTC timestamp>` in the same directory, reports the recovery
+path, and starts a clean rebuild. It never deletes or overwrites the corrupt file.
+Without `--fix`, diagnosis is read-only and startup stays `unavailable_error`.
+
+### Index execution and consistency
+
+The background task continues using the current incremental graph writer, but
+no graph-dependent handler may run until the whole startup attempt succeeds. Per-
+batch writes and intermediate persistence are implementation progress, not a usable
+snapshot. `indexed_commit` does not advance unless the complete pass satisfies the
+existing full-pass rules.
+
+Background indexing must also be execution-isolated from protocol I/O. The current
+`lain mcp` entry point uses a single-thread Tokio runtime. Change it to a
+multi-thread runtime with `max(2, available_parallelism)` worker threads. Moving
+indexing into `tokio::spawn` on the old runtime alone does not satisfy this milestone because
+blocking Git, parser, LSP, model, or filesystem work could still starve
+`initialize`, `ping`, or `tools/list`. Route synchronous Git, parser, model, and
+filesystem work through `spawn_blocking`; keep async LSP I/O on Tokio tasks. The
+index coordinator and every blocking child handle are server-owned, cancellable,
+and joined. This design must pass the blocked-indexer responsiveness test below.
+
+The coordinator performs these steps in order:
+
+1. Resolve and validate the repository root before constructing repository state.
+2. Construct the MCP handler and lifecycle snapshot with `warming_up/discovering`.
+3. Construct the transport and handler without awaiting repository indexing.
+4. Spawn exactly one startup indexing task on the isolated execution lane; retain
+   its cancellation handle and join handle in server-owned lifecycle state.
+5. Enter the MCP serving loop immediately. No startup-index future is awaited on the
+   protocol I/O path.
+6. Read `HEAD`, the persisted indexed commit, and the intended file count.
+7. If the persisted graph is already current, skip scanning but still reconcile the
+   initial working-tree overlay before transitioning to `ready`.
+8. Otherwise run scan, resolve, enrich, and persistence phases while publishing
+   monotonic progress.
+9. Reconcile the working-tree overlay. A successful base index without this step is
+   not `ready`.
+10. Start or confirm the source watcher and commit-sync worker.
+11. Re-read `HEAD`. If it changed during startup, remain `warming_up` and immediately
+    index toward the new commit; do not briefly publish `ready` for the superseded
+    commit.
+12. Transition once to `ready` only when `indexed_commit == HEAD`, required graph
+    invariants pass, persistence succeeded, and the overlay represents the current
+    working tree.
+
+Indexing and watcher-driven mutation must continue to use the existing repository
+change lock. Events arriving during the startup pass must be queued or followed by
+the final reconciliation in step 9; no event may be silently lost in the handoff
+between initial reconciliation and watcher activation. The implementation must add
+a test-visible watcher-ready barrier rather than depending on sleeps.
+
+The existing startup timeout remains a bound on one attempt. On timeout, cancel and
+join the indexing task, persist only progress that satisfies existing persistence
+invariants, and transition to `unavailable_error` with code
+`index_startup_timeout`. Do not leave a detached indexer mutating the graph after
+the error is published. A normal MCP shutdown also cancels and joins the startup
+task and stops watcher/commit-sync workers before process exit.
+
+Cancellation is cooperative as well as task-level. The scan loop checks a shared
+cancellation token before scheduling a batch, after each completed batch, before
+each persistence operation, and between resolve, enrich, persistence, and overlay
+phases. Once cancellation is observed, no new graph write may begin. The coordinator
+waits for any already-held graph write lock to finish before publishing
+`unavailable_error` or completing shutdown. Tests use injected barriers and tokens;
+production code must not depend on timing sleeps.
+
+Because the current writer mutates the graph incrementally, a failed or timed-out
+attempt is never exposed as `stale_usable`. The next process may reuse the persisted
+progress to continue indexing, but graph tools remain gated until a complete pass
+succeeds.
+
+### Current, stale, and missing graph policy
+
+This milestone implements exactly these policies:
+
+| Initial graph | Startup behavior | Graph-tool behavior |
+|---|---|---|
+| Current at `HEAD` | Validate and reconcile overlay in background. | `warming_up` until reconciliation completes, then `ready`. |
+| Stale | Refresh in background using existing incremental persistence. | `warming_up`; do not serve the graph during mutation. |
+| Missing | Build in background. | `warming_up`. |
+| Corrupt/unreadable | Record typed failure; do not silently replace unless an existing safe recovery rule authorizes it. | `unavailable_error`. |
+| Refresh failed/timed out | Cancel and join the attempt; retain valid persisted progress for a future retry. | `unavailable_error`. |
+
+`stale_usable` remains part of the shared capability schema for intact snapshots,
+but startup does not emit it in this milestone. Supporting it later requires a
+separate shadow-build-and-atomic-swap design. That optimization must not be partially
+implemented through the live incremental writer.
+
+### Multiple repositories
+
+Each repository owns its own lifecycle snapshot. Repository-scoped tools gate only
+on the selected repository. A tool spanning several repositories may run only when
+every repository in its resolved input set satisfies its declared requirement; if
+not, its loading response lists the blocking repository IDs in deterministic sorted
+order.
+
+Capability and federation-health responses include both per-repository state and an
+aggregate. Aggregate required capabilities are `ready` only when every configured
+repository required by the active workspace is ready. Optional semantic absence in
+one or more repositories does not make the aggregate unusable. A failed repository
+does not prevent health or capability calls for ready repositories.
+
+### Progress and notifications
+
+Progress is derived from actual scheduled source files:
+
+- `files_total` is fixed when a scan attempt is planned;
+- `files_completed` counts successful and failed file attempts and never decreases;
+- `files_failed` is required, counts failed file attempts, never decreases, and is
+  always less than or equal to `files_completed`;
+- phase changes and meaningful progress updates increment `sequence`;
+- snapshot progress is published once per completed ingestion batch;
+- notifications are emitted at most four times per second, coalescing intermediate
+  progress and retaining the newest snapshot.
+
+On every externally visible state transition, emit one advisory MCP notification:
+
+```text
+notifications/lain/capabilities_changed
+```
+
+Its payload is the same capability snapshot returned by discovery. Clients are not
+required to support the custom notification, so polling `get_capabilities` remains
+the canonical fallback. Notification delivery failure is logged to stderr and does
+not affect indexing state or MCP stdout.
+
+### Implementation sequence
+
+Land Milestone 4 as a series of reviewable commits or PRs. Each step must leave the
+tree green and must not introduce a second temporary state model:
+
+1. Add lifecycle and problem DTOs, transition validation, serialization fixtures,
+   and capability projection tests.
+2. Add mandatory readiness classification to every canonical tool definition and
+   validate the complete generated tool surface.
+3. Add central dispatch gating and loading/error response fixtures while retaining
+   the existing blocking startup.
+4. Instrument indexing phases and monotonic file progress through the coordinator.
+5. Replace the pre-transport await with a server-owned background task for stdio;
+   add cancellation and joining on every exit path.
+6. Apply the same lifecycle helper to HTTP transport so behavior cannot drift.
+7. Add the watcher-ready handoff and final `HEAD`/overlay reconciliation.
+8. Add per-repository federation state and deterministic multi-repository gating.
+9. Add capability-change notifications and verify polling-only clients behave
+   identically.
+10. Remove the old blocking-startup helper and tests only after all replacement
+    contract tests pass; update documentation and the tool-schema snapshot in the
+    same change.
+
+No step may leave both the old awaited indexer and the new background coordinator
+reachable in production. Search-based structural tests must assert that there is
+one startup-index entry point for each transport.
+
+Required ownership and code placement:
+
+| Concern | Canonical location | Rule |
+|---|---|---|
+| Lifecycle DTOs, transition validation, capability projection | `src/server/readiness.rs` | No transport or CLI-specific formatting. |
+| Shared lifecycle handle on the server/tool context | `src/server/ingest/server.rs` and `src/server/tools/registry.rs` | All consumers clone the same handle. |
+| Index phase/progress reporting | `src/server/ingest/ingestion.rs` | Report through a coordinator-owned progress sink; never format MCP responses here. |
+| Tool readiness requirement | `src/server/tools/definitions.rs` and all special definitions in `src/server/mcp/definitions.rs` | Exactly one requirement per advertised tool. |
+| Central gate and MCP response construction | `src/server/mcp/handler.rs` | One gate before every tool handler path. |
+| Background task ownership and transport startup | `src/server/mcp/handler.rs` | Shared helper used by stdio and HTTP. |
+| Capability MCP tool | `src/server/mcp/definitions.rs` plus its handler | Thin serialization of the shared projection. |
+| CLI JSON/human projections | `src/cli/doctor.rs` and new `src/cli/capabilities.rs` / `src/cli/status.rs` | Consume shared DTOs; do not recompute readiness. |
+| Contract tests | `tests/mcp_cold_start.rs`, new readiness unit tests, and schema fixtures | No sleep-based readiness assertions. |
+
+If implementation reveals that a listed file is no longer canonical because of a
+landed refactor, update this ownership table in the same PR that changes the target;
+do not silently place a second implementation elsewhere.
+
+### Explicit non-goals
+
+Milestone 4 does not:
+
+- serve stale graph queries while a replacement graph is being built;
+- expose partial results from the live incremental writer;
+- dynamically add or remove tools from `tools/list`;
+- queue and replay graph-tool calls made during warm-up;
+- make optional semantic initialization a prerequisite for structural readiness;
+- automatically delete corrupt graphs;
+- require clients to understand custom notifications.
+
+These exclusions are final for this milestone. Any later proposal that changes one
+requires its own design, acceptance criteria, and issue; it is not a missing tail of
+the startup implementation.
 
 ## Acceptance criteria
 
 - Starting `lain mcp` inside a nested repository directory works.
-- A warm repository exposes structural tools within a small latency budget.
+- In an integration test where the indexer is held at an injected barrier,
+  `initialize`, `ping`, and `tools/list` each complete within 2 seconds on every CI
+  platform; existing warm-path performance budgets remain unchanged.
+- An immediate graph-dependent call during cold indexing returns structured `warming_up` state with retry guidance, not a partial answer.
+- Health/capability discovery remains callable during indexing and reports deterministic progress.
+- Graph-dependent tools transition to normal answers only after the complete index is ready.
+- An indexing failure transitions required graph capabilities to `unavailable_error` with remediation.
+- On the committed tiny cold-start fixture, a current cached graph reaches `ready`
+  within 5 seconds and its first structural call remains within the existing tool
+  performance budget.
 - A missing semantic model does not fail MCP startup.
-- Stale state is clearly represented rather than silently treated as current.
+- A stale graph is gated as `warming_up` for this milestone and is never dispatched
+  as `stale_usable` through the live incremental writer.
+- MCP stdout remains protocol-clean throughout startup and indexing.
+- Every advertised tool has one validated readiness requirement, and all gated
+  calls pass through the central dispatcher.
+- Progress counters are monotonic and state transitions follow the allowed state
+  machine under concurrent polling.
+- A `HEAD` change during startup is indexed before `ready` is published.
+- Timeout, indexing failure, corrupt graph, and shutdown paths leave no detached
+  indexing or watcher tasks.
+- Cancellation tests prove that no graph write begins after cancellation is
+  observed and that process shutdown joins the coordinator within 5 seconds when
+  workers are at cooperative cancellation points.
+- Single-repository and federation tests cover current, stale, missing, failed, and
+  mixed-readiness repositories.
+- Loading and failure responses have byte-stable JSON fixtures with no ANSI escapes.
+- The former cold-start assertion is replaced: an immediate structural call may
+  return `warming_up`, and the same call must return a normal non-empty answer after
+  readiness transitions to `ready`.
 
 ---
 
@@ -441,11 +891,15 @@ Doctor, bootstrap, discovery, and CLI status share the same capability keys (`sy
 
 A new agent should not spend several calls learning what repository it is in, which LAIN capabilities are available, and which tools are appropriate.
 
-## Proposed MCP tool
+## Primary MCP tool
 
 ```text
-bootstrap_repository_context
+understand_repository
 ```
+
+`understand_repository` is the public semantic tool name. Internally it may compose
+a bootstrap-context builder, but `bootstrap_repository_context` must not be exposed
+as a second public alias because that recreates tool-selection ambiguity.
 
 Example response:
 
@@ -524,6 +978,7 @@ find_related
 assess_change
 search_code
 query_graph
+get_capabilities
 get_health
 ```
 
@@ -538,7 +993,8 @@ Possible intent mapping:
 | “Find code that does Y” | `search_code` | lexical + structural + optional semantic |
 | “Understand this repo” | `understand_repository` | bootstrap/anchors/entry points |
 | Advanced graph question | `query_graph` | existing graph query surface |
-| Trust/readiness | `get_health` | structured capability state |
+| Fast readiness check | `get_capabilities` | shared capability snapshot only |
+| Full diagnosis | `get_health` | capability snapshot plus problems and remediation |
 
 ### Tool descriptions matter
 
@@ -565,7 +1021,9 @@ Primary tools should orchestrate existing internal capabilities instead of intro
 
 # Milestone 7 — Capability discovery and readiness
 
-Introduce a cheap capability endpoint/tool that an agent can call before planning.
+Introduce one cheap MCP tool named `get_capabilities` that an agent can call before
+planning. This is the canonical polling target used by warm-up responses. Do not add
+an unnamed endpoint, resource alias, or second discovery tool.
 
 ```json
 {
@@ -589,11 +1047,24 @@ Introduce a cheap capability endpoint/tool that an agent can call before plannin
 }
 ```
 
-This should be substantially cheaper than a full health diagnostic and safe to call frequently. Expose the same capability model through `lain capabilities --json`; expose repository freshness, indexing progress, and aggregate readiness through `lain status --json`. Both CLI responses include `schema_version` and `server_version` and reuse the core state computation. These are proposed commands, not existing CLI guarantees.
+`get_capabilities` performs no Git subprocess, graph traversal, model load, index
+mutation, or network call. It serializes the current shared readiness snapshot and
+is safe to call frequently. `get_health` remains the more expensive diagnostic
+surface and adds problems, remediation, installation checks, and detailed counts.
+
+Expose the same capability model through `lain capabilities --json`; expose
+repository freshness, indexing progress, and aggregate readiness through
+`lain status --json`. Both CLI responses include `schema_version` and
+`server_version` and reuse the core state computation. These are proposed commands,
+not existing CLI guarantees.
 
 ## Acceptance criteria
 
 - Agents never need to infer readiness from error strings.
+- `get_capabilities` is present in `tools/list`, classified
+  `graph_independent`, and stays callable throughout indexing.
+- Repeated calls without a transition return byte-equivalent structured payloads
+  except for fields explicitly documented as clocks.
 - Capability state transitions are testable.
 - Freshness is explicit.
 - Optional capability absence is distinguishable from failure.
@@ -652,8 +1123,11 @@ For each target:
 7. perform `initialize`;
 8. list tools;
 9. call capability discovery;
-10. call one structural query;
-11. assert protocol-clean stdout.
+10. if required structural capabilities are `warming_up`, poll capability discovery
+    no faster than `retry_after_ms` until `ready` or the test's explicit index budget
+    expires;
+11. call one structural query and require a normal non-loading answer;
+12. assert protocol-clean stdout.
 
 The current npm installer skips downloads when `CI` is set unless `LAIN_FORCE_INSTALL=1`. Add a separate automation lane with both `CI=true` and `LAIN_FORCE_INSTALL=1`; retain the unforced user lane above. Use fresh cache directories in both lanes, require an actual downloaded binary, and then verify offline cache reuse. Do not treat a skipped postinstall as a successful installation.
 
@@ -734,27 +1208,29 @@ Avoid stack traces by default. Offer `--verbose` / `RUST_LOG` for diagnostics.
 ## Phase B — Trust and onboarding
 
 4. Normalize structured capability/readiness state.
-5. modernize `doctor` and implement `capabilities --json` / `status --json` around that state.
-6. implement `setup` core and generic MCP adapter.
-7. add client adapters incrementally.
+5. Modernize `doctor`, including safe corrupt-graph quarantine, and implement `capabilities --json` / `status --json` around that state.
+6. Add `get_capabilities` and mandatory readiness classification for every MCP tool.
+7. Add central graph-tool gating, background startup indexing, progress, and clean shutdown.
+8. Add federation readiness aggregation and capability transition notifications.
+9. Implement `setup` core and generic MCP adapter.
+10. Add client adapters incrementally.
 
 **Why second:** setup should consume a reliable health/readiness model instead of inventing a parallel one.
 
 ## Phase C — Agent-native interface
 
-8. bootstrap repository context.
-9. semantic primary tool layer.
-10. tool descriptions and recommendation metadata.
-11. agent selection benchmarks.
+11. Implement `understand_repository` context bootstrap.
+12. Implement the remaining semantic primary tool layer.
+13. Complete tool descriptions and recommendation metadata.
+14. Add agent selection benchmarks.
 
 **Why third:** simplify the agent surface after the server can reliably report what is ready.
 
 ## Phase D — Polish and release gates
 
-12. capability transition notifications.
-13. optional background model acquisition UX.
-14. cross-platform clean-room MCP contract tests.
-15. update Quickstart to the new canonical path.
+15. Add optional background model acquisition UX.
+16. Add cross-platform clean-room MCP contract tests.
+17. Update Quickstart to the new canonical path.
 
 ---
 
@@ -766,22 +1242,37 @@ Keep implementation PRs small and independently shippable.
 2. **npm: native launcher with verified binary cache**
 3. **CI: clean-room launcher smoke tests**
 4. **Core: structured capability/readiness model**
-5. **CLI: redesign `lain doctor` + stable JSON output**
-6. **CLI: implement idempotent `lain setup` framework**
-7. **Setup: generic MCP adapter**
-8. **Setup: Claude Code adapter**
-9. **Setup: Codex adapter**
-10. **Setup: Cursor / VS Code / Continue adapters**
-11. **MCP: bootstrap repository context tool**
-12. **MCP: primary semantic agent API**
-13. **MCP: capability discovery tool/resource**
-14. **Bench: agent tool-selection benchmark suite**
-15. **CI: end-to-end MCP distribution acceptance matrix**
-16. **Docs: replace install-first quickstart with setup-first onboarding**
-17. **CLI: implement `lain capabilities --json` using the shared capability schema** — test all capability states, schema version, exit codes, and protocol-free JSON.
-18. **CLI: implement `lain status --json` for freshness and aggregate readiness** — test current/stale/missing graphs, indexing progress, required failures, and agreement with doctor.
+5. **CLI: redesign `lain doctor` + stable JSON + safe corrupt-graph quarantine** — `--fix` renames, never deletes, before rebuilding.
+6. **CLI: implement `lain capabilities --json` and `lain status --json`** — test all capability states, schema version, exit codes, freshness, indexing progress, required failures, and agreement with doctor.
+7. **MCP: add `get_capabilities` and classify every advertised tool** — no production behavior changes yet; schema validation rejects missing classifications.
+8. **MCP: central readiness gate and stable warm-up/error envelopes** — retain blocking startup until the gate and fixtures are complete.
+9. **Index: lifecycle coordinator with phases and monotonic progress** — one shared state handle; no transport-specific state.
+10. **MCP: start stdio/HTTP transport before indexing** — isolate indexing from protocol I/O; cancel and join it on every exit path.
+11. **Index: deterministic watcher handoff and final HEAD/overlay reconciliation** — add a readiness barrier; do not use sleeps.
+12. **Federation: per-repository readiness and deterministic aggregate gating** — mixed-ready repositories remain diagnosable.
+13. **MCP: capability transition notifications** — polling remains canonical; notification failure never changes readiness.
+14. **CLI: implement idempotent `lain setup` framework**
+15. **Setup: generic MCP adapter**
+16. **Setup: Claude Code adapter**
+17. **Setup: Codex adapter**
+18. **Setup: Cursor / VS Code / Continue adapters**
+19. **MCP: `understand_repository` context tool**
+20. **MCP: remaining primary semantic agent API**
+21. **Bench: agent tool-selection benchmark suite**
+22. **CI: end-to-end MCP distribution acceptance matrix**
+23. **Docs: replace install-first quickstart with setup-first onboarding**
 
-Each issue should define UX screenshots/transcripts, implementation constraints, and acceptance tests before coding.
+Dependencies are strict: 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13;
+setup issues 14–18 depend on 5–7 and 13; semantic issues 19–21 depend on 7 and
+12; the final distribution gate 22 depends on all runtime and setup issues it
+exercises; documentation issue 23 lands last. Distribution issues 1–3 may
+run in parallel with 4–13.
+
+Each issue must define UX transcripts, implementation constraints, fixtures, and
+acceptance tests before coding. An issue is not complete while it leaves a temporary
+code path, ignored test, unclassified tool, unhandled shutdown path, undocumented
+schema field, stale generated schema, or follow-up TODO required for its stated
+contract.
 
 ---
 
