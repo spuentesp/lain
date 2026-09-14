@@ -201,30 +201,61 @@ fn resolve_repo_or_error(
     }
 }
 
-/// Dispatch one of the 8 multiplayer MCP tools against the shared
-/// `LainServer`. Returns the formatted `CallToolResult` directly so the
-/// caller can `return` it. When the server was built without a presence
-/// layer (the sidecar), the tool returns a clean error result instead of
-/// panicking.
-fn dispatch_presence_tool<F>(
+/// Per-process status snapshot carried into the HTTP request handler
+/// closure. Built once per accepted connection (cloning the cheap
+/// `SystemTime` and Arc-shared Mutexes) so the inner `service_fn`
+/// closure doesn't need to capture the whole `LainMcpServer` state.
+#[derive(Clone)]
+struct HandlerStatus {
+    transport: Option<crate::server::Transport>,
+    port: Option<u16>,
+    started_at: std::time::SystemTime,
+    last_sync_at: Arc<parking_lot::Mutex<std::time::SystemTime>>,
+    last_error: Arc<parking_lot::Mutex<Option<String>>>,
+    repo_count: usize,
+    workspaces_count: usize,
+}
+
+impl HandlerStatus {
+    /// Render the `get_server_status` payload.
+    ///
+    /// Delegates to the one builder in
+    /// `federation_tools::server_status` — this used to be a second
+    /// implementation of the same JSON, and it drifted: build-identity
+    /// fields were added there and this transport kept serving a
+    /// payload without them.
+    fn render(&self) -> serde_json::Value {
+        use crate::server::mcp::federation_tools::server_status::{
+            render_server_status, ServerStatusFields,
+        };
+        render_server_status(ServerStatusFields {
+            transport: self.transport.map(|t| match t {
+                crate::server::Transport::Stdio => "stdio".to_string(),
+                crate::server::Transport::Http => "http".to_string(),
+            }),
+            port: self.port,
+            started_at: self.started_at,
+            last_sync_at: *self.last_sync_at.lock(),
+            last_error: self.last_error.lock().clone(),
+            repo_count: self.repo_count,
+            workspace_count: self.workspaces_count,
+        })
+    }
+}
+
+fn dispatch_presence_tool_outcome<F>(
     server: Option<&LainServer>,
-    overlay: &crate::overlay::VolatileOverlay,
     name: &str,
     args: &Map<String, serde_json::Value>,
     runner: F,
-) -> CallToolResult
+) -> (String, bool)
 where
     F: Fn(&LainServer, serde_json::Value) -> Result<serde_json::Value, String>,
 {
-    // P1 #1: capture static-graph generation once per dispatch.
-    let static_graph_generation_unix: Option<i64> =
-        server.and_then(|s| s.static_graph_generation_unix());
     let Some(server) = server else {
-        return tool_text_result(
+        return (
             format!("{name}: presence layer not configured on this server"),
             true,
-            overlay,
-            static_graph_generation_unix,
         );
     };
     let value = serde_json::Value::Object(args.clone().into_iter().collect());
@@ -232,95 +263,475 @@ where
         Ok(v) => {
             let text =
                 serde_json::to_string(&v).unwrap_or_else(|e| format!("serialization error: {e}"));
-            tool_text_result(text, false, overlay, static_graph_generation_unix)
+            (text, false)
         }
-        Err(e) => tool_text_result(
-            format!("{name}: {e}"),
-            true,
-            overlay,
-            static_graph_generation_unix,
-        ),
+        Err(e) => (format!("{name}: {e}"), true),
     }
 }
 
-/// Same shape as `dispatch_presence_tool` but for the HTTP /mcp
-/// JSON-RPC path: takes the local closures so the helper can be
-/// reused without re-defining `jsonrpc_tool_result` / `jsonrpc_error`
-/// at module scope.
-fn jsonrpc_presence_tool<F>(
-    jsonrpc_tool_result: impl Fn(Option<&serde_json::Value>, &str, bool) -> Response<OverlayHttpBody>,
-    jsonrpc_error: impl Fn(Option<&serde_json::Value>, i32, String) -> Response<OverlayHttpBody>,
-    id: Option<&serde_json::Value>,
-    name: &str,
-    args: &Map<String, serde_json::Value>,
+/// Unified MCP tool dispatcher shared by Stdio and HTTP transports.
+///
+/// Dispatches server-status, reload, multiplayer presence, federation,
+/// workspace, and core graph tools. Returns `(payload_text, is_error)`.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool_call(
+    executor: &ToolExecutor,
+    federation: Option<&FederatedIndex>,
+    workspaces: Option<&Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
+    status: &HandlerStatus,
+    reload_bus: Option<&crate::server::reload::ReloadBus>,
     server: Option<&LainServer>,
-    runner: F,
-) -> Response<OverlayHttpBody>
-where
-    F: Fn(&LainServer, serde_json::Value) -> Result<serde_json::Value, String>,
-{
-    let Some(server) = server else {
-        return jsonrpc_tool_result(
-            id,
-            &format!("{name}: presence layer not configured on this server"),
-            true,
-        );
-    };
-    let value = serde_json::Value::Object(args.clone().into_iter().collect());
-    // P1 #1: bake the static-graph generation into the success/error
-    // envelope here so the HTTP path carries it without plumbing the
-    // value through the `jsonrpc_tool_result` closure. The success
-    // path appends `_meta.static_graph_generation`; the error path
-    // already wraps the message in a `result: { content, isError }`
-    // shape and we mirror the same field there.
-    let static_graph_generation_unix: Option<i64> = server.static_graph_generation_unix();
-    let render_error = |msg: String| -> Response<OverlayHttpBody> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "error": {
-                "code": -32000,
-                "message": msg,
-                "_meta": {
-                    "static_graph_generation": static_graph_generation_unix
-                }
-            },
-            "id": id
-        });
-        let text = serde_json::to_string(&body).unwrap_or_default();
-        jsonrpc_error(id, -32000, /* unused */ String::new());
-        // jsonrpc_error is a closure we don't control, so we have to
-        // return its result via a side-channel: instead, build the
-        // Response inline with our text. Since the closure's
-        // responsibility is just the body+isError shape, and the
-        // outer HTTP layer reads `result` / `error` from the body, we
-        // can return the body as a plain Response.
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(full_body(Bytes::from(text)))
-            .unwrap()
-    };
-    let _ = render_error; // suppress unused warning
-    match runner(server, value) {
-        Ok(v) => {
-            let mut payload = match serde_json::to_value(&v) {
-                Ok(val) => val,
-                Err(e) => {
-                    return jsonrpc_tool_result(id, &format!("serialization error: {e}"), true);
+    name: &str,
+    mut args_map: Map<String, serde_json::Value>,
+) -> (String, bool) {
+    match name {
+        "get_server_status" => {
+            let payload = status.render();
+            return (payload.to_string(), false);
+        }
+        "list_recent_projects" => {
+            let list = match crate::server::mcp::federation_tools::list_recent_projects() {
+                Ok(l) => l,
+                Err(e) => return (format!("{e}"), true),
+            };
+            let text = match serde_json::to_string(&list) {
+                Ok(s) => s,
+                Err(e) => return (format!("serialization error: {e}"), true),
+            };
+            return (text, false);
+        }
+        "get_reload_status" => {
+            let bus = match reload_bus {
+                Some(b) => b,
+                None => {
+                    return ("reload bus not configured on this server".to_string(), true);
                 }
             };
-            if let serde_json::Value::Object(ref mut map) = payload {
-                map.insert(
-                    "_meta".to_string(),
-                    serde_json::json!({
-                        "static_graph_generation": static_graph_generation_unix
-                    }),
+            let payload = crate::server::mcp::federation_tools::get_reload_status(bus);
+            let text = serde_json::to_string(&payload)
+                .unwrap_or_else(|e| format!("serialization error: {e}"));
+            return (text, false);
+        }
+        "request_reload" => {
+            let bus = match reload_bus {
+                Some(b) => b,
+                None => {
+                    return ("reload bus not configured on this server".to_string(), true);
+                }
+            };
+            return match crate::server::mcp::federation_tools::request_reload(bus) {
+                Ok(payload) => (
+                    serde_json::to_string(&payload)
+                        .unwrap_or_else(|e| format!("serialization error: {e}")),
+                    false,
+                ),
+                Err(e) => (format!("{e}"), true),
+            };
+        }
+        "register_agent" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_register_agent,
+            );
+        }
+        "heartbeat" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_heartbeat,
+            );
+        }
+        "list_active_agents" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_list_active_agents,
+            );
+        }
+        "who_am_i" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_who_am_i,
+            );
+        }
+        "list_subagents" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_list_subagents,
+            );
+        }
+        "claim_files" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_claim_files,
+            );
+        }
+        "release_files" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_release_files,
+            );
+        }
+        "list_occupancy" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_list_occupancy,
+            );
+        }
+        "my_claims" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_my_claims,
+            );
+        }
+        "detect_overlap" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_detect_overlap,
+            );
+        }
+        "get_audit_log" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::audit_tools::run_get_audit_log,
+            );
+        }
+        "get_world_state" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::presence_tools::run_get_world_state,
+            );
+        }
+        "get_recent_activity" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::audit_tools::run_get_recent_activity,
+            );
+        }
+        _ => {}
+    }
+
+    if let Some(fed) = federation {
+        match name {
+            "list_repos" => {
+                let repos = crate::server::mcp::federation_tools::list_repos(fed);
+                return (
+                    serde_json::to_string(&repos)
+                        .unwrap_or_else(|e| format!("serialization error: {e}")),
+                    false,
                 );
             }
-            let text = serde_json::to_string(&payload).unwrap_or_default();
-            jsonrpc_tool_result(id, &text, false)
+            "get_repo_info" => {
+                let repo_id_str = match args_map.get("repo_id").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => {
+                        return ("Missing required argument: repo_id".to_string(), true);
+                    }
+                };
+                let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
+                    Ok(r) => r,
+                    Err(e) => return (format!("{e}"), true),
+                };
+                return match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
+                    Ok(info) => {
+                        let mut value: serde_json::Value =
+                            serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
+                        let active_edits = server
+                            .map(|s| {
+                                let occupancy = s.occupancy();
+                                let active = s.presence().list_active(false);
+                                active
+                                    .iter()
+                                    .filter(|sess| {
+                                        let claims = occupancy.list_for_agent(&sess.id);
+                                        !claims.is_empty()
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0);
+                        if let Some(obj) = value.as_object_mut() {
+                            obj.insert(
+                                "active_edits".to_string(),
+                                serde_json::Value::Number(active_edits.into()),
+                            );
+                        }
+                        (
+                            serde_json::to_string(&value)
+                                .unwrap_or_else(|e| format!("serialization error: {e}")),
+                            false,
+                        )
+                    }
+                    Err(e) => (format!("{e}"), true),
+                };
+            }
+            "get_federation_health" => {
+                let health = crate::server::mcp::federation_tools::get_federation_health(fed);
+                return (
+                    serde_json::to_string(&health)
+                        .unwrap_or_else(|e| format!("serialization error: {e}")),
+                    false,
+                );
+            }
+            "search_org" => {
+                let query = match args_map.get("query").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => {
+                        return ("Missing required argument: query".to_string(), true);
+                    }
+                };
+                let limit: usize = match args_map.get("limit") {
+                    Some(serde_json::Value::Number(n)) => match n.as_u64() {
+                        Some(u) => u as usize,
+                        None => {
+                            return (
+                                "Invalid argument: limit must be a non-negative integer"
+                                    .to_string(),
+                                true,
+                            );
+                        }
+                    },
+                    Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
+                        Ok(u) => u,
+                        Err(_) => {
+                            return (
+                                "Invalid argument: limit must be a non-negative integer"
+                                    .to_string(),
+                                true,
+                            );
+                        }
+                    },
+                    _ => {
+                        return ("Missing required argument: limit".to_string(), true);
+                    }
+                };
+                let hits = crate::server::mcp::federation_tools::search_org(fed, query, limit);
+                return (
+                    serde_json::to_string(&hits)
+                        .unwrap_or_else(|e| format!("serialization error: {e}")),
+                    false,
+                );
+            }
+            "get_cross_repo_blast_radius" => {
+                let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => {
+                        return ("Missing required argument: symbol".to_string(), true);
+                    }
+                };
+                let depth_owned =
+                    match crate::server::tools::utils::required_str_arg(&args_map, "depth") {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return (e.to_string(), true);
+                        }
+                    };
+                let depth = match parse_depth_range(&depth_owned) {
+                    Ok(r) => r,
+                    Err(e) => return (e, true),
+                };
+                return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(
+                    fed, symbol, depth,
+                ) {
+                    Ok(r) => (
+                        serde_json::to_string(&r)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ),
+                    Err(e) => (format!("{e}"), true),
+                };
+            }
+            "get_cross_repo_blast_radius_for_repo" => {
+                let repo_id = match args_map.get("repo_id").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => {
+                        return ("Missing required argument: repo_id".to_string(), true);
+                    }
+                };
+                let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => {
+                        return ("Missing required argument: symbol".to_string(), true);
+                    }
+                };
+                let depth_owned =
+                    match crate::server::tools::utils::required_str_arg(&args_map, "depth") {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return (e.to_string(), true);
+                        }
+                    };
+                let depth = match parse_depth_range(&depth_owned) {
+                    Ok(r) => r,
+                    Err(e) => return (e, true),
+                };
+                return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(
+                    fed, repo_id, symbol, depth,
+                ) {
+                    Ok(r) => (
+                        serde_json::to_string(&r)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ),
+                    Err(e) => (format!("{e}"), true),
+                };
+            }
+            _ => {}
         }
-        Err(e) => jsonrpc_tool_result(id, &format!("{name}: {e}"), true),
+    }
+
+    if let Some(workspaces_lock) = workspaces {
+        let workspaces: &crate::federation::workspace::WorkspacesFile = &workspaces_lock.read();
+        match name {
+            "list_workspaces" => {
+                let active = ActiveWorkspace::load().ok().flatten();
+                let infos = crate::server::mcp::federation_tools::list_workspaces(
+                    workspaces,
+                    active.as_ref(),
+                );
+                return (
+                    serde_json::to_string(&infos)
+                        .unwrap_or_else(|e| format!("serialization error: {e}")),
+                    false,
+                );
+            }
+            "get_active_workspace" => {
+                let fed_ref = match federation {
+                    Some(f) => f,
+                    None => {
+                        return (
+                            LainError::Workspace(
+                                "get_active_workspace requires federation mode".into(),
+                            )
+                            .to_string(),
+                            true,
+                        );
+                    }
+                };
+                return match crate::server::mcp::federation_tools::get_active_workspace(
+                    fed_ref, workspaces,
+                ) {
+                    Ok(info) => (
+                        serde_json::to_string(&info)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ),
+                    Err(e) => (format!("{e}"), true),
+                };
+            }
+            "get_workspace" => {
+                let name_arg = args_map.get("name").and_then(|v| v.as_str());
+                let name_str = match name_arg {
+                    Some(s) => s.to_string(),
+                    None => return ("Missing required argument: name".to_string(), true),
+                };
+                let detail = match federation {
+                    Some(fed) => crate::server::mcp::federation_tools::get_workspace(
+                        fed, workspaces, &name_str,
+                    ),
+                    None => match workspaces.workspaces.iter().find(|w| w.name == name_str) {
+                        Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
+                            name: ws.name.clone(),
+                            description: ws.description.clone(),
+                            source: None,
+                            members: ws
+                                .members
+                                .iter()
+                                .map(
+                                    |m| crate::server::mcp::federation_tools::WorkspaceRepoInfo {
+                                        repo_id: m.clone(),
+                                        path: String::new(),
+                                        health: "not_loaded".into(),
+                                    },
+                                )
+                                .collect(),
+                        }),
+                        None => Err(crate::error::LainError::NotFound(format!(
+                            "workspace {name_str}"
+                        ))),
+                    },
+                };
+                return match detail {
+                    Ok(d) => (
+                        serde_json::to_string(&d)
+                            .unwrap_or_else(|e| format!("serialization error: {e}")),
+                        false,
+                    ),
+                    Err(e) => (format!("{e}"), true),
+                };
+            }
+            "get_workspace_graph" => {
+                let filter = args_map.get("filter").and_then(|v| v.as_str());
+                return match federation {
+                    Some(fed) => {
+                        match crate::server::mcp::federation_tools::get_workspace_graph(
+                            fed, workspaces, filter,
+                        ) {
+                            Ok(graph) => (
+                                serde_json::to_string(&graph)
+                                    .unwrap_or_else(|e| format!("serialization error: {e}")),
+                                false,
+                            ),
+                            Err(e) => (format!("{e}"), true),
+                        }
+                    }
+                    None => (
+                        LainError::Workspace("get_workspace_graph requires federation mode".into())
+                            .to_string(),
+                        true,
+                    ),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(fed) = federation {
+        if requires_repo_scope(name) {
+            match resolve_repo_or_error(fed, name, &args_map) {
+                Ok(rid) => {
+                    args_map.insert(
+                        "repo_id".into(),
+                        serde_json::Value::String(rid.as_str().to_string()),
+                    );
+                }
+                Err(text) => return (text, true),
+            }
+        }
+    }
+
+    let args: Option<&serde_json::Map<String, serde_json::Value>> = if args_map.is_empty() {
+        None
+    } else {
+        Some(&args_map)
+    };
+
+    match executor.call(name, args).await {
+        Ok(text) => (text, false),
+        Err(e) => (format!("Error: {e}"), true),
     }
 }
 
@@ -460,731 +871,49 @@ impl ServerHandler for LainHandler {
         _runtime: Arc<dyn McpServer>,
     ) -> std::result::Result<CallToolResult, rust_mcp_sdk::schema::schema_utils::CallToolError>
     {
-        // P1 #1: capture static-graph generation once per dispatch.
         let static_graph_generation_unix: Option<i64> = self
             .server
             .as_deref()
             .and_then(|s| s.static_graph_generation_unix());
         let empty: Map<String, serde_json::Value> = Map::new();
-        let args_ref = params.arguments.as_ref().unwrap_or(&empty);
-        // Clone the args so we can inject the resolved `repo_id` in
-        // federation mode. The executor already clones internally
-        // (`call_inner` does `arguments.cloned().unwrap_or_default()`), so
-        // this is a no-op cost-wise. Owning the map lets the resolver's
-        // successful `RepoId` flow through to downstream tool handlers
-        // instead of being discarded (Task 19 round-1 fix).
-        let mut args_owned: Map<String, serde_json::Value> = args_ref.clone();
-
-        // Server-status / recent-projects dispatch happens first so the
-        // tools are reachable even when the server has no federation or
-        // workspaces file attached.
-        match params.name.as_str() {
-            "get_server_status" => {
-                let handler_status = HandlerStatus {
-                    transport: self.status_transport,
-                    port: self.status_port,
-                    started_at: self.status_started_at,
-                    last_sync_at: self.status_last_sync_at.clone(),
-                    last_error: self.status_last_error.clone(),
-                    repo_count: self
-                        .federation
-                        .as_ref()
-                        .map(|f| f.list_repos().len())
-                        .unwrap_or(0),
-                    workspaces_count: self
-                        .workspaces
-                        .as_ref()
-                        .map(|w| w.read().workspaces.len())
-                        .unwrap_or(0),
-                };
-                let payload = handler_status.render();
-                return Ok(tool_text_result(
-                    payload.to_string(),
-                    false,
-                    self.executor.overlay(),
-                    static_graph_generation_unix,
-                ));
-            }
-            "list_recent_projects" => {
-                let list = match crate::server::mcp::federation_tools::list_recent_projects() {
-                    Ok(l) => l,
-                    Err(e) => {
-                        return Ok(tool_text_result(
-                            format!("{e}"),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        ))
-                    }
-                };
-                let text = match serde_json::to_string(&list) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return Ok(tool_text_result(
-                            format!("serialization error: {e}"),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        ));
-                    }
-                };
-                return Ok(tool_text_result(
-                    text,
-                    false,
-                    self.executor.overlay(),
-                    static_graph_generation_unix,
-                ));
-            }
-            "get_reload_status" => {
-                let bus = match self.reload_bus.as_ref() {
-                    Some(b) => b,
-                    None => {
-                        return Ok(tool_text_result(
-                            "reload bus not configured on this server".to_string(),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        ));
-                    }
-                };
-                let payload = crate::server::mcp::federation_tools::get_reload_status(bus);
-                let text = serde_json::to_string(&payload)
-                    .unwrap_or_else(|e| format!("serialization error: {e}"));
-                return Ok(tool_text_result(
-                    text,
-                    false,
-                    self.executor.overlay(),
-                    static_graph_generation_unix,
-                ));
-            }
-            "request_reload" => {
-                let bus = match self.reload_bus.as_ref() {
-                    Some(b) => b,
-                    None => {
-                        return Ok(tool_text_result(
-                            "reload bus not configured on this server".to_string(),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        ));
-                    }
-                };
-                return match crate::server::mcp::federation_tools::request_reload(bus) {
-                    Ok(payload) => Ok(tool_text_result(
-                        serde_json::to_string(&payload)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                        self.executor.overlay(),
-                        static_graph_generation_unix,
-                    )),
-                    Err(e) => Ok(tool_text_result(
-                        format!("{e}"),
-                        true,
-                        self.executor.overlay(),
-                        static_graph_generation_unix,
-                    )),
-                };
-            }
-            "register_agent" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_register_agent,
-                ));
-            }
-            "heartbeat" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_heartbeat,
-                ));
-            }
-            "list_active_agents" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_list_active_agents,
-                ));
-            }
-            "who_am_i" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_who_am_i,
-                ));
-            }
-            "list_subagents" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_list_subagents,
-                ));
-            }
-            "claim_files" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_claim_files,
-                ));
-            }
-            "release_files" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_release_files,
-                ));
-            }
-            "list_occupancy" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_list_occupancy,
-                ));
-            }
-            "my_claims" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_my_claims,
-                ));
-            }
-            "detect_overlap" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_detect_overlap,
-                ));
-            }
-            "get_audit_log" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::audit_tools::run_get_audit_log,
-                ));
-            }
-            "get_world_state" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::presence_tools::run_get_world_state,
-                ));
-            }
-            "get_recent_activity" => {
-                return Ok(dispatch_presence_tool(
-                    self.server.as_deref(),
-                    self.executor.overlay(),
-                    &params.name,
-                    &args_owned,
-                    crate::server::mcp::audit_tools::run_get_recent_activity,
-                ));
-            }
-            _ => {}
-        }
-
-        if let Some(fed) = &self.federation {
-            match params.name.as_str() {
-                "list_repos" => {
-                    let repos = crate::server::mcp::federation_tools::list_repos(fed);
-                    return Ok(tool_text_result(
-                        serde_json::to_string(&repos)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                        self.executor.overlay(),
-                        static_graph_generation_unix,
-                    ));
-                }
-                "get_repo_info" => {
-                    let repo_id_str = match args_owned.get("repo_id").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return Ok(tool_text_result(
-                                "Missing required argument: repo_id".to_string(),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return Ok(tool_text_result(
-                                format!("{e}"),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    return match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
-                        Ok(info) => {
-                            // Enrich the JSON with `active_edits`: the
-                            // count of unique agents with at least one
-                            // claim (any intent) touching this repo's
-                            // workspace. Sourced from the `LainServer`
-                            // orchestrator when the MCP server was built
-                            // with `with_server`; for sidecar / read-only
-                            // servers the count is 0.
-                            let mut value: serde_json::Value =
-                                serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
-                            let active_edits = self
-                                .server
-                                .as_ref()
-                                .map(|s| {
-                                    let occupancy = s.occupancy();
-                                    let active = s.presence().list_active(false);
-                                    active
-                                        .iter()
-                                        .filter(|sess| {
-                                            let claims = occupancy.list_for_agent(&sess.id);
-                                            // "Active edits" = any claim
-                                            // on this repo's working set.
-                                            // The MVP filter is any claim
-                                            // at all; per-repo path
-                                            // mapping is a follow-up.
-                                            !claims.is_empty()
-                                        })
-                                        .count()
-                                })
-                                .unwrap_or(0);
-                            if let Some(obj) = value.as_object_mut() {
-                                obj.insert(
-                                    "active_edits".to_string(),
-                                    serde_json::Value::Number(active_edits.into()),
-                                );
-                            }
-                            Ok(tool_text_result(
-                                serde_json::to_string(&value)
-                                    .unwrap_or_else(|e| format!("serialization error: {e}")),
-                                false,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ))
-                        }
-                        Err(e) => Ok(tool_text_result(
-                            format!("{e}"),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        )),
-                    };
-                }
-                "get_federation_health" => {
-                    let health = crate::server::mcp::federation_tools::get_federation_health(fed);
-                    return Ok(tool_text_result(
-                        serde_json::to_string(&health)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                        self.executor.overlay(),
-                        static_graph_generation_unix,
-                    ));
-                }
-                "search_org" => {
-                    let query = match args_owned.get("query").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return Ok(tool_text_result(
-                                "Missing required argument: query".to_string(),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    let limit: usize = match args_owned.get("limit") {
-                        Some(serde_json::Value::Number(n)) => match n.as_u64() {
-                            Some(u) => u as usize,
-                            None => {
-                                return Ok(tool_text_result(
-                                    "Invalid argument: limit must be a non-negative integer"
-                                        .to_string(),
-                                    true,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                ));
-                            }
-                        },
-                        Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
-                            Ok(u) => u,
-                            Err(_) => {
-                                return Ok(tool_text_result(
-                                    "Invalid argument: limit must be a non-negative integer"
-                                        .to_string(),
-                                    true,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                ));
-                            }
-                        },
-                        _ => {
-                            return Ok(tool_text_result(
-                                "Missing required argument: limit".to_string(),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    let hits = crate::server::mcp::federation_tools::search_org(fed, query, limit);
-                    return Ok(tool_text_result(
-                        serde_json::to_string(&hits)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                        self.executor.overlay(),
-                        static_graph_generation_unix,
-                    ));
-                }
-                "get_cross_repo_blast_radius" => {
-                    let symbol = match args_owned.get("symbol").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return Ok(tool_text_result(
-                                "Missing required argument: symbol".to_string(),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    // Not `.and_then(as_str)`: that collapses "absent" and
-                    // "present but a number" into one message, and `depth: 2`
-                    // is the mistake callers actually make (it is a string
-                    // range like "1..3").
-                    let depth_owned =
-                        match crate::server::tools::utils::required_str_arg(&args_owned, "depth") {
-                            Ok(s) => s,
-                            Err(e) => {
-                                return Ok(tool_text_result(
-                                    e.to_string(),
-                                    true,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                ));
-                            }
-                        };
-                    let depth = match parse_depth_range(&depth_owned) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return Ok(tool_text_result(
-                                e,
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ))
-                        }
-                    };
-                    return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(
-                        fed, symbol, depth,
-                    ) {
-                        Ok(r) => Ok(tool_text_result(
-                            serde_json::to_string(&r)
-                                .unwrap_or_else(|e| format!("serialization error: {e}")),
-                            false,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        )),
-                        Err(e) => Ok(tool_text_result(
-                            format!("{e}"),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        )),
-                    };
-                }
-                "get_cross_repo_blast_radius_for_repo" => {
-                    let repo_id = match args_owned.get("repo_id").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return Ok(tool_text_result(
-                                "Missing required argument: repo_id".to_string(),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    let symbol = match args_owned.get("symbol").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return Ok(tool_text_result(
-                                "Missing required argument: symbol".to_string(),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    let depth_owned =
-                        match crate::server::tools::utils::required_str_arg(&args_owned, "depth") {
-                            Ok(s) => s,
-                            Err(e) => {
-                                return Ok(tool_text_result(
-                                    e.to_string(),
-                                    true,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                ));
-                            }
-                        };
-                    let depth = match parse_depth_range(&depth_owned) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return Ok(tool_text_result(
-                                e,
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ))
-                        }
-                    };
-                    return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
-                        Ok(r) => Ok(tool_text_result(
-                            serde_json::to_string(&r)
-                                .unwrap_or_else(|e| format!("serialization error: {e}")),
-                            false,
-                            self.executor.overlay(),
-                        static_graph_generation_unix,
-                        )),
-                        Err(e) => Ok(tool_text_result(format!("{e}"), true, self.executor.overlay(), static_graph_generation_unix)),
-                    };
-                }
-                _ => {}
-            }
-        }
-
-        // Workspace tools: only registered when a workspaces file was
-        // supplied to the server constructor. `get_active_workspace` and
-        // `get_workspace` cross-reference the federation (for loaded repo
-        // info) when it's available; `list_workspaces` only needs the
-        // workspaces file.
-        //
-        // Read through `RwLock::read()` on every dispatch (rather than
-        // cloning the inner `WorkspacesFile`) so a `set_workspace`
-        // call from the rebuild loop is observed by the very next
-        // `list_workspaces` / `get_workspace` / `get_workspace_graph`
-        // call. The synchronous helpers below complete in microseconds,
-        // so the read guard never blocks the writers in `set_workspace`.
-        if let Some(workspaces_lock) = &self.workspaces {
-            let workspaces: &crate::federation::workspace::WorkspacesFile = &workspaces_lock.read();
-            match params.name.as_str() {
-                "list_workspaces" => {
-                    let active = ActiveWorkspace::load().ok().flatten();
-                    let infos = crate::server::mcp::federation_tools::list_workspaces(
-                        workspaces,
-                        active.as_ref(),
-                    );
-                    return Ok(tool_text_result(
-                        serde_json::to_string(&infos)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                        self.executor.overlay(),
-                        static_graph_generation_unix,
-                    ));
-                }
-                "get_active_workspace" => {
-                    let fed = self.federation.as_deref();
-                    return match fed {
-                        Some(fed) => {
-                            match crate::server::mcp::federation_tools::get_active_workspace(
-                                fed, workspaces,
-                            ) {
-                                Ok(info) => Ok(tool_text_result(
-                                    serde_json::to_string(&info)
-                                        .unwrap_or_else(|e| format!("serialization error: {e}")),
-                                    false,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                )),
-                                Err(e) => Ok(tool_text_result(
-                                    format!("{e}"),
-                                    true,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                )),
-                            }
-                        }
-                        None => Ok(tool_text_result(
-                            LainError::Workspace(
-                                "get_active_workspace requires federation mode".into(),
-                            )
-                            .to_string(),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        )),
-                    };
-                }
-                "get_workspace" => {
-                    let name = match args_owned.get("name").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => {
-                            return Ok(tool_text_result(
-                                "Missing required argument: name".to_string(),
-                                true,
-                                self.executor.overlay(),
-                                static_graph_generation_unix,
-                            ));
-                        }
-                    };
-                    // For get_workspace we want member paths/healths from
-                    // the live federation, but if the federation isn't
-                    // loaded (defensive — shouldn't happen in practice
-                    // since the workspace tools are only registered with
-                    // a federation), we fall back to "not_loaded" health
-                    // for each member. The source field is dropped in
-                    // this fallback path.
-                    let detail_res: Result<
-                        crate::server::mcp::federation_tools::WorkspaceDetail,
-                        LainError,
-                    > = match self.federation.as_deref() {
-                        Some(fed) => crate::server::mcp::federation_tools::get_workspace(
-                            fed, workspaces, name,
-                        ),
-                        None => match workspaces.workspaces.iter().find(|w| w.name == name) {
-                            Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
-                                name: ws.name.clone(),
-                                description: ws.description.clone(),
-                                source: None,
-                                members: ws
-                                    .members
-                                    .iter()
-                                    .map(|m| {
-                                        crate::server::mcp::federation_tools::WorkspaceRepoInfo {
-                                            repo_id: m.clone(),
-                                            path: String::new(),
-                                            health: "not_loaded".into(),
-                                        }
-                                    })
-                                    .collect(),
-                            }),
-                            None => Err(LainError::NotFound(format!("workspace {name}"))),
-                        },
-                    };
-                    return match detail_res {
-                        Ok(d) => Ok(tool_text_result(
-                            serde_json::to_string(&d)
-                                .unwrap_or_else(|e| format!("serialization error: {e}")),
-                            false,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        )),
-                        Err(e) => Ok(tool_text_result(
-                            format!("{e}"),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        )),
-                    };
-                }
-                "get_workspace_graph" => {
-                    let filter = args_owned.get("filter").and_then(|v| v.as_str());
-                    return match self.federation.as_deref() {
-                        Some(fed) => {
-                            match crate::server::mcp::federation_tools::get_workspace_graph(
-                                fed, workspaces, filter,
-                            ) {
-                                Ok(graph) => Ok(tool_text_result(
-                                    serde_json::to_string(&graph)
-                                        .unwrap_or_else(|e| format!("serialization error: {e}")),
-                                    false,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                )),
-                                Err(e) => Ok(tool_text_result(
-                                    format!("{e}"),
-                                    true,
-                                    self.executor.overlay(),
-                                    static_graph_generation_unix,
-                                )),
-                            }
-                        }
-                        None => Ok(tool_text_result(
-                            LainError::Workspace(
-                                "get_workspace_graph requires federation mode".into(),
-                            )
-                            .to_string(),
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        )),
-                    };
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(fed) = &self.federation {
-            if requires_repo_scope(params.name.as_str()) {
-                match resolve_repo_or_error(fed, params.name.as_str(), &args_owned) {
-                    Ok(rid) => {
-                        // Inject the resolved `repo_id` into the args the
-                        // executor will see. Existing per-repo tools resolve
-                        // symbols against `ctx.graph` (the executor's
-                        // single-workspace context) and ignore this; future
-                        // federation-aware tool handlers can read it. This is
-                        // the round-1 fix: the previously discarded `RepoId`
-                        // now flows through dispatch.
-                        args_owned.insert(
-                            "repo_id".into(),
-                            serde_json::Value::String(rid.as_str().to_string()),
-                        );
-                    }
-                    Err(text) => {
-                        return Ok(tool_text_result(
-                            text,
-                            true,
-                            self.executor.overlay(),
-                            static_graph_generation_unix,
-                        ))
-                    }
-                }
-            }
-        }
-
-        // Fallback to the legacy executor for tools that don't have an
-        // explicit dispatcher arm above. The `CallToolResult` here is the
-        // raw executor response; route it through the same envelope
-        // contract — every tool response carries `_meta.revision` at the
-        // `CallToolResult` outer level, never inside `content[0].text`.
-        let raw = match self.executor.call(&params.name, Some(&args_owned)).await {
-            Ok(text) => tool_text_result(
-                text,
-                false,
-                self.executor.overlay(),
-                static_graph_generation_unix,
-            ),
-            Err(e) => tool_text_result(
-                format!("Error: {e}"),
-                true,
-                self.executor.overlay(),
-                static_graph_generation_unix,
-            ),
+        let args_owned: Map<String, serde_json::Value> =
+            params.arguments.as_ref().unwrap_or(&empty).clone();
+        let handler_status = HandlerStatus {
+            transport: self.status_transport,
+            port: self.status_port,
+            started_at: self.status_started_at,
+            last_sync_at: self.status_last_sync_at.clone(),
+            last_error: self.status_last_error.clone(),
+            repo_count: self
+                .federation
+                .as_ref()
+                .map(|f| f.list_repos().len())
+                .unwrap_or(0),
+            workspaces_count: self
+                .workspaces
+                .as_ref()
+                .map(|w| w.read().workspaces.len())
+                .unwrap_or(0),
         };
-        Ok(raw)
+
+        let (text, is_error) = dispatch_tool_call(
+            &self.executor,
+            self.federation.as_deref(),
+            self.workspaces.as_ref(),
+            &handler_status,
+            self.reload_bus.as_deref(),
+            self.server.as_deref(),
+            params.name.as_str(),
+            args_owned,
+        )
+        .await;
+
+        Ok(tool_text_result(
+            text,
+            is_error,
+            self.executor.overlay(),
+            static_graph_generation_unix,
+        ))
     }
 }
 
@@ -1664,48 +1393,6 @@ fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
     })
 }
 
-/// Per-process status snapshot carried into the HTTP request handler
-/// closure. Built once per accepted connection (cloning the cheap
-/// `SystemTime` and Arc-shared Mutexes) so the inner `service_fn`
-/// closure doesn't need to capture the whole `LainMcpServer` state.
-#[derive(Clone)]
-struct HandlerStatus {
-    transport: Option<crate::server::Transport>,
-    port: Option<u16>,
-    started_at: std::time::SystemTime,
-    last_sync_at: Arc<parking_lot::Mutex<std::time::SystemTime>>,
-    last_error: Arc<parking_lot::Mutex<Option<String>>>,
-    repo_count: usize,
-    workspaces_count: usize,
-}
-
-impl HandlerStatus {
-    /// Render the `get_server_status` payload.
-    ///
-    /// Delegates to the one builder in
-    /// `federation_tools::server_status` — this used to be a second
-    /// implementation of the same JSON, and it drifted: build-identity
-    /// fields were added there and this transport kept serving a
-    /// payload without them.
-    fn render(&self) -> serde_json::Value {
-        use crate::server::mcp::federation_tools::server_status::{
-            render_server_status, ServerStatusFields,
-        };
-        render_server_status(ServerStatusFields {
-            transport: self.transport.map(|t| match t {
-                crate::server::Transport::Stdio => "stdio".to_string(),
-                crate::server::Transport::Http => "http".to_string(),
-            }),
-            port: self.port,
-            started_at: self.started_at,
-            last_sync_at: *self.last_sync_at.lock(),
-            last_error: self.last_error.lock().clone(),
-            repo_count: self.repo_count,
-            workspace_count: self.workspaces_count,
-        })
-    }
-}
-
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     executor: Arc<ToolExecutor>,
@@ -1728,13 +1415,6 @@ async fn handle_request(
             .header("Content-Type", "application/json")
             .body(full_body(Bytes::from(body)))
             .unwrap()
-    };
-    let jsonrpc_error = |id: Option<&serde_json::Value>, code: i32, msg: String| {
-        jsonrpc_response(serde_json::json!({
-            "jsonrpc": "2.0",
-            "error": {"code": code, "message": msg},
-            "id": id
-        }))
     };
     let jsonrpc_tool_result = |id: Option<&serde_json::Value>, text: &str, is_error: bool| {
         // Read the overlay revision once per response so the value is
@@ -1997,692 +1677,25 @@ async fn handle_request(
                             .and_then(|p| p.get("name"))
                             .and_then(|n| n.as_str())
                             .unwrap_or("");
-                        let mut args_map: serde_json::Map<String, serde_json::Value> = params
+                        let args_map: serde_json::Map<String, serde_json::Value> = params
                             .and_then(|p| p.get("arguments"))
                             .and_then(|v| v.as_object())
                             .cloned()
                             .unwrap_or_default();
 
-                        // Server-status / recent-projects dispatch — always
-                        // available regardless of federation mode.
-                        match name {
-                            "get_server_status" => {
-                                let payload = status.render().to_string();
-                                return Ok(jsonrpc_tool_result(id, &payload, false));
-                            }
-                            "list_recent_projects" => {
-                                let list =
-                                    match crate::server::mcp::federation_tools::list_recent_projects(
-                                    ) {
-                                        Ok(l) => l,
-                                        Err(e) => {
-                                            return Ok(jsonrpc_tool_result(
-                                                id,
-                                                &format!("{e}"),
-                                                true,
-                                            ))
-                                        }
-                                    };
-                                let text = match serde_json::to_string(&list) {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        return Ok(jsonrpc_error(
-                                            id,
-                                            -32000,
-                                            format!("serialization: {e}"),
-                                        ))
-                                    }
-                                };
-                                return Ok(jsonrpc_tool_result(id, &text, false));
-                            }
-                            "get_reload_status" => {
-                                let bus = match reload_bus.as_ref() {
-                                    Some(b) => b,
-                                    None => {
-                                        return Ok(jsonrpc_tool_result(
-                                            id,
-                                            "reload bus not configured on this server",
-                                            true,
-                                        ));
-                                    }
-                                };
-                                let payload =
-                                    crate::server::mcp::federation_tools::get_reload_status(bus);
-                                let text = match serde_json::to_string(&payload) {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        return Ok(jsonrpc_error(
-                                            id,
-                                            -32000,
-                                            format!("serialization: {e}"),
-                                        ))
-                                    }
-                                };
-                                return Ok(jsonrpc_tool_result(id, &text, false));
-                            }
-                            "request_reload" => {
-                                let bus = match reload_bus.as_ref() {
-                                    Some(b) => b,
-                                    None => {
-                                        return Ok(jsonrpc_tool_result(
-                                            id,
-                                            "reload bus not configured on this server",
-                                            true,
-                                        ));
-                                    }
-                                };
-                                match crate::server::mcp::federation_tools::request_reload(bus) {
-                                    Ok(payload) => {
-                                        let text = match serde_json::to_string(&payload) {
-                                            Ok(s) => s,
-                                            Err(e) => {
-                                                return Ok(jsonrpc_error(
-                                                    id,
-                                                    -32000,
-                                                    format!("serialization: {e}"),
-                                                ))
-                                            }
-                                        };
-                                        return Ok(jsonrpc_tool_result(id, &text, false));
-                                    }
-                                    Err(e) => {
-                                        return Ok(jsonrpc_tool_result(id, &format!("{e}"), true));
-                                    }
-                                }
-                            }
-                            // 8 multiplayer tools (Task 7). Dispatched
-                            // against the shared `LainServer`; if it's
-                            // missing (sidecar path) the helper returns
-                            // a clean error.
-                            "register_agent" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_register_agent,
-                                ));
-                            }
-                            "heartbeat" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_heartbeat,
-                                ));
-                            }
-                            "list_active_agents" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_list_active_agents,
-                                ));
-                            }
-                            "who_am_i" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_who_am_i,
-                                ));
-                            }
-                            "list_subagents" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_list_subagents,
-                                ));
-                            }
-                            "claim_files" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_claim_files,
-                                ));
-                            }
-                            "release_files" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_release_files,
-                                ));
-                            }
-                            "list_occupancy" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_list_occupancy,
-                                ));
-                            }
-                            "my_claims" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_my_claims,
-                                ));
-                            }
-                            "detect_overlap" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_detect_overlap,
-                                ));
-                            }
-                            "get_audit_log" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::audit_tools::run_get_audit_log,
-                                ));
-                            }
-                            "get_world_state" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::presence_tools::run_get_world_state,
-                                ));
-                            }
-                            "get_recent_activity" => {
-                                return Ok(jsonrpc_presence_tool(
-                                    jsonrpc_tool_result,
-                                    jsonrpc_error,
-                                    id,
-                                    name,
-                                    &args_map,
-                                    server.as_deref(),
-                                    crate::server::mcp::audit_tools::run_get_recent_activity,
-                                ));
-                            }
-                            _ => {}
-                        }
+                        let (text, is_error) = dispatch_tool_call(
+                            &executor,
+                            federation.as_deref(),
+                            workspaces.as_ref(),
+                            &status,
+                            reload_bus.as_deref(),
+                            server.as_deref(),
+                            name,
+                            args_map,
+                        )
+                        .await;
 
-                        if let Some(fed) = &federation {
-                            match name {
-                                "list_repos" => {
-                                    let repos =
-                                        crate::server::mcp::federation_tools::list_repos(fed);
-                                    let text = match serde_json::to_string(&repos) {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            return Ok(jsonrpc_error(
-                                                id,
-                                                -32000,
-                                                format!("serialization: {e}"),
-                                            ))
-                                        }
-                                    };
-                                    return Ok(jsonrpc_tool_result(id, &text, false));
-                                }
-                                "get_repo_info" => {
-                                    let repo_id_str =
-                                        match args_map.get("repo_id").and_then(|v| v.as_str()) {
-                                            Some(s) => s,
-                                            None => {
-                                                return Ok(jsonrpc_tool_result(
-                                                    id,
-                                                    "Missing required argument: repo_id",
-                                                    true,
-                                                ))
-                                            }
-                                        };
-                                    let rid = match crate::federation::repo_id::RepoId::new(
-                                        repo_id_str,
-                                    ) {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            return Ok(jsonrpc_tool_result(
-                                                id,
-                                                &format!("{e}"),
-                                                true,
-                                            ))
-                                        }
-                                    };
-                                    match crate::server::mcp::federation_tools::get_repo_info(
-                                        fed, &rid,
-                                    ) {
-                                        Ok(info) => {
-                                            // Mirror the stdio dispatch:
-                                            // count interactive agents with
-                                            // at least one claim and inject
-                                            // the number as `active_edits`.
-                                            let mut value: serde_json::Value =
-                                                serde_json::to_value(&info)
-                                                    .unwrap_or(serde_json::Value::Null);
-                                            let active_edits = server
-                                                .as_ref()
-                                                .map(|s| {
-                                                    let occupancy = s.occupancy();
-                                                    let active = s.presence().list_active(false);
-                                                    active
-                                                        .iter()
-                                                        .filter(|sess| {
-                                                            !occupancy
-                                                                .list_for_agent(&sess.id)
-                                                                .is_empty()
-                                                        })
-                                                        .count()
-                                                })
-                                                .unwrap_or(0);
-                                            if let Some(obj) = value.as_object_mut() {
-                                                obj.insert(
-                                                    "active_edits".to_string(),
-                                                    serde_json::Value::Number(active_edits.into()),
-                                                );
-                                            }
-                                            let text = match serde_json::to_string(&value) {
-                                                Ok(s) => s,
-                                                Err(e) => {
-                                                    return Ok(jsonrpc_error(
-                                                        id,
-                                                        -32000,
-                                                        format!("serialization: {e}"),
-                                                    ))
-                                                }
-                                            };
-                                            return Ok(jsonrpc_tool_result(id, &text, false));
-                                        }
-                                        Err(e) => {
-                                            return Ok(jsonrpc_tool_result(
-                                                id,
-                                                &format!("{e}"),
-                                                true,
-                                            ))
-                                        }
-                                    }
-                                }
-                                "get_federation_health" => {
-                                    let health =
-                                        crate::server::mcp::federation_tools::get_federation_health(
-                                            fed,
-                                        );
-                                    let text = match serde_json::to_string(&health) {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            return Ok(jsonrpc_error(
-                                                id,
-                                                -32000,
-                                                format!("serialization: {e}"),
-                                            ))
-                                        }
-                                    };
-                                    return Ok(jsonrpc_tool_result(id, &text, false));
-                                }
-                                "search_org" => {
-                                    let query = match args_map.get("query").and_then(|v| v.as_str())
-                                    {
-                                        Some(s) => s,
-                                        None => {
-                                            return Ok(jsonrpc_tool_result(
-                                                id,
-                                                "Missing required argument: query",
-                                                true,
-                                            ))
-                                        }
-                                    };
-                                    let limit: usize = match args_map.get("limit") {
-                                        Some(serde_json::Value::Number(n)) => match n.as_u64() {
-                                            Some(u) => u as usize,
-                                            None => return Ok(jsonrpc_tool_result(id, "Invalid argument: limit must be a non-negative integer", true)),
-                                        },
-                                        Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
-                                            Ok(u) => u,
-                                            Err(_) => return Ok(jsonrpc_tool_result(id, "Invalid argument: limit must be a non-negative integer", true)),
-                                        },
-                                        _ => return Ok(jsonrpc_tool_result(id, "Missing required argument: limit", true)),
-                                    };
-                                    let hits = crate::server::mcp::federation_tools::search_org(
-                                        fed, query, limit,
-                                    );
-                                    let text = match serde_json::to_string(&hits) {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            return Ok(jsonrpc_error(
-                                                id,
-                                                -32000,
-                                                format!("serialization: {e}"),
-                                            ))
-                                        }
-                                    };
-                                    return Ok(jsonrpc_tool_result(id, &text, false));
-                                }
-                                "get_cross_repo_blast_radius" => {
-                                    let symbol =
-                                        match args_map.get("symbol").and_then(|v| v.as_str()) {
-                                            Some(s) => s,
-                                            None => {
-                                                return Ok(jsonrpc_tool_result(
-                                                    id,
-                                                    "Missing required argument: symbol",
-                                                    true,
-                                                ))
-                                            }
-                                        };
-                                    // Same reasoning as the stdio path: `depth: 2`
-                                    // must not be reported as a missing argument.
-                                    let depth_owned =
-                                        match crate::server::tools::utils::required_str_arg(
-                                            &args_map, "depth",
-                                        ) {
-                                            Ok(s) => s,
-                                            Err(e) => {
-                                                return Ok(jsonrpc_tool_result(
-                                                    id,
-                                                    &e.to_string(),
-                                                    true,
-                                                ))
-                                            }
-                                        };
-                                    let depth = match parse_depth_range(&depth_owned) {
-                                        Ok(r) => r,
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
-                                    };
-                                    match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, symbol, depth) {
-                                        Ok(r) => {
-                                            let text = match serde_json::to_string(&r) {
-                                                Ok(s) => s,
-                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
-                                            };
-                                            return Ok(jsonrpc_tool_result(id, &text, false));
-                                        }
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
-                                    }
-                                }
-                                "get_cross_repo_blast_radius_for_repo" => {
-                                    let repo_id =
-                                        match args_map.get("repo_id").and_then(|v| v.as_str()) {
-                                            Some(s) => s,
-                                            None => {
-                                                return Ok(jsonrpc_tool_result(
-                                                    id,
-                                                    "Missing required argument: repo_id",
-                                                    true,
-                                                ))
-                                            }
-                                        };
-                                    let symbol =
-                                        match args_map.get("symbol").and_then(|v| v.as_str()) {
-                                            Some(s) => s,
-                                            None => {
-                                                return Ok(jsonrpc_tool_result(
-                                                    id,
-                                                    "Missing required argument: symbol",
-                                                    true,
-                                                ))
-                                            }
-                                        };
-                                    // Same reasoning as the stdio path: `depth: 2`
-                                    // must not be reported as a missing argument.
-                                    let depth_owned =
-                                        match crate::server::tools::utils::required_str_arg(
-                                            &args_map, "depth",
-                                        ) {
-                                            Ok(s) => s,
-                                            Err(e) => {
-                                                return Ok(jsonrpc_tool_result(
-                                                    id,
-                                                    &e.to_string(),
-                                                    true,
-                                                ))
-                                            }
-                                        };
-                                    let depth = match parse_depth_range(&depth_owned) {
-                                        Ok(r) => r,
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &e, true)),
-                                    };
-                                    match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(fed, repo_id, symbol, depth) {
-                                        Ok(r) => {
-                                            let text = match serde_json::to_string(&r) {
-                                                Ok(s) => s,
-                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
-                                            };
-                                            return Ok(jsonrpc_tool_result(id, &text, false));
-                                        }
-                                        Err(e) => return Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // Workspace tools: only registered when a
-                        // workspaces file was supplied to the server
-                        // constructor. Mirrors the stdio dispatch in
-                        // handle_call_tool_request.
-                        //
-                        // Read through the shared lock so a
-                        // `set_workspace` swap from the rebuild
-                        // loop is reflected on the very next request
-                        // hitting this connection.
-                        if let Some(workspaces_lock) = &workspaces {
-                            let workspaces: &crate::federation::workspace::WorkspacesFile =
-                                &workspaces_lock.read();
-                            match name {
-                                "list_workspaces" => {
-                                    let active =
-                                        crate::state::ActiveWorkspace::load().ok().flatten();
-                                    let infos =
-                                        crate::server::mcp::federation_tools::list_workspaces(
-                                            workspaces,
-                                            active.as_ref(),
-                                        );
-                                    let text = match serde_json::to_string(&infos) {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            return Ok(jsonrpc_error(
-                                                id,
-                                                -32000,
-                                                format!("serialization: {e}"),
-                                            ))
-                                        }
-                                    };
-                                    return Ok(jsonrpc_tool_result(id, &text, false));
-                                }
-                                "get_active_workspace" => {
-                                    let fed_ref = match federation.as_deref() {
-                                        Some(f) => f,
-                                        None => {
-                                            return Ok(jsonrpc_tool_result(
-                                                id,
-                                                &format!(
-                                                "{}",
-                                                crate::error::LainError::Workspace(
-                                                    "get_active_workspace requires federation mode"
-                                                        .into()
-                                                )
-                                            ),
-                                                true,
-                                            ))
-                                        }
-                                    };
-                                    return match crate::server::mcp::federation_tools::get_active_workspace(fed_ref, workspaces) {
-                                        Ok(info) => {
-                                            let text = match serde_json::to_string(&info) {
-                                                Ok(s) => s,
-                                                Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
-                                            };
-                                            Ok(jsonrpc_tool_result(id, &text, false))
-                                        }
-                                        Err(e) => Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
-                                    };
-                                }
-                                "get_workspace" => {
-                                    let name_arg = args_map.get("name").and_then(|v| v.as_str());
-                                    let name_str = match name_arg {
-                                        Some(s) => s.to_string(),
-                                        None => {
-                                            return Ok(jsonrpc_tool_result(
-                                                id,
-                                                "Missing required argument: name",
-                                                true,
-                                            ))
-                                        }
-                                    };
-                                    let detail = match federation.as_deref() {
-                                        Some(fed) => {
-                                            crate::server::mcp::federation_tools::get_workspace(
-                                                fed, workspaces, &name_str,
-                                            )
-                                        }
-                                        None => {
-                                            // Defensive fallback: no federation
-                                            // means the workspace tools shouldn't
-                                            // have been registered. Build a minimal
-                                            // detail from the workspaces file.
-                                            match workspaces.workspaces.iter().find(|w| w.name == name_str) {
-                                                Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
-                                                    name: ws.name.clone(),
-                                                    description: ws.description.clone(),
-                                                    source: None,
-                                                    members: ws.members.iter().map(|m| crate::server::mcp::federation_tools::WorkspaceRepoInfo {
-                                                        repo_id: m.clone(),
-                                                        path: String::new(),
-                                                        health: "not_loaded".into(),
-                                                    }).collect(),
-                                                }),
-                                                None => Err(crate::error::LainError::NotFound(format!("workspace {name_str}"))),
-                                            }
-                                        }
-                                    };
-                                    return match detail {
-                                        Ok(d) => {
-                                            let text = match serde_json::to_string(&d) {
-                                                Ok(s) => s,
-                                                Err(e) => {
-                                                    return Ok(jsonrpc_error(
-                                                        id,
-                                                        -32000,
-                                                        format!("serialization: {e}"),
-                                                    ))
-                                                }
-                                            };
-                                            Ok(jsonrpc_tool_result(id, &text, false))
-                                        }
-                                        Err(e) => {
-                                            Ok(jsonrpc_tool_result(id, &format!("{e}"), true))
-                                        }
-                                    };
-                                }
-                                "get_workspace_graph" => {
-                                    let filter = args_map.get("filter").and_then(|v| v.as_str());
-                                    return match federation.as_deref() {
-                                        Some(fed) => match crate::server::mcp::federation_tools::get_workspace_graph(fed, workspaces, filter) {
-                                            Ok(graph) => {
-                                                let text = match serde_json::to_string(&graph) {
-                                                    Ok(s) => s,
-                                                    Err(e) => return Ok(jsonrpc_error(id, -32000, format!("serialization: {e}"))),
-                                                };
-                                                Ok(jsonrpc_tool_result(id, &text, false))
-                                            }
-                                            Err(e) => Ok(jsonrpc_tool_result(id, &format!("{e}"), true)),
-                                        },
-                                        None => Ok(jsonrpc_tool_result(
-                                            id,
-                                            &format!("{}", crate::error::LainError::Workspace("get_workspace_graph requires federation mode".into())),
-                                            true,
-                                        )),
-                                    };
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if let Some(fed) = &federation {
-                            if requires_repo_scope(name) {
-                                match resolve_repo_or_error(fed, name, &args_map) {
-                                    Ok(rid) => {
-                                        // Inject the resolved `repo_id` into
-                                        // the args the executor will see (Task
-                                        // 19 round-1 fix). Existing per-repo
-                                        // tools resolve against `ctx.graph`
-                                        // and ignore this; future
-                                        // federation-aware handlers can read it.
-                                        args_map.insert(
-                                            "repo_id".into(),
-                                            serde_json::Value::String(rid.as_str().to_string()),
-                                        );
-                                    }
-                                    Err(text) => return Ok(jsonrpc_tool_result(id, &text, true)),
-                                }
-                            }
-                        }
-
-                        // Recompute the args reference after the
-                        // `repo_id` injection so a previously-empty
-                        // `args_map` (which would have produced
-                        // `args = None`) now flows as `Some(&args_map)`.
-                        let args: Option<&serde_json::Map<String, serde_json::Value>> =
-                            if args_map.is_empty() {
-                                None
-                            } else {
-                                Some(&args_map)
-                            };
-
-                        match executor.call(name, args).await {
-                            Ok(text) => {
-                                serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "result": {
-                                        "content": [{"type": "text", "text": text}],
-                                        "isError": false
-                                    },
-                                    "id": id
-                                })
-                            }
-                            Err(e) => {
-                                serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "result": {
-                                        "content": [{"type": "text", "text": format!("Error: {}", e)}],
-                                        "isError": true
-                                    },
-                                    "id": id
-                                })
-                            }
-                        }
+                        return Ok(jsonrpc_tool_result(id, &text, is_error));
                     }
                     _ => {
                         serde_json::json!({

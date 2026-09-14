@@ -40,12 +40,7 @@ pub const PATH_FORMAT_VERSION: u32 = 2;
 /// relative path; they are stable, just not workspace-relative.
 pub fn graph_path(workspace: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(workspace).unwrap_or(path);
-    let s = rel.to_string_lossy();
-    if std::path::MAIN_SEPARATOR == '/' {
-        s.into_owned()
-    } else {
-        s.replace(std::path::MAIN_SEPARATOR, "/")
-    }
+    crate::server::path_util::posix_string(rel)
 }
 
 #[derive(Serialize, Deserialize)]
