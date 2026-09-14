@@ -45,8 +45,7 @@ fn occupancy_payload(presence: &PresenceRegistry, occupancy: &OccupancyMap) -> V
 /// Execute a query against the graph using the ops array interface.
 ///
 /// The returned JSON has a top-level `occupancy` key carrying the
-/// active-agents summary described in
-/// `docs/superpowers/plans/2026-08-15-lain-multiplayer-awareness.md`.
+/// active-agents summary.
 /// When no agents have registered (the default for the sidecar /
 /// read-only executor), `active_agents` is an empty list.
 #[allow(clippy::too_many_arguments)] // one more than the lint's 7; the

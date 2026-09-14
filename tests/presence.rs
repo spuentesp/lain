@@ -1369,9 +1369,8 @@ fn claim_without_plan_revision_deserializes_to_none() {
 
 // -------------------------------------------------------------------------
 // Runtime TooOld test: TooOld path through the full claim_files → world_state
-// pipeline. The smoke harness couldn't exercise this end-to-end (creating
-// 280+ files in the workspace broke the LSP bridge; see
-// docs/superpowers/sdd/2026-08-18-coordination-staleness-audit/).
+// pipeline. The smoke harness couldn't exercise this end-to-end because
+// creating 280+ files in the workspace broke the LSP bridge.
 //
 // Drive the RevisionLog directly via the public overlay.insert_node API
 // instead — that has the same effect (increments current_revision; once

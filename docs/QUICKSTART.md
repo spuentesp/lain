@@ -115,8 +115,6 @@ curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
 
 ![LAIN Command Center demo](screenshots/spa-demo.gif)
 
-**Watch in HD** ([MP4](screenshots/spa-demo.mp4), [WebM](screenshots/spa-demo.webm)).
-
 ## First aid
 
 | Symptom | Try |

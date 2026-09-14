@@ -65,7 +65,7 @@ What's new on the wire:
 | `register_agent`, `heartbeat`, `list_active_agents`, `who_am_i`, `claim_files`, `release_files`, `list_occupancy`, `my_claims` | The eight call-shape tools introduced with the layer. |
 | `list_subagents` | Enumerate child sessions of a parent (passes parent session token). See [Subagents](#subagents). |
 | `detect_overlap` | Symbol-level conflict scan between two git refs. See [Commit-time overlap detection](#commit-time-overlap-detection). |
-| `get_audit_log` | Read the audit log. See [`docs/audit.md`](audit.md). |
+| `get_audit_log` | Read recent claim and edit events. |
 | `get_world_state` | On-demand snapshot of the world-state envelope (changed symbols since a given `plan_revision`). See [world_state.changed_symbols](#world_statechanged_symbols). |
 | `get_recent_activity` | Recent activity feed (server-agnostic, polled). |
 | `GET /events` | Server-Sent Events stream. Fires whenever an agent joins, claims, releases, or a conflict is detected. The Command Center subscribes here for its live panels. |

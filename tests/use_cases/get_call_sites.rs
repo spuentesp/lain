@@ -159,7 +159,7 @@ fn get_call_sites_reports_each_distinct_call_line_not_enclosing_function() {
          range; got:\n{text}"
     );
 
-    // 3. The by-name path (audit_2026_08_30.md Follow-up B) resolves
+    // 3. The by-name path resolves
     //    to the same node as the by-id path now that the test spawns
     //    the server from a cwd with no `target/` directory to collide
     //    with the literal symbol name. Same two assertions, driven

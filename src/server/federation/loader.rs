@@ -171,9 +171,8 @@ pub async fn load_federation_with_workspace(
 /// Build a `FederationManifest` from the in-memory federation and persist it
 /// to `path`.
 ///
-/// Per the spec (`docs/superpowers/specs/2026-08-07-federated-indexer-design.md:244-249`)
-/// the cold-restart contract is: load the manifest first, then re-attach
-/// each repo's bincode. In this MVP, repo membership is still authoritative
+/// The cold-restart contract loads the manifest first, then re-attaches each
+/// repo's bincode. In this MVP, repo membership is still authoritative
 /// in `repos.yaml` (the loader re-reads it on every cold restart), so the
 /// manifest is persisted as a *snapshot* of the federation the server is
 /// currently serving — useful for observability and future tooling, but not

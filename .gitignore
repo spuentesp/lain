@@ -44,3 +44,8 @@ tests/js/node_modules/
 
 # Playwright SPA e2e screenshots — generated locally, not committed.
 tests/js/screenshots/*.png
+
+# Demo recording intermediates; only the README GIF is committed.
+docs/screenshots/spa-demo.mp4
+docs/screenshots/spa-demo.webm
+docs/screenshots/spa-demo-poster.png

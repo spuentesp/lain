@@ -5,9 +5,7 @@ The Command Center is the operator's primary surface for inspecting and steering
 MCP HTTP transport. Every panel talks to the running server via the JSON-RPC
 `tools/call` endpoint at `POST /mcp` — no separate API, no auth portal.
 
-[![LAIN Command Center demo](screenshots/spa-demo.gif)](screenshots/spa-demo.mp4)
-
-**Watch in HD** — click the GIF to open the MP4.
+![LAIN Command Center demo](screenshots/spa-demo.gif)
 
 ```mermaid
 flowchart LR

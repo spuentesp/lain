@@ -1,61 +1,44 @@
-# Docs Index
+# Documentation
 
-| Want | Read |
-|------|------|
-| Get running in five minutes | [QUICKSTART.md](QUICKSTART.md) |
-| Plan agent-first install/onboarding UX | [AGENT_UX_ROADMAP.md](AGENT_UX_ROADMAP.md) |
-| Pick a deployment mode and ship a recipe | [COOKBOOK.md](COOKBOOK.md) |
-| Operate / troubleshoot | [USER_MANUAL.md](USER_MANUAL.md) |
-| Understand design choices | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| Read the source | [TECHNICAL.md](TECHNICAL.md) |
-| Multi-repo operating | [FEDERATION.md](FEDERATION.md) |
-| `repos.yaml` schema | [REPOS_YAML.md](REPOS_YAML.md) |
-| `query_graph` ops-array | [query-language.md](query-language.md) |
-| All MCP tools | [quickstart-tools.md](quickstart-tools.md) |
-| Command Center SPA | [command-center.md](command-center.md) |
-| Hot-reload internals | [hot-reload.md](hot-reload.md) |
-| Multi-agent presence | [multiplayer.md](multiplayer.md) |
-| Pre-edit hooks | [hooks.md](hooks.md) |
-| CI pipeline notes | [CI.md](CI.md) |
-| Use-case proving tests & inventory | [use_cases_inventory.md](use_cases_inventory.md) |
+Start with the [quickstart](QUICKSTART.md). It covers installation, a first
+single-repository setup, federation, and basic troubleshooting.
 
-```mermaid
-flowchart LR
-    Q[QUICKSTART] --> U[USER_MANUAL]
-    Q --> A[ARCHITECTURE]
-    Q --> UX[AGENT_UX_ROADMAP]
-    U --> A
-    A --> T[TECHNICAL]
-    U --> F[FEDERATION]
-    U --> R[REPOS_YAML]
-    U --> QL[query-language]
-    U --> QT[quickstart-tools]
-    U --> CC[command-center]
-    F --> HR[hot-reload]
-    F --> R
-    U --> MP[multiplayer]
-    U --> HK[hooks]
-    U --> CI[CI]
-```
+## Operate Lain
 
-## In one sentence
+- [User manual](USER_MANUAL.md): day-to-day operation and troubleshooting
+- [Cookbook](COOKBOOK.md): deployment recipes
+- [Federation](FEDERATION.md): multi-repository operation
+- [`repos.yaml` reference](REPOS_YAML.md): configuration fields and examples
+- [Command Center](command-center.md): the browser interface
+- [Hot reload](hot-reload.md): config reload behavior
+- [Multiplayer](multiplayer.md): agent presence, claims, and coordination
+- [Pre-edit hooks](hooks.md): hook installation and behavior
 
-`lain` is a persistent code-intelligence MCP server that builds a
-structural map of your code (calls, dependencies, co-change) and
-answers structural questions about it through any MCP-aware agent.
+## Query Lain
 
-## Conventions
+- [Tool guide](quickstart-tools.md): MCP tools and request examples
+- [Query tutorial](quickstart-query.md): a short introduction to `query_graph`
+- [Query language reference](query-language.md): the full ops-array format
+- [`tool-schema.json`](tool-schema.json): generated wire-format schema
 
-- Federation tools in two places: [FEDERATION.md](FEDERATION.md)
-  (operator view) and [TECHNICAL.md §"Cross-repo blast-radius
-  semantics"](TECHNICAL.md#cross-repo-blast-radius-semantics)
-  (internals).
-- "Single-repo" = `lain mcp`. "Federation" = `lain server --config
-  repos.yaml`. They share every lower layer except the orchestrator.
-- `get_health.Build:` and `get_health.Status:` exist so an agent
-  can tell whether to trust the rest of the answer. See
-  [TECHNICAL.md](TECHNICAL.md#reading-get_health).
+## Understand and maintain it
+
+- [Architecture](ARCHITECTURE.md): system boundaries and design choices
+- [Technical reference](TECHNICAL.md): modules, data structures, and internals
+- [CI](CI.md): checks run in continuous integration
+- [Release verification](VERIFICATION.md): how to verify a release artifact
+- [Supply-chain security](SUPPLY_CHAIN.md): release and dependency controls
+- [SafeSkill scoring](SAFESKILL.md): scope and interpretation of the score
+- [Agent UX roadmap](AGENT_UX_ROADMAP.md): active install and onboarding work
+- [Graph data-source decision](opinions/graph-tab-data-source.md): why the
+  Command Center graph uses `get_workspace_graph`
+
+`METADATA.toml` belongs to the release workflow rather than the reading path.
+
+Completed plans, audits, review notes, and the academic SRS package live in Git
+history. Keeping them out of the current tree prevents old implementation notes
+from competing with maintained documentation.
 
 ## License
 
-MIT — Copyright (c) 2026 spuentesp
+MIT, Copyright (c) 2026 spuentesp

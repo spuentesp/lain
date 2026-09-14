@@ -13,7 +13,6 @@
 //! `None` and the resolve phase is bit-identical to the pre-resolver
 //! behavior, so the new wiring is a no-op for non-federation servers.
 //!
-//! See `docs/wish-list.md` #13 for the original gap.
 
 use crate::federation::repo_id::{GlobalId, RepoId};
 use std::path::Path;

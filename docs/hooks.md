@@ -8,10 +8,10 @@ Pick your agent and follow the README in its directory:
 
 | Agent | Hook dir | README |
 |---|---|---|
-| Claude Code | [`hooks/claude-code/`](hooks/claude-code/) | [README](hooks/claude-code/README.md) |
-| Kimi | [`hooks/kimi/`](hooks/kimi/) | [README](hooks/kimi/README.md) |
-| Agy | [`hooks/agy/`](hooks/agy/) | [README](hooks/agy/README.md) |
-| Codex | [`hooks/codex/`](hooks/codex/) | [README](hooks/codex/README.md) |
+| Claude Code | [`hooks/claude-code/`](../hooks/claude-code/) | [README](../hooks/claude-code/README.md) |
+| Kimi | [`hooks/kimi/`](../hooks/kimi/) | [README](../hooks/kimi/README.md) |
+| Agy | [`hooks/agy/`](../hooks/agy/) | [README](../hooks/agy/README.md) |
+| Codex | [`hooks/codex/`](../hooks/codex/) | [README](../hooks/codex/README.md) |
 
 ## Common setup
 
@@ -41,4 +41,6 @@ All sessions of one agent kind share the same `~/.config/lain/hooks/<kind>.sessi
 
 ## E2E harness
 
-`tests/e2e/multiplayer-hooks.sh` exercises the full hook flow against a real `lain server`. See [the harness README](#) (or run `tests/e2e/multiplayer-hooks.sh --help` once it exists).
+`tests/e2e/multiplayer-hooks.sh` exercises the full hook flow against a real
+`lain server`. See [the harness README](../tests/e2e/README.md), or run
+`tests/e2e/multiplayer-hooks.sh --help`.
