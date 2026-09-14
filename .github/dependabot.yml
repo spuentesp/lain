@@ -1,0 +1,61 @@
+# Dependabot keeps GitHub Actions, Cargo, and npm dependencies current.
+# Every workflow in this repo pins third-party actions by commit SHA
+# (with the version as a trailing comment); Dependabot updates both
+# the SHA and the comment in lockstep, so `git log .github/workflows/`
+# always shows what version is running.
+#
+# If you'd rather use Renovate, swap this file for a `renovate.json`
+# with the same ecosystems. Dependabot was chosen for the built-in
+# support and zero extra setup.
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "npm"
+    directory: "/npm-shim"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "npm"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5

@@ -5,15 +5,29 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
+# Top-level `permissions: {}` denies everything by default; jobs grant
+# only what they need. PR #2 changes vs PR #1:
+#
+#   - build-* jobs gain `id-token: write` for SLSA-style build
+#     provenance attestation (actions/attest-build-provenance needs it).
+#   - Per-binary SBOM generation via anchore/sbom-action (syft).
+#   - Per-binary SHA256 side-file via scripts/compute-sha256.py.
+#   - A new `sha256sums` job aggregates per-binary hashes into the
+#     SHA256SUMS file attached to the release.
+#   - `publish-server-json` now derives server.json from
+#     docs/METADATA.toml + the release tag, updating ALL
+#     `"version":` fields (top-level AND packages[].version). The
+#     previous sed only matched the first occurrence.
+permissions: {}
 
 jobs:
   version-check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Verify release tag and package metadata
@@ -22,32 +36,57 @@ jobs:
   build-linux:
     needs: version-check
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
+      # Reproducible-build environment variables. SOURCE_DATE_EPOCH
+      # normalizes embedded timestamps; CARGO_INCREMENTAL=0 drops
+      # absolute-path incremental compilation artifacts. Full
+      # byte-identical reproduction still requires a pinned
+      # rust-toolchain.toml, which is the next iteration.
       - name: Build
+        env:
+          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
+          CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-unknown-linux-gnu
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-unknown-linux-gnu/release/lain
-      - name: Package
+      - name: Package tarball
         run: |
           mkdir -p release
           cp target/x86_64-unknown-linux-gnu/release/lain release/lain
           tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C release lain
           rm release/lain
-      - uses: softprops/action-gh-release@v2
+      - name: Compute per-binary SHA256
+        run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+      - name: Generate SBOM (CycloneDX JSON)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          files: release/*
+          format: cyclonedx-json
+          artifact: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.sha256
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cdx.json
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,32 +94,52 @@ jobs:
   build-macos-arm64:
     needs: version-check
     runs-on: macos-14
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
       - name: Build
+        env:
+          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
+          CARGO_INCREMENTAL: '0'
         run: cargo build --release --target aarch64-apple-darwin
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/aarch64-apple-darwin/release/lain
-      - name: Package
+      - name: Package tarball
         run: |
           mkdir -p release
           cp target/aarch64-apple-darwin/release/lain release/lain
           tar czf release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz -C release lain
           rm release/lain
-      - uses: softprops/action-gh-release@v2
+      - name: Compute per-binary SHA256
+        run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+      - name: Generate SBOM (CycloneDX JSON)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          files: release/*
+          format: cyclonedx-json
+          artifact: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sha256
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -88,52 +147,119 @@ jobs:
   build-windows:
     needs: version-check
     runs-on: windows-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Extract version
         shell: bash
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
       - name: Build
+        env:
+          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
+          CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-pc-windows-msvc
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-pc-windows-msvc/release/lain.exe
-      - name: Package
+      - name: Package tarball
         shell: bash
         run: |
           mkdir -p release
           cp target/x86_64-pc-windows-msvc/release/lain.exe release/lain.exe
           tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz -C release lain.exe
           rm release/lain.exe
-      - uses: softprops/action-gh-release@v2
+      - name: Compute per-binary SHA256
+        shell: bash
+        run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+      - name: Generate SBOM (CycloneDX JSON)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          files: release/*
+          format: cyclonedx-json
+          artifact: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.sha256
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cdx.json
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  
-  publish-server-json:
-    runs-on: ubuntu-latest
+  # Aggregate the three per-binary tarballs into a single SHA256SUMS
+  # file and attach it to the release. Downloading via
+  # `gh release download` (rather than cross-job artifacts) means the
+  # SHA256SUMS file is computed against the exact bytes consumers will
+  # receive — there is no separate attacker-controlled surface.
+  sha256sums:
     needs: [build-linux, build-macos-arm64, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Download release tarballs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          gh release download "$GITHUB_REF_NAME" \
+            --dir artifacts \
+            --pattern 'lain-*-*.tar.gz'
+      - name: Compute aggregate SHA256SUMS
+        run: |
+          cd artifacts
+          python scripts/compute-sha256.py lain-*-*.tar.gz > /tmp/sums.txt
+          # Compute writes sidecars, but we only want the aggregate
+          # file. Move the SUMs into a single SHA256SUMS file.
+          rm -f lain-*-*.tar.gz.sha256
+          mv /tmp/sums.txt SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: artifacts/SHA256SUMS
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-server-json:
+    needs: [sha256sums]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
-      - name: Update server.json version
-        run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" server.json
-      - uses: softprops/action-gh-release@v2
+      # The previous release.yml sed-edited only the first "version"
+      # field it found, leaving packages[].version drifted from the
+      # top-level version. sync-server-json.py updates both, plus
+      # description / homepage / keywords / repository.url from
+      # docs/METADATA.toml.
+      - name: Sync server.json from METADATA.toml
+        run: python scripts/sync-server-json.py --version "${{ steps.version.outputs.VERSION }}"
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: server.json
           draft: false

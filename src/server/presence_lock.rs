@@ -185,8 +185,8 @@ fn try_lock_once(
 /// Both relative and absolute paths pointing to the same file produce
 /// the same canonical key, avoiding disjoint lock paths across different callers.
 pub fn canonical_lock_key(workspace_root: &Path, path: &Path) -> String {
-    let normalized_root = crate::server::presence::lexical_normalize(workspace_root);
-    let normalized_path = crate::server::presence::lexical_normalize(path);
+    let normalized_root = crate::server::path_util::lexical_normalize(workspace_root);
+    let normalized_path = crate::server::path_util::lexical_normalize(path);
     let rel = if normalized_path.is_absolute() {
         match normalized_path.strip_prefix(&normalized_root) {
             Ok(p) => p.to_path_buf(),

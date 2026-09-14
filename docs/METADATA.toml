@@ -1,0 +1,48 @@
+# Canonical project metadata for LAIN.
+#
+# This file is the single source of truth for fields the project
+# publishes in more than one place. Every place those fields appear
+# (server.json, npm-shim/package.json, Formula/lain.rb) is derived
+# from here, either:
+#
+#   - automatically by `scripts/sync-server-json.py` on every release, or
+#   - manually via `scripts/sync-package-json.py` before the npm publish,
+#     or
+#   - by hand for Formula/lain.rb (Homebrew taps need an explicit PR; see
+#     docs/CI.md § "Distribution channels").
+#
+# Why this exists: before PR #2, the four descriptions in
+# README.md, server.json, npm-shim/package.json, and Formula/lain.rb
+# drifted from each other (one even opened with a German word — "Wird"
+# in package.json). The Trust & Visibility umbrella treats that drift
+# as a Phase 3 bug; centralising the values here makes it impossible
+# to forget.
+#
+# When you change a value below, also run:
+#
+#   python scripts/sync-server-json.py --version "$(sed -n 's/^version = //p' Cargo.toml | tr -d '\"')"
+#
+# to refresh server.json, and edit npm-shim/package.json + Formula/lain.rb
+# to match. `scripts/check-release-version.py` only catches VERSION drift;
+# the description/homepage/keywords drift is caught by the smoke test
+# added in PR #2 (see scripts/test_sync_metadata.py).
+
+[project]
+description = "High-performance knowledge graph MCP server for AI coding agents with semantic search."
+homepage = "https://github.com/spuentesp/lain#readme"
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "coding",
+    "knowledge-graph",
+    "rust",
+    "semantic-search",
+    "code-analysis",
+]
+
+# `repository` is the canonical GitHub URL. `source` is the registry's
+# discriminator (always "github" for this repo).
+[repository]
+url = "https://github.com/spuentesp/lain"
+source = "github"
