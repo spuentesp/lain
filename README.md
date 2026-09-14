@@ -1,58 +1,170 @@
 # LAIN-mcp
 
+[![CI](https://github.com/spuentesp/lain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/spuentesp/lain/actions/workflows/ci.yml)
 [![SafeSkill 88/100](https://img.shields.io/badge/SafeSkill-88%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/spuentesp-lain)
 [![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/spuentesp/lain)](https://scorecard.dev/viewer/?uri=github.com/spuentesp/lain)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platforms: Linux | macOS | Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue)](.github/workflows/ci.yml)
+[![Rust 1.75 or newer](https://img.shields.io/badge/rust-1.75%20or%20newer-orange)](Cargo.toml)
 
-LAIN builds a map of how all the code in your project connects — what calls what, what depends on what, which files tend to change together. Then it lets your AI coding assistant ask questions about that map. So instead of the AI just looking at one file and guessing, it can ask "if I change this function, what else breaks?" and get a real answer. It plugs into any AI agent that supports MCP and runs in the background while you work.
+> **Structural Code Intelligence & Multi-Agent Coordination for AI Assistants.**
+> Give your coding agents an in-memory graph brain instead of making them guess from flat text.
+
+---
+
+## What is LAIN?
+
+**LAIN** is a persistent, high-performance code intelligence and coordination engine built specifically for AI coding agents (Claude Code, Cursor, Copilot, Codex, Agy, Cline, Windsurf, etc.) over the **Model Context Protocol (MCP)**.
+
+Instead of treating code as unstructured flat text or relying on fuzzy keyword searches, LAIN indexes your codebase into an in-memory, typed structural property graph (using Tree-sitter, language servers, and Git commit history). It then exposes a rich suite of deterministic MCP tools that allow AI agents to navigate, reason about, and modify complex codebases without hallucinations, blind edits, or context-window waste.
+
+### The Problem LAIN Solves
+
+| Without LAIN (Flat Text / Grep / RAG) | With LAIN (Structural Graph & Coordination) |
+|:---|:---|
+| **Blind Refactoring**: The agent modifies a function, unaware that 14 callers across 6 files and 2 repositories depend on its exact signature. Tests break, and the agent burns thousands of tokens in trial-and-error loops. | **Exact Blast Radius in <10ms**: The agent calls `get_blast_radius` before touching a line. LAIN traces every upstream caller, downstream dependency, and affected test file across the entire repository graph. |
+| **Token-Exhausting Exploration**: The agent reads 30 full source files into its context window just to understand how an API endpoint connects to the database layer. | **Surgical Traversal**: The agent queries `get_call_chain` or `trace_dependency` and receives only the exact call chain in a compact, structured JSON response. |
+| **Multi-Agent Collision Chaos**: Multiple agents running in parallel (or human + agent pairs) edit the same files or dependent symbols simultaneously, creating merge conflicts and silent regressions. | **Multiplayer Presence & Claims**: Agents declare intent via `claim_files`, inspect `list_active_agents`, and detect symbol-level overlap via `detect_overlap` before editing. |
+| **Multi-Repo / Microservice Blindness**: Agents are trapped in a single directory and cannot see how changing a shared library affects consuming services. | **Cross-Repo Federation**: `lain server` indexes multiple repositories simultaneously, mapping cross-repository call edges, shared symbols, and org-wide blast radiuses. |
+
+---
+
+## Why LAIN? (Comparison Matrix)
+
+| Capability | Grep / Text Search | Vector RAG | Traditional LSP | **LAIN (MCP Server)** |
+|:---|:---:|:---:|:---:|:---:|
+| **Transitive Call Traversal** | ❌ None (matches text) | ❌ None (similarity only) | ⚠️ Single file / manual | ✅ **Deterministic BFS graph traversal** |
+| **Full Blast Radius Analysis** | ❌ No | ❌ No | ❌ No | ✅ **Sub-10ms transitive caller impact** |
+| **Token-Compact Output** | ❌ Dumps raw lines | ❌ Injects large text chunks | ❌ Editor UI only | ✅ **Compact UUID v5 symbols & graph ops** |
+| **Multi-Agent Coordination** | ❌ None | ❌ None | ❌ None | ✅ **Advisory file/symbol claims & SSE streams** |
+| **Git Co-Change Coupling** | ❌ No | ❌ No | ❌ No | ✅ **Temporal coupling radar via commit history** |
+| **Multi-Repo Federation** | ❌ No | ⚠️ Unstructured | ❌ Single project root | ✅ **Federated graph across N repositories** |
+| **Interactive Human UI** | ❌ CLI only | ❌ CLI only | ⚠️ Editor IDE | ✅ **Built-in Command Center SPA dashboard** |
+
+---
+
+## Real-World Scenarios: Before vs. After
+
+### Scenario 1: Refactoring a Shared Core API
+* **Without LAIN**: You ask an agent to rename or update parameters on a central authentication helper. The agent greps for the name, finds 3 local callers, modifies them, and declares success. In reality, 8 other files in different modules (and 2 separate microservices) call that function. The CI build fails, and the agent wastes 40,000 tokens trying to diagnose compiler errors.
+* **With LAIN**: The agent invokes `get_blast_radius(symbol: "verify_token")`. Within 8 milliseconds, LAIN returns the exact caller tree across all modules and workspaces. The agent updates every call site in its very first pass.
+
+### Scenario 2: Multi-Agent Swarms ("Multiplayer Mode")
+* **Without LAIN**: Two agents work in parallel on the same repository—Agent A is refactoring payment logic while Agent B is fixing an edge case in checkout. Both edit `checkout_service.rs` and push conflicting diffs, leaving broken code for the developer to resolve.
+* **With LAIN**: Agent A runs `claim_files("checkout_service.rs")`. When Agent B inspects `list_occupancy(path: "checkout_service.rs")` or triggers the pre-edit hook, LAIN reports that Agent A is actively working on that file. Agent B coordinates, waits, or switches to an uncontested task.
+
+### Scenario 3: Onboarding an Agent onto a 500,000-Line Codebase
+* **Without LAIN**: The agent attempts to read the directory tree, guesses random entry points, and burns through context limits before writing a single line of working code.
+* **With LAIN**: The agent executes `list_entry_points` and `find_anchors`. LAIN computes percentile-normalized centrality scores and immediately highlights the top 5 architectural hub functions and public routers in the project.
+
+---
 
 ## See it run
 
 ![LAIN Command Center demo](docs/screenshots/spa-demo.gif)
 
-[Download MP4](docs/screenshots/spa-demo.mp4) · [Download WebM](docs/screenshots/spa-demo.webm)
-
-- Federation overview, repo health, and the call graph — answered in well under a second.
-- Edit `repos.yaml` from the Repos tab; the server hot-reloads without dropping a request.
-- Try any MCP tool straight from the Tools tab; *Copy as cURL* hands the agent a shareable snippet.
+- **Instant Answers**: Federation overview, repo health, and call graphs answered in milliseconds.
+- **Hot Reload**: Edit `repos.yaml` or `workspaces.yaml`; the server updates live without dropping a single active MCP session.
+- **Interactive Tool Console**: Exercise any MCP tool directly from the web browser; *Copy as cURL* gives agents and operators instant reproducibility.
 
 > [!NOTE]
-> The hero GIF is large (~4 MB) so it autoplays inline on GitHub. For sharper playback, the [MP4](docs/screenshots/spa-demo.mp4) and [WebM](docs/screenshots/spa-demo.webm) siblings sit alongside it in `docs/screenshots/`.
+> The demo is kept as a single GIF so it plays inline without storing duplicate video encodings in the repository.
+
+---
 
 ## How it fits together
 
 ```mermaid
-flowchart LR
-    A["AI Agent<br/>(Claude Code / Kimi / Agy / Codex)"] -->|MCP<br/>JSON-RPC| L["lain"]
-    L -->|reads| FS[".lain/<br/>graph.bin"]
-    L -->|runs| ENG["LSP / NLP / git<br/>engines"]
-    L -->|answers| T["MCP tools<br/>(get_blast_radius,<br/>explain_symbol, …)"]
-    A --> T
+flowchart TB
+    subgraph Clients["AI Agents & Developers"]
+        A["AI Coding Agent<br/>(Claude Code / Cursor / Agy / Codex)"]
+        B["Developer / Operator<br/>(Browser Command Center)"]
+    end
+
+    subgraph Transports["MCP & Web Transports"]
+        S["stdio (single-repo)"]
+        H["HTTP :9999 (JSON-RPC & SSE)"]
+    end
+
+    subgraph Core["LAIN Core Engine"]
+        EX["Unified MCP Tool Dispatcher"]
+        G["In-Memory Graph Engine<br/>(Petgraph · UUID v5)"]
+        PRES["Presence & Claim Registry<br/>(Advisory Leases & Locks)"]
+        FED["Federation Engine<br/>(N Repositories)"]
+    end
+
+    subgraph Sources["Code Analysis & Storage"]
+        TS["Tree-sitter AST Parser"]
+        LSP["Language Servers (rust-analyzer, pylsp...)"]
+        GIT["Git Commit History (Co-change radar)"]
+        BIN[".lain/graph.bin (Persistent Cache)"]
+    end
+
+    A -->|MCP JSON-RPC| S
+    A -->|MCP HTTP| H
+    B -->|GET /| H
+    S --> EX
+    H --> EX
+    EX --> G
+    EX --> PRES
+    EX --> FED
+    G <--> BIN
+    G --> TS
+    G --> LSP
+    G --> GIT
 ```
 
-`lain` is a long-running MCP server that indexes your code once and
-keeps it fresh while you work. The agent speaks MCP (JSON-RPC over
-stdio or HTTP); the server answers structural questions across one
-repo (`lain mcp`) or many repos (`lain server --config repos.yaml`).
+1. **Indexing & Parsing**: LAIN scans your code using Tree-sitter and language servers (LSPs), extracting functions, classes, imports, and references into a property graph.
+2. **Persistent Graph Store**: The graph is serialized into `.lain/graph.bin` using deterministically derived UUID v5 identifiers for instant reloads.
+3. **Temporal Mining**: LAIN analyzes git commit logs to build a *co-change coupling radar* (identifying modules that evolve together even without explicit imports).
+4. **Advisory Presence**: In-memory and on-disk occupancy registries track agent sessions and file claims, preventing overlapping edits in real time.
+5. **Universal MCP Delivery**: Exposes standardized tools over stdio or HTTP so any MCP-compatible agent can query the graph directly.
 
-## Documentation
+---
 
-| Doc | What's in it |
-|-----|--------------|
-| **[`docs/QUICKSTART.md`](docs/QUICKSTART.md)** | Five-minute tour |
-| **[`docs/USER_MANUAL.md`](docs/USER_MANUAL.md)** | Operator + agent manual |
-| **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** | How and why — design rationale |
-| **[`docs/TECHNICAL.md`](docs/TECHNICAL.md)** | Source-level internals |
-| **[`docs/FEDERATION.md`](docs/FEDERATION.md)** | Multi-repo operating guide |
-| **[`docs/REPOS_YAML.md`](docs/REPOS_YAML.md)** | `repos.yaml` schema |
-| **[`docs/query-language.md`](docs/query-language.md)** | `query_graph` ops-array reference |
-| **[`docs/quickstart-tools.md`](docs/quickstart-tools.md)** | All MCP tools |
-| **[`docs/command-center.md`](docs/command-center.md)** | Command Center SPA |
-| **[`docs/hot-reload.md`](docs/hot-reload.md)** | Config hot-reload |
-| **[`docs/multiplayer.md`](docs/multiplayer.md)** | Multi-agent coordination |
-| **[`docs/hooks.md`](docs/hooks.md)** | Pre-edit hooks |
-| **[`docs/INDEX.md`](docs/INDEX.md)** | Docs index |
+## What can AI Agents ask LAIN?
 
-## TL;DR — install in 30 seconds
+LAIN provides specialized MCP tools categorized by capability:
+
+### 1. Blast Radius & Dependency Tracing
+- **`get_blast_radius`** — Downstream impact analysis: every function, type, and file affected by changing a symbol.
+- **`get_call_chain`** — Shortest path between two functions in the call graph.
+- **`trace_dependency`** — All upstream dependencies (callees, imports, types) of a target symbol.
+- **`get_coupling_radar`** — Files that frequently change together based on Git commit co-occurrence.
+
+### 2. Architectural Discovery & Navigation
+- **`find_anchors`** — Identifies the core architectural pillars (most-called, most-stable symbols).
+- **`list_entry_points`** — Discovers `main()`, HTTP routes, and event handlers.
+- **`get_context_depth`** — Measures abstraction distance from public entry points.
+- **`explore_architecture`** — High-level hierarchical module and package tree.
+
+### 3. Multi-Agent Coordination ("Multiplayer Mode")
+- **`register_agent` / `heartbeat`** — Registers an agent session and keeps advisory leases fresh.
+- **`claim_files` / `release_files`** — Claims or releases files and symbol ranges before editing.
+- **`detect_overlap`** — Analyzes overlapping symbol changes between git branches or concurrent sessions.
+- **`list_active_agents` / `who_am_i`** — Discovers other active agents and reports session identity.
+
+### 4. Search & Deep Graph Queries
+- **`semantic_search`** *(requires ONNX model — see [Setting Up Semantic Search](#setting-up-semantic-search-optional))* — Concept-based code search using local ONNX embeddings with hybrid BM25/stemmed ranking.
+- **`query_graph`** — Composable JSON ops pipeline (`find`, `connect`, `filter`, `semantic_filter`, `sort`, `limit`).
+- **`explain_symbol`** — Complete structural dossier for a symbol (signature, callers, docstring, location).
+
+### 5. Multi-Repo Federation
+- **`list_repos` / `get_repo_info`** — Status, health, and size of all repos registered in `repos.yaml`.
+- **`get_federation_health`** — Aggregate health counts, total node/edge counts, and a rough memory estimate across the federation.
+- **`get_cross_repo_blast_radius`** — Cross-repository impact analysis when modifying a shared symbol.
+- **`get_cross_repo_blast_radius_for_repo`** — Same as `get_cross_repo_blast_radius`, but the caller disambiguates the target repo by `repo_id` instead of by symbol resolution.
+- **`search_org`** — Organization-wide symbol and code search across all registered repositories.
+
+### 6. Code Health & Refactoring
+- **`find_dead_code`** — Detects unreachable functions and unused symbols (excluding traits and tests).
+- **`suggest_refactor_targets`** — Identifies brittle code (high-coupling, low-stability candidates).
+- **`get_agent_strategy`** — Retrieves operational guidelines and strategic instructions for agents.
+- **`get_world_state`** — Summarizes active sessions, file claims, and graph freshness in a single compact call.
+
+---
+
+## TL;DR — Install in 30 Seconds
 
 ```bash
 # Install (interactive — adds `lain` to PATH)
@@ -63,31 +175,58 @@ source ~/.zshrc   # or ~/.bashrc
 lain --version
 ```
 
-See [QUICKSTART.md](docs/QUICKSTART.md) for the full install matrix (Homebrew, build-from-source, non-interactive flags, ONNX model).
-
-## What is Lain?
-
-Lain is a persistent code-intelligence MCP server. The headline is
-`lain server`: a long-running process that reads a `repos.yaml` config,
-indexes every registered repository (locally, by clone, or by shallow
-fetch), and answers structural questions across them through MCP
-tools. The server also serves a Command Center dashboard at `GET /` for
-humans who want to inspect the federation, edit the config, run
-queries, and exercise the MCP tool surface directly.
-
-The value over LSP-only or RAG-based approaches is cross-file
-structural reasoning: agents can ask about blast radius, transitive
-dependency traces, anchor identification, co-change correlation, and
-contextual build failure decoration, so they reason about callers
-rather than just the failing line. Written in Rust, persists across
-sessions, and hot-reloads its `repos.yaml` / `workspaces.yaml` config
-without a restart.
+See [QUICKSTART.md](docs/QUICKSTART.md) for Homebrew, manual builds, non-interactive flags, and ONNX model setups.
 
 ---
 
-## The commands
+## Connecting Your AI Agent
 
-After install, `lain` exposes these subcommands:
+### Claude Code
+```bash
+claude mcp add lain -- lain mcp
+```
+
+### Cursor / Windsurf
+Add to your MCP configuration (`cursor settings > Features > MCP` or `mcp.json`):
+```json
+{
+  "mcpServers": {
+    "lain": {
+      "command": "lain",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Multi-Repo Server Mode (HTTP)
+Run LAIN as a shared service across multiple repositories:
+```bash
+lain server --config ./repos.yaml --transport http --port 9999
+```
+Access the **Command Center UI** in your browser at `http://localhost:9999`.
+
+---
+
+## Command Center Dashboard
+
+When `lain server` runs with `--transport http`, it serves the Command Center dashboard at `GET /`. It is a self-contained single-page application (SPA) that talks back to the running server over the same MCP JSON-RPC protocol.
+
+![Command Center — Overview tab](docs/screenshots/command-center-overview.png)
+
+- **Overview** — Real-time node/edge stats, memory footprint, and federation health.
+- **Graph** — Interactive D3 force-directed visualizer of workspaces and symbol dependencies.
+- **Repos** — Repository table showing health, path, and node/edge statistics.
+- **Query** — Interactive query runner for `query_graph` traversals.
+- **Tools** — Form-based MCP tool runner with auto-generated *Copy as cURL* snippets for quick testing.
+
+![Command Center — Repos tab](docs/screenshots/command-center-repos.png)
+
+---
+
+## The CLI Commands
+
+LAIN exposes the following CLI commands:
 
 | Command | Purpose |
 |---------|---------|
@@ -104,321 +243,111 @@ After install, `lain` exposes these subcommands:
 | `lain schema` | Emit the canonical tool-surface schema dump (`dump [--out PATH]` defaults to `./docs/tool-schema.json`). Pair with `make schema && git diff --exit-code docs/tool-schema.json` in CI to fail on schema drift. |
 | `scripts/demo.sh` | Capability demonstration and benchmark. Boots a real server against a synthetic repo whose call graph is known by construction, checks lain's answers against that ground truth (not merely that it answered), then benchmarks the same tools against this repo at ~3.5k nodes. `--quick` skips the build and benchmark phases; `--json FILE` writes machine-readable results; `--force-build` overrides `--quick` / `--no-build`; `--allow-stale` skips the binary-freshness check. Exits non-zero if any check fails (or if the binary is older than any source file and `--allow-stale` was not passed). |
 
-The cut surface (`agents`, `hook`, `projects`, top-level `use`) is
-gone — those concerns are reached through the commands above. `server`
-plus the two config CLIs (`workspaces`, `repos`) cover everything the
-prior surface did, scoped to a single project directory that owns a
-`repos.yaml`.
-
-This table is checked against `lain --help` by
-`tests/cli_surface.rs`, so it cannot drift from the binary again.
-
----
-
-## Quick Start
-
-1. **Install** — see [QUICKSTART.md § Install](docs/QUICKSTART.md#install).
-2. **Configure** — see [QUICKSTART.md § Federation (multi-repo)](docs/QUICKSTART.md#federation-multi-repo).
-3. **Wire your agent** — see [QUICKSTART.md § Single-repo (recommended default)](docs/QUICKSTART.md#single-repo-recommended-default).
-
----
-
-## Command Center
-
-For a narrated tour of every tab, see [command-center.md § Tour](docs/command-center.md#tour).
-
-When `lain server` runs with `--transport http`, it serves the Command
-Center dashboard at `GET /`. It's a self-contained vanilla-JS SPA that
-talks back to the running server over the same JSON-RPC endpoint the
-MCP tools use. No separate API, no auth portal.
-
-![Command Center — Overview tab](docs/screenshots/command-center-overview.png)
-
-Tabs:
-
-- **Overview** — `get_health` + `get_federation_health` in one view.
-- **Graph** — D3 force-directed graph of the active workspace.
-- **Repos** — per-repo table (id, path, health, node/edge counts).
-- **Query** — runs `query_graph` against the federation.
-- **Tools** — auto-generated MCP tool tester. Calls `tools/list`, then
-  renders a form per tool by introspecting its `inputSchema`. *Copy as
-  cURL* copies a `curl -X POST http://localhost:9999/mcp ...` snippet
-  to the clipboard.
-
-![Command Center — Repos tab](docs/screenshots/command-center-repos.png)
-
-The status bar in the footer polls every 2 s for `get_server_status`
-and `get_reload_status` so hand-edits to `repos.yaml` /
-`workspaces.yaml` show up live.
-
-See [`docs/command-center.md`](docs/command-center.md) for the full
-walkthrough.
-
 ---
 
 ## Hot Reload
 
-`lain server` watches `repos.yaml` and `workspaces.yaml` and rebuilds
-its federation state when they change — no restart needed. Both the
-`notify` watcher (for hand-edits) and the CLI (via `lain repos add`
-or `lain workspaces create`) trigger the same `ReloadBus`.
+`lain server` monitors `repos.yaml` and `workspaces.yaml` and automatically updates its federation state when they change—without restarting the process or dropping active agent connections. Both manual file edits and CLI commands (`lain repos add ...`) communicate over a local Unix socket (`~/.local/lain/run/<repos-stem>.sock`) to rebuild the index diff atomically.
 
-When you run `lain repos add my-repo …`, the CLI writes the YAML
-atomically (write to temp file, then `rename`), then signals the
-running server over a Unix socket at
-`~/.local/lain/run/<repos-stem>.sock`. The server's rebuild task
-diffs the new file against the live federation and applies add / remove
-operations against `FederatedIndex`. `get_reload_status` reports the
-state (`idle` / `rebuilding` / `failed`); the Command Center status
-bar shows it live.
-
-See [`docs/hot-reload.md`](docs/hot-reload.md) for the full picture
-(internals, observability, failure modes, caveats).
+See [`docs/hot-reload.md`](docs/hot-reload.md) for full operational details.
 
 ---
 
-## Federation mode
+## Documentation Index
 
-For org-wide structural questions — "who else uses this function?",
-"what depends on this service?" — run `lain server --config
-./repos.yaml`. Federation mode exposes six MCP tools (`list_repos`,
-`get_repo_info`, `get_federation_health`, `search_org`,
-`get_cross_repo_blast_radius`,
-`get_cross_repo_blast_radius_for_repo`) that answer questions
-spanning repos. See [`docs/FEDERATION.md`](docs/FEDERATION.md) for the
-full guide and [`docs/REPOS_YAML.md`](docs/REPOS_YAML.md) for the
-config schema.
-
----
-
-## Key Features
-
-- **Federation mode** — index N repos and answer org-wide structural questions across them.
-- **Command Center** — vanilla-JS SPA at `GET /` for human inspection, config editing, query running, and MCP tool testing.
-- **Hot reload** — `repos.yaml` / `workspaces.yaml` changes apply without restarting the server.
-
-### Query Language (`query_graph`)
-
-JSON-based ops array for flexible graph traversals:
-
-```json
-{
-  "ops": [
-    { "op": "find", "type": "Function" },
-    { "op": "connect", "edge": "Calls", "depth": { "min": 1, "max": 3 } },
-    { "op": "filter", "label": "test" },
-    { "op": "semantic_filter", "like": "error handling", "threshold": 0.35 },
-    { "op": "limit", "count": 10 }
-  ]
-}
-```
-
-Available ops: `find`, `connect`, `filter`, `semantic_filter`, `group`,
-`sort`, `limit`.
-
-### Dependency Intelligence
-
-- **`get_call_chain`** — Shortest path between two functions.
-- **`get_blast_radius`** — Everything affected by a change.
-- **`trace_dependency`** — What a symbol depends on.
-- **`get_coupling_radar`** — Files that change together.
-
-### Architectural Analysis
-
-- **`find_anchors`** — Most-called, most-stable symbols (architectural pillars).
-- **`list_entry_points`** — Find `main()`, route handlers, app initialization.
-- **`get_context_depth`** — How far from an entry point (abstraction layers).
-- **`explore_architecture`** — High-level tree of modules and files.
-
-### Search
-
-- **`semantic_search`** — Find code by meaning, not just names. Uses local ONNX embeddings with hybrid scoring (cosine similarity + stemmed token-overlap) and shows body excerpts in the response. BGE-small-en-v1.5 is the recommended model (better than MiniLM for technical corpora); use a query prefix to enable BGE-style asymmetric retrieval.
-
-### Code Health
-
-- **`find_dead_code`** — Potentially unreachable code (filters trait defaults, common names).
-- **`suggest_refactor_targets`** — High-coupling, low-stability nodes.
-
-### Project Management
-
-A project is a directory containing `repos.yaml` (and optionally
-`workspaces.yaml`). Manage it directly with the CLI:
-
-- **`lain repos add <name> <url>`** — register a repo in `repos.yaml`.
-- **`lain repos list`** — show registered repos.
-- **`lain repos remove <name>`** — unregister a repo.
-- **`lain workspaces create <name> --members a,b,c`** — declare a named workspace.
-- **`lain workspaces list`** — show all workspaces.
-- **`lain workspaces use <name>`** — activate a workspace (writes `~/.config/lain/active_workspace`).
-- **`lain workspaces current`** — print the active workspace.
-- **`lain workspaces forget <name>`** — remove a workspace.
-
-## Where to go next
-
-- Operate `lain` for a team → [USER_MANUAL.md](docs/USER_MANUAL.md)
-- Federation operating guide → [FEDERATION.md](docs/FEDERATION.md)
-- Full MCP tool reference → [quickstart-tools.md](docs/quickstart-tools.md)
-- Command Center narrated tour → [command-center.md](docs/command-center.md)
+| Doc | What's in it |
+|---|---|
+| **[`docs/QUICKSTART.md`](docs/QUICKSTART.md)** | Step-by-step 5-minute setup and quickstart |
+| **[`docs/USER_MANUAL.md`](docs/USER_MANUAL.md)** | Comprehensive operator and agent manual |
+| **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** | System design, graph layering, and technical rationale |
+| **[`docs/TECHNICAL.md`](docs/TECHNICAL.md)** | Deep dive into internal modules and data structures |
+| **[`docs/FEDERATION.md`](docs/FEDERATION.md)** | Multi-repo setup, org search, and cross-repo intelligence |
+| **[`docs/REPOS_YAML.md`](docs/REPOS_YAML.md)** | Schema and options for `repos.yaml` |
+| **[`docs/multiplayer.md`](docs/multiplayer.md)** | Multi-agent coordination, claims, and advisory locks |
+| **[`docs/hooks.md`](docs/hooks.md)** | Git and editor pre-edit hook configuration |
+| **[`docs/query-language.md`](docs/query-language.md)** | Syntax and operations reference for `query_graph` |
+| **[`docs/quickstart-tools.md`](docs/quickstart-tools.md)** | Complete reference guide for all MCP tools |
+| **[`docs/command-center.md`](docs/command-center.md)** | Features and usage of the web Command Center |
+| **[`docs/INDEX.md`](docs/INDEX.md)** | Full documentation sitemap |
 
 ---
 
-## Requirements
+## Requirements & Optional Semantic Search
 
 | Requirement | Details |
-|-------------|---------|
-| Rust (build only) | 1.75 or newer |
-| Git | Required for co-change analysis |
-| ONNX Model | Optional — for `semantic_search` |
+|---|---|
+| **Rust** (build only) | 1.75 or newer |
+| **Git** | Required for co-change coupling analysis |
+| **ONNX Model** | Optional — required only for `semantic_search` |
 
-### Optional: Semantic Search
+### Setting Up Semantic Search (Optional)
 
-For `semantic_search` to work, you need an ONNX embedding model. The
-easiest setup uses the provided install script with `--download-model`.
-Otherwise, drop a model into `.lain/models/`:
+For `semantic_search`, download an ONNX embedding model (or run `install.sh --download-model`):
 
 ```bash
 mkdir -p .lain/models
 
-# Option A: bge-small-en-v1.5 (recommended — better MTEB scores, 384d, ~120MB)
+# BAAI/bge-small-en-v1.5 (recommended — 384d, ~120MB)
 curl -L https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx \
   -o .lain/models/model.onnx
 curl -L https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json \
   -o .lain/models/tokenizer.json
 
-# Option B: all-MiniLM-L6-v2 (smaller, 384d, ~80MB)
-curl -L https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx \
-  -o .lain/models/model.onnx
-curl -L https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json \
-  -o .lain/models/tokenizer.json
-```
-
-Export the model path so the server picks it up:
-
-```bash
 export LAIN_EMBEDDING_MODEL=$PWD/.lain/models/model.onnx
 ```
 
-For BGE-style asymmetric retrieval (better for short queries), set
-the query prefix in `.lain/tuning.toml`:
+For BGE-style asymmetric retrieval (optimized for short natural-language queries), configure the prefix in `.lain/tuning.toml`:
 
 ```toml
 query_prefix = "Represent this sentence for searching relevant passages: "
 ```
 
-Without the model, `semantic_search` is filtered from `tools/list`
-entirely. Other features still work. The binary drops the tool rather
-than advertise one that always says "unavailable".
+*Note: If no embedding model is configured, `semantic_search` is filtered out of `tools/list` automatically so agents are never presented with an unusable tool. All graph, blast radius, navigation, and coordination tools function without an ONNX model.*
 
 ---
 
 ## MCP Transport Modes
 
 | Mode | Command | Use Case |
-|------|---------|----------|
-| `stdio` | `--transport stdio` | Claude Code, MCP clients |
-| `http` | `--transport http --port 9999` | Command Center dashboard + curl-driven MCP |
-
-The HTTP transport is no longer combined with stdio in a single
-`both` mode — start two `lain server` processes (or use the HTTP
-transport and exercise tools via `curl` against `/mcp`).
+|---|---|---|
+| `stdio` | `lain mcp` or `lain server --transport stdio` | Claude Code, Cursor, MCP clients |
+| `http` | `lain server --transport http --port 9999` | Command Center dashboard + curl-driven JSON-RPC |
 
 ---
 
 ## Troubleshooting
 
-For first-time setup, see [QUICKSTART.md § First aid](docs/QUICKSTART.md#first-aid) before reading this section.
-
-**Hand-edit not picked up?**
-
-The hot-reload watcher is non-recursive and uses atomic rename.
-Editing the file in place (`vim repos.yaml`) triggers a notify event
-within ~1 s. If you've moved the file across directories, save it
-back into the same directory.
-
-**Repo stuck in `indexing` / `degraded` / `unavailable` / `missing`?**
-
-```bash
-# Check federation health
-curl -s -X POST http://localhost:9999/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_federation_health","arguments":{}},"id":1}'
-```
-
-The Command Center's Overview tab shows the same numbers in a single
-view.
-
-**Force a reload:**
-
-```bash
-curl -s -X POST http://localhost:9999/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"request_reload","arguments":{}},"id":1}'
-```
-
-**View all available tools:**
-
-```bash
-curl -s -X POST http://localhost:9999/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_agent_strategy","arguments":{}},"id":1}'
-```
-
-**`run_build` / `run_tests` fail with "not found"?**
-
-The server inherits the environment of whatever launched it, and an
-editor-launched MCP server usually has no version-manager shims on
-`PATH`. lain searches the toolchain's known install locations (rustup,
-nvm, pyenv, volta, mise, asdf and friends) before giving up, and the
-error names every way to fix it. To teach it a manager it doesn't know,
-add `program_dirs` / `program_resolver` to that toolchain's profile —
-see [`toolchains/README.md`](toolchains/README.md).
-
-**Answers look stale, or a symbol "doesn't exist" that clearly does?**
-
-`lain mcp` blocks on the first re-index before its stdio loop comes
-up, so the first tool call after `initialize` already sees a
-populated graph (or `LAIN_REINDEX_TIMEOUT` was exceeded — see below).
-The legacy "second call works, first doesn't" footgun is gone.
-
-If you still see stale or missing symbols, check `get_health`:
-
-- **`Build:`** tells you the version and git SHA of the process
-  answering, and warns when a newer binary is on disk. An MCP stdio
-  server is spawned once by its client and outlives every rebuild, so
-  it can be older than your source tree — restart the client to pick up
-  a new build.
-- **`Status:`** reads `Degraded ⚠` when the last re-index failed OR
-  timed out, which means "not in this graph", not "does not exist". A
-  timeout banner means `LAIN_REINDEX_TIMEOUT` (default 300s for the
-  outer startup budget, 60s for the per-repo pipeline under it) was
-  too short for your working tree — raise it past **both** defaults
-  (`LAIN_REINDEX_TIMEOUT=600` covers a `tokio`-sized repo on a cold
-  cache) and restart.
-
-**Two agents not seeing each other?**
-
-They must share one workspace. Presence is exchanged through the state
-file under `~/.local/lain/state/`, so agents on the same repo see each
-other's claims even when each console spawned its own stdio server.
-`list_active_agents` and `list_occupancy` are the quickest check.
+- **First-time setup issues?** See [QUICKSTART.md § First aid](docs/QUICKSTART.md#first-aid).
+- **Run diagnostics**: `lain doctor` verifies binary freshness, hook installation, active presence sessions, and MCP tool reachability.
+- **Hand-edit not picked up?** The hot-reload watcher is non-recursive and uses atomic rename. Editing the file in place (`vim repos.yaml`) triggers a notify event within ~1 s. If you moved the file across directories, save it back into the project directory.
+- **Repo stuck in `indexing` / `degraded` / `unavailable`?**
+  ```bash
+  curl -s -X POST http://localhost:9999/mcp \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_federation_health","arguments":{}},"id":1}'
+  ```
+  The Command Center Overview tab displays these metrics live.
+- **`run_build` / `run_tests` fail with "not found"?** Editor-launched MCP servers inherit environments that lack version-manager shims (rustup, nvm, pyenv, volta, asdf). LAIN searches known install locations automatically; to configure custom managers, see [`toolchains/README.md`](toolchains/README.md).
+- **Answers look stale, or a symbol "doesn't exist" that clearly does?** Check `get_health`:
+  - `Build:` shows the binary version and git SHA. MCP stdio processes are spawned once by the client and outlive source rebuilds; restart your editor/client to pick up a newly built binary.
+  - `Status: Degraded ⚠` indicates indexing timed out. Set `LAIN_REINDEX_TIMEOUT=600` (defaults to 300s outer, 60s per-repo) to accommodate large working trees on cold cache.
+- **Two agents not seeing each other?** Verify they share the same workspace. State is persisted under `~/.local/lain/state/`, and `list_active_agents` confirms shared visibility.
+- **Force re-indexing**: Call `request_reload` via MCP or touch `repos.yaml`.
 
 ---
 
-## Regenerating the demo video
+## Regenerating the Demo Video
 
-The hero recording above is checked in. Re-record it after any SPA change:
+The hero demo recording in `docs/screenshots/` can be re-recorded after UI changes:
 
 ```bash
 make record-demo
 ```
 
-Or: `npm run record-demo --prefix tests/js` (runs only the Playwright driver;
-you still need `scripts/record-spa-demo.sh` for the ffmpeg encoding pass).
-
-For the offline (synthetic) fixture, run `make record-demo-small`.
+Or run `npm run record-demo --prefix tests/js` for the Playwright driver (and `scripts/record-spa-demo.sh` for ffmpeg encoding). For offline fixture testing, run `make record-demo-small`.
 
 ---
 
 ## License
 
-MIT — Copyright (c) 2026 spuentesp
+[MIT](LICENSE) — Copyright (c) 2026 spuentesp
