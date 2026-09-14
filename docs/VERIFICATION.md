@@ -21,8 +21,8 @@ provenance; these files are not retroactively generated.
 | `SHA256SUMS` | `<hash>  <filename>` for all three tarballs |
 | `server.json` | MCP registry manifest |
 
-Plus, for each tarball, a build-provenance attestation signed by
-GitHub's OIDC token during the build and discoverable via
+Plus, for each tarball, a build-provenance attestation signed using
+GitHub Actions' OIDC identity during the build and discoverable via
 `gh attestation verify`.
 
 The supported `<target>` triples today are:
@@ -67,7 +67,7 @@ Either check the per-binary sidecar:
 ```bash
 sha256sum -c "lain-${VER}-${TARGET}.tar.gz.sha256"
 # expected output:
-# lain-0.7.3-x86_64-unknown-linux-gnu.tar.gz: OK
+# lain-<version>-x86_64-unknown-linux-gnu.tar.gz: OK
 ```
 
 Or verify the same hash appears in the aggregate file:
@@ -130,7 +130,7 @@ for deeper analysis.
 ```bash
 tar xzf "lain-${VER}-${TARGET}.tar.gz"
 ./lain --version
-# expected output: lain 0.7.3
+# expected output: lain <version>
 ```
 
 ## What to do if a check fails
