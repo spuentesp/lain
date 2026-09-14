@@ -1,0 +1,56 @@
+name: CodeQL
+
+# Static analysis on Rust source via CodeQL. Runs on:
+#   * push to main and dev (full scan on the integration branches)
+#   * pull_request targeting main or dev (delta scan on the PR diff)
+#   * weekly cron on Monday 13:37 UTC (a non-:00 minute to avoid the
+#     shared GitHub API herd)
+#
+# Scorecard's SAST check requires a SAST tool to run on every commit;
+# CodeQL covers that. Scorecard's Dependency-Update-Tool check is
+# already satisfied by Dependabot (.github/dependabot.yml).
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    - cron: '37 13 * * 1'
+  workflow_dispatch:
+
+# Deny everything by default; each job grants only what it needs.
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # Skip forks on PRs to avoid double-scanning on PRs from a fork
+    # whose head is the same repo. Mirrors the upstream CodeQL template.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@c20e34f438d671fc35777cc9820dd7adf8252874 # v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended,security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@c20e34f438d671fc35777cc9820dd7adf8252874 # v3
+        with:
+          category: /language:${{ matrix.language }}

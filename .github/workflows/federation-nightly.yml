@@ -5,6 +5,11 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
 
+# Deny everything by default; the lone job below only needs read.
+# OpenSSF Scorecard Token-Permissions check requires this default-deny
+# at the workflow level rather than relying on job-level scope.
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
