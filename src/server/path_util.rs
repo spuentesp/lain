@@ -66,9 +66,42 @@ pub fn lexical_normalize(path: &Path) -> PathBuf {
 /// (`\\?\C:\Users\X\.tmpABC\...`) collapse to the same string
 /// the relative anchor strips to.
 pub fn canonical_form(path: &Path) -> PathBuf {
-    // `fs::canonicalize` returns Err for unborn paths; fall back
-    // to `lexical_normalize` which doesn't touch the filesystem.
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path));
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(r) => r,
+        Err(_) => {
+            // Unborn path: walk up to the closest existing ancestor,
+            // canonicalize *that* (which resolves any symlinks in
+            // the prefix — e.g. macOS's `/var/folders/.../T/` →
+            // `/private/var/folders/.../T/`), then re-attach the
+            // unborn tail and lexically collapse any `.`/`..` in
+            // the result. Pure lexical normalization cannot resolve
+            // symlinks, which broke the absolute-vs-relative key
+            // invariant on macOS for unborn files: Alice's absolute
+            // path stayed unresolved while Bob's relative path was
+            // anchored to the canonicalized workspace root, so the
+            // two claims landed on different keys and never collided.
+            let mut ancestor = path.to_path_buf();
+            let mut tail: Vec<std::ffi::OsString> = Vec::new();
+            while !ancestor.exists() {
+                match ancestor.file_name() {
+                    Some(name) => {
+                        tail.insert(0, name.to_os_string());
+                        if !ancestor.pop() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            let resolved_ancestor =
+                std::fs::canonicalize(&ancestor).unwrap_or_else(|_| lexical_normalize(&ancestor));
+            let mut combined = resolved_ancestor;
+            for c in tail {
+                combined.push(c);
+            }
+            lexical_normalize(&combined)
+        }
+    };
     // `canonicalize` on Windows prepends the extended-length
     // `\\?\` UNC prefix for paths that don't fit MAX_PATH; strip
     // it so absolute and relative forms end up in the same string
@@ -138,5 +171,45 @@ mod tests {
         let nonexistent = Path::new("/nonexistent/path/../destination/file.rs");
         let canon = canonical_form(nonexistent);
         assert_eq!(canon, PathBuf::from("/nonexistent/destination/file.rs"));
+    }
+
+    /// Regression for the macOS-only `claim_for_a_file_that_does_not_exist_yet_still_collides`
+    /// failure in tests/presence.rs. The tempdir's parent on macOS is
+    /// `/var/folders/.../T/`, which is symlinked to
+    /// `/private/var/folders/.../T/`. `fs::canonicalize` resolves the
+    /// symlink for existing paths but errors on unborn ones; the
+    /// previous fallback (`lexical_normalize`) couldn't resolve the
+    /// symlink, so Alice's absolute claim key stayed on the
+    /// `/var/folders/...` prefix while Bob's relative key (anchored to
+    /// the canonicalized workspace root) landed on `/private/var/...`
+    /// — the two keys diverged and the unborn-file collision contract
+    /// broke.
+    ///
+    /// This test creates its own symlink so the same scenario is
+    /// reproducible on Linux and macOS without relying on the host's
+    /// tempdir layout.
+    #[cfg(unix)]
+    #[test]
+    fn canonical_form_resolves_symlink_for_unborn_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Place the symlink in the same directory as the tempdir so
+        // we don't depend on `/tmp` or `/var/folders/...` being writable.
+        let parent = tmp.path().parent().unwrap();
+        let link = parent.join(format!(
+            "{}-unborn-link",
+            tmp.path().file_name().unwrap().to_string_lossy()
+        ));
+        std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
+
+        let unborn_via_link = link.join("src/new.rs");
+        let unborn_direct = tmp.path().join("src/new.rs");
+
+        let via_link = canonical_form(&unborn_via_link);
+        let direct = canonical_form(&unborn_direct);
+
+        assert_eq!(
+            via_link, direct,
+            "canonical_form must resolve the symlink so an unborn path accessed through it collides with the same path accessed directly"
+        );
     }
 }
