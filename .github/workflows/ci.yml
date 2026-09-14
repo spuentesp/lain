@@ -313,8 +313,17 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
+      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+        # 17 tests in `tests/use_cases/battery_*` invoke the `lain`
+        # binary and panic with a helpful message if it is missing.
+        # `cargo llvm-cov` defaults to a separate target_dir
+        # (target/llvm-cov-target), so the build here uses the same
+        # --target-dir the next step will use, keeping the binary at
+        # the path the tests expect.
+        run: cargo build --bin lain --target-dir target
+
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info --target-dir target
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
