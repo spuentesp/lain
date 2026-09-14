@@ -7,13 +7,17 @@ for *why* these checks exist.
 
 ## What ships in a release
 
-For each tagged release (e.g. `v0.7.3`) the workflow publishes:
+The updated release workflow publishes the files below for new tags.
+Historical releases, including `v0.7.3`, may lack checksums, SBOMs, or
+provenance; these files are not retroactively generated.
 
 | File | What it is |
 |------|-----------|
 | `lain-<ver>-<target>.tar.gz` | The compressed `lain` binary |
 | `lain-<ver>-<target>.tar.gz.sha256` | `<hash>  <filename>` for that tarball |
 | `lain-<ver>-<target>.tar.gz.cdx.json` | CycloneDX SBOM of that tarball |
+| `lain-<ver>-<target>.tar.gz.sigstore.json` | Full signed attestation bundle |
+| `lain-<ver>-<target>.tar.gz.intoto.jsonl` | Signed in-toto envelope extracted from that bundle |
 | `SHA256SUMS` | `<hash>  <filename>` for all three tarballs |
 | `server.json` | MCP registry manifest |
 
@@ -29,13 +33,13 @@ The supported `<target>` triples today are:
 
 ## Verification flow
 
-The example below uses Linux x86_64 and tag `v0.7.3`. Replace the
-`VER` and `TARGET` values for other releases and platforms.
+The example below uses Linux x86_64. Set `VER` to a release that includes
+the files listed above; `v0.7.3` does not include them.
 
 ### 1. Download the artifact and its checksums
 
 ```bash
-VER=0.7.3
+VER='REPLACE_WITH_RELEASE_VERSION'
 TARGET=x86_64-unknown-linux-gnu
 
 mkdir lain-verify && cd lain-verify
@@ -83,7 +87,21 @@ gh attestation verify \
 # ✓ Verification succeeded!
 ```
 
-The attestation is signed by GitHub Actions' OIDC token during the
+You can also verify using the downloaded bundle:
+
+```bash
+gh release download "v${VER}" --repo spuentesp/lain \
+  --pattern "lain-${VER}-${TARGET}.tar.gz.sigstore.json"
+gh attestation verify "lain-${VER}-${TARGET}.tar.gz" \
+  --repo spuentesp/lain \
+  --bundle "lain-${VER}-${TARGET}.tar.gz.sigstore.json"
+```
+
+The `.intoto.jsonl` file preserves the signed DSSE envelope for tools that
+consume in-toto provenance. Use the full `.sigstore.json` bundle for the
+verification command above; it also contains verification material.
+
+The attestation is signed using GitHub Actions' OIDC identity during the
 build, binding the artifact to the specific commit and workflow run
 that produced it. If the tarball was modified in transit, or if a
 fork's release workflow claimed to produce it, this command fails.
