@@ -85,12 +85,30 @@ Why syft over cargo-cyclonedx:
 Each `cargo build` runs with:
 
 ```yaml
-SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
+SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
 CARGO_INCREMENTAL: '0'
 ```
 
-`SOURCE_DATE_EPOCH` normalizes timestamps embedded by the build
-(helpful for byte-identical reproduction across runs).
+`SOURCE_DATE_EPOCH` is a **Unix-epoch integer** (e.g. `1757889033`),
+not an ISO timestamp. The `version-check` job computes it once via
+GNU `date -d "$GITHUB_REPOSITORY_UPDATED_AT" +%s` (ubuntu runner),
+and downstream build jobs consume the integer via
+`needs.version-check.outputs.epoch`. That gives all three platform
+builds (Linux, macOS, Windows) the same fixed value for this run,
+so the resulting binaries are reproducible against each other.
+
+Earlier versions of this workflow passed the raw ISO string from
+`github.event.repository.updated_at` directly. `cc` rejects that on
+ring's iOS-targeted assembly paths with:
+
+```
+error: environment variable 'SOURCE_DATE_EPOCH' ('2026-09-14T23:10:33Z')
+       must be a non-negative decimal integer <= 253402300799
+```
+
+The integer conversion sidesteps that, and the cross-job output
+sidesteps the GNU-vs-BSD `date` portability gap.
+
 `CARGO_INCREMENTAL=0` disables incremental compilation artifacts that
 would otherwise embed absolute paths.
 

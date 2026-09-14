@@ -32,6 +32,29 @@ jobs:
           python-version: '3.12'
       - name: Verify release tag and package metadata
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME"
+      # Compute SOURCE_DATE_EPOCH as a Unix-epoch INTEGER here. The
+      # shell-only `date -d` form below proved brittle on this runner
+      # (the redirect to $GITHUB_OUTPUT silently produced an empty
+      # value, leaving build jobs with SOURCE_DATE_EPOCH='').
+      # Computing via python3 is portable across Linux + macOS
+      # runners, uses an already-set-up tool, and writes through
+      # Python's file API which is straightforward to reason about.
+      # Build jobs consume it via
+      # `needs.version-check.outputs.epoch` so all three platforms
+      # share the same fixed value per workflow run.
+      - name: Compute reproducible-build epoch
+        id: epoch
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          from datetime import datetime, timezone
+          iso = os.environ['UPDATED_AT'].replace('Z', '+00:00')
+          epoch = int(datetime.fromisoformat(iso).timestamp())
+          print(f"epoch={epoch}")
+          PY
+          echo "epoch-output-debug: $(tail -n 1 "$GITHUB_OUTPUT")"
 
   build-linux:
     needs: version-check
@@ -56,7 +79,7 @@ jobs:
       # rust-toolchain.toml, which is the next iteration.
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
+          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-unknown-linux-gnu
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -128,7 +151,7 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
+          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target aarch64-apple-darwin
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -201,7 +224,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
+          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-pc-windows-msvc
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
