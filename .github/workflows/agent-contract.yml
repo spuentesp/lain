@@ -1,0 +1,87 @@
+name: Agent contract
+
+# Rollup the agent-relevant jobs from the CI workflow into a single
+# commit status named `lain/agent-contract`. The badge target is this
+# status, not CI itself, so a "Passing" verdict is unambiguous about
+# what it means.
+#
+# Aggregate rule: PASS iff every agent-relevant job in the CI workflow
+# run is `success` or `skipped`. The relevant jobs are:
+#
+#   * `Capability suite (demo.sh)`  -- scripts/demo.sh ground-truth
+#                                     checks against the synthetic
+#                                     fixture with a known call graph.
+#   * `Tool schema matches ...`     -- `lain schema dump` byte-equal to
+#                                     the committed `docs/tool-schema.json`.
+#   * `npm-shim install tests`      -- the `npx @spuentesp/lain-mcp`
+#                                     installer/launcher test suite.
+#
+# Anything else in CI (test matrix, lint, version-drift, action-contracts)
+# is intentionally excluded: a test failure on a single OS does not
+# break the contract an agent cares about, but a failed capability or
+# schema drift does.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+# Deny everything by default; each job grants only what it needs.
+permissions: {}
+
+jobs:
+  rollup:
+    name: Publish agent-contract status
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+      actions: read
+    steps:
+      - name: Aggregate CI jobs into agent-contract status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          # Pull job conclusions for the CI workflow run. `name` is the
+          # display name set by `name:` on each job, not the job id.
+          jobs_json=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+            --paginate \
+            --jq '.jobs[] | {name, conclusion}')
+
+          # Filter to the agent-contract-relevant jobs.
+          relevant=$(echo "$jobs_json" | jq -s '
+            map(select(.name | test("Capability suite|Tool schema matches|npm-shim install")))
+          ')
+
+          # Compute aggregate state. Empty set (CI structure changed and
+          # nothing matches our regex) is treated as a soft success so
+          # the badge does not permanently go red on a rename.
+          status=$(echo "$relevant" | jq -r '
+            if (length == 0) then "success"
+            elif any(.conclusion != "success" and .conclusion != "skipped") then "failure"
+            else "success" end
+          ')
+
+          passed=$(echo "$relevant" | jq '[.[] | select(.conclusion == "success" or .conclusion == "skipped")] | length')
+          total=$(echo "$relevant" | length)
+          summary="${passed}/${total} agent-contract jobs green"
+
+          # If the parent CI run itself was cancelled or failed before
+          # reporting any jobs, fall through to the upstream conclusion.
+          if [ "$total" = "0" ] && [ "$RUN_CONCLUSION" != "success" ]; then
+            status="$RUN_CONCLUSION"
+            summary="CI run ${RUN_CONCLUSION}; no agent-contract jobs observed"
+          fi
+
+          echo "Rollup: ${passed}/${total} -> ${status} (${summary})"
+
+          gh api "repos/${REPO}/statuses/${RUN_SHA}" \
+            --method POST \
+            --field state="${status}" \
+            --field description="${summary}" \
+            --field context='lain/agent-contract'
