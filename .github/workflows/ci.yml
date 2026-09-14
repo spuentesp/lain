@@ -268,7 +268,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          # Node 20 was deprecated on github-actions runners on
+          # 2025-09-19; bumped to 22 (LTS, current default). The
+          # npm-shim's `engines.node` is `>=18`, so 22 is in range.
+          node-version: '22'
       - name: Install dependencies
         run: npm ci || npm install
       - name: Run tests

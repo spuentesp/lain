@@ -13,6 +13,12 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # dependency-review-action reads the repo's dependency graph via
+      # `GET /repos/{owner}/{repo}/dependency-graph/snapshots/{ref}`.
+      # Without `security-events: read` the API returns 403 and the
+      # action aborts with "Dependency review is not supported on this
+      # repository".
+      security-events: read
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
