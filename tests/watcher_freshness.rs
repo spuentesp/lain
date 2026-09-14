@@ -356,6 +356,37 @@ async fn watcher_does_not_panic_on_edit() {
     // Give the inotify backend a moment to register the watch.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+    // [DIAG-WATCHER-FRESHNESS] Tell the diag helper to also append
+    // every sync_overlay / process_overlay_change trace to a file.
+    // cargo test discards stdout for passing tests by default, so on
+    // a green Windows run we would otherwise see nothing in CI logs
+    // and have no data to debug the next failure. The trace always
+    // survives in this file.
+    //
+    // Place the diag file OUTSIDE the watched tmp.path(): the
+    // notify watcher fires on every write to the diag file, so
+    // writing it inside the watched dir would self-trigger another
+    // sync_overlay cycle. The OS temp dir is fine.
+    //
+    // SAFETY: std::env::set_var is not thread-safe across tokio
+    // tasks, but watcher_does_not_panic_on_edit runs serially in
+    // CI's per-test process; the env mutation only lives for the
+    // duration of this #[tokio::test]. We restore the previous
+    // value (or remove it) on the way out.
+    let diag_path = std::env::temp_dir().join(format!(
+        "lain-watcher-diag-{}-{}.log",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let prev_diag = std::env::var_os("LAIN_WATCHER_DIAG_FILE");
+    // SAFETY: see comment above.
+    unsafe {
+        std::env::set_var("LAIN_WATCHER_DIAG_FILE", &diag_path);
+    }
+
     // Subscribe to the receiver's "I finished an index + sync_overlay
     // cycle" signal so we wake as soon as the receiver has processed
     // each edit, instead of guessing a wall-clock sleep budget. The
@@ -437,6 +468,28 @@ async fn watcher_does_not_panic_on_edit() {
          the receiver task; an empty overlay here means the receiver \
          stopped processing events after the first one"
     );
+
+    // [DIAG-WATCHER-FRESHNESS] Echo the diag trace to stdout so it
+    // shows up in CI logs whether the test passed (and stdout would
+    // normally be discarded by `cargo test`) or failed. Then restore
+    // the env var so we don't leak it to the next test in this
+    // process.
+    if let Ok(trace) = std::fs::read_to_string(&diag_path) {
+        if !trace.is_empty() {
+            eprintln!("---- watcher_diag_trace begin ----");
+            for line in trace.lines() {
+                eprintln!("{line}");
+            }
+            eprintln!("---- watcher_diag_trace end ----");
+        }
+    }
+    // SAFETY: see the matching comment where we set the env var.
+    unsafe {
+        match prev_diag {
+            Some(v) => std::env::set_var("LAIN_WATCHER_DIAG_FILE", v),
+            None => std::env::remove_var("LAIN_WATCHER_DIAG_FILE"),
+        }
+    }
 
     // Hold the RepoIndex alive for the rest of the test process (do NOT
     // drop — see tests/federation_integration.rs:184-192 for why).
