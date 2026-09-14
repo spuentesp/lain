@@ -68,7 +68,7 @@ jobs:
           ')
 
           passed=$(echo "$relevant" | jq '[.[] | select(.conclusion == "success" or .conclusion == "skipped")] | length')
-          total=$(echo "$relevant" | length)
+          total=$(echo "$relevant" | jq 'length')
           summary="${passed}/${total} agent-contract jobs green"
 
           # If the parent CI run itself was cancelled or failed before
