@@ -361,6 +361,9 @@ struct PresenceState {
 /// cost beyond a single Arc + None slot.
 type PersistFn = std::sync::Arc<dyn Fn() + Send + Sync>;
 
+/// Callback invoked when an agent session is explicitly removed.
+pub type RemoveCallbackFn = std::sync::Arc<dyn Fn(&AgentId) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct PresenceRegistry {
     inner: std::sync::Arc<Mutex<PresenceState>>,
@@ -371,6 +374,11 @@ pub struct PresenceRegistry {
     /// `heartbeat` are not persisted (heartbeat fields are
     /// `#[serde(skip_serializing)]`).
     persist_cb: std::sync::Arc<parking_lot::Mutex<Option<PersistFn>>>,
+    /// Optional session removal callback. Fired when an agent session
+    /// is explicitly removed via `remove(id)`. Used by `LainServer` to
+    /// automatically release in-memory claims and advisory lock leases in
+    /// `OccupancyMap` without coupling the registry to the occupancy map directly.
+    on_remove_cb: std::sync::Arc<parking_lot::Mutex<Option<RemoveCallbackFn>>>,
 }
 
 impl std::fmt::Debug for PresenceRegistry {
@@ -407,6 +415,7 @@ impl PresenceRegistry {
                 expires_after,
             })),
             persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            on_remove_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -426,6 +435,21 @@ impl PresenceRegistry {
     /// no-op in that case.
     fn cloned_persist_cb(&self) -> Option<PersistFn> {
         self.persist_cb.lock().clone()
+    }
+
+    /// Install a callback fired when a session is explicitly removed from the
+    /// registry. Fired on `remove(id)` with the id of the removed agent.
+    pub fn set_on_remove_callback<F>(&self, cb: F)
+    where
+        F: Fn(&AgentId) + Send + Sync + 'static,
+    {
+        let mut slot = self.on_remove_cb.lock();
+        *slot = Some(std::sync::Arc::new(cb));
+    }
+
+    /// Clone the (optional) remove callback out of the slot.
+    fn cloned_on_remove_cb(&self) -> Option<RemoveCallbackFn> {
+        self.on_remove_cb.lock().clone()
     }
 
     /// How long a session stays valid after its last heartbeat. The MCP
@@ -546,6 +570,9 @@ impl PresenceRegistry {
             removed
         };
         if removed.is_some() {
+            if let Some(cb) = self.cloned_on_remove_cb() {
+                cb(id);
+            }
             if let Some(cb) = self.cloned_persist_cb() {
                 cb();
             }
@@ -771,45 +798,30 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
 /// it came in; it still collides with itself, which is the best
 /// available answer.
 fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
-    let (absolute, matched_root) = if path.is_absolute() {
-        (lexical_normalize(path), None)
+    let absolute = if path.is_absolute() {
+        lexical_normalize(path)
     } else {
-        // Find the root that actually anchored this relative path.
-        // Pre-fix this only tried `roots.first()`, so a file in
-        // `roots[1..]` was anchored under the first root's join
-        // (often non-existent) and the strip_prefix below would fall
-        // through to the absolute path. Files in the primary root
-        // were saved as relative; files in secondary roots were saved
-        // as absolute, breaking claim lookups between processes.
         let anchored = roots
             .iter()
-            .map(|root| (root, lexical_normalize(&root.join(path))))
-            .find(|(_, candidate)| candidate.exists());
-        match anchored {
-            Some((root, p)) => (p, Some(root.clone())),
-            None => match roots.first() {
-                Some(root) => (lexical_normalize(&root.join(path)), Some(root.clone())),
-                None => return PathBuf::from(posix_string(path)),
-            },
+            .map(|root| lexical_normalize(&root.join(path)))
+            .find(|candidate| candidate.exists());
+        match anchored.or_else(|| {
+            roots
+                .first()
+                .map(|root| lexical_normalize(&root.join(path)))
+        }) {
+            Some(p) => p,
+            None => return PathBuf::from(posix_string(path)),
         }
     };
 
-    let relative = match matched_root {
-        Some(primary) => match absolute.strip_prefix(&primary) {
+    let relative = match roots.first() {
+        Some(primary) => match absolute.strip_prefix(primary) {
             Ok(rel) => rel.to_path_buf(),
             Err(_) => absolute,
         },
         None => absolute,
     };
-    // The MCP wire contract and the audit JSONL both require forward
-    // slashes on every platform. `lexical_normalize` and
-    // `PathBuf::strip_prefix` produce platform-native separators
-    // (backslashes on Windows); `posix_string` converts to forward
-    // slashes so `to_string_lossy()` on the stored PathBuf returns
-    // the canonical form. Same conversion is applied at the response
-    // and audit-write sites (see `presence_tools.rs` /
-    // `audit_tools.rs`); this fix covers the *stored* PathBuf so the
-    // three sites are consistent.
     PathBuf::from(posix_string(&relative))
 }
 
@@ -892,14 +904,32 @@ impl OccupancyMap {
     /// When unset (e.g. unit tests, federation paths without a
     /// workspace anchor), `claim` skips the filesystem write entirely.
     pub fn set_workspace_root(&self, workspace_root: &Path) {
+        // Canonicalize the workspace root so an absolute claim
+        // (`/var/folders/.../src/a.rs` on macOS, where the tempdir
+        // is a symlink to `/private/var/folders/...`) and a
+        // relative claim anchored against `roots.first()` (the
+        // un-symlinked canonical root, once stored here) collapse
+        // to the same canonical key. Without this the relative
+        // claim strips to `src/a.rs` while the absolute claim keeps
+        // its symlinked prefix, the two never collide, and the
+        // presence tests in `tests/presence.rs` panic on
+        // `/var/folders/...` paths that `/private/var/folders/...`
+        // is a symlink for. Falls back to the un-symlinked form
+        // only when canonicalize itself fails (e.g. the path was
+        // removed between `tempfile::tempdir` and the test body).
+        let canonical_root =
+            std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
         let mut slot = self.workspace_root.lock();
-        *slot = Some(workspace_root.to_path_buf());
+        *slot = Some(canonical_root.clone());
         drop(slot);
         // The workspace is also the first anchor for relative claim
         // paths. Kept at the front so it wins over repo roots added
-        // later by `add_claim_roots`.
+        // later by `add_claim_roots`. Use the canonical form so the
+        // anchored key (canonical_root joined with the relative path
+        // and stripped again) lands on the same string as the
+        // absolute key's stripped form.
         let mut roots = self.claim_roots.lock();
-        let root = lexical_normalize(workspace_root);
+        let root = lexical_normalize(&canonical_root);
         roots.retain(|r| r != &root);
         roots.insert(0, root);
     }
@@ -2755,6 +2785,54 @@ mod audit_persistence_tests {
         assert!(
             mtime_refreshed > mtime_past,
             "touch must refresh lock file mtime"
+        );
+    }
+
+    #[test]
+    fn remove_invokes_on_remove_callback_and_cleans_up_occupancy() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        occ.set_workspace_root(ws);
+
+        // Wire on_remove_callback
+        let occ_clone = occ.clone();
+        reg.set_on_remove_callback(move |id| {
+            occ_clone.release_all_for(id);
+        });
+
+        let sess = reg.register(
+            "worker".into(),
+            AgentKind::ClaudeCode,
+            AgentMode::Interactive,
+            None,
+            None,
+        );
+
+        let req = ClaimRequest {
+            path: PathBuf::from("src/worker.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        occ.claim_with_session(&sess, vec![req]);
+        assert_eq!(occ.lock_leases_count(), 1);
+        let lock_path = crate::server::presence_lock::lock_path_for(ws, Path::new("src/worker.rs"));
+        assert!(lock_path.exists());
+        assert!(occ.list_for_path(Path::new("src/worker.rs")).is_some());
+
+        // Call reg.remove: callback must fire, releasing occupancy and lock file
+        let removed = reg.remove(&sess.id);
+        assert!(removed.is_some());
+        assert!(reg.get(&sess.id).is_none());
+
+        assert!(occ.list_for_path(Path::new("src/worker.rs")).is_none());
+        assert_eq!(occ.lock_leases_count(), 0);
+        assert!(
+            !lock_path.exists(),
+            "lock file must be deleted when session is removed"
         );
     }
 }
