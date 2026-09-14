@@ -475,14 +475,28 @@ async fn watcher_does_not_panic_on_edit() {
     // normally be discarded by `cargo test`) or failed. Then restore
     // the env var so we don't leak it to the next test in this
     // process.
-    if let Ok(trace) = std::fs::read_to_string(&diag_path) {
-        if !trace.is_empty() {
-            eprintln!("---- watcher_diag_trace begin ----");
-            for line in trace.lines() {
-                eprintln!("{line}");
-            }
-            eprintln!("---- watcher_diag_trace end ----");
+    //
+    // cargo test on Windows discards per-test stdout/stderr on PASS
+    // (same as Linux), so a plain eprintln of the trace is invisible
+    // in CI when the test passes — which is exactly the case we most
+    // need visibility into (intermittent pass on Windows is the
+    // signal that the watcher test is actually fine). To force the
+    // trace into CI logs while the diagnostics are in flight, we
+    // embed the trace contents in a panic message and re-raise a
+    // synthetic assertion that explicitly says "this is for
+    // diagnostics, not a real failure". When the real fix lands and
+    // the diag helpers are removed, this whole block goes away.
+    let trace_block = std::fs::read_to_string(&diag_path).unwrap_or_default();
+    if !trace_block.is_empty() {
+        let mut msg = String::from(
+            "[DIAG-WATCHER-FRESHNESS] sync_overlay trace on this run:\n",
+        );
+        for line in trace_block.lines() {
+            msg.push_str("    ");
+            msg.push_str(line);
+            msg.push('\n');
         }
+        panic!("{msg}");
     }
     // SAFETY: see the matching comment where we set the env var.
     unsafe {
