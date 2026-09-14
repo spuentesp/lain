@@ -797,29 +797,65 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
 /// With no roots configured at all the path is normalized and left as
 /// it came in; it still collides with itself, which is the best
 /// available answer.
+/// One canonical form for a path: symlinks resolved when the
+/// file/directory exists, otherwise lexically cleaned. Strips
+/// the Windows `\\?\` extended-length prefix that `fs::canonicalize`
+/// adds, and normalizes all backslashes to forward slashes. The
+/// absolute and relative branches of `canonical_claim_path`
+/// both pass through this helper so the symlink-rooted tempdir
+/// case on macOS (`/var/folders/.../T/` → `/private/var/folders/.../T/`)
+/// and the extended-length-prefix case on Windows
+/// (`\\?\C:\Users\X\.tmpABC\...`) collapse to the same string
+/// the relative anchor strips to.
+fn canonical_form(path: &Path) -> PathBuf {
+    // `fs::canonicalize` returns Err for unborn paths; fall back
+    // to `lexical_normalize` which doesn't touch the filesystem.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path));
+    // `canonicalize` on Windows prepends the extended-length
+    // `\\?\` UNC prefix for paths that don't fit MAX_PATH; strip
+    // it so absolute and relative forms end up in the same string
+    // form (the test-side `Path::new("C:\\Users\\X\\...")` doesn't
+    // have that prefix, so `strip_prefix` would otherwise fail).
+    let s = resolved.to_string_lossy();
+    let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    PathBuf::from(posix_string(Path::new(stripped)))
+}
+
 fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
+    // Both branches go through the same canonical form so
+    // symlinks and Windows extended-length prefixes don't
+    // produce divergent absolute vs. relative keys.
     let absolute = if path.is_absolute() {
-        lexical_normalize(path)
+        canonical_form(path)
     } else {
         let anchored = roots
             .iter()
-            .map(|root| lexical_normalize(&root.join(path)))
+            .map(|root| canonical_form(&root.join(path)))
             .find(|candidate| candidate.exists());
-        match anchored.or_else(|| {
-            roots
-                .first()
-                .map(|root| lexical_normalize(&root.join(path)))
-        }) {
+        match anchored.or_else(|| roots.first().map(|root| canonical_form(&root.join(path)))) {
             Some(p) => p,
             None => return PathBuf::from(posix_string(path)),
         }
     };
 
     let relative = match roots.first() {
-        Some(primary) => match absolute.strip_prefix(primary) {
-            Ok(rel) => rel.to_path_buf(),
-            Err(_) => absolute,
-        },
+        Some(primary) => {
+            // The stored `roots.first()` is the canonical form (the
+            // set_workspace_root path calls canonicalize_path, and
+            // any added claim roots should be canonical too). Strip
+            // the same `\\?\` prefix off the stored form before
+            // matching so absolute and relative keys end up in the
+            // same string form.
+            let stripped_primary = primary
+                .to_string_lossy()
+                .strip_prefix(r"\\?\")
+                .map(|s| PathBuf::from(s))
+                .unwrap_or_else(|| primary.clone());
+            match absolute.strip_prefix(&stripped_primary) {
+                Ok(rel) => rel.to_path_buf(),
+                Err(_) => absolute,
+            }
+        }
         None => absolute,
     };
     PathBuf::from(posix_string(&relative))
