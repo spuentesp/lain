@@ -51,6 +51,18 @@ class ProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'does not match'):
             module.export(self.bundle_path, self.artifact)
 
+    def test_rejects_additional_subjects(self):
+        self.statement['subject'].append({'name': 'other.tar.gz', 'digest': {'sha256': '00'}})
+        self.write_bundle()
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            module.export(self.bundle_path, self.artifact)
+
+    def test_rejects_missing_subject(self):
+        self.statement['subject'] = []
+        self.write_bundle()
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            module.export(self.bundle_path, self.artifact)
+
     def test_rejects_unsigned_envelope(self):
         self.write_bundle(signatures=[])
         with self.assertRaisesRegex(ValueError, 'Missing DSSE signature'):

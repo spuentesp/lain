@@ -283,7 +283,11 @@ jobs:
       - name: Compute aggregate SHA256SUMS
         run: |
           cd artifacts
-          python ../scripts/compute-sha256.py lain-*-*.tar.gz > SHA256SUMS
+          version="${GITHUB_REF_NAME#v}"
+          python ../scripts/compute-sha256.py \
+            "lain-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            "lain-${version}-aarch64-apple-darwin.tar.gz" \
+            "lain-${version}-x86_64-pc-windows-msvc.tar.gz" > SHA256SUMS
           # Compute writes sidecars, but we only want the aggregate
           # file. The output above contains all tarball hashes.
           rm -f lain-*-*.tar.gz.sha256

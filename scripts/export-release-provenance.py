@@ -24,9 +24,12 @@ def export(bundle_path: Path, artifact: Path) -> None:
         raise ValueError('Expected SLSA v1 build provenance')
     with artifact.open('rb') as source:
         digest = hashlib.file_digest(source, 'sha256').hexdigest()
-    if not any(subject.get('name') == artifact.name and
-               subject.get('digest', {}).get('sha256') == digest
-               for subject in statement.get('subject', [])):
+    subjects = statement.get('subject', [])
+    if len(subjects) != 1:
+        raise ValueError('Expected exactly one provenance subject')
+    subject = subjects[0]
+    if (subject.get('name') != artifact.name or
+            subject.get('digest', {}).get('sha256') != digest):
         raise ValueError('Provenance does not match artifact name and SHA256')
     # Preserve the signed payload and signatures exactly; don't re-sign or
     # invent provenance for releases that lack build-time evidence.
