@@ -769,6 +769,21 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Resolve symlinks in `path` via `std::fs::canonicalize` if the file
+/// or directory exists, falling back to `lexical_normalize` for
+/// unborn paths. On macOS, `tempfile::tempdir()` returns
+/// `/var/folders/.../T/` which is a symlink to
+/// `/private/var/folders/.../T/`; without symlink resolution, an
+/// absolute claim path stays in the un-symlinked form and the
+/// relative anchor strips to `src/a.rs`, so the two never collide
+/// even though they describe the same file.
+pub(crate) fn canonicalize_path(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => lexical_normalize(path),
+    }
+}
+
 /// Canonical key for a claim path.
 ///
 /// Claims used to be keyed on the caller's raw spelling, so
@@ -799,16 +814,28 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
 /// available answer.
 fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
-        lexical_normalize(path)
+        // For absolute paths, resolve symlinks when the file exists
+        // so an absolute claim lands on the same key as a relative
+        // claim anchored against the same workspace root. Unborn
+        // files (the explicit `claim_for_a_file_that_does_not_exist_yet_still_collides`
+        // contract) fall through to `lexical_normalize` because
+        // `fs::canonicalize` would error.
+        canonicalize_path(path)
     } else {
+        // For relative paths, also canonicalize the anchor (not
+        // just `lexical_normalize`) so the symlink form resolves
+        // consistently with the absolute branch. The fallback
+        // `canonicalize_path` on a non-existent file still goes
+        // through `lexical_normalize`, preserving the unborn-file
+        // contract.
         let anchored = roots
             .iter()
-            .map(|root| lexical_normalize(&root.join(path)))
+            .map(|root| canonicalize_path(&root.join(path)))
             .find(|candidate| candidate.exists());
         match anchored.or_else(|| {
             roots
                 .first()
-                .map(|root| lexical_normalize(&root.join(path)))
+                .map(|root| canonicalize_path(&root.join(path)))
         }) {
             Some(p) => p,
             None => return PathBuf::from(posix_string(path)),
