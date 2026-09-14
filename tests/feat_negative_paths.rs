@@ -165,7 +165,10 @@ fn boot_server(port: u16) -> ServerGuard {
             )
         });
 
-    let guard = ServerGuard(child);
+    let guard = ServerGuard {
+        child,
+        stderr_path: std::path::PathBuf::from(""),
+    };
 
     let host = format!("127.0.0.1:{port}");
     wait_for_health(&host, Duration::from_secs(30));

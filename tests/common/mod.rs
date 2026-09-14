@@ -190,11 +190,17 @@ pub fn tools_call_envelope(
 /// RAII guard that kills the spawned server on drop, regardless of
 /// how the test exits. Prevents orphan `lain server` processes when
 /// the test panics.
-pub struct ServerGuard(pub Child);
+pub struct ServerGuard {
+    pub child: Child,
+    /// Path to the file that received the child's stderr while it
+    /// ran. `exit_diag` reads this on demand so a failing test can
+    /// see *why* the child died without having to know the path.
+    pub stderr_path: std::path::PathBuf,
+}
 impl Drop for ServerGuard {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 impl ServerGuard {
@@ -202,7 +208,54 @@ impl ServerGuard {
     /// value of `false` means the process exited — either it crashed
     /// (the failure mode we're testing for) or `Drop` already ran.
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// If the child has exited, return `(exit_status, captured_stderr)`
+    /// so the caller can include both in a failure message. If the
+    /// child is still running, returns `Ok(())`. The stderr content
+    /// is read from `self.stderr_path` (which the constructor wrote
+    /// the child's stderr to while it ran).
+    pub fn exit_diag(&mut self) -> Result<(), (std::process::ExitStatus, String)> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_else(|e| {
+                    format!("<could not read {}: {}>", self.stderr_path.display(), e)
+                });
+                Err((status, stderr))
+            }
+            Ok(None) => Ok(()),
+            Err(e) => {
+                // try_wait itself failed (rare — usually a waitpid
+                // race). Stderr content is still useful. ExitStatus
+                // is not constructible here, so encode the OS error
+                // into the diagnostic string and return a status
+                // reflecting "we couldn't determine".
+                let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_default();
+                Err((
+                    Self::synthetic_exit_status_for_unrecoverable_try_wait(),
+                    format!("try_wait failed: {e}\nstderr:\n{stderr}"),
+                ))
+            }
+        }
+    }
+
+    /// Rust's std does not expose a constructor for `ExitStatus`,
+    /// so for the unrecoverable `try_wait` error path we report
+    /// the situation with a distinct, recognizable dummy. Using
+    /// the per-platform raw exit code `127` ("command not found")
+    /// is conventional; the surrounding message carries the real
+    /// diagnostic. The caller should treat this as "unknown exit".
+    #[cfg(unix)]
+    fn synthetic_exit_status_for_unrecoverable_try_wait() -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(127 << 8)
+    }
+    #[cfg(windows)]
+    fn synthetic_exit_status_for_unrecoverable_try_wait() -> std::process::ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        // 127 expressed as a Windows u32 exit code.
+        std::process::ExitStatus::from_raw(127)
     }
 }
 
@@ -257,7 +310,7 @@ fn boot_server_impl(port: u16, repos_yaml_path: &Path, cwd: Option<&Path>) -> Se
         )
     });
 
-    ServerGuard(child)
+    ServerGuard { child, stderr_path }
 }
 
 /// Wait until `/health` returns 200, or panic with the captured
