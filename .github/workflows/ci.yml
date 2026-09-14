@@ -327,7 +327,12 @@ jobs:
         run: cargo build --bin lain --target-dir target
 
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info --target-dir target
+        # CARGO_TARGET_DIR matches the explicit --target-dir on the
+        # build step above. cargo-llvm-cov's CLI rejects --target-dir
+        # as a flag, so the equivalent is set as an env var.
+        env:
+          CARGO_TARGET_DIR: target
+        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
