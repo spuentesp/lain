@@ -706,7 +706,10 @@ impl RepoIndex {
         // the root cause.
         eprintln!(
             "[diag-sync-overlay] ns={:?} workspace={:?} changes.len()={} indexed_current_commit={}",
-            self.id_namespace, workspace_root, changes.len(), indexed_current_commit
+            self.id_namespace,
+            workspace_root,
+            changes.len(),
+            indexed_current_commit
         );
         for (i, c) in changes.iter().enumerate() {
             eprintln!(
@@ -796,7 +799,8 @@ impl RepoIndex {
                     // the insert path actually has anything to insert.
                     eprintln!(
                         "[diag-sync-overlay]   process_overlay_change OK for key={:?} nodes={}",
-                        key, nodes.len()
+                        key,
+                        nodes.len()
                     );
                     let active = self.active.lock();
                     if !*active {
@@ -869,7 +873,8 @@ impl RepoIndex {
             // sync_overlay on Windows.
             eprintln!(
                 "[diag-process-overlay] path={:?} workspace={:?}",
-                path, self.source.local_path()
+                path,
+                self.source.local_path()
             );
             match lsp
                 .get_document_symbols_hierarchical(
@@ -887,7 +892,9 @@ impl RepoIndex {
                     Some(syms)
                 }
                 Ok(_) => {
-                    eprintln!("[diag-process-overlay]   LSP returned 0 symbols -> tree-sitter fallback");
+                    eprintln!(
+                        "[diag-process-overlay]   LSP returned 0 symbols -> tree-sitter fallback"
+                    );
                     None
                 }
                 Err(e) => {
