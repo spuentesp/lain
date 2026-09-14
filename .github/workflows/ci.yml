@@ -1,10 +1,14 @@
 name: CI
 
+# Triggers on both main and dev. Job-level `if:` conditions keep
+# `version-drift`, `coverage`, and the agent-required jobs scoped to
+# main where they belong; the rest of the matrix runs on both
+# branches so PRs targeting dev drive the agent-contract rollup.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 env:
   CARGO_TERM_COLOR: always

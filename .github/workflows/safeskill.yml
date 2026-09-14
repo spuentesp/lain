@@ -2,9 +2,9 @@ name: SafeSkill scoring
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
   schedule:
     - cron: '23 8 * * 1'
   workflow_dispatch:
