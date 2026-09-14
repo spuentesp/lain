@@ -381,6 +381,7 @@ async fn watcher_does_not_panic_on_edit() {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    eprintln!("[watcher-test-setup] diag_path = {:?}", diag_path);
     let prev_diag = std::env::var_os("LAIN_WATCHER_DIAG_FILE");
     // SAFETY: see comment above.
     unsafe {
