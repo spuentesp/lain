@@ -39,6 +39,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract version
@@ -76,17 +77,35 @@ jobs:
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           format: cyclonedx-json
-          artifact: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          output-file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cdx.json
+          upload-release-assets: false
       - name: Attest build provenance
+        id: provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+      - name: Export signed provenance for release downloads
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          ARTIFACT_PATH: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/export-release-provenance.py "$BUNDLE_PATH" "$ARTIFACT_PATH"
+          gh attestation verify "$ARTIFACT_PATH" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ARTIFACT_PATH.sigstore.json" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF"
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.sha256
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cdx.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.sigstore.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.intoto.jsonl
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -97,6 +116,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract version
@@ -129,17 +149,35 @@ jobs:
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           format: cyclonedx-json
-          artifact: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+          file: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+          output-file: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
+          upload-release-assets: false
       - name: Attest build provenance
+        id: provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+      - name: Export signed provenance for release downloads
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          ARTIFACT_PATH: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/export-release-provenance.py "$BUNDLE_PATH" "$ARTIFACT_PATH"
+          gh attestation verify "$ARTIFACT_PATH" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ARTIFACT_PATH.sigstore.json" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF"
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sha256
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sigstore.json
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.intoto.jsonl
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -150,6 +188,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract version
@@ -185,17 +224,35 @@ jobs:
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           format: cyclonedx-json
-          artifact: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+          file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+          output-file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cdx.json
+          upload-release-assets: false
       - name: Attest build provenance
+        id: provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+      - name: Export signed provenance for release downloads
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          ARTIFACT_PATH: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/export-release-provenance.py "$BUNDLE_PATH" "$ARTIFACT_PATH"
+          gh attestation verify "$ARTIFACT_PATH" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ARTIFACT_PATH.sigstore.json" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF"
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.sha256
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cdx.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.sigstore.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.intoto.jsonl
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -209,7 +266,7 @@ jobs:
     needs: [build-linux, build-macos-arm64, build-windows]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -226,15 +283,19 @@ jobs:
       - name: Compute aggregate SHA256SUMS
         run: |
           cd artifacts
-          python scripts/compute-sha256.py lain-*-*.tar.gz > /tmp/sums.txt
+          version="${GITHUB_REF_NAME#v}"
+          python ../scripts/compute-sha256.py \
+            "lain-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            "lain-${version}-aarch64-apple-darwin.tar.gz" \
+            "lain-${version}-x86_64-pc-windows-msvc.tar.gz" > SHA256SUMS
           # Compute writes sidecars, but we only want the aggregate
-          # file. Move the SUMs into a single SHA256SUMS file.
+          # file. The output above contains all tarball hashes.
           rm -f lain-*-*.tar.gz.sha256
-          mv /tmp/sums.txt SHA256SUMS
           cat SHA256SUMS
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: artifacts/SHA256SUMS
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -262,6 +323,7 @@ jobs:
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: server.json
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

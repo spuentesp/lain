@@ -355,6 +355,8 @@ jobs:
           python-version: '3.12'
       - name: Release metadata consistency
         run: python scripts/check-release-version.py
+      - name: Release provenance export tests
+        run: python scripts/test_release_provenance.py
       - name: Release gate regression tests
         run: python scripts/test_release_version.py
       # METADATA.toml / server.json / sync-server-json.py drift gate.
