@@ -6,6 +6,7 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::GraphNode;
+use crate::server::federation::federated_index::FederatedIndex;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -78,6 +79,58 @@ pub fn resolve_node(
          so a symbol added since the last commit will not appear until it is \
          committed and re-indexed"
     )))
+}
+
+/// Federation fallback for [`resolve_node`]. Called when the per-repo
+/// `ctx.graph` + shared `overlay` miss on the handle. Walks every repo
+/// in the federation and tries the same name/path lookups against each
+/// repo's graph.
+///
+/// Two situations this actually catches:
+///
+/// 1. **`ctx.graph` is briefly stale during a freshly-booted server.**
+///    The per-repo indexer walks the worktree asynchronously after
+///    boot, so the active repo's graph lags behind the federation
+///    overlay for a few hundred ms. Without this fallback, tool calls
+///    made in that window return "Node not found for handle" even
+///    though the symbol is in the federation's view. Reproduces
+///    intermittently on slow CI runners.
+/// 2. **Cross-repo callers.** A bare handle like `parse` could be a
+///    function in any of N repos. `ctx.graph` only sees one; the
+///    federation sees all of them.
+///
+/// Returns `Ok(None)` when the federation also has nothing; the
+/// caller (the original `resolve_node` caller) is then free to
+/// surface its NotFound with whatever context it has.
+pub fn resolve_node_federation_fallback(
+    federation: &FederatedIndex,
+    handle: &str,
+) -> Option<GraphNode> {
+    let canonical_handle = if Path::new(handle).exists() {
+        dunce::canonicalize(handle)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| handle.to_string())
+    } else {
+        handle.to_string()
+    };
+
+    for (repo_id, _) in federation.list_repos() {
+        let Some(repo) = federation.get_repo(&repo_id) else {
+            continue;
+        };
+        let graph = repo.db();
+        // Same name-first ordering as the per-repo resolver.
+        if let Some(n) = graph.find_node_by_name(handle) {
+            return Some(n);
+        }
+        if let Some(n) = graph.find_node_by_path(handle) {
+            return Some(n);
+        }
+        if let Some(n) = graph.find_node_by_path(&canonical_handle) {
+            return Some(n);
+        }
+    }
+    None
 }
 
 /// Resolve `handle`, and report the other definitions that share the

@@ -1,10 +1,11 @@
 //! Navigation domain handlers
 
 use crate::error::LainError;
+use crate::federation::federated_index::FederatedIndex;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::{GraphNode, NodeType};
-use crate::server::tools::utils::resolve_node;
+use crate::server::tools::utils::{resolve_node, resolve_node_federation_fallback};
 use crate::server::tools::{UiSession, UiSessionData};
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
@@ -68,12 +69,36 @@ pub fn trace_dependency(
 pub async fn get_call_chain(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
+    federation: Option<&FederatedIndex>,
     from: &str,
     to: &str,
     ui_sessions: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
-    let start = resolve_node(graph, overlay, from)?;
-    let end = resolve_node(graph, overlay, to)?;
+    // Federation fallback: if `from`/`to` don't resolve through the
+    // active repo's graph + the shared overlay, search the
+    // federation's other repos before declaring NotFound. Without
+    // this, get_call_chain is the most frequent victim of the
+    // post-boot indexer race: the per-repo graph is still empty for
+    // a few hundred ms after the HTTP listener comes up, and any
+    // call in that window returns isError=true with "Node not
+    // found". Empirically ~40% of test runs on a cold-boot fixture
+    // hit this before the fallback; with it, the race is
+    // recoverable.
+    let resolve = |handle: &str| -> Result<GraphNode, LainError> {
+        match resolve_node(graph, overlay, handle) {
+            Ok(n) => Ok(n),
+            Err(_) => match federation {
+                Some(fed) => resolve_node_federation_fallback(fed, handle).ok_or_else(|| {
+                    LainError::NotFound(format!("Node not found for handle: {handle}"))
+                }),
+                None => Err(LainError::NotFound(format!(
+                    "Node not found for handle: {handle}"
+                ))),
+            },
+        }
+    };
+    let start = resolve(from)?;
+    let end = resolve(to)?;
 
     let mut queue = VecDeque::new();
     let mut parents = HashMap::new();

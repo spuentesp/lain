@@ -325,7 +325,7 @@ proptest! {
                 }
                 let expected_distance = bfs_distance(&from.id, &to.id);
                 let output = rt
-                    .block_on(get_call_chain(&graph, &overlay, &from.id, &to.id, None))
+                    .block_on(get_call_chain(&graph, &overlay, None, &from.id, &to.id, None))
                     .expect("get_call_chain");
 
                 if expected_distance.is_none() {

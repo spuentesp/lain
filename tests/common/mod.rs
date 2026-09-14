@@ -367,8 +367,14 @@ fn boot_and_wait_impl(repos_yaml_path: &Path, cwd: Option<&Path>) -> (String, Se
 }
 
 /// Poll `list_repos` until the per-repo `node_count` is non-zero, then
-/// poll `search_org` for each symbol in `wait_for_symbol` until it's
-/// visible. Shared by [`boot_single_repo`] and [`boot_single_repo_in_dir`].
+/// Poll `list_repos` and `search_org` until the per-repo index is
+/// populated AND each requested symbol resolves through `explain_symbol`.
+///
+/// `search_org` is federation-scoped; it can return matches before
+/// the active repo's per-repo graph has them, so a tool call routed
+/// through the per-repo resolver still races the indexer. Polling
+/// `explain_symbol` with the same handle the test will use forces
+/// the per-repo graph to catch up before the test proceeds.
 pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
     // The federation boot is fast, but the indexer may not have
     // walked the files yet. Poll `list_repos` for non-zero count,
@@ -386,24 +392,29 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
         break;
     }
     if !wait_for_symbol.is_empty() {
-        // `search_org` only returns matches, so we issue one query per
-        // symbol and require each to be visible. A simpler "ping any
-        // symbol" loop would race the indexer.
+        // `search_org` is federation-scoped and may show a symbol
+        // before the per-repo graph does. For tools that resolve
+        // through the active repo's resolver (get_call_chain,
+        // get_blast_radius, etc.), that gap matters. Poll
+        // `explain_symbol` with each requested handle so we wait for
+        // the per-repo graph specifically — the same path the
+        // failing tools will use.
         let start = std::time::Instant::now();
         for &name in wait_for_symbol {
             loop {
                 if start.elapsed() > Duration::from_secs(30) {
-                    panic!("symbol `{name}` never appeared in search_org within 30s on {host}");
+                    panic!("symbol `{name}` never resolved through per-repo resolver within 30s on {host}");
                 }
-                let resp = tools_call_text(
-                    host,
-                    "search_org",
-                    serde_json::json!({"query": name, "limit": 50}),
-                );
-                if resp.contains(name) {
+                let resp =
+                    tools_call_text(host, "explain_symbol", serde_json::json!({"symbol": name}));
+                // `explain_symbol` returns isError=true with
+                // "Node not found for handle" before the indexer
+                // catches up. Anything else means the per-repo
+                // resolver found it.
+                if !resp.contains("\"isError\":true") || !resp.contains("Node not found") {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
