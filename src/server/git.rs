@@ -479,7 +479,9 @@ impl GitSensor {
     pub fn get_repo_identity(&self) -> Result<Option<RepoIdentity>, LainError> {
         let remotes = self.repo.remotes()?;
         for remote_name in remotes.iter().flatten() {
-            let Some(remote_name) = remote_name else { continue };
+            let Some(remote_name) = remote_name else {
+                continue;
+            };
             if remote_name == "origin" {
                 let remote = self.repo.find_remote(remote_name)?;
                 if let Ok(url) = remote.url() {

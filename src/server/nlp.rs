@@ -105,9 +105,7 @@ impl NlpEmbedder {
         // Initialize ORT global logging once
         if !ort::init()
             .with_name("lain-nlp")
-            .with_execution_providers([
-                ort::ep::CPU::default().build()
-            ])
+            .with_execution_providers([ort::ep::CPU::default().build()])
             .commit()
         {
             tracing::warn!("ORT initialization returned false - may indicate already initialized");
@@ -474,9 +472,7 @@ impl CrossEncoder {
         // Same global ORT init as the embedder; second call is a no-op.
         if !ort::init()
             .with_name("lain-cross-encoder")
-            .with_execution_providers([
-                ort::ep::CPU::default().build()
-            ])
+            .with_execution_providers([ort::ep::CPU::default().build()])
             .commit()
         {
             tracing::debug!(

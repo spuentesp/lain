@@ -309,7 +309,8 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
     sort_by_name(&mut on_disk_sorted);
 
     assert_eq!(
-        live_sorted, on_disk_sorted,
+        live_sorted,
+        on_disk_sorted,
         "tools/list and docs/tool-schema.json have drifted.\n\
          Re-run `make schema` and commit the result.\n\
          -- live:\n{live_tools}\n-- on-disk:\n{on_disk}",
