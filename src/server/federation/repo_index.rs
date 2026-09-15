@@ -112,6 +112,12 @@ pub struct RepoIndex {
     git: Arc<AsyncMutex<GitSensor>>,
     health: Arc<RwLock<RepoHealth>>,
     last_indexed: Arc<RwLock<SystemTime>>,
+    /// The error text from the most recent failed `index()`/`index_forced()`
+    /// attempt, if any. `RepoHealth::Degraded` alone doesn't say *why* —
+    /// this is what `get_repo_info` surfaces so an operator (or a test
+    /// harness diagnosing a flake) can see the real cause instead of just
+    /// the coarse health enum. Cleared on the next successful index.
+    last_index_error: Arc<RwLock<Option<String>>>,
     /// Shared handle to the federation's `VolatileOverlay`. `index()`
     /// touches it after a successful index pass so the `Overlay
     /// freshness` banner doesn't read as "stale" the moment the
@@ -252,6 +258,7 @@ impl RepoIndex {
             git,
             health: Arc::new(RwLock::new(RepoHealth::Indexing)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
+            last_index_error: Arc::new(RwLock::new(None)),
             server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
             overlay_paths: parking_lot::Mutex::new(HashMap::new()),
             sync_overlay_lock: AsyncMutex::new(()),
@@ -297,6 +304,13 @@ impl RepoIndex {
 
     pub fn health(&self) -> RepoHealth {
         *self.health.read()
+    }
+
+    /// The error text from the most recent failed indexing attempt, if
+    /// this repo is (or was last) `Degraded`. `None` if it has never
+    /// failed, or the last attempt since a failure succeeded.
+    pub fn last_index_error(&self) -> Option<String> {
+        self.last_index_error.read().clone()
     }
 
     /// Install the federation's shared `VolatileOverlay`. Called by
@@ -408,11 +422,10 @@ impl RepoIndex {
                     self.source.local_path()
                 );
                 drop(git_guard);
+                let message = format!("RepoIndex::index exceeded {:?} budget", budget);
+                *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
-                return Err(LainError::Other(format!(
-                    "RepoIndex::index exceeded {:?} budget",
-                    budget
-                )));
+                return Err(LainError::Other(message));
             }
         };
 
@@ -426,11 +439,13 @@ impl RepoIndex {
                 self.source.local_path(),
                 e
             );
+            *self.last_index_error.write() = Some(e.to_string());
             self.set_health(RepoHealth::Degraded);
             return Err(result.unwrap_err());
         }
 
         *self.last_indexed.write() = SystemTime::now();
+        *self.last_index_error.write() = None;
         self.set_health(RepoHealth::Ready);
         Ok(())
     }
@@ -483,11 +498,10 @@ impl RepoIndex {
                     self.source.local_path()
                 );
                 drop(git_guard);
+                let message = format!("RepoIndex::index_forced exceeded {:?} budget", budget);
+                *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
-                return Err(LainError::Other(format!(
-                    "RepoIndex::index_forced exceeded {:?} budget",
-                    budget
-                )));
+                return Err(LainError::Other(message));
             }
         };
 
@@ -499,11 +513,13 @@ impl RepoIndex {
                 self.source.local_path(),
                 e
             );
+            *self.last_index_error.write() = Some(e.to_string());
             self.set_health(RepoHealth::Degraded);
             return Err(result.unwrap_err());
         }
 
         *self.last_indexed.write() = SystemTime::now();
+        *self.last_index_error.write() = None;
         self.set_health(RepoHealth::Ready);
         Ok(())
     }

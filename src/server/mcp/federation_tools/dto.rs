@@ -16,6 +16,11 @@ pub struct RepoInfo {
     pub last_indexed_unix: i64,
     pub node_count: usize,
     pub edge_count: usize,
+    /// Error text from the most recent failed indexing attempt, when
+    /// `health` is (or was last) `degraded`. `None` when the repo has
+    /// never failed to index.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
