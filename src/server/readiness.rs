@@ -186,6 +186,11 @@ pub struct GatedResponse {
     pub next_action: Option<GatedNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<Problem>,
+    /// Sorted repo ids blocking a federation-wide tool call. Always empty
+    /// for a single-workspace response (there is nothing to disambiguate).
+    /// Populated by `federation::readiness::gate_federated_tool_call`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub blocking_repos: Vec<String>,
 }
 
 impl GatedResponse {
@@ -214,6 +219,7 @@ impl GatedResponse {
             retry_after_ms: Some(WARMING_UP_RETRY_AFTER_MS),
             next_action: Some(GatedNextAction::poll_capabilities()),
             problem: None,
+            blocking_repos: Vec::new(),
         }
     }
 
@@ -229,6 +235,7 @@ impl GatedResponse {
             retry_after_ms: None,
             next_action: Some(GatedNextAction::poll_capabilities()),
             problem: lifecycle.problem.clone(),
+            blocking_repos: Vec::new(),
         }
     }
 
@@ -244,6 +251,7 @@ impl GatedResponse {
             retry_after_ms: None,
             next_action: Some(GatedNextAction::poll_capabilities()),
             problem: None,
+            blocking_repos: Vec::new(),
         }
     }
 }
@@ -684,5 +692,29 @@ mod gate_tests {
         assert!(value.get("retry_after_ms").is_none());
         assert_eq!(value["problem"]["code"], "index_failed");
         assert!(gated.is_error());
+    }
+
+    #[test]
+    fn blocking_repos_is_empty_and_omitted_for_a_single_workspace_response() {
+        for gated in [
+            GatedResponse::warming_up(&warming(IndexPhase::Scanning), "symbols"),
+            GatedResponse::unavailable_error(&failed_snapshot(), "symbols"),
+            GatedResponse::unavailable_optional(&warming(IndexPhase::Scanning)),
+        ] {
+            assert!(gated.blocking_repos.is_empty());
+            let value = serde_json::to_value(&gated).unwrap();
+            assert!(
+                value.get("blocking_repos").is_none(),
+                "blocking_repos must be omitted from the wire shape when empty: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocking_repos_serializes_sorted_when_populated() {
+        let mut gated = GatedResponse::warming_up(&warming(IndexPhase::Scanning), "symbols");
+        gated.blocking_repos = vec!["repo-a".into(), "repo-b".into()];
+        let value = serde_json::to_value(&gated).unwrap();
+        assert_eq!(value["blocking_repos"], json!(["repo-a", "repo-b"]));
     }
 }
