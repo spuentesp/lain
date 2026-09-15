@@ -1,17 +1,34 @@
 name: CI
 
-# Triggers on both main and dev. Job-level `if:` conditions keep
-# `version-drift`, `coverage`, and the agent-required jobs scoped to
-# main where they belong; the rest of the matrix runs on both
-# branches so PRs targeting dev drive the agent-contract rollup.
+# Two-tier CI: cheap battery on dev/PR-to-dev, full hardened on
+# main and PR-to-main. Job-level `if: ${{ inputs.full-battery }}`
+# expressions keep the matrix lean on dev without splitting the
+# workflow file.
+#
+#   dev push / PR-to-dev:  ubuntu-only test + lint + npm-shim
+#                          + health-badge + schema-drift (~5 min)
+#   main push / PR-to-main: full matrix + capability + coverage
+#                          + version-drift + action-contracts (~20 min)
+#
+# `concurrency:` cancels superseded runs so rapid-fire commits
+# don't pile up behind each other.
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  # `full-battery` is true on main pushes, PRs targeting main,
+  # and manual dispatches. Heavy jobs (macos/windows test cells,
+  # capability suite, coverage, action-contracts) gate on this.
+  # Cheaper jobs run on both branches.
+  full-battery: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main') }}
 
 # Top-level `permissions: {}` denies everything by default; each job
 # grants only what it needs (mirroring safeskill.yml's posture).
@@ -27,7 +44,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Fast lane: Linux only. macos/windows cells move to the
+        # `test-cross` job below, which is gated on full-battery.
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -77,9 +96,46 @@ jobs:
           npm ci
           npm test
 
+  test-cross:
+    # Cross-platform (macOS + Windows) cells. Only runs on full
+    # battery — i.e. push to main or PR targeting main. Saves
+    # ~10 min/runner on every dev push and PR-to-dev.
+    name: Cargo Test cross-platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    if: env.full-battery == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+        shell: bash
+        run: cargo build --bin lain
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --workspace
+
+      - name: Module declarations resolve to committed files
+        shell: bash
+        run: bash scripts/check-mod-resolution.sh
+
   capability:
     name: Capability suite (demo.sh)
     runs-on: ubuntu-latest
+    if: env.full-battery == 'true'
     permissions:
       contents: read
     steps:
@@ -136,8 +192,8 @@ jobs:
       contents: read
     # The drift check runs on main, where release tags are pushed.
     # On PRs the comparison would fail the moment a new tag is cut,
-    # before the bump PR can land. Run only on push to main.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # before the bump PR can land. Run only on full-battery.
+    if: env.full-battery == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract pinned version from action.yml
@@ -283,17 +339,18 @@ jobs:
 
 
   coverage:
-    # Coverage run is intentionally restricted to push-to-main. PRs
-    # already pay the `cargo test --workspace` cost on every OS; adding
-    # a coverage build per PR would lengthen the queue without changing
-    # the merge signal (codecov.io still annotates PRs from the latest
-    # main-branch upload). Until a baseline is chosen, the upload
-    # never fails CI: `fail_ci_if_error: false` plus codecov.yml's
+    # Coverage run is intentionally restricted to full-battery
+    # (push-to-main or PR-to-main). PRs already pay the `cargo test
+    # --workspace` cost on every OS; adding a coverage build per PR
+    # would lengthen the queue without changing the merge signal
+    # (codecov.io still annotates PRs from the latest main-branch
+    # upload). Until a baseline is chosen, the upload never fails
+    # CI: `fail_ci_if_error: false` plus codecov.yml's
     # target=0/threshold=0 settings keep the badge dark until the
     # first deliberate baseline PR.
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: env.full-battery == 'true'
     permissions:
       contents: read
     steps:
@@ -346,6 +403,7 @@ jobs:
   action-contracts:
     name: Badge and release contracts
     runs-on: ubuntu-latest
+    if: env.full-battery == 'true'
     permissions:
       contents: read
     steps:
