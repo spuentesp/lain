@@ -1,9 +1,17 @@
 name: CI
 
 # Two-tier CI: cheap battery on dev/PR-to-dev, full hardened on
-# main and PR-to-main. Job-level `if: env.full_battery`
-# expressions keep the matrix lean on dev without splitting the
-# workflow file.
+# main and PR-to-main. Job-level `if: FULL_BATTERY_EXPR` (see below)
+# keeps the matrix lean on dev without splitting the workflow file.
+#
+# The condition is inlined into each gated job's `if:` rather than
+# read from a shared `env:` var: job-level `if:` only has access to
+# the `github`, `inputs`, and `needs` contexts (confirmed via
+# actionlint -- `env` is not among them, even for workflow-level env
+# vars, and referencing it there invalidates the whole workflow file
+# at schedule time with zero jobs run). `github.*` alone is enough
+# for this condition, so no extra job is needed to smuggle it through
+# `needs.*.outputs` either.
 #
 #   dev push / PR-to-dev:  ubuntu-only test + lint + npm-shim
 #                          + health-badge + schema-drift (~5 min)
@@ -24,11 +32,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # `full_battery` is true on main pushes, PRs targeting main,
-  # and manual dispatches. Heavy jobs (macos/windows test cells,
-  # capability suite, coverage, action-contracts) gate on this.
-  # Cheaper jobs run on both branches.
-  full_battery: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main') }}
 
 # Top-level `permissions: {}` denies everything by default; each job
 # grants only what it needs (mirroring safeskill.yml's posture).
@@ -102,7 +105,7 @@ jobs:
     # ~10 min/runner on every dev push and PR-to-dev.
     name: Cargo Test cross-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    if: env.full_battery == 'true'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     strategy:
@@ -135,7 +138,7 @@ jobs:
   capability:
     name: Capability suite (demo.sh)
     runs-on: ubuntu-latest
-    if: env.full_battery == 'true'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     steps:
@@ -193,7 +196,7 @@ jobs:
     # The drift check runs on main, where release tags are pushed.
     # On PRs the comparison would fail the moment a new tag is cut,
     # before the bump PR can land. Run only on full_battery.
-    if: env.full_battery == 'true'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract pinned version from action.yml
@@ -350,7 +353,7 @@ jobs:
     # first deliberate baseline PR.
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-latest
-    if: env.full_battery == 'true'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     steps:
@@ -403,7 +406,7 @@ jobs:
   action-contracts:
     name: Badge and release contracts
     runs-on: ubuntu-latest
-    if: env.full_battery == 'true'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     steps:
