@@ -109,7 +109,23 @@ fn main() -> Result<()> {
             // env var (comma-separated), or the agent-harness cwd
             // walk-up. See `cli::mcp::resolve_workspaces` for the
             // full resolution policy.
-            let rt = tokio::runtime::Builder::new_current_thread()
+            // Milestone 4 (AGENT_UX_ROADMAP.md): the startup re-index now
+            // runs as a background task alongside the MCP protocol loop
+            // (see `LainMcpServer::run_stdio`/`run_http`) rather than
+            // being awaited before it starts. A single-thread runtime
+            // would still let a long synchronous git/parser call in that
+            // background task starve `initialize`/`ping`/`tools/list` —
+            // both tasks would be cooperatively scheduled on the same one
+            // OS thread. `max(2, available_parallelism)` guarantees the
+            // protocol loop always has its own thread to run on, even on
+            // a single-core sandbox where `available_parallelism()` could
+            // report 1.
+            let worker_threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .max(2);
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(worker_threads)
                 .enable_all()
                 .build()
                 .context("build tokio runtime for mcp subcommand")?;

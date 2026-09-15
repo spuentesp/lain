@@ -1207,30 +1207,38 @@ impl LainMcpServer {
     pub async fn run_stdio(self) -> SdkResult<()> {
         info!("Starting Lain MCP server on stdio");
 
-        // Block until the first re-index returns (or its budget
-        // elapses) before letting the stdio loop come up. Synchronous
-        // agent loops fire `find_anchors` immediately after
-        // `initialize` and must see a populated graph — a `tokio::spawn`
-        // here used to race the re-index against the stdio loop, so the
-        // first call always read an empty graph and the agent had to
-        // retry ~0.5s later.
+        // Milestone 4 (AGENT_UX_ROADMAP.md): the startup re-index runs on
+        // its own background task instead of being awaited here, so
+        // `initialize`/`ping`/`tools/list` and any `graph_independent`
+        // tool call are answered immediately even on a cold, large
+        // repository. Graph-dependent tool calls made before the index
+        // reaches `ready` are turned back at the central gate in
+        // `dispatch_tool_call` with a structured `warming_up` result
+        // instead of racing the indexer for an empty graph (the bug this
+        // code used to guard against by blocking here).
         //
         // `build_core_memory` short-circuits when the graph is already
-        // current, so this is a no-op on a warm start. On a cold start
-        // it reads `HEAD`, parses the working tree, and writes
-        // `.lain/graph.bin`; the timeout budget (default 300s,
-        // override via `LAIN_REINDEX_TIMEOUT` env or `--reindex-timeout`
-        // flag) bounds the wait. Past that we proceed with whatever
-        // the worker has written so far and record
-        // `RefreshResult::Timeout` on `last_outcome` so `get_health`
-        // reports degraded state instead of silently serving an empty
-        // graph.
+        // current, so this is a no-op on a warm start. The timeout budget
+        // (default 300s, override via `LAIN_REINDEX_TIMEOUT` env or
+        // `--reindex-timeout` flag) still bounds one attempt; past that
+        // the coordinator records `RefreshResult::Timeout` on
+        // `last_outcome` and marks the readiness handle
+        // `unavailable_error`, both surfaced through `get_health` /
+        // `get_capabilities` — not just `tracing::warn` and stderr, which
+        // a stdio MCP client never sees.
         //
-        // The outcome is written to `server.last_outcome` so `get_health`
-        // can surface failures — the previous code logged only to
-        // `tracing::warn` and stderr, neither of which a stdio MCP
-        // client surfaces to the model.
-        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
+        // This is not full cooperative cancellation: the indexing
+        // coordinator has no cancellation token yet, so a clean shutdown
+        // below gives it a short bounded window to finish and otherwise
+        // hard-aborts it with `AbortHandle::abort()` rather than waiting
+        // indefinitely. Threading a real cancellation token through every
+        // scan/resolve/persist phase boundary is tracked separately
+        // (roadmap step 11) and intentionally not attempted here.
+        let startup_task = tokio::spawn(await_startup_reindex(
+            self.server.clone(),
+            self.reindex_timeout,
+        ));
+        let startup_abort = startup_task.abort_handle();
 
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
@@ -1256,7 +1264,20 @@ impl LainMcpServer {
             message_observer: None,
         });
 
-        server.start().await
+        let result = server.start().await;
+
+        // Give the background indexer a short window to reach a natural
+        // stopping point (or finish outright on a small repo) before
+        // hard-aborting it; either way we don't hold process exit open
+        // waiting on it indefinitely.
+        if tokio::time::timeout(std::time::Duration::from_secs(5), startup_task)
+            .await
+            .is_err()
+        {
+            startup_abort.abort();
+        }
+
+        result
     }
 
     /// Run with HTTP transport (for MCP clients and browser diagnostics)
@@ -1268,9 +1289,17 @@ impl LainMcpServer {
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
-        // Same awaited re-index as `run_stdio`; the HTTP path serves
-        // the same contract. See `run_stdio` for the rationale.
-        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
+        // Same backgrounded re-index as `run_stdio`; see there for the
+        // full rationale. HTTP has no equivalent to stdio's "session
+        // ended" moment (the accept loop below runs until the process is
+        // killed), so there is nowhere to bound-join this task before
+        // returning — it is left detached and reclaimed on process exit,
+        // the same way the NLP background-enrichment task spawned inside
+        // `build_core_memory` already is.
+        tokio::spawn(await_startup_reindex(
+            self.server.clone(),
+            self.reindex_timeout,
+        ));
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).

@@ -1,15 +1,25 @@
-//! D-M2: `lain mcp` must serve a populated graph on the first tool
-//! call after `initialize`, bounded by `LAIN_REINDEX_TIMEOUT`.
+//! D-M2 / AGENT_UX_ROADMAP Milestone 4: `lain mcp` must answer the MCP
+//! handshake immediately — never behind the startup re-index — and must
+//! eventually serve a populated graph once indexing completes, bounded
+//! by `LAIN_REINDEX_TIMEOUT`.
 //!
-//! Before the fix, the startup re-index is `tokio::spawn`-ed inside
-//! `LainMcpServer::run_stdio`, so the stdio loop comes up while
-//! `build_core_memory` is still running. The first `find_anchors`
-//! call therefore races against indexing and reads an empty graph.
+//! This file's contract inverted with Milestone 4's central readiness
+//! gate. It originally pinned the *opposite* behavior: the startup
+//! re-index was awaited before the stdio loop came up, so a
+//! `find_anchors` call fired immediately after `initialize` was
+//! guaranteed to see a fully populated graph, never a "warming up"
+//! state. That was itself the fix for an earlier bug (the re-index
+//! raced a bare `tokio::spawn` and the first call read an empty graph).
 //!
-//! These tests pin the fix: a `find_anchors` call fired immediately
-//! after `initialize` returns a non-empty anchor list, AND a too-short
-//! `LAIN_REINDEX_TIMEOUT` still produces a running server that
-//! reports the timeout via `get_health`.
+//! Milestone 4 backgrounds the re-index on purpose, so the protocol
+//! handshake is never gated on repository size — and now the central
+//! gate in `dispatch_tool_call` can legitimately answer that same
+//! immediate `find_anchors` call with a structured `warming_up` result
+//! instead of a populated (or empty) one. `find_anchors_works_after_a_cold_start`
+//! below pins the new contract: an immediate call may be `warming_up`,
+//! but the *same* call must return the real, populated answer once
+//! `get_capabilities` reports `ready` — polled no faster than the
+//! envelope's own `retry_after_ms`, never a fixed sleep.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -182,7 +192,22 @@ impl LainChild {
 
     fn shutdown(mut self) {
         drop(self.stdin);
-        let _ = self.child.wait_timeout(Duration::from_secs(5));
+        // Closing stdin does not reliably make the stdio transport exit on
+        // its own — observed leaking `lain mcp` processes across repeated
+        // local test runs (each one holding its own LSP pool / model)
+        // until this fixture's tempdir-backed workspace was cleaned up by
+        // something else entirely. Explicitly kill it once the grace
+        // period elapses instead of leaving an orphaned process behind.
+        if self
+            .child
+            .wait_timeout(Duration::from_secs(5))
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -207,16 +232,22 @@ impl ChildWaitTimeout for std::process::Child {
     }
 }
 
-/// D-M2 main test. Boots `lain mcp` against the fixture, fires
-/// `initialize`, then immediately calls `find_anchors` with NO
-/// sleep or poll loop. Asserts a non-empty anchor list — proving
-/// the re-index ran before the stdio loop came up.
+/// Milestone 4 main test. Boots `lain mcp` against the fixture and
+/// proves two things:
 ///
-/// On the current (buggy) source this test fails because the spawn
-/// runs in parallel with the stdio loop, and `find_anchors` reads
-/// an empty graph.
+/// 1. `initialize` never waits on the startup re-index — it must return
+///    well within the roadmap's 2-second budget regardless of repository
+///    size, because the re-index now runs on a background task instead
+///    of gating the protocol handshake.
+/// 2. An immediate `find_anchors` call is allowed to come back as a
+///    structured `warming_up` result (the central gate in
+///    `dispatch_tool_call` denying a `graph_required` tool before the
+///    index is ready), but the *same* call must return the real,
+///    populated answer once `get_capabilities` reports the structural
+///    capability `ready` — polled by respecting the envelope's own
+///    `retry_after_ms`, never a fixed sleep.
 #[test]
-fn find_anchors_works_immediately_after_initialize() {
+fn find_anchors_works_after_a_cold_start() {
     let Some(bin) = lain_bin() else {
         eprintln!("skipping: no lain binary (set LAIN_BIN or run `cargo build`)");
         return;
@@ -233,13 +264,69 @@ fn find_anchors_works_immediately_after_initialize() {
         "capabilities": {},
         "clientInfo": {"name": "cold-start-test", "version": "1"},
     });
+
+    let handshake_budget = Duration::from_secs(2);
+    let handshake_start = Instant::now();
     let init_resp = child.send("initialize", init_params.clone());
+    let initialize_elapsed = handshake_start.elapsed();
     assert!(
         init_resp.get("result").is_some(),
         "initialize must succeed: {init_resp}"
     );
+    assert!(
+        initialize_elapsed < handshake_budget,
+        "initialize must never wait on the startup re-index — took {initialize_elapsed:?}, \
+         budget is {handshake_budget:?}"
+    );
 
-    // No sleep, no poll loop. This is the contract.
+    let list_start = Instant::now();
+    let list_resp = child.send("tools/list", serde_json::json!({}));
+    assert!(
+        list_resp.get("result").is_some(),
+        "tools/list must succeed: {list_resp}"
+    );
+    assert!(
+        list_start.elapsed() < handshake_budget,
+        "tools/list must never wait on the startup re-index — took {:?}",
+        list_start.elapsed()
+    );
+
+    // The first `find_anchors` call may legitimately be denied with a
+    // structured `warming_up` result now — that is the point of the
+    // central gate. Poll `get_capabilities` (itself `graph_independent`,
+    // so always answered immediately) until the structural capability
+    // is `ready`, sleeping only by the amount the envelope itself names.
+    let index_budget = Duration::from_secs(30);
+    let poll_start = Instant::now();
+    loop {
+        let caps = child.call_tool("get_capabilities", serde_json::json!({}));
+        let text = caps
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+        let state = value
+            .pointer("/indexing/state")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert_ne!(
+            state, "unavailable_error",
+            "indexing failed while polling get_capabilities: {value}"
+        );
+        if state == "ready" {
+            break;
+        }
+        assert!(
+            poll_start.elapsed() < index_budget,
+            "indexing never reached ready within {index_budget:?}; last capabilities: {value}"
+        );
+        let retry_after_ms = value
+            .pointer("/indexing/retry_after_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200);
+        std::thread::sleep(Duration::from_millis(retry_after_ms.min(500)));
+    }
+
     let resp = child.call_tool("find_anchors", serde_json::json!({"limit": 5}));
     let text = resp
         .pointer("/result/content/0/text")
@@ -249,9 +336,8 @@ fn find_anchors_works_immediately_after_initialize() {
 
     assert!(
         !text.is_empty() && !text.contains("No anchors"),
-        "find_anchors returned empty on the first call after initialize — \
-         cold-start re-index is not awaited. Response: {text:?}\n\
-         Full JSON: {resp}"
+        "find_anchors returned empty once indexing reported ready. \
+         Response: {text:?}\nFull JSON: {resp}"
     );
     // The fixture's orchestrator must surface — the test is meaningful
     // only if we know the graph had something to find.
@@ -263,17 +349,23 @@ fn find_anchors_works_immediately_after_initialize() {
     child.shutdown();
 }
 
-/// D-M2 second contract: when the re-index budget elapses, the
-/// server still comes up — degraded, but alive — and `get_health`
-/// reports the timeout. This pins the `RefreshResult::Timeout`
-/// branch of `await_startup_reindex`.
+/// D-M2 second contract: when the re-index budget elapses, the server
+/// still comes up — degraded, but alive — and `get_health` reports the
+/// timeout once the background indexing task actually reaches it. This
+/// pins the `RefreshResult::Timeout` branch of `await_startup_reindex`,
+/// now running on its own task instead of being awaited before the stdio
+/// loop starts.
 ///
 /// We force the timeout with `LAIN_REINDEX_TIMEOUT=1` (one second).
-/// On a slow CI runner the fixture's first index will exceed that,
-/// which is what we want. On a fast machine the index may finish
-/// before the budget; in that case the assertion falls through to
-/// the success branch (the contract is "the server must come up AND
-/// answer queries", which holds either way).
+/// Since indexing is backgrounded, `get_health` immediately after
+/// `initialize` would just see the untouched `Skipped` default and
+/// trivially report "Operational" without having exercised anything —
+/// so this polls `get_capabilities` until the structural capability
+/// reaches a terminal state (`ready` or `unavailable_error`) before
+/// checking `get_health`. On a slow CI runner the fixture's first index
+/// will exceed the 1s budget, which is what we want; on a fast machine
+/// the index may finish first — the contract is "the server must come
+/// up AND answer queries", which holds either way.
 #[test]
 fn startup_degrades_when_reindex_times_out() {
     let Some(bin) = lain_bin() else {
@@ -299,10 +391,42 @@ fn startup_degrades_when_reindex_times_out() {
         "initialize must succeed even when re-index times out: {init_resp}"
     );
 
-    // `get_health` after initialize — must report either:
+    // Wait for the background attempt to reach a terminal state (bounded
+    // well past the 1s budget so a slow CI runner still converges).
+    let terminal_budget = Duration::from_secs(15);
+    let poll_start = Instant::now();
+    loop {
+        let caps = child.call_tool("get_capabilities", serde_json::json!({}));
+        let text = caps
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+        let state = value
+            .pointer("/indexing/state")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if state == "ready" || state == "unavailable_error" {
+            break;
+        }
+        assert!(
+            poll_start.elapsed() < terminal_budget,
+            "indexing never reached a terminal state within {terminal_budget:?} \
+             (LAIN_REINDEX_TIMEOUT=1 should have forced one well before this); \
+             last capabilities: {value}"
+        );
+        let retry_after_ms = value
+            .pointer("/indexing/retry_after_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200);
+        std::thread::sleep(Duration::from_millis(retry_after_ms.min(500)));
+    }
+
+    // `get_health` — must report either:
     //   (a) `Degraded ⚠ ... timed out`  — the budget elapsed, OR
     //   (b) `Operational ✅`             — the index finished under 1s.
-    // In both cases the server is alive and the await ran.
+    // In both cases the server is alive and the background attempt ran
+    // to completion (one way or the other).
     let health = child.call_tool("get_health", serde_json::json!({}));
     let health_text = health
         .pointer("/result/content/0/text")
@@ -318,7 +442,9 @@ fn startup_degrades_when_reindex_times_out() {
          cold start with LAIN_REINDEX_TIMEOUT=1: {health_text}"
     );
 
-    // Either way, the served graph must be non-empty — the await ran.
+    // Either way, the served graph must answer with a normal result
+    // envelope — `warming_up` and populated are both fine here, an
+    // MCP-level error is not.
     let anchors = child.call_tool("find_anchors", serde_json::json!({"limit": 5}));
 
     // The server came up (initialize succeeded, get_health answered).
