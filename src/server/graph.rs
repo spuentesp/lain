@@ -58,7 +58,9 @@ struct GraphState {
 /// this preserves the distinction between corrupt and missing graph data.
 pub fn inspect_persisted_graph(path: &Path) -> Result<Option<String>, GraphInspectionError> {
     let data = std::fs::read(path).map_err(GraphInspectionError::Io)?;
-    let state: GraphState = bincode::deserialize(&data).map_err(GraphInspectionError::Corrupt)?;
+    let state: GraphState = bincode::serde::decode_from_slice(&data, bincode::config::legacy())
+        .map(|(state, _)| state)
+        .map_err(GraphInspectionError::Corrupt)?;
     if state.path_format_version != PATH_FORMAT_VERSION {
         return Err(GraphInspectionError::Incompatible(
             state.path_format_version,
@@ -80,7 +82,7 @@ pub enum GraphInspectionError {
     #[error("cannot read graph: {0}")]
     Io(std::io::Error),
     #[error("cannot decode graph: {0}")]
-    Corrupt(bincode::Error),
+    Corrupt(bincode::error::DecodeError),
     #[error("graph path format {0} is incompatible with this binary")]
     Incompatible(u32),
     #[error("graph index does not match its nodes")]
@@ -1556,8 +1558,8 @@ impl GraphDatabase {
                     .collect(),
                 last_commit: self.last_commit.read().clone(),
             };
-            let data =
-                bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
+            let data = bincode::serde::encode_to_vec(&state, bincode::config::legacy())
+                .map_err(|e| LainError::Database(e.to_string()))?;
             let persistence_path = self.persistence_path.clone();
             (data, persistence_path)
         };
@@ -1581,7 +1583,8 @@ impl GraphDatabase {
                 .collect(),
             last_commit: self.last_commit.read().clone(),
         };
-        let data = bincode::serialize(&state).map_err(|e| LainError::Database(e.to_string()))?;
+        let data = bincode::serde::encode_to_vec(&state, bincode::config::legacy())
+            .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
         Ok(())
@@ -1599,17 +1602,20 @@ impl GraphDatabase {
         // path used to `?` the deserialize error straight out of
         // `GraphDatabase::new`, which turned any format change into a startup
         // crash instead of a rebuild.
-        let state: GraphState = match bincode::deserialize(&data) {
-            Ok(state) => state,
-            Err(e) => {
-                warn!(
-                    "Ignoring unreadable graph at {}: {e}. Starting empty; \
+        let state: GraphState =
+            match bincode::serde::decode_from_slice(&data, bincode::config::legacy())
+                .map(|(state, _)| state)
+            {
+                Ok(state) => state,
+                Err(e) => {
+                    warn!(
+                        "Ignoring unreadable graph at {}: {e}. Starting empty; \
                      the next index pass will rebuild it.",
-                    self.persistence_path.display()
-                );
-                return Ok(());
-            }
-        };
+                        self.persistence_path.display()
+                    );
+                    return Ok(());
+                }
+            };
 
         if state.path_format_version != PATH_FORMAT_VERSION {
             warn!(

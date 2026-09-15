@@ -23,7 +23,8 @@ use rust_mcp_schema::{CallToolResult, ContentBlock, TextContent};
 /// existing shape. Revisions live in `_meta.revision`, which is
 /// additive at the `CallToolResult` envelope level and is supported
 /// by every `CallToolResult` constructor in
-/// `rust-mcp-schema` 0.10 (the version pinned in `Cargo.toml`).
+/// `rust-mcp-schema` 1.0+ (the version pinned in `Cargo.toml` after
+/// PR #53 closed the 0.10.3 → 1.0.0 dep skew that broke the build).
 pub fn tool_text_result(
     text: String,
     is_error: bool,

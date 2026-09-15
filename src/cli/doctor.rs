@@ -128,6 +128,7 @@ fn dirty(repo: &git2::Repository) -> Result<bool> {
         // LAIN's own cache cannot make an otherwise clean source tree stale.
         !entry
             .path()
+            .ok()
             .is_some_and(|path| path == ".lain" || path.starts_with(".lain/"))
     }))
 }

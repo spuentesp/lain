@@ -1,41 +1,31 @@
 [
   {
-    "description": "Compares stability and coupling metrics between two modules",
+    "description": "Provides a structural estimate of code coverage based on call graph connectivity",
     "inputSchema": {
       "properties": {
-        "module_a": {
-          "type": "string"
-        },
-        "module_b": {
+        "module_path": {
           "type": "string"
         }
       },
-      "required": [
-        "module_a",
-        "module_b"
-      ],
+      "required": [],
       "type": "object"
     },
-    "name": "compare_modules"
+    "name": "get_coverage_summary"
   },
   {
-    "description": "Finds the exact path of function calls between two points",
+    "description": "Generates a test scaffold for a given function or type",
     "inputSchema": {
       "properties": {
-        "from": {
-          "type": "string"
-        },
-        "to": {
+        "function_name": {
           "type": "string"
         }
       },
       "required": [
-        "from",
-        "to"
+        "function_name"
       ],
       "type": "object"
     },
-    "name": "get_call_chain"
+    "name": "get_test_template"
   },
   {
     "description": "Identifies functions that may lack test coverage based on call graph analysis",
@@ -51,45 +41,13 @@
     "name": "find_untested_functions"
   },
   {
-    "description": "Provides a structural estimate of code coverage based on call graph connectivity",
+    "description": "Shows current branch and git status",
     "inputSchema": {
-      "properties": {
-        "module_path": {
-          "type": "string"
-        }
-      },
+      "properties": {},
       "required": [],
       "type": "object"
     },
-    "name": "get_coverage_summary"
-  },
-  {
-    "description": "Finds all callers of a given symbol",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_call_sites"
-  },
-  {
-    "description": "Shows uncommitted changes (staged and unstaged)",
-    "inputSchema": {
-      "properties": {
-        "path": {
-          "type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_file_diff"
+    "name": "get_branch_status"
   },
   {
     "description": "Shows recent commit history with author and message",
@@ -105,17 +63,32 @@
     "name": "get_commit_history"
   },
   {
-    "description": "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
+    "description": "Shows uncommitted changes (staged and unstaged)",
     "inputSchema": {
       "properties": {
-        "limit": {
-          "type": "integer"
+        "path": {
+          "type": "string"
         }
       },
       "required": [],
       "type": "object"
     },
-    "name": "suggest_refactor_targets"
+    "name": "get_file_diff"
+  },
+  {
+    "description": "Finds all callers of a given symbol",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_call_sites"
   },
   {
     "description": "Reads a file with surrounding context around a specific line",
@@ -139,9 +112,12 @@
     "name": "get_code_snippet"
   },
   {
-    "description": "Recursively finds everything a symbol depends on",
+    "description": "Builds LLM-optimized context for a symbol with signature, docstring, and relationships",
     "inputSchema": {
       "properties": {
+        "max_tokens": {
+          "type": "integer"
+        },
         "symbol": {
           "type": "string"
         }
@@ -151,7 +127,67 @@
       ],
       "type": "object"
     },
-    "name": "trace_dependency"
+    "name": "get_context_for_prompt"
+  },
+  {
+    "description": "Runs cargo clippy with optional auto-fix and returns lint results with architectural context on failure",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "fix": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_clippy"
+  },
+  {
+    "description": "Runs cargo test with optional filter and returns test results",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "filter": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_tests"
+  },
+  {
+    "description": "Runs cargo build (optionally release) and returns build output and status",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "release": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_build"
+  },
+  {
+    "description": "Forces a re-sync of the graph with the current Git HEAD state",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "sync_state"
   },
   {
     "description": "Triggers a full architectural scan and enrichment pass",
@@ -178,23 +214,54 @@
     "name": "get_cross_runtime_callers"
   },
   {
-    "description": "Runs cargo test with optional filter and returns test results",
+    "description": "Returns the graph schema (node types, edge types, example queries) for LLM session initialization",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "describe_schema"
+  },
+  {
+    "description": "Execute a query against the graph using a JSON ops array",
     "inputSchema": {
       "properties": {
-        "cwd": {
-          "type": "string"
-        },
-        "filter": {
-          "type": "string"
-        },
-        "timeout_secs": {
+        "query": {
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "query_graph"
+  },
+  {
+    "description": "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
+    "inputSchema": {
+      "properties": {
+        "limit": {
           "type": "integer"
         }
       },
       "required": [],
       "type": "object"
     },
-    "name": "run_tests"
+    "name": "suggest_refactor_targets"
+  },
+  {
+    "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "explain_symbol"
   },
   {
     "description": "Identifies reachable nodes with zero incoming callers or usages",
@@ -209,24 +276,6 @@
       "type": "object"
     },
     "name": "find_dead_code"
-  },
-  {
-    "description": "Builds LLM-optimized context for a symbol with signature, docstring, and relationships",
-    "inputSchema": {
-      "properties": {
-        "max_tokens": {
-          "type": "integer"
-        },
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_context_for_prompt"
   },
   {
     "description": "Calculates layers of abstraction from the entry point for a symbol",
@@ -259,35 +308,26 @@
     "name": "get_anchor_score"
   },
   {
-    "description": "Generates a test scaffold for a given function or type",
+    "description": "Lists the top 10 most foundational/stable components in the codebase",
     "inputSchema": {
       "properties": {
-        "function_name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "function_name"
-      ],
-      "type": "object"
-    },
-    "name": "get_test_template"
-  },
-  {
-    "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
-    "inputSchema": {
-      "properties": {
-        "min_fan_out": {
-          "type": "integer"
-        },
-        "min_pattern_files": {
+        "limit": {
           "type": "integer"
         }
       },
       "required": [],
       "type": "object"
     },
-    "name": "architectural_observations"
+    "name": "find_anchors"
+  },
+  {
+    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_entry_points"
   },
   {
     "description": "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns",
@@ -303,37 +343,6 @@
       "type": "object"
     },
     "name": "get_coupling_radar"
-  },
-  {
-    "description": "Shows current branch and git status",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_branch_status"
-  },
-  {
-    "description": "Lists the top 10 most foundational/stable components in the codebase",
-    "inputSchema": {
-      "properties": {
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "find_anchors"
-  },
-  {
-    "description": "Forces a re-sync of the graph with the current Git HEAD state",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "sync_state"
   },
   {
     "description": "Calculates the transitive impact and ripple effect of changing a symbol",
@@ -363,58 +372,20 @@
     "name": "get_master_map"
   },
   {
-    "description": "Runs cargo clippy with optional auto-fix and returns lint results with architectural context on failure",
+    "description": "Returns a 'slice' of the architecture at a specific depth from the entry point",
     "inputSchema": {
       "properties": {
-        "cwd": {
+        "granularity": {
           "type": "string"
         },
-        "fix": {
-          "type": "boolean"
+        "layer": {
+          "type": "integer"
         }
       },
       "required": [],
       "type": "object"
     },
-    "name": "run_clippy"
-  },
-  {
-    "description": "Returns the graph schema (node types, edge types, example queries) for LLM session initialization",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "describe_schema"
-  },
-  {
-    "description": "Execute a query against the graph using a JSON ops array",
-    "inputSchema": {
-      "properties": {
-        "query": {
-          "type": "object"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "query_graph"
-  },
-  {
-    "description": "Runs cargo build (optionally release) and returns build output and status",
-    "inputSchema": {
-      "properties": {
-        "cwd": {
-          "type": "string"
-        },
-        "release": {
-          "type": "boolean"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "run_build"
+    "name": "get_layered_map"
   },
   {
     "description": "Finds the most foundational 'Anchor' node that controls a given leaf function",
@@ -432,20 +403,26 @@
     "name": "navigate_to_anchor"
   },
   {
-    "description": "Returns a high-level tree of files and modules up to a specific depth",
+    "description": "Finds the exact path of function calls between two points",
     "inputSchema": {
       "properties": {
-        "max_depth": {
-          "type": "integer"
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
         }
       },
-      "required": [],
+      "required": [
+        "from",
+        "to"
+      ],
       "type": "object"
     },
-    "name": "explore_architecture"
+    "name": "get_call_chain"
   },
   {
-    "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
+    "description": "Recursively finds everything a symbol depends on",
     "inputSchema": {
       "properties": {
         "symbol": {
@@ -457,32 +434,55 @@
       ],
       "type": "object"
     },
-    "name": "explain_symbol"
+    "name": "trace_dependency"
   },
   {
-    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "list_entry_points"
-  },
-  {
-    "description": "Returns a 'slice' of the architecture at a specific depth from the entry point",
+    "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
     "inputSchema": {
       "properties": {
-        "granularity": {
-          "type": "string"
+        "min_fan_out": {
+          "type": "integer"
         },
-        "layer": {
+        "min_pattern_files": {
           "type": "integer"
         }
       },
       "required": [],
       "type": "object"
     },
-    "name": "get_layered_map"
+    "name": "architectural_observations"
+  },
+  {
+    "description": "Compares stability and coupling metrics between two modules",
+    "inputSchema": {
+      "properties": {
+        "module_a": {
+          "type": "string"
+        },
+        "module_b": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "module_a",
+        "module_b"
+      ],
+      "type": "object"
+    },
+    "name": "compare_modules"
+  },
+  {
+    "description": "Returns a high-level tree of files and modules up to a specific depth",
+    "inputSchema": {
+      "properties": {
+        "max_depth": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "explore_architecture"
   },
   {
     "description": "Return server health, node/edge counts, last enriched commit, and language-server availability.",

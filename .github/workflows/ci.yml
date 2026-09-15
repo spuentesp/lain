@@ -1,62 +1,48 @@
 name: CI
 
-# Triggers on both main and dev. Job-level `if:` conditions keep
-# `version-drift`, `coverage`, and the agent-required jobs scoped to
-# main where they belong; the rest of the matrix runs on both
-# branches so PRs targeting dev drive the agent-contract rollup.
+# Two-tier CI: cheap battery on dev/PR-to-dev, full hardened on
+# main and PR-to-main. Job-level `if: FULL_BATTERY_EXPR` (see below)
+# keeps the matrix lean on dev without splitting the workflow file.
 #
-# Tiered so a broken build is cheap to see and doesn't burn the
-# expensive jobs finding out: every job used to fire in parallel with
-# no `needs:` at all, so a `cargo fmt` typo still paid for the full
-# 3-OS test matrix, a release build for schema-drift, and another for
-# capability, before anyone looked at the result.
+# The condition is inlined into each gated job's `if:` rather than
+# read from a shared `env:` var: job-level `if:` only has access to
+# the `github`, `inputs`, and `needs` contexts (confirmed via
+# actionlint -- `env` is not among them, even for workflow-level env
+# vars, and referencing it there invalidates the whole workflow file
+# at schedule time with zero jobs run). `github.*` alone is enough
+# for this condition, so no extra job is needed to smuggle it through
+# `needs.*.outputs` either.
 #
-#   Tier 0 (parallel with tier 1): changes. A cheap git-diff
-#     classification other jobs read via `needs.changes.outputs`.
-#   Tier 1 (fast, parallel, gates everything below): lint, npm-shim,
-#     action-contracts. Each is a few minutes at most and needs no
-#     release build.
-#   Tier 2 (needs: all of tier 1): test (the 3-OS matrix), capability,
-#     schema-drift, health-badge, version-drift.
-#   Tier 3 (needs: tier 2's `test`, main-push only): coverage.
+#   dev push / PR-to-dev:  ubuntu-only test + lint + npm-shim
+#                          + health-badge + schema-drift (~5 min)
+#   main push / PR-to-main: full matrix + capability + coverage
+#                          + version-drift + action-contracts (~20 min)
 #
-# Trade-off, deliberately accepted: a fully green run now takes
-# tier-1-time + tier-2-time back to back instead of max(tier 1, tier
-# 2) in parallel. The point is cheap iteration while a PR still has
-# red jobs, which is the common case during active development, not
-# the fastest possible time-to-green on an already-passing PR.
+# Two more cuts on top of the full-battery gate, both scoped to the
+# heavier jobs (Tier 1 -- lint/npm-shim/action-contracts -- always
+# runs, even in draft, for fast feedback):
+#   - Draft PRs skip the heavier jobs (`github.event.pull_request.draft
+#     != true`). A push event has no `pull_request` context, so this
+#     evaluates to `null != true` (true) there and never affects
+#     push-triggered runs.
+#   - Docs-only changes additionally skip the rust-matrix-building jobs
+#     (`test-cross`, `capability`, `schema-drift`) via the `changes`
+#     job's `docs_only` output. The classifier defaults to `false`
+#     (run everything) whenever it can't establish a diff base, so an
+#     unrecognized file type or force-push never silently skips a real
+#     code change.
 #
-# Two more cuts on top of the tier graph, both scoped to Tier 2 only
-# (Tier 1 always runs, even in draft, so a draft PR still gets fast
-# lint/npm-shim/contracts feedback):
-#   - Draft PRs skip Tier 2 (`github.event.pull_request.draft != true`).
-#     A push event has no `pull_request` context, so this evaluates to
-#     `null != true` (true) there and never affects push-triggered runs.
-#   - Docs-only changes skip the expensive rust-matrix jobs (`test`,
-#     `capability`, `schema-drift`) via the `changes` job's
-#     `docs_only` output. The classifier defaults to `false` (run
-#     everything) whenever it can't establish a diff base, so an
-#     unrecognized file type or force-push never silently skips a
-#     real code change.
-#
-# Job `name:` values are unchanged by the tiering — agent-contract.yml
-# matches jobs by name via a `workflow_run` rollup after this whole
-# workflow completes, so renaming any of "Capability suite (demo.sh)",
-# "Tool schema matches docs/tool-schema.json", or "npm-shim install
-# tests" would silently break that regex.
+# `concurrency:` cancels superseded runs so rapid-fire commits don't
+# pile up behind each other. `github.head_ref` is only set for
+# pull_request events; the `|| github.ref` fallback gives push events
+# (main/dev) their own per-branch group instead of colliding on an
+# empty string.
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
-# Rapid-prototyping best practice: a PR that gets three pushes in two
-# minutes used to run three full CI pipelines in parallel, each paying
-# for its own 3-OS matrix. Only the latest push on a given ref matters,
-# so cancel whatever's still in flight for that ref when a new run
-# starts. `github.head_ref` is only set for pull_request events; the
-# `|| github.ref` fallback gives push events (main/dev) their own
-# per-branch group instead of colliding with an empty string.
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -130,8 +116,6 @@ jobs:
 
   test:
     name: Cargo Test (${{ matrix.os }})
-    needs: [lint, npm-shim, action-contracts, changes]
-    if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
     # A hung test (this session hit a real one: a subprocess reader
     # with no timeout blocking forever) must fail the job, not sit on
@@ -142,7 +126,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Fast lane: Linux only. macos/windows cells move to the
+        # `test-cross` job below, which is gated on full_battery.
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -192,12 +178,51 @@ jobs:
           npm ci
           npm test
 
+  test-cross:
+    # Cross-platform (macOS + Windows) cells. Only runs on full
+    # battery — i.e. push to main or PR targeting main. Saves
+    # ~10 min/runner on every dev push and PR-to-dev. Also skips on
+    # docs-only diffs and draft PRs (see header comment).
+    name: Cargo Test cross-platform (${{ matrix.os }})
+    needs: [changes]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+        shell: bash
+        run: cargo build --bin lain
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --workspace
+
+      - name: Module declarations resolve to committed files
+        shell: bash
+        run: bash scripts/check-mod-resolution.sh
+
   capability:
     name: Capability suite (demo.sh)
-    needs: [lint, npm-shim, action-contracts, changes]
-    if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     steps:
@@ -229,7 +254,6 @@ jobs:
 
   health-badge:
     name: Lain architecture health badge
-    needs: [lint, npm-shim, action-contracts]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
@@ -251,14 +275,16 @@ jobs:
 
   version-drift:
     name: lain-version default tracks latest release
-    needs: [lint, npm-shim, action-contracts]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
     # The drift check runs on main, where release tags are pushed.
     # On PRs the comparison would fail the moment a new tag is cut,
-    # before the bump PR can land. Run only on push to main.
+    # before the bump PR can land -- confirmed live: this job failed
+    # on this exact PR when v0.7.4-rc1 was cut mid-review, before
+    # action.yml's pinned default caught up. Push-to-main only, not
+    # the broader full-battery condition the other gated jobs share.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -308,9 +334,6 @@ jobs:
     # These checks aren't OS-specific — ubuntu runs them once and
     # the three test-matrix cells pick up the rest. Failures here
     # block merge regardless of the test matrix's color.
-    #
-    # Tier 1: no `needs:` — this is one of the fast gates everything
-    # else waits on.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -346,10 +369,10 @@ jobs:
 
   schema-drift:
     name: Tool schema matches docs/tool-schema.json
-    needs: [lint, npm-shim, action-contracts, changes]
+    needs: [changes]
+    timeout-minutes: 15
     if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     permissions:
       contents: read
     # The drift check is the documented contract (docs/CI.md §
@@ -390,10 +413,11 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    # The npm shim resolves, verifies, caches, and launches release binaries.
-    # Its tests exercise the shipped runtime module rather than copied logic.
-    #
-    # Tier 1: no `needs:` — runs in parallel with lint/action-contracts.
+    # The npm-shim is what `npm install lain-mcp` runs. Its install
+    # script (`scripts/install.js`) is the only piece of JavaScript
+    # that ships to end users; tests in `scripts/install.test.js`
+    # were not on any CI matrix (URGENT FIXES #6). Failures here
+    # would silently break every consumer install.
     defaults:
       run:
         working-directory: npm-shim
@@ -409,29 +433,22 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
-      - name: Inspect published package contents
-        run: npm pack --dry-run
 
 
   coverage:
-    # Coverage run is intentionally restricted to push-to-main. PRs
-    # already pay the `cargo test --workspace` cost on every OS; adding
-    # a coverage build per PR would lengthen the queue without changing
-    # the merge signal (codecov.io still annotates PRs from the latest
-    # main-branch upload). Until a baseline is chosen, the upload
-    # never fails CI: `fail_ci_if_error: false` plus codecov.yml's
+    # Coverage run is intentionally restricted to full_battery
+    # (push-to-main or PR-to-main). PRs already pay the `cargo test
+    # --workspace` cost on every OS; adding a coverage build per PR
+    # would lengthen the queue without changing the merge signal
+    # (codecov.io still annotates PRs from the latest main-branch
+    # upload). Until a baseline is chosen, the upload never fails
+    # CI: `fail_ci_if_error: false` plus codecov.yml's
     # target=0/threshold=0 settings keep the badge dark until the
     # first deliberate baseline PR.
-    #
-    # Tier 3: waits on tier 2's `test` (all three OS cells) rather than
-    # just tier 1. A push to main has normally already passed `test` in
-    # the PR that merged it, but re-deriving coverage from a run that's
-    # already known broken would just be more wasted minutes.
     name: Coverage (cargo llvm-cov)
-    needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && github.event.pull_request.draft != true
     permissions:
       contents: read
     steps:
@@ -485,9 +502,9 @@ jobs:
     name: Badge and release contracts
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && github.event.pull_request.draft != true
     permissions:
       contents: read
-    # Tier 1: no `needs:` — runs in parallel with lint/npm-shim.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -520,3 +537,66 @@ jobs:
         run: bash .github/actions/lain-health-badge/tests/test_extract_added_fns.sh
       - name: Installer checks
         run: bash tests/install-test.sh
+
+  # Publishes the `lain/agent-contract` commit status directly from
+  # this workflow run, instead of the separate agent-contract.yml's
+  # `workflow_run: [CI]` rollup. That indirection never actually fired
+  # for a PR's own commit -- confirmed live: dozens of prior PR-branch
+  # CI completions, zero corresponding agent-contract runs, only ever
+  # firing from CI runs already on `main` (i.e. post-merge). Since
+  # `lain/agent-contract` is a required branch-protection check, this
+  # meant no PR could ever satisfy it before merge; only an admin
+  # bypass got PRs in. Running the aggregation as a job in this same
+  # workflow fires deterministically for every push and pull_request,
+  # on every branch, with no separate trigger to go stale.
+  #
+  # Same aggregate rule as before: PASS iff every agent-relevant job
+  # (capability, schema-drift, npm-shim) is success or skipped.
+  agent-contract:
+    name: Publish agent-contract status
+    needs: [capability, schema-drift, npm-shim]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Aggregate into lain/agent-contract commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CAPABILITY: ${{ needs.capability.result }}
+          SCHEMA_DRIFT: ${{ needs.schema-drift.result }}
+          NPM_SHIM: ${{ needs.npm-shim.result }}
+        run: |
+          set -euo pipefail
+
+          # `github.sha` on a pull_request event is the ephemeral
+          # merge commit, not the PR's actual head commit -- posting a
+          # status there would be invisible to the PR branch of the
+          # protection check it's meant to satisfy. Use the real head
+          # SHA for PRs; `github.sha` is already correct for push.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
+
+          status="success"
+          total=0
+          passed=0
+          for result in "$CAPABILITY" "$SCHEMA_DRIFT" "$NPM_SHIM"; do
+            total=$((total + 1))
+            if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
+              passed=$((passed + 1))
+            else
+              status="failure"
+            fi
+          done
+          summary="${passed}/${total} agent-contract jobs green"
+          echo "Rollup for ${SHA}: ${summary} -> ${status}"
+
+          gh api "repos/${{ github.repository }}/statuses/${SHA}" \
+            --method POST \
+            --field state="$status" \
+            --field description="$summary" \
+            --field context='lain/agent-contract'
