@@ -32,18 +32,37 @@ jobs:
           python-version: '3.12'
       - name: Verify release tag and package metadata
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME"
-      # Compute SOURCE_DATE_EPOCH as a Unix-epoch INTEGER here, where
-      # we have GNU `date -d`. Build jobs consume it via
-      # `needs.version-check.outputs.epoch`, so all three platforms
-      # (Linux GNU date, macOS BSD date, Windows non-applicable) share
-      # the same value. Earlier versions of this workflow passed
-      # the raw ISO timestamp `github.event.repository.updated_at`,
-      # which cc rejects on ring's iOS-targeted assembly paths with:
-      #   "environment variable 'SOURCE_DATE_EPOCH' ('...Z') must be
+      # Compute SOURCE_DATE_EPOCH as a Unix-epoch INTEGER and expose
+      # it via $GITHUB_OUTPUT for build jobs to consume via
+      # `needs.version-check.outputs.epoch`.
+      #
+      # The previous shell form
+      #   echo "epoch=$(date -d '...' +%s)" >> "$GITHUB_OUTPUT"
+      # looked correct and CI passed, but at runtime the step's
+      # outputs dict was empty: the redirect silently produced no
+      # value, and downstream build jobs saw SOURCE_DATE_EPOCH=''.
+      # cc on ring/tree-sitter iOS assembly then failed with
+      #   "environment variable 'SOURCE_DATE_EPOCH' ('') must be
       #    a non-negative decimal integer <= 253402300799"
+      #
+      # Computing via Python (already set up by setup-python in this
+      # job) writes through Python's own file API and is straightforward
+      # to reason about; the trailing `echo` prints what was actually
+      # written so future regressions are visible without a separate
+      # API query.
       - name: Compute reproducible-build epoch
         id: epoch
-        run: echo "epoch=$(date -d '${{ github.event.repository.updated_at }}' +%s)" >> "$GITHUB_OUTPUT"
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          from datetime import datetime
+          iso = os.environ['UPDATED_AT'].replace('Z', '+00:00')
+          epoch = int(datetime.fromisoformat(iso).timestamp())
+          print(f"epoch={epoch}")
+          PY
+          echo "epoch-output-debug: $(tail -n 1 "$GITHUB_OUTPUT")"
 
   build-linux:
     needs: version-check
