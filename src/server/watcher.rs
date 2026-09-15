@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 /// Return the set of paths the reload-aware watcher should watch given
@@ -153,23 +153,26 @@ impl FileWatcher {
         Self { sender, receiver }
     }
 
-    /// Start watching the workspace directory
-    pub fn start(self, workspace: PathBuf, server: LainServer) {
+    /// Start watching the workspace directory. Returns a one-shot
+    /// receiver that fires once the initial `notify` registration
+    /// completes (the same barrier tests already used internally via
+    /// `WatcherTestHooks::ready_signal`, now also wired for production
+    /// callers that need to sequence startup against it — see
+    /// `start_source_watcher`).
+    pub fn start(self, workspace: PathBuf, server: LainServer) -> oneshot::Receiver<usize> {
         let file_sender = self.sender.clone();
         let receiver = self.receiver;
         let git = Arc::clone(&server.git);
 
         // The watcher thread body lives in `run_watcher_thread` so
         // production *and* tests share one closure and one command
-        // dispatch path. Production has no use for the test-only
-        // readiness/command-done hooks, so both are passed as `None`.
+        // dispatch path. `command_done` has no production use, so only
+        // `ready_signal` is wired here.
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
-        let _join = run_watcher_thread(WatcherThreadArgs::production(
-            workspace,
-            file_sender,
-            git,
-            (cmd_tx, cmd_rx),
-        ));
+        let (ready_tx, ready_rx) = oneshot::channel::<usize>();
+        let mut args = WatcherThreadArgs::production(workspace, file_sender, git, (cmd_tx, cmd_rx));
+        args.test_hooks.ready_signal = Some(ready_tx);
+        let _join = run_watcher_thread(args);
 
         // Spawn the event processor task
         tokio::spawn(async move {
@@ -247,6 +250,8 @@ impl FileWatcher {
                 server.overlay_updated().notify_one();
             }
         });
+
+        ready_rx
     }
 }
 

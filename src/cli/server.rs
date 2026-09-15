@@ -176,7 +176,7 @@ pub async fn run_server(
     // reindexes. One per indexed repo — `spawn_config_watcher` above
     // only watches `repos.yaml`/`workspaces.yaml`, not source.
     for root in fed_repo_paths {
-        crate::server::ingest::background::start_source_watcher(root, server.clone());
+        crate::server::ingest::background::start_source_watcher(root, server.clone()).await;
     }
 
     // Reap expired `/ui/...` sessions; the HTTP transport creates one per
