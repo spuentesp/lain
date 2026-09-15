@@ -4,22 +4,30 @@
 >
 > A developer should be able to install it, connect an MCP client, and get useful repository intelligence with almost no configuration. An agent should be able to discover what LAIN knows, choose the right capability, and recover from partial readiness without human intervention.
 
-## Implementation review (2026-09-15)
+## Implementation review (2026-09-15, updated)
 
 Review of branch `spuentesp/brittlestar`. These observations describe this
-checkout; they do not verify published packages. Superseded the 2026-09-14
-review below it, which was stale (it predated the capabilities/status
-commands and all of Milestone 4 steps 3-7).
+checkout; they do not verify published packages. Superseded the first
+2026-09-15 review and the 2026-09-14 review below it, both stale in turn as
+more of Milestone 4 landed the same day.
 
 | Area | Evidence and remaining work |
 |---|---|
 | Distribution | `.github/workflows/release.yml` publishes versioned archives and `SHA256SUMS`. `npm-shim/scripts/install.js` pins the package version but downloads and extracts without checking the checksum. It still installs into shared `~/.lain/bin`; the launcher needs the version/target cache, override, and offline behavior from milestone 1. |
 | Diagnostics | `lain doctor`, `lain capabilities --json`, and `lain status --json` exist and share the readiness model in `src/server/readiness.rs` (issues 5-6). `--fix` behavior has not been re-audited since it landed. |
-| Startup (Milestone 4) | Implementation-sequence steps 1-7 are landed: mandatory tool readiness classification (`src/server/tools/definitions.rs`); the central dispatch gate (`gate_tool_call` in `readiness.rs`, consulted at both stdio and HTTP `tools/call` sites before any handler runs); phase and file-progress instrumentation through `build_core_memory` into the one shared `ReadinessHandle`; the startup re-index backgrounded via `tokio::spawn` in `run_stdio`/`run_http` instead of blocking transport startup; `lain mcp`'s runtime moved from single- to multi-thread; and the source-watcher startup barrier (`FileWatcher::start` returns a `ready_signal` receiver, awaited by `start_source_watcher`). Commits, in order: `5a4b99c`, `af206f7`, `d5b08e3`, `b214895`. |
+| Startup (Milestone 4) | Implementation-sequence steps 1-7 and 9 are landed. Steps 1-6: mandatory tool readiness classification, the central dispatch gate, phase/file-progress instrumentation into the one shared `ReadinessHandle`, the startup re-index backgrounded via `tokio::spawn` in `run_stdio`/`run_http` instead of blocking transport startup, and `lain mcp`'s runtime moved to multi-thread. Step 7: the source-watcher startup barrier (`FileWatcher::start` returns a `ready_signal` receiver) and a final `sync_volatile_overlay()` reconciliation right before publishing `ready`. Step 9: a `notifications/lain/capabilities_changed` push notification on stdio (HTTP and federation excluded — see below). Commits, in order: `5a4b99c`, `af206f7`, `d5b08e3`, `b214895`, `51446af`, `077f0c9`. Landing steps 5-6 and 9 surfaced real ripple effects in code that talks to `lain mcp` and assumed the old blocking-startup, no-notification contract — `lain oneshot` (single-shot, no retry) and two test harnesses needed fixes; see `077f0c9`'s commit message before assuming every caller of `tools/call` is unaffected. |
 | Onboarding | `setup` still does not exist (issues 14-18). |
 
-Steps 8-12 of Milestone 4's implementation sequence are **not started** —
-check `git log` against the commits above before assuming otherwise:
+Only step 8 of Milestone 4's original 10-step implementation sequence is
+still **not started**: federation per-repository readiness aggregation and
+deterministic multi-repository gating. There is exactly one global
+`ReadinessHandle` per process today, not one per repository, so a
+multi-repo federation server cannot yet report per-repo warming/ready state
+or gate a cross-repo tool call on only the repositories it actually touches.
+
+Two related, larger pieces from the coordinator's detailed design (not
+numbered steps of their own, but referenced throughout that section) are
+also not attempted:
 
 - a cooperative cancellation token threaded through the scan/resolve/persist
   phase boundaries (today shutdown only gives the background indexing task a
@@ -28,13 +36,9 @@ check `git log` against the commits above before assuming otherwise:
 - `spawn_blocking` conversion of the pipeline's synchronous git/parser work
   (it still all runs inline on async worker threads; the multi-thread
   runtime gives it room to not starve the protocol loop, but does not
-  isolate it the way the roadmap's design calls for);
+  isolate it the way the roadmap's design calls for); and
 - HEAD-change-during-startup re-indexing (an attempt does not yet notice a
-  moving `HEAD` and restart toward the new commit);
-- federation per-repository readiness aggregation (there is exactly one
-  global `ReadinessHandle` per process today, not one per repository); and
-- capability-change notifications (`notifications/lain/capabilities_changed`,
-  issue 13).
+  moving `HEAD` and restart toward the new commit).
 
 ### Implementation review (2026-09-14) — superseded, kept for history
 
