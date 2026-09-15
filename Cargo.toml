@@ -36,7 +36,7 @@ notify = "6"
 petgraph = { version = "0.6", features = ["serde-1"] }
 
 # Persistence
-bincode = "1.3"
+bincode = { version = "2", features = ["serde"] }
 
 # NLP & Machine Learning
 ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
