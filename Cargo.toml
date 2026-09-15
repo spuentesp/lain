@@ -14,8 +14,8 @@ license = "MIT"
 tokio = { version = "1.35", features = ["full"] }
 
 # MCP Server (Model Context Protocol)
-rust-mcp-sdk = { version = "=1.0.1", default-features = false, features = ["server", "stdio", "macros"] }
-rust-mcp-schema = { version = "=0.10.3", default-features = false, features = ["2025_11_25", "schema_utils"] }
+rust-mcp-sdk = { version = "=1.1.0", default-features = false, features = ["server", "stdio", "macros"] }
+rust-mcp-schema = { version = "=1.0.0", default-features = false, features = ["2025_11_25", "schema_utils"] }
 
 # HTTP server for diagnostics UI
 hyper = { version = "1.9", features = ["http1", "server"] }
@@ -39,7 +39,7 @@ petgraph = { version = "0.6", features = ["serde-1"] }
 bincode = "1.3"
 
 # NLP & Machine Learning
-ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
+ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
 # Disable tokenizers' default `esaxx_fast` feature, which pulls in
 # `esaxx-rs`'s `cc`-built C++ as a static `/MT` archive. That collides
 # at link time on Windows with `ort-sys`'s prebuilt `/MD` C++ runtime
@@ -97,7 +97,7 @@ which = "8.0.2"
 dashmap = "6.0"
 rayon = "1.10"
 async-recursion = "1.1.1"
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 # Tree-sitter static analysis
 tree-sitter = "0.22"

@@ -106,7 +106,7 @@ impl NlpEmbedder {
         if !ort::init()
             .with_name("lain-nlp")
             .with_execution_providers([
-                ort::execution_providers::CPUExecutionProvider::default().build()
+                ort::ep::CPU::default().build()
             ])
             .commit()
         {
@@ -475,7 +475,7 @@ impl CrossEncoder {
         if !ort::init()
             .with_name("lain-cross-encoder")
             .with_execution_providers([
-                ort::execution_providers::CPUExecutionProvider::default().build()
+                ort::ep::CPU::default().build()
             ])
             .commit()
         {
