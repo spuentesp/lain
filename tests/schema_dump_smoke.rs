@@ -120,6 +120,37 @@ fn lain_schema_dump_writes_tools_list_shape() {
         Some("array"),
         "claim_files.files must be typed array, got: {claim}"
     );
+
+    // PR #63 review finding: `get_workspace_graph` declared its one
+    // optional arg as `required_args: &["filter?"]` instead of
+    // `optional_args: &["filter"]`. The `?` was never stripped by the
+    // schema builder, so the property was literally named `filter?`
+    // (not `filter`, which the handler and every real caller actually
+    // use) and was also marked required. Guard the whole surface
+    // against the same mistake recurring on any tool: no property name
+    // or required-arg name may contain a `?` — optionality belongs in
+    // `optional_args`, never encoded into the name string.
+    for t in tools {
+        let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("<unnamed>");
+        let schema = t.get("inputSchema").expect("checked above");
+        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+            for prop_name in props.keys() {
+                assert!(
+                    !prop_name.contains('?'),
+                    "{name}: property name {prop_name:?} contains `?` — optionality must be \
+                     expressed by omitting it from `required`, not by encoding it into the name"
+                );
+            }
+        }
+        if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+            for req in required.iter().filter_map(|v| v.as_str()) {
+                assert!(
+                    !req.contains('?'),
+                    "{name}: required arg {req:?} contains `?`"
+                );
+            }
+        }
+    }
 }
 
 /// Boot a real `lain server --transport http`, send a JSON-RPC

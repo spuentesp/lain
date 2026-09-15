@@ -129,8 +129,8 @@ pub const WORKSPACE_TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "get_workspace_graph",
         description: "Per-workspace graph for the dashboard. Returns {nodes: [...], edges: [...], truncated: bool}. Filters to Function/Method/Class + Calls/Imports. Optional filter: substring match against node name + path. Cross-repo Calls edges are marked cross_repo: true.",
-        required_args: &["filter?"],
-        optional_args: &[],
+        required_args: &[],
+        optional_args: &["filter"],
     },
 ];
 
