@@ -988,6 +988,18 @@ pub(crate) async fn await_startup_reindex(
     let readiness = server.tool_executor.ctx.readiness.clone();
     let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
         Ok(Ok(())) => {
+            // AGENT_UX_ROADMAP.md Milestone 4, coordinator step 9: "a
+            // successful base index without this step is not ready." The
+            // working tree can have moved since `run_mcp`'s one-time
+            // initial `sync_volatile_overlay()` call — which ran before
+            // this potentially long scan started — so reconcile the
+            // overlay against the just-built graph before publishing
+            // `ready`. A failure here is a freshness warning, not a
+            // startup failure: the static graph itself is valid, so this
+            // does not fall through to the `failed` branch.
+            if let Err(e) = server.sync_volatile_overlay().await {
+                eprintln!("final pre-ready overlay reconciliation failed (continuing): {e}");
+            }
             readiness.ready(server.graph.get_last_commit().ok().flatten());
             crate::server::refresh::RefreshOutcome::ok(started)
         }
