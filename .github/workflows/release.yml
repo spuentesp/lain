@@ -75,7 +75,7 @@ jobs:
         env:
           UPDATED_AT: ${{ github.event.repository.updated_at }}
         run: |
-          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))')
+          EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -158,7 +158,7 @@ jobs:
         env:
           UPDATED_AT: ${{ github.event.repository.updated_at }}
         run: |
-          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))')
+          EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -238,7 +238,7 @@ jobs:
           UPDATED_AT: ${{ github.event.repository.updated_at }}
         shell: bash
         run: |
-          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))')
+          EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
