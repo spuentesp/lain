@@ -1,0 +1,85 @@
+name: Fuzz Nightly
+
+# Brief fuzz run on each registered target, scheduled off-peak.
+# The OpenSSF Scorecard Fuzzing check (0/10 -> 10/10 once a
+# fuzz target exists in the repo and a CI workflow touches it)
+# wants:
+#   - a `fuzz/` directory under the repo root, OR explicit fuzz
+#     targets in a registered fuzzing framework
+#   - a CI workflow that exercises those targets
+#
+# Each target runs ~60 seconds; enough to satisfy the scorecard
+# check that the project *does* fuzz, and to catch regressions
+# between releases. Reproducer artefacts from any crash get
+# uploaded for the maintainer to triage.
+on:
+  schedule:
+    # Off-peak UTC, runs once a day. 17 picks a non-:00 minute so
+    # we don't compete with other repo's cron sweeps at the top of
+    # the hour.
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+# Deny everything by default; the lone job below only needs read.
+# OpenSSF Scorecard Token-Permissions check requires this default-deny
+# at the workflow level rather than relying on job-level scope.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: cargo fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - federation_config
+          - mcp_envelope
+          - graph_node
+        # Run each target on its own runner so a crash in one doesn't
+        # cancel the rest.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust (stable + nightly for cargo-fuzz)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # The nightly toolchain is required by cargo-fuzz even when the
+      # project itself is stable; rustup is set up by dtolnay/rust-toolchain's
+      # `components` field on the next step.
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: nightly
+
+      - name: Build fuzz harnesses
+        run: cd fuzz && cargo +nightly fuzz build
+
+      - name: Run ${{ matrix.target }} for 60 seconds
+        # -max_total_time is the wall-clock budget, not the corpus size.
+        # 60s per target is enough to satisfy the scorecard's "is there
+        # a fuzz target?" check and to surface obvious regressions; for
+        # deep coverage this would be much longer.
+        run: cd fuzz && cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+      # If a crash is found, the corpus is preserved under
+      # `fuzz/artifacts/$target/`. Upload it as a CI artefact so the
+      # maintainer can reproduce locally with `cargo fuzz run <target>
+      # <artifact>`.
+      - name: Upload fuzz artefacts (only if present)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
