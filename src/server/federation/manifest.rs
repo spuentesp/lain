@@ -77,7 +77,7 @@ impl FederationManifest {
         }
         let bytes =
             std::fs::read(path).map_err(|e| LainError::Io(format!("read manifest: {e}")))?;
-        let m: Self = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+        let m: Self = bincode::serde::decode_from_slice(&bytes, bincode::config::legacy())
             .map(|(m, _)| m)
             .map_err(|e| LainError::Serialization(format!("bincode: {e}")))?;
         if m.version > CURRENT_VERSION {
@@ -91,7 +91,7 @@ impl FederationManifest {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| LainError::Io(format!("mkdir: {e}")))?;
         }
-        let bytes = bincode::serde::encode_to_vec(self, bincode::config::standard())
+        let bytes = bincode::serde::encode_to_vec(self, bincode::config::legacy())
             .map_err(|e| LainError::Serialization(format!("bincode: {e}")))?;
         // Write through a temp file and rename. A plain `fs::write`
         // truncates the destination first, so a crash — or a reader

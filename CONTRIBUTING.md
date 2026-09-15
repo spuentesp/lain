@@ -7,7 +7,9 @@ point for the change-management process; the details live in
 
 ## Development setup
 
-You need a recent stable Rust toolchain (1.75 or newer) and Node 18+
+You need a recent stable Rust toolchain (1.85 or newer; check
+`rust-toolchain.toml` if present, otherwise the toolchain that
+last touched `Cargo.lock` is fine) and Node 18+
 (the npm-shim postinstall runs under Node).
 
 ```bash
