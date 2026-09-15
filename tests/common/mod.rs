@@ -399,8 +399,8 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
         // `explain_symbol` with each requested handle so we wait for
         // the per-repo graph specifically — the same path the
         // failing tools will use.
-        let start = std::time::Instant::now();
         for &name in wait_for_symbol {
+            let start = std::time::Instant::now();
             loop {
                 if start.elapsed() > Duration::from_secs(30) {
                     panic!("symbol `{name}` never resolved through per-repo resolver within 30s on {host}");
