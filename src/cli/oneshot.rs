@@ -252,6 +252,16 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         .pointer("/result/content/0/text")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // MCP signals a tool-level failure (including the central gate's
+    // terminal `unavailable_error` — the one gate state this loop lets
+    // through instead of retrying, see `is_warming_up` above) via
+    // `result.isError`, not the top-level JSON-RPC `error` field checked
+    // above. Without this, `lain oneshot` printed the error payload and
+    // still exited 0.
+    let is_tool_error = tool_response
+        .pointer("/result/isError")
+        .and_then(|v| v.as_bool())
+        == Some(true);
 
     match serde_json::from_str::<Value>(raw_text) {
         Ok(v) => println!(
@@ -259,6 +269,9 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
             serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw_text.into())
         ),
         Err(_) => println!("{}", raw_text),
+    }
+    if is_tool_error {
+        return Err(anyhow!("tool {tool} returned isError=true (see output above)"));
     }
     Ok(())
 }
