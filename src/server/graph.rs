@@ -1514,7 +1514,7 @@ impl GraphDatabase {
                 last_commit: self.last_commit.read().clone(),
             };
             let data =
-                bincode::serde::encode_to_vec(&state, bincode::config::standard())
+                bincode::serde::encode_to_vec(&state, bincode::config::legacy())
                     .map_err(|e| LainError::Database(e.to_string()))?;
             let persistence_path = self.persistence_path.clone();
             (data, persistence_path)
@@ -1539,7 +1539,7 @@ impl GraphDatabase {
                 .collect(),
             last_commit: self.last_commit.read().clone(),
         };
-        let data = bincode::serde::encode_to_vec(&state, bincode::config::standard())
+        let data = bincode::serde::encode_to_vec(&state, bincode::config::legacy())
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
@@ -1558,7 +1558,7 @@ impl GraphDatabase {
         // path used to `?` the deserialize error straight out of
         // `GraphDatabase::new`, which turned any format change into a startup
         // crash instead of a rebuild.
-        let state: GraphState = match bincode::serde::decode_from_slice(&data, bincode::config::standard())
+        let state: GraphState = match bincode::serde::decode_from_slice(&data, bincode::config::legacy())
             .map(|(state, _)| state)
         {
             Ok(state) => state,
