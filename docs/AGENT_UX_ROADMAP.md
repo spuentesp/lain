@@ -12,7 +12,7 @@ inline. Full history is `git log`; this table is a snapshot, not an archive.
 
 | # | Milestone | Status | Evidence / what's missing |
 |---|---|---|---|
-| 1 | Frictionless distribution | 🟡 Partial | `npm-shim/scripts/runtime.js` (`609f8db`) verifies checksums, caches by version+target, honors `LAIN_VERSION`, reuses cache offline. Missing: the clean-room CI proof (Milestone 9) that the published `npx` path actually works on a bare machine. |
+| 1 | Frictionless distribution | 🔴 Regressed in production | `npm-shim/scripts/runtime.js` (`609f8db`) in *this repo* verifies checksums, caches by version+target, honors `LAIN_VERSION`, reuses cache offline — but confirmed live (2026-09-16) that npm's `latest` dist-tag (`0.6.1`) still ships the pre-`609f8db` `bin/lain.js`, which has no knowledge of any of that and only works if `~/.lain/bin/lain-launcher` already happens to exist. See the callout below the table. |
 | 2 | `lain setup` | ✅ Done | `src/cli/setup.rs` (`7132baa`): detects repo/languages, resolves or offers to install the optional embedding model, configures one MCP client, verifies with a real `initialize`+`tools/list` round trip. `generic` (writes `.mcp.json`) and `claude-code` (shells to `claude mcp add`) adapters only — Codex/Cursor/VS Code/Continue are Milestone 8's job. |
 | 3 | `lain doctor` | ✅ Done | `lain doctor` / `lain capabilities --json` / `lain status --json`, sharing one readiness model (`src/server/readiness.rs`). |
 | 4 | Zero-config MCP startup | 🟡 Mostly done | Implementation-sequence steps 1-7 and 9 of 10 landed (`5a4b99c`, `af206f7`, `d5b08e3`, `b214895`, `51446af`, `077f0c9`): mandatory tool classification, the central dispatch gate, phase/progress instrumentation, backgrounded startup re-index, multi-thread runtime, watcher-ready handoff, final overlay reconciliation, and a stdio `capabilities_changed` push notification. Missing: step 8 (federation per-repository readiness — there is one global `ReadinessHandle` per process, not one per repo), a real cooperative cancellation token through the indexing phases, and `spawn_blocking` isolation of the pipeline's synchronous work. |
@@ -20,7 +20,25 @@ inline. Full history is `git log`; this table is a snapshot, not an archive.
 | 6 | Semantic Agent API | ⬜ Not started | None of `find_symbol` / `get_context` / `find_related` / `assess_change` / `search_code` exist. (Not to be confused with the semantic-search *embedding model*, which Milestone 2 already auto-installs.) |
 | 7 | Capability discovery | ✅ Done | `get_capabilities`, folded into Milestone 4's central gate work. |
 | 8 | First-class client recipes | ⬜ Not started | Only `claude-code` exists (via Milestone 2's adapter); Codex/Cursor/VS Code/Continue adapters and the CI verification matrix are unbuilt. |
-| 9 | Distribution acceptance CI | ⬜ Not started | CI runs `cargo test` on 3 OSes; no clean-room `npx install → initialize → tools/list → capability poll → structural query` test against the *published* package. |
+| 9 | Distribution acceptance CI | ✅ Done | `.github/workflows/distribution-acceptance.yml` (`496938c`): 3-OS matrix, three lanes (public `npx` user path, forced-install automation path, release-gate against downloaded GitHub Release artifacts), all driving `scripts/clean_room_mcp_check.py` through the full `initialize → tools/list → get_capabilities → structural query` sequence against *published* state. Currently red against the live `latest` npm package — see the callout below the table; that is this gate correctly catching a real problem, not a bug in the gate. |
+
+> **🔴 Live finding (2026-09-16), unresolved:** confirmed directly against the
+> published registry and GitHub Releases while building Milestone 9, not
+> inferred from code. `npm view @spuentesp/lain-mcp dist-tags` names `latest:
+> 0.6.1`. The `bin/lain.js` inside that exact published tarball predates the
+> `runtime.js` rewrite (`609f8db`): it does not read `LAIN_CACHE_DIR` or
+> `LAIN_VERSION`, performs no checksum verification, and never downloads
+> anything itself — it only spawns a binary it expects to already exist at a
+> hardcoded `~/.lain/bin/lain-launcher`, printing an error and exiting 1
+> otherwise. Separately, the `v0.6.1` GitHub release has three platform
+> tarballs but **no `SHA256SUMS` asset** at all. Net effect: `npx
+> @spuentesp/lain-mcp` on a genuinely clean machine today — the exact
+> headline command this whole roadmap is built around — installs nothing and
+> exits 1. Every "done" mark above describes what's in this repository, not
+> what a stranger gets right now from the published package. Fixing this is
+> a publishing decision (cut a stable release from a commit that includes
+> the rewritten launcher, then move the `latest` npm dist-tag to it) that
+> this session did not make unilaterally.
 
 ## Product outcome
 
@@ -1136,7 +1154,7 @@ Avoid client-specific product logic inside the core server. Client adapters belo
 
 # Milestone 9 — Distribution acceptance CI
 
-**Status: ⬜ Not started.** CI runs `cargo test` on 3 OSes, which is not this milestone: no job installs via the public `npx` command and drives `initialize` → `tools/list` → capability poll → a structural query against the *published* package.
+**Status: ✅ Done** (`.github/workflows/distribution-acceptance.yml`, `496938c`) — and it is currently red against the live published package for a real reason, not a false positive. See the callout in the "Status" table at the top of this document.
 
 The real acceptance test is not “Cargo tests pass.” It is “a stranger can install LAIN in a clean environment and an MCP client can talk to it.”
 
