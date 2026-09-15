@@ -1513,9 +1513,8 @@ impl GraphDatabase {
                     .collect(),
                 last_commit: self.last_commit.read().clone(),
             };
-            let data =
-                bincode::serde::encode_to_vec(&state, bincode::config::legacy())
-                    .map_err(|e| LainError::Database(e.to_string()))?;
+            let data = bincode::serde::encode_to_vec(&state, bincode::config::legacy())
+                .map_err(|e| LainError::Database(e.to_string()))?;
             let persistence_path = self.persistence_path.clone();
             (data, persistence_path)
         };
@@ -1558,19 +1557,20 @@ impl GraphDatabase {
         // path used to `?` the deserialize error straight out of
         // `GraphDatabase::new`, which turned any format change into a startup
         // crash instead of a rebuild.
-        let state: GraphState = match bincode::serde::decode_from_slice(&data, bincode::config::legacy())
-            .map(|(state, _)| state)
-        {
-            Ok(state) => state,
-            Err(e) => {
-                warn!(
-                    "Ignoring unreadable graph at {}: {e}. Starting empty; \
+        let state: GraphState =
+            match bincode::serde::decode_from_slice(&data, bincode::config::legacy())
+                .map(|(state, _)| state)
+            {
+                Ok(state) => state,
+                Err(e) => {
+                    warn!(
+                        "Ignoring unreadable graph at {}: {e}. Starting empty; \
                      the next index pass will rebuild it.",
-                    self.persistence_path.display()
-                );
-                return Ok(());
-            }
-        };
+                        self.persistence_path.display()
+                    );
+                    return Ok(());
+                }
+            };
 
         if state.path_format_version != PATH_FORMAT_VERSION {
             warn!(
