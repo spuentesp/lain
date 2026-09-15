@@ -288,14 +288,28 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
     let on_disk: serde_json::Value =
         serde_json::from_str(&on_disk_raw).expect("parse docs/tool-schema.json");
 
-    // Canonicalize (re-serialize to drop formatting whitespace and
-    // normalize map-key ordering) and byte-compare.
-    let live_canonical = serde_json::to_string(&live_tools).expect("canon live");
-    let on_disk_canonical = serde_json::to_string(&on_disk).expect("canon disk");
+    // Sort the tool list by `name` before comparing. Plugin
+    // registration order changed between inventory 0.1 and 0.2, so
+    // the order of items in the live `tools/list` array is no longer
+    // stable across inventory versions. Sort by name to compare set
+    // membership instead of order. Map keys are already canonicalised
+    // by serde_json.
+    fn sort_by_name(v: &mut serde_json::Value) {
+        if let Some(arr) = v.as_array_mut() {
+            arr.sort_by(|a, b| {
+                let na = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let nb = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                na.cmp(nb)
+            });
+        }
+    }
+    let mut live_sorted = live_tools.clone();
+    sort_by_name(&mut live_sorted);
+    let mut on_disk_sorted = on_disk.clone();
+    sort_by_name(&mut on_disk_sorted);
 
     assert_eq!(
-        live_canonical,
-        on_disk_canonical,
+        live_sorted, on_disk_sorted,
         "tools/list and docs/tool-schema.json have drifted.\n\
          Re-run `make schema` and commit the result.\n\
          -- live:\n{live_tools}\n-- on-disk:\n{on_disk}",
