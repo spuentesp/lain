@@ -42,6 +42,13 @@ impl LainServer {
         }
 
         info!("Building core topology for commit {}", latest_commit);
+        // A real re-index (not the no-op "already up to date" path just
+        // above, which never reaches here): if a prior pass already
+        // published `ready`, this must move the gate back to
+        // `warming_up` for the duration of this pass, or graph-required
+        // tools keep dispatching against a graph this pass is actively
+        // mutating.
+        self.readiness().resume_warming_up();
 
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
@@ -489,6 +496,30 @@ impl LainServer {
         self.overlay.touch();
 
         let duration = scan_start.elapsed();
+
+        // A partial pass (scan-phase timeout, or capped by
+        // `max_files_per_scan`) persists whatever it produced above so the
+        // next attempt resumes from it, but it must not be reported as a
+        // successful attempt: `indexed_commit` was deliberately left behind
+        // `target_commit`, and `files_completed < files_total`. Returning
+        // `Ok(())` here let every caller (`await_startup_reindex`,
+        // `run_background_sync`) publish `ready` on a graph known to be
+        // incomplete. Matches the M4 design's "Refresh failed/timed out"
+        // row: `unavailable_error`, valid persisted progress kept for a
+        // future retry — not `ready`.
+        if partial {
+            warn!(
+                "Partial index pass ({} files scanned, {} failed) persisted in {:?}; \
+                 reporting as a failed attempt so the graph is not served as ready",
+                scanned, failed, duration
+            );
+            return Err(LainError::Other(format!(
+                "index pass was partial: {} of {} changed files scanned",
+                scanned + failed,
+                files.len(),
+            )));
+        }
+
         info!("Lain fully restored and ready in {:?}", duration);
 
         Ok(())
@@ -1173,6 +1204,142 @@ mod readiness_progress_tests {
         let total = snapshot.files_total.expect("files_total must be set");
         assert!(snapshot.files_completed <= total);
         assert!(snapshot.files_failed <= snapshot.files_completed);
+    }
+
+    /// A second, real re-index after the coordinator already published
+    /// `ready` from a first pass must move the gate through
+    /// `warming_up` again, not leave `state` at `Ready` for a graph
+    /// that's being actively mutated (Copilot review finding on PR #63:
+    /// a commit-sync/background-sync re-index after the first `ready`
+    /// changed only `phase`, never `state`, so the central gate kept
+    /// dispatching `graph_required` tools throughout it). Pinned via
+    /// `attempt_id`, which only `resume_warming_up`/the initial default
+    /// ever advance — a deterministic signal that doesn't need to catch
+    /// the pass mid-flight the way asserting on `state` alone would.
+    #[tokio::test]
+    async fn a_second_real_reindex_after_ready_resumes_warming_up() {
+        let root = git_fixture_with_one_file();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        let budget = std::time::Duration::from_secs(60);
+        tokio::time::timeout(budget, server.build_core_memory())
+            .await
+            .expect("first build_core_memory must not hang past the test's own budget")
+            .unwrap();
+
+        // Simulate what `await_startup_reindex`/`run_background_sync` do
+        // after a successful pass: publish `ready`.
+        server
+            .readiness()
+            .ready(server.graph.get_last_commit().ok().flatten());
+        let attempt_after_ready = server.readiness().snapshot().attempt_id;
+        assert_eq!(
+            server.readiness().snapshot().state,
+            crate::server::readiness::IndexState::Ready
+        );
+
+        // A second real commit, so the next build_core_memory call takes
+        // the real re-index path, not the no-op "already up to date" one.
+        std::fs::write(root.path().join("lib2.rs"), "pub fn world() {}\n").unwrap();
+        for args in [["add", "-A"].as_slice(), &["commit", "-q", "-m", "second"]] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        tokio::time::timeout(budget, server.build_core_memory())
+            .await
+            .expect("second build_core_memory must not hang past the test's own budget")
+            .unwrap();
+
+        let snapshot = server.readiness().snapshot();
+        assert!(
+            snapshot.attempt_id > attempt_after_ready,
+            "a real second re-index must bump attempt_id via resume_warming_up \
+             (before: {attempt_after_ready}, after: {})",
+            snapshot.attempt_id
+        );
+        assert_eq!(
+            snapshot.state,
+            crate::server::readiness::IndexState::WarmingUp,
+            "build_core_memory itself never publishes ready; only its caller does, \
+             so it must still read warming_up right after the pass completes"
+        );
+    }
+
+    /// A pass capped by `max_files_per_scan` before covering every changed
+    /// file is "partial": it persists whatever it scanned (so the next
+    /// attempt can resume) but must not report success — `indexed_commit`
+    /// is deliberately left behind `HEAD`, and every caller
+    /// (`await_startup_reindex`, `run_background_sync`) reads a bare `Ok`
+    /// as "publish `ready`." Before this fix, a capped pass returned
+    /// `Ok(())` and the graph was served as ready with files missing.
+    #[tokio::test]
+    async fn a_capped_partial_pass_reports_failure_not_success() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [
+            ("user.email", "readiness-test@lain"),
+            ("user.name", "readiness-test"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+        }
+        // Two files, so max_files_per_scan=1 below caps this pass short of
+        // covering every changed file.
+        std::fs::write(root.path().join("a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.path().join("b.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::create_dir_all(root.path().join(".lain")).unwrap();
+        std::fs::write(
+            root.path().join(".lain/tuning.toml"),
+            "[ingestion]\nmax_files_per_scan = 1\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "fixture"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            server.build_core_memory(),
+        )
+        .await
+        .expect("build_core_memory must not hang past the test's own budget");
+
+        assert!(
+            result.is_err(),
+            "a capped partial pass must report failure, not Ok(()), so callers don't publish ready"
+        );
+        // The partial pass still persists what it scanned...
+        let snapshot = server.readiness().snapshot();
+        assert_eq!(snapshot.files_total, Some(1));
+        // ...but must not have advanced the indexed-commit marker to HEAD.
+        assert_eq!(server.graph.get_last_commit().unwrap(), None);
     }
 }
 

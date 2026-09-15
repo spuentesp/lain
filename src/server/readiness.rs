@@ -120,6 +120,25 @@ impl ReadinessHandle {
         });
     }
 
+    /// Transition a `Ready` snapshot back to `WarmingUp` for a real
+    /// re-index attempt (a commit-sync or watcher-triggered rebuild, not
+    /// the no-op "already up to date" fast path, which must never touch
+    /// this handle at all). Without this, a re-index after the first
+    /// successful pass left `state` at `Ready` the whole time it ran,
+    /// so the central gate kept dispatching `graph_required`/
+    /// `semantic_required` tools against a graph being actively
+    /// mutated instead of turning them back with `warming_up` until the
+    /// new pass publishes `ready` again.
+    pub fn resume_warming_up(&self) {
+        self.update(|snapshot| {
+            snapshot.state = IndexState::WarmingUp;
+            snapshot.attempt_id = snapshot.attempt_id.saturating_add(1);
+            snapshot.completed_at_unix_ms = None;
+            snapshot.retry_after_ms = Some(WARMING_UP_RETRY_AFTER_MS);
+            snapshot.problem = None;
+        });
+    }
+
     pub fn failed(&self, message: String) {
         self.update(|snapshot| {
             snapshot.state = IndexState::UnavailableError;
