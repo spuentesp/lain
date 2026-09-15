@@ -88,6 +88,60 @@ fn dry_run_reports_would_configure_and_writes_nothing() {
     assert!(!fixture.path().join(".mcp.json").exists());
 }
 
+/// PR #63 review finding: `resolve_semantic_model` checked `opts.yes`
+/// before `opts.dry_run`/`opts.print_config`, so `lain setup --dry-run
+/// --yes` (no model installed) reached `download_model()` for real —
+/// a ~90MB network download and disk write, directly contradicting
+/// "dry-run changes nothing." `HOME` is redirected to an isolated
+/// tempdir so `shared_models_dir()` can't find (or be confused with) a
+/// real cached model on the test runner.
+#[test]
+fn dry_run_with_yes_does_not_download_the_model() {
+    let fixture = build_fixture();
+    let fake_home = tempfile::tempdir().unwrap();
+    let out = Command::new(lain_bin())
+        .args(["setup", "--workspace"])
+        .arg(fixture.path())
+        .args(["--agent", "generic", "--dry-run", "--yes", "--json"])
+        .env("HOME", fake_home.path())
+        .output()
+        .expect("run lain setup");
+    assert!(
+        out.status.success(),
+        "dry-run setup must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(value["semantic_model"]["state"], "would_install");
+    assert!(
+        !fake_home.path().join(".local/lain/models").exists(),
+        "--dry-run --yes must not download the semantic model"
+    );
+}
+
+/// Same bug, `--print-config` path.
+#[test]
+fn print_config_with_yes_does_not_download_the_model() {
+    let fixture = build_fixture();
+    let fake_home = tempfile::tempdir().unwrap();
+    let out = Command::new(lain_bin())
+        .args(["setup", "--workspace"])
+        .arg(fixture.path())
+        .args(["--agent", "generic", "--print-config", "--yes"])
+        .env("HOME", fake_home.path())
+        .output()
+        .expect("run lain setup");
+    assert!(
+        out.status.success(),
+        "print-config setup must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !fake_home.path().join(".local/lain/models").exists(),
+        "--print-config --yes must not download the semantic model"
+    );
+}
+
 /// Full run against a real fixture: writes `.mcp.json`, then performs
 /// the real `initialize` + `tools/list` verification round trip against
 /// the exact configured command. This is the roadmap's "final

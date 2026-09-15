@@ -50,6 +50,9 @@ pub enum SemanticModelState {
     NotInstalled,
     DownloadFailed,
     Skipped,
+    /// `--dry-run` or `--print-config`: a real run would download the
+    /// model, but this one changes nothing on disk or over the network.
+    WouldInstall,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,7 +128,20 @@ fn download_model() -> Result<(PathBuf, PathBuf)> {
         .build()
         .context("build HTTP client for model download")?;
 
-    let fetch = |url: &str, dest: &Path| -> Result<()> {
+    // `dest.with_extension("part")` used to be a fixed path shared by
+    // every invocation of `lain setup` targeting the same shared model
+    // directory. Two processes downloading concurrently (a real scenario:
+    // nothing serializes `lain setup --yes` runs) wrote to the same
+    // `.part` file, and either one's failure cleanup could delete the
+    // other's in-progress or just-completed download. Suffixing with this
+    // process's PID makes the temp path unique per invocation; PIDs are
+    // unique among processes actually running at the same time, which is
+    // exactly the concurrency this needs to be safe against.
+    let pid = std::process::id();
+    let model_tmp = model_path.with_extension(format!("part-{pid}"));
+    let tokenizer_tmp = tokenizer_path.with_extension(format!("part-{pid}"));
+
+    let fetch = |url: &str, dest: &Path, tmp: &Path| -> Result<()> {
         let mut resp = client
             .get(url)
             .send()
@@ -133,26 +149,28 @@ fn download_model() -> Result<(PathBuf, PathBuf)> {
         if !resp.status().is_success() {
             return Err(anyhow!("{url} returned HTTP {}", resp.status()));
         }
-        let tmp = dest.with_extension("part");
         {
             let mut file =
-                std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+                std::fs::File::create(tmp).with_context(|| format!("create {}", tmp.display()))?;
             resp.copy_to(&mut file)
                 .with_context(|| format!("write body from {url}"))?;
         }
-        std::fs::rename(&tmp, dest)
+        std::fs::rename(tmp, dest)
             .with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
         Ok(())
     };
 
-    let result = fetch(MODEL_URL, &model_path).and_then(|_| fetch(TOKENIZER_URL, &tokenizer_path));
+    let result = fetch(MODEL_URL, &model_path, &model_tmp)
+        .and_then(|_| fetch(TOKENIZER_URL, &tokenizer_path, &tokenizer_tmp));
     if let Err(e) = result {
         // Don't leave a half-downloaded model behind — the same
-        // all-or-nothing rule `install.sh` follows.
-        let _ = std::fs::remove_file(&model_path);
-        let _ = std::fs::remove_file(&tokenizer_path);
-        let _ = std::fs::remove_file(model_path.with_extension("part"));
-        let _ = std::fs::remove_file(tokenizer_path.with_extension("part"));
+        // all-or-nothing rule `install.sh` follows. Only this
+        // invocation's own files: never touch `model_path`/
+        // `tokenizer_path` themselves here, since a concurrent
+        // invocation may have already completed and renamed a good
+        // file into place while this one was still downloading.
+        let _ = std::fs::remove_file(&model_tmp);
+        let _ = std::fs::remove_file(&tokenizer_tmp);
         return Err(e);
     }
     Ok((model_path, tokenizer_path))
@@ -175,6 +193,24 @@ fn resolve_semantic_model(opts: &SetupOptions) -> SemanticModelStatus {
             state: SemanticModelState::Skipped,
             model_path: None,
             detail: Some("--no-model passed; semantic_search will be unavailable_optional".into()),
+        };
+    }
+    // `--dry-run`/`--print-config` must change nothing, on disk or over
+    // the network — checked before `opts.yes` so `--dry-run --yes` (or
+    // `--print-config --yes`) can't fall through to a real ~90MB
+    // download despite promising not to touch anything. This used to
+    // reach `download_model()` below because neither flag was checked
+    // at all here.
+    if opts.dry_run || opts.print_config {
+        return SemanticModelStatus {
+            state: SemanticModelState::WouldInstall,
+            model_path: None,
+            detail: Some(
+                "would download the optional semantic model (~90MB, \
+                 sentence-transformers/all-MiniLM-L6-v2); re-run without \
+                 --dry-run/--print-config to install it."
+                    .into(),
+            ),
         };
     }
     let should_download = if opts.yes {
@@ -340,7 +376,19 @@ fn backup_file(path: &Path) -> Result<PathBuf> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "config".to_string());
-    let backup = path.with_file_name(format!("{file_name}.bak-{ts}"));
+    // Second-level precision alone collides on repeated runs within the
+    // same second (e.g. a test suite, or an agent retrying setup), and
+    // `std::fs::copy` silently overwrites its destination -- the second
+    // run's "backup" would actually destroy the first run's backup of
+    // the user's original configuration. Append a numeric suffix once a
+    // timestamped name is already taken, trying until a free one is
+    // found, so no run's backup is ever lost.
+    let mut backup = path.with_file_name(format!("{file_name}.bak-{ts}"));
+    let mut suffix = 1u32;
+    while backup.exists() {
+        backup = path.with_file_name(format!("{file_name}.bak-{ts}-{suffix}"));
+        suffix += 1;
+    }
     std::fs::copy(path, &backup)
         .with_context(|| format!("back up {} to {}", path.display(), backup.display()))?;
     Ok(backup)
@@ -491,6 +539,25 @@ fn configure_claude_code(
     // already exists, so refresh rather than duplicate or silently
     // keep stale settings (e.g. an embedding model path from a
     // previous run that no longer applies).
+    //
+    // Not transactional the way an atomic file replace would be — the
+    // `claude` CLI's own config storage is opaque, so there is no
+    // "write a new file, then rename" move available here. But it must
+    // not go straight from "working entry" to "no entry, and the add
+    // then also failed" with the previous configuration lost: capture
+    // `claude mcp get`'s output before removing, and if the replacement
+    // `add` fails, surface it so the user can restore by hand instead
+    // of having to remember or reconstruct what they had.
+    let previous_config = if already_configured {
+        Command::new("claude")
+            .args(["mcp", "get", "lain"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    };
     if already_configured {
         let _ = Command::new("claude")
             .args(["mcp", "remove", "lain"])
@@ -506,18 +573,40 @@ fn configure_claude_code(
             target: Some("claude mcp".into()),
             detail: None,
         },
-        Ok(out) => ConfigurationOutcome {
-            agent: "claude-code".into(),
-            state: ConfigurationState::Failed,
-            target: Some("claude mcp".into()),
-            detail: Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-        },
+        Ok(out) => {
+            let add_error = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            ConfigurationOutcome {
+                agent: "claude-code".into(),
+                state: ConfigurationState::Failed,
+                target: Some("claude mcp".into()),
+                detail: Some(failed_replacement_detail(add_error, previous_config)),
+            }
+        }
         Err(e) => ConfigurationOutcome {
             agent: "claude-code".into(),
             state: ConfigurationState::Failed,
             target: Some("claude mcp".into()),
-            detail: Some(e.to_string()),
+            detail: Some(failed_replacement_detail(e.to_string(), previous_config)),
         },
+    }
+}
+
+/// Build the failure message for a `claude mcp add` that failed after an
+/// existing `lain` entry was already removed to make way for it. When
+/// `previous_config` is `Some` (there was something to lose), the
+/// message includes it verbatim so the user can restore it by hand —
+/// silently dropping it here was the bug (PR #63 review): the CLI's own
+/// config storage is opaque, so this text is the only record of what
+/// used to be there. `previous_config` is `None` both when there was no
+/// prior entry and when capturing it failed; either way there's nothing
+/// to show.
+fn failed_replacement_detail(add_error: String, previous_config: Option<String>) -> String {
+    match previous_config {
+        Some(prev) if !prev.is_empty() => format!(
+            "{add_error}\n\nThe previous `lain` entry was removed to make way for this one \
+             and could not be restored automatically. Its configuration was:\n{prev}"
+        ),
+        _ => add_error,
     }
 }
 
@@ -737,6 +826,7 @@ fn print_human(report: &SetupReport) {
         SemanticModelState::NotInstalled => ("○", "optional model not installed".to_string()),
         SemanticModelState::DownloadFailed => ("×", "download failed".to_string()),
         SemanticModelState::Skipped => ("○", "skipped".to_string()),
+        SemanticModelState::WouldInstall => ("○", "would install (dry run)".to_string()),
     };
     println!("  Semantic search   {mark} {label}");
     println!();
@@ -897,6 +987,84 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{}");
         // Original is untouched by a backup — only the write path replaces it.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+    }
+
+    /// Two backups of the same file within the same second (a real
+    /// scenario: repeated `lain setup` runs, or a test suite) must not
+    /// collide — `std::fs::copy` silently overwrites its destination,
+    /// so a naive same-second timestamp would let the second run
+    /// destroy the first run's backup of the user's original config.
+    /// Deterministic regardless of real-time second-boundary luck: after
+    /// the first real backup, a synthetic file is pre-created at exactly
+    /// the base name (no suffix) a same-second second call would try
+    /// first, forcing the suffix branch to fire rather than hoping two
+    /// calls happen to land in the same wall-clock second.
+    #[test]
+    fn backup_file_does_not_collide_within_the_same_second() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".mcp.json");
+        std::fs::write(&path, "first").unwrap();
+        let backup1 = backup_file(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&backup1).unwrap(), "first");
+
+        // Simulate "a same-second backup already exists" deterministically:
+        // whatever timestamp the next call computes, pre-occupy its
+        // un-suffixed base name with unrelated content.
+        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let base = path.with_file_name(format!("{file_name}.bak-{ts}"));
+        std::fs::write(&base, "occupied by another run").unwrap();
+
+        std::fs::write(&path, "second").unwrap();
+        let backup2 = backup_file(&path).unwrap();
+
+        assert_ne!(
+            backup2, base,
+            "backup_file must not overwrite an already-occupied same-second path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&base).unwrap(),
+            "occupied by another run",
+            "the pre-existing same-second backup must survive untouched"
+        );
+        assert_eq!(std::fs::read_to_string(&backup2).unwrap(), "second");
+    }
+
+    /// PR #63 review finding: `configure_claude_code` removed the
+    /// existing `lain` entry before attempting to add the new one, and
+    /// if `add` then failed, the user's prior working configuration was
+    /// simply gone. `failed_replacement_detail` is the extracted, pure
+    /// piece of that fix (the shell-out to the real `claude` CLI isn't
+    /// independently testable here) — it must surface the captured
+    /// previous config, not swallow it.
+    #[test]
+    fn failed_replacement_detail_surfaces_the_lost_config() {
+        let detail = failed_replacement_detail(
+            "error: permission denied".into(),
+            Some("command: /usr/local/bin/lain\nargs: [mcp]".into()),
+        );
+        assert!(detail.contains("permission denied"));
+        assert!(detail.contains("/usr/local/bin/lain"));
+        assert!(detail.contains("removed to make way"));
+    }
+
+    #[test]
+    fn failed_replacement_detail_is_just_the_error_with_nothing_to_lose() {
+        // No prior entry existed (fresh install) — nothing was removed,
+        // so the message should not claim otherwise.
+        let detail = failed_replacement_detail("error: permission denied".into(), None);
+        assert_eq!(detail, "error: permission denied");
+
+        // Capturing `claude mcp get` itself failed — still nothing to
+        // show, and claiming "removed to make way for this one" would
+        // be misleading if capture failed for a reason other than "no
+        // prior entry" (e.g. `claude` misbehaving).
+        let detail =
+            failed_replacement_detail("error: permission denied".into(), Some(String::new()));
+        assert_eq!(detail, "error: permission denied");
     }
 
     #[test]
