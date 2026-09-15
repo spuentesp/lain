@@ -36,7 +36,10 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// JSON-RPC id of the `tools/call` request (initialize is id 1).
+/// JSON-RPC id of the `initialize` request.
+const ID_INITIALIZE: i64 = 1;
+/// JSON-RPC id of the first `tools/call` request; a retry (see the
+/// warming-up handling below) increments from here.
 const ID_CALL: i64 = 2;
 
 /// Run `lain mcp` as a subprocess, send one `tools/call`, print the
@@ -140,7 +143,7 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         let protocol_version = rust_mcp_schema::ProtocolVersion::latest().to_string();
         let init = json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": ID_INITIALIZE,
             "method": "initialize",
             "params": {
                 "protocolVersion": protocol_version,
@@ -161,9 +164,18 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         // answered whenever a startup re-index keeps the runtime busy.
     }
 
-    // Reader thread: stream stdout lines until the tools/call response
-    // shows up, then forward it. Reading line-by-line (not a fixed
-    // byte cap) so large responses survive intact.
+    // Reader thread: forward every stdout line that carries a JSON-RPC
+    // `id` other than the `initialize` request's, for as long as the
+    // child keeps writing. AGENT_UX_ROADMAP.md Milestone 4's central
+    // gate can answer a `tools/call` made immediately after `initialize`
+    // with a structured `warming_up` result instead of blocking until
+    // the startup re-index finishes — a one-shot process has no later
+    // chance to poll, so the loop below re-sends the same call until it
+    // gets a real answer, and needs to keep watching stdout across every
+    // retry rather than stopping after the first `id` it sees. A
+    // notification (`notifications/lain/capabilities_changed`, no `id`
+    // field) is silently skipped here; a one-shot invocation has no use
+    // for it.
     let stdout = child.stdout.take().context("take stdout")?;
     let (tx, rx) = std::sync::mpsc::channel::<Value>();
     std::thread::spawn(move || {
@@ -176,9 +188,11 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
                 Ok(0) | Err(_) => break, // EOF or IO error: server gone
                 Ok(_) => {
                     if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        if v.get("id").and_then(|i| i.as_i64()) == Some(ID_CALL) {
-                            let _ = tx.send(v);
-                            break;
+                        let id = v.get("id").and_then(|i| i.as_i64());
+                        if let Some(id) = id {
+                            if id != ID_INITIALIZE && tx.send(v).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
@@ -198,10 +212,12 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         let _ = err_tx.send(s);
     });
 
-    let deadline = std::time::Duration::from_secs(timeout_secs);
-    let tool_response = match rx.recv_timeout(deadline) {
-        Ok(v) => v,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+    let overall_deadline = std::time::Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
+    let mut next_id = ID_CALL;
+    let tool_response = loop {
+        let remaining = overall_deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
             let _ = child.kill();
             let _ = child.wait();
             let stderr_text = err_rx
@@ -217,22 +233,82 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
                 }
             ));
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let stderr_text = err_rx
-                .recv_timeout(std::time::Duration::from_millis(200))
-                .unwrap_or_default();
-            return Err(anyhow!(
-                "`lain mcp` exited without answering tools/call \
-                 (server stderr: {})",
-                if stderr_text.trim().is_empty() {
-                    "<empty>".into()
-                } else {
-                    stderr_text
-                }
-            ));
+        let response = match rx.recv_timeout(remaining) {
+            Ok(v) => v,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stderr_text = err_rx
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .unwrap_or_default();
+                return Err(anyhow!(
+                    "no tools/call response from `lain mcp` within {timeout_secs}s \
+                     (server stderr: {})",
+                    if stderr_text.trim().is_empty() {
+                        "<empty>".into()
+                    } else {
+                        stderr_text
+                    }
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stderr_text = err_rx
+                    .recv_timeout(std::time::Duration::from_millis(200))
+                    .unwrap_or_default();
+                return Err(anyhow!(
+                    "`lain mcp` exited without answering tools/call \
+                     (server stderr: {})",
+                    if stderr_text.trim().is_empty() {
+                        "<empty>".into()
+                    } else {
+                        stderr_text
+                    }
+                ));
+            }
+        };
+
+        // A `graph_required`/`semantic_required` tool called before the
+        // index is `ready` comes back as the central gate's structured
+        // `warming_up` envelope, not the real answer — retry the exact
+        // same call instead of printing a placeholder and exiting. This
+        // is the one-shot equivalent of the poll loop a persistent MCP
+        // client is expected to run against `get_capabilities`.
+        let gate_envelope = response
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let is_warming_up = gate_envelope
+            .as_ref()
+            .and_then(|v| v.get("state"))
+            .and_then(|s| s.as_str())
+            == Some("warming_up");
+        if !is_warming_up {
+            break response;
         }
+        let retry_after_ms = gate_envelope
+            .as_ref()
+            .and_then(|v| v.get("retry_after_ms"))
+            .and_then(|r| r.as_u64())
+            .unwrap_or(1000);
+        let remaining_after_retry = overall_deadline.saturating_sub(started.elapsed());
+        if remaining_after_retry.is_zero() {
+            continue; // let the top of the loop raise the timeout error
+        }
+        std::thread::sleep(
+            std::time::Duration::from_millis(retry_after_ms).min(remaining_after_retry),
+        );
+        next_id += 1;
+        let retry_call = json!({
+            "jsonrpc": "2.0",
+            "id": next_id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": args_obj}
+        });
+        let stdin = child.stdin.as_mut().context("re-take stdin for retry")?;
+        writeln!(stdin, "{}", retry_call)?;
+        stdin.flush()?;
     };
 
     // Response in hand: now the server is disposable.

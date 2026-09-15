@@ -975,9 +975,55 @@ pub struct LainMcpServer {
 /// reports degraded state instead of silently serving an empty
 /// graph. Returns immediately when no `LainServer` is attached
 /// (sidecar / read-only servers).
+/// Build the custom notification `get_capabilities` advertises as the
+/// canonical polling fallback: `notifications/lain/capabilities_changed`.
+/// Its payload is the exact JSON `get_capabilities` returns — one
+/// projection, read here rather than recomputed, so the pushed payload
+/// can never drift from what a client would see by polling instead.
+/// Returns `None` on a serialization failure (never expected in
+/// practice); the caller logs and moves on rather than treating a
+/// failed *notification* as an indexing failure.
+fn capabilities_changed_notification(
+    tool_executor: &ToolExecutor,
+) -> Option<rust_mcp_sdk::schema::CustomNotification> {
+    let text = tool_executor.get_capabilities().ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let params = value.as_object().cloned()?;
+    Some(rust_mcp_sdk::schema::CustomNotification {
+        method: "notifications/lain/capabilities_changed".to_string(),
+        params: Some(params),
+    })
+}
+
+/// Send the capability-change notification if a transport that supports
+/// server-initiated notifications is attached. `notifier` is `None` for
+/// HTTP (a plain request/response JSON-RPC loop with no persistent
+/// connection to push an unsolicited notification through) and for the
+/// sidecar/read-only path (which never reaches this function at all,
+/// since `server` is `None` there). Per the roadmap, delivery failure
+/// here is logged to stderr and never changes indexing state — polling
+/// `get_capabilities` remains the canonical fallback for any client that
+/// doesn't support the notification, or wasn't listening for it.
+async fn notify_capabilities_changed(
+    notifier: Option<&std::sync::Arc<dyn McpServer>>,
+    tool_executor: &ToolExecutor,
+) {
+    let Some(notifier) = notifier else {
+        return;
+    };
+    let Some(notification) = capabilities_changed_notification(tool_executor) else {
+        eprintln!("capabilities_changed notification: could not serialize capability snapshot");
+        return;
+    };
+    if let Err(e) = notifier.notify_custom(notification).await {
+        eprintln!("capabilities_changed notification failed to send: {e}");
+    }
+}
+
 pub(crate) async fn await_startup_reindex(
     server: Option<std::sync::Arc<LainServer>>,
     reindex_timeout: Option<std::time::Duration>,
+    notifier: Option<std::sync::Arc<dyn McpServer>>,
 ) {
     let Some(server) = server else {
         return;
@@ -1021,6 +1067,7 @@ pub(crate) async fn await_startup_reindex(
         }
     };
     *last_outcome.lock() = outcome;
+    notify_capabilities_changed(notifier.as_ref(), &server.tool_executor).await;
 }
 
 impl LainMcpServer {
@@ -1219,38 +1266,11 @@ impl LainMcpServer {
     pub async fn run_stdio(self) -> SdkResult<()> {
         info!("Starting Lain MCP server on stdio");
 
-        // Milestone 4 (AGENT_UX_ROADMAP.md): the startup re-index runs on
-        // its own background task instead of being awaited here, so
-        // `initialize`/`ping`/`tools/list` and any `graph_independent`
-        // tool call are answered immediately even on a cold, large
-        // repository. Graph-dependent tool calls made before the index
-        // reaches `ready` are turned back at the central gate in
-        // `dispatch_tool_call` with a structured `warming_up` result
-        // instead of racing the indexer for an empty graph (the bug this
-        // code used to guard against by blocking here).
-        //
-        // `build_core_memory` short-circuits when the graph is already
-        // current, so this is a no-op on a warm start. The timeout budget
-        // (default 300s, override via `LAIN_REINDEX_TIMEOUT` env or
-        // `--reindex-timeout` flag) still bounds one attempt; past that
-        // the coordinator records `RefreshResult::Timeout` on
-        // `last_outcome` and marks the readiness handle
-        // `unavailable_error`, both surfaced through `get_health` /
-        // `get_capabilities` — not just `tracing::warn` and stderr, which
-        // a stdio MCP client never sees.
-        //
-        // This is not full cooperative cancellation: the indexing
-        // coordinator has no cancellation token yet, so a clean shutdown
-        // below gives it a short bounded window to finish and otherwise
-        // hard-aborts it with `AbortHandle::abort()` rather than waiting
-        // indefinitely. Threading a real cancellation token through every
-        // scan/resolve/persist phase boundary is tracked separately
-        // (roadmap step 11) and intentionally not attempted here.
-        let startup_task = tokio::spawn(await_startup_reindex(
-            self.server.clone(),
-            self.reindex_timeout,
-        ));
-        let startup_abort = startup_task.abort_handle();
+        // Captured before `self.server` is moved into `handler` below;
+        // this is the same `Option<Arc<LainServer>>` the background
+        // re-index needs.
+        let lain_server_for_reindex = self.server.clone();
+        let reindex_timeout = self.reindex_timeout;
 
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
@@ -1275,6 +1295,47 @@ impl LainMcpServer {
             client_task_store: None,
             message_observer: None,
         });
+
+        // Milestone 4 (AGENT_UX_ROADMAP.md): the startup re-index runs on
+        // its own background task instead of being awaited here, so
+        // `initialize`/`ping`/`tools/list` and any `graph_independent`
+        // tool call are answered immediately even on a cold, large
+        // repository. Graph-dependent tool calls made before the index
+        // reaches `ready` are turned back at the central gate in
+        // `dispatch_tool_call` with a structured `warming_up` result
+        // instead of racing the indexer for an empty graph (the bug this
+        // code used to guard against by blocking here).
+        //
+        // `build_core_memory` short-circuits when the graph is already
+        // current, so this is a no-op on a warm start. The timeout budget
+        // (default 300s, override via `LAIN_REINDEX_TIMEOUT` env or
+        // `--reindex-timeout` flag) still bounds one attempt; past that
+        // the coordinator records `RefreshResult::Timeout` on
+        // `last_outcome` and marks the readiness handle
+        // `unavailable_error`, both surfaced through `get_health` /
+        // `get_capabilities` — not just `tracing::warn` and stderr, which
+        // a stdio MCP client never sees.
+        //
+        // `server` (the constructed `ServerRuntime`, cloned here before
+        // `.start()` consumes an `Arc` handle to it) is the notifier for
+        // `notifications/lain/capabilities_changed` — advisory, best
+        // effort; a client that doesn't support it, or wasn't listening,
+        // still gets the same answer by polling `get_capabilities`.
+        //
+        // This is not full cooperative cancellation: the indexing
+        // coordinator has no cancellation token yet, so a clean shutdown
+        // below gives it a short bounded window to finish and otherwise
+        // hard-aborts it with `AbortHandle::abort()` rather than waiting
+        // indefinitely. Threading a real cancellation token through every
+        // scan/resolve/persist phase boundary is tracked separately
+        // (roadmap step 11) and intentionally not attempted here.
+        let notifier: Arc<dyn McpServer> = server.clone();
+        let startup_task = tokio::spawn(await_startup_reindex(
+            lain_server_for_reindex,
+            reindex_timeout,
+            Some(notifier),
+        ));
+        let startup_abort = startup_task.abort_handle();
 
         let result = server.start().await;
 
@@ -1308,9 +1369,15 @@ impl LainMcpServer {
         // returning — it is left detached and reclaimed on process exit,
         // the same way the NLP background-enrichment task spawned inside
         // `build_core_memory` already is.
+        //
+        // No notifier: this transport is a plain request/response
+        // JSON-RPC loop with no persistent connection to push an
+        // unsolicited notification through. `get_capabilities` polling
+        // is the only freshness signal HTTP clients get today.
         tokio::spawn(await_startup_reindex(
             self.server.clone(),
             self.reindex_timeout,
+            None,
         ));
 
         // Publish the real listener port so tool output can link to

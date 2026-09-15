@@ -194,13 +194,26 @@ impl AgentChild {
         )
         .expect("write stdin");
         self.stdin.flush().expect("flush");
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).expect("read stdout");
-        if line.is_empty() {
-            panic!("empty reply for {method}");
+        // Milestone 4 added a server-initiated
+        // `notifications/lain/capabilities_changed` notification that can
+        // land on stdout at any time, not just as a reply to something
+        // this test sent. A notification has no `id`; skip past any and
+        // keep reading until the actual response to *this* request
+        // arrives — otherwise a notification landing between request and
+        // response gets misread as that response.
+        loop {
+            let mut line = String::new();
+            self.stdout.read_line(&mut line).expect("read stdout");
+            if line.is_empty() {
+                panic!("empty reply for {method}");
+            }
+            let value: serde_json::Value = serde_json::from_str(&line)
+                .unwrap_or_else(|e| panic!("not JSON for {method}: {e}\nline: {line:?}"));
+            if value.get("id").is_none() {
+                continue;
+            }
+            return value;
         }
-        serde_json::from_str(&line)
-            .unwrap_or_else(|e| panic!("not JSON for {method}: {e}\nline: {line:?}"))
     }
 
     fn initialize(&mut self) {

@@ -140,6 +140,12 @@ struct LainChild {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
+    /// Server-initiated notifications (no `id` field) seen on stdout
+    /// while waiting for a request/response pair in `send`. A pipe
+    /// preserves write order, so any notification the server sent before
+    /// the next response is guaranteed to surface here rather than being
+    /// silently skipped or mistaken for that response.
+    notifications: Vec<serde_json::Value>,
 }
 
 impl LainChild {
@@ -166,6 +172,7 @@ impl LainChild {
             child,
             stdin,
             stdout,
+            notifications: Vec::new(),
         }
     }
 
@@ -178,9 +185,24 @@ impl LainChild {
         });
         writeln!(self.stdin, "{}", msg).expect("write stdin");
         self.stdin.flush().expect("flush");
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).expect("read stdout");
-        serde_json::from_str(&line).expect("parse jsonrpc response")
+        // Milestone 4 added a server-initiated notification
+        // (`notifications/lain/capabilities_changed`) that can land on
+        // stdout at any time, not just as a reply to something this test
+        // sent. A notification has no `id`; keep reading past any until
+        // the actual response to *this* request arrives, instead of
+        // risking every existing poll loop here misreading a
+        // notification as the response it was waiting for.
+        loop {
+            let mut line = String::new();
+            self.stdout.read_line(&mut line).expect("read stdout");
+            let value: serde_json::Value =
+                serde_json::from_str(&line).expect("parse jsonrpc message");
+            if value.get("id").is_none() {
+                self.notifications.push(value);
+                continue;
+            }
+            return value;
+        }
     }
 
     fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
@@ -344,6 +366,85 @@ fn find_anchors_works_after_a_cold_start() {
     assert!(
         text.contains("orchestrate"),
         "the fixture's `orchestrate` function must appear in the anchor list: {text}"
+    );
+
+    child.shutdown();
+}
+
+/// Milestone 4 (roadmap step 9 / issue 13): once the background re-index
+/// reaches a terminal state, the server pushes one
+/// `notifications/lain/capabilities_changed` notification, unprompted,
+/// carrying the same payload `get_capabilities` would return. Polling
+/// remains the canonical fallback for a client that doesn't support it —
+/// this test just proves the push side actually fires over stdio, not
+/// that clients must rely on it.
+#[test]
+fn capabilities_changed_notification_fires_on_startup_completion() {
+    let Some(bin) = lain_bin() else {
+        eprintln!("skipping: no lain binary (set LAIN_BIN or run `cargo build`)");
+        return;
+    };
+    let Some(version) = protocol_version(&bin) else {
+        eprintln!("skipping: could not determine MCP protocol version");
+        return;
+    };
+    let fixture = build_fixture();
+
+    let mut child = LainChild::spawn(&bin, fixture.path(), &[]);
+    let init_params = serde_json::json!({
+        "protocolVersion": version,
+        "capabilities": {},
+        "clientInfo": {"name": "cold-start-test-notify", "version": "1"},
+    });
+    let init_resp = child.send("initialize", init_params);
+    assert!(
+        init_resp.get("result").is_some(),
+        "initialize must succeed: {init_resp}"
+    );
+
+    // Poll until indexing reaches `ready` (or fails the test on timeout).
+    // Every `send`/`call_tool` call in this loop transparently drains any
+    // notification lines into `child.notifications` as a side effect —
+    // see `LainChild::send`.
+    let budget = Duration::from_secs(30);
+    let poll_start = Instant::now();
+    loop {
+        let caps = child.call_tool("get_capabilities", serde_json::json!({}));
+        let text = caps
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+        let state = value
+            .pointer("/indexing/state")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if state == "ready" || state == "unavailable_error" {
+            break;
+        }
+        assert!(
+            poll_start.elapsed() < budget,
+            "indexing never reached a terminal state within {budget:?}; last capabilities: {value}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let notification = child.notifications.iter().find(|n| {
+        n.get("method").and_then(|m| m.as_str()) == Some("notifications/lain/capabilities_changed")
+    });
+    assert!(
+        notification.is_some(),
+        "expected a notifications/lain/capabilities_changed notification on stdout \
+         after startup completed; saw these notifications instead: {:?}",
+        child.notifications
+    );
+    let params = notification
+        .unwrap()
+        .get("params")
+        .expect("notification must carry params");
+    assert!(
+        params.get("schema_version").is_some() && params.get("capabilities").is_some(),
+        "notification params must match the get_capabilities payload shape: {params}"
     );
 
     child.shutdown();

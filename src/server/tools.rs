@@ -490,7 +490,10 @@ impl ToolExecutor {
         ToolRegistry::dispatch(&self.ctx, name, &args).await
     }
 
-    fn get_capabilities(&self) -> Result<String, LainError> {
+    /// `pub(crate)` (not just called from `call_inner`) so the MCP
+    /// handler's capability-change notification can serialize the exact
+    /// same projection instead of computing a second one.
+    pub(crate) fn get_capabilities(&self) -> Result<String, LainError> {
         use crate::server::readiness::{
             Capabilities, Capability, CapabilityState, IndexState, SCHEMA_VERSION,
         };
