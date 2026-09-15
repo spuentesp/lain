@@ -21,7 +21,33 @@ on:
 permissions: {}
 
 jobs:
+  # Guards every build job below: a tag can be pushed to any commit,
+  # including one CI never ran on or one CI failed on. Without this,
+  # `git tag vX && git push --tags` ships binaries built from
+  # unverified source. `github.sha` on a tag-push event is already the
+  # target commit (not the tag object), so no peeling is needed.
+  ci-status-check:
+    name: Verify tagged commit passed CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require a passing CI run for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          CONCLUSION=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          echo "CI conclusion for commit $SHA: $CONCLUSION"
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::No successful CI run found for tagged commit $SHA (conclusion: $CONCLUSION). Release builds require the 'CI' workflow to have completed successfully on this exact commit."
+            exit 1
+          fi
+
   version-check:
+    needs: ci-status-check
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -11,6 +11,8 @@ name: CI
 # 3-OS test matrix, a release build for schema-drift, and another for
 # capability, before anyone looked at the result.
 #
+#   Tier 0 (parallel with tier 1): changes. A cheap git-diff
+#     classification other jobs read via `needs.changes.outputs`.
 #   Tier 1 (fast, parallel, gates everything below): lint, npm-shim,
 #     action-contracts. Each is a few minutes at most and needs no
 #     release build.
@@ -23,6 +25,19 @@ name: CI
 # 2) in parallel. The point is cheap iteration while a PR still has
 # red jobs, which is the common case during active development, not
 # the fastest possible time-to-green on an already-passing PR.
+#
+# Two more cuts on top of the tier graph, both scoped to Tier 2 only
+# (Tier 1 always runs, even in draft, so a draft PR still gets fast
+# lint/npm-shim/contracts feedback):
+#   - Draft PRs skip Tier 2 (`github.event.pull_request.draft != true`).
+#     A push event has no `pull_request` context, so this evaluates to
+#     `null != true` (true) there and never affects push-triggered runs.
+#   - Docs-only changes skip the expensive rust-matrix jobs (`test`,
+#     `capability`, `schema-drift`) via the `changes` job's
+#     `docs_only` output. The classifier defaults to `false` (run
+#     everything) whenever it can't establish a diff base, so an
+#     unrecognized file type or force-push never silently skips a
+#     real code change.
 #
 # Job `name:` values are unchanged by the tiering — agent-contract.yml
 # matches jobs by name via a `workflow_run` rollup after this whole
@@ -55,9 +70,68 @@ env:
 permissions: {}
 
 jobs:
+  changes:
+    name: Detect change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify changed files
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.event.after }}"
+          fi
+
+          # Any uncertainty about the diff range (new branch, force-push,
+          # missing context) defaults to docs_only=false -- run the full
+          # matrix. The only way to skip it is a diff this script can
+          # positively classify as docs-only, never the absence of one.
+          if [ -z "$BASE" ] || [ -z "$HEAD" ] || [[ "$BASE" =~ ^0+$ ]]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "Could not determine a diff base; running full matrix."
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          if [ -z "$CHANGED" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "No changed files detected; running full matrix."
+            exit 0
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Conservative allowlist: every changed file must match one of
+          # these patterns for the run to count as docs-only. Anything
+          # unrecognized counts as code.
+          NON_DOCS=$(echo "$CHANGED" | grep -vE '(\.md$|^docs/|^LICENSE$|^\.github/ISSUE_TEMPLATE/|^\.gitignore$)' || true)
+          if [ -z "$NON_DOCS" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "All changed files match the docs-only allowlist."
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "Non-docs files changed:"
+            echo "$NON_DOCS"
+          fi
+
   test:
     name: Cargo Test (${{ matrix.os }})
-    needs: [lint, npm-shim, action-contracts]
+    needs: [lint, npm-shim, action-contracts, changes]
+    if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
     # A hung test (this session hit a real one: a subprocess reader
     # with no timeout blocking forever) must fail the job, not sit on
@@ -120,7 +194,8 @@ jobs:
 
   capability:
     name: Capability suite (demo.sh)
-    needs: [lint, npm-shim, action-contracts]
+    needs: [lint, npm-shim, action-contracts, changes]
+    if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -157,7 +232,7 @@ jobs:
     needs: [lint, npm-shim, action-contracts]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
     # The action posts a commit status and a PR comment. The default
     # GITHUB_TOKEN is read-only; grant the scopes the steps need.
     permissions:
@@ -271,7 +346,8 @@ jobs:
 
   schema-drift:
     name: Tool schema matches docs/tool-schema.json
-    needs: [lint, npm-shim, action-contracts]
+    needs: [lint, npm-shim, action-contracts, changes]
+    if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
