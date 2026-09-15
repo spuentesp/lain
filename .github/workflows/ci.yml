@@ -195,8 +195,11 @@ jobs:
       contents: read
     # The drift check runs on main, where release tags are pushed.
     # On PRs the comparison would fail the moment a new tag is cut,
-    # before the bump PR can land. Run only on full_battery.
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    # before the bump PR can land -- confirmed live: this job failed
+    # on this exact PR when v0.7.4-rc1 was cut mid-review, before
+    # action.yml's pinned default caught up. Push-to-main only, not
+    # the broader full-battery condition the other gated jobs share.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract pinned version from action.yml
