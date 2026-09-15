@@ -1,7 +1,7 @@
 name: CI
 
 # Two-tier CI: cheap battery on dev/PR-to-dev, full hardened on
-# main and PR-to-main. Job-level `if: env['full-battery']`
+# main and PR-to-main. Job-level `if: env.full_battery`
 # expressions keep the matrix lean on dev without splitting the
 # workflow file.
 #
@@ -24,11 +24,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # `full-battery` is true on main pushes, PRs targeting main,
+  # `full_battery` is true on main pushes, PRs targeting main,
   # and manual dispatches. Heavy jobs (macos/windows test cells,
   # capability suite, coverage, action-contracts) gate on this.
   # Cheaper jobs run on both branches.
-  full-battery: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main') }}
+  full_battery: ${{ github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main') }}
 
 # Top-level `permissions: {}` denies everything by default; each job
 # grants only what it needs (mirroring safeskill.yml's posture).
@@ -45,7 +45,7 @@ jobs:
       fail-fast: false
       matrix:
         # Fast lane: Linux only. macos/windows cells move to the
-        # `test-cross` job below, which is gated on full-battery.
+        # `test-cross` job below, which is gated on full_battery.
         os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,7 +102,7 @@ jobs:
     # ~10 min/runner on every dev push and PR-to-dev.
     name: Cargo Test cross-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    if: env['full-battery'] == 'true'
+    if: env.full_battery == 'true'
     permissions:
       contents: read
     strategy:
@@ -135,7 +135,7 @@ jobs:
   capability:
     name: Capability suite (demo.sh)
     runs-on: ubuntu-latest
-    if: env['full-battery'] == 'true'
+    if: env.full_battery == 'true'
     permissions:
       contents: read
     steps:
@@ -192,8 +192,8 @@ jobs:
       contents: read
     # The drift check runs on main, where release tags are pushed.
     # On PRs the comparison would fail the moment a new tag is cut,
-    # before the bump PR can land. Run only on full-battery.
-    if: env['full-battery'] == 'true'
+    # before the bump PR can land. Run only on full_battery.
+    if: env.full_battery == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract pinned version from action.yml
@@ -339,7 +339,7 @@ jobs:
 
 
   coverage:
-    # Coverage run is intentionally restricted to full-battery
+    # Coverage run is intentionally restricted to full_battery
     # (push-to-main or PR-to-main). PRs already pay the `cargo test
     # --workspace` cost on every OS; adding a coverage build per PR
     # would lengthen the queue without changing the merge signal
@@ -350,7 +350,7 @@ jobs:
     # first deliberate baseline PR.
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-latest
-    if: env['full-battery'] == 'true'
+    if: env.full_battery == 'true'
     permissions:
       contents: read
     steps:
@@ -403,7 +403,7 @@ jobs:
   action-contracts:
     name: Badge and release contracts
     runs-on: ubuntu-latest
-    if: env['full-battery'] == 'true'
+    if: env.full_battery == 'true'
     permissions:
       contents: read
     steps:
