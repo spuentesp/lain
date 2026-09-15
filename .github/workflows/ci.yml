@@ -432,5 +432,67 @@ jobs:
         run: python .github/actions/lain-health-badge/tests/test_action.py
       - name: Badge extraction
         run: bash .github/actions/lain-health-badge/tests/test_extract_added_fns.sh
+
+  # Publishes the `lain/agent-contract` commit status directly from
+  # this workflow run, instead of the separate agent-contract.yml's
+  # `workflow_run: [CI]` rollup. That indirection never actually fired
+  # for a PR's own commit -- confirmed live: dozens of prior PR-branch
+  # CI completions, zero corresponding agent-contract runs, only ever
+  # firing from CI runs already on `main` (i.e. post-merge). Since
+  # `lain/agent-contract` is a required branch-protection check, this
+  # meant no PR could ever satisfy it before merge; only an admin
+  # bypass got PRs in. Running the aggregation as a job in this same
+  # workflow fires deterministically for every push and pull_request,
+  # on every branch, with no separate trigger to go stale.
+  #
+  # Same aggregate rule as before: PASS iff every agent-relevant job
+  # (capability, schema-drift, npm-shim) is success or skipped.
+  agent-contract:
+    name: Publish agent-contract status
+    needs: [capability, schema-drift, npm-shim]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Aggregate into lain/agent-contract commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CAPABILITY: ${{ needs.capability.result }}
+          SCHEMA_DRIFT: ${{ needs.schema-drift.result }}
+          NPM_SHIM: ${{ needs.npm-shim.result }}
+        run: |
+          set -euo pipefail
+
+          # `github.sha` on a pull_request event is the ephemeral
+          # merge commit, not the PR's actual head commit -- posting a
+          # status there would be invisible to the PR branch of the
+          # protection check it's meant to satisfy. Use the real head
+          # SHA for PRs; `github.sha` is already correct for push.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
+
+          status="success"
+          total=0
+          passed=0
+          for result in "$CAPABILITY" "$SCHEMA_DRIFT" "$NPM_SHIM"; do
+            total=$((total + 1))
+            if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
+              passed=$((passed + 1))
+            else
+              status="failure"
+            fi
+          done
+          summary="${passed}/${total} agent-contract jobs green"
+          echo "Rollup for ${SHA}: ${summary} -> ${status}"
+
+          gh api "repos/${{ github.repository }}/statuses/${SHA}" \
+            --method POST \
+            --field state="$status" \
+            --field description="$summary" \
+            --field context='lain/agent-contract'
       - name: Installer checks
         run: bash tests/install-test.sh
