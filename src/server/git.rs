@@ -133,7 +133,7 @@ impl GitSensor {
 
         for entry in statuses.iter() {
             if entry.status().is_wt_new() {
-                if let Some(path) = entry.path() {
+                if let Ok(path) = entry.path() {
                     let full_path = self.workspace.join(path);
                     changes.push(FileChange {
                         path: full_path,
@@ -479,9 +479,10 @@ impl GitSensor {
     pub fn get_repo_identity(&self) -> Result<Option<RepoIdentity>, LainError> {
         let remotes = self.repo.remotes()?;
         for remote_name in remotes.iter().flatten() {
+            let Some(remote_name) = remote_name else { continue };
             if remote_name == "origin" {
                 let remote = self.repo.find_remote(remote_name)?;
-                if let Some(url) = remote.url() {
+                if let Ok(url) = remote.url() {
                     return Ok(RepoIdentity::from_remote(url));
                 }
             }
