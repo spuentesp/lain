@@ -50,14 +50,63 @@ fn tool_error_message(env: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-struct Fixture {
+/// Fixture directories the spawned `lain server` needs for its entire
+/// lifetime, not just while `boot_server` is on the stack. Bundled with
+/// the `ServerGuard` so a caller that binds the whole tuple (rather than
+/// discarding the tempdirs) keeps them alive until the guard itself
+/// drops — see the doc comment on `boot_server` for the bug this fixes.
+struct ServerFixture {
+    _guard: ServerGuard,
     _project: tempfile::TempDir,
     _state: tempfile::TempDir,
     _xdg_config: tempfile::TempDir,
-    _guard: ServerGuard,
 }
 
-fn boot_server(port: u16) -> Fixture {
+/// Boots a real `lain server` against a freshly-built one-repo fixture.
+///
+/// Returns a [`ServerFixture`] bundling the [`ServerGuard`] with every
+/// tempdir the *running server process* depends on — not just the ones
+/// `boot_server` itself touches before returning. Dropping the fixture
+/// (not just the guard) is what tears the server-owned files down.
+///
+/// **Bug this fixes:** the server keeps running after `boot_server`
+/// returns — indexing continues, and its file watcher stays live on the
+/// repo directory. The previous version of this helper returned a bare
+/// `ServerGuard` and let `project`/`state`/`xdg_config` — the tempdirs
+/// backing the actual git repo the server watches — drop the instant
+/// the function returned. `TempDir::drop` deletes the whole tree, which
+/// fires a burst of filesystem-delete events the watcher picks up and
+/// reacts to with a forced re-index (`RepoIndex::start_watcher` ->
+/// `index_forced`) against a repo that's now partially or fully gone,
+/// racing the boot-time index. That produced an intermittent, fast
+/// (0.2-0.4s) "Git error: reference 'HEAD' not found" -> `RepoHealth::Degraded`,
+/// surfacing through the central readiness gate (AGENT_UX_ROADMAP.md M4
+/// step 8) as confusing, unrelated-looking test failures ("search_org
+/// missing-query message should name query", etc.) depending on which
+/// assertion happened to run next. Confirmed via `RepoIndex::last_index_error`
+/// on 8+ of 30 local repro runs — always the same git error, at a
+/// consistent ~25-30% rate, matching a genuine delete/reindex race
+/// rather than a fixed bug. `RepoIndex::index_one_repo` and the
+/// readiness gate were both working as designed; only the test fixture's
+/// tempdir lifetime was wrong.
+fn boot_server_fixture(port: u16) -> ServerFixture {
+    let (guard, project, state, xdg_config) = boot_server(port);
+    ServerFixture {
+        _guard: guard,
+        _project: project,
+        _state: state,
+        _xdg_config: xdg_config,
+    }
+}
+
+fn boot_server(
+    port: u16,
+) -> (
+    ServerGuard,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
     // Same fixture as `feat_suite.rs`: one minimal Rust repo with
     // `orchestrate`, `entrypoint`, `helper_a`, `helper_b` so the
     // graph is non-empty and `find_anchors`/`get_blast_radius`/
@@ -141,19 +190,11 @@ fn boot_server(port: u16) -> Fixture {
             )
         });
 
-    let guard = ServerGuard {
-        child,
-        stderr_path: stderr_path.clone(),
-    };
+    let guard = ServerGuard { child, stderr_path };
 
     let host = format!("127.0.0.1:{port}");
     wait_for_health(&host, Duration::from_secs(30));
-    Fixture {
-        _project: project,
-        _state: state,
-        _xdg_config: xdg_config,
-        _guard: guard,
-    }
+    (guard, project, state, xdg_config)
 }
 
 /// One big `#[test]` that walks through every tool we cover, asserting
@@ -166,7 +207,7 @@ fn boot_server(port: u16) -> Fixture {
 fn feat_negative_paths_end_to_end() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let _server = boot_server(port);
+    let _server = boot_server_fixture(port);
 
     // The fixture defines `orchestrate`, `entrypoint`, `helper_a`,
     // and `helper_b` and commits them. `wait_for_health` only waits

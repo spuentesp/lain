@@ -41,6 +41,30 @@ pub fn tool_text_result(
     }
 }
 
+/// Project a central-gate [`crate::server::readiness::GatedResponse`] into
+/// a `CallToolResult`. Warm-up and `unavailable_optional` responses are
+/// successful results (`isError: false`) — the state is expected and
+/// retryable, not a failed call; only a terminal indexing failure sets
+/// `isError: true`. The same JSON is mirrored into both `structuredContent`
+/// (for clients that read it) and a text content block (for clients that
+/// don't).
+pub fn gated_tool_result(
+    response: &crate::server::readiness::GatedResponse,
+    overlay: &VolatileOverlay,
+    static_graph_generation_unix: Option<i64>,
+) -> CallToolResult {
+    let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
+    let text = serde_json::to_string(&value).unwrap_or_default();
+    CallToolResult {
+        content: vec![ContentBlock::TextContent(TextContent::new(
+            text, None, None,
+        ))],
+        is_error: Some(response.is_error()),
+        meta: revision_meta(overlay, static_graph_generation_unix),
+        structured_content: value.as_object().cloned(),
+    }
+}
+
 /// Build a `_meta` map for the `CallToolResult` envelope that
 /// records the overlay's current `revision`. Read once at construction
 /// time so the value is stable for the lifetime of the response —

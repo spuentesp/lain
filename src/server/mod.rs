@@ -32,6 +32,7 @@ pub mod watcher;
 
 pub mod ingest;
 pub mod query;
+pub mod readiness;
 pub mod reload;
 
 // Multiplayer awareness

@@ -220,7 +220,19 @@ pub const DISABLE_SOURCE_WATCHER_ENV: &str = "LAIN_DISABLE_FILE_WATCHER";
 /// not run `cargo metadata`) took it to 2 with `cargo` present.
 /// `get_health`'s language-support table is the place to check which
 /// servers are actually resolvable.
-pub fn start_source_watcher(workspace: PathBuf, server: crate::server::LainServer) {
+///
+/// AGENT_UX_ROADMAP.md Milestone 4, roadmap step 7 (watcher-ready
+/// handoff): waits (bounded) for the watcher thread's initial `notify`
+/// registration to complete before returning, using the same
+/// `ready_signal` barrier the watcher's own tests already relied on
+/// internally. Without this, a caller that reads current state
+/// immediately after calling this function (`run_mcp`'s initial
+/// `sync_volatile_overlay`) could race a real edit that lands after that
+/// read but before the watcher is actually subscribed — silently lost
+/// until the next commit-triggered reindex. A timeout here degrades to
+/// "watcher is presumably still starting" rather than blocking startup
+/// indefinitely if directory registration is ever unexpectedly slow.
+pub async fn start_source_watcher(workspace: PathBuf, server: crate::server::LainServer) {
     if env_disables(std::env::var(DISABLE_SOURCE_WATCHER_ENV).ok().as_deref()) {
         tracing::info!(
             "source file watcher disabled by {}",
@@ -229,7 +241,21 @@ pub fn start_source_watcher(workspace: PathBuf, server: crate::server::LainServe
         return;
     }
     tracing::info!("source file watcher: watching {:?}", workspace);
-    crate::server::watcher::FileWatcher::new().start(workspace, server);
+    let ready = crate::server::watcher::FileWatcher::new().start(workspace, server);
+    match tokio::time::timeout(std::time::Duration::from_secs(5), ready).await {
+        Ok(Ok(watched)) => {
+            tracing::debug!("source file watcher: {watched} directories registered");
+        }
+        Ok(Err(_)) => {
+            tracing::warn!("source file watcher: readiness sender dropped before registering");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "source file watcher: directory registration did not complete within 5s; \
+                 continuing without waiting further"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

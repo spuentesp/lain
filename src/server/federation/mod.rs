@@ -10,6 +10,7 @@ pub mod health;
 pub mod loader;
 pub mod manifest;
 pub mod matching;
+pub mod readiness;
 pub mod repo_id;
 pub mod repo_index;
 pub mod repo_source;

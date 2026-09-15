@@ -67,8 +67,56 @@ fn git_init(path: &std::path::Path) {
 /// Boot a federation-mode server with one minimal Rust repo. Same
 /// fixture shape as `feat_suite.rs` so the symbol graph is non-empty
 /// and the federation tools (`list_repos`, etc.) have something to
-/// report. The returned `ServerGuard` cleans up the child on drop.
-fn boot_server(port: u16) -> ServerGuard {
+/// report. The returned fixture's `ServerGuard` cleans up the child on
+/// drop, alongside the fixture directories it needs for its entire
+/// lifetime, not just while `boot_server` is on the stack — see
+/// `tests/feat_negative_paths.rs::boot_server_fixture`'s doc comment for
+/// the full story (the same bug, found there first and fixed here too):
+/// the previous bare-`ServerGuard`-returning version of this helper let
+/// `project`/`state`/`xdg_config` drop the instant the function
+/// returned, while the spawned server kept running with a live file
+/// watcher on the now-deleted repo directory, producing an intermittent
+/// "Git error: reference 'HEAD' not found" -> `RepoHealth::Degraded`.
+/// `Deref`/`DerefMut` to `ServerGuard` so this file's `.is_alive()`/
+/// `.exit_diag()` call sites don't need to change.
+struct ServerFixture {
+    guard: ServerGuard,
+    _project: tempfile::TempDir,
+    _state: tempfile::TempDir,
+    _xdg_config: tempfile::TempDir,
+}
+
+impl std::ops::Deref for ServerFixture {
+    type Target = ServerGuard;
+    fn deref(&self) -> &ServerGuard {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for ServerFixture {
+    fn deref_mut(&mut self) -> &mut ServerGuard {
+        &mut self.guard
+    }
+}
+
+fn boot_server_fixture(port: u16) -> ServerFixture {
+    let (guard, project, state, xdg_config) = boot_server(port);
+    ServerFixture {
+        guard,
+        _project: project,
+        _state: state,
+        _xdg_config: xdg_config,
+    }
+}
+
+fn boot_server(
+    port: u16,
+) -> (
+    ServerGuard,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
     let project = tempfile::tempdir().unwrap();
     let repo_dir = project.path().join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
@@ -198,7 +246,7 @@ fn boot_server(port: u16) -> ServerGuard {
             }
         }
     }
-    guard
+    (guard, project, state, xdg_config)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -215,7 +263,7 @@ fn boot_server(port: u16) -> ServerGuard {
 fn server_survives_truncated_mcp_request() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let mut server = boot_server(port);
+    let mut server = boot_server_fixture(port);
 
     let mut stream = TcpStream::connect(&host).expect("connect");
     stream
@@ -272,7 +320,7 @@ fn server_survives_truncated_mcp_request() {
 fn server_survives_malformed_json() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let mut server = boot_server(port);
+    let mut server = boot_server_fixture(port);
 
     let body = "{not valid json";
     let req = format!(
@@ -331,7 +379,7 @@ fn server_survives_malformed_json() {
 fn server_handles_concurrent_overloaded_clients() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let mut server = boot_server(port);
+    let mut server = boot_server_fixture(port);
 
     const N_CLIENTS: usize = 20;
     let barrier = Arc::new(Barrier::new(N_CLIENTS));
@@ -416,7 +464,7 @@ fn server_handles_concurrent_overloaded_clients() {
 fn tools_return_structured_error_not_panic() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let mut server = boot_server(port);
+    let mut server = boot_server_fixture(port);
 
     // 4a. find_anchors with `limit` set to a non-number string.
     //     The schema says `limit: integer`; serde's `as_u64()` on a
@@ -547,7 +595,7 @@ fn envelope_error_text(env: &serde_json::Value) -> String {
 fn server_starts_when_embedding_model_missing() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let _server = boot_server(port);
+    let _server = boot_server_fixture(port);
 
     let body = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
@@ -828,7 +876,7 @@ fn request_reload_handles_corrupt_yaml() {
 fn server_logs_dropped_messages_gracefully() {
     let port = free_port();
     let host = format!("127.0.0.1:{port}");
-    let mut server = boot_server(port);
+    let mut server = boot_server_fixture(port);
 
     // Open one connection and write 1000 short invalid messages.
     // Each one is a complete HTTP/1.1 request line + headers +

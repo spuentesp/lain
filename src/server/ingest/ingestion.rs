@@ -25,8 +25,14 @@ impl LainServer {
             return Ok(());
         }
         let scan_start = std::time::Instant::now();
+        self.readiness().update(|snapshot| {
+            snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
+        });
         let (latest_commit, latest_time) = self.git.lock().get_latest_commit_info()?;
         let last_commit = self.graph.get_last_commit()?;
+        self.readiness().update(|snapshot| {
+            snapshot.target_commit = Some(latest_commit.clone());
+        });
 
         if let Some(ref last) = last_commit {
             if last == &latest_commit {
@@ -36,6 +42,13 @@ impl LainServer {
         }
 
         info!("Building core topology for commit {}", latest_commit);
+        // A real re-index (not the no-op "already up to date" path just
+        // above, which never reaches here): if a prior pass already
+        // published `ready`, this must move the gate back to
+        // `warming_up` for the duration of this pass, or graph-required
+        // tools keep dispatching against a graph this pass is actively
+        // mutating.
+        self.readiness().resume_warming_up();
 
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
@@ -71,6 +84,17 @@ impl LainServer {
             .chunks(files_per_batch)
             .map(|chunk| chunk.to_vec())
             .collect();
+
+        // `files_total` is fixed for this attempt the moment the scan is
+        // planned; it does not shrink or grow even if the scan later times
+        // out or aborts early — that partial-ness shows up as
+        // `files_completed` staying below it, not as the total moving.
+        self.readiness().update(|snapshot| {
+            snapshot.phase = crate::server::readiness::IndexPhase::Scanning;
+            snapshot.files_total = Some(files_to_scan.len() as u64);
+            snapshot.files_completed = 0;
+            snapshot.files_failed = 0;
+        });
 
         let mut set = tokio::task::JoinSet::new();
         for chunk in file_chunks {
@@ -202,6 +226,13 @@ impl LainServer {
                     warn!("Task join error: {}", e);
                 }
             }
+            // Published once per completed batch. `files_completed` counts
+            // every attempt (success and failure), matching the wire
+            // contract's "never decreases, always >= files_failed".
+            self.readiness().update(|snapshot| {
+                snapshot.files_completed = (scanned + failed) as u64;
+                snapshot.files_failed = failed as u64;
+            });
         }
 
         // Final partial flush
@@ -223,6 +254,9 @@ impl LainServer {
               scanned, failed, all_external_refs.len(), all_static_refs.len(), all_pattern_refs.len());
 
         // 3. Resolve Phase: Link external references to internal nodes (CALLS/USES)
+        self.readiness().update(|snapshot| {
+            snapshot.phase = crate::server::readiness::IndexPhase::Resolving;
+        });
         info!(
             "Resolving topology: Linking {} external references...",
             all_external_refs.len()
@@ -301,6 +335,9 @@ impl LainServer {
         self.graph.insert_co_change_edges(&co_change_tuples)?;
 
         // 5. Enrichment Phase: Topological Algorithms (synchronous, fast)
+        self.readiness().update(|snapshot| {
+            snapshot.phase = crate::server::readiness::IndexPhase::Enriching;
+        });
         info!("Enriching topology: Calculating anchors and depths...");
         self.graph.calculate_anchor_scores()?;
         self.graph.calculate_depths()?;
@@ -438,6 +475,9 @@ impl LainServer {
         // edges below, so the work is kept and the next run resumes from it — but
         // the marker stays behind so `get_health` keeps reporting the true
         // commits-behind count instead of silently claiming to be current.
+        self.readiness().update(|snapshot| {
+            snapshot.phase = crate::server::readiness::IndexPhase::Persisting;
+        });
         if partial {
             warn!(
                 "Partial index pass ({} files scanned, {} failed);                  leaving indexed-commit marker unchanged",
@@ -456,6 +496,30 @@ impl LainServer {
         self.overlay.touch();
 
         let duration = scan_start.elapsed();
+
+        // A partial pass (scan-phase timeout, or capped by
+        // `max_files_per_scan`) persists whatever it produced above so the
+        // next attempt resumes from it, but it must not be reported as a
+        // successful attempt: `indexed_commit` was deliberately left behind
+        // `target_commit`, and `files_completed < files_total`. Returning
+        // `Ok(())` here let every caller (`await_startup_reindex`,
+        // `run_background_sync`) publish `ready` on a graph known to be
+        // incomplete. Matches the M4 design's "Refresh failed/timed out"
+        // row: `unavailable_error`, valid persisted progress kept for a
+        // future retry — not `ready`.
+        if partial {
+            warn!(
+                "Partial index pass ({} files scanned, {} failed) persisted in {:?}; \
+                 reporting as a failed attempt so the graph is not served as ready",
+                scanned, failed, duration
+            );
+            return Err(LainError::Other(format!(
+                "index pass was partial: {} of {} changed files scanned",
+                scanned + failed,
+                files.len(),
+            )));
+        }
+
         info!("Lain fully restored and ready in {:?}", duration);
 
         Ok(())
@@ -1000,6 +1064,283 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     );
     overlay.touch();
     Ok(())
+}
+
+#[cfg(test)]
+mod readiness_progress_tests {
+    use super::*;
+
+    fn git_fixture_with_one_file() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [
+            ("user.email", "readiness-test@lain"),
+            ("user.name", "readiness-test"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+        }
+        std::fs::write(root.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "fixture"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        root
+    }
+
+    /// Mark every multiplexer in the server's LSP pool unavailable so
+    /// `build_core_memory` takes the tree-sitter fallback path instead of
+    /// spawning a real `rust-analyzer`. Mirrors the same guard in
+    /// `scan.rs`'s tests: the `lsp-bridge` crate's `LspProcess::Drop` can
+    /// hang cleaning up a real, in-process LSP child, which turns any test
+    /// that actually drives the LSP path into an intermittent multi-minute
+    /// hang instead of a failure.
+    async fn disable_real_lsp(server: &LainServer, workspace: &Path) {
+        // `next()` round-robins over a fixed, private Vec with no length
+        // accessor; call it exactly as many times as the pool has entries
+        // (the same tuning value `LainServer::new` used to size it) so
+        // every multiplexer gets marked, not just however many a smaller
+        // guess would have covered.
+        let pool_size = crate::tuning::load_tuning_config(workspace)
+            .ingestion
+            .lsp_pool_size;
+        for _ in 0..pool_size {
+            server
+                .lsp_pool
+                .next()
+                .lock()
+                .await
+                .mark_unavailable("rust-analyzer");
+        }
+    }
+
+    /// `build_core_memory` is the one place that reports indexing progress;
+    /// `readiness()` is the one shared handle `get_capabilities` and the
+    /// central MCP gate both read. This pins that the coordinator actually
+    /// publishes phase and file-count progress into it — before this,
+    /// `IndexLifecycleSnapshot` only ever moved on `ready()`/`failed()` at
+    /// the very end, so a client polling `get_capabilities` mid-index saw
+    /// nothing but the static `warming_up/discovering` default the whole
+    /// time.
+    #[tokio::test]
+    async fn build_core_memory_reports_file_progress_and_target_commit() {
+        let root = git_fixture_with_one_file();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        assert_eq!(
+            server.readiness().snapshot().state,
+            crate::server::readiness::IndexState::WarmingUp
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            server.build_core_memory(),
+        )
+        .await
+        .expect("build_core_memory must not hang past the test's own budget")
+        .unwrap();
+
+        let snapshot = server.readiness().snapshot();
+        assert_eq!(snapshot.files_total, Some(1));
+        assert_eq!(snapshot.files_completed, 1);
+        assert_eq!(snapshot.files_failed, 0);
+        assert_eq!(
+            snapshot.phase,
+            crate::server::readiness::IndexPhase::Persisting
+        );
+        assert_eq!(
+            snapshot.target_commit,
+            server.graph.get_last_commit().unwrap()
+        );
+        // `build_core_memory` only reports progress; only the startup
+        // coordinator (`await_startup_reindex`) decides `ready`/`failed`,
+        // so the state itself must stay `warming_up` here.
+        assert_eq!(
+            snapshot.state,
+            crate::server::readiness::IndexState::WarmingUp
+        );
+    }
+
+    /// A no-op re-index (graph already current at `HEAD`) must not corrupt
+    /// progress fields left over from a previous attempt into looking like
+    /// a fresh scan happened — it returns before touching `files_total`, so
+    /// a stale value from an earlier attempt could otherwise leak through.
+    /// This pins that a second call is at least self-consistent: `files_total`
+    /// is always defined and never smaller than `files_completed`.
+    #[tokio::test]
+    async fn a_second_up_to_date_call_leaves_progress_internally_consistent() {
+        let root = git_fixture_with_one_file();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        let budget = std::time::Duration::from_secs(60);
+        tokio::time::timeout(budget, server.build_core_memory())
+            .await
+            .expect("first build_core_memory must not hang past the test's own budget")
+            .unwrap();
+        tokio::time::timeout(budget, server.build_core_memory())
+            .await
+            .expect("second build_core_memory must not hang past the test's own budget")
+            .unwrap();
+
+        let snapshot = server.readiness().snapshot();
+        let total = snapshot.files_total.expect("files_total must be set");
+        assert!(snapshot.files_completed <= total);
+        assert!(snapshot.files_failed <= snapshot.files_completed);
+    }
+
+    /// A second, real re-index after the coordinator already published
+    /// `ready` from a first pass must move the gate through
+    /// `warming_up` again, not leave `state` at `Ready` for a graph
+    /// that's being actively mutated (Copilot review finding on PR #63:
+    /// a commit-sync/background-sync re-index after the first `ready`
+    /// changed only `phase`, never `state`, so the central gate kept
+    /// dispatching `graph_required` tools throughout it). Pinned via
+    /// `attempt_id`, which only `resume_warming_up`/the initial default
+    /// ever advance — a deterministic signal that doesn't need to catch
+    /// the pass mid-flight the way asserting on `state` alone would.
+    #[tokio::test]
+    async fn a_second_real_reindex_after_ready_resumes_warming_up() {
+        let root = git_fixture_with_one_file();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        let budget = std::time::Duration::from_secs(60);
+        tokio::time::timeout(budget, server.build_core_memory())
+            .await
+            .expect("first build_core_memory must not hang past the test's own budget")
+            .unwrap();
+
+        // Simulate what `await_startup_reindex`/`run_background_sync` do
+        // after a successful pass: publish `ready`.
+        server
+            .readiness()
+            .ready(server.graph.get_last_commit().ok().flatten());
+        let attempt_after_ready = server.readiness().snapshot().attempt_id;
+        assert_eq!(
+            server.readiness().snapshot().state,
+            crate::server::readiness::IndexState::Ready
+        );
+
+        // A second real commit, so the next build_core_memory call takes
+        // the real re-index path, not the no-op "already up to date" one.
+        std::fs::write(root.path().join("lib2.rs"), "pub fn world() {}\n").unwrap();
+        for args in [["add", "-A"].as_slice(), &["commit", "-q", "-m", "second"]] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        tokio::time::timeout(budget, server.build_core_memory())
+            .await
+            .expect("second build_core_memory must not hang past the test's own budget")
+            .unwrap();
+
+        let snapshot = server.readiness().snapshot();
+        assert!(
+            snapshot.attempt_id > attempt_after_ready,
+            "a real second re-index must bump attempt_id via resume_warming_up \
+             (before: {attempt_after_ready}, after: {})",
+            snapshot.attempt_id
+        );
+        assert_eq!(
+            snapshot.state,
+            crate::server::readiness::IndexState::WarmingUp,
+            "build_core_memory itself never publishes ready; only its caller does, \
+             so it must still read warming_up right after the pass completes"
+        );
+    }
+
+    /// A pass capped by `max_files_per_scan` before covering every changed
+    /// file is "partial": it persists whatever it scanned (so the next
+    /// attempt can resume) but must not report success — `indexed_commit`
+    /// is deliberately left behind `HEAD`, and every caller
+    /// (`await_startup_reindex`, `run_background_sync`) reads a bare `Ok`
+    /// as "publish `ready`." Before this fix, a capped pass returned
+    /// `Ok(())` and the graph was served as ready with files missing.
+    #[tokio::test]
+    async fn a_capped_partial_pass_reports_failure_not_success() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [
+            ("user.email", "readiness-test@lain"),
+            ("user.name", "readiness-test"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+        }
+        // Two files, so max_files_per_scan=1 below caps this pass short of
+        // covering every changed file.
+        std::fs::write(root.path().join("a.rs"), "pub fn a() {}\n").unwrap();
+        std::fs::write(root.path().join("b.rs"), "pub fn b() {}\n").unwrap();
+        std::fs::create_dir_all(root.path().join(".lain")).unwrap();
+        std::fs::write(
+            root.path().join(".lain/tuning.toml"),
+            "[ingestion]\nmax_files_per_scan = 1\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "fixture"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            server.build_core_memory(),
+        )
+        .await
+        .expect("build_core_memory must not hang past the test's own budget");
+
+        assert!(
+            result.is_err(),
+            "a capped partial pass must report failure, not Ok(()), so callers don't publish ready"
+        );
+        // The partial pass still persists what it scanned...
+        let snapshot = server.readiness().snapshot();
+        assert_eq!(snapshot.files_total, Some(1));
+        // ...but must not have advanced the indexed-commit marker to HEAD.
+        assert_eq!(server.graph.get_last_commit().unwrap(), None);
+    }
 }
 
 #[cfg(test)]

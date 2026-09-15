@@ -175,8 +175,26 @@ pub async fn run_server(
     // Source-file watcher: keeps the volatile overlay fresh between
     // reindexes. One per indexed repo — `spawn_config_watcher` above
     // only watches `repos.yaml`/`workspaces.yaml`, not source.
-    for root in fed_repo_paths {
-        crate::server::ingest::background::start_source_watcher(root, server.clone());
+    //
+    // `start_source_watcher` waits (bounded 5s) for its watcher to
+    // actually register before returning, so its caller knows the
+    // watcher is subscribed rather than racing its startup. Awaiting
+    // that sequentially, one repo at a time, meant a federation of N
+    // repos could add up to 5*N seconds to every server boot; starting
+    // all of them concurrently bounds the wait to the slowest one.
+    let watcher_tasks: Vec<_> = fed_repo_paths
+        .into_iter()
+        .map(|root| {
+            tokio::spawn(crate::server::ingest::background::start_source_watcher(
+                root,
+                server.clone(),
+            ))
+        })
+        .collect();
+    for task in watcher_tasks {
+        if let Err(e) = task.await {
+            tracing::warn!("source file watcher registration task panicked: {e}");
+        }
     }
 
     // Reap expired `/ui/...` sessions; the HTTP transport creates one per

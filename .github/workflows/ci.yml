@@ -18,8 +18,25 @@ name: CI
 #   main push / PR-to-main: full matrix + capability + coverage
 #                          + version-drift + action-contracts (~20 min)
 #
-# `concurrency:` cancels superseded runs so rapid-fire commits
-# don't pile up behind each other.
+# Two more cuts on top of the full-battery gate, both scoped to the
+# heavier jobs (Tier 1 -- lint/npm-shim/action-contracts -- always
+# runs, even in draft, for fast feedback):
+#   - Draft PRs skip the heavier jobs (`github.event.pull_request.draft
+#     != true`). A push event has no `pull_request` context, so this
+#     evaluates to `null != true` (true) there and never affects
+#     push-triggered runs.
+#   - Docs-only changes additionally skip the rust-matrix-building jobs
+#     (`test-cross`, `capability`, `schema-drift`) via the `changes`
+#     job's `docs_only` output. The classifier defaults to `false`
+#     (run everything) whenever it can't establish a diff base, so an
+#     unrecognized file type or force-push never silently skips a real
+#     code change.
+#
+# `concurrency:` cancels superseded runs so rapid-fire commits don't
+# pile up behind each other. `github.head_ref` is only set for
+# pull_request events; the `|| github.ref` fallback gives push events
+# (main/dev) their own per-branch group instead of colliding on an
+# empty string.
 on:
   push:
     branches: [main, dev]
@@ -27,7 +44,7 @@ on:
     branches: [main, dev]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -39,9 +56,84 @@ env:
 permissions: {}
 
 jobs:
+  changes:
+    name: Detect change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify changed files
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.event.after }}"
+          fi
+
+          # Any uncertainty about the diff range (new branch, force-push,
+          # missing context) defaults to docs_only=false -- run the full
+          # matrix. The only way to skip it is a diff this script can
+          # positively classify as docs-only, never the absence of one.
+          if [ -z "$BASE" ] || [ -z "$HEAD" ] || [[ "$BASE" =~ ^0+$ ]]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "Could not determine a diff base; running full matrix."
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          if [ -z "$CHANGED" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "No changed files detected; running full matrix."
+            exit 0
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # docs/tool-schema.json lives under docs/ but is a generated
+          # artifact, not documentation -- it's the exact file
+          # `schema-drift` exists to catch drifting undetected. `^docs/`
+          # below would otherwise let a PR that edits only this file
+          # skip the one check whose job is to verify it, so it's
+          # special-cased out of the docs-only allowlist before the
+          # general classification runs.
+          if echo "$CHANGED" | grep -qx 'docs/tool-schema.json'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "docs/tool-schema.json changed; treating as non-docs so schema-drift still runs."
+            exit 0
+          fi
+
+          # Conservative allowlist: every changed file must match one of
+          # these patterns for the run to count as docs-only. Anything
+          # unrecognized counts as code.
+          NON_DOCS=$(echo "$CHANGED" | grep -vE '(\.md$|^docs/|^LICENSE$|^\.github/ISSUE_TEMPLATE/|^\.gitignore$)' || true)
+          if [ -z "$NON_DOCS" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "All changed files match the docs-only allowlist."
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "Non-docs files changed:"
+            echo "$NON_DOCS"
+          fi
+
   test:
     name: Cargo Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung test (this session hit a real one: a subprocess reader
+    # with no timeout blocking forever) must fail the job, not sit on
+    # the runner queue for the 360-minute GitHub default.
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -102,10 +194,13 @@ jobs:
   test-cross:
     # Cross-platform (macOS + Windows) cells. Only runs on full
     # battery — i.e. push to main or PR targeting main. Saves
-    # ~10 min/runner on every dev push and PR-to-dev.
+    # ~10 min/runner on every dev push and PR-to-dev. Also skips on
+    # docs-only diffs and draft PRs (see header comment).
     name: Cargo Test cross-platform (${{ matrix.os }})
+    needs: [changes]
     runs-on: ${{ matrix.os }}
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    timeout-minutes: 30
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     strategy:
@@ -137,8 +232,10 @@ jobs:
 
   capability:
     name: Capability suite (demo.sh)
+    needs: [changes]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    timeout-minutes: 20
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     steps:
@@ -171,7 +268,8 @@ jobs:
   health-badge:
     name: Lain architecture health badge
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
     # The action posts a commit status and a PR comment. The default
     # GITHUB_TOKEN is read-only; grant the scopes the steps need.
     permissions:
@@ -191,6 +289,7 @@ jobs:
   version-drift:
     name: lain-version default tracks latest release
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     # The drift check runs on main, where release tags are pushed.
@@ -242,6 +341,7 @@ jobs:
   lint:
     name: Lint + format + doc tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     # These checks aren't OS-specific — ubuntu runs them once and
@@ -282,6 +382,9 @@ jobs:
 
   schema-drift:
     name: Tool schema matches docs/tool-schema.json
+    needs: [changes]
+    timeout-minutes: 15
+    if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -320,6 +423,7 @@ jobs:
   npm-shim:
     name: npm-shim install tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     # The npm-shim is what `npm install lain-mcp` runs. Its install
@@ -356,7 +460,8 @@ jobs:
     # first deliberate baseline PR.
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    timeout-minutes: 30
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && github.event.pull_request.draft != true
     permissions:
       contents: read
     steps:
@@ -409,6 +514,14 @@ jobs:
   action-contracts:
     name: Badge and release contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # This job is one of the three the header comment above names as
+    # Tier 1 ("lint/npm-shim/action-contracts -- always runs, even in
+    # draft, for fast feedback"), but the `draft != true` clause this
+    # inherited from the heavier jobs contradicted that: it made draft
+    # PRs targeting main skip release-contract validation entirely
+    # until marked ready. No draft exclusion here, matching lint/
+    # npm-shim, which never had one.
     if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
@@ -428,6 +541,16 @@ jobs:
       # ignores (description / homepage / keywords / repository.url).
       - name: Canonical metadata sync gate
         run: python scripts/test_sync_metadata.py
+      # Fast, network-free unit tests for the Milestone 9 clean-room
+      # check script (reader-thread timeout handling, protocol-violation
+      # detection) against a fake in-process server. The real live-network
+      # run against a published `npx @spuentesp/lain-mcp` lives in
+      # distribution-acceptance.yml, not here -- it exercises external
+      # published state, not this diff, so it doesn't belong on every PR.
+      - name: Clean-room check script unit tests
+        run: python scripts/test_clean_room_mcp_check.py
+      - name: Cached-binary assertion helper unit tests
+        run: python scripts/test_assert_cached_binary.py
       - name: Action configuration and version pinning
         run: python .github/actions/lain-health-badge/tests/test_action.py
       - name: Badge extraction
@@ -454,6 +577,7 @@ jobs:
     needs: [capability, schema-drift, npm-shim]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       statuses: write
     steps:

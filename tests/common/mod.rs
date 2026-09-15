@@ -405,26 +405,47 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
                 if start.elapsed() > Duration::from_secs(30) {
                     panic!("symbol `{name}` never resolved through per-repo resolver within 30s on {host}");
                 }
-                let resp = tools_call_envelope(
+                // Not `tools_call_text`: it panics on any `isError:true`,
+                // which used to be safe here because an unindexed repo's
+                // "not found" response was never `isError:true` in
+                // federation mode (the AGENT_UX_ROADMAP.md M4 central gate
+                // was a no-op there). It's real now, so a call made while
+                // the repo is still gated needs its own tolerant handling
+                // instead of panicking through this loop's own diagnostics.
+                let env = tools_call_envelope(
                     host,
                     "explain_symbol",
                     serde_json::json!({"symbol": name}),
                 );
-                // `explain_symbol` returns isError=true with
-                // "Node not found for handle" before the indexer
-                // catches up. Anything else means the per-repo
-                // resolver found it.
-                let is_error = resp
-                    .pointer("/result/isError")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let text = resp
-                    .pointer("/result/content/0/text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if !is_error || !text.contains("Node not found") {
+                let is_error =
+                    env.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true);
+                if !is_error {
                     break;
                 }
+                let text = env
+                    .pointer("/result/content/0/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                // The central gate's `unavailable_error` state is terminal
+                // (a repo that has already failed to index will not start
+                // succeeding by itself) — fail fast with the real cause
+                // instead of spinning for 30s and reporting a generic
+                // timeout that hides it.
+                if text.contains("\"state\":\"unavailable_error\"") {
+                    // `explain_symbol`'s own gated response only carries a
+                    // generic "Repository is degraded" — `list_repos`
+                    // includes each repo's real `last_error` (see
+                    // RepoIndex::last_index_error), which is the whole
+                    // point of failing here instead of spinning silently.
+                    let repos = tools_call_text(host, "list_repos", serde_json::json!({}));
+                    panic!(
+                        "repo indexing failed while waiting for symbol `{name}` on {host}: {text}\nlist_repos: {repos}"
+                    );
+                }
+                // Either the gate's own `warming_up` (retryable) or the
+                // pre-gate "Node not found for handle" text `explain_symbol`
+                // returns once the repo is `ready` but the specific symbol
+                // genuinely isn't indexed yet — both are worth retrying.
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
