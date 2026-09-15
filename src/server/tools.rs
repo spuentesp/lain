@@ -282,6 +282,15 @@ impl ToolExecutor {
         })
         .with_workspace(workspace);
 
+        // A read-only executor never indexes: the sidecar answers from the
+        // owner's already-persisted graph (streamed updates land in the
+        // overlay, not here), and the doctor probe deliberately opens an
+        // empty graph to exercise the MCP handshake only. Leaving this
+        // handle at its `warming_up` default would gate every graph tool
+        // forever, since nothing else ever transitions it.
+        ctx.readiness
+            .ready(ctx.graph.get_last_commit().ok().flatten());
+
         Self {
             ctx,
             jobs: jobs_registry,
@@ -447,6 +456,7 @@ impl ToolExecutor {
         // Special executor methods — not registered as ToolHandlers
         match name {
             "get_health" => return self.get_health().await,
+            "get_capabilities" => return self.get_capabilities(),
             "get_agent_strategy" => return self.get_agent_strategy(),
             "install_language_server" => {
                 let lang = get_str_arg(arguments, "language");
@@ -478,6 +488,48 @@ impl ToolExecutor {
 
         // Delegate to inventory-based registry
         ToolRegistry::dispatch(&self.ctx, name, &args).await
+    }
+
+    fn get_capabilities(&self) -> Result<String, LainError> {
+        use crate::server::readiness::{
+            Capabilities, Capability, CapabilityState, IndexState, SCHEMA_VERSION,
+        };
+        let lifecycle = self.ctx.readiness.snapshot();
+        let structural = match lifecycle.state {
+            IndexState::Ready => CapabilityState::Ready,
+            IndexState::WarmingUp => CapabilityState::WarmingUp,
+            IndexState::UnavailableError => CapabilityState::UnavailableError,
+        };
+        let mut symbols = Capability::new(structural, false);
+        let mut call_graph = Capability::new(structural, false);
+        if structural == CapabilityState::WarmingUp {
+            symbols.retry_after_ms = lifecycle.retry_after_ms;
+            call_graph.retry_after_ms = lifecycle.retry_after_ms;
+        }
+        let semantic_search = if self.ctx.embedder.is_stub() {
+            Capability::new(CapabilityState::UnavailableOptional, true)
+        } else {
+            Capability::new(structural, true)
+        };
+        let capabilities = Capabilities {
+            symbols,
+            call_graph,
+            git_history: Capability::new(CapabilityState::Ready, false),
+            semantic_search,
+        };
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
+            "capabilities": capabilities,
+            "freshness": {
+                "head": lifecycle.target_commit,
+                "indexed_commit": lifecycle.indexed_commit,
+                "working_tree_overlay": lifecycle.state == IndexState::Ready,
+            },
+            "indexing": lifecycle,
+        }))
+        .map_err(Into::into)
     }
 
     pub async fn get_health(&self) -> Result<String, LainError> {
@@ -894,5 +946,23 @@ mod tests {
         let exec = create_test_executor_with_graph(graph);
         exec.get_agent_strategy()
             .expect("get_agent_strategy should succeed")
+    }
+
+    /// A read-only executor (sidecar, or the doctor MCP probe) never runs
+    /// `await_startup_reindex` — nothing else would ever call
+    /// `ReadinessHandle::ready()` on it. Before this fix, leaving the
+    /// handle at its `warming_up` default meant the central gate added in
+    /// `dispatch_tool_call` would deny every graph-dependent tool call to
+    /// a sidecar forever, since a sidecar never indexes.
+    #[test]
+    fn read_only_executor_starts_ready_not_warming_up() {
+        let graph = crate::graph::GraphDatabase::empty_read_only();
+        let overlay = crate::overlay::VolatileOverlay::new();
+        let executor = ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."));
+        let snapshot = executor.ctx.readiness.snapshot();
+        assert_eq!(snapshot.state, crate::server::readiness::IndexState::Ready);
+        assert!(
+            crate::server::readiness::gate_tool_call("find_anchors", &snapshot, true).is_none()
+        );
     }
 }

@@ -493,6 +493,14 @@
     "name": "get_health"
   },
   {
+    "description": "Return the current repository capability states, freshness, and indexing progress. Warming states are retryable.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "get_capabilities"
+  },
+  {
     "description": "Return the recommended tool sequence and quick-reference for working with Lain.",
     "inputSchema": {
       "properties": {},

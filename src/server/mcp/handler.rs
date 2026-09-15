@@ -67,7 +67,7 @@ fn cow_to_bytes(cow: std::borrow::Cow<'static, [u8]>) -> Bytes {
 use crate::server::mcp::definitions::{
     defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
 };
-use crate::server::mcp::envelope::tool_text_result;
+use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
 /// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
@@ -832,7 +832,7 @@ impl ServerHandler for LainHandler {
         let inert = inert_tool_names(self.executor.embedder());
         tools.retain(|t| !inert.contains(&t.name.as_str()));
 
-        // Append the 6 special-case tools handled in ToolExecutor::call_inner
+        // Append special-case tools handled in ToolExecutor::call_inner
         // so MCP clients can see the full surface in tools/list.
         for special in special_tool_definitions() {
             let input_schema = serde_json::from_value(special.input_schema.clone())
@@ -895,6 +895,18 @@ impl ServerHandler for LainHandler {
                 .map(|w| w.read().workspaces.len())
                 .unwrap_or(0),
         };
+
+        if let Some(gated) = crate::server::readiness::gate_tool_call(
+            params.name.as_str(),
+            &self.executor.ctx.readiness.snapshot(),
+            !self.executor.embedder().is_stub(),
+        ) {
+            return Ok(gated_tool_result(
+                &gated,
+                self.executor.overlay(),
+                static_graph_generation_unix,
+            ));
+        }
 
         let (text, is_error) = dispatch_tool_call(
             &self.executor,
@@ -973,10 +985,15 @@ pub(crate) async fn await_startup_reindex(
     let started = std::time::SystemTime::now();
     let timeout = reindex_timeout.unwrap_or_else(crate::server::refresh::parse_reindex_timeout);
     let last_outcome = server.last_outcome.clone();
+    let readiness = server.tool_executor.ctx.readiness.clone();
     let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
-        Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
+        Ok(Ok(())) => {
+            readiness.ready(server.graph.get_last_commit().ok().flatten());
+            crate::server::refresh::RefreshOutcome::ok(started)
+        }
         Ok(Err(e)) => {
             eprintln!("startup re-index failed: {e}");
+            readiness.failed(e.to_string());
             crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
         }
         Err(_) => {
@@ -984,6 +1001,10 @@ pub(crate) async fn await_startup_reindex(
                 "startup re-index timed out after {}s; using existing graph",
                 timeout.as_secs()
             );
+            readiness.failed(format!(
+                "startup re-index timed out after {}s",
+                timeout.as_secs()
+            ));
             crate::server::refresh::RefreshOutcome::timeout(started)
         }
     };
@@ -1416,32 +1437,44 @@ async fn handle_request(
             .body(full_body(Bytes::from(body)))
             .unwrap()
     };
-    let jsonrpc_tool_result = |id: Option<&serde_json::Value>, text: &str, is_error: bool| {
-        // Read the overlay revision once per response so the value is
-        // stable for the duration of this HTTP round-trip. The internal
-        // tool_text_result helper does the same read on the stdio path;
-        // both stdio and HTTP responses now carry `_meta.revision` in
-        // the `CallToolResult` envelope, not in `content[0].text`.
-        // P1 #1: also carry the static-graph generation so the LLM
-        // knows how fresh the static graph is without a separate
-        // `list_repos` round-trip.
-        let rev = executor.overlay().current_revision();
-        let sgg = server
-            .as_deref()
-            .and_then(|s| s.static_graph_generation_unix());
-        jsonrpc_response(serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": {
+    let jsonrpc_tool_result =
+        |id: Option<&serde_json::Value>,
+         text: &str,
+         is_error: bool,
+         structured: Option<serde_json::Value>| {
+            // Read the overlay revision once per response so the value is
+            // stable for the duration of this HTTP round-trip. The internal
+            // tool_text_result helper does the same read on the stdio path;
+            // both stdio and HTTP responses now carry `_meta.revision` in
+            // the `CallToolResult` envelope, not in `content[0].text`.
+            // P1 #1: also carry the static-graph generation so the LLM
+            // knows how fresh the static graph is without a separate
+            // `list_repos` round-trip.
+            let rev = executor.overlay().current_revision();
+            let sgg = server
+                .as_deref()
+                .and_then(|s| s.static_graph_generation_unix());
+            let mut result = serde_json::json!({
                 "content": [{"type": "text", "text": text}],
                 "isError": is_error,
                 "_meta": {
                     "revision": rev,
                     "static_graph_generation": sgg,
                 }
-            },
-            "id": id
-        }))
-    };
+            });
+            // Additive: only present for the gated warm-up/error envelope
+            // today, so every existing response's shape is unchanged.
+            if let Some(structured) = structured {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("structuredContent".to_string(), structured);
+                }
+            }
+            jsonrpc_response(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": result,
+                "id": id
+            }))
+        };
 
     let path = req.uri().path().to_string();
     let method = req.method().clone();
@@ -1683,6 +1716,17 @@ async fn handle_request(
                             .cloned()
                             .unwrap_or_default();
 
+                        if let Some(gated) = crate::server::readiness::gate_tool_call(
+                            name,
+                            &executor.ctx.readiness.snapshot(),
+                            !executor.embedder().is_stub(),
+                        ) {
+                            let is_error = gated.is_error();
+                            let value = serde_json::to_value(&gated).unwrap_or_default();
+                            let text = serde_json::to_string(&value).unwrap_or_default();
+                            return Ok(jsonrpc_tool_result(id, &text, is_error, Some(value)));
+                        }
+
                         let (text, is_error) = dispatch_tool_call(
                             &executor,
                             federation.as_deref(),
@@ -1695,7 +1739,7 @@ async fn handle_request(
                         )
                         .await;
 
-                        return Ok(jsonrpc_tool_result(id, &text, is_error));
+                        return Ok(jsonrpc_tool_result(id, &text, is_error, None));
                     }
                     _ => {
                         serde_json::json!({
@@ -2010,11 +2054,19 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
             name: "get_health",
             description: "Return server health, node/edge counts, last enriched commit, and language-server availability.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
+        },
+        ToolDefinition {
+            name: "get_capabilities",
+            description: "Return the current repository capability states, freshness, and indexing progress. Warming states are retryable.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "get_agent_strategy",
             description: "Return the recommended tool sequence and quick-reference for working with Lain.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "install_language_server",
@@ -2024,6 +2076,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "language": { "type": "string", "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'." } },
                 "required": ["language"]
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "register_job_webhook",
@@ -2033,6 +2086,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "url": { "type": "string" } },
                 "required": ["url"]
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "get_job_status",
@@ -2042,6 +2096,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "job_id": { "type": "string" } },
                 "required": ["job_id"]
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "debug_sleep",
@@ -2050,6 +2105,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "type": "object",
                 "properties": { "secs": { "type": "integer", "default": 1 } }
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
     ]
 }
