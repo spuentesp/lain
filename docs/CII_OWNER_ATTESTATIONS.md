@@ -145,18 +145,11 @@ points). Higher tiers (silver at 7, gold at 10) require more
 documentation + ≥3 distinct contributing orgs + ≥2 reviewers +
 admin bypass off — which is structural and depends on org growth.
 
-## What's missing for the CII claim to file
+## Project badge status
 
-1. Maintainer goes to <https://www.bestpractices.dev/en/projects/new>
-   and registers `spuentesp/lain`.
-2. Maintainer signs in (GitHub OAuth works) and goes through the
-   ~50-question form. Each "Yes" needs a short justification;
-   the bullets above are the per-question starting points.
-3. After submission, the badge URL appears at
-   `https://www.bestpractices.dev/projects/<id>` and the
-   OpenSSF Scorecard picks it up on the next weekly run — giving
-   `CII-Best-Practices: 5` in this repo's scorecard.
-
-The web-form claim is a **user action** (not something the agent
-can complete). Once it's filed, the scorecard moves
-automatically.
+1. Project is registered at <https://www.bestpractices.dev/projects/14660>.
+2. Badge status is embedded in `README.md`:
+   `[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14660/badge)](https://www.bestpractices.dev/projects/14660)`
+3. Upon completing the passing tier criteria, OpenSSF Scorecard picks
+   it up on the next run — moving `CII-Best-Practices: 0 -> 5` in
+   this repo's scorecard.
