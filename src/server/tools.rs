@@ -1073,7 +1073,8 @@ mod tests {
 
         let graph = crate::graph::GraphDatabase::empty_read_only();
         let overlay = crate::overlay::VolatileOverlay::new();
-        let mut executor = ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."));
+        let mut executor =
+            ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."));
         executor.ctx.federation = Some(Arc::new(fed));
 
         let json_text = executor.get_capabilities().unwrap();

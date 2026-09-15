@@ -3175,6 +3175,53 @@ mod tests {
             .expect("query_graph must gate while alpha/zeta are not ready");
         assert_eq!(gated.blocking_repos, vec!["alpha", "zeta"]);
     }
+
+    /// AGENT_UX_ROADMAP.md M4 step 10: structural pin so a future change
+    /// can't quietly reintroduce a second startup-indexing path alongside
+    /// `await_startup_reindex` — the exact bug this milestone's backgrounded
+    /// coordinator replaced (a synchronous `build_core_memory().await`
+    /// before the transport came up, blocking `initialize`/`tools/list` on
+    /// a cold, large repository). Reads this file's own source rather than
+    /// running the server, so a regression is caught by `cargo test`
+    /// without needing a live process.
+    ///
+    /// `await_startup_reindex` must appear exactly 3 times: its own
+    /// definition, plus one call in `run_stdio` and one in `run_http` — no
+    /// more, no fewer. And `.build_core_memory()` must be called exactly
+    /// once in the whole file: inside `await_startup_reindex` itself, never
+    /// directly from either transport's `run_*` method.
+    #[test]
+    fn each_transport_has_exactly_one_startup_index_entry_point() {
+        // Scan only the production code above this test module — this
+        // very test's own source mentions the coordinator's name in its
+        // assertions, which would otherwise inflate the count it's
+        // checking.
+        let full_source = include_str!("handler.rs");
+        let boundary = full_source
+            .find("\nmod tests {")
+            .expect("this file must contain the `mod tests` boundary");
+        let source = &full_source[..boundary];
+
+        let coordinator_occurrences = source.matches("await_startup_reindex(").count();
+        assert_eq!(
+            coordinator_occurrences, 3,
+            "expected `await_startup_reindex(` to appear exactly 3 times in production \
+             code (its definition + one call from run_stdio + one call from run_http); \
+             found {coordinator_occurrences}. A different count means either a second \
+             startup-indexing entry point exists, or one of the two transports lost \
+             its call to the coordinator."
+        );
+
+        let direct_build_core_memory_calls = source.matches(".build_core_memory()").count();
+        assert_eq!(
+            direct_build_core_memory_calls, 1,
+            "expected exactly one direct `.build_core_memory()` call in this file's \
+             production code (inside `await_startup_reindex`); found \
+             {direct_build_core_memory_calls}. `run_stdio`/`run_http` must only reach \
+             indexing through the coordinator, never by awaiting build_core_memory \
+             directly — that was the pre-M4 blocking path this milestone replaced."
+        );
+    }
 }
 
 // -------------------------------------------------------------------------

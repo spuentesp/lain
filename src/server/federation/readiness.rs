@@ -129,7 +129,10 @@ mod tests {
 
     #[test]
     fn warming_up_when_only_indexing_repos_block() {
-        let resolved = vec![repo("a", RepoHealth::Ready), repo("b", RepoHealth::Indexing)];
+        let resolved = vec![
+            repo("a", RepoHealth::Ready),
+            repo("b", RepoHealth::Indexing),
+        ];
         let gated = gate_federated_tool_call("find_anchors", &resolved, true).expect("must gate");
         assert_eq!(gated.state, "warming_up");
         assert_eq!(gated.blocking_repos, vec!["b"]);
@@ -143,9 +146,12 @@ mod tests {
 
     #[test]
     fn semantic_required_without_a_model_is_unavailable_optional_regardless_of_health() {
-        let resolved = vec![repo("a", RepoHealth::Ready), repo("b", RepoHealth::Indexing)];
-        let gated = gate_federated_tool_call("semantic_search", &resolved, false)
-            .expect("must gate");
+        let resolved = vec![
+            repo("a", RepoHealth::Ready),
+            repo("b", RepoHealth::Indexing),
+        ];
+        let gated =
+            gate_federated_tool_call("semantic_search", &resolved, false).expect("must gate");
         assert_eq!(gated.state, "unavailable_optional");
     }
 }
