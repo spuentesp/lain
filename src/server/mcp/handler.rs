@@ -201,6 +201,65 @@ fn resolve_repo_or_error(
     }
 }
 
+/// The one central readiness gate every `tools/call` dispatch site must
+/// consult before entering a tool's handler — both stdio and HTTP funnel
+/// through this single function so they can't drift.
+///
+/// Single-workspace mode (`federation: None`) dispatches to
+/// `readiness::gate_tool_call` against the one process-global
+/// `ReadinessHandle`, exactly as before this function existed. Federation
+/// mode resolves the tool's target repo(s) first — reusing
+/// `requires_repo_scope` and `resolve_repo_for_tool`, the same resolution
+/// `dispatch_tool_call` performs for a normal (non-gated) dispatch — and
+/// gates against those repos' own `RepoHealth` via
+/// `federation::readiness::gate_federated_tool_call` instead.
+///
+/// Returns `None` both when the call is genuinely ready to dispatch and
+/// when repo resolution itself fails (ambiguous symbol, no repos loaded,
+/// must disambiguate): that failure is `resolve_repo_or_error`'s job to
+/// report inside `dispatch_tool_call`, not this gate's — duplicating its
+/// error formatting here would just give it a second place to drift from.
+fn gate_for_dispatch(
+    executor: &ToolExecutor,
+    federation: Option<&FederatedIndex>,
+    name: &str,
+    args: &Map<String, serde_json::Value>,
+) -> Option<crate::server::readiness::GatedResponse> {
+    let semantic_model_configured = !executor.embedder().is_stub();
+
+    let Some(fed) = federation else {
+        return crate::server::readiness::gate_tool_call(
+            name,
+            &executor.ctx.readiness.snapshot(),
+            semantic_model_configured,
+        );
+    };
+
+    use crate::server::tools::definitions::{readiness_requirement, ReadinessRequirement};
+    match readiness_requirement(name) {
+        None | Some(ReadinessRequirement::GraphIndependent) => return None,
+        Some(_) => {}
+    }
+
+    let resolved: Vec<(RepoId, crate::federation::health::RepoHealth)> =
+        if requires_repo_scope(name) {
+            let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
+            let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
+            match resolve_repo_for_tool(fed, name, symbol_hint, explicit_repo) {
+                Ok(id) => vec![fed.list_repos().into_iter().find(|(rid, _)| rid == &id)?],
+                Err(_) => return None,
+            }
+        } else {
+            fed.list_repos()
+        };
+
+    crate::server::federation::readiness::gate_federated_tool_call(
+        name,
+        &resolved,
+        semantic_model_configured,
+    )
+}
+
 /// Per-process status snapshot carried into the HTTP request handler
 /// closure. Built once per accepted connection (cloning the cheap
 /// `SystemTime` and Arc-shared Mutexes) so the inner `service_fn`
@@ -896,10 +955,11 @@ impl ServerHandler for LainHandler {
                 .unwrap_or(0),
         };
 
-        if let Some(gated) = crate::server::readiness::gate_tool_call(
+        if let Some(gated) = gate_for_dispatch(
+            &self.executor,
+            self.federation.as_deref(),
             params.name.as_str(),
-            &self.executor.ctx.readiness.snapshot(),
-            !self.executor.embedder().is_stub(),
+            &args_owned,
         ) {
             return Ok(gated_tool_result(
                 &gated,
@@ -1824,11 +1884,9 @@ async fn handle_request(
                             .cloned()
                             .unwrap_or_default();
 
-                        if let Some(gated) = crate::server::readiness::gate_tool_call(
-                            name,
-                            &executor.ctx.readiness.snapshot(),
-                            !executor.embedder().is_stub(),
-                        ) {
+                        if let Some(gated) =
+                            gate_for_dispatch(&executor, federation.as_deref(), name, &args_map)
+                        {
                             let is_error = gated.is_error();
                             let value = serde_json::to_value(&gated).unwrap_or_default();
                             let text = serde_json::to_string(&value).unwrap_or_default();
@@ -3023,6 +3081,99 @@ mod tests {
             !requires_repo_scope("query_graph"),
             "query_graph must not require scope; the resolver should be skipped before it sees the call",
         );
+    }
+
+    async fn add_test_repo(
+        fed: &FederatedIndex,
+        root: &std::path::Path,
+        name: &str,
+    ) -> tempfile::TempDir {
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, root).await.unwrap();
+        src_dir
+    }
+
+    fn test_executor() -> ToolExecutor {
+        let graph = crate::graph::GraphDatabase::empty_read_only();
+        let overlay = crate::overlay::VolatileOverlay::new();
+        ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."))
+    }
+
+    /// M4 step 8: a repo-scoped tool call must gate only on the repo it
+    /// resolves to. A different, unhealthy repo in the same federation
+    /// must not block it — the single process-global handle this used to
+    /// consult (before `gate_for_dispatch` existed) could not tell the
+    /// two repos apart.
+    #[tokio::test]
+    async fn repo_scoped_gating_is_unaffected_by_a_different_repos_health() {
+        use crate::server::federation::health::RepoHealth;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _healthy_src = add_test_repo(&fed, tmp.path(), "healthy-repo").await;
+        let _broken_src = add_test_repo(&fed, tmp.path(), "broken-repo").await;
+        fed.get_repo(&RepoId::new("healthy-repo").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Ready);
+        fed.get_repo(&RepoId::new("broken-repo").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Unavailable);
+
+        let executor = test_executor();
+        let mut args = Map::new();
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("healthy-repo".into()),
+        );
+        assert!(
+            gate_for_dispatch(&executor, Some(&fed), "find_anchors", &args).is_none(),
+            "a call explicitly scoped to the healthy repo must not be gated by the broken one"
+        );
+
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("broken-repo".into()),
+        );
+        let gated = gate_for_dispatch(&executor, Some(&fed), "find_anchors", &args)
+            .expect("a call scoped to the broken repo must gate");
+        assert_eq!(gated.state, "unavailable_error");
+        assert_eq!(gated.blocking_repos, vec!["broken-repo"]);
+    }
+
+    /// M4 step 8: a federation-wide tool (`requires_repo_scope` ==
+    /// false) gates against every loaded repo and reports every blocking
+    /// repo id, sorted, regardless of `FederatedIndex::list_repos`'s
+    /// iteration order or which repo was added first.
+    #[tokio::test]
+    async fn federation_wide_tool_call_reports_every_blocking_repo_sorted() {
+        use crate::server::federation::health::RepoHealth;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _z = add_test_repo(&fed, tmp.path(), "zeta").await;
+        let _a = add_test_repo(&fed, tmp.path(), "alpha").await;
+        let _r = add_test_repo(&fed, tmp.path(), "ready-repo").await;
+        fed.get_repo(&RepoId::new("zeta").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Degraded);
+        fed.get_repo(&RepoId::new("alpha").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Indexing);
+        fed.get_repo(&RepoId::new("ready-repo").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Ready);
+
+        let executor = test_executor();
+        let gated = gate_for_dispatch(&executor, Some(&fed), "query_graph", &Map::new())
+            .expect("query_graph must gate while alpha/zeta are not ready");
+        assert_eq!(gated.blocking_repos, vec!["alpha", "zeta"]);
     }
 }
 
