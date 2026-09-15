@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod mcp_client;
 pub mod oneshot;
 pub mod query;
+pub mod readiness;
 pub mod repos;
 pub mod schema;
 pub mod server;
@@ -239,6 +240,20 @@ pub enum Commands {
         /// Internal read-only MCP transport used by the diagnostic probe.
         #[arg(long, hide = true, conflicts_with = "json", requires = "workspace")]
         probe_mcp: bool,
+    },
+    /// List repository capabilities and their readiness states.
+    Capabilities {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Show aggregate repository, index, and MCP readiness.
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
 }
 

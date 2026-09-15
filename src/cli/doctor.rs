@@ -241,7 +241,7 @@ fn observe_semantic(report: &mut DoctorReport) {
     report.problem("semantic_unverified", reason, action, true);
 }
 
-pub fn run_doctor(json_output: bool, workspace: Option<&Path>) -> Result<i32> {
+pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     let mut report = DoctorReport {
         schema_version: SCHEMA_VERSION,
         server_version: env!("CARGO_PKG_VERSION"),
@@ -354,6 +354,11 @@ pub fn run_doctor(json_output: bool, workspace: Option<&Path>) -> Result<i32> {
     report
         .problems
         .sort_by(|a, b| (&a.code, &a.message).cmp(&(&b.code, &b.message)));
+    Ok(report)
+}
+
+pub fn run_doctor(json_output: bool, workspace: Option<&Path>) -> Result<i32> {
+    let report = build_report(workspace)?;
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

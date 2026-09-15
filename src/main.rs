@@ -156,6 +156,22 @@ fn main() -> Result<()> {
             };
             std::process::exit(code);
         }
+        Some(Commands::Capabilities { json, workspace }) => {
+            let code = lain::cli::readiness::capabilities(json, workspace.as_deref())
+                .unwrap_or_else(|error| {
+                    eprintln!("capabilities failed: {error:#}");
+                    2
+                });
+            std::process::exit(code);
+        }
+        Some(Commands::Status { json, workspace }) => {
+            let code =
+                lain::cli::readiness::status(json, workspace.as_deref()).unwrap_or_else(|error| {
+                    eprintln!("status failed: {error:#}");
+                    2
+                });
+            std::process::exit(code);
+        }
         None => {
             // No subcommand: print help.
             let mut cmd = Args::command();

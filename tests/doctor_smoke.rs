@@ -180,6 +180,38 @@ fn diagnosis_keeps_cached_sessions() {
     );
 }
 
+#[test]
+fn capability_and_status_commands_project_the_same_readiness() {
+    let fixture = Fixture::new(true);
+    let doctor = fixture.json(0);
+    for command in ["capabilities", "status"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_lain"))
+            .args([command, "--json", "--workspace"])
+            .arg(fixture.repo.path())
+            .env("HOME", fixture.home.path())
+            .env("LAIN_CACHE_DIR", fixture.home.path().join("cache"))
+            .env_remove("LAIN_URL")
+            .env_remove("LAIN_SERVER_URL")
+            .env_remove("LAIN_EMBEDDING_MODEL")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema_version"], doctor["schema_version"]);
+        assert_eq!(value["server_version"], doctor["server_version"]);
+        assert_eq!(value["capabilities"], doctor["capabilities"]);
+        if command == "status" {
+            assert_eq!(value["agent_ready"], doctor["agent_ready"]);
+            assert!(value.get("indexing").is_some());
+        }
+    }
+}
+
 /// Regression test for the doctor `tools/list` happy path.
 ///
 /// The pre-fix code sent `{"method": "tools/call", "params": {"name": "tools/list"}}`
