@@ -121,7 +121,14 @@ fn boot_server_fixture(port: u16) -> ServerFixture {
     }
 }
 
-fn boot_server(port: u16) -> (ServerGuard, tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
+fn boot_server(
+    port: u16,
+) -> (
+    ServerGuard,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
     // Project dir: one minimal repo so the federation is non-empty
     // (federation tools refuse to dispatch when `list_repos()` is
     // empty — `get_health` and friends return

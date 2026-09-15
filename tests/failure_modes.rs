@@ -109,7 +109,14 @@ fn boot_server_fixture(port: u16) -> ServerFixture {
     }
 }
 
-fn boot_server(port: u16) -> (ServerGuard, tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
+fn boot_server(
+    port: u16,
+) -> (
+    ServerGuard,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
     let project = tempfile::tempdir().unwrap();
     let repo_dir = project.path().join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();

@@ -99,7 +99,14 @@ fn boot_server_fixture(port: u16) -> ServerFixture {
     }
 }
 
-fn boot_server(port: u16) -> (ServerGuard, tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
+fn boot_server(
+    port: u16,
+) -> (
+    ServerGuard,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
     // Same fixture as `feat_suite.rs`: one minimal Rust repo with
     // `orchestrate`, `entrypoint`, `helper_a`, `helper_b` so the
     // graph is non-empty and `find_anchors`/`get_blast_radius`/

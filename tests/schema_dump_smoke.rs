@@ -131,7 +131,10 @@ fn lain_schema_dump_writes_tools_list_shape() {
     // or required-arg name may contain a `?` — optionality belongs in
     // `optional_args`, never encoded into the name string.
     for t in tools {
-        let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("<unnamed>");
+        let name = t
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("<unnamed>");
         let schema = t.get("inputSchema").expect("checked above");
         if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
             for prop_name in props.keys() {

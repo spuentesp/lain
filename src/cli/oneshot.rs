@@ -271,7 +271,9 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         Err(_) => println!("{}", raw_text),
     }
     if is_tool_error {
-        return Err(anyhow!("tool {tool} returned isError=true (see output above)"));
+        return Err(anyhow!(
+            "tool {tool} returned isError=true (see output above)"
+        ));
     }
     Ok(())
 }

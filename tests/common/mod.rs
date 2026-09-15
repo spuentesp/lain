@@ -412,8 +412,13 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
                 // was a no-op there). It's real now, so a call made while
                 // the repo is still gated needs its own tolerant handling
                 // instead of panicking through this loop's own diagnostics.
-                let env = tools_call_envelope(host, "explain_symbol", serde_json::json!({"symbol": name}));
-                let is_error = env.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true);
+                let env = tools_call_envelope(
+                    host,
+                    "explain_symbol",
+                    serde_json::json!({"symbol": name}),
+                );
+                let is_error =
+                    env.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true);
                 if !is_error {
                     break;
                 }
