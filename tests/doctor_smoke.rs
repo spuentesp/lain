@@ -170,7 +170,10 @@ fn diagnosis_keeps_cached_sessions() {
     std::fs::create_dir_all(&hooks).unwrap();
     let session = hooks.join("old.session");
     std::fs::write(&session, "old cached session").unwrap();
-    let file = std::fs::File::open(&session).unwrap();
+    // `set_times` needs write access to the handle on Windows (Unix's
+    // `utimensat` is more permissive about a read-only fd) -- a plain
+    // `File::open` handle fails with PermissionDenied there.
+    let file = std::fs::File::options().write(true).open(&session).unwrap();
     file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
         .unwrap();
     fixture.json(0);
