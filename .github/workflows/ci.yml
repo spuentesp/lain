@@ -101,6 +101,19 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
+          # docs/tool-schema.json lives under docs/ but is a generated
+          # artifact, not documentation -- it's the exact file
+          # `schema-drift` exists to catch drifting undetected. `^docs/`
+          # below would otherwise let a PR that edits only this file
+          # skip the one check whose job is to verify it, so it's
+          # special-cased out of the docs-only allowlist before the
+          # general classification runs.
+          if echo "$CHANGED" | grep -qx 'docs/tool-schema.json'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "docs/tool-schema.json changed; treating as non-docs so schema-drift still runs."
+            exit 0
+          fi
+
           # Conservative allowlist: every changed file must match one of
           # these patterns for the run to count as docs-only. Anything
           # unrecognized counts as code.
@@ -502,7 +515,14 @@ jobs:
     name: Badge and release contracts
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && github.event.pull_request.draft != true
+    # This job is one of the three the header comment above names as
+    # Tier 1 ("lint/npm-shim/action-contracts -- always runs, even in
+    # draft, for fast feedback"), but the `draft != true` clause this
+    # inherited from the heavier jobs contradicted that: it made draft
+    # PRs targeting main skip release-contract validation entirely
+    # until marked ready. No draft exclusion here, matching lint/
+    # npm-shim, which never had one.
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     steps:

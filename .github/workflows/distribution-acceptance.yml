@@ -124,11 +124,39 @@ jobs:
         shell: bash
         run: bash scripts/make-clean-room-fixture.sh "${{ runner.temp }}/fixture"
 
-      - name: lain doctor --json
+      - name: lain doctor --json (fresh fixture has no index yet)
         shell: bash
         env:
           CI: ''
-        run: npx -y @spuentesp/lain-mcp doctor --json --workspace "${{ runner.temp }}/fixture"
+        run: |
+          # A plain step requires exit 0. This fixture was just created
+          # by make-clean-room-fixture.sh two steps above and nothing has
+          # indexed it yet, so `doctor` is *correct* to report it
+          # unusable and exit 2 -- see
+          # missing_index_is_unusable_and_diagnosis_does_not_create_it in
+          # tests/doctor_smoke.rs, which pins exactly this: exit 2,
+          # agent_ready=false, a graph_missing problem, and no .lain/
+          # directory created as a side effect of diagnosing. Requiring
+          # exit 0 here meant this step -- and the identical one in
+          # release-gate below -- could never pass, healthy package or
+          # not.
+          set +e
+          OUTPUT=$(npx -y @spuentesp/lain-mcp doctor --json --workspace "${{ runner.temp }}/fixture")
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+          if [ "$STATUS" -ne 2 ]; then
+            echo "::error::expected doctor to exit 2 (unusable: no index yet) on a fresh, unindexed fixture; got exit $STATUS"
+            exit 1
+          fi
+          echo "$OUTPUT" | python3 -c "
+          import json, sys
+          report = json.load(sys.stdin)
+          assert report.get('agent_ready') is False, f'expected agent_ready=false, got {report.get(\"agent_ready\")!r}'
+          codes = [p.get('code') for p in report.get('problems', [])]
+          assert 'graph_missing' in codes, f'expected a graph_missing problem, got {codes!r}'
+          print('doctor correctly diagnosed the unindexed fixture as unusable')
+          "
 
       - name: MCP protocol round trip
         shell: bash
@@ -244,7 +272,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_INPUT: ${{ inputs.tag }}
         run: |
+          # `gh release view` with no tag resolves the latest *stable*
+          # release. For the workflow_run path that's wrong on two
+          # counts: it doesn't necessarily match the release that
+          # actually triggered this run, and a prerelease (published
+          # under the `next` npm tag, not `latest`) is invisible to it
+          # entirely -- this job would then silently re-validate an
+          # older, already-validated release while claiming to gate the
+          # one that just published. `workflow_run.head_branch` carries
+          # the triggering tag name for a tag-push-triggered workflow, so
+          # prefer that; fall back to `gh release view` only when neither
+          # an explicit input nor a workflow_run tag is available (e.g.
+          # manual dispatch with no `tag` input).
           TAG="$TAG_INPUT"
+          if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "workflow_run" ]; then
+            TAG="${{ github.event.workflow_run.head_branch }}"
+          fi
           if [ -z "$TAG" ]; then
             TAG=$(gh release view --json tagName -q .tagName)
           fi
@@ -304,18 +347,48 @@ jobs:
           BIN=./lain
           [ "${{ matrix.os }}" = "windows-latest" ] && BIN=./lain.exe
           chmod +x "$BIN" 2>/dev/null || true
-          "$BIN" --version
+          # This step used to only print the version, never compare it
+          # -- a tarball containing a build of the wrong version (a stale
+          # cache entry, a mislabeled asset) still passed the release
+          # gate. `lain --version` prints "lain <CARGO_PKG_VERSION>".
+          ACTUAL=$("$BIN" --version)
+          EXPECTED="lain ${{ steps.tag.outputs.version }}"
+          echo "$ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::extracted binary reports '$ACTUAL', expected '$EXPECTED' for tag ${{ steps.tag.outputs.tag }}"
+            exit 1
+          fi
 
       - name: Create fixture repository
         shell: bash
         run: bash scripts/make-clean-room-fixture.sh "${{ runner.temp }}/fixture"
 
-      - name: lain doctor --json
+      - name: lain doctor --json (fresh fixture has no index yet)
         shell: bash
         run: |
+          # Same fix as the identical step in user-lane/automation-lane
+          # above: doctor correctly exits 2 (unusable, graph_missing) on
+          # this just-created, unindexed fixture. A plain step requiring
+          # exit 0 meant this could never pass.
           BIN="${{ runner.temp }}/release/lain"
           [ "${{ matrix.os }}" = "windows-latest" ] && BIN="${{ runner.temp }}/release/lain.exe"
-          "$BIN" doctor --json --workspace "${{ runner.temp }}/fixture"
+          set +e
+          OUTPUT=$("$BIN" doctor --json --workspace "${{ runner.temp }}/fixture")
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+          if [ "$STATUS" -ne 2 ]; then
+            echo "::error::expected doctor to exit 2 (unusable: no index yet) on a fresh, unindexed fixture; got exit $STATUS"
+            exit 1
+          fi
+          echo "$OUTPUT" | python3 -c "
+          import json, sys
+          report = json.load(sys.stdin)
+          assert report.get('agent_ready') is False, f'expected agent_ready=false, got {report.get(\"agent_ready\")!r}'
+          codes = [p.get('code') for p in report.get('problems', [])]
+          assert 'graph_missing' in codes, f'expected a graph_missing problem, got {codes!r}'
+          print('doctor correctly diagnosed the unindexed fixture as unusable')
+          "
 
       - name: MCP protocol round trip against the extracted binary
         shell: bash
