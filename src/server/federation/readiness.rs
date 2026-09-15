@@ -21,7 +21,7 @@ use crate::server::readiness::{
 /// becomes a bare `warming_up` with no progress detail, and every
 /// unhealthy variant collapses to one terminal `unavailable_error` with a
 /// problem code naming which `RepoHealth` variant caused it.
-fn repo_health_to_snapshot(health: RepoHealth) -> IndexLifecycleSnapshot {
+pub(crate) fn repo_health_to_snapshot(health: RepoHealth) -> IndexLifecycleSnapshot {
     let mut snapshot = IndexLifecycleSnapshot::warming_up();
     match health {
         RepoHealth::Ready => {

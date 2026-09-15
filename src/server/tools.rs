@@ -497,29 +497,98 @@ impl ToolExecutor {
         use crate::server::readiness::{
             Capabilities, Capability, CapabilityState, IndexState, SCHEMA_VERSION,
         };
-        let lifecycle = self.ctx.readiness.snapshot();
-        let structural = match lifecycle.state {
-            IndexState::Ready => CapabilityState::Ready,
-            IndexState::WarmingUp => CapabilityState::WarmingUp,
-            IndexState::UnavailableError => CapabilityState::UnavailableError,
-        };
-        let mut symbols = Capability::new(structural, false);
-        let mut call_graph = Capability::new(structural, false);
-        if structural == CapabilityState::WarmingUp {
-            symbols.retry_after_ms = lifecycle.retry_after_ms;
-            call_graph.retry_after_ms = lifecycle.retry_after_ms;
+
+        fn structural_state(index_state: IndexState) -> CapabilityState {
+            match index_state {
+                IndexState::Ready => CapabilityState::Ready,
+                IndexState::WarmingUp => CapabilityState::WarmingUp,
+                IndexState::UnavailableError => CapabilityState::UnavailableError,
+            }
         }
-        let semantic_search = if self.ctx.embedder.is_stub() {
-            Capability::new(CapabilityState::UnavailableOptional, true)
-        } else {
-            Capability::new(structural, true)
-        };
-        let capabilities = Capabilities {
-            symbols,
-            call_graph,
-            git_history: Capability::new(CapabilityState::Ready, false),
-            semantic_search,
-        };
+
+        /// How bad a structural `CapabilityState` is, for picking the
+        /// worst-of across repos when aggregating. Only `Ready` /
+        /// `WarmingUp` / `UnavailableError` are ever produced by
+        /// `structural_state` above; `StaleUsable` and
+        /// `UnavailableOptional` rank alongside `WarmingUp` for
+        /// completeness even though they don't occur here today.
+        fn badness(state: CapabilityState) -> u8 {
+            use CapabilityState::*;
+            match state {
+                Ready => 0,
+                WarmingUp | StaleUsable | UnavailableOptional => 1,
+                UnavailableError => 2,
+            }
+        }
+
+        fn capabilities_for(
+            structural: CapabilityState,
+            retry_after_ms: Option<u64>,
+            semantic_stub: bool,
+        ) -> Capabilities {
+            let mut symbols = Capability::new(structural, false);
+            let mut call_graph = Capability::new(structural, false);
+            if structural == CapabilityState::WarmingUp {
+                symbols.retry_after_ms = retry_after_ms;
+                call_graph.retry_after_ms = retry_after_ms;
+            }
+            let semantic_search = if semantic_stub {
+                Capability::new(CapabilityState::UnavailableOptional, true)
+            } else {
+                Capability::new(structural, true)
+            };
+            Capabilities {
+                symbols,
+                call_graph,
+                git_history: Capability::new(CapabilityState::Ready, false),
+                semantic_search,
+            }
+        }
+
+        let semantic_stub = self.ctx.embedder.is_stub();
+
+        // Federation mode: each repo owns its own RepoHealth, so
+        // `capabilities` (kept for backward compatibility) becomes the
+        // worst-of aggregate across every loaded repo, and a new
+        // `repositories` array (sorted by id, so the shape is
+        // deterministic) carries each repo's own state. AGENT_UX_ROADMAP.md
+        // Milestone 4 step 8.
+        if let Some(fed) = self.ctx.federation.as_ref() {
+            use crate::server::federation::readiness::repo_health_to_snapshot;
+
+            let mut repos = fed.list_repos();
+            repos.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+
+            let mut worst = CapabilityState::Ready;
+            let mut worst_retry_after_ms: Option<u64> = None;
+            let repositories: Vec<serde_json::Value> = repos
+                .iter()
+                .map(|(id, health)| {
+                    let snapshot = repo_health_to_snapshot(*health);
+                    let structural = structural_state(snapshot.state);
+                    if badness(structural) > badness(worst) {
+                        worst = structural;
+                        worst_retry_after_ms = snapshot.retry_after_ms;
+                    }
+                    let caps = capabilities_for(structural, snapshot.retry_after_ms, semantic_stub);
+                    serde_json::json!({ "id": id.as_str(), "capabilities": caps })
+                })
+                .collect();
+            let aggregate = capabilities_for(worst, worst_retry_after_ms, semantic_stub);
+
+            return serde_json::to_string(&serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "server_version": env!("CARGO_PKG_VERSION"),
+                "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
+                "capabilities": aggregate,
+                "repositories": repositories,
+            }))
+            .map_err(Into::into);
+        }
+
+        let lifecycle = self.ctx.readiness.snapshot();
+        let structural = structural_state(lifecycle.state);
+        let capabilities = capabilities_for(structural, lifecycle.retry_after_ms, semantic_stub);
         serde_json::to_string(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "server_version": env!("CARGO_PKG_VERSION"),
@@ -967,5 +1036,59 @@ mod tests {
         assert!(
             crate::server::readiness::gate_tool_call("find_anchors", &snapshot, true).is_none()
         );
+    }
+
+    /// AGENT_UX_ROADMAP.md M4 step 8: in federation mode, `get_capabilities`
+    /// must report both each repo's own state (`repositories`) and a
+    /// worst-of aggregate under the existing `capabilities` key, not the
+    /// one process-global handle a federation server never advances.
+    #[tokio::test]
+    async fn get_capabilities_reports_per_repo_state_and_worst_of_aggregate_in_federation_mode() {
+        use crate::federation::federated_index::FederatedIndex;
+        use crate::federation::graph_backend::PetgraphBackend;
+        use crate::federation::repo_id::RepoId;
+        use crate::federation::repo_source::WorkspaceDirSource;
+        use crate::server::federation::health::RepoHealth;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+
+        let mut src_dirs = Vec::new();
+        for name in ["alpha", "beta"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+            src_dirs.push(src_dir);
+        }
+        fed.get_repo(&RepoId::new("alpha").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Ready);
+        fed.get_repo(&RepoId::new("beta").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Indexing);
+
+        let graph = crate::graph::GraphDatabase::empty_read_only();
+        let overlay = crate::overlay::VolatileOverlay::new();
+        let mut executor = ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."));
+        executor.ctx.federation = Some(Arc::new(fed));
+
+        let json_text = executor.get_capabilities().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+
+        // Aggregate must reflect the worst repo (beta, still indexing).
+        assert_eq!(value["capabilities"]["symbols"]["state"], "warming_up");
+
+        let repos = value["repositories"].as_array().unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0]["id"], "alpha");
+        assert_eq!(repos[0]["capabilities"]["symbols"]["state"], "ready");
+        assert_eq!(repos[1]["id"], "beta");
+        assert_eq!(repos[1]["capabilities"]["symbols"]["state"], "warming_up");
+
+        drop(src_dirs);
     }
 }
