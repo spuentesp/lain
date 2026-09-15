@@ -8,7 +8,7 @@ name: Fuzz Nightly
 #     targets in a registered fuzzing framework
 #   - a CI workflow that exercises those targets
 #
-# Each target runs ~60 seconds; enough to satisfy the scorecard
+# Each target runs ~90 seconds; enough to satisfy the scorecard
 # check that the project *does* fuzz, and to catch regressions
 # between releases. Reproducer artefacts from any crash get
 # uploaded for the maintainer to triage.

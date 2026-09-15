@@ -43,12 +43,24 @@ fn fuzz_path_canonicalize(data: &[u8]) {
     // round-trip via `Path` (which is what callers do).
     let path = Path::new(&*input);
 
-    // We don't have claim roots in the fuzzer; canonicalize_path /
-    // posix_string don't need them. canonical_claim_path does, so
-    // give it an empty-root slice — it falls through to the
-    // `posix_string(path)` branch in that case, which is the
-    // production fallback when no root is configured.
-    let roots: Vec<PathBuf> = Vec::new();
+    // Build a non-empty list of claim roots so the
+    // `canonical_claim_path` branch that joins against each root
+    // (the production path with `set_workspace_root` configured)
+    // actually gets exercised. Empty roots short-circuit to the
+    // `posix_string(path)` fallback which only re-tests the path
+    // formatter — the join-and-strip-prefix logic isn't hit.
+    //
+    // We can't create real on-disk roots (the fuzzer is sandboxed),
+    // but `canonical_form` is a no-op on non-existent paths (returns
+    // the lexically-normalized form), so a synthetic root that
+    // doesn't exist on disk still drives the full prefix-stripping
+    // branch — the function doesn't care if the root exists, only
+    // whether the candidate path can be stripped against it.
+    let roots: Vec<PathBuf> = vec![
+        PathBuf::from("/workspace"),
+        PathBuf::from("/repo"),
+        PathBuf::from("/tmp/lain-test-roots/primary"),
+    ];
 
     let _ = posix_string(&path);
     let _ = lexical_normalize(&path);

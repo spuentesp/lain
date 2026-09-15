@@ -771,7 +771,7 @@ struct OccupancyState {
 /// available answer.
 /// Both branches pass through `canonical_form` in `path_util` so
 /// symlinks and Windows extended-length prefixes collapse to the same string.
-fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
+pub fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
     // Both branches go through the same canonical form so
     // symlinks and Windows extended-length prefixes don't
     // produce divergent absolute vs. relative keys.

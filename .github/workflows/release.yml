@@ -404,8 +404,12 @@ jobs:
         id: version
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'  # npm 11.5.1+ for Trusted Publishing OIDC
-          registry-url: 'https://registry.npmjs.org'
+          node-version: '22'  # Node 22 LTS. We then explicitly bump
+          registry-url: 'https://registry.npmjs.org'   # npm to >=11.5.1 because Node 22's
+                                                 # bundled npm 10.x is below the floor for
+                                                 # Trusted Publishing (OIDC) — see PR #59 review.
+      - name: Bump npm to satisfy Trusted Publishing floor
+        run: npm install -g npm@^11.5.1
       - name: Sync npm-shim version to release tag
         working-directory: npm-shim
         run: |

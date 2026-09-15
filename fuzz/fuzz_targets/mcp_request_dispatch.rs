@@ -25,8 +25,17 @@
 
 #[libfuzzer_sys::fuzz_target]
 fn fuzz_mcp_request_dispatch(data: &[u8]) {
-    // Same lossy round-trip the handler does on HTTP body bytes.
-    let value: serde_json::Value = match serde_json::from_slice(data) {
+    // Mirror the handler's exact lossy round-trip on HTTP body bytes
+    // (src/server/mcp/handler.rs:1582-1584):
+    //   1. String::from_utf8_lossy(&body_bytes) → lossy UTF-8
+    //   2. serde_json::from_str::<Value>(&body_str)
+    //
+    // `serde_json::from_slice` would reject invalid UTF-8 before
+    // deserialization, which is *stricter* than the production
+    // path and would silently miss any panic in the lossy branch.
+    // The two-step form is what the handler actually does.
+    let input = String::from_utf8_lossy(data);
+    let value: serde_json::Value = match serde_json::from_str(&input) {
         Ok(v) => v,
         Err(_) => return,
     };
