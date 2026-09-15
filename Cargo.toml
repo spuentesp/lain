@@ -27,7 +27,7 @@ http-body-util = "0.1"
 async-trait = "0.1"
 
 # Git integration
-git2 = "0.19"
+git2 = "0.21"
 
 # File watching
 notify = "6"
