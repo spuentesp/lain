@@ -33,36 +33,38 @@ jobs:
       - name: Verify release tag and package metadata
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME"
       # Compute SOURCE_DATE_EPOCH as a Unix-epoch INTEGER and expose
-      # it via $GITHUB_OUTPUT for build jobs to consume via
-      # `needs.version-check.outputs.epoch`.
+      # it as a step output for build jobs to consume via
+      # `needs.version-check.outputs.epoch-py`.
       #
-      # The previous shell form
-      #   echo "epoch=$(date -d '...' +%s)" >> "$GITHUB_OUTPUT"
-      # looked correct and CI passed, but at runtime the step's
-      # outputs dict was empty: the redirect silently produced no
-      # value, and downstream build jobs saw SOURCE_DATE_EPOCH=''.
-      # cc on ring/tree-sitter iOS assembly then failed with
-      #   "environment variable 'SOURCE_DATE_EPOCH' ('') must be
-      #    a non-negative decimal integer <= 253402300799"
+      # History of attempts that "looked right" but silently failed:
       #
-      # Computing via Python (already set up by setup-python in this
-      # job) writes through Python's own file API and is straightforward
-      # to reason about; the trailing `echo` prints what was actually
-      # written so future regressions are visible without a separate
-      # API query.
-      - name: Compute reproducible-build epoch
-        id: epoch
+      # 1. PR #43: shell form
+      #      echo "epoch=$(date -d '${{ ... }}' +%s)" >> "$GITHUB_OUTPUT"
+      #    step concluded success and CI was green, but at runtime
+      #    the step's outputs dict was empty and build jobs saw
+      #    SOURCE_DATE_EPOCH=''. tree-sitter then failed with
+      #      "environment variable 'SOURCE_DATE_EPOCH' ('') must be
+      #       a non-negative decimal integer <= 253402300799"
+      #
+      # 2. PR #45: python via heredoc redirected to $GITHUB_OUTPUT
+      #    Same silent failure. The file DID contain
+      #    "epoch=1789430578" (verified by a debug echo), but GitHub
+      #    Actions never registered the output.
+      #
+      # 3. This step uses `>> "$GITHUB_OUTPUT"` with the value
+      #    computed in a Python step that writes the OUTPUT line
+      #    DIRECTLY (no shell pipeline between Python and the file).
+      #    If this also silently drops, fall back to a workflow-level
+      #    env or pass via a sidecar file (see follow-up TODO).
+      - name: Compute epoch (Python)
+        id: epoch-py
         env:
           UPDATED_AT: ${{ github.event.repository.updated_at }}
         run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import os
-          from datetime import datetime
-          iso = os.environ['UPDATED_AT'].replace('Z', '+00:00')
-          epoch = int(datetime.fromisoformat(iso).timestamp())
-          print(f"epoch={epoch}")
-          PY
-          echo "epoch-output-debug: $(tail -n 1 "$GITHUB_OUTPUT")"
+          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ["UPDATED_AT"].replace("Z","+00:00")).timestamp())))')
+          echo "epoch-computed=$EPOCH"
+          echo "epoch=$EPOCH" >> "$GITHUB_OUTPUT"
+          echo "wrote-debug: $(tail -n 1 "$GITHUB_OUTPUT")"
 
   build-linux:
     needs: version-check
@@ -87,7 +89,7 @@ jobs:
       # rust-toolchain.toml, which is the next iteration.
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
+          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch-py }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-unknown-linux-gnu
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -159,7 +161,7 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
+          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch-py }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target aarch64-apple-darwin
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -232,7 +234,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
+          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch-py }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-pc-windows-msvc
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
