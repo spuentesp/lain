@@ -227,11 +227,19 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::cli::schema::SchemaAction,
     },
-    /// Run installation / version diagnostics — the
-    /// "one-version-of-truth" page operators can paste into bug
-    /// reports. Always exits 0 on a clean install, 1 on hard
-    /// failures (missing hook script, un-creatable dirs).
-    Doctor,
+    /// Diagnose repository readiness without changing files.
+    /// Exit codes: 0 ready, 1 usable but degraded, 2 unusable.
+    Doctor {
+        /// Emit the versioned diagnostic report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Inspect this repository (defaults to the current directory).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Internal read-only MCP transport used by the diagnostic probe.
+        #[arg(long, hide = true, conflicts_with = "json", requires = "workspace")]
+        probe_mcp: bool,
+    },
 }
 
 #[cfg(test)]

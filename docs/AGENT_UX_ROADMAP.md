@@ -4,6 +4,49 @@
 >
 > A developer should be able to install it, connect an MCP client, and get useful repository intelligence with almost no configuration. An agent should be able to discover what LAIN knows, choose the right capability, and recover from partial readiness without human intervention.
 
+## Implementation review (2026-09-14)
+
+Review of branch `spuentesp/brittlestar`, starting at `3c545d9`. These
+observations describe this checkout; they do not verify published packages.
+
+| Area | Evidence and remaining work |
+|---|---|
+| Distribution | `.github/workflows/release.yml` publishes versioned archives and `SHA256SUMS`. `npm-shim/scripts/install.js` pins the package version but downloads and extracts without checking the checksum. It still installs into shared `~/.lain/bin`; the launcher needs the version/target cache, override, and offline behavior from milestone 1. |
+| Diagnostics | `src/cli/doctor.rs` checks installation and optionally a remote MCP endpoint. It does not diagnose repository freshness or expose JSON. It also creates directories and prunes sessions during ordinary diagnosis; move repairs behind `--fix` when implementing issue 5. Existing directory presence does not prove writability despite the current output. |
+| Startup | `src/cli/mcp.rs` constructs the server and synchronizes the overlay before entering stdio. Keep the planned classification and central gate ahead of asynchronous startup so agents cannot query an incomplete graph. |
+| Onboarding | The CLI has `doctor` but no `setup`, `capabilities`, or `status` commands. Keep setup dependent on the shared diagnostic contract. |
+
+The dependency order below still fits the code. Begin with issue 4; distribution
+issues 1–3 can proceed independently. Do not treat the existing npm package or
+doctor command as completion of their corresponding UX milestones.
+
+### First implementation: shared capability policy (issue 4)
+
+`src/server/readiness.rs` now defines the five capability states, the four fixed
+capability keys, optional diagnostic fields, and schema version constant. One
+calculation supplies both `agent_ready` and the future diagnostic exit code.
+It performs no I/O and requires callers to supply observed states explicitly.
+
+The acceptance contract for this change is:
+
+- Required capabilities must be `ready` or `stale_usable`, and transport must be
+  healthy, for `agent_ready` to be true. An absent optional dependency alone exits 0.
+- Usable stale/warming/error combinations exit 1; required absence, warming,
+  failure, or unhealthy transport exits 2.
+- JSON uses the state names and keys specified in milestone 4, omits absent
+  diagnostics, and accepts unknown additive fields when reading.
+- Tests cover every combination of the five capability states (625 combinations)
+  with healthy and unhealthy transport, plus serialization fixtures.
+
+This is a library foundation; existing command output and MCP behavior do not yet
+consume it. There is no new CLI transcript in this change. The next implementation
+is issue 5: observe repository and transport health, build the versioned doctor
+report from this policy, and test read-only diagnosis and explicit repair. The
+index lifecycle coordinator remains issue 9 and must own live transitions.
+
+Before merging to `dev`, reconcile its CI-only commit `ea99b27`, which is absent
+from this branch's starting history. This review does not merge or publish changes.
+
 ## Product outcome
 
 The target experience is intentionally boring:

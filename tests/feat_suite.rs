@@ -559,20 +559,21 @@ fn feat_suite_end_to_end() {
     }
 
     // ─── Category E — doctor ──────────────────────────────────────
-    // E.1 `lain doctor` exits 0.
-    // E.2 stdout contains "all checks passed".
+    // The repository used to run this suite need not have a current graph,
+    // so assert the stable JSON contract and documented exit-code range.
     let doctor = Command::new(env!("CARGO_BIN_EXE_lain"))
-        .args(["doctor"])
+        .args(["doctor", "--json"])
         .output()
         .expect("run doctor");
     let doctor_stdout = String::from_utf8_lossy(&doctor.stdout).to_string();
     assert!(
-        doctor.status.success(),
-        "lain doctor failed (status {:?}): {doctor_stdout}",
-        doctor.status.code()
+        matches!(doctor.status.code(), Some(0..=2)),
+        "lain doctor returned an undocumented status {:?}: {doctor_stdout}",
+        doctor.status.code(),
     );
-    assert!(
-        doctor_stdout.contains("all checks passed"),
-        "lain doctor missing `all checks passed` line; stdout:\n{doctor_stdout}"
-    );
+    let doctor_json: serde_json::Value =
+        serde_json::from_str(&doctor_stdout).expect("doctor output must be JSON");
+    assert_eq!(doctor_json["schema_version"], 1);
+    assert!(doctor_json["agent_ready"].is_boolean());
+    assert!(doctor_json["capabilities"].is_object());
 }

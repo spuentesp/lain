@@ -6,8 +6,7 @@
 //! `Init`, `Agents`, `Projects`, and the old top-level `Use` are gone
 //! after the consolidation. `hooks` is the agent pre-edit hook entry
 //! point (claim/release against the server's presence registry).
-//! `doctor` is the "one version of truth" diagnostic for the
-//! installation — binary version + git sha + on-disk state.
+//! `doctor` is the read-only repository and MCP readiness diagnostic.
 //!
 //! `main` is sync. Only the `server` subcommand needs a tokio runtime,
 //! and we build a fresh one for it on demand rather than wrapping the
@@ -135,12 +134,27 @@ fn main() -> Result<()> {
             tool,
             args,
         }) => lain::cli::oneshot::run_oneshot(workspace.as_deref(), &tool, &args),
-        Some(Commands::Doctor) => {
-            // `doctor` returns its own exit code (0 clean, 1 hard
-            // failure). Anything else (e.g. a network error from
-            // reqwest) collapses to 2 so we don't silently lie about
-            // a clean install.
-            std::process::exit(lain::cli::doctor::run_doctor().unwrap_or(2));
+        Some(Commands::Doctor {
+            json,
+            workspace,
+            probe_mcp,
+        }) => {
+            if probe_mcp {
+                return tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(lain::cli::doctor::run_probe(
+                        workspace.as_deref().context("probe workspace")?,
+                    ));
+            }
+            let code = match lain::cli::doctor::run_doctor(json, workspace.as_deref()) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("doctor failed: {error:#}");
+                    2
+                }
+            };
+            std::process::exit(code);
         }
         None => {
             // No subcommand: print help.

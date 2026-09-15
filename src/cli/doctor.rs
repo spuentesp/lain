@@ -1,278 +1,500 @@
-//! `lain doctor` — one-version-of-truth diagnostic for the installation.
-//!
-//! Wishlist item #6: when an operator (or an automated bug report) needs
-//! to know "is this binary the one I think it is, and is the local state
-//! sane?", they run `lain doctor` and get a single page that names:
-//!
-//! 1. The binary version (Cargo.toml) + the git short SHA captured at
-//!    build time by `build.rs`.
-//! 2. Whether the on-disk hook scripts the agents rely on are present.
-//! 3. Whether the config dir (`~/.config/lain`) is present / creatable.
-//! 4. Whether the hooks dir (`<config>/hooks`) is present / creatable
-//!    and how many cached session JSON files it carries.
-//! 5. Whether the in-process presence registry constructs cleanly (i.e.
-//!    the data structures the server hot path relies on are reachable).
-//! 6. If `LAIN_URL` or `LAIN_SERVER_URL` is set, whether the server is
-//!    reachable — this is a soft `[WARN]` rather than a hard `[FAIL]`
-//!    because `lain doctor` is also useful in environments where no
-//!    server is running locally.
-//! 7. If that server answered, whether its **MCP surface** is live:
-//!    `tools/list` is called and the advertised tool count reported.
-//!    This one is a hard `[FAIL]` (wishlist #10). A reachable `/health`
-//!    only proves the process is up; the surface agents actually call
-//!    can be empty behind it, and "all checks passed" printed over a
-//!    broken MCP registration is the single most misleading thing this
-//!    page could do. Once the server is known reachable, an empty or
-//!    erroring tool list is a real failure, not an environment quirk.
-//!
-//! Returns `Ok(0)` if every check passed, `Ok(1)` if any hard check
-//! failed. Hard failures do not abort early — the operator should see
-//! every result, not just the first one that broke.
+//! Read-only repository diagnosis. The report describes a persisted snapshot and
+//! a separate MCP transport probe, not the readiness of a running indexer.
 
 use crate::config::{config_dir, hooks_dir, lain_git_sha};
-use crate::server::presence::PresenceRegistry;
-use anyhow::Result;
+use crate::server::graph::{inspect_persisted_graph, GraphInspectionError};
+use crate::server::readiness::{Capabilities, Capability, CapabilityState, SCHEMA_VERSION};
+use anyhow::{anyhow, Context, Result};
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-/// One diagnostic result line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Severity {
-    Ok,
-    Fail,
-    Warn,
+#[derive(Debug, Serialize)]
+pub struct Problem {
+    pub code: String,
+    pub message: String,
+    pub remediation: String,
+    pub retryable: bool,
 }
 
-impl Severity {
-    fn tag(self) -> &'static str {
-        match self {
-            Severity::Ok => "[OK]",
-            Severity::Fail => "[FAIL]",
-            Severity::Warn => "[WARN]",
-        }
+#[derive(Debug, Serialize)]
+pub struct RepositoryReport {
+    pub root: PathBuf,
+    pub head: Option<String>,
+    pub indexed_commit: Option<String>,
+    /// This command never constructs or observes a live working-tree overlay.
+    pub working_tree_overlay: bool,
+    pub working_tree_dirty: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransportReport {
+    pub kind: &'static str,
+    pub healthy: bool,
+    pub tools_count: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InstallationReport {
+    pub config_dir: PathBuf,
+    pub config_dir_state: &'static str,
+    pub hooks_dir: PathBuf,
+    pub hooks_dir_state: &'static str,
+    pub hook_script: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DoctorReport {
+    pub schema_version: u32,
+    pub server_version: &'static str,
+    pub build_commit: &'static str,
+    pub assessment: &'static str,
+    pub agent_ready: bool,
+    pub repository: Option<RepositoryReport>,
+    pub capabilities: Capabilities,
+    pub transport: TransportReport,
+    pub installation: InstallationReport,
+    pub problems: Vec<Problem>,
+}
+
+impl DoctorReport {
+    pub fn exit_code(&self) -> i32 {
+        self.capabilities
+            .readiness(self.transport.healthy)
+            .exit_code()
     }
-}
 
-fn emit(sev: Severity, msg: impl AsRef<str>) -> bool {
-    println!("{} {}", sev.tag(), msg.as_ref());
-    sev != Severity::Fail
-}
-
-/// Ask a live MCP endpoint for its tool list and report what came back.
-/// Returns false on a hard failure (unreachable, error envelope, or an
-/// empty surface) — an operator whose agent "sees no tools" needs this
-/// line to say so, not a green page derived from `/health`.
-fn emit_tools_list_check(base: &str) -> bool {
-    let url = format!("{base}/mcp");
-    // `tools/list` is a top-level JSON-RPC method, not a tool — so
-    // route through `post_json_rpc` rather than `post_tool_call`,
-    // which would send `tools/call` with `params.name = "tools/list"`
-    // (a request no server-side handler can dispatch). The pre-dedup
-    // code sent the correct envelope; the migration regressed it,
-    // and the regression went uncaught by `doctor_smoke` because that
-    // test does not set `LAIN_URL`. See final-review-report.md
-    // Critical #1.
-    let value =
-        match crate::cli::mcp_client::post_json_rpc(&url, "tools/list", serde_json::json!({})) {
-            Ok(v) => v,
-            Err(e) => {
-                return emit(
-                    Severity::Fail,
-                    format!("MCP endpoint {url} did not answer tools/list: {e}"),
-                )
-            }
-        };
-    let tools = value.get("tools").and_then(|t| t.as_array());
-    match tools {
-        Some(list) if !list.is_empty() => emit(
-            Severity::Ok,
-            format!(
-                "MCP surface live: tools/list advertises {} tools",
-                list.len()
-            ),
-        ),
-        Some(_) => emit(
-            Severity::Fail,
-            "MCP surface empty: tools/list advertises 0 tools (agents will see no tools)",
-        ),
-        None => emit(
-            Severity::Fail,
-            "tools/list response had no result.tools array",
-        ),
-    }
-}
-
-/// Run the diagnostic. Returns the exit code (0 = all hard checks OK,
-/// 1 = at least one hard check failed). Wrapped in `Result` so the
-/// caller can `?`-propagate unexpected panics from `reqwest` etc.
-pub fn run_doctor() -> Result<i32> {
-    println!("== lain doctor ==\n");
-
-    let mut failures = 0usize;
-
-    // Check 1: binary version + git sha (one-version-of-truth).
-    let version = env!("CARGO_PKG_VERSION");
-    let sha = lain_git_sha();
-    if !emit(
-        Severity::Ok,
-        format!("binary version : {version} (commit {sha})"),
+    fn problem(
+        &mut self,
+        code: &str,
+        message: impl Into<String>,
+        remediation: &str,
+        retryable: bool,
     ) {
-        failures += 1;
+        self.problems.push(Problem {
+            code: code.into(),
+            message: message.into(),
+            remediation: remediation.into(),
+            retryable,
+        });
     }
 
-    // Check 2: hook scripts present on disk. The Claude Code hook is
-    // the reference one — every agent's pre-edit integration points
-    // at the same `hooks/<kind>/pre-edit.sh` layout. For dev builds
-    // they're at `$CARGO_MANIFEST_DIR/hooks/`; for installed binaries
-    // they ship next to the binary itself (the install layout puts
-    // them in `$bindir/../share/lain/hooks/`, but a flat `cargo
-    // install --path .` lands them next to the executable). Check
-    // both, plus the legacy single-file dev path, before failing —
-    // a `[FAIL]` here on a release binary was a long-standing bug
-    // (wishlist #6's "one version of truth" promise).
-    let source_hook =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("hooks/claude-code/pre-edit.sh");
-    let installed_hook = std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.parent()
-                .map(|p| p.join("../share/lain/hooks/claude-code/pre-edit.sh"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("<no install path>"));
-    let flat_hook = std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.parent()
-                .map(|p| p.join("hooks/claude-code/pre-edit.sh"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("<no flat path>"));
-    let candidates = [&source_hook, &installed_hook, &flat_hook];
-    let found = candidates.iter().find(|p| p.exists());
-    if let Some(p) = found {
-        if !emit(
-            Severity::Ok,
-            format!("claude-code hook script present: {}", p.display()),
-        ) {
-            failures += 1;
+    fn structural(&mut self, state: CapabilityState, reason: &str, remediation: &str) {
+        let mut capability = Capability::new(state, false);
+        capability.reason = Some(reason.into());
+        capability.remediation = Some(remediation.into());
+        self.capabilities.symbols = capability.clone();
+        self.capabilities.call_graph = capability;
+    }
+}
+
+fn directory_state(path: &Path) -> &'static str {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => "present",
+        Ok(_) => "not_directory",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+        Err(_) => "unreadable",
+    }
+}
+
+fn installation() -> InstallationReport {
+    let mut candidates =
+        vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("hooks/claude-code/pre-edit.sh")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("../share/lain/hooks/claude-code/pre-edit.sh"));
+            candidates.push(parent.join("hooks/claude-code/pre-edit.sh"));
         }
-    } else {
-        emit(
-            Severity::Fail,
-            format!(
-                "claude-code hook script MISSING. Looked at: {} ; {} ; {}",
-                source_hook.display(),
-                installed_hook.display(),
-                flat_hook.display()
-            ),
-        );
-        failures += 1;
     }
-
-    // Check 3: config dir writable (or creatable).
-    let cfg = config_dir();
-    let cfg_ok = cfg.exists() || std::fs::create_dir_all(&cfg).is_ok();
-    if cfg_ok {
-        if !emit(
-            Severity::Ok,
-            format!("config dir writable: {}", cfg.display()),
-        ) {
-            failures += 1;
-        }
-    } else {
-        emit(
-            Severity::Fail,
-            format!("config dir not writable: {}", cfg.display()),
-        );
-        failures += 1;
+    let config_dir = config_dir();
+    let hooks_dir = hooks_dir();
+    InstallationReport {
+        config_dir_state: directory_state(&config_dir),
+        hooks_dir_state: directory_state(&hooks_dir),
+        config_dir,
+        hooks_dir,
+        hook_script: candidates.into_iter().find(|path| path.is_file()),
     }
+}
 
-    // Check 4: hooks dir present/creatable + cached session count.
-    let hd = hooks_dir();
-    let hd_ok = hd.exists() || std::fs::create_dir_all(&hd).is_ok();
-    if hd_ok {
-        // Wishlist #12e: reap session-token JSON files older than
-        // 30 days. The CLI uses 7 days; the MCP tool dispatch path
-        // does NOT reap (it must stay fast and side-effect-free).
-        // `lain doctor` is the natural place — it's a periodic
-        // operator-facing check that already enumerates the dir.
-        let reaped =
-            crate::config::prune_old_sessions(std::time::Duration::from_secs(30 * 24 * 3600))
-                .unwrap_or(0);
-        let count = std::fs::read_dir(&hd).map(|d| d.count()).unwrap_or(0);
-        let reap_note = if reaped > 0 {
-            format!(" — reaped {reaped} stale session file(s) older than 30 days")
-        } else {
-            String::new()
-        };
-        if !emit(
-            Severity::Ok,
-            format!(
-                "hooks dir present: {} ({count} cached sessions){reap_note}",
-                hd.display()
-            ),
-        ) {
-            failures += 1;
-        }
-    } else {
-        emit(
-            Severity::Fail,
-            format!("hooks dir not creatable: {}", hd.display()),
-        );
-        failures += 1;
-    }
+fn dirty(repo: &git2::Repository) -> Result<bool> {
+    let mut options = git2::StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .update_index(false);
+    Ok(repo.statuses(Some(&mut options))?.iter().any(|entry| {
+        // LAIN's own cache cannot make an otherwise clean source tree stale.
+        !entry
+            .path()
+            .is_some_and(|path| path == ".lain" || path.starts_with(".lain/"))
+    }))
+}
 
-    // Check 5: presence registry constructs cleanly. This is a
-    // tautology at the moment — `PresenceRegistry::new()` cannot
-    // fail. Kept as a sentinel so future refactors of
-    // `server::presence` that introduce a fallible `try_new` get
-    // surfaced here for free. (`emit` is unconditional; the
-    // previous `if !emit(...)` pattern was dead code since the
-    // Ok arm is the only one reachable.)
-    let _reg = PresenceRegistry::new();
-    emit(Severity::Ok, "presence registry constructs cleanly");
-
-    // Check 6: server reachability — soft check. Only runs when an
-    // env var names the server; otherwise silent. We strip a trailing
-    // `/mcp` so the same `LAIN_URL` that hooks use works here without
-    // requiring a separate "diagnostic" URL.
-    if let Ok(url) = std::env::var("LAIN_URL").or_else(|_| std::env::var("LAIN_SERVER_URL")) {
-        let base = url
-            .trim_end_matches("/mcp")
-            .trim_end_matches('/')
-            .to_string();
-        let health_url = format!("{base}/health");
-        match reqwest::blocking::get(&health_url) {
-            Ok(r) if r.status().is_success() => {
-                emit(Severity::Ok, format!("server reachable at {url}"));
-                // Check 6b (wishlist #10): a reachable /health says the
-                // process is up, not that the surface agents actually
-                // call is wired. A server answering health while
-                // `tools/list` returns nothing is precisely the
-                // "all checks passed" on a broken MCP registration this
-                // page exists to catch, so ask the MCP endpoint itself.
-                if !emit_tools_list_check(&base) {
-                    failures += 1;
+fn observe_repository(report: &mut DoctorReport, root: &Path) -> Result<()> {
+    let repo = git2::Repository::open(root)?;
+    let head = repo.head()?.peel_to_commit()?.id().to_string();
+    let was_dirty = dirty(&repo)?;
+    let mut repository = RepositoryReport {
+        root: root.to_path_buf(),
+        head: Some(head.clone()),
+        indexed_commit: None,
+        working_tree_overlay: false,
+        working_tree_dirty: Some(was_dirty),
+    };
+    report.capabilities.git_history = Capability::new(CapabilityState::Ready, false);
+    let refresh = "Run `lain mcp` in this repository to build or refresh the index.";
+    match inspect_persisted_graph(&root.join(".lain/graph.bin")) {
+        Ok(commit) => {
+            repository.indexed_commit = commit.clone();
+            match commit {
+                None => {
+                    report.structural(
+                        CapabilityState::UnavailableError,
+                        "Graph has no indexed commit.",
+                        refresh,
+                    );
+                    report.problem(
+                        "graph_unindexed",
+                        "Graph has no indexed commit.",
+                        refresh,
+                        true,
+                    );
+                }
+                Some(commit) if commit != head || was_dirty => {
+                    let reason = "Persisted graph is an intact stale snapshot; working-tree changes are not included.";
+                    report.structural(CapabilityState::StaleUsable, reason, refresh);
+                    report.problem("graph_stale", reason, refresh, true);
+                }
+                Some(_) => {
+                    report.capabilities.symbols = Capability::new(CapabilityState::Ready, false);
+                    report.capabilities.call_graph = Capability::new(CapabilityState::Ready, false);
                 }
             }
-            Ok(r) => {
-                emit(
-                    Severity::Fail,
-                    format!("server at {url} returned {}", r.status()),
+        }
+        Err(error) => {
+            let (code, action) = match &error {
+                GraphInspectionError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => ("graph_missing", refresh),
+                GraphInspectionError::Io(_) => ("graph_unreadable", "Check read permissions on .lain/graph.bin and its parent directories."),
+                GraphInspectionError::Incompatible(_) => ("graph_incompatible", "Stop LAIN processes using this repository, back up .lain/graph.bin, then run `lain mcp` to rebuild."),
+                _ => ("graph_corrupt", "Stop LAIN processes using this repository, move .lain/graph.bin to a backup, then run `lain mcp` to rebuild."),
+            };
+            report.structural(
+                CapabilityState::UnavailableError,
+                &error.to_string(),
+                action,
+            );
+            report.problem(code, error.to_string(), action, true);
+        }
+    }
+    // Do not label a snapshot current if Git changed during inspection.
+    let final_head = repo.head()?.peel_to_commit()?.id().to_string();
+    let final_dirty = dirty(&repo)?;
+    if final_head != head || final_dirty != was_dirty {
+        let message = "Repository changed during diagnosis.";
+        report.structural(
+            CapabilityState::UnavailableError,
+            message,
+            "Run `lain doctor` again after edits settle.",
+        );
+        report.problem(
+            "repository_changed",
+            message,
+            "Run `lain doctor` again after edits settle.",
+            true,
+        );
+    }
+    report.repository = Some(repository);
+    Ok(())
+}
+
+fn observe_semantic(report: &mut DoctorReport) {
+    let configured = std::env::var_os("LAIN_EMBEDDING_MODEL");
+    let (model, tokenizer) = configured
+        .as_deref()
+        .map(Path::new)
+        .map(crate::server::nlp::NlpEmbedder::resolve_model_paths)
+        .unwrap_or_else(|| {
+            (
+                PathBuf::from("models/all-MiniLM-L6-v2.onnx"),
+                PathBuf::from("models/tokenizer.json"),
+            )
+        });
+    if configured.is_none() && !model.exists() && !tokenizer.exists() {
+        let mut capability = Capability::new(CapabilityState::UnavailableOptional, true);
+        capability.reason = Some("Optional semantic model is not installed.".into());
+        report.capabilities.semantic_search = capability;
+        return;
+    }
+    // File presence cannot prove model validity or semantic index coverage.
+    let reason = if !model.is_file() || !tokenizer.is_file() {
+        "Configured semantic model or tokenizer is missing."
+    } else {
+        "Model files are present; semantic runtime and index coverage have not been verified."
+    };
+    let action = "Check LAIN_EMBEDDING_MODEL and inspect `get_health` on the running MCP server.";
+    let mut capability = Capability::new(CapabilityState::UnavailableError, true);
+    capability.reason = Some(reason.into());
+    capability.remediation = Some(action.into());
+    report.capabilities.semantic_search = capability;
+    report.problem("semantic_unverified", reason, action, true);
+}
+
+pub fn run_doctor(json_output: bool, workspace: Option<&Path>) -> Result<i32> {
+    let mut report = DoctorReport {
+        schema_version: SCHEMA_VERSION,
+        server_version: env!("CARGO_PKG_VERSION"),
+        build_commit: lain_git_sha(),
+        assessment: "persisted_snapshot",
+        agent_ready: false,
+        repository: None,
+        capabilities: Capabilities {
+            symbols: Capability::new(CapabilityState::UnavailableError, false),
+            call_graph: Capability::new(CapabilityState::UnavailableError, false),
+            git_history: Capability::new(CapabilityState::UnavailableError, false),
+            semantic_search: Capability::new(CapabilityState::UnavailableOptional, true),
+        },
+        transport: TransportReport {
+            kind: "not_checked",
+            healthy: false,
+            tools_count: None,
+        },
+        installation: installation(),
+        problems: Vec::new(),
+    };
+    // Interactive CLI diagnosis follows its own cwd, not an agent parent's cwd.
+    let root = workspace
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|start| crate::cli::workspace::walk_up_for_git(&start))
+        .and_then(|root| root.ok_or_else(|| anyhow!("No Git repository found.")));
+    match root {
+        Err(error) => report.problem(
+            "repository_not_found",
+            error.to_string(),
+            "Run inside a Git repository or pass `--workspace PATH`.",
+            false,
+        ),
+        Ok(root) => {
+            if let Err(error) = observe_repository(&mut report, &root) {
+                let action =
+                    "Check repository permissions and create an initial commit if HEAD is unborn.";
+                report.structural(
+                    CapabilityState::UnavailableError,
+                    &error.to_string(),
+                    action,
                 );
-                failures += 1;
+                report.capabilities.git_history =
+                    Capability::new(CapabilityState::UnavailableError, false);
+                report.problem("repository_unreadable", error.to_string(), action, true);
             }
-            Err(e) => {
-                // Soft fail — `lain doctor` is also useful when no
-                // server is running locally.
-                emit(Severity::Warn, format!("server at {url} unreachable: {e}"));
+            report.transport.kind = "stdio_probe";
+            let probe = probe_stdio(&root);
+            match probe {
+                Ok(count) => {
+                    report.transport.healthy = true;
+                    report.transport.tools_count = Some(count);
+                }
+                Err(error) => report.problem(
+                    "mcp_probe_failed",
+                    format!("{error:#}"),
+                    "Run `lain mcp` directly and inspect its stderr output.",
+                    true,
+                ),
             }
         }
     }
-
-    println!();
-    if failures == 0 {
-        println!("all checks passed");
-        Ok(0)
-    } else {
-        println!("{failures} check(s) failed");
-        Ok(1)
+    observe_semantic(&mut report);
+    // An explicitly selected endpoint must work too; a healthy local probe must
+    // not hide a broken endpoint used by the caller's agent.
+    if let Ok(url) = std::env::var("LAIN_URL").or_else(|_| std::env::var("LAIN_SERVER_URL")) {
+        report.transport.kind = "http_endpoint";
+        let endpoint_probe = crate::cli::mcp_client::post_json_rpc(
+            &url,
+            "initialize",
+            json!({
+                "protocolVersion": rust_mcp_schema::ProtocolVersion::latest().to_string(),
+                "capabilities": {},
+                "clientInfo": {"name": "lain-doctor", "version": env!("CARGO_PKG_VERSION")}
+            }),
+        )
+        .and_then(|initialized| {
+            if initialized.get("serverInfo").is_none()
+                || initialized.get("protocolVersion").is_none()
+            {
+                return Err(anyhow!("invalid MCP initialize response"));
+            }
+            crate::cli::mcp_client::post_json_rpc(&url, "tools/list", json!({}))
+        })
+        .and_then(|value| tools_count(&value));
+        match endpoint_probe {
+            Ok(count) => {
+                report.transport.healthy = true;
+                report.transport.tools_count = Some(count);
+            }
+            Err(error) => {
+                report.transport.healthy = false;
+                report.transport.tools_count = None;
+                report.problem(
+                    "mcp_endpoint_failed",
+                    format!("{error:#}"),
+                    "Check LAIN_URL/LAIN_SERVER_URL and start the selected MCP server.",
+                    true,
+                );
+            }
+        }
     }
+    report.agent_ready = report
+        .capabilities
+        .readiness(report.transport.healthy)
+        .agent_ready();
+    report
+        .problems
+        .sort_by(|a, b| (&a.code, &a.message).cmp(&(&b.code, &b.message)));
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_human(&report);
+    }
+    Ok(report.exit_code())
+}
+
+fn print_human(report: &DoctorReport) {
+    println!(
+        "== lain doctor ==\nbinary version: {} (commit {})",
+        report.server_version, report.build_commit
+    );
+    if let Some(repo) = &report.repository {
+        println!("Repository: {}", repo.root.display());
+        println!(
+            "Graph commit: {}",
+            repo.indexed_commit.as_deref().unwrap_or("not indexed")
+        );
+    }
+    for (name, capability) in [
+        ("Symbols", &report.capabilities.symbols),
+        ("Call graph", &report.capabilities.call_graph),
+        ("Git history", &report.capabilities.git_history),
+        ("Semantic search", &report.capabilities.semantic_search),
+    ] {
+        println!(
+            "{name}: {}",
+            serde_json::to_value(capability.state)
+                .unwrap()
+                .as_str()
+                .unwrap()
+        );
+    }
+    if report.transport.healthy {
+        println!(
+            "MCP surface live: tools/list advertises {} tools ({})",
+            report.transport.tools_count.unwrap_or(0),
+            report.transport.kind
+        );
+    } else {
+        println!("MCP transport: unavailable");
+    }
+    println!(
+        "config dir: {} ({})",
+        report.installation.config_dir.display(),
+        report.installation.config_dir_state
+    );
+    println!(
+        "hooks dir: {} ({})",
+        report.installation.hooks_dir.display(),
+        report.installation.hooks_dir_state
+    );
+    println!(
+        "hook script: {}",
+        report
+            .installation
+            .hook_script
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not installed (optional)".into())
+    );
+    for problem in &report.problems {
+        println!(
+            "{}: {}\n  Next: {}",
+            problem.code, problem.message, problem.remediation
+        );
+    }
+    println!(
+        "Agent-ready: {} (persisted snapshot assessment)",
+        if report.agent_ready { "YES" } else { "NO" }
+    );
+}
+
+fn tools_count(value: &Value) -> Result<usize> {
+    let tools = value
+        .get("tools")
+        .and_then(Value::as_array)
+        .context("tools/list response has no tools array")?;
+    if tools.is_empty() {
+        return Err(anyhow!("MCP surface empty: tools/list advertises 0 tools"));
+    }
+    Ok(tools.len())
+}
+
+/// Internal probe endpoint: no indexing, watchers, model loading, or tool calls.
+pub async fn run_probe(workspace: &Path) -> Result<()> {
+    // Validate before the sidecar constructor, preventing its fallback stub repo.
+    crate::server::git::GitSensor::new(workspace)?;
+    let graph = crate::server::graph::GraphDatabase::empty_read_only();
+    let executor = crate::server::tools::ToolExecutor::new_read_only(
+        graph,
+        crate::server::overlay::VolatileOverlay::new(),
+        workspace.to_path_buf(),
+    );
+    crate::server::mcp::handler::LainMcpServer::new_read_only(executor)
+        .run_stdio()
+        .await
+        .map_err(|error| anyhow!("{error}"))
+}
+
+fn probe_stdio(workspace: &Path) -> Result<usize> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use std::process::Stdio;
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args(["doctor", "--probe-mcp", "--workspace"]).arg(workspace)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .kill_on_drop(true).spawn()?;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stdin = child.stdin.take().context("probe stdin")?;
+            let mut stdout = BufReader::new(child.stdout.take().context("probe stdout")?).lines();
+            let initialize = json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params": {
+                "protocolVersion": rust_mcp_schema::ProtocolVersion::latest().to_string(),
+                "capabilities":{}, "clientInfo":{"name":"lain-doctor", "version":env!("CARGO_PKG_VERSION")}
+            }});
+            stdin.write_all(format!("{initialize}\n").as_bytes()).await?;
+            let mut initialized = false;
+            while let Some(line) = stdout.next_line().await? {
+                let value: Value = serde_json::from_str(&line).context("non-JSON MCP stdout")?;
+                if value.get("error").is_some() { return Err(anyhow!("MCP probe error: {}", value["error"])); }
+                if value["id"] == 1 && !initialized {
+                    if value.pointer("/result/serverInfo").is_none() || value.pointer("/result/protocolVersion").is_none() {
+                        return Err(anyhow!("invalid MCP initialize response"));
+                    }
+                    initialized = true;
+                    let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+                    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}});
+                    stdin.write_all(format!("{notification}\n{list}\n").as_bytes()).await?;
+                } else if value["id"] == 2 && initialized {
+                    return tools_count(&value["result"]);
+                }
+            }
+            Err(anyhow!("MCP probe exited before completing initialize/tools-list"))
+        }).await;
+        // Always reap the child, including malformed responses and timeout paths.
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        result.context("MCP probe timed out after 5 seconds")?
+    })
 }

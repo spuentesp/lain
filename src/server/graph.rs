@@ -54,6 +54,39 @@ struct GraphState {
     path_format_version: u32,
 }
 
+/// Strict, read-only inspection for diagnostics. Unlike the runtime loader,
+/// this preserves the distinction between corrupt and missing graph data.
+pub fn inspect_persisted_graph(path: &Path) -> Result<Option<String>, GraphInspectionError> {
+    let data = std::fs::read(path).map_err(GraphInspectionError::Io)?;
+    let state: GraphState = bincode::deserialize(&data).map_err(GraphInspectionError::Corrupt)?;
+    if state.path_format_version != PATH_FORMAT_VERSION {
+        return Err(GraphInspectionError::Incompatible(
+            state.path_format_version,
+        ));
+    }
+    if state.index_map.len() != state.graph.node_count()
+        || state
+            .index_map
+            .iter()
+            .any(|(id, index)| state.graph.node_weight(*index).map(|node| &node.id) != Some(id))
+    {
+        return Err(GraphInspectionError::InvalidIndex);
+    }
+    Ok(state.last_commit)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GraphInspectionError {
+    #[error("cannot read graph: {0}")]
+    Io(std::io::Error),
+    #[error("cannot decode graph: {0}")]
+    Corrupt(bincode::Error),
+    #[error("graph path format {0} is incompatible with this binary")]
+    Incompatible(u32),
+    #[error("graph index does not match its nodes")]
+    InvalidIndex,
+}
+
 #[derive(Clone)]
 pub struct GraphDatabase {
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
@@ -139,7 +172,22 @@ impl Freshness {
 
 impl GraphDatabase {
     pub fn new(memory_path: &Path) -> Result<Self, LainError> {
-        let db = Self {
+        let db = Self::empty(memory_path);
+        if memory_path.exists() {
+            db.load_from_disk()?;
+        }
+        Ok(db)
+    }
+
+    /// An in-memory view for protocol probes; persistence writes are disabled.
+    pub fn empty_read_only() -> Self {
+        let mut db = Self::empty(Path::new(""));
+        db.read_only = true;
+        db
+    }
+
+    fn empty(memory_path: &Path) -> Self {
+        Self {
             graph: Arc::new(RwLock::new(StableGraph::new())),
             index_map: DashMap::new(),
             path_index: DashMap::new(),
@@ -154,12 +202,7 @@ impl GraphDatabase {
             // `insert_co_change_edges`.
             namespace: RepoNamespace::for_test(),
             pending_external_edges: Arc::new(parking_lot::Mutex::new(Vec::new())),
-        };
-
-        if memory_path.exists() {
-            db.load_from_disk()?;
         }
-        Ok(db)
     }
 
     /// Set the namespace used by `insert_co_change_edges` and
