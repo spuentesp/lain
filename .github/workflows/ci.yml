@@ -4,11 +4,47 @@ name: CI
 # `version-drift`, `coverage`, and the agent-required jobs scoped to
 # main where they belong; the rest of the matrix runs on both
 # branches so PRs targeting dev drive the agent-contract rollup.
+#
+# Tiered so a broken build is cheap to see and doesn't burn the
+# expensive jobs finding out: every job used to fire in parallel with
+# no `needs:` at all, so a `cargo fmt` typo still paid for the full
+# 3-OS test matrix, a release build for schema-drift, and another for
+# capability, before anyone looked at the result.
+#
+#   Tier 1 (fast, parallel, gates everything below): lint, npm-shim,
+#     action-contracts. Each is a few minutes at most and needs no
+#     release build.
+#   Tier 2 (needs: all of tier 1): test (the 3-OS matrix), capability,
+#     schema-drift, health-badge, version-drift.
+#   Tier 3 (needs: tier 2's `test`, main-push only): coverage.
+#
+# Trade-off, deliberately accepted: a fully green run now takes
+# tier-1-time + tier-2-time back to back instead of max(tier 1, tier
+# 2) in parallel. The point is cheap iteration while a PR still has
+# red jobs, which is the common case during active development, not
+# the fastest possible time-to-green on an already-passing PR.
+#
+# Job `name:` values are unchanged by the tiering — agent-contract.yml
+# matches jobs by name via a `workflow_run` rollup after this whole
+# workflow completes, so renaming any of "Capability suite (demo.sh)",
+# "Tool schema matches docs/tool-schema.json", or "npm-shim install
+# tests" would silently break that regex.
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+
+# Rapid-prototyping best practice: a PR that gets three pushes in two
+# minutes used to run three full CI pipelines in parallel, each paying
+# for its own 3-OS matrix. Only the latest push on a given ref matters,
+# so cancel whatever's still in flight for that ref when a new run
+# starts. `github.head_ref` is only set for pull_request events; the
+# `|| github.ref` fallback gives push events (main/dev) their own
+# per-branch group instead of colliding with an empty string.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,7 +57,12 @@ permissions: {}
 jobs:
   test:
     name: Cargo Test (${{ matrix.os }})
+    needs: [lint, npm-shim, action-contracts]
     runs-on: ${{ matrix.os }}
+    # A hung test (this session hit a real one: a subprocess reader
+    # with no timeout blocking forever) must fail the job, not sit on
+    # the runner queue for the 360-minute GitHub default.
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -79,7 +120,9 @@ jobs:
 
   capability:
     name: Capability suite (demo.sh)
+    needs: [lint, npm-shim, action-contracts]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -111,7 +154,9 @@ jobs:
 
   health-badge:
     name: Lain architecture health badge
+    needs: [lint, npm-shim, action-contracts]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request'
     # The action posts a commit status and a PR comment. The default
     # GITHUB_TOKEN is read-only; grant the scopes the steps need.
@@ -131,7 +176,9 @@ jobs:
 
   version-drift:
     name: lain-version default tracks latest release
+    needs: [lint, npm-shim, action-contracts]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     # The drift check runs on main, where release tags are pushed.
@@ -180,11 +227,15 @@ jobs:
   lint:
     name: Lint + format + doc tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     # These checks aren't OS-specific — ubuntu runs them once and
     # the three test-matrix cells pick up the rest. Failures here
     # block merge regardless of the test matrix's color.
+    #
+    # Tier 1: no `needs:` — this is one of the fast gates everything
+    # else waits on.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -220,7 +271,9 @@ jobs:
 
   schema-drift:
     name: Tool schema matches docs/tool-schema.json
+    needs: [lint, npm-shim, action-contracts]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     # The drift check is the documented contract (docs/CI.md §
@@ -258,10 +311,13 @@ jobs:
   npm-shim:
     name: npm-shim install tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     # The npm shim resolves, verifies, caches, and launches release binaries.
     # Its tests exercise the shipped runtime module rather than copied logic.
+    #
+    # Tier 1: no `needs:` — runs in parallel with lint/action-contracts.
     defaults:
       run:
         working-directory: npm-shim
@@ -290,8 +346,15 @@ jobs:
     # never fails CI: `fail_ci_if_error: false` plus codecov.yml's
     # target=0/threshold=0 settings keep the badge dark until the
     # first deliberate baseline PR.
+    #
+    # Tier 3: waits on tier 2's `test` (all three OS cells) rather than
+    # just tier 1. A push to main has normally already passed `test` in
+    # the PR that merged it, but re-deriving coverage from a run that's
+    # already known broken would just be more wasted minutes.
     name: Coverage (cargo llvm-cov)
+    needs: [test]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -345,8 +408,10 @@ jobs:
   action-contracts:
     name: Badge and release contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
+    # Tier 1: no `needs:` — runs in parallel with lint/npm-shim.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
