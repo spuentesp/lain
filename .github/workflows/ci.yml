@@ -432,6 +432,8 @@ jobs:
         run: python .github/actions/lain-health-badge/tests/test_action.py
       - name: Badge extraction
         run: bash .github/actions/lain-health-badge/tests/test_extract_added_fns.sh
+      - name: Installer checks
+        run: bash tests/install-test.sh
 
   # Publishes the `lain/agent-contract` commit status directly from
   # this workflow run, instead of the separate agent-contract.yml's
@@ -494,5 +496,3 @@ jobs:
             --field state="$status" \
             --field description="$summary" \
             --field context='lain/agent-contract'
-      - name: Installer checks
-        run: bash tests/install-test.sh
