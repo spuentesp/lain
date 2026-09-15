@@ -4,74 +4,23 @@
 >
 > A developer should be able to install it, connect an MCP client, and get useful repository intelligence with almost no configuration. An agent should be able to discover what LAIN knows, choose the right capability, and recover from partial readiness without human intervention.
 
-## Implementation review (2026-09-15, updated)
+## Status (2026-09-16)
 
-Review of branch `spuentesp/brittlestar`. These observations describe this
-checkout; they do not verify published packages. Superseded the first
-2026-09-15 review and the 2026-09-14 review below it, both stale in turn as
-more of Milestone 4 landed the same day.
+What's actually landed on branch `spuentesp/brittlestar`, checked against the
+code — not aspirational. Each milestone section below repeats its own status
+inline. Full history is `git log`; this table is a snapshot, not an archive.
 
-| Area | Evidence and remaining work |
-|---|---|
-| Distribution | `.github/workflows/release.yml` publishes versioned archives and `SHA256SUMS`. `npm-shim/scripts/install.js` pins the package version but downloads and extracts without checking the checksum. It still installs into shared `~/.lain/bin`; the launcher needs the version/target cache, override, and offline behavior from milestone 1. |
-| Diagnostics | `lain doctor`, `lain capabilities --json`, and `lain status --json` exist and share the readiness model in `src/server/readiness.rs` (issues 5-6). `--fix` behavior has not been re-audited since it landed. |
-| Startup (Milestone 4) | Implementation-sequence steps 1-7 and 9 are landed. Steps 1-6: mandatory tool readiness classification, the central dispatch gate, phase/file-progress instrumentation into the one shared `ReadinessHandle`, the startup re-index backgrounded via `tokio::spawn` in `run_stdio`/`run_http` instead of blocking transport startup, and `lain mcp`'s runtime moved to multi-thread. Step 7: the source-watcher startup barrier (`FileWatcher::start` returns a `ready_signal` receiver) and a final `sync_volatile_overlay()` reconciliation right before publishing `ready`. Step 9: a `notifications/lain/capabilities_changed` push notification on stdio (HTTP and federation excluded — see below). Commits, in order: `5a4b99c`, `af206f7`, `d5b08e3`, `b214895`, `51446af`, `077f0c9`. Landing steps 5-6 and 9 surfaced real ripple effects in code that talks to `lain mcp` and assumed the old blocking-startup, no-notification contract — `lain oneshot` (single-shot, no retry) and two test harnesses needed fixes; see `077f0c9`'s commit message before assuming every caller of `tools/call` is unaffected. |
-| Onboarding (Milestone 2) | `lain setup` now exists (`src/cli/setup.rs`, commit `7132baa`): detects the repo/languages, resolves or offers to install the optional embedding model (mirrors `install.sh --download-model`), configures one MCP client, and verifies with a real `initialize`+`tools/list` round trip. Two adapters landed — `generic` (writes/merges `.mcp.json`) and `claude-code` (shells to `claude mcp add`/`get`/`remove`, never hand-edits `~/.claude.json`). Codex/Cursor/VS Code/Continue adapters (issues 17-18) are not implemented. Milestones 5/6 (`understand_repository` and the semantic tool layer: `find_symbol`, `get_context`, `find_related`, `assess_change`, `search_code`) have not been started at all. |
-
-Only step 8 of Milestone 4's original 10-step implementation sequence is
-still **not started**: federation per-repository readiness aggregation and
-deterministic multi-repository gating. There is exactly one global
-`ReadinessHandle` per process today, not one per repository, so a
-multi-repo federation server cannot yet report per-repo warming/ready state
-or gate a cross-repo tool call on only the repositories it actually touches.
-
-Two related, larger pieces from the coordinator's detailed design (not
-numbered steps of their own, but referenced throughout that section) are
-also not attempted:
-
-- a cooperative cancellation token threaded through the scan/resolve/persist
-  phase boundaries (today shutdown only gives the background indexing task a
-  bounded 5s window before a hard `AbortHandle::abort()`, which is not the
-  same contract);
-- `spawn_blocking` conversion of the pipeline's synchronous git/parser work
-  (it still all runs inline on async worker threads; the multi-thread
-  runtime gives it room to not starve the protocol loop, but does not
-  isolate it the way the roadmap's design calls for); and
-- HEAD-change-during-startup re-indexing (an attempt does not yet notice a
-  moving `HEAD` and restart toward the new commit).
-
-### Implementation review (2026-09-14) — superseded, kept for history
-
-Review of branch `spuentesp/brittlestar`, starting at `3c545d9`.
-
-| Area | Evidence and remaining work |
-|---|---|
-| Distribution | `.github/workflows/release.yml` publishes versioned archives and `SHA256SUMS`. `npm-shim/scripts/install.js` pins the package version but downloads and extracts without checking the checksum. It still installs into shared `~/.lain/bin`; the launcher needs the version/target cache, override, and offline behavior from milestone 1. |
-| Diagnostics | `src/cli/doctor.rs` checks installation and optionally a remote MCP endpoint. It does not diagnose repository freshness or expose JSON. It also creates directories and prunes sessions during ordinary diagnosis; move repairs behind `--fix` when implementing issue 5. Existing directory presence does not prove writability despite the current output. |
-| Startup | `src/cli/mcp.rs` constructs the server and synchronizes the overlay before entering stdio. Keep the planned classification and central gate ahead of asynchronous startup so agents cannot query an incomplete graph. |
-| Onboarding | The CLI has `doctor` but no `setup`, `capabilities`, or `status` commands. Keep setup dependent on the shared diagnostic contract. |
-
-### First implementation: shared capability policy (issue 4)
-
-`src/server/readiness.rs` now defines the five capability states, the four fixed
-capability keys, optional diagnostic fields, and schema version constant. One
-calculation supplies both `agent_ready` and the future diagnostic exit code.
-It performs no I/O and requires callers to supply observed states explicitly.
-
-The acceptance contract for this change is:
-
-- Required capabilities must be `ready` or `stale_usable`, and transport must be
-  healthy, for `agent_ready` to be true. An absent optional dependency alone exits 0.
-- Usable stale/warming/error combinations exit 1; required absence, warming,
-  failure, or unhealthy transport exits 2.
-- JSON uses the state names and keys specified in milestone 4, omits absent
-  diagnostics, and accepts unknown additive fields when reading.
-- Tests cover every combination of the five capability states (625 combinations)
-  with healthy and unhealthy transport, plus serialization fixtures.
-
-Before merging to `dev`, reconcile its CI-only commit `ea99b27`, which was absent
-from this branch's starting history as of 2026-09-14; unverified whether this is
-still outstanding.
+| # | Milestone | Status | Evidence / what's missing |
+|---|---|---|---|
+| 1 | Frictionless distribution | 🟡 Partial | `npm-shim/scripts/runtime.js` (`609f8db`) verifies checksums, caches by version+target, honors `LAIN_VERSION`, reuses cache offline. Missing: the clean-room CI proof (Milestone 9) that the published `npx` path actually works on a bare machine. |
+| 2 | `lain setup` | ✅ Done | `src/cli/setup.rs` (`7132baa`): detects repo/languages, resolves or offers to install the optional embedding model, configures one MCP client, verifies with a real `initialize`+`tools/list` round trip. `generic` (writes `.mcp.json`) and `claude-code` (shells to `claude mcp add`) adapters only — Codex/Cursor/VS Code/Continue are Milestone 8's job. |
+| 3 | `lain doctor` | ✅ Done | `lain doctor` / `lain capabilities --json` / `lain status --json`, sharing one readiness model (`src/server/readiness.rs`). |
+| 4 | Zero-config MCP startup | 🟡 Mostly done | Implementation-sequence steps 1-7 and 9 of 10 landed (`5a4b99c`, `af206f7`, `d5b08e3`, `b214895`, `51446af`, `077f0c9`): mandatory tool classification, the central dispatch gate, phase/progress instrumentation, backgrounded startup re-index, multi-thread runtime, watcher-ready handoff, final overlay reconciliation, and a stdio `capabilities_changed` push notification. Missing: step 8 (federation per-repository readiness — there is one global `ReadinessHandle` per process, not one per repo), a real cooperative cancellation token through the indexing phases, and `spawn_blocking` isolation of the pipeline's synchronous work. |
+| 5 | Agent bootstrap context | ⬜ Not started | `understand_repository` does not exist. |
+| 6 | Semantic Agent API | ⬜ Not started | None of `find_symbol` / `get_context` / `find_related` / `assess_change` / `search_code` exist. (Not to be confused with the semantic-search *embedding model*, which Milestone 2 already auto-installs.) |
+| 7 | Capability discovery | ✅ Done | `get_capabilities`, folded into Milestone 4's central gate work. |
+| 8 | First-class client recipes | ⬜ Not started | Only `claude-code` exists (via Milestone 2's adapter); Codex/Cursor/VS Code/Continue adapters and the CI verification matrix are unbuilt. |
+| 9 | Distribution acceptance CI | ⬜ Not started | CI runs `cargo test` on 3 OSes; no clean-room `npx install → initialize → tools/list → capability poll → structural query` test against the *published* package. |
 
 ## Product outcome
 
@@ -165,6 +114,8 @@ There can be multiple installation mechanisms, but the docs should recommend one
 
 # Milestone 1 — Frictionless distribution
 
+**Status: 🟡 Partial.** The npm launcher (`npm-shim/scripts/runtime.js`, `609f8db`) verifies checksums, caches by version+target, and honors `LAIN_VERSION`. What's missing is the clean-room CI proof (Milestone 9) that `npx @spuentesp/lain-mcp --version` actually works on a bare machine.
+
 ## User story
 
 > I want to try LAIN in an arbitrary repository without installing Rust or reading installation documentation.
@@ -250,6 +201,8 @@ Forward explicit CLI arguments unchanged; the canonical MCP invocation includes 
 ---
 
 # Milestone 2 — `lain setup`: guided, modern onboarding
+
+**Status: ✅ Done** (for the `generic` and `claude-code` adapters). `src/cli/setup.rs`, commit `7132baa`. Detection, model auto-install, idempotent re-run with backup, `--dry-run`/`--print-config`, and a real MCP verification round trip are all implemented and tested (`tests/setup_e2e.rs`). Codex/Cursor/VS Code/Continue adapters are Milestone 8's remaining scope.
 
 ## User story
 
@@ -347,6 +300,8 @@ Before modifying a client config:
 
 # Milestone 3 — `lain doctor`: one trustworthy diagnosis surface
 
+**Status: ✅ Done.** `lain doctor` / `lain capabilities --json` / `lain status --json` all exist and share the readiness model in `src/server/readiness.rs`.
+
 `doctor` already exists. The UX milestone is to make it the single authoritative answer to “is LAIN usable here?”
 
 ## Target UX
@@ -435,6 +390,8 @@ Never silently install unrelated system packages or mutate source files.
 ---
 
 # Milestone 4 — Zero-config MCP startup
+
+**Status: 🟡 Mostly done.** Steps 1-7 and 9 of the 10-step implementation sequence below are landed (`5a4b99c` … `077f0c9`) — see "Status" at the top of this document for the full breakdown. Missing: step 8 (federation per-repository readiness aggregation), a real cooperative cancellation token through the indexing phases, and `spawn_blocking` isolation of the pipeline's synchronous work.
 
 ## User story
 
@@ -956,6 +913,8 @@ the startup implementation.
 
 # Milestone 5 — Agent bootstrap context
 
+**Status: ⬜ Not started.** `understand_repository` does not exist anywhere in the codebase.
+
 ## Problem
 
 A new agent should not spend several calls learning what repository it is in, which LAIN capabilities are available, and which tools are appropriate.
@@ -1031,6 +990,8 @@ The payload should respect a token/size budget:
 
 # Milestone 6 — A small semantic Agent API
 
+**Status: ⬜ Not started.** None of `find_symbol` / `get_context` / `find_related` / `assess_change` / `search_code` exist. ("Semantic" here means intent-organized, not embedding-based — don't confuse this with the semantic-search *model*, which Milestone 2's `lain setup` already auto-installs.)
+
 ## Problem
 
 LAIN's detailed MCP surface is powerful, but a large tool list increases selection cost and makes client behavior less predictable.
@@ -1090,6 +1051,8 @@ Primary tools should orchestrate existing internal capabilities instead of intro
 
 # Milestone 7 — Capability discovery and readiness
 
+**Status: ✅ Done.** `get_capabilities` exists and is load-bearing in Milestone 4's central gate and notification work.
+
 Introduce one cheap MCP tool named `get_capabilities` that an agent can call before
 planning. This is the canonical polling target used by warm-up responses. Do not add
 an unnamed endpoint, resource alias, or second discovery tool.
@@ -1143,6 +1106,8 @@ not existing CLI guarantees.
 
 # Milestone 8 — First-class client recipes
 
+**Status: ⬜ Not started** (1 of 6 clients partially covered as a side effect of Milestone 2). `claude-code` has an adapter (`lain setup --agent claude-code`, install + auto-config, no CI verification yet); Codex/Cursor/VS Code/Continue have none.
+
 Support a small set of integrations well rather than documenting dozens poorly.
 
 Initial matrix:
@@ -1170,6 +1135,8 @@ Avoid client-specific product logic inside the core server. Client adapters belo
 ---
 
 # Milestone 9 — Distribution acceptance CI
+
+**Status: ⬜ Not started.** CI runs `cargo test` on 3 OSes, which is not this milestone: no job installs via the public `npx` command and drives `initialize` → `tools/list` → capability poll → a structural query against the *published* package.
 
 The real acceptance test is not “Cargo tests pass.” It is “a stranger can install LAIN in a clean environment and an MCP client can talk to it.”
 
