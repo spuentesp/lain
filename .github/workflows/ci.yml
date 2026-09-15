@@ -260,11 +260,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # The npm-shim is what `npm install lain-mcp` runs. Its install
-    # script (`scripts/install.js`) is the only piece of JavaScript
-    # that ships to end users; tests in `scripts/install.test.js`
-    # were not on any CI matrix (URGENT FIXES #6). Failures here
-    # would silently break every consumer install.
+    # The npm shim resolves, verifies, caches, and launches release binaries.
+    # Its tests exercise the shipped runtime module rather than copied logic.
     defaults:
       run:
         working-directory: npm-shim
@@ -280,6 +277,8 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      - name: Inspect published package contents
+        run: npm pack --dry-run
 
 
   coverage:
