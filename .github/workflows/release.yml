@@ -32,39 +32,25 @@ jobs:
           python-version: '3.12'
       - name: Verify release tag and package metadata
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME"
-      # Compute SOURCE_DATE_EPOCH as a Unix-epoch INTEGER and expose
-      # it as a step output for build jobs to consume via
-      # `needs.version-check.outputs.epoch-py`.
+      # Compute SOURCE_DATE_EPOCH as a Unix-epoch INTEGER and consume
+      # it via `needs.version-check.outputs.epoch`.
       #
       # History of attempts that "looked right" but silently failed:
       #
-      # 1. PR #43: shell form
-      #      echo "epoch=$(date -d '${{ ... }}' +%s)" >> "$GITHUB_OUTPUT"
-      #    step concluded success and CI was green, but at runtime
-      #    the step's outputs dict was empty and build jobs saw
-      #    SOURCE_DATE_EPOCH=''. tree-sitter then failed with
-      #      "environment variable 'SOURCE_DATE_EPOCH' ('') must be
-      #       a non-negative decimal integer <= 253402300799"
+      # 1. shell form `echo "epoch=$(date -d '...' +%s)" >> ...` (PR #43)
+      # 2. python heredoc redirect to $GITHUB_OUTPUT       (PR #45)
+      # 3. python + direct echo to $GITHUB_OUTPUT          (this branch)
       #
-      # 2. PR #45: python via heredoc redirected to $GITHUB_OUTPUT
-      #    Same silent failure. The file DID contain
-      #    "epoch=1789430578" (verified by a debug echo), but GitHub
-      #    Actions never registered the output.
+      # All three wrote the value to the file correctly (verified
+      # by a debug `tail` echo), but GitHub Actions never registered
+      # the output key. Build jobs continued to see SOURCE_DATE_EPOCH='',
+      # and macOS-arm64's ring/tree-sitter iOS assembly then failed
+      # with "environment variable 'SOURCE_DATE_EPOCH' ('') must be
+      # a non-negative decimal integer".
       #
-      # 3. This step uses `>> "$GITHUB_OUTPUT"` with the value
-      #    computed in a Python step that writes the OUTPUT line
-      #    DIRECTLY (no shell pipeline between Python and the file).
-      #    If this also silently drops, fall back to a workflow-level
-      #    env or pass via a sidecar file (see follow-up TODO).
-      - name: Compute epoch (Python)
-        id: epoch-py
-        env:
-          UPDATED_AT: ${{ github.event.repository.updated_at }}
-        run: |
-          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ["UPDATED_AT"].replace("Z","+00:00")).timestamp())))')
-          echo "epoch-computed=$EPOCH"
-          echo "epoch=$EPOCH" >> "$GITHUB_OUTPUT"
-          echo "wrote-debug: $(tail -n 1 "$GITHUB_OUTPUT")"
+      # Build jobs now compute their own epoch locally from the same
+      # `github.event.repository.updated_at` value. Same fixed value
+      # across jobs in a single run, no cross-job output needed.
 
   build-linux:
     needs: version-check
@@ -78,23 +64,33 @@ jobs:
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
+      # setup-python moves up so SOURCE_DATE_EPOCH can be computed
+      # via Python before the cargo build step. Within-job GITHUB_ENV
+      # writes are reliable; cross-job outputs were silently dropped
+      # (see version-check comment for the full history).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Compute SOURCE_DATE_EPOCH
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        run: |
+          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ["UPDATED_AT"].replace("Z","+00:00")).timestamp())))')
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
       # Reproducible-build environment variables. SOURCE_DATE_EPOCH
-      # normalizes embedded timestamps; CARGO_INCREMENTAL=0 drops
+      # is set via GITHUB_ENV above; CARGO_INCREMENTAL=0 drops
       # absolute-path incremental compilation artifacts. Full
       # byte-identical reproduction still requires a pinned
       # rust-toolchain.toml, which is the next iteration.
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch-py }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-unknown-linux-gnu
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-unknown-linux-gnu/release/lain
@@ -155,18 +151,24 @@ jobs:
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Compute SOURCE_DATE_EPOCH
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        run: |
+          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ["UPDATED_AT"].replace("Z","+00:00")).timestamp())))')
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch-py }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target aarch64-apple-darwin
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/aarch64-apple-darwin/release/lain
@@ -228,18 +230,25 @@ jobs:
         shell: bash
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Compute SOURCE_DATE_EPOCH
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        shell: bash
+        run: |
+          EPOCH=$(python3 -c 'from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ["UPDATED_AT"].replace("Z","+00:00")).timestamp())))')
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch-py }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-pc-windows-msvc
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-pc-windows-msvc/release/lain.exe
