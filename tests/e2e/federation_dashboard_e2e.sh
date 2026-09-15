@@ -89,7 +89,9 @@ sys.exit(0 if (f and f.get("repos")) else 1)
 done
 
 echo "==> GET /health (should include federation blob)"
-curl -s "${BASE}/health" | python3 -c '
+TMP=$(mktemp)
+curl -s "${BASE}/health" > "$TMP"
+python3 <<PYEOF < "$TMP"
 import json, sys
 data = json.load(sys.stdin)
 assert "federation" in data, "federation blob missing from /health"
@@ -100,7 +102,8 @@ assert "total_nodes" in f
 assert "total_edges" in f
 assert "memory_estimate_bytes" in f
 print("OK: /health has federation blob with", len(f["repos"]), "repos")
-'
+PYEOF
+rm -f "$TMP"
 
 echo "==> GET / (should show federation banner)"
 # `-s` not `-sf`: we want the body even on non-2xx, but a 200 here is
