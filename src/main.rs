@@ -188,6 +188,30 @@ fn main() -> Result<()> {
                 });
             std::process::exit(code);
         }
+        Some(Commands::Setup {
+            workspace,
+            agent,
+            json,
+            dry_run,
+            print_config,
+            yes,
+            no_model,
+        }) => {
+            let code = lain::cli::setup::run_setup(lain::cli::setup::SetupOptions {
+                workspace,
+                agent,
+                json,
+                dry_run,
+                print_config,
+                yes,
+                no_model,
+            })
+            .unwrap_or_else(|error| {
+                eprintln!("setup failed: {error:#}");
+                2
+            });
+            std::process::exit(code);
+        }
         None => {
             // No subcommand: print help.
             let mut cmd = Args::command();

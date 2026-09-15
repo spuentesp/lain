@@ -12,6 +12,7 @@ pub mod readiness;
 pub mod repos;
 pub mod schema;
 pub mod server;
+pub mod setup;
 pub mod signal;
 pub mod workspace;
 pub mod workspaces;
@@ -254,6 +255,30 @@ pub enum Commands {
         json: bool,
         #[arg(long)]
         workspace: Option<PathBuf>,
+    },
+    /// Guided onboarding: detect the repository, optionally install the
+    /// semantic model, configure one MCP client, and verify the result.
+    Setup {
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// "claude-code" or "generic". Omit to be asked interactively
+        /// (TTY only); non-interactive runs default to "generic".
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Show what would change without writing or configuring anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the MCP configuration instead of writing/configuring it.
+        #[arg(long)]
+        print_config: bool,
+        /// Assume "yes" to every prompt (currently: the model download).
+        #[arg(long)]
+        yes: bool,
+        /// Never attempt to install the optional embedding model.
+        #[arg(long)]
+        no_model: bool,
     },
 }
 

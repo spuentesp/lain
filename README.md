@@ -236,6 +236,7 @@ LAIN exposes the following CLI commands:
 |---------|---------|
 | `lain server` | Start the MCP server (the headline). Reads `repos.yaml`, serves MCP tools + the Command Center dashboard. Hot-reloads the config when it changes. |
 | `lain mcp` | Single-repo MCP server on stdio. Walks up from cwd for `.git` — the stable "drop in a clone and run" entrypoint. No `repos.yaml` required. |
+| `lain setup` | Guided onboarding: detects the repository and languages, optionally installs the semantic model, configures one MCP client (`--agent claude-code` shells to `claude mcp add`; `--agent generic` writes `.mcp.json`), and verifies the result with a real MCP round trip. `--dry-run` and `--print-config` change nothing. |
 | `lain workspaces` | Manage `workspaces.yaml`. Create, list, show, activate (`use`), forget named groups of repos. |
 | `lain repos` | Manage `repos.yaml`. Add, list, remove a repo entry. |
 | `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
