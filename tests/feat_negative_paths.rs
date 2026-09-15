@@ -29,7 +29,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 mod common;
-use common::{free_port, jsonrpc, tools_call_envelope, wait_for_health, ServerGuard};
+use common::{
+    free_port, git_init_committed, jsonrpc, tools_call_envelope, wait_for_health, ServerGuard,
+};
 
 /// Pull the text payload out of a `tools/call` result envelope. Returns
 /// `None` when the call hit a JSON-RPC-level error (no `result`).
@@ -48,40 +50,14 @@ fn tool_error_message(env: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Initialize a git repo at `path`, configure a local identity,
-/// and commit everything in the working tree. Mirrors `feat_suite.rs`.
-fn git_init(path: &std::path::Path) {
-    let status = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(path)
-        .status()
-        .expect("git init");
-    assert!(status.success(), "git init failed");
-    for (k, v) in [
-        ("user.email", "feat-negative@lain"),
-        ("user.name", "feat-negative"),
-    ] {
-        std::process::Command::new("git")
-            .args(["config", k, v])
-            .current_dir(path)
-            .status()
-            .unwrap();
-    }
-    let add = std::process::Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(path)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add failed");
-    let commit = std::process::Command::new("git")
-        .args(["commit", "-q", "-m", "feat-negative fixture"])
-        .current_dir(path)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit failed");
+struct Fixture {
+    _project: tempfile::TempDir,
+    _state: tempfile::TempDir,
+    _xdg_config: tempfile::TempDir,
+    _guard: ServerGuard,
 }
 
-fn boot_server(port: u16) -> ServerGuard {
+fn boot_server(port: u16) -> Fixture {
     // Same fixture as `feat_suite.rs`: one minimal Rust repo with
     // `orchestrate`, `entrypoint`, `helper_a`, `helper_b` so the
     // graph is non-empty and `find_anchors`/`get_blast_radius`/
@@ -104,7 +80,7 @@ fn boot_server(port: u16) -> ServerGuard {
          pub fn helper_b() -> u32 { 2 }\n",
     )
     .unwrap();
-    git_init(&repo_dir);
+    git_init_committed(&repo_dir);
     let repo_id = repo_dir
         .file_name()
         .and_then(|s| s.to_str())
@@ -167,12 +143,17 @@ fn boot_server(port: u16) -> ServerGuard {
 
     let guard = ServerGuard {
         child,
-        stderr_path: std::path::PathBuf::from(""),
+        stderr_path: stderr_path.clone(),
     };
 
     let host = format!("127.0.0.1:{port}");
     wait_for_health(&host, Duration::from_secs(30));
-    guard
+    Fixture {
+        _project: project,
+        _state: state,
+        _xdg_config: xdg_config,
+        _guard: guard,
+    }
 }
 
 /// One big `#[test]` that walks through every tool we cover, asserting

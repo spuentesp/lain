@@ -399,19 +399,30 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
         // `explain_symbol` with each requested handle so we wait for
         // the per-repo graph specifically — the same path the
         // failing tools will use.
-        let start = std::time::Instant::now();
         for &name in wait_for_symbol {
+            let start = std::time::Instant::now();
             loop {
                 if start.elapsed() > Duration::from_secs(30) {
                     panic!("symbol `{name}` never resolved through per-repo resolver within 30s on {host}");
                 }
-                let resp =
-                    tools_call_text(host, "explain_symbol", serde_json::json!({"symbol": name}));
+                let resp = tools_call_envelope(
+                    host,
+                    "explain_symbol",
+                    serde_json::json!({"symbol": name}),
+                );
                 // `explain_symbol` returns isError=true with
                 // "Node not found for handle" before the indexer
                 // catches up. Anything else means the per-repo
                 // resolver found it.
-                if !resp.contains("\"isError\":true") || !resp.contains("Node not found") {
+                let is_error = resp
+                    .pointer("/result/isError")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let text = resp
+                    .pointer("/result/content/0/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !is_error || !text.contains("Node not found") {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
