@@ -38,6 +38,9 @@ jobs:
       fail-fast: false
       matrix:
         target:
+          - path_canonicalize
+          - mcp_request_dispatch
+          - repo_source_load
           - federation_config
           - mcp_envelope
           - graph_node
@@ -65,12 +68,17 @@ jobs:
       - name: Build fuzz harnesses
         run: cd fuzz && cargo +nightly fuzz build
 
-      - name: Run ${{ matrix.target }} for 60 seconds
-        # -max_total_time is the wall-clock budget, not the corpus size.
-        # 60s per target is enough to satisfy the scorecard's "is there
-        # a fuzz target?" check and to surface obvious regressions; for
-        # deep coverage this would be much longer.
-        run: cd fuzz && cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+      - name: Run ${{ matrix.target }} for 90 seconds
+        # -max_total_time is the wall-clock budget, not the corpus
+        # size. 90s per target is enough to satisfy the scorecard's
+        # "is there a fuzz target?" check and to surface obvious
+        # regressions; for deep coverage bump the number.
+        # Targets are ordered by impact:
+        #   * path_canonicalize — security-critical (every HTTP/CLI path)
+        #   * mcp_request_dispatch — product attack surface
+        #   * repo_source_load — operator-facing config round-trip
+        #   * federation_config, mcp_envelope, graph_node — baseline
+        run: cd fuzz && cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=90
 
       # If a crash is found, the corpus is preserved under
       # `fuzz/artifacts/$target/`. Upload it as a CI artefact so the

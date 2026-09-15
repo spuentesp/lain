@@ -45,5 +45,17 @@ path = "fuzz_targets/mcp_envelope.rs"
 name = "graph_node"
 path = "fuzz_targets/graph_node.rs"
 
+[[bin]]
+name = "path_canonicalize"
+path = "fuzz_targets/path_canonicalize.rs"
+
+[[bin]]
+name = "mcp_request_dispatch"
+path = "fuzz_targets/mcp_request_dispatch.rs"
+
+[[bin]]
+name = "repo_source_load"
+path = "fuzz_targets/repo_source_load.rs"
+
 [profile.release]
 debug = 1
