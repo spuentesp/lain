@@ -1,7 +1,7 @@
 name: CI
 
 # Two-tier CI: cheap battery on dev/PR-to-dev, full hardened on
-# main and PR-to-main. Job-level `if: ${{ inputs.full-battery }}`
+# main and PR-to-main. Job-level `if: env['full-battery']`
 # expressions keep the matrix lean on dev without splitting the
 # workflow file.
 #
@@ -102,7 +102,7 @@ jobs:
     # ~10 min/runner on every dev push and PR-to-dev.
     name: Cargo Test cross-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    if: env.full-battery == 'true'
+    if: env['full-battery'] == 'true'
     permissions:
       contents: read
     strategy:
@@ -135,7 +135,7 @@ jobs:
   capability:
     name: Capability suite (demo.sh)
     runs-on: ubuntu-latest
-    if: env.full-battery == 'true'
+    if: env['full-battery'] == 'true'
     permissions:
       contents: read
     steps:
@@ -193,7 +193,7 @@ jobs:
     # The drift check runs on main, where release tags are pushed.
     # On PRs the comparison would fail the moment a new tag is cut,
     # before the bump PR can land. Run only on full-battery.
-    if: env.full-battery == 'true'
+    if: env['full-battery'] == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract pinned version from action.yml
@@ -350,7 +350,7 @@ jobs:
     # first deliberate baseline PR.
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-latest
-    if: env.full-battery == 'true'
+    if: env['full-battery'] == 'true'
     permissions:
       contents: read
     steps:
@@ -403,7 +403,7 @@ jobs:
   action-contracts:
     name: Badge and release contracts
     runs-on: ubuntu-latest
-    if: env.full-battery == 'true'
+    if: env['full-battery'] == 'true'
     permissions:
       contents: read
     steps:
