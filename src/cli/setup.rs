@@ -550,18 +550,15 @@ pub struct VerificationOutcome {
 /// a stand-in, so a misconfigured adapter is caught here rather than
 /// on the agent's first real turn.
 fn verify_mcp_command(exe: &Path, root: &Path, model: Option<&Path>) -> VerificationOutcome {
+    use crate::cli::mcp_stdio::{initialize_request, StdioSession};
+
     let mut cmd = Command::new(exe);
-    cmd.arg("mcp")
-        .arg("--workspace")
-        .arg(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.arg("mcp").arg("--workspace").arg(root);
     if let Some(model) = model {
         cmd.env("LAIN_EMBEDDING_MODEL", model);
     }
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    let mut session = match StdioSession::spawn(cmd, false) {
+        Ok(s) => s,
         Err(e) => {
             return VerificationOutcome {
                 healthy: false,
@@ -570,52 +567,17 @@ fn verify_mcp_command(exe: &Path, root: &Path, model: Option<&Path>) -> Verifica
             }
         }
     };
-    let write_result = (|| -> std::io::Result<()> {
-        let stdin = child.stdin.as_mut().expect("piped stdin");
-        let protocol_version = rust_mcp_schema::ProtocolVersion::latest().to_string();
-        let init = json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": protocol_version,
-                "capabilities": {},
-                "clientInfo": {"name": "lain-setup", "version": env!("CARGO_PKG_VERSION")}
-            }
-        });
-        let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}});
-        writeln!(stdin, "{init}")?;
-        writeln!(stdin, "{list}")?;
-        stdin.flush()
-    })();
-    if let Err(e) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
+
+    let init = initialize_request(1, "lain-setup");
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}});
+    if let Err(e) = session.send(&init).and_then(|_| session.send(&list)) {
+        session.shutdown();
         return VerificationOutcome {
             healthy: false,
             tools_count: None,
             detail: Some(format!("failed to write to lain mcp stdin: {e}")),
         };
     }
-
-    let stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = std::sync::mpsc::channel::<Value>();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        if v.get("id").is_some() && tx.send(v).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    });
 
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut init_ok = false;
@@ -627,7 +589,7 @@ fn verify_mcp_command(exe: &Path, root: &Path, model: Option<&Path>) -> Verifica
             detail = Some("timed out waiting for a response from lain mcp".to_string());
             break;
         }
-        match rx.recv_timeout(remaining) {
+        match session.recv_timeout(remaining) {
             Ok(v) => match v.get("id").and_then(|i| i.as_i64()) {
                 Some(1) => init_ok = v.get("result").is_some(),
                 Some(2) => {
@@ -644,8 +606,7 @@ fn verify_mcp_command(exe: &Path, root: &Path, model: Option<&Path>) -> Verifica
             }
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    session.shutdown();
     VerificationOutcome {
         healthy: init_ok && tools_count.is_some(),
         tools_count,

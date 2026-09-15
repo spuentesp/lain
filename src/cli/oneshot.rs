@@ -29,18 +29,35 @@
 //!    a silent server blocks `read()` forever and the deadline never
 //!    fires.
 
+use crate::cli::mcp_stdio::{initialize_request, StdioSession};
 use crate::cli::workspace::find_git_workspace_root;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::sync::mpsc::RecvTimeoutError;
 
 /// JSON-RPC id of the `initialize` request.
 const ID_INITIALIZE: i64 = 1;
 /// JSON-RPC id of the first `tools/call` request; a retry (see the
 /// warming-up handling below) increments from here.
 const ID_CALL: i64 = 2;
+
+/// Shut the session down and build an error carrying whatever it
+/// printed to stderr, for the three give-up points in the wait loop
+/// below (deadline elapsed, recv timed out, subprocess disconnected).
+fn give_up(session: &mut StdioSession, message: String) -> anyhow::Error {
+    let stderr_text = session.stderr_text();
+    session.shutdown();
+    anyhow!(
+        "{message} (server stderr: {})",
+        if stderr_text.trim().is_empty() {
+            "<empty>".into()
+        } else {
+            stderr_text
+        }
+    )
+}
 
 /// Run `lain mcp` as a subprocess, send one `tools/call`, print the
 /// result, and exit. Returns an error if the tool name is unknown
@@ -121,153 +138,68 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
 
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("mcp")
         .arg("--workspace")
         .arg(&workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("RUST_LOG", "lain=debug")
-        .spawn()
-        .context("spawn `lain mcp`")?;
+        .env("RUST_LOG", "lain=debug");
+    let mut session = StdioSession::spawn(command, true).context("spawn `lain mcp`")?;
 
-    {
-        let stdin = child.stdin.as_mut().context("take stdin")?;
-        // Minimal MCP initialize + tools/call. The MCP spec requires
-        // `notifications/initialized` after initialize; we skip it (the
-        // server tolerates the omission for short-lived clients).
-        // Single source of truth for the protocol version — driven by
-        // the `2025_11_25` feature on `rust-mcp-schema`. Bumping the
-        // feature in Cargo.toml propagates here without a code change.
-        let protocol_version = rust_mcp_schema::ProtocolVersion::latest().to_string();
-        let init = json!({
-            "jsonrpc": "2.0",
-            "id": ID_INITIALIZE,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": protocol_version,
-                "capabilities": {},
-                "clientInfo": {"name": "lain-oneshot", "version": "0.6.0"}
-            }
-        });
-        let call = json!({
-            "jsonrpc": "2.0",
-            "id": ID_CALL,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": args_obj}
-        });
-        writeln!(stdin, "{}", init)?;
-        writeln!(stdin, "{}", call)?;
-        // stdin stays OPEN (see module docs): closing it now would let
-        // the server's transport shut down before our tools/call is
-        // answered whenever a startup re-index keeps the runtime busy.
-    }
-
-    // Reader thread: forward every stdout line that carries a JSON-RPC
-    // `id` other than the `initialize` request's, for as long as the
-    // child keeps writing. AGENT_UX_ROADMAP.md Milestone 4's central
-    // gate can answer a `tools/call` made immediately after `initialize`
-    // with a structured `warming_up` result instead of blocking until
-    // the startup re-index finishes — a one-shot process has no later
-    // chance to poll, so the loop below re-sends the same call until it
-    // gets a real answer, and needs to keep watching stdout across every
-    // retry rather than stopping after the first `id` it sees. A
-    // notification (`notifications/lain/capabilities_changed`, no `id`
-    // field) is silently skipped here; a one-shot invocation has no use
-    // for it.
-    let stdout = child.stdout.take().context("take stdout")?;
-    let (tx, rx) = std::sync::mpsc::channel::<Value>();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break, // EOF or IO error: server gone
-                Ok(_) => {
-                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        let id = v.get("id").and_then(|i| i.as_i64());
-                        if let Some(id) = id {
-                            if id != ID_INITIALIZE && tx.send(v).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    // Minimal MCP initialize + tools/call. The MCP spec requires
+    // `notifications/initialized` after initialize; we skip it (the
+    // server tolerates the omission for short-lived clients).
+    let init = initialize_request(ID_INITIALIZE, "lain-oneshot");
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": ID_CALL,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args_obj}
     });
+    session.send(&init)?;
+    session.send(&call)?;
+    // stdin stays OPEN (see module docs): closing it now would let
+    // the server's transport shut down before our tools/call is
+    // answered whenever a startup re-index keeps the runtime busy.
 
-    // Drain stderr on its own thread so a chatty child (RUST_LOG=debug)
-    // can't block on a full pipe buffer; the captured text is attached
-    // to error messages for diagnosis.
-    let stderr = child.stderr.take().context("take stderr")?;
-    let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut s = String::new();
-        let _ = stderr.take(256 * 1024).read_to_string(&mut s);
-        let _ = err_tx.send(s);
-    });
-
+    // `session`'s reader thread forwards every stdout line that carries
+    // a JSON-RPC `id`, including the `initialize` response's — skipped
+    // below rather than filtered at the source, since AGENT_UX_ROADMAP.md
+    // Milestone 4's central gate can answer a `tools/call` made
+    // immediately after `initialize` with a structured `warming_up`
+    // result instead of blocking until the startup re-index finishes: a
+    // one-shot process has no later chance to poll, so this loop
+    // re-sends the same call (with a fresh id) until it gets a real
+    // answer.
     let overall_deadline = std::time::Duration::from_secs(timeout_secs);
     let started = std::time::Instant::now();
     let mut next_id = ID_CALL;
     let tool_response = loop {
         let remaining = overall_deadline.saturating_sub(started.elapsed());
         if remaining.is_zero() {
-            let _ = child.kill();
-            let _ = child.wait();
-            let stderr_text = err_rx
-                .recv_timeout(std::time::Duration::from_millis(200))
-                .unwrap_or_default();
-            return Err(anyhow!(
-                "no tools/call response from `lain mcp` within {timeout_secs}s \
-                 (server stderr: {})",
-                if stderr_text.trim().is_empty() {
-                    "<empty>".into()
-                } else {
-                    stderr_text
-                }
+            return Err(give_up(
+                &mut session,
+                format!("no tools/call response from `lain mcp` within {timeout_secs}s"),
             ));
         }
-        let response = match rx.recv_timeout(remaining) {
+        let response = match session.recv_timeout(remaining) {
             Ok(v) => v,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let stderr_text = err_rx
-                    .recv_timeout(std::time::Duration::from_millis(200))
-                    .unwrap_or_default();
-                return Err(anyhow!(
-                    "no tools/call response from `lain mcp` within {timeout_secs}s \
-                     (server stderr: {})",
-                    if stderr_text.trim().is_empty() {
-                        "<empty>".into()
-                    } else {
-                        stderr_text
-                    }
-                ));
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(give_up(
+                    &mut session,
+                    format!("no tools/call response from `lain mcp` within {timeout_secs}s"),
+                ))
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let stderr_text = err_rx
-                    .recv_timeout(std::time::Duration::from_millis(200))
-                    .unwrap_or_default();
-                return Err(anyhow!(
-                    "`lain mcp` exited without answering tools/call \
-                     (server stderr: {})",
-                    if stderr_text.trim().is_empty() {
-                        "<empty>".into()
-                    } else {
-                        stderr_text
-                    }
-                ));
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(give_up(
+                    &mut session,
+                    "`lain mcp` exited without answering tools/call".to_string(),
+                ))
             }
         };
+        if response.get("id").and_then(|i| i.as_i64()) == Some(ID_INITIALIZE) {
+            continue; // the initialize response; not interesting here
+        }
 
         // A `graph_required`/`semantic_required` tool called before the
         // index is `ready` comes back as the central gate's structured
@@ -306,14 +238,11 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
             "method": "tools/call",
             "params": {"name": tool, "arguments": args_obj}
         });
-        let stdin = child.stdin.as_mut().context("re-take stdin for retry")?;
-        writeln!(stdin, "{}", retry_call)?;
-        stdin.flush()?;
+        session.send(&retry_call)?;
     };
 
     // Response in hand: now the server is disposable.
-    let _ = child.kill();
-    let _ = child.wait();
+    session.shutdown();
 
     if let Some(err) = tool_response.get("error") {
         return Err(anyhow!("tool error: {err}"));

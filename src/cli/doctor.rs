@@ -462,45 +462,53 @@ pub async fn run_probe(workspace: &Path) -> Result<()> {
 }
 
 fn probe_stdio(workspace: &Path) -> Result<usize> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        use std::process::Stdio;
-        let mut child = tokio::process::Command::new(std::env::current_exe()?)
-            .args(["doctor", "--probe-mcp", "--workspace"]).arg(workspace)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
-            .kill_on_drop(true).spawn()?;
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut stdin = child.stdin.take().context("probe stdin")?;
-            let mut stdout = BufReader::new(child.stdout.take().context("probe stdout")?).lines();
-            let initialize = json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params": {
-                "protocolVersion": rust_mcp_schema::ProtocolVersion::latest().to_string(),
-                "capabilities":{}, "clientInfo":{"name":"lain-doctor", "version":env!("CARGO_PKG_VERSION")}
-            }});
-            stdin.write_all(format!("{initialize}\n").as_bytes()).await?;
-            let mut initialized = false;
-            while let Some(line) = stdout.next_line().await? {
-                let value: Value = serde_json::from_str(&line).context("non-JSON MCP stdout")?;
-                if value.get("error").is_some() { return Err(anyhow!("MCP probe error: {}", value["error"])); }
-                if value["id"] == 1 && !initialized {
-                    if value.pointer("/result/serverInfo").is_none() || value.pointer("/result/protocolVersion").is_none() {
-                        return Err(anyhow!("invalid MCP initialize response"));
-                    }
-                    initialized = true;
-                    let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-                    let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}});
-                    stdin.write_all(format!("{notification}\n{list}\n").as_bytes()).await?;
-                } else if value["id"] == 2 && initialized {
-                    return tools_count(&value["result"]);
-                }
+    use crate::cli::mcp_stdio::{initialize_request, is_valid_initialize_result, StdioSession};
+
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args(["doctor", "--probe-mcp", "--workspace"])
+        .arg(workspace);
+    let mut session = StdioSession::spawn(command, false)?;
+    session.send(&initialize_request(1, "lain-doctor"))?;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut initialized = false;
+    let result = loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break Err(anyhow!("MCP probe timed out after 5 seconds"));
+        }
+        let value = match session.recv_timeout(remaining) {
+            Ok(v) => v,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                break Err(anyhow!("MCP probe timed out after 5 seconds"))
             }
-            Err(anyhow!("MCP probe exited before completing initialize/tools-list"))
-        }).await;
-        // Always reap the child, including malformed responses and timeout paths.
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        result.context("MCP probe timed out after 5 seconds")?
-    })
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break Err(anyhow!(
+                    "MCP probe exited before completing initialize/tools-list"
+                ))
+            }
+        };
+        if value.get("error").is_some() {
+            break Err(anyhow!("MCP probe error: {}", value["error"]));
+        }
+        if value["id"] == 1 && !initialized {
+            if !is_valid_initialize_result(&value["result"]) {
+                break Err(anyhow!("invalid MCP initialize response"));
+            }
+            initialized = true;
+            let notification = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+            let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}});
+            if let Err(e) = session
+                .send(&notification)
+                .and_then(|_| session.send(&list))
+            {
+                break Err(e);
+            }
+        } else if value["id"] == 2 && initialized {
+            break tools_count(&value["result"]);
+        }
+    };
+    session.shutdown();
+    result
 }

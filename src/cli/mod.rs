@@ -6,6 +6,7 @@ pub mod init;
 pub mod io;
 pub mod mcp;
 pub mod mcp_client;
+pub mod mcp_stdio;
 pub mod oneshot;
 pub mod query;
 pub mod readiness;
