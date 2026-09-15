@@ -4,10 +4,41 @@
 >
 > A developer should be able to install it, connect an MCP client, and get useful repository intelligence with almost no configuration. An agent should be able to discover what LAIN knows, choose the right capability, and recover from partial readiness without human intervention.
 
-## Implementation review (2026-09-14)
+## Implementation review (2026-09-15)
 
-Review of branch `spuentesp/brittlestar`, starting at `3c545d9`. These
-observations describe this checkout; they do not verify published packages.
+Review of branch `spuentesp/brittlestar`. These observations describe this
+checkout; they do not verify published packages. Superseded the 2026-09-14
+review below it, which was stale (it predated the capabilities/status
+commands and all of Milestone 4 steps 3-7).
+
+| Area | Evidence and remaining work |
+|---|---|
+| Distribution | `.github/workflows/release.yml` publishes versioned archives and `SHA256SUMS`. `npm-shim/scripts/install.js` pins the package version but downloads and extracts without checking the checksum. It still installs into shared `~/.lain/bin`; the launcher needs the version/target cache, override, and offline behavior from milestone 1. |
+| Diagnostics | `lain doctor`, `lain capabilities --json`, and `lain status --json` exist and share the readiness model in `src/server/readiness.rs` (issues 5-6). `--fix` behavior has not been re-audited since it landed. |
+| Startup (Milestone 4) | Implementation-sequence steps 1-7 are landed: mandatory tool readiness classification (`src/server/tools/definitions.rs`); the central dispatch gate (`gate_tool_call` in `readiness.rs`, consulted at both stdio and HTTP `tools/call` sites before any handler runs); phase and file-progress instrumentation through `build_core_memory` into the one shared `ReadinessHandle`; the startup re-index backgrounded via `tokio::spawn` in `run_stdio`/`run_http` instead of blocking transport startup; `lain mcp`'s runtime moved from single- to multi-thread; and the source-watcher startup barrier (`FileWatcher::start` returns a `ready_signal` receiver, awaited by `start_source_watcher`). Commits, in order: `5a4b99c`, `af206f7`, `d5b08e3`, `b214895`. |
+| Onboarding | `setup` still does not exist (issues 14-18). |
+
+Steps 8-12 of Milestone 4's implementation sequence are **not started** —
+check `git log` against the commits above before assuming otherwise:
+
+- a cooperative cancellation token threaded through the scan/resolve/persist
+  phase boundaries (today shutdown only gives the background indexing task a
+  bounded 5s window before a hard `AbortHandle::abort()`, which is not the
+  same contract);
+- `spawn_blocking` conversion of the pipeline's synchronous git/parser work
+  (it still all runs inline on async worker threads; the multi-thread
+  runtime gives it room to not starve the protocol loop, but does not
+  isolate it the way the roadmap's design calls for);
+- HEAD-change-during-startup re-indexing (an attempt does not yet notice a
+  moving `HEAD` and restart toward the new commit);
+- federation per-repository readiness aggregation (there is exactly one
+  global `ReadinessHandle` per process today, not one per repository); and
+- capability-change notifications (`notifications/lain/capabilities_changed`,
+  issue 13).
+
+### Implementation review (2026-09-14) — superseded, kept for history
+
+Review of branch `spuentesp/brittlestar`, starting at `3c545d9`.
 
 | Area | Evidence and remaining work |
 |---|---|
@@ -15,10 +46,6 @@ observations describe this checkout; they do not verify published packages.
 | Diagnostics | `src/cli/doctor.rs` checks installation and optionally a remote MCP endpoint. It does not diagnose repository freshness or expose JSON. It also creates directories and prunes sessions during ordinary diagnosis; move repairs behind `--fix` when implementing issue 5. Existing directory presence does not prove writability despite the current output. |
 | Startup | `src/cli/mcp.rs` constructs the server and synchronizes the overlay before entering stdio. Keep the planned classification and central gate ahead of asynchronous startup so agents cannot query an incomplete graph. |
 | Onboarding | The CLI has `doctor` but no `setup`, `capabilities`, or `status` commands. Keep setup dependent on the shared diagnostic contract. |
-
-The dependency order below still fits the code. Begin with issue 4; distribution
-issues 1–3 can proceed independently. Do not treat the existing npm package or
-doctor command as completion of their corresponding UX milestones.
 
 ### First implementation: shared capability policy (issue 4)
 
@@ -38,14 +65,9 @@ The acceptance contract for this change is:
 - Tests cover every combination of the five capability states (625 combinations)
   with healthy and unhealthy transport, plus serialization fixtures.
 
-This is a library foundation; existing command output and MCP behavior do not yet
-consume it. There is no new CLI transcript in this change. The next implementation
-is issue 5: observe repository and transport health, build the versioned doctor
-report from this policy, and test read-only diagnosis and explicit repair. The
-index lifecycle coordinator remains issue 9 and must own live transitions.
-
-Before merging to `dev`, reconcile its CI-only commit `ea99b27`, which is absent
-from this branch's starting history. This review does not merge or publish changes.
+Before merging to `dev`, reconcile its CI-only commit `ea99b27`, which was absent
+from this branch's starting history as of 2026-09-14; unverified whether this is
+still outstanding.
 
 ## Product outcome
 
