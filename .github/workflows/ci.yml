@@ -363,6 +363,16 @@ jobs:
       # ignores (description / homepage / keywords / repository.url).
       - name: Canonical metadata sync gate
         run: python scripts/test_sync_metadata.py
+      # Fast, network-free unit tests for the Milestone 9 clean-room
+      # check script (reader-thread timeout handling, protocol-violation
+      # detection) against a fake in-process server. The real live-network
+      # run against a published `npx @spuentesp/lain-mcp` lives in
+      # distribution-acceptance.yml, not here -- it exercises external
+      # published state, not this diff, so it doesn't belong on every PR.
+      - name: Clean-room check script unit tests
+        run: python scripts/test_clean_room_mcp_check.py
+      - name: Cached-binary assertion helper unit tests
+        run: python scripts/test_assert_cached_binary.py
       - name: Action configuration and version pinning
         run: python .github/actions/lain-health-badge/tests/test_action.py
       - name: Badge extraction
