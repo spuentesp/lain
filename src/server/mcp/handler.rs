@@ -331,18 +331,23 @@ pub struct McpContext<'a> {
 /// `declare_audit_tool!` macros below.
 pub struct McpToolEntry {
     pub name: &'static str,
-    pub handler: fn(&McpContext, serde_json::Value) -> Result<serde_json::Value, String>,
+    pub handler:
+        fn(&McpContext, serde_json::Value) -> Result<serde_json::Value, String>,
 }
 inventory::collect!(McpToolEntry);
 
 /// Wrap a handler result into the `(text, is_error)` shape every
 /// `dispatch_tool_call` arm returns. Centralizes the `unwrap_or_else`
 /// serialization fallback so the per-tool wrapper functions stay short.
-fn tool_result(name: &str, result: Result<serde_json::Value, String>) -> (String, bool) {
+fn tool_result(
+    name: &str,
+    result: Result<serde_json::Value, String>,
+) -> (String, bool) {
     match result {
         Ok(v) => (
-            serde_json::to_string(&v)
-                .unwrap_or_else(|e| format!("{name}: serialization error: {e}")),
+            serde_json::to_string(&v).unwrap_or_else(|e| {
+                format!("{name}: serialization error: {e}")
+            }),
             false,
         ),
         Err(e) => (format!("{name}: {e}"), true),
@@ -3203,8 +3208,8 @@ fn list_recent_projects_handler(
     _ctx: &McpContext,
     _args: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let list =
-        crate::server::mcp::federation_tools::list_recent_projects().map_err(|e| e.to_string())?;
+    let list = crate::server::mcp::federation_tools::list_recent_projects()
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(list).map_err(|e| e.to_string())
 }
 
@@ -3226,8 +3231,8 @@ fn request_reload_handler(
     let bus = ctx
         .reload_bus
         .ok_or_else(|| "reload bus not configured on this server".to_string())?;
-    let payload =
-        crate::server::mcp::federation_tools::request_reload(bus).map_err(|e| e.to_string())?;
+    let payload = crate::server::mcp::federation_tools::request_reload(bus)
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(payload).map_err(|e| e.to_string())
 }
 
@@ -3253,61 +3258,17 @@ macro_rules! declare_presence_tool {
     };
 }
 
-declare_presence_tool!(
-    register_agent_handler,
-    "register_agent",
-    crate::server::mcp::presence_tools::run_register_agent
-);
-declare_presence_tool!(
-    heartbeat_handler,
-    "heartbeat",
-    crate::server::mcp::presence_tools::run_heartbeat
-);
-declare_presence_tool!(
-    list_active_agents_handler,
-    "list_active_agents",
-    crate::server::mcp::presence_tools::run_list_active_agents
-);
-declare_presence_tool!(
-    who_am_i_handler,
-    "who_am_i",
-    crate::server::mcp::presence_tools::run_who_am_i
-);
-declare_presence_tool!(
-    list_subagents_handler,
-    "list_subagents",
-    crate::server::mcp::presence_tools::run_list_subagents
-);
-declare_presence_tool!(
-    claim_files_handler,
-    "claim_files",
-    crate::server::mcp::presence_tools::run_claim_files
-);
-declare_presence_tool!(
-    release_files_handler,
-    "release_files",
-    crate::server::mcp::presence_tools::run_release_files
-);
-declare_presence_tool!(
-    list_occupancy_handler,
-    "list_occupancy",
-    crate::server::mcp::presence_tools::run_list_occupancy
-);
-declare_presence_tool!(
-    my_claims_handler,
-    "my_claims",
-    crate::server::mcp::presence_tools::run_my_claims
-);
-declare_presence_tool!(
-    detect_overlap_handler,
-    "detect_overlap",
-    crate::server::mcp::presence_tools::run_detect_overlap
-);
-declare_presence_tool!(
-    get_world_state_handler,
-    "get_world_state",
-    crate::server::mcp::presence_tools::run_get_world_state
-);
+declare_presence_tool!(register_agent_handler, "register_agent", crate::server::mcp::presence_tools::run_register_agent);
+declare_presence_tool!(heartbeat_handler, "heartbeat", crate::server::mcp::presence_tools::run_heartbeat);
+declare_presence_tool!(list_active_agents_handler, "list_active_agents", crate::server::mcp::presence_tools::run_list_active_agents);
+declare_presence_tool!(who_am_i_handler, "who_am_i", crate::server::mcp::presence_tools::run_who_am_i);
+declare_presence_tool!(list_subagents_handler, "list_subagents", crate::server::mcp::presence_tools::run_list_subagents);
+declare_presence_tool!(claim_files_handler, "claim_files", crate::server::mcp::presence_tools::run_claim_files);
+declare_presence_tool!(release_files_handler, "release_files", crate::server::mcp::presence_tools::run_release_files);
+declare_presence_tool!(list_occupancy_handler, "list_occupancy", crate::server::mcp::presence_tools::run_list_occupancy);
+declare_presence_tool!(my_claims_handler, "my_claims", crate::server::mcp::presence_tools::run_my_claims);
+declare_presence_tool!(detect_overlap_handler, "detect_overlap", crate::server::mcp::presence_tools::run_detect_overlap);
+declare_presence_tool!(get_world_state_handler, "get_world_state", crate::server::mcp::presence_tools::run_get_world_state);
 
 /// Same shape for the audit tools; the runner signature differs only
 /// in the domain module.
@@ -3329,30 +3290,10 @@ macro_rules! declare_audit_tool {
     };
 }
 
-declare_audit_tool!(
-    get_audit_log_handler,
-    "get_audit_log",
-    crate::server::mcp::audit_tools::run_get_audit_log
-);
-declare_audit_tool!(
-    get_recent_activity_handler,
-    "get_recent_activity",
-    crate::server::mcp::audit_tools::run_get_recent_activity
-);
+declare_audit_tool!(get_audit_log_handler, "get_audit_log", crate::server::mcp::audit_tools::run_get_audit_log);
+declare_audit_tool!(get_recent_activity_handler, "get_recent_activity", crate::server::mcp::audit_tools::run_get_recent_activity);
 
-inventory::submit!(McpToolEntry {
-    name: "get_server_status",
-    handler: server_status_handler
-});
-inventory::submit!(McpToolEntry {
-    name: "list_recent_projects",
-    handler: list_recent_projects_handler
-});
-inventory::submit!(McpToolEntry {
-    name: "get_reload_status",
-    handler: get_reload_status_handler
-});
-inventory::submit!(McpToolEntry {
-    name: "request_reload",
-    handler: request_reload_handler
-});
+inventory::submit!(McpToolEntry { name: "get_server_status", handler: server_status_handler });
+inventory::submit!(McpToolEntry { name: "list_recent_projects", handler: list_recent_projects_handler });
+inventory::submit!(McpToolEntry { name: "get_reload_status", handler: get_reload_status_handler });
+inventory::submit!(McpToolEntry { name: "request_reload", handler: request_reload_handler });
