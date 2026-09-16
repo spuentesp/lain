@@ -168,6 +168,21 @@ jobs:
             --bundle "$ARTIFACT_PATH.sigstore.json" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-ref "$GITHUB_REF"
+      # Independent of the provenance attestation above: a direct
+      # cosign keyless signature over the tarball's bytes, verifiable
+      # with only the `cosign` CLI (no `gh` / GitHub API dependency).
+      # Uses the same GitHub Actions OIDC identity via Fulcio/Rekor.
+      # `--bundle` is the current cosign v3 output format (the old
+      # `--output-signature`/`--output-certificate` flags were removed
+      # upstream); named `.cosign.bundle.json` to stay distinct from
+      # the `.sigstore.json` provenance bundle above.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign release artifact (cosign keyless)
+        run: |
+          cosign sign-blob --yes \
+            --bundle release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cosign.bundle.json \
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
@@ -176,6 +191,7 @@ jobs:
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cdx.json
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.sigstore.json
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.intoto.jsonl
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cosign.bundle.json
           fail_on_unmatched_files: true
           draft: false
         env:
@@ -246,6 +262,13 @@ jobs:
             --bundle "$ARTIFACT_PATH.sigstore.json" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-ref "$GITHUB_REF"
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign release artifact (cosign keyless)
+        run: |
+          cosign sign-blob --yes \
+            --bundle release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cosign.bundle.json \
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
@@ -254,6 +277,7 @@ jobs:
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sigstore.json
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.intoto.jsonl
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cosign.bundle.json
           fail_on_unmatched_files: true
           draft: false
         env:
@@ -328,6 +352,14 @@ jobs:
             --bundle "$ARTIFACT_PATH.sigstore.json" \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-ref "$GITHUB_REF"
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign release artifact (cosign keyless)
+        shell: bash
+        run: |
+          cosign sign-blob --yes \
+            --bundle release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cosign.bundle.json \
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
@@ -336,6 +368,7 @@ jobs:
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cdx.json
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.sigstore.json
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.intoto.jsonl
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cosign.bundle.json
           fail_on_unmatched_files: true
           draft: false
         env:
