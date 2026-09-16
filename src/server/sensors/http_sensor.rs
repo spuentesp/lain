@@ -327,12 +327,8 @@ pub fn scan_workspace_routes(
         return Ok(0);
     }
     let mut count = 0;
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
 
-    for entry in walker.flatten() {
+    for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 

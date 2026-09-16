@@ -95,32 +95,6 @@ pub fn parse_proto(content: &str, proto_path: &str) -> Vec<ProtoService> {
     services
 }
 
-/// Find handler node in graph by name
-fn find_handler(graph: &GraphDatabase, method_name: &str) -> Option<GraphNode> {
-    let snake = to_snake_case(method_name);
-
-    // Try exact match
-    if let Some(node) = graph.find_node_by_name(method_name) {
-        return Some(node);
-    }
-    // Try snake_case
-    if let Some(node) = graph.find_node_by_name(&snake) {
-        return Some(node);
-    }
-    None
-}
-
-fn to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
-        }
-        result.push(c.to_ascii_lowercase());
-    }
-    result
-}
-
 /// Enrich graph with gRPC service definitions
 pub fn enrich_with_proto(
     graph: &GraphDatabase,
@@ -162,7 +136,9 @@ pub fn enrich_with_proto(
         graph.upsert_node(service_node)?;
 
         // Find handler by method name (not package-qualified)
-        if let Some(handler) = find_handler(graph, &svc.method_name) {
+        if let Some(handler) =
+            crate::server::sensors::util::find_handler_in_graph(graph, &svc.method_name)
+        {
             let edge = GraphEdge::new(EdgeType::Implements, handler.id.clone(), service_id);
             graph.insert_edge(&edge)?;
             count += 1;
@@ -180,12 +156,7 @@ pub fn scan_workspace(
 ) -> Result<usize, LainError> {
     let mut count = 0;
 
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
-
-    for entry in walker.flatten() {
+    for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("proto") {
             match enrich_with_proto(graph, path, root, namespace) {
