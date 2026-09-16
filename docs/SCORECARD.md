@@ -1,150 +1,127 @@
 # OpenSSF Scorecard plan
 
-The badge currently shows **score 5.0** for `github.com/spuentesp/lain`,
-fetched from `https://api.securityscorecards.dev/projects/github.com/spuentesp/lain`
-on 2026-09-14. This document lists every check, what we scored, why,
-and the ranked fix list.
+Live snapshot fetched from
+`https://api.securityscorecards.dev/projects/github.com/spuentesp/lain`
+on 2026-09-16. **Overall score: 7.9/10** (up from 5.0 on 2026-09-14).
 
-## Current state (all 18 checks)
+## Current state (all 18 checks, live 2026-09-16)
 
-| Check | Score | Reason | Fix path |
-|---|---:|---|---|
-| Binary-Artifacts | 10 | no binaries in repo | n/a |
-| Dangerous-Workflow | 10 | no risky patterns | n/a |
-| Dependency-Update-Tool | 10 | Dependabot detected | n/a |
-| License | 10 | LICENSE present (MIT) | n/a |
-| Maintained | 10 | 30 commits + 2 issues in last 90 days | n/a |
-| Token-Permissions | 9 | one workflow has excessive perms | tighten |
-| Pinned-Dependencies | 7 | some deps not pinned by hash | tighten |
-| CI-Tests | 6 | CI runs but not on every commit | wire |
-| Security-Policy | 4 | policy file present but incomplete | expand |
-| Contributors | 3 | single maintainer | n/a (project reality) |
-| Branch-Protection | 0 | no branch protection on default branch | **done** — set 2026-09-14 |
-| Code-Review | 0 | 0/20 approved changesets | **done** — 1 approval required |
-| SAST | 0 | no SAST tool runs on every commit | **done** — CodeQL added |
-| Signed-Releases | 0 | SLSA provenance present but not `.sig`/`.asc` | add cosign keyless |
-| Fuzzing | 0 | not fuzzed | out of scope (multi-day) |
-| Vulnerabilities | 0 | 18 known vulns | triage |
-| CII-Best-Practices | 0 | no CII badge effort | out of scope (doc-heavy) |
-| Packaging | -1 | not published as a package | deferred (publishing is version work) |
+| Check | Score | Notes |
+|---|---:|---|
+| Dependency-Update-Tool | 10 | Dependabot detected |
+| Maintained | 10 | active commit/issue history |
+| Binary-Artifacts | 10 | no binaries in repo |
+| Dangerous-Workflow | 10 | no risky patterns |
+| Token-Permissions | 10 | every workflow uses top-level `permissions: {}` + least-privilege per-job grants (verified 2026-09-16 across all `.github/workflows/*.yml`) |
+| Security-Policy | 10 | `SECURITY.md` covers contact channel, supported versions, response SLAs, coordinated disclosure |
+| Pinned-Dependencies | 10 | all GitHub Actions pinned by full commit SHA (verified 2026-09-16, no `@vN`-only refs found) |
+| License | 10 | LICENSE present (MIT) |
+| Fuzzing | 10 | `fuzz-nightly.yml` wired |
+| CI-Tests | 10 | wired to every PR via `ci.yml` |
+| SAST | 10 | CodeQL runs on every push/PR |
+| Packaging | 10 | published |
+| Vulnerabilities | 7 | rolling triage in [`docs/VULNS.md`](VULNS.md) — that file is the live source, not this one |
+| CII-Best-Practices | 5 | "passing" badge live (`bestpractices.dev/projects/14660`, confirmed 2026-09-16) — the mid-tier "silver"/"gold" levels are unclaimed, not doc-heavy triage anymore |
+| Branch-Protection | 5 | see root cause below |
+| Contributors | 3 | single maintainer — structural, not fixable |
+| Code-Review | 0 | see root cause below |
+| Signed-Releases | 2 | SLSA provenance attestation present; Scorecard wants `.sig`/`.asc` — only 1 of 5 recent releases has one |
 
-**Already fixed this session:**
+## Root cause: Code-Review (0) and Branch-Protection (5)
 
-- `Branch-Protection`: 0 → 10 (set via API on `main`, lighter rules on `dev`)
-- `Code-Review`: 0 → 10 (1 approval required, stale-review dismiss on push)
-- `SAST`: 0 → 10 (`.github/workflows/codeql.yml` runs CodeQL on every push to `main`/`dev` and on every PR)
+**This repo's own prior docs claimed both went to 10 on 2026-09-14 —
+that was wrong.** Confirmed live against GitHub on 2026-09-16:
 
-**On the next scorecard run (weekly + push-to-main) the composite should
-re-aggregate from these three going to 10.** Three zeros to 10s move the
-composite by roughly +1.5 points.
+- `required_approving_review_count: 1` is set on `main`.
+- `enforce_admins: false` is also set on `main`.
+- Every recent PR merged to `main` (checked #49 through #73) was
+  merged by the repo admin with only bot `COMMENTED` reviews —
+  never a human `APPROVED` review — because admin bypass means the
+  approval requirement never actually applies to the person doing
+  all the merging.
+
+The branch-protection *setting* is real; it just has never been
+*exercised*, because the sole maintainer is also the sole approver
+and GitHub won't let an author approve their own PR. Turning on
+`enforce_admins: true` would make this check meaningful, but it would
+also block every future merge until a second approver (human or a
+bot account configured to submit `APPROVED`, not just `COMMENTED`)
+exists — that's a workflow decision for the maintainer, not something
+to flip silently. Until that decision is made, `Code-Review` is
+structurally capped at 0 for the same reason `Contributors` is capped
+at 3: single-maintainer reality, not a bug to "tighten."
 
 ## Recommended next moves, ranked by value ÷ effort
 
-### 1. Signed-Releases (0 → 10) — ~30 min
+### 1. Signed-Releases (2 → 10) — ~30 min
 
-`release.yml` already calls `actions/attest-build-provenance@v2.4.0`,
-which produces a SLSA-style provenance attestation signed by GitHub's
-OIDC token. Scorecard's `Signed-Releases` check looks for `.sig`,
-`.asc`, `.pem`, or `.gpg` files attached to the release — it does not
-recognize the SLSA attestation as a "signed release" artifact.
+`release.yml` already calls `actions/attest-build-provenance@v2.4.0`
+(confirmed live at lines 156/234/316), which produces a SLSA-style
+provenance attestation signed by GitHub's OIDC token, but Scorecard's
+`Signed-Releases` check specifically wants `.sig`/`.asc`/`.pem`/`.gpg`
+files attached to the release — hence 2/10 instead of 0, but still not
+10.
 
 Cheapest path: add `cosign sign-blob` with keyless OIDC after the
 provenance step. Output to `release/lain-${VER}-${TARGET}.tar.gz.sig`
-and add it to the `softprops/action-gh-release` upload list. Scorecard
-sees `.sig` → score 10.
+and add it to the `softprops/action-gh-release` upload list.
 
 This touches the release pipeline, so it should be its own PR with a
-dry-run review before any new release ships.
+dry-run review before any new release ships — not bundled into a docs
+pass.
 
-### 2. Token-Permissions (9 → 10) — ~15 min
+### 2. Branch-Protection / Code-Review — process decision, not a patch
 
-A workflow still has `permissions: write-all` or an unscoped `GITHUB_TOKEN`.
-Find the offender with `grep -rn "write-all\|permissions: write" .github/workflows/`
-and tighten.
+See the root-cause section above. The only real fix is
+`enforce_admins: true` plus a plan for how PRs get a second approval
+on a single-maintainer repo. Flagging for the maintainer to decide;
+not something to change unilaterally given it can block merges.
 
-### 3. Security-Policy (4 → 10) — ~30 min
+### 3. CII-Best-Practices (5 → higher) — doc-heavy
 
-`SECURITY.md` exists but scorecard gives partial credit. The check
-wants: contact channel, supported versions, expected response time,
-coordinated disclosure language. Rewrite to include all four sections.
+The "passing" tier is claimed. Silver/gold tiers require materially
+more process documentation. Defer unless there's a reason to chase it.
 
-### 4. Pinned-Dependencies (7 → 10) — ~30 min
+### 4. Vulnerabilities — see `docs/VULNS.md`
 
-`dependabot.yml` keeps GitHub Actions pinned by commit SHA already.
-The deduction is for one or two `uses: foo/bar@vN` style references
-without a SHA. Grep for `@v[0-9]` in `.github/workflows/` and pin.
+That file is the live triage log; keep updates there, not here.
 
-### 5. CI-Tests (6 → 10) — small but configurable
+## Out of scope
 
-The check wants test results published as a GitHub check. The current
-`cargo test` jobs are already check runs; the deduction is probably
-because the `federation-nightly.yml` workflow runs on a cron and isn't
-wired to PR status. Either wire it to PR runs or document it as
-out-of-scope for merge gating.
-
-### 6. Vulnerabilities (0 → ?) — medium effort
-
-18 detected vulnerabilities via OSV/Dependabot. Triage:
-
-1. `cargo audit` (or `cargo deny`) locally to enumerate.
-2. For each, classify: patched in upstream Cargo.lock / advisory-only
-   / unmaintained crate that needs replacing.
-3. Either bump or pin-with-advisory.
-
-This is real engineering work and likely worth a dedicated PR per
-class of fix.
-
-### 7. CII-Best-Practices (0 → ?) — doc-heavy
-
-CII Best Practices self-certification requires ~50 met criteria across
-documentation, governance, and code. Heavy lift for a single-maintainer
-project. Defer.
-
-### 8. Fuzzing (0 → ?) — multi-day
-
-`cargo fuzz` integration with a CI cron that uploads reproducer
-artifacts. Useful for the parser layer in particular. Out of scope for
-this session.
-
-## Out of scope this session
-
-- **Packaging** — score `-1` means the check can't run, because
-  crates.io/npm don't list `spuentesp/lain`. Publishing involves
-  version-number work, which you asked to defer.
 - **Contributors** — score 3 is structural (one primary author); not
   something to "fix".
-- **CII / Fuzzing** — both meaningful but heavy enough to be their own
-  initiatives.
+- **CII silver/gold** — heavy enough to be its own initiative.
 
 ## Branching implications for the score work
 
-The `main` branch now requires:
-- 1 approving review on every PR (Code-Review +0)
-- `lain/agent-contract` status check (Branch-Protection +0)
+The `main` branch requires:
+- 1 approving review on every PR (not currently enforced against
+  admin merges — see root cause above)
+- `lain/agent-contract` status check
 
 The `dev` branch requires:
 - `lain/agent-contract` status check only
 
-Both rules were applied 2026-09-14 via the GitHub API. See
-[`docs/BRANCHING.md`](BRANCHING.md) for the workflow.
+See [`docs/BRANCHING.md`](BRANCHING.md) for the workflow.
 
-## Maintenance update (September 14, 2026)
+## Maintenance notes
 
-The `main protection (Scorecard visible)` GitHub repository ruleset mirrors
-the classic protection on `main`: one approval, stale-review dismissal,
-the `lain/agent-contract` check, an up-to-date branch, and restrictions on
-deletion and force pushes. It retains the existing administrator bypass.
-Keep these settings consistent when changing branch protection.
+The `main protection (Scorecard visible)` GitHub repository ruleset
+mirrors the classic protection on `main`: one approval requirement,
+stale-review dismissal, the `lain/agent-contract` check, an
+up-to-date branch, and restrictions on deletion and force pushes. It
+retains the existing administrator bypass — see the root-cause section
+above for why that matters to the score.
 
-Scorecard can read the ruleset with its default token. No `SCORECARD_TOKEN`
-secret is required. Private vulnerability reporting is enabled; the
-reporting link is in [SECURITY.md](../SECURITY.md).
+Scorecard can read the ruleset with its default token. No
+`SCORECARD_TOKEN` secret is required. Private vulnerability reporting
+is enabled; the reporting link is in [SECURITY.md](../SECURITY.md).
 
 ### Dependency pinning
 
-Both JavaScript CI jobs use `npm ci` with committed lockfiles. Update the
-appropriate lockfile when changing a package manifest; don't fall back to
-`npm install` in CI.
+Both JavaScript CI jobs use `npm ci` with committed lockfiles. Update
+the appropriate lockfile when changing a package manifest; don't fall
+back to `npm install` in CI.
 
 The September 14, 2026 scan at commit `49e96b0` reported nine
 `downloadThenRun` findings in these scripts:
@@ -156,10 +133,11 @@ The September 14, 2026 scan at commit `49e96b0` reported nine
 | `tests/e2e/multiplayer-hooks.sh` | 67, 81 | MCP JSON responses |
 | `tests/e2e/real-bench.sh` | 59 | Health JSON response |
 
-These pipelines pass response data to fixed `python3 -c` code that parses
-JSON. They don't execute the response as Python code. Scorecard's shell
-scanner treats the download-to-interpreter pipeline as execution, so these
-findings remain false positives. This note doesn't suppress the check.
+These pipelines pass response data to fixed `python3 -c` code that
+parses JSON. They don't execute the response as Python code.
+Scorecard's shell scanner treats the download-to-interpreter pipeline
+as execution, so these findings remain false positives. This note
+doesn't suppress the check.
 
-Run the OpenSSF Scorecard workflow after merging changes to refresh the
-published results; the viewer may take additional time to update.
+Run the OpenSSF Scorecard workflow after merging changes to refresh
+the published results; the viewer may take additional time to update.
