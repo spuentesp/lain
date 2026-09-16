@@ -270,6 +270,47 @@ impl FederatedIndex {
         out
     }
 
+    /// Per-repository readiness snapshot. One entry per registered repo,
+    /// sorted by repo id (same ordering `list_repos` uses). The shape is
+    /// the canonical [`crate::server::federation::readiness::PerRepoReadiness`]
+    /// DTO — the same struct `get_capabilities` embeds in its
+    /// `repositories[]` payload, so this snapshot and the wire format
+    /// cannot disagree on what "ready" means.
+    ///
+    /// Read-only — does not hold the federation lock across any
+    /// per-repo probe. Each `RepoIndex` accessor is itself non-blocking
+    /// (`indexed_at_least_once` and `outstanding_files` are atomics,
+    /// `last_indexed` is a parking_lot read guard, the `db.get_last_commit`
+    /// path is a parking_lot read). The returned `Vec` is consumed in
+    /// order by the dispatcher on the call's thread.
+    pub fn per_repo_readiness(
+        &self,
+    ) -> Vec<crate::server::federation::readiness::PerRepoReadiness> {
+        use crate::server::federation::readiness::build_per_repo_readiness;
+        let repos = self.repos.read();
+        let mut out: Vec<_> = repos
+            .iter()
+            .map(|(id, idx)| {
+                let last_indexed_unix_ms = idx
+                    .last_indexed()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_millis() as u64);
+                let last_indexed_commit = idx.db().get_last_commit().ok().flatten();
+                build_per_repo_readiness(
+                    id,
+                    idx.health(),
+                    idx.indexed_signal_was_fired(),
+                    last_indexed_commit,
+                    last_indexed_unix_ms,
+                    idx.outstanding_files(),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.repo_id.as_str().cmp(b.repo_id.as_str()));
+        out
+    }
+
     /// Local checkout paths of every registered repo. The attribution
     /// watcher monitors exactly these roots — watching `repos.yaml`'s
     /// parent dir instead swept in unrelated files (server logs,
