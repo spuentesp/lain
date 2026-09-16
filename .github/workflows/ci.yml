@@ -452,6 +452,43 @@ jobs:
       - name: Run tests
         run: npm test
 
+  arch-guardrails:
+    name: Architecture guardrails (no redundant code)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    # Tier 1: runs on every PR (draft included), no docs_only gating.
+    # The four scripts under `scripts/check-*.py` enforce the
+    # duplication / single-source rules documented in
+    # `docs/CONTRIBUTING_AGENTS.md`. They are pure-Python stdlib and
+    # finish in well under a minute — the cost of catching a new
+    # sensor that copies the walker from an existing one, or a
+    # second `format_duration`, is a 50-line script; the cost of
+    # letting that drift land is a 200-line cleanup PR.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Sensor duplication
+        run: python scripts/check-no-duplicate-sensors.py
+      - name: MCP dispatch shape
+        run: python scripts/check-mcp-dispatch-shape.py
+      - name: Mirror DTOs
+        run: python scripts/check-no-mirror-dtos.py
+      - name: format_duration uniqueness
+        run: python scripts/check-format-duration-once.py
+      # The self-tests (`test_check_*.py`) live next to each check
+      # and run against a tempdir copy, so they can never affect the
+      # real tree. ~1s combined.
+      - name: Check self-tests
+        run: |
+          python scripts/test_check_no_duplicate_sensors.py
+          python scripts/test_check_mcp_dispatch_shape.py
+          python scripts/test_check_no_mirror_dtos.py
+          python scripts/test_check_format_duration_once.py
+
 
   coverage:
     # Coverage run is intentionally restricted to full_battery
