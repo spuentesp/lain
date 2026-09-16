@@ -84,6 +84,36 @@ impl<T> From<ort::Error<T>> for LainError {
     }
 }
 
+impl From<bincode::error::DecodeError> for LainError {
+    fn from(err: bincode::error::DecodeError) -> Self {
+        LainError::Serialization(format!("bincode decode: {err}"))
+    }
+}
+
+impl From<bincode::error::EncodeError> for LainError {
+    fn from(err: bincode::error::EncodeError) -> Self {
+        LainError::Serialization(format!("bincode encode: {err}"))
+    }
+}
+
+impl From<serde_yaml::Error> for LainError {
+    fn from(err: serde_yaml::Error) -> Self {
+        LainError::Serialization(format!("yaml: {err}"))
+    }
+}
+
+impl From<toml::de::Error> for LainError {
+    fn from(err: toml::de::Error) -> Self {
+        LainError::Config(format!("toml decode: {err}"))
+    }
+}
+
+impl From<toml::ser::Error> for LainError {
+    fn from(err: toml::ser::Error) -> Self {
+        LainError::Config(format!("toml encode: {err}"))
+    }
+}
+
 impl serde::Serialize for LainError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
