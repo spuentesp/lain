@@ -251,10 +251,10 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "65" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "70" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "64" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "69" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -690,6 +690,28 @@ for t in json.load(sys.stdin)["result"]["tools"]:
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 check_contains "install_language_server advertises its schema (not invoked: it mutates the machine)" \
   "language" "${ILS_SCHEMA:-}"
+
+# Annotations and handoffs (M4 §4.3): cross-session notes anchored to
+# a target (symbol/file/repo/edge), plus a lightweight mailbox for
+# the next agent that registers.
+ADD_OUT=$(call add_annotation \
+  '{"target":{"kind":"repo","repo_id":"subject"},"kind":"note","body":"demo annotation","author":"demo-agent"}')
+check_contains "add_annotation answers" "repo_id" "$ADD_OUT"
+ANN_ID=$(printf '%s' "$ADD_OUT" | python3 -c "import json,sys
+try: print(json.load(sys.stdin).get('id',''))
+except Exception: print('')")
+
+check_contains "list_annotations sees it" "demo annotation" \
+  "$(call list_annotations '{"target":{"kind":"repo","repo_id":"subject"}}')"
+
+check_contains "resolve_annotation closes it" "resolved" \
+  "$(call resolve_annotation "{\"id\":\"$ANN_ID\",\"resolved_by\":\"demo-agent\"}")"
+
+check_contains "leave_handoff_note answers" "expires_at_unix_ms" \
+  "$(call leave_handoff_note '{"body":"demo handoff for the next agent","author":"demo-agent"}')"
+
+check_contains "get_pending_handoffs sees it" "demo handoff" \
+  "$(call get_pending_handoffs '{}')"
 
 # Coverage: every advertised tool must be exercised here, or named below
 # as deliberately not invoked. A tool added to the surface without a

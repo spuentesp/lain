@@ -74,8 +74,19 @@ fn canonical_target_id(target: &AnnotationTarget) -> String {
 /// Windows where backslashes (re-normalized to forward by
 /// `posix_string`) and `..` segments combine to escape the
 /// workspace root in any tool that later re-resolves the id.
+///
+/// Absolute-ness is checked by hand rather than via `Path::is_absolute()`:
+/// that method is platform-relative, so a Unix-style `/etc/passwd`
+/// target is (correctly) rejected when this runs on Linux but is
+/// *not* absolute by Windows' path parser (no drive letter), which
+/// would let it slip through on a Windows build. The server accepts
+/// paths from any agent regardless of the host OS, so both a
+/// leading `/` or `\` and a Windows drive-letter prefix (`C:`) are
+/// rejected unconditionally.
 fn canonical_file(p: &str) -> String {
-    if p.contains("..") || Path::new(p).is_absolute() {
+    let is_drive_absolute = p.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && p.as_bytes().get(1) == Some(&b':');
+    if p.contains("..") || p.starts_with('/') || p.starts_with('\\') || is_drive_absolute {
         return String::new();
     }
     posix_string(Path::new(p))

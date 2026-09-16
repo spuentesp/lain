@@ -3035,6 +3035,36 @@ declare_presence_tool!(
     crate::server::mcp::presence_tools::run_get_world_state
 );
 
+// The five annotation/handoff tools (M4 §4.3) fit the same
+// `&LainServer` + `Value` -> `Result<Value, String>` shape as the
+// presence tools above, so they register through the same macro
+// rather than a sixth near-identical one.
+declare_presence_tool!(
+    add_annotation_handler,
+    "add_annotation",
+    crate::server::mcp::annotation_tools::run_add_annotation
+);
+declare_presence_tool!(
+    list_annotations_handler,
+    "list_annotations",
+    crate::server::mcp::annotation_tools::run_list_annotations
+);
+declare_presence_tool!(
+    resolve_annotation_handler,
+    "resolve_annotation",
+    crate::server::mcp::annotation_tools::run_resolve_annotation
+);
+declare_presence_tool!(
+    leave_handoff_note_handler,
+    "leave_handoff_note",
+    crate::server::mcp::annotation_tools::run_leave_handoff_note
+);
+declare_presence_tool!(
+    get_pending_handoffs_handler,
+    "get_pending_handoffs",
+    crate::server::mcp::annotation_tools::run_get_pending_handoffs
+);
+
 /// Same shape for the audit tools; the runner signature differs only
 /// in the domain module.
 macro_rules! declare_audit_tool {
