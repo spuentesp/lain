@@ -6,10 +6,10 @@
 use super::dto::{
     ActiveWorkspaceInfo, WorkspaceDetail, WorkspaceGraph, WorkspaceInfo, WorkspaceRepoInfo,
 };
-use crate::schema::{GraphEdge, GraphNode};
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::workspace::{WorkspaceSourceConfig, WorkspacesFile};
+use crate::schema::{GraphEdge, GraphNode};
 use crate::state::ActiveWorkspace;
 
 fn source_label(s: &Option<WorkspaceSourceConfig>) -> Option<String> {
@@ -192,7 +192,11 @@ pub fn get_workspace_graph(
         }
         let mut wire = GraphNode::new(n.node_type, n.name.clone(), n.path.clone());
         wire.id = n.id.clone();
-        wire.repo_id = if repo_id.is_empty() { None } else { Some(repo_id) };
+        wire.repo_id = if repo_id.is_empty() {
+            None
+        } else {
+            Some(repo_id)
+        };
         nodes.push(wire);
     }
     let node_ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
