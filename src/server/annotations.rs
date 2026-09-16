@@ -66,7 +66,18 @@ fn canonical_target_id(target: &AnnotationTarget) -> String {
 /// `posix_string`-normalized (workspace-relative, forward
 /// slashes). Re-normalizing here is the safety net for agents that
 /// bypass `TargetSpec` and pass raw paths.
+///
+/// `..` segments and absolute paths are rejected: an annotation's
+/// `target_id` lands in a sqlite row that other agents later
+/// query by. A `target_id` of `../../etc/passwd` would be a
+/// confusing row on Linux but a real path-traversal footgun on
+/// Windows where backslashes (re-normalized to forward by
+/// `posix_string`) and `..` segments combine to escape the
+/// workspace root in any tool that later re-resolves the id.
 fn canonical_file(p: &str) -> String {
+    if p.contains("..") || Path::new(p).is_absolute() {
+        return String::new();
+    }
     posix_string(Path::new(p))
 }
 
@@ -178,9 +189,14 @@ pub struct Annotation {
 
 /// A trimmed-down view of [`Annotation`] suitable for embedding in
 /// `explain_symbol` / `get_blast_radius` output. Truncates `body`
-/// at 240 characters so the rendered markdown stays legible; the
-/// agent can call `list_annotations` with the id to fetch the full
+/// at 240 bytes so the rendered markdown stays legible; the agent
+/// can call `list_annotations` with the id to fetch the full
 /// record.
+///
+/// Note: this is a byte limit, not a character limit — see the
+/// `from_full` impl for the rationale. UTF-8 boundary-safe, so we
+/// never slice through a multi-byte sequence, but a 4-byte emoji
+/// may still truncate after ~60 visible characters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnnotationSummary {
     pub id: String,
@@ -195,11 +211,17 @@ pub struct AnnotationSummary {
 
 impl AnnotationSummary {
     pub fn from_full(a: &Annotation) -> Self {
+        // 240 *bytes*, not characters. A char limit would force
+        // a full UTF-8 walk per annotation; the markdown excerpt
+        // is bounded by line length anyway, and walking back to
+        // a char boundary on truncation keeps the excerpt valid
+        // UTF-8 even when a multi-byte character straddles the
+        // 240-byte boundary.
         const EXCERPT_LIMIT: usize = 240;
         let excerpt = if a.body.len() <= EXCERPT_LIMIT {
             a.body.clone()
         } else {
-            // char boundary safe: walk back to a UTF-8 boundary so
+            // Char boundary safe: walk back to a UTF-8 boundary so
             // we never slice through a multi-byte sequence.
             let mut idx = EXCERPT_LIMIT;
             while !a.body.is_char_boundary(idx) && idx > 0 {
@@ -307,6 +329,16 @@ impl AnnotationStore {
     /// Limit applies *before* staleness re-classification, so the
     /// caller doesn't get a stale entry when an open one would have
     /// fit in the page.
+    ///
+    /// Status filter: the SQL `WHERE status = ?` is intentionally
+    /// *only* applied for `Resolved`. For `Open`, we read every
+    /// open row and let the live reclassification down-grade rows
+    /// whose target no longer exists in the graph — applying the
+    /// SQL filter for `Open` would silently drop rows that should
+    /// become `stale` on this read. For `Stale`, we read every row
+    /// (open + resolved + stale) and post-filter on the
+    /// reclassified status, so a caller querying `status = stale`
+    /// sees both DB-persisted and freshly-reclassified rows.
     pub fn list_with_staleness(&self, q: &ListQuery<'_>) -> Result<Vec<Annotation>, LainError> {
         let mut sql = String::from(
             "SELECT id, target_kind, target_id, kind, body, author, \
@@ -328,8 +360,12 @@ impl AnnotationStore {
             args.push(Box::new(kind.as_str().to_string()));
         }
         if let Some(status) = q.filter.status {
-            sql.push_str(" AND status = ?");
-            args.push(Box::new(status.as_str().to_string()));
+            // Only pre-filter on `Resolved` — see the doc comment
+            // above for why Open/Stale must be post-filtered.
+            if matches!(status, AnnotationStatus::Resolved) {
+                sql.push_str(" AND status = ?");
+                args.push(Box::new(status.as_str().to_string()));
+            }
         }
         sql.push_str(" ORDER BY created_at DESC, id ASC");
         let limit = q.filter.limit.unwrap_or(100).min(1000);
@@ -360,6 +396,19 @@ impl AnnotationStore {
                     // but treat as stale defensively so callers see
                     // it instead of acting on malformed data.
                     a.status = AnnotationStatus::Stale.as_str().to_string();
+                }
+            }
+            // Post-filter: caller asked for `Open` or `Stale`,
+            // reclassify the result here so freshly-downgraded
+            // rows are returned alongside DB-persisted ones.
+            if let Some(requested) = q.filter.status {
+                let matches = match requested {
+                    AnnotationStatus::Resolved => a.status == AnnotationStatus::Resolved.as_str(),
+                    AnnotationStatus::Open => a.status == AnnotationStatus::Open.as_str(),
+                    AnnotationStatus::Stale => a.status == AnnotationStatus::Stale.as_str(),
+                };
+                if !matches {
+                    continue;
                 }
             }
             out.push(a);
@@ -542,6 +591,32 @@ impl AnnotationRegistry {
         })
     }
 
+    /// Best-effort constructor for the `LainServer` field.
+    ///
+    /// `open` requires a writable state dir; an I/O failure (a
+    /// full disk, a permission-denied path, the audit-integration
+    /// test's blocker-file scenario) must NOT panic the server.
+    /// Returns a frozen empty registry that every per-repo
+    /// `store_for` call translates into a "storage unavailable"
+    /// error on the MCP tool path. This mirrors the audit log's
+    /// "best-effort, never block an edit" invariant.
+    pub fn open_best_effort(state_dir: &Path) -> Arc<Self> {
+        match Self::open(state_dir) {
+            Ok(reg) => Arc::new(reg),
+            Err(e) => {
+                eprintln!(
+                    "annotation registry open failed at {state_dir:?}: {e} — \
+                     annotation tools will return storage errors until the \
+                     state directory is writable"
+                );
+                Arc::new(Self {
+                    state_dir: state_dir.to_path_buf(),
+                    stores: parking_lot::RwLock::new(HashMap::new()),
+                })
+            }
+        }
+    }
+
     pub fn store_for(&self, repo: &RepoId) -> Result<Arc<AnnotationStore>, LainError> {
         if let Some(existing) = self.stores.read().get(repo).cloned() {
             return Ok(existing);
@@ -675,6 +750,89 @@ mod tests {
     }
 
     #[test]
+    fn list_filter_status_post_filtered_for_open_and_stale() {
+        // Copilot-review fix: pre-fix bug applied the SQL
+        // `WHERE status = ?` for every status value, which meant
+        // a caller filtering for `Open` never saw freshly-
+        // reclassified `Stale` rows, and a caller filtering for
+        // `Stale` saw zero rows because live reclassification
+        // happens AFTER the SQL filter. Both must now return
+        // post-filtered results.
+        let (_tmp, store) = open_store();
+        let make = |target: AnnotationTarget, kind: AnnotationKind, body: &str, author: &str| {
+            AddAnnotationInputs {
+                target,
+                kind,
+                body: body.into(),
+                author: AgentId(author.into()),
+                refs: vec![],
+            }
+            .into_annotation()
+        };
+        // One row whose target exists, one whose doesn't.
+        store
+            .add(&make(
+                AnnotationTarget::Symbol {
+                    symbol: "exists".into(),
+                },
+                AnnotationKind::Note,
+                "live",
+                "alice",
+            ))
+            .unwrap();
+        store
+            .add(&make(
+                AnnotationTarget::Symbol {
+                    symbol: "ghost".into(),
+                },
+                AnnotationKind::Note,
+                "orphan",
+                "alice",
+            ))
+            .unwrap();
+
+        // Resolver returns true (everything exists): both rows
+        // are Open. Filtering for `Open` returns both.
+        let q_open = ListQuery {
+            filter: &ListFilter {
+                status: Some(AnnotationStatus::Open),
+                limit: Some(10),
+                ..Default::default()
+            },
+            exists: &|_| true,
+        };
+        let rows = store.list_with_staleness(&q_open).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.status == "open"));
+
+        // Resolver returns false (everything is stale): both
+        // rows reclassified. Filtering for `Stale` returns both,
+        // filtering for `Open` returns zero.
+        let q_false = ListQuery {
+            filter: &ListFilter {
+                status: Some(AnnotationStatus::Stale),
+                limit: Some(10),
+                ..Default::default()
+            },
+            exists: &|_| false,
+        };
+        let rows = store.list_with_staleness(&q_false).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.status == "stale"));
+
+        let q_open_false = ListQuery {
+            filter: &ListFilter {
+                status: Some(AnnotationStatus::Open),
+                limit: Some(10),
+                ..Default::default()
+            },
+            exists: &|_| false,
+        };
+        let rows = store.list_with_staleness(&q_open_false).unwrap();
+        assert_eq!(rows.len(), 0, "Open filter must drop freshly-stale rows");
+    }
+
+    #[test]
     fn list_filter_by_target_kind_and_author() {
         let (_tmp, store) = open_store();
         let make = |target: AnnotationTarget, kind: AnnotationKind, body: &str, author: &str| {
@@ -745,6 +903,24 @@ mod tests {
         let rows = store.list_with_staleness(&q).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].body, "first");
+    }
+
+    #[test]
+    fn canonical_file_rejects_traversal_and_absolute_paths() {
+        // Path-traversal protection: a `..` segment or absolute
+        // path on `File` targets is rejected up front so a row
+        // can't escape the workspace root in tools that later
+        // re-resolve the stored id. The `..` check is what
+        // matters on every platform; the `is_absolute()` check
+        // catches Unix absolute paths directly and (on Windows)
+        // drive-letter absolute paths via the platform's path
+        // parser.
+        assert_eq!(canonical_file("../../etc/passwd"), "");
+        assert_eq!(canonical_file("src/../lib.rs"), "");
+        assert_eq!(canonical_file("/etc/passwd"), "");
+        // Legitimate workspace-relative paths are preserved.
+        assert_eq!(canonical_file("src/lib.rs"), "src/lib.rs");
+        assert_eq!(canonical_file("src/sub/mod.rs"), "src/sub/mod.rs");
     }
 
     #[test]

@@ -287,9 +287,18 @@ impl FederatedIndex {
         &self,
     ) -> Vec<crate::server::federation::readiness::PerRepoReadiness> {
         use crate::server::federation::readiness::build_per_repo_readiness;
-        let repos = self.repos.read();
-        let mut out: Vec<_> = repos
-            .iter()
+        // Clone the handles under the lock, then drop the guard.
+        // A slow `db.get_last_commit()` on one repo must NOT block
+        // `add_repo` / `remove_repo` for the whole snapshot.
+        let handles: Vec<(RepoId, Arc<RepoIndex>)> = {
+            let repos = self.repos.read();
+            repos
+                .iter()
+                .map(|(id, idx)| (id.clone(), idx.clone()))
+                .collect()
+        };
+        let mut out: Vec<_> = handles
+            .into_iter()
             .map(|(id, idx)| {
                 let last_indexed_unix_ms = idx
                     .last_indexed()
@@ -298,7 +307,7 @@ impl FederatedIndex {
                     .map(|d| d.as_millis() as u64);
                 let last_indexed_commit = idx.db().get_last_commit().ok().flatten();
                 build_per_repo_readiness(
-                    id,
+                    &id,
                     idx.health(),
                     idx.indexed_signal_was_fired(),
                     last_indexed_commit,

@@ -117,7 +117,27 @@ fn target_to_repo(
     use crate::federation::repo_id::RepoId;
     match target {
         AnnotationTarget::Repo { repo_id } => {
-            RepoId::new(repo_id).map_err(|e| format!("Invalid repo_id: {e}"))
+            let rid = RepoId::new(repo_id).map_err(|e| format!("Invalid repo_id: {e}"))?;
+            // Reject unknown repos up front. Otherwise
+            // `AnnotationStore::open` would happily create a
+            // `<state_dir>/annotations/<repo>.sqlite` for a never-
+            // registered id, the row would land there, and
+            // `list_annotations`/`resolve_annotation` would never
+            // find it because they enumerate only registered repos.
+            if server
+                .federation()
+                .is_some_and(|f| f.get_repo(&rid).is_none())
+            {
+                return Err(format!("Unknown repo_id: {repo_id}"));
+            }
+            if server.federation().is_none() && server.federation_repos().is_empty() {
+                // Single-workspace mode has no federation registry;
+                // the lone workspace IS the only valid repo. We
+                // accept the target verbatim so single-workspace
+                // servers can target their own repo by id without
+                // a federation registration round-trip.
+            }
+            Ok(rid)
         }
         AnnotationTarget::File { .. } | AnnotationTarget::Symbol { .. } => {
             // Single-repo mode: pin to the lone repo. Federation
@@ -184,13 +204,20 @@ pub fn run_add_annotation(server: &LainServer, args: Value) -> Result<Value, Str
 pub fn run_list_annotations(server: &LainServer, args: Value) -> Result<Value, String> {
     let target = args.get("target").map(parse_target_spec).transpose()?;
     let author = opt_str_arg(&args, "author").map(AgentId);
-    let kind = parse_kind(args.get("kind"))?;
+    // `kind` is OPTIONAL — only filter by it when the caller passed
+    // the argument. Pre-fix bug: parse_kind defaulted to Note when
+    // missing, then `Some(kind)` made every list call notes-only.
+    let kind = if args.get("kind").is_some() {
+        Some(parse_kind(args.get("kind"))?)
+    } else {
+        None
+    };
     let status = parse_status(args.get("status"))?;
     let limit = parse_limit(args.get("limit"))?;
     let filter = ListFilter {
         target,
         author,
-        kind: Some(kind),
+        kind,
         status,
         limit,
     };

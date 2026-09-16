@@ -1058,16 +1058,45 @@
           "type": "string"
         },
         "refs": {
-          "description": "refs",
-          "type": "string"
+          "description": "Cross-references to other annotation targets.",
+          "items": {
+            "$ref": "#/properties/target"
+          },
+          "type": "array"
         },
         "session_token": {
           "description": "session_token",
           "type": "string"
         },
         "target": {
-          "description": "target",
-          "type": "string"
+          "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "from": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "symbol",
+                "file",
+                "repo",
+                "edge"
+              ],
+              "type": "string"
+            },
+            "repo_id": {
+              "type": "string"
+            },
+            "symbol": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "type": "object"
         }
       },
       "required": [
@@ -1096,12 +1125,42 @@
           "type": "integer"
         },
         "status": {
-          "description": "status",
+          "enum": [
+            "open",
+            "resolved",
+            "stale"
+          ],
           "type": "string"
         },
         "target": {
-          "description": "target",
-          "type": "string"
+          "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "from": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "symbol",
+                "file",
+                "repo",
+                "edge"
+              ],
+              "type": "string"
+            },
+            "repo_id": {
+              "type": "string"
+            },
+            "symbol": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "type": "object"
         }
       },
       "required": [],
@@ -1146,11 +1205,14 @@
           "type": "string"
         },
         "refs": {
-          "description": "refs",
-          "type": "string"
+          "description": "Cross-references to other annotation targets.",
+          "items": {
+            "$ref": "#/properties/target"
+          },
+          "type": "array"
         },
         "scope": {
-          "description": "scope",
+          "description": "Handoff scope: 'workspace' | 'repo:<id>' | 'agent_kind:<k>'.",
           "type": "string"
         },
         "session_token": {
@@ -1170,12 +1232,12 @@
     "inputSchema": {
       "properties": {
         "scope": {
-          "description": "scope",
+          "description": "Handoff scope: 'workspace' | 'repo:<id>' | 'agent_kind:<k>'.",
           "type": "string"
         },
         "since_unix_ms": {
-          "description": "since_unix_ms",
-          "type": "string"
+          "description": "Filter to rows with created_at_unix_ms >= this value.",
+          "type": "integer"
         }
       },
       "required": [],
