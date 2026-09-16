@@ -4,6 +4,19 @@ on:
   push:
     tags:
       - 'v*'
+  # Escape hatch for a stuck/failed npm publish on an already-cut
+  # release (binaries, SBOM, provenance, and the GitHub Release are
+  # untouched by this path — see `publish-npm-retry` below). Exists
+  # because @spuentesp/lain-mcp has been stuck at 0.6.1 on the public
+  # registry since v0.6.2 (see docs comments in this file's history
+  # and docs/AGENT_UX_ROADMAP.md) with no way to retry npm publish
+  # alone without rebuilding an entire release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re-)publish to npm, e.g. v0.7.4. The GitHub Release for this tag must already exist with its assets.'
+        required: true
+        type: string
 
 # Top-level `permissions: {}` denies everything by default; jobs grant
 # only what they need. PR #2 changes vs PR #1:
@@ -28,6 +41,7 @@ jobs:
   # target commit (not the tag object), so no peeling is needed.
   ci-status-check:
     name: Verify tagged commit passed CI
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,6 +78,7 @@ jobs:
 
   version-check:
     needs: ci-status-check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -96,6 +111,7 @@ jobs:
 
   build-linux:
     needs: version-check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -199,6 +215,7 @@ jobs:
 
   build-macos-arm64:
     needs: version-check
+    if: github.event_name == 'push'
     runs-on: macos-14
     permissions:
       contents: write
@@ -285,6 +302,7 @@ jobs:
 
   build-windows:
     needs: version-check
+    if: github.event_name == 'push'
     runs-on: windows-latest
     permissions:
       contents: write
@@ -381,6 +399,7 @@ jobs:
   # receive — there is no separate attacker-controlled surface.
   sha256sums:
     needs: [build-linux, build-macos-arm64, build-windows]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -419,6 +438,7 @@ jobs:
 
   publish-server-json:
     needs: [sha256sums]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -468,6 +488,7 @@ jobs:
   # uploaded.
   publish-npm:
     needs: [publish-server-json]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -479,8 +500,20 @@ jobs:
         id: version
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22'  # npm 11.5.1+ for Trusted Publishing OIDC
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+      # setup-node's cached Node 22 toolchain bundles npm 10.9.8, which
+      # predates npm's Trusted Publishing OIDC support (needs 11.5.1+).
+      # With no OIDC exchange, npm silently falls back to a credential-
+      # less publish attempt, which the registry 404s on `PUT` rather
+      # than 401/403 -- easy to mistake for a Trusted Publisher
+      # configuration problem on npmjs.com, but it's purely a client
+      # version gate. Confirmed live 2026-09-16: v0.7.4's first publish
+      # attempt failed exactly this way even with sigstore provenance
+      # signing succeeding (that step uses the raw GitHub OIDC token
+      # directly against Fulcio, independent of npm's own OIDC handshake).
+      - name: Upgrade npm for Trusted Publishing OIDC support
+        run: npm install -g npm@12.0.2
       - name: Sync npm-shim version to release tag
         working-directory: npm-shim
         run: |
@@ -502,6 +535,64 @@ jobs:
           # `npm install @spuentesp/lain-mcp`. Detect a prerelease suffix
           # (anything after a `-` in the version) and route the publish
           # to the `next` tag instead, leaving `latest` for stable cuts.
+          case "$VERSION" in
+            *-*) TAG_FLAG="--tag next" ;;
+            *)    TAG_FLAG="" ;;
+          esac
+          npm publish --provenance --access public $TAG_FLAG
+
+  # Manual escape hatch (workflow_dispatch) for retrying a stuck npm
+  # publish against an already-cut release without rebuilding
+  # binaries, SBOM, provenance, or the GitHub Release itself. See the
+  # `workflow_dispatch` trigger comment at the top of this file.
+  publish-npm-retry:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate tag format
+        run: |
+          TAG="${{ inputs.tag }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::tag input '$TAG' does not look like a release tag (expected vX.Y.Z or vX.Y.Z-suffix)"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Confirm the GitHub Release for this tag already exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release view "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" >/dev/null
+      - name: Extract version
+        run: echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ inputs.tag }}
+        id: version
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm for Trusted Publishing OIDC support
+        run: npm install -g npm@12.0.2
+      - name: Sync npm-shim version to release tag
+        working-directory: npm-shim
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = "package.json";
+            const pkg = JSON.parse(fs.readFileSync(path));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          '
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+      - name: Publish to npm
+        working-directory: npm-shim
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
           case "$VERSION" in
             *-*) TAG_FLAG="--tag next" ;;
             *)    TAG_FLAG="" ;;
