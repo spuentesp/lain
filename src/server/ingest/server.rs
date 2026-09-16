@@ -114,6 +114,9 @@ pub struct LainServer {
     /// and `LAIN_RATE_LIMIT_RPM` env vars at server startup. Cloned into
     /// the HTTP request handler so dev mode (no env) stays zero-cost.
     pub auth: Arc<crate::server::auth::AuthState>,
+    /// Per-repo annotation registry (M4 plan §4.2). Lazily opens
+    /// per-repo SQLite stores under `<state_dir>/annotations/`.
+    pub annotations: Arc<crate::server::annotations::AnnotationRegistry>,
     /// Durable SSE event log (P1 #2). Captures every `PresenceEvent`
     /// broadcast on the SSE channel with a monotonic `event_id: u64`,
     /// supports replay-after-id via `events.jsonl` so SSE subscribers
@@ -347,6 +350,29 @@ impl LainServer {
             .as_ref()
             .map(|w| w.read().workspaces.len())
             .unwrap_or(0)
+    }
+
+    /// Per-repo annotation registry. Lazily opens per-repo SQLite
+    /// stores on demand under `<state_dir>/annotations/<repo>.sqlite`.
+    /// Always non-None; the cost of having a registry with no
+    /// registered repos is just an opened-but-empty map.
+    pub fn annotations(&self) -> &Arc<crate::server::annotations::AnnotationRegistry> {
+        &self.annotations
+    }
+
+    /// Sorted list of repo ids in this federation. Returns an empty
+    /// slice for single-workspace servers that don't have a
+    /// `FederatedIndex`. Used by the annotation tools to enumerate
+    /// the per-repo stores on every cross-repo query.
+    pub fn federation_repos(&self) -> Vec<crate::federation::repo_id::RepoId> {
+        match self.federation.as_ref() {
+            Some(fed) => {
+                let mut ids: Vec<_> = fed.list_repos().into_iter().map(|(id, _)| id).collect();
+                ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                ids
+            }
+            None => Vec::new(),
+        }
     }
 
     /// Consume the server and run the federation-mode MCP loop on the

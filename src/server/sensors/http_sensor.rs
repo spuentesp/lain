@@ -378,6 +378,33 @@ pub fn scan_workspace_routes(
 
     Ok(count)
 }
+
+/// Unit-struct Sensor impl. Discovery via
+/// `inventory::submit!(SensorEntry(&HttpRouteSensor))` below; no central
+/// registry to edit. The HTTP sensor is the one named
+/// `scan_workspace_routes` (not `scan_workspace`) so the legacy
+/// aggregator doesn't have to special-case it — the trait impl
+/// delegates to whichever name the module uses.
+pub struct HttpRouteSensor;
+
+impl crate::server::sensors::Sensor for HttpRouteSensor {
+    fn name(&self) -> &'static str {
+        "http"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::HttpRoutes
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &std::path::Path,
+        namespace: &crate::schema::RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace_routes(graph, root, namespace)
+    }
+}
+
+inventory::submit!(crate::server::sensors::SensorEntry(&HttpRouteSensor));
 #[cfg(test)]
 mod tests {
     use super::*;

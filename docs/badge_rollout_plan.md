@@ -1,5 +1,18 @@
 # Badge rollout plan
 
+> **Status update (README cleanup pass).** Steps 4, 5, 10, and 11 were
+> reverted from the README: MIT and Platforms are self-asserted, not
+> external signals; the MCP tools count badge had drifted stale (67 vs.
+> the live 73) with nothing regenerating it on every push; and Agent
+> Contract never got the dedicated rollup workflow Step 11 specifies —
+> it shipped pointing at the same `ci.yml` badge URL as the plain CI
+> badge, so it rendered as a silent duplicate rather than a distinct
+> signal. Steps 1–3 and 6–9 (CI, Scorecard, SafeSkill, MSRV, SBOM,
+> Provenance) remain in the README as verified-accurate external or
+> build-derived signals. Re-add 4/5/10/11 only alongside the
+> infrastructure that keeps them honest (an MCP-tools regeneration step
+> in CI, and Step 11's real rollup workflow, respectively).
+
 Companion to `docs/AGENT_UX_ROADMAP.md`. Each step is independently shippable.
 Steps are ordered by the two waves proposed for README impact: the cheap
 "trust + activity" row first, then the deeper supply-chain / LAIN-specific

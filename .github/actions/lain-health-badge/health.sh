@@ -199,6 +199,33 @@ if ! ARCH=$(call_tool_text "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"par
   emit_outputs "error" "architectural_observations failed" "Unable to compute architecture health: architectural_observations failed."
   exit 1
 fi
+# Capability readiness (M4 step 8 + §4.7): query get_capabilities so
+# the comment can lead with a one-line summary of the structural state.
+# Best-effort: a failed call must NOT fail the badge — this section
+# is an enrichment, not a hard gate.
+CAPS=""
+if CAPS_RESP=$(curl -fsS --max-time 30 -X POST http://127.0.0.1:9999/mcp \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_capabilities","arguments":{}},"id":4}' 2>/dev/null); then
+  CAPS=$(printf '%s' "$CAPS_RESP" | jq -r 'try (.result.content[0].text // empty) catch empty' 2>/dev/null)
+fi
+
+# Render the readiness line from get_capabilities. Both fields are
+# best-effort: a missing capabilities block prints "?" so the line
+# still renders. The format mirrors what an agent reading the
+# comment sees in the MCP `get_capabilities` payload.
+readiness_line() {
+  local caps="$1"
+  if [ -z "$caps" ]; then
+    echo "Capability readiness: unavailable (get_capabilities call failed)"
+    return
+  fi
+  local ready_total ready ready_n total
+  ready_total=$(printf '%s' "$caps" | jq -r 'try ((.result.capabilities.symbols.state // "?") + "/" + (.result.capabilities.git_history.state // "?")) catch "?"' 2>/dev/null)
+  ready=$(printf '%s' "$caps" | jq -r 'try (.result.capabilities.symbols.state // "?") catch "?"' 2>/dev/null)
+  total=$(printf '%s' "$caps" | jq -r 'try ((.result.repositories // []) | length) catch 0' 2>/dev/null)
+  echo "Capability readiness: $ready_total ready across ${total:-0} repo(s)"
+}
 
 # Decide level from the prose output. A single rule: fail if the graph
 # is degraded. Everything else is success. See the plan doc for the
@@ -217,6 +244,13 @@ BODY=$(mktemp)
   echo "## Architecture health"
   echo
   echo "_Computed by [lain](https://github.com/spuentesp/lain) — thresholds: min-fan-out=${MIN_FAN_OUT}_"
+  echo
+  # Top-of-comment readiness line (M4 step 8 + §4.7): one line
+  # summarising the structural state across every registered repo.
+  # Filled in from the `get_capabilities` MCP call above; empty
+  # CAPS falls back to an explicit "unavailable" so the line still
+  # renders.
+  readiness_line "$CAPS"
   echo
   echo "### Server health"
   echo
@@ -238,6 +272,7 @@ BODY=$(mktemp)
 # affect and how widely?".
 PR_IMPACT=""
 PR_NUMBER=""
+FILES_JSON=""
 if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH}" ]; then
   PR_NUMBER=$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null)
 fi
@@ -305,6 +340,101 @@ fi
 # Append the PR-impact section if any.
 if [ -n "$PR_IMPACT" ]; then
   printf "\n\n%s" "$PR_IMPACT" >> "$BODY"
+fi
+
+# Per-file "Open annotations" subsection (M4 §4.7): for every file
+# in the PR's changed-path set, query list_annotations(target={file})
+# and append the first 3 open rows as a markdown bullet list.
+# Capped at 3 per file with a "more..." line that shows the
+# underlying MCP call the agent can copy-paste to fetch the rest.
+# Best-effort: a failed list_annotations call must NOT fail the
+# badge — this section is an enrichment.
+if [ -n "$FILES_JSON" ] && [ -d "$WORKSPACE" ]; then
+  echo "::group::Per-file annotations"
+  ANN_LINES=""
+  TOTAL_ANN_FILES=0
+  TOTAL_ANN_OPEN=0
+  while IFS= read -r filename; do
+    [ -z "$filename" ] && continue
+    BODY_ANN=$(jq -n --arg file "$filename" \
+      '{jsonrpc:"2.0",method:"tools/call",params:{name:"list_annotations",arguments:{target:{kind:"file",file:$file},status:"open",limit:3}},id:99}')
+    ANN_RESP=$(curl -fsS --max-time 30 -X POST http://127.0.0.1:9999/mcp \
+      -H 'Content-Type: application/json' -d "$BODY_ANN" 2>/dev/null || true)
+    [ -z "$ANN_RESP" ] && continue
+    # Extract the {annotations:[...]} payload from the MCP text field.
+    ANN_JSON=$(printf '%s' "$ANN_RESP" | jq -r 'try (.result.content[0].text | fromjson | .annotations) catch empty' 2>/dev/null)
+    [ -z "$ANN_JSON" ] || [ "$ANN_JSON" = "null" ] && continue
+    ANN_COUNT=$(printf '%s' "$ANN_JSON" | jq 'length' 2>/dev/null)
+    [ -z "$ANN_COUNT" ] || [ "$ANN_COUNT" = "0" ] && continue
+    TOTAL_ANN_FILES=$((TOTAL_ANN_FILES + 1))
+    TOTAL_ANN_OPEN=$((TOTAL_ANN_OPEN + ANN_COUNT))
+    ANN_LINES="$ANN_LINES\n\n### \`$filename\` (${ANN_COUNT} open annotation(s))"
+    while IFS=$'\t' read -r kind body_excerpt; do
+      [ -z "$kind" ] && continue
+      # Escape the excerpt so a `*` or `_` in agent prose doesn't
+      # blow up the markdown list.
+      safe_body=$(printf '%s' "$body_excerpt" | sed 's/`/\\`/g')
+      ANN_LINES="$ANN_LINES\n\n- **${kind}** — ${safe_body}"
+    done < <(printf '%s' "$ANN_JSON" | jq -r '.[] | [.kind, (.body_excerpt // "")] | @tsv')
+    if [ "$ANN_COUNT" -ge 3 ]; then
+      ANN_LINES="$ANN_LINES\n\n_more — run \`list_annotations(target={kind:'file',file:'$filename'},status:'open',limit:50)\`_"
+    fi
+  done < <(printf '%s' "$FILES_JSON" | jq -r '.[] | select(.patch != null) | .filename')
+  if [ -n "$ANN_LINES" ]; then
+    ANN_IMPACT=$(printf "## Open annotations\n\n_${TOTAL_ANN_OPEN} open across ${TOTAL_ANN_FILES} file(s) — these are agent-side notes from prior sessions on the symbols/files touched by this PR._%b" "$ANN_LINES")
+    printf "\n\n%s" "$ANN_IMPACT" >> "$BODY"
+  fi
+  echo "::endgroup::"
+fi
+
+# Previous-run delta (M4 §4.7): for the PR's base ref, walk the
+# list of modified (not just added) functions defined in this PR
+# and call explain_symbol on each, capturing a 5-line excerpt.
+# Compared with the "new symbols" section above, this catches
+# regressions where a touched-but-not-new function now has a
+# different blast radius or new callers. Best-effort: skip the
+# delta cleanly when no previous commit is available (first commit
+# on a new branch).
+if [ -n "$PR_NUMBER" ]; then
+  BASE_REF="${GITHUB_BASE_REF:-}"
+  PREV_SHA=""
+  if [ -n "$BASE_REF" ]; then
+    PREV_SHA=$(git -C "$WORKSPACE" log -1 --format=%H "origin/${BASE_REF}^" 2>/dev/null || true)
+  fi
+  if [ -n "$PREV_SHA" ]; then
+    echo "::group::Previous-run delta"
+    DELTA_LINES=""
+    DELTA_TOTAL=0
+    while IFS=$'\t' read -r filename patch_b64; do
+      [ -z "$filename" ] || [ -z "$patch_b64" ] && continue
+      patch=$(printf '%s' "$patch_b64" | base64 -d 2>/dev/null)
+      [ -z "$patch" ] && continue
+      MODIFIED_FNS=$(printf '%s\n' "$patch" \
+        | grep -E '^[+-][^+-]' \
+        | grep -oP '(async def|def|function|class|fn) +\K[a-zA-Z_][a-zA-Z0-9_]*' \
+        | sort -u)
+      [ -z "$MODIFIED_FNS" ] && continue
+      while IFS= read -r sym; do
+        [ -z "$sym" ] && continue
+        DELTA_TOTAL=$((DELTA_TOTAL + 1))
+        BODY_EXP=$(jq -n --arg sym "$sym" \
+          '{jsonrpc:"2.0",method:"tools/call",params:{name:"explain_symbol",arguments:{symbol:$sym}},id:99}')
+        EXP_TEXT=$(curl -fsS --max-time 30 -X POST http://127.0.0.1:9999/mcp \
+          -H 'Content-Type: application/json' -d "$BODY_EXP" 2>/dev/null \
+          | jq -r 'try (.result.content[0].text // empty) catch empty' 2>/dev/null \
+          | head -5)
+        if [ -n "$EXP_TEXT" ]; then
+          DELTA_LINES="$DELTA_LINES\n\n#### \`$sym\` (modified, current)\n"
+          DELTA_LINES="$DELTA_LINES\n\`\`\`\n${EXP_TEXT}\n\`\`\`"
+        fi
+      done <<< "$MODIFIED_FNS"
+    done < <(printf '%s' "$FILES_JSON" | jq -r '.[] | select(.patch != null) | [.filename, (.patch | @base64)] | @tsv')
+    if [ -n "$DELTA_LINES" ]; then
+      DELTA_IMPACT=$(printf "## Previous-run delta\n\n_explain_symbol for ${DELTA_TOTAL} modified symbol(s), compared against ${PREV_SHA:0:7}._%b" "$DELTA_LINES")
+      printf "\n\n%s" "$DELTA_IMPACT" >> "$BODY"
+    fi
+    echo "::endgroup::"
+  fi
 fi
 
 emit_outputs "$LEVEL" "$SUMMARY" "$(cat "$BODY")"

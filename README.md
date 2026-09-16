@@ -4,13 +4,9 @@
 [![SafeSkill 88/100](https://img.shields.io/badge/SafeSkill-88%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/spuentesp-lain)
 [![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/spuentesp/lain)](https://scorecard.dev/viewer/?uri=github.com/spuentesp/lain)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14660/badge)](https://www.bestpractices.dev/projects/14660)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platforms: Linux | macOS | Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue)](.github/workflows/ci.yml)
 [![Rust 1.75 or newer](https://img.shields.io/badge/rust-1.75%20or%20newer-orange)](Cargo.toml)
 [![SBOM](https://img.shields.io/badge/SBOM-CycloneDX-blueviolet)](https://github.com/spuentesp/lain/releases/latest)
 [![Build Provenance](https://img.shields.io/badge/Provenance-SLSA_L2-success)](docs/VERIFICATION.md)
-[![MCP tools](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/spuentesp/lain/main/.github/badges/mcp-tools.json)](https://github.com/spuentesp/lain/blob/main/docs/tool-schema.json)
-[![Agent contract](https://github.com/spuentesp/lain/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/spuentesp/lain/actions/workflows/ci.yml?query=event%3Apush+branch%3Amain+job%3Aagent-contract)
 
 > **Structural Code Intelligence & Multi-Agent Coordination for AI Assistants.**
 > Give your coding agents an in-memory graph brain instead of making them guess from flat text.
@@ -22,45 +18,6 @@
 **LAIN** is a persistent, high-performance code intelligence and coordination engine built specifically for AI coding agents (Claude Code, Cursor, Copilot, Codex, Agy, Cline, Windsurf, etc.) over the **Model Context Protocol (MCP)**.
 
 Instead of treating code as unstructured flat text or relying on fuzzy keyword searches, LAIN indexes your codebase into an in-memory, typed structural property graph (using Tree-sitter, language servers, and Git commit history). It then exposes a rich suite of deterministic MCP tools that allow AI agents to navigate, reason about, and modify complex codebases without hallucinations, blind edits, or context-window waste.
-
-### The Problem LAIN Solves
-
-| Without LAIN (Flat Text / Grep / RAG) | With LAIN (Structural Graph & Coordination) |
-|:---|:---|
-| **Blind Refactoring**: The agent modifies a function, unaware that 14 callers across 6 files and 2 repositories depend on its exact signature. Tests break, and the agent burns thousands of tokens in trial-and-error loops. | **Exact Blast Radius in <10ms**: The agent calls `get_blast_radius` before touching a line. LAIN traces every upstream caller, downstream dependency, and affected test file across the entire repository graph. |
-| **Token-Exhausting Exploration**: The agent reads 30 full source files into its context window just to understand how an API endpoint connects to the database layer. | **Surgical Traversal**: The agent queries `get_call_chain` or `trace_dependency` and receives only the exact call chain in a compact, structured JSON response. |
-| **Multi-Agent Collision Chaos**: Multiple agents running in parallel (or human + agent pairs) edit the same files or dependent symbols simultaneously, creating merge conflicts and silent regressions. | **Multiplayer Presence & Claims**: Agents declare intent via `claim_files`, inspect `list_active_agents`, and detect symbol-level overlap via `detect_overlap` before editing. |
-| **Multi-Repo / Microservice Blindness**: Agents are trapped in a single directory and cannot see how changing a shared library affects consuming services. | **Cross-Repo Federation**: `lain server` indexes multiple repositories simultaneously, mapping cross-repository call edges, shared symbols, and org-wide blast radiuses. |
-
----
-
-## Why LAIN? (Comparison Matrix)
-
-| Capability | Grep / Text Search | Vector RAG | Traditional LSP | **LAIN (MCP Server)** |
-|:---|:---:|:---:|:---:|:---:|
-| **Transitive Call Traversal** | ❌ None (matches text) | ❌ None (similarity only) | ⚠️ Single file / manual | ✅ **Deterministic BFS graph traversal** |
-| **Full Blast Radius Analysis** | ❌ No | ❌ No | ❌ No | ✅ **Sub-10ms transitive caller impact** |
-| **Token-Compact Output** | ❌ Dumps raw lines | ❌ Injects large text chunks | ❌ Editor UI only | ✅ **Compact UUID v5 symbols & graph ops** |
-| **Multi-Agent Coordination** | ❌ None | ❌ None | ❌ None | ✅ **Advisory file/symbol claims & SSE streams** |
-| **Git Co-Change Coupling** | ❌ No | ❌ No | ❌ No | ✅ **Temporal coupling radar via commit history** |
-| **Multi-Repo Federation** | ❌ No | ⚠️ Unstructured | ❌ Single project root | ✅ **Federated graph across N repositories** |
-| **Interactive Human UI** | ❌ CLI only | ❌ CLI only | ⚠️ Editor IDE | ✅ **Built-in Command Center SPA dashboard** |
-
----
-
-## Real-World Scenarios: Before vs. After
-
-### Scenario 1: Refactoring a Shared Core API
-* **Without LAIN**: You ask an agent to rename or update parameters on a central authentication helper. The agent greps for the name, finds 3 local callers, modifies them, and declares success. In reality, 8 other files in different modules (and 2 separate microservices) call that function. The CI build fails, and the agent wastes 40,000 tokens trying to diagnose compiler errors.
-* **With LAIN**: The agent invokes `get_blast_radius(symbol: "verify_token")`. Within 8 milliseconds, LAIN returns the exact caller tree across all modules and workspaces. The agent updates every call site in its very first pass.
-
-### Scenario 2: Multi-Agent Swarms ("Multiplayer Mode")
-* **Without LAIN**: Two agents work in parallel on the same repository—Agent A is refactoring payment logic while Agent B is fixing an edge case in checkout. Both edit `checkout_service.rs` and push conflicting diffs, leaving broken code for the developer to resolve.
-* **With LAIN**: Agent A runs `claim_files("checkout_service.rs")`. When Agent B inspects `list_occupancy(path: "checkout_service.rs")` or triggers the pre-edit hook, LAIN reports that Agent A is actively working on that file. Agent B coordinates, waits, or switches to an uncontested task.
-
-### Scenario 3: Onboarding an Agent onto a 500,000-Line Codebase
-* **Without LAIN**: The agent attempts to read the directory tree, guesses random entry points, and burns through context limits before writing a single line of working code.
-* **With LAIN**: The agent executes `list_entry_points` and `find_anchors`. LAIN computes percentile-normalized centrality scores and immediately highlights the top 5 architectural hub functions and public routers in the project.
 
 ---
 

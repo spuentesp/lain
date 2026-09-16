@@ -114,29 +114,8 @@ pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod active_workspace_tests {
     use super::*;
+    use crate::test_util::XdgGuard;
     use std::path::Path;
-
-    /// Run a closure with XDG_CONFIG_HOME pointed at a tempdir, restoring
-    /// the original env var on drop. Used so tests don't touch the user's
-    /// real `~/.config/lain/active_workspace`.
-    struct XdgGuard {
-        prev: Option<String>,
-    }
-    impl XdgGuard {
-        fn new(dir: &Path) -> Self {
-            let prev = std::env::var("XDG_CONFIG_HOME").ok();
-            std::env::set_var("XDG_CONFIG_HOME", dir);
-            Self { prev }
-        }
-    }
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
-    }
 
     /// Write the file directly into the effective config dir so it's
     /// picked up by `config_dir()`. `config_dir()` appends `lain` to

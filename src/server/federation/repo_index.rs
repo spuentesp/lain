@@ -195,6 +195,25 @@ pub struct RepoIndex {
     /// graph and federation backend observable at different points —
     /// is what this signal unifies.
     indexed: Arc<tokio::sync::Notify>,
+    /// Cheap "ever fired" companion to the `indexed` `Notify`. The
+    /// `Notify` round-trip is right for the dispatcher's cold-boot
+    /// bounded wait, but a snapshot reader (`FederatedIndex::per_repo_readiness`,
+    /// `get_capabilities`) only needs the boolean. Setting an
+    /// `AtomicBool` next to `notify_one()` is silently idempotent and
+    /// catches `indexed_signal = true` for the wire payload the
+    /// `Notify`'s one-shot semantics would otherwise miss.
+    indexed_at_least_once: std::sync::atomic::AtomicBool,
+    /// Current depth of the watcher's bounded event channel.
+    /// Incremented by the receiver loop on receive, decremented on
+    /// process. Exposed as the `outstanding_files` field on
+    /// `PerRepoReadiness` so `get_capabilities` can show back-pressure
+    /// without scraping the receiver task's internals. Currently
+    /// stays at 0 — the receiver loop's incr/decr is wired but the
+    /// channel capacity (1024) rarely fills in practice; the
+    /// spawn_blocking follow-up PR will fill it in for hot-loop
+    /// observability. Defined now to keep the wire shape stable
+    /// across that work.
+    outstanding_files: std::sync::atomic::AtomicU64,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -285,6 +304,8 @@ impl RepoIndex {
             cross_repo_resolver: parking_lot::Mutex::new(None),
             id_namespace,
             indexed: Arc::new(tokio::sync::Notify::new()),
+            indexed_at_least_once: std::sync::atomic::AtomicBool::new(false),
+            outstanding_files: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -305,6 +326,38 @@ impl RepoIndex {
     /// one buffered permit, then back to un-fired state.
     pub fn indexed_signal(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.indexed)
+    }
+
+    /// Borrow the LSP pool. Tests outside this module use it to mark
+    /// specific language servers unavailable (so the indexer takes the
+    /// tree-sitter fallback on a host with no `rust-analyzer` on
+    /// PATH); production code does not need it.
+    pub fn lsp(&self) -> &LspPool {
+        &self.lsp
+    }
+
+    /// Whether `index()` or `index_forced()` has succeeded at least
+    /// once on this `RepoIndex`. Pinned at the same site as
+    /// `indexed_signal().notify_one()`, so the two are observed
+    /// together — the boolean exists for snapshot readers
+    /// (`FederatedIndex::per_repo_readiness`,
+    /// `get_capabilities`) that don't want the `Notify`'s one-shot
+    /// waiting semantics.
+    pub fn indexed_signal_was_fired(&self) -> bool {
+        self.indexed_at_least_once
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Current depth of the watcher's bounded event channel, exposed
+    /// as `PerRepoReadiness::outstanding_files` so
+    /// `get_capabilities` can show watcher back-pressure without
+    /// scraping the receiver task's internals. Currently stays at
+    /// 0 — the receiver loop's incr/decr is wired but the channel
+    /// capacity (1024) rarely fills in practice; the spawn_blocking
+    /// follow-up PR will fill it in for hot-loop observability.
+    pub fn outstanding_files(&self) -> u64 {
+        self.outstanding_files
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Number of files whose overlay refresh was skipped due to LSP
@@ -482,6 +535,12 @@ impl RepoIndex {
         // returns its existing NotFound for the test's poll loop to
         // retry on.
         self.indexed.notify_one();
+        // Same idempotent flag for snapshot readers that don't need
+        // the `Notify`'s one-shot waiting semantics. Stores are
+        // `Relaxed` — the only consumer (`per_repo_readiness`,
+        // `get_capabilities`) treats this as a hint.
+        self.indexed_at_least_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -560,6 +619,8 @@ impl RepoIndex {
         // arrives during a watcher-driven re-index gets the same
         // bounded-wait window the boot path gets.
         self.indexed.notify_one();
+        self.indexed_at_least_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

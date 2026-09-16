@@ -270,6 +270,79 @@ impl FederatedIndex {
         out
     }
 
+    /// Per-repository readiness snapshot. One entry per registered repo,
+    /// sorted by repo id (same ordering `list_repos` uses). The shape is
+    /// the canonical [`crate::server::federation::readiness::PerRepoReadiness`]
+    /// DTO — the same struct `get_capabilities` embeds in its
+    /// `repositories[]` payload, so this snapshot and the wire format
+    /// cannot disagree on what "ready" means.
+    ///
+    /// Read-only — does not hold the federation lock across any
+    /// per-repo probe. Each `RepoIndex` accessor is itself non-blocking
+    /// (`indexed_at_least_once` and `outstanding_files` are atomics,
+    /// `last_indexed` is a parking_lot read guard, the `db.get_last_commit`
+    /// path is a parking_lot read). The returned `Vec` is consumed in
+    /// order by the dispatcher on the call's thread.
+    pub fn per_repo_readiness(
+        &self,
+    ) -> Vec<crate::server::federation::readiness::PerRepoReadiness> {
+        use crate::server::federation::readiness::build_per_repo_readiness;
+        // Clone the handles under the lock, then drop the guard.
+        // A slow `db.get_last_commit()` on one repo must NOT block
+        // `add_repo` / `remove_repo` for the whole snapshot.
+        let handles: Vec<(RepoId, Arc<RepoIndex>)> = {
+            let repos = self.repos.read();
+            repos
+                .iter()
+                .map(|(id, idx)| (id.clone(), idx.clone()))
+                .collect()
+        };
+        let mut out: Vec<_> = handles
+            .into_iter()
+            .map(|(id, idx)| {
+                let indexed_signal = idx.indexed_signal_was_fired();
+                // `last_indexed_commit` is sourced from disk and
+                // represents the commit a previous run's full index
+                // pass reached. Without a successful index pass in
+                // *this* process (`indexed_signal == false`), the
+                // in-memory graph may not reflect it yet — surfacing
+                // the disk value would mislead callers into thinking
+                // the graph is current. The acceptance criterion
+                // (docs/FOLLOWUPS.md entry #6) is: `last_indexed_commit`
+                // is `null` until a successful index pass has
+                // reached a commit, then the actual commit string.
+                let last_indexed_commit = if indexed_signal {
+                    idx.db().get_last_commit().ok().flatten()
+                } else {
+                    None
+                };
+                // Same reasoning for the wall-clock stamp: `last_indexed`
+                // starts at UNIX_EPOCH and is only updated on success,
+                // so its zero-state already implies "never indexed".
+                // Keeping it gated on `indexed_signal` makes the
+                // wire shape consistent with the commit field.
+                let last_indexed_unix_ms = if indexed_signal {
+                    idx.last_indexed()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_millis() as u64)
+                } else {
+                    None
+                };
+                build_per_repo_readiness(
+                    &id,
+                    idx.health(),
+                    indexed_signal,
+                    last_indexed_commit,
+                    last_indexed_unix_ms,
+                    idx.outstanding_files(),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.repo_id.as_str().cmp(b.repo_id.as_str()));
+        out
+    }
+
     /// Local checkout paths of every registered repo. The attribution
     /// watcher monitors exactly these roots — watching `repos.yaml`'s
     /// parent dir instead swept in unrelated files (server logs,
@@ -360,6 +433,7 @@ impl FederatedIndex {
                 source_id: src.clone(),
                 target_id: resolved_target,
                 weight: edge.weight,
+                cross_repo: false,
             });
         }
         self.backend.upsert_edges_batch(&batch)?;
@@ -438,6 +512,7 @@ impl FederatedIndex {
                     source_id: src.clone(),
                     target_id: edge.target_id.clone(),
                     weight: edge.weight,
+                    cross_repo: false,
                 });
             }
             self.backend.upsert_edges_batch(&external_batch)?;
@@ -549,6 +624,7 @@ impl FederatedIndex {
                     source_id: new_node.id.clone(),
                     target_id: target_gid,
                     weight: Some(sim),
+                    cross_repo: true,
                 });
             }
         }

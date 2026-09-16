@@ -266,11 +266,56 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **Federation per-repository readiness aggregation (M4 step 8).**
+  New `PerRepoReadiness` DTO and `FederatedIndex::per_repo_readiness()`
+  snapshot expose every repo's `state`, `indexed_signal`,
+  `last_indexed_commit`, `last_indexed_at_unix_ms`, `outstanding_files`,
+  and `staleness` (mapping `RepoHealth` to the existing
+  `CapabilityState`). `get_capabilities` now includes these deep
+  per-repo fields alongside the existing `repositories[].capabilities`
+  shape; the aggregate `capabilities` and `SchemaVersion` are
+  unchanged so old clients keep parsing. Federation-aggregate tools
+  (`search_org`, `get_cross_repo_blast_radius`) were already gated
+  via the central `gate_federated_tool_call`; this commit layers the
+  snapshot path and the per-repo wire shape. New
+  `tests/federation_readiness.rs` (7 tests) pins the contract.
+- **Agent-side annotation + handoff layer (5 new MCP tools).** New
+  per-repo SQLite storage at `<state_dir>/annotations/<repo>.sqlite`
+  backing `add_annotation`, `list_annotations`, `resolve_annotation`,
+  `leave_handoff_note`, and `get_pending_handoffs`. Live-staleness
+  pass on `list_annotations` re-checks each open row's target
+  against the live graph and marks rows with missing targets as
+  `status: "stale"`. Schema dump regen (via `cargo run -- schema
+  dump`) advertises the 5 new entries; diff is exactly the new
+  tools. `LainServer` gains `annotations: Arc<AnnotationRegistry>`
+  + `annotations()` accessor + `federation_repos()` helper.
 - `cli::workspace::parent_process_cwd()` and a new
   `find_git_workspace_root_resolved()` policy that prefers the parent
   cwd over the process cwd. `find_git_workspace_root()` is the public
   wrapper that wires this in; the existing `Some(p)` / `None` ergonomics
   are preserved.
+
+### Changed
+
+- **`lain-health-badge` PR comment is enriched.** The sticky comment
+  now leads with a `Capability readiness: ...` line from
+  `get_capabilities`, lists open annotations per file (first 3
+  rows + a "more..." link to the underlying `list_annotations` MCP
+  call), and adds a "Previous-run delta" section that calls
+  `explain_symbol` for every modified (not just added) function in
+  the PR against the base ref's previous commit. All three
+  additions are best-effort — a failed MCP call must not fail the
+  badge itself. No new `action.yml` inputs.
+
+### Fixed
+
+- **`tests/feat_negative_paths.rs` baseline compile error.** The
+  recent merge to `dev` (4c885c3) added `.keep()` calls that
+  consumed `TempDir`s but the function's return type still
+  expected `TempDir`. Replaced with `.path().to_path_buf()` so the
+  same `PathBuf` is derived without moving the `TempDir`. Without
+  this fix `cargo build --workspace --all-targets` failed on the
+  branch baseline.
 
 - `cli::mcp::resolve_workspaces()` and a strict variant that errors
   when no workspace can be resolved. `resolve_workspaces_strict()`

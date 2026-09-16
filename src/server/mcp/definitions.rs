@@ -252,6 +252,36 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
         required_args: &[],
         optional_args: &[],
     },
+    ToolDef {
+        name: "add_annotation",
+        description: "Add an annotation (note | warning | todo | investigation | fix) targeting a symbol, file, repo, or edge. Body is 1..=4096 bytes. Returns { id, created_at_unix_ms, repo_id }. Author defaults to the authenticated session_token if `author` is omitted.",
+        required_args: &["target", "kind", "body"],
+        optional_args: &["author", "session_token", "refs"],
+    },
+    ToolDef {
+        name: "list_annotations",
+        description: "List annotations with optional filters: target (symbol | file | repo | edge), author, kind, status, limit (default 100). Live-staleness pass marks targets that no longer exist in the graph as status='stale'. Returns { annotations: [Annotation] }.",
+        required_args: &[],
+        optional_args: &["target", "author", "kind", "status", "limit"],
+    },
+    ToolDef {
+        name: "resolve_annotation",
+        description: "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud.",
+        required_args: &["id"],
+        optional_args: &["session_token", "resolved_by"],
+    },
+    ToolDef {
+        name: "leave_handoff_note",
+        description: "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now.",
+        required_args: &["body"],
+        optional_args: &["scope", "refs", "author", "session_token"],
+    },
+    ToolDef {
+        name: "get_pending_handoffs",
+        description: "List open handoff notes from prior agents. Filters: scope (workspace | repo:<id> | agent_kind:<k>), since_unix_ms. Returns { handoffs: [Annotation] } — only kind=note, status=open rows within the 24h TTL.",
+        required_args: &[],
+        optional_args: &["scope", "since_unix_ms"],
+    },
 ];
 
 /// Map a `&[ToolDef]` to the Vec<Tool> shape the MCP `tools/list`

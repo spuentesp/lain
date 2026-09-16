@@ -14,6 +14,50 @@ use super::repo_id::RepoId;
 use crate::server::readiness::{
     gate_tool_call, GatedResponse, IndexLifecycleSnapshot, IndexState, Problem,
 };
+use serde::{Deserialize, Serialize};
+
+/// Per-repository readiness snapshot. Fed verbatim into the per-repo entry
+/// of `get_capabilities` so a caller can decide whether to wait, fail, or
+/// proceed — see `FederatedIndex::per_repo_readiness` for the snapshot
+/// function and `get_capabilities` for the wire shape.
+///
+/// `Staleness` reuses the existing [`crate::server::readiness::CapabilityState`]
+/// vocabulary (the "no parallel readiness state model" rule in
+/// `docs/M4-step-8-plan.md` §7). `indexed_signal` and `outstanding_files`
+/// carry the watcher-side observability `CapabilityState` does not cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerRepoReadiness {
+    pub repo_id: RepoId,
+    /// Per-repo health as the indexer reports it. Distinct from
+    /// `staleness`: a repo can be `Ready` yet still `stale_usable`
+    /// when the working tree has edits the watcher has not yet
+    /// republished.
+    pub state: RepoHealth,
+    /// True once `RepoIndex::index` (or `index_forced`) has fired at
+    /// least once on this repo. Independent of `state`: a repo
+    /// whose first `index` failed is `Degraded` but `indexed_signal`
+    /// stays `false`.
+    pub indexed_signal: bool,
+    /// HEAD commit at the time of the last successful index, when
+    /// known. The string form (not `git2::Oid`) matches the rest of
+    /// lain's commit-hash wire shape.
+    pub last_indexed_commit: Option<String>,
+    pub last_indexed_at_unix_ms: Option<u64>,
+    /// Depth of the watcher's event channel at snapshot time. Currently
+    /// always 0 — the AtomicUsize counter is wired up so the spawn_blocking
+    /// follow-up PR can fill it in without changing this DTO. Pinning the
+    /// field now keeps the wire shape stable across that work.
+    pub outstanding_files: u64,
+    /// Re-uses `CapabilityState` so `get_capabilities` does not need a
+    /// parallel staleness vocabulary. Mapping:
+    /// - `Ready`            → `Ready`
+    /// - `Indexing`         → `WarmingUp`
+    /// - `Degraded`/`Unavailable`/`Missing` → `UnavailableError`
+    ///
+    /// `StaleUsable` is reserved for the future "graph caught up but
+    /// the working tree has unpushed edits" state.
+    pub staleness: crate::server::readiness::CapabilityState,
+}
 
 /// `RepoIndex` has no phase/file-progress instrumentation (unlike the
 /// single-workspace `build_core_memory` coordinator), so this mapping is
@@ -50,6 +94,48 @@ pub(crate) fn repo_health_to_snapshot(health: RepoHealth) -> IndexLifecycleSnaps
         }
     }
     snapshot
+}
+
+/// Map a `RepoHealth` to the canonical `CapabilityState` used in
+/// `PerRepoReadiness::staleness` and (already) in `get_capabilities`'s
+/// per-repo `capabilities.{symbols,call_graph,git_history,semantic_search}`
+/// entries. `StaleUsable` and `UnavailableOptional` are reserved for
+/// future states (a healthy graph that is behind working-tree edits;
+/// a missing optional embedder) and never produced here today.
+pub(crate) fn repo_health_to_capability_state(
+    health: RepoHealth,
+) -> crate::server::readiness::CapabilityState {
+    use crate::server::readiness::CapabilityState;
+    match health {
+        RepoHealth::Ready => CapabilityState::Ready,
+        RepoHealth::Indexing => CapabilityState::WarmingUp,
+        RepoHealth::Degraded | RepoHealth::Unavailable | RepoHealth::Missing => {
+            CapabilityState::UnavailableError
+        }
+    }
+}
+
+/// Build a `PerRepoReadiness` from the raw signals `FederatedIndex`
+/// already holds. Centralized so `per_repo_readiness` (the snapshot)
+/// and `get_capabilities` (the wire payload) cannot disagree on what
+/// "ready" means.
+pub(crate) fn build_per_repo_readiness(
+    id: &RepoId,
+    health: RepoHealth,
+    indexed_signal: bool,
+    last_indexed_commit: Option<String>,
+    last_indexed_at_unix_ms: Option<u64>,
+    outstanding_files: u64,
+) -> PerRepoReadiness {
+    PerRepoReadiness {
+        repo_id: id.clone(),
+        state: health,
+        indexed_signal,
+        last_indexed_commit,
+        last_indexed_at_unix_ms,
+        outstanding_files,
+        staleness: repo_health_to_capability_state(health),
+    }
 }
 
 /// Federation-mode analogue of `crate::server::readiness::gate_tool_call`:
