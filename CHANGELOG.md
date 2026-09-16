@@ -5,6 +5,25 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-09-16
+
+### Added
+
+- **Cosign keyless signing for release artifacts.** Each platform
+  tarball now ships a `<tarball>.cosign.bundle.json` alongside the
+  existing SLSA build-provenance bundle, signed via `cosign sign-blob`
+  using the same GitHub Actions OIDC identity. Verifiable with only
+  the `cosign` CLI — no `gh`/GitHub API dependency. See
+  [`docs/VERIFICATION.md`](docs/VERIFICATION.md) for the verify
+  command.
+
+### Removed
+
+- **Deleted the `v0.7.0`–`v0.7.3` GitHub releases.** They predated the
+  build-provenance/SBOM/checksum pipeline and shipped without those
+  artifacts. The underlying git tags are untouched; only the GitHub
+  Release objects (and their binary assets) were removed.
+
 ### Fixed
 
 - **Windows path-format normalization.** All MCP tool responses that

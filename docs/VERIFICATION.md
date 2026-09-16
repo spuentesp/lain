@@ -8,7 +8,7 @@ for *why* these checks exist.
 ## What ships in a release
 
 The updated release workflow publishes the files below for new tags.
-Historical releases, including `v0.7.3`, may lack checksums, SBOMs, or
+Historical releases predating `v0.7.4` may lack checksums, SBOMs, or
 provenance; these files are not retroactively generated.
 
 | File | What it is |
@@ -47,7 +47,7 @@ The supported `<target>` triples today are:
 ## Verification flow
 
 The example below uses Linux x86_64. Set `VER` to a release that includes
-the files listed above; `v0.7.3` does not include them.
+the files listed above; releases before `v0.7.4` do not include them (some, lacking these artifacts entirely, have been removed -- see CHANGELOG.md).
 
 ### 1. Download the artifact and its checksums
 
