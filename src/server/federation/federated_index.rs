@@ -300,16 +300,39 @@ impl FederatedIndex {
         let mut out: Vec<_> = handles
             .into_iter()
             .map(|(id, idx)| {
-                let last_indexed_unix_ms = idx
-                    .last_indexed()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| d.as_millis() as u64);
-                let last_indexed_commit = idx.db().get_last_commit().ok().flatten();
+                let indexed_signal = idx.indexed_signal_was_fired();
+                // `last_indexed_commit` is sourced from disk and
+                // represents the commit a previous run's full index
+                // pass reached. Without a successful index pass in
+                // *this* process (`indexed_signal == false`), the
+                // in-memory graph may not reflect it yet — surfacing
+                // the disk value would mislead callers into thinking
+                // the graph is current. The acceptance criterion
+                // (docs/FOLLOWUPS.md entry #6) is: `last_indexed_commit`
+                // is `null` until a successful index pass has
+                // reached a commit, then the actual commit string.
+                let last_indexed_commit = if indexed_signal {
+                    idx.db().get_last_commit().ok().flatten()
+                } else {
+                    None
+                };
+                // Same reasoning for the wall-clock stamp: `last_indexed`
+                // starts at UNIX_EPOCH and is only updated on success,
+                // so its zero-state already implies "never indexed".
+                // Keeping it gated on `indexed_signal` makes the
+                // wire shape consistent with the commit field.
+                let last_indexed_unix_ms = if indexed_signal {
+                    idx.last_indexed()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_millis() as u64)
+                } else {
+                    None
+                };
                 build_per_repo_readiness(
                     &id,
                     idx.health(),
-                    idx.indexed_signal_was_fired(),
+                    indexed_signal,
                     last_indexed_commit,
                     last_indexed_unix_ms,
                     idx.outstanding_files(),
