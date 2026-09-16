@@ -15,9 +15,10 @@ use std::collections::HashSet;
 /// Words that follow "lain" in ordinary prose rather than naming a
 /// subcommand. Each is a sentence about lain, not an instruction.
 const PROSE: &[&str] = &[
-    "binary",  // "...the lain binary..."
-    "expires", // "lain expires sessions 60 seconds after..."
-    "hook",    // "lain hook: 1 granted" — an output prefix, not a command
+    "binary",     // "...the lain binary..."
+    "expires",    // "lain expires sessions 60 seconds after..."
+    "hook",       // "lain hook: 1 granted" — an output prefix, not a command
+    "subprocess", // "spawn lain subprocess" — describes the child process, not a command
 ];
 
 fn subcommands() -> HashSet<String> {

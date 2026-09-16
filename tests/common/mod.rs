@@ -399,24 +399,19 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
         // `explain_symbol` with each requested handle so we wait for
         // the per-repo graph specifically — the same path the
         // failing tools will use.
-        //
-        // Use `tools_call_envelope` (not `tools_call_text`) so the
-        // poll can observe an isError=true response without panicking.
-        // The cold-boot race closure in `ToolRegistry::dispatch` —
-        // which awaits the active repo's `indexed_signal` with a 200 ms
-        // budget when the per-repo graph is empty — converts the
-        // pre-index "Node not found" miss into a small per-poll wait,
-        // so the loop now mostly observes isError=true on each poll
-        // until the indexer fires the signal and the next poll
-        // succeeds. `tools_call_text` panics on isError=true, which
-        // would turn the bounded wait into a panic before the test
-        // ever sees the populated graph.
-        let start = std::time::Instant::now();
         for &name in wait_for_symbol {
+            let start = std::time::Instant::now();
             loop {
                 if start.elapsed() > Duration::from_secs(30) {
                     panic!("symbol `{name}` never resolved through per-repo resolver within 30s on {host}");
                 }
+                // Not `tools_call_text`: it panics on any `isError:true`,
+                // which used to be safe here because an unindexed repo's
+                // "not found" response was never `isError:true` in
+                // federation mode (the AGENT_UX_ROADMAP.md M4 central gate
+                // was a no-op there). It's real now, so a call made while
+                // the repo is still gated needs its own tolerant handling
+                // instead of panicking through this loop's own diagnostics.
                 let env = tools_call_envelope(
                     host,
                     "explain_symbol",
@@ -424,25 +419,33 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
                 );
                 let is_error =
                     env.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true);
-                let text = env
-                    .pointer("/result/content/0/text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let not_found = text.contains("Node not found");
-                // Only break when the resolver actually found the
-                // symbol. `is_error && not_found` is the cold-boot
-                // miss and stays in the loop; `is_error && !not_found`
-                // is a different error (e.g. empty graph, parse
-                // error) that we'd want to surface — panic with the
-                // full envelope so the failure is debuggable instead
-                // of timing out.
                 if !is_error {
                     break;
                 }
-                if !not_found {
-                    panic!("explain_symbol({name}) returned an unexpected error envelope: {env}");
+                let text = env
+                    .pointer("/result/content/0/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                // The central gate's `unavailable_error` state is terminal
+                // (a repo that has already failed to index will not start
+                // succeeding by itself) — fail fast with the real cause
+                // instead of spinning for 30s and reporting a generic
+                // timeout that hides it.
+                if text.contains("\"state\":\"unavailable_error\"") {
+                    // `explain_symbol`'s own gated response only carries a
+                    // generic "Repository is degraded" — `list_repos`
+                    // includes each repo's real `last_error` (see
+                    // RepoIndex::last_index_error), which is the whole
+                    // point of failing here instead of spinning silently.
+                    let repos = tools_call_text(host, "list_repos", serde_json::json!({}));
+                    panic!(
+                        "repo indexing failed while waiting for symbol `{name}` on {host}: {text}\nlist_repos: {repos}"
+                    );
                 }
+                // Either the gate's own `warming_up` (retryable) or the
+                // pre-gate "Node not found for handle" text `explain_symbol`
+                // returns once the repo is `ready` but the specific symbol
+                // genuinely isn't indexed yet — both are worth retrying.
                 std::thread::sleep(Duration::from_millis(50));
             }
         }

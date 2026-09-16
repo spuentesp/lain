@@ -251,11 +251,17 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "64" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "65" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "63" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "64" "$TOOL_COUNT"
 fi
+
+# get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
+# advertised regardless of model/index state -- the one tool the
+# central readiness gate itself is built to answer even while every
+# other capability is warming up or broken.
+check_contains "get_capabilities reports the current capability snapshot" "schema_version" "$(call get_capabilities)"
 
 H=$(call get_health)
 check_contains "get_health reports Operational" "Operational" "$H"
@@ -523,6 +529,11 @@ check_contains "lain --help lists the subcommands" "server" "$("$LAIN" --help 2>
 check_contains "lain doctor runs its checks" "lain doctor" "$("$LAIN" doctor 2>&1)"
 
 # doctor must fail loudly on a healthy process with a dead MCP surface.
+# `doctor` does a real `initialize` handshake (checking for serverInfo +
+# protocolVersion) before probing `tools/list` -- the stub must answer
+# that correctly first, or doctor fails at the handshake step with a
+# different message ("invalid MCP initialize response") instead of
+# reaching the empty-tools-list case this scenario means to exercise.
 python3 - "$WORK" <<'PY' &
 import sys, json
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -532,7 +543,15 @@ class H(BaseHTTPRequestHandler):
         self.send_header('Content-Type','application/json')
         self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
     def do_GET(self):  self._s(200, {"status":"ok"}) if self.path=='/health' else self._s(404,{})
-    def do_POST(self): self._s(200, {"jsonrpc":"2.0","id":1,"result":{"tools":[]}})
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(length) or b'{}')
+        req_id = body.get('id', 1)
+        if body.get('method') == 'initialize':
+            result = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "stub", "version": "0.0.0"}, "capabilities": {}}
+        else:
+            result = {"tools": []}
+        self._s(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
     def log_message(self,*a): pass
 HTTPServer(('127.0.0.1',9932),H).serve_forever()
 PY
@@ -541,7 +560,10 @@ sleep 2
 DOC=$(LAIN_URL=http://127.0.0.1:9932 "$LAIN" doctor 2>&1); DOC_RC=$?
 kill "$STUB_PID" 2>/dev/null
 check_contains "doctor catches an empty MCP surface" "MCP surface empty" "$DOC"
-check "doctor exits non-zero on that failure" "1" "$DOC_RC"
+# Unhealthy transport maps to Readiness::Unusable (exit 2), not a plain
+# hard-fail 1 -- see src/server/readiness.rs's exit_code(): Ready=0,
+# Degraded=1, Unusable=2. A dead/broken MCP endpoint is Unusable.
+check "doctor exits non-zero on that failure" "2" "$DOC_RC"
 
 DOC_OK=$(LAIN_URL="$URL" "$LAIN" doctor 2>&1)
 check_contains "doctor confirms a live surface" "MCP surface live" "$DOC_OK"

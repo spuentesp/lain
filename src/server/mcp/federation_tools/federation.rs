@@ -16,31 +16,32 @@ pub fn list_repos(fed: &FederatedIndex) -> Vec<RepoInfo> {
         .into_iter()
         .map(|(id, health)| {
             let repo = fed.get_repo(&id);
-            let (last_refreshed_unix, last_indexed_unix, node_count, edge_count, path) = match repo
-            {
-                Some(r) => {
-                    let path = r.source().local_path().display().to_string();
-                    let last_refreshed = r
-                        .source()
-                        .last_refreshed()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    let last_indexed = r
-                        .last_indexed()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    (
-                        last_refreshed,
-                        last_indexed,
-                        r.nodes().len(),
-                        r.edges().len(),
-                        path,
-                    )
-                }
-                None => (0, 0, 0, 0, String::new()),
-            };
+            let (last_refreshed_unix, last_indexed_unix, node_count, edge_count, path, last_error) =
+                match repo {
+                    Some(r) => {
+                        let path = r.source().local_path().display().to_string();
+                        let last_refreshed = r
+                            .source()
+                            .last_refreshed()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        let last_indexed = r
+                            .last_indexed()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        (
+                            last_refreshed,
+                            last_indexed,
+                            r.nodes().len(),
+                            r.edges().len(),
+                            path,
+                            r.last_index_error(),
+                        )
+                    }
+                    None => (0, 0, 0, 0, String::new(), None),
+                };
             RepoInfo {
                 id: id.to_string(),
                 path,
@@ -49,6 +50,7 @@ pub fn list_repos(fed: &FederatedIndex) -> Vec<RepoInfo> {
                 last_indexed_unix,
                 node_count,
                 edge_count,
+                last_error,
             }
         })
         .collect()

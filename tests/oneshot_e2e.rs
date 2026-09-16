@@ -165,3 +165,53 @@ fn oneshot_discovers_workspace_from_cwd() {
     };
     assert!(status.success(), "exit: {:?}", status);
 }
+
+/// PR #63 review finding: `lain oneshot` only checked the top-level
+/// JSON-RPC `error` field, never `result.isError` — the field MCP tools
+/// (including the central readiness gate's terminal `unavailable_error`)
+/// use for a genuine failure. It printed the error payload and still
+/// exited 0, so a script or agent checking the exit code alone saw
+/// success. `explain_symbol` with no `symbol` arg is a cheap way to
+/// force `isError: true` from a healthy server without needing to
+/// manufacture a degraded repo.
+#[test]
+fn oneshot_exits_nonzero_on_tool_error() {
+    let (_tmp, root) = make_repo(3);
+    let state = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lain"))
+        .args([
+            "oneshot",
+            "--workspace",
+            root.to_str().unwrap(),
+            "explain_symbol",
+        ])
+        .env("XDG_STATE_HOME", state.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if start.elapsed() > Duration::from_secs(75) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("oneshot (missing arg) exceeded 75s budget — hung");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut out).unwrap();
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+    assert!(
+        !status.success(),
+        "explain_symbol with a missing required arg must exit non-zero; stdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        out.contains("symbol") || err.contains("symbol"),
+        "the isError payload naming the missing arg should still be printed; stdout:\n{out}\nstderr:\n{err}"
+    );
+}

@@ -204,6 +204,14 @@ impl LainServer {
         Arc::clone(&self.overlay_updated)
     }
 
+    /// Shared index lifecycle handle. `build_core_memory` reports phase
+    /// and progress through this same handle so there is exactly one
+    /// place — never a second computation in `doctor`, a tool handler,
+    /// or the MCP dispatch gate — that decides what "warming up" means.
+    pub fn readiness(&self) -> &crate::server::readiness::ReadinessHandle {
+        &self.tool_executor.ctx.readiness
+    }
+
     /// Borrowed handle to the presence registry. The field itself is
     /// already `pub`, but this accessor keeps the contract consistent
     /// with the other `Arc`-sharing accessors (`reload_bus`,

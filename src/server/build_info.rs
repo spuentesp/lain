@@ -6,8 +6,8 @@
 //! same path. Nothing in the protocol surface exposed which build was
 //! answering, so an agent could read a fix in the source tree, call the
 //! tool it fixed, and get the old behavior with no way to tell why.
-//! `lain doctor` checks exactly this, but it is a human CLI the agent
-//! never sees.
+//! `lain doctor` reports the compile-time identity for a fresh process, but a
+//! long-running agent needs the same information through its MCP connection.
 //!
 //! This module carries the compile-time identity (`VERSION`,
 //! `GIT_SHA`) plus the executable's mtime as observed at startup, so

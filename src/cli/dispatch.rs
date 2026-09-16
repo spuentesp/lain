@@ -88,7 +88,7 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
 mod tests {
     /// The top-level help text must list the kept subcommands
     /// (`server`, `workspaces`, `repos`, `query`, `ask`, `hooks`,
-    /// `init`, `schema`) and must NOT list the removed ones
+    /// `init`, `schema`, `doctor`, `capabilities`, `status`) and must NOT list the removed ones
     /// (`init` as the old top-level `Use`, `agents`, `projects`).
     /// `hooks` is now a kept subcommand (agent pre-edit hook entry
     /// point — see `cli::hooks`), so the pre-consolidation guard
@@ -113,6 +113,12 @@ mod tests {
         assert!(help.contains("ask"), "help must list `ask`: {help}");
         assert!(help.contains("hooks"), "help must list `hooks`: {help}");
         assert!(help.contains("schema"), "help must list `schema`: {help}");
+        assert!(help.contains("doctor"), "help must list `doctor`: {help}");
+        assert!(
+            help.contains("capabilities"),
+            "help must list `capabilities`: {help}"
+        );
+        assert!(help.contains("status"), "help must list `status`: {help}");
         // Removed subcommands must not appear.
         // `init` was reintroduced in B (the ergonomic shortcut commit)
         // as a kept subcommand. Make sure the help string reflects that.

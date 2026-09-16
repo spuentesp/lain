@@ -111,7 +111,19 @@ async fn list_repos_returns_all_registered() {
 #[tokio::test]
 async fn list_repos_handles_empty_federation() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("repos.yaml"), "data_dir: /tmp\nrepos: []\n").unwrap();
+    // `data_dir` must be this test's own tempdir, not the shared `/tmp` —
+    // the loader writes a fixed-name `federation_manifest.bin` directly
+    // under `data_dir`, so a hardcoded `/tmp` collides with any other
+    // concurrent test or process on the machine using the same
+    // convention. Found via a real, reproducible "bincode: io error:
+    // unexpected end of file" from a torn concurrent write to
+    // `/tmp/federation_manifest.bin`.
+    let data_dir = dir.path().join("data");
+    std::fs::write(
+        dir.path().join("repos.yaml"),
+        format!("data_dir: {}\nrepos: []\n", data_dir.display()),
+    )
+    .unwrap();
     let fed = load_federation(&dir.path().join("repos.yaml"))
         .await
         .unwrap();

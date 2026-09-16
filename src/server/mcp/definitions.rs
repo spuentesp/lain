@@ -129,8 +129,8 @@ pub const WORKSPACE_TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "get_workspace_graph",
         description: "Per-workspace graph for the dashboard. Returns {nodes: [...], edges: [...], truncated: bool}. Filters to Function/Method/Class + Calls/Imports. Optional filter: substring match against node name + path. Cross-repo Calls edges are marked cross_repo: true.",
-        required_args: &["filter?"],
-        optional_args: &[],
+        required_args: &[],
+        optional_args: &["filter"],
     },
 ];
 
@@ -315,7 +315,7 @@ pub fn defs_to_value_tools(defs: &[ToolDef]) -> Vec<serde_json::Value> {
 ///
 /// Five sources, in the order `tools/list` appends them:
 ///   1. `ToolRegistry::definitions()` — `inventory`-discovered tools.
-///   2. `special_tool_definitions()` — the 6 tools that bypass
+///   2. `special_tool_definitions()` — tools that bypass
 ///      `ToolHandler` (get_health, get_agent_strategy, etc.).
 ///   3. `FEDERATION_TOOL_DEFS` — federation-mode MCP tools (only
 ///      included here so the doc surface is the *maximum* an agent
@@ -383,6 +383,29 @@ pub fn dump_tools_schema(inert: &[&str]) -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod dump_tools_schema_tests {
     use super::*;
+
+    #[test]
+    fn every_advertised_tool_has_an_explicit_readiness_classification() {
+        use crate::server::tools::definitions::readiness_requirement;
+        for tool in dump_tools_schema(&[]) {
+            let name = tool["name"].as_str().expect("tool name");
+            assert!(
+                readiness_requirement(name).is_some(),
+                "unclassified MCP tool: {name}"
+            );
+        }
+        assert!(readiness_requirement("future_unreviewed_tool").is_none());
+
+        for definition in crate::server::tools::registry::ToolRegistry::definitions()
+            .into_iter()
+            .chain(crate::server::mcp::handler::special_tool_definitions())
+        {
+            assert_eq!(
+                Some(definition.readiness),
+                readiness_requirement(definition.name)
+            );
+        }
+    }
 
     /// The dump must contain every subset the HTTP `tools/list` arm
     /// appends. The integration test in `tests/schema_dump_smoke.rs`

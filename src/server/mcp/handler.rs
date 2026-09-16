@@ -67,7 +67,7 @@ fn cow_to_bytes(cow: std::borrow::Cow<'static, [u8]>) -> Bytes {
 use crate::server::mcp::definitions::{
     defs_to_tools, defs_to_value_tools, FEDERATION_TOOL_DEFS, SERVER_TOOL_DEFS, WORKSPACE_TOOL_DEFS,
 };
-use crate::server::mcp::envelope::tool_text_result;
+use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
 /// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
@@ -199,6 +199,65 @@ fn resolve_repo_or_error(
         }
         Err(e) => Err(format!("{}", e)),
     }
+}
+
+/// The one central readiness gate every `tools/call` dispatch site must
+/// consult before entering a tool's handler — both stdio and HTTP funnel
+/// through this single function so they can't drift.
+///
+/// Single-workspace mode (`federation: None`) dispatches to
+/// `readiness::gate_tool_call` against the one process-global
+/// `ReadinessHandle`, exactly as before this function existed. Federation
+/// mode resolves the tool's target repo(s) first — reusing
+/// `requires_repo_scope` and `resolve_repo_for_tool`, the same resolution
+/// `dispatch_tool_call` performs for a normal (non-gated) dispatch — and
+/// gates against those repos' own `RepoHealth` via
+/// `federation::readiness::gate_federated_tool_call` instead.
+///
+/// Returns `None` both when the call is genuinely ready to dispatch and
+/// when repo resolution itself fails (ambiguous symbol, no repos loaded,
+/// must disambiguate): that failure is `resolve_repo_or_error`'s job to
+/// report inside `dispatch_tool_call`, not this gate's — duplicating its
+/// error formatting here would just give it a second place to drift from.
+fn gate_for_dispatch(
+    executor: &ToolExecutor,
+    federation: Option<&FederatedIndex>,
+    name: &str,
+    args: &Map<String, serde_json::Value>,
+) -> Option<crate::server::readiness::GatedResponse> {
+    let semantic_model_configured = !executor.embedder().is_stub();
+
+    let Some(fed) = federation else {
+        return crate::server::readiness::gate_tool_call(
+            name,
+            &executor.ctx.readiness.snapshot(),
+            semantic_model_configured,
+        );
+    };
+
+    use crate::server::tools::definitions::{readiness_requirement, ReadinessRequirement};
+    match readiness_requirement(name) {
+        None | Some(ReadinessRequirement::GraphIndependent) => return None,
+        Some(_) => {}
+    }
+
+    let resolved: Vec<(RepoId, crate::federation::health::RepoHealth)> =
+        if requires_repo_scope(name) {
+            let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
+            let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
+            match resolve_repo_for_tool(fed, name, symbol_hint, explicit_repo) {
+                Ok(id) => vec![fed.list_repos().into_iter().find(|(rid, _)| rid == &id)?],
+                Err(_) => return None,
+            }
+        } else {
+            fed.list_repos()
+        };
+
+    crate::server::federation::readiness::gate_federated_tool_call(
+        name,
+        &resolved,
+        semantic_model_configured,
+    )
 }
 
 /// Per-process status snapshot carried into the HTTP request handler
@@ -832,7 +891,7 @@ impl ServerHandler for LainHandler {
         let inert = inert_tool_names(self.executor.embedder());
         tools.retain(|t| !inert.contains(&t.name.as_str()));
 
-        // Append the 6 special-case tools handled in ToolExecutor::call_inner
+        // Append special-case tools handled in ToolExecutor::call_inner
         // so MCP clients can see the full surface in tools/list.
         for special in special_tool_definitions() {
             let input_schema = serde_json::from_value(special.input_schema.clone())
@@ -895,6 +954,19 @@ impl ServerHandler for LainHandler {
                 .map(|w| w.read().workspaces.len())
                 .unwrap_or(0),
         };
+
+        if let Some(gated) = gate_for_dispatch(
+            &self.executor,
+            self.federation.as_deref(),
+            params.name.as_str(),
+            &args_owned,
+        ) {
+            return Ok(gated_tool_result(
+                &gated,
+                self.executor.overlay(),
+                static_graph_generation_unix,
+            ));
+        }
 
         let (text, is_error) = dispatch_tool_call(
             &self.executor,
@@ -963,9 +1035,55 @@ pub struct LainMcpServer {
 /// reports degraded state instead of silently serving an empty
 /// graph. Returns immediately when no `LainServer` is attached
 /// (sidecar / read-only servers).
+/// Build the custom notification `get_capabilities` advertises as the
+/// canonical polling fallback: `notifications/lain/capabilities_changed`.
+/// Its payload is the exact JSON `get_capabilities` returns — one
+/// projection, read here rather than recomputed, so the pushed payload
+/// can never drift from what a client would see by polling instead.
+/// Returns `None` on a serialization failure (never expected in
+/// practice); the caller logs and moves on rather than treating a
+/// failed *notification* as an indexing failure.
+fn capabilities_changed_notification(
+    tool_executor: &ToolExecutor,
+) -> Option<rust_mcp_sdk::schema::CustomNotification> {
+    let text = tool_executor.get_capabilities().ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let params = value.as_object().cloned()?;
+    Some(rust_mcp_sdk::schema::CustomNotification {
+        method: "notifications/lain/capabilities_changed".to_string(),
+        params: Some(params),
+    })
+}
+
+/// Send the capability-change notification if a transport that supports
+/// server-initiated notifications is attached. `notifier` is `None` for
+/// HTTP (a plain request/response JSON-RPC loop with no persistent
+/// connection to push an unsolicited notification through) and for the
+/// sidecar/read-only path (which never reaches this function at all,
+/// since `server` is `None` there). Per the roadmap, delivery failure
+/// here is logged to stderr and never changes indexing state — polling
+/// `get_capabilities` remains the canonical fallback for any client that
+/// doesn't support the notification, or wasn't listening for it.
+async fn notify_capabilities_changed(
+    notifier: Option<&std::sync::Arc<dyn McpServer>>,
+    tool_executor: &ToolExecutor,
+) {
+    let Some(notifier) = notifier else {
+        return;
+    };
+    let Some(notification) = capabilities_changed_notification(tool_executor) else {
+        eprintln!("capabilities_changed notification: could not serialize capability snapshot");
+        return;
+    };
+    if let Err(e) = notifier.notify_custom(notification).await {
+        eprintln!("capabilities_changed notification failed to send: {e}");
+    }
+}
+
 pub(crate) async fn await_startup_reindex(
     server: Option<std::sync::Arc<LainServer>>,
     reindex_timeout: Option<std::time::Duration>,
+    notifier: Option<std::sync::Arc<dyn McpServer>>,
 ) {
     let Some(server) = server else {
         return;
@@ -973,10 +1091,27 @@ pub(crate) async fn await_startup_reindex(
     let started = std::time::SystemTime::now();
     let timeout = reindex_timeout.unwrap_or_else(crate::server::refresh::parse_reindex_timeout);
     let last_outcome = server.last_outcome.clone();
+    let readiness = server.tool_executor.ctx.readiness.clone();
     let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
-        Ok(Ok(())) => crate::server::refresh::RefreshOutcome::ok(started),
+        Ok(Ok(())) => {
+            // AGENT_UX_ROADMAP.md Milestone 4, coordinator step 9: "a
+            // successful base index without this step is not ready." The
+            // working tree can have moved since `run_mcp`'s one-time
+            // initial `sync_volatile_overlay()` call — which ran before
+            // this potentially long scan started — so reconcile the
+            // overlay against the just-built graph before publishing
+            // `ready`. A failure here is a freshness warning, not a
+            // startup failure: the static graph itself is valid, so this
+            // does not fall through to the `failed` branch.
+            if let Err(e) = server.sync_volatile_overlay().await {
+                eprintln!("final pre-ready overlay reconciliation failed (continuing): {e}");
+            }
+            readiness.ready(server.graph.get_last_commit().ok().flatten());
+            crate::server::refresh::RefreshOutcome::ok(started)
+        }
         Ok(Err(e)) => {
             eprintln!("startup re-index failed: {e}");
+            readiness.failed(e.to_string());
             crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
         }
         Err(_) => {
@@ -984,10 +1119,15 @@ pub(crate) async fn await_startup_reindex(
                 "startup re-index timed out after {}s; using existing graph",
                 timeout.as_secs()
             );
+            readiness.failed(format!(
+                "startup re-index timed out after {}s",
+                timeout.as_secs()
+            ));
             crate::server::refresh::RefreshOutcome::timeout(started)
         }
     };
     *last_outcome.lock() = outcome;
+    notify_capabilities_changed(notifier.as_ref(), &server.tool_executor).await;
 }
 
 impl LainMcpServer {
@@ -1186,30 +1326,11 @@ impl LainMcpServer {
     pub async fn run_stdio(self) -> SdkResult<()> {
         info!("Starting Lain MCP server on stdio");
 
-        // Block until the first re-index returns (or its budget
-        // elapses) before letting the stdio loop come up. Synchronous
-        // agent loops fire `find_anchors` immediately after
-        // `initialize` and must see a populated graph — a `tokio::spawn`
-        // here used to race the re-index against the stdio loop, so the
-        // first call always read an empty graph and the agent had to
-        // retry ~0.5s later.
-        //
-        // `build_core_memory` short-circuits when the graph is already
-        // current, so this is a no-op on a warm start. On a cold start
-        // it reads `HEAD`, parses the working tree, and writes
-        // `.lain/graph.bin`; the timeout budget (default 300s,
-        // override via `LAIN_REINDEX_TIMEOUT` env or `--reindex-timeout`
-        // flag) bounds the wait. Past that we proceed with whatever
-        // the worker has written so far and record
-        // `RefreshResult::Timeout` on `last_outcome` so `get_health`
-        // reports degraded state instead of silently serving an empty
-        // graph.
-        //
-        // The outcome is written to `server.last_outcome` so `get_health`
-        // can surface failures — the previous code logged only to
-        // `tracing::warn` and stderr, neither of which a stdio MCP
-        // client surfaces to the model.
-        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
+        // Captured before `self.server` is moved into `handler` below;
+        // this is the same `Option<Arc<LainServer>>` the background
+        // re-index needs.
+        let lain_server_for_reindex = self.server.clone();
+        let reindex_timeout = self.reindex_timeout;
 
         let server_details = self.server_info();
         let transport = StdioTransport::new(TransportOptions::default())?;
@@ -1235,7 +1356,61 @@ impl LainMcpServer {
             message_observer: None,
         });
 
-        server.start().await
+        // Milestone 4 (AGENT_UX_ROADMAP.md): the startup re-index runs on
+        // its own background task instead of being awaited here, so
+        // `initialize`/`ping`/`tools/list` and any `graph_independent`
+        // tool call are answered immediately even on a cold, large
+        // repository. Graph-dependent tool calls made before the index
+        // reaches `ready` are turned back at the central gate in
+        // `dispatch_tool_call` with a structured `warming_up` result
+        // instead of racing the indexer for an empty graph (the bug this
+        // code used to guard against by blocking here).
+        //
+        // `build_core_memory` short-circuits when the graph is already
+        // current, so this is a no-op on a warm start. The timeout budget
+        // (default 300s, override via `LAIN_REINDEX_TIMEOUT` env or
+        // `--reindex-timeout` flag) still bounds one attempt; past that
+        // the coordinator records `RefreshResult::Timeout` on
+        // `last_outcome` and marks the readiness handle
+        // `unavailable_error`, both surfaced through `get_health` /
+        // `get_capabilities` — not just `tracing::warn` and stderr, which
+        // a stdio MCP client never sees.
+        //
+        // `server` (the constructed `ServerRuntime`, cloned here before
+        // `.start()` consumes an `Arc` handle to it) is the notifier for
+        // `notifications/lain/capabilities_changed` — advisory, best
+        // effort; a client that doesn't support it, or wasn't listening,
+        // still gets the same answer by polling `get_capabilities`.
+        //
+        // This is not full cooperative cancellation: the indexing
+        // coordinator has no cancellation token yet, so a clean shutdown
+        // below gives it a short bounded window to finish and otherwise
+        // hard-aborts it with `AbortHandle::abort()` rather than waiting
+        // indefinitely. Threading a real cancellation token through every
+        // scan/resolve/persist phase boundary is tracked separately
+        // (roadmap step 11) and intentionally not attempted here.
+        let notifier: Arc<dyn McpServer> = server.clone();
+        let startup_task = tokio::spawn(await_startup_reindex(
+            lain_server_for_reindex,
+            reindex_timeout,
+            Some(notifier),
+        ));
+        let startup_abort = startup_task.abort_handle();
+
+        let result = server.start().await;
+
+        // Give the background indexer a short window to reach a natural
+        // stopping point (or finish outright on a small repo) before
+        // hard-aborting it; either way we don't hold process exit open
+        // waiting on it indefinitely.
+        if tokio::time::timeout(std::time::Duration::from_secs(5), startup_task)
+            .await
+            .is_err()
+        {
+            startup_abort.abort();
+        }
+
+        result
     }
 
     /// Run with HTTP transport (for MCP clients and browser diagnostics)
@@ -1247,9 +1422,23 @@ impl LainMcpServer {
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
-        // Same awaited re-index as `run_stdio`; the HTTP path serves
-        // the same contract. See `run_stdio` for the rationale.
-        await_startup_reindex(self.server.clone(), self.reindex_timeout).await;
+        // Same backgrounded re-index as `run_stdio`; see there for the
+        // full rationale. HTTP has no equivalent to stdio's "session
+        // ended" moment (the accept loop below runs until the process is
+        // killed), so there is nowhere to bound-join this task before
+        // returning — it is left detached and reclaimed on process exit,
+        // the same way the NLP background-enrichment task spawned inside
+        // `build_core_memory` already is.
+        //
+        // No notifier: this transport is a plain request/response
+        // JSON-RPC loop with no persistent connection to push an
+        // unsolicited notification through. `get_capabilities` polling
+        // is the only freshness signal HTTP clients get today.
+        tokio::spawn(await_startup_reindex(
+            self.server.clone(),
+            self.reindex_timeout,
+            None,
+        ));
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).
@@ -1416,32 +1605,44 @@ async fn handle_request(
             .body(full_body(Bytes::from(body)))
             .unwrap()
     };
-    let jsonrpc_tool_result = |id: Option<&serde_json::Value>, text: &str, is_error: bool| {
-        // Read the overlay revision once per response so the value is
-        // stable for the duration of this HTTP round-trip. The internal
-        // tool_text_result helper does the same read on the stdio path;
-        // both stdio and HTTP responses now carry `_meta.revision` in
-        // the `CallToolResult` envelope, not in `content[0].text`.
-        // P1 #1: also carry the static-graph generation so the LLM
-        // knows how fresh the static graph is without a separate
-        // `list_repos` round-trip.
-        let rev = executor.overlay().current_revision();
-        let sgg = server
-            .as_deref()
-            .and_then(|s| s.static_graph_generation_unix());
-        jsonrpc_response(serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": {
+    let jsonrpc_tool_result =
+        |id: Option<&serde_json::Value>,
+         text: &str,
+         is_error: bool,
+         structured: Option<serde_json::Value>| {
+            // Read the overlay revision once per response so the value is
+            // stable for the duration of this HTTP round-trip. The internal
+            // tool_text_result helper does the same read on the stdio path;
+            // both stdio and HTTP responses now carry `_meta.revision` in
+            // the `CallToolResult` envelope, not in `content[0].text`.
+            // P1 #1: also carry the static-graph generation so the LLM
+            // knows how fresh the static graph is without a separate
+            // `list_repos` round-trip.
+            let rev = executor.overlay().current_revision();
+            let sgg = server
+                .as_deref()
+                .and_then(|s| s.static_graph_generation_unix());
+            let mut result = serde_json::json!({
                 "content": [{"type": "text", "text": text}],
                 "isError": is_error,
                 "_meta": {
                     "revision": rev,
                     "static_graph_generation": sgg,
                 }
-            },
-            "id": id
-        }))
-    };
+            });
+            // Additive: only present for the gated warm-up/error envelope
+            // today, so every existing response's shape is unchanged.
+            if let Some(structured) = structured {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("structuredContent".to_string(), structured);
+                }
+            }
+            jsonrpc_response(serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": result,
+                "id": id
+            }))
+        };
 
     let path = req.uri().path().to_string();
     let method = req.method().clone();
@@ -1726,6 +1927,15 @@ async fn handle_request(
                             .cloned()
                             .unwrap_or_default();
 
+                        if let Some(gated) =
+                            gate_for_dispatch(&executor, federation.as_deref(), name, &args_map)
+                        {
+                            let is_error = gated.is_error();
+                            let value = serde_json::to_value(&gated).unwrap_or_default();
+                            let text = serde_json::to_string(&value).unwrap_or_default();
+                            return Ok(jsonrpc_tool_result(id, &text, is_error, Some(value)));
+                        }
+
                         let (text, is_error) = dispatch_tool_call(
                             &executor,
                             federation.as_deref(),
@@ -1738,7 +1948,7 @@ async fn handle_request(
                         )
                         .await;
 
-                        return Ok(jsonrpc_tool_result(id, &text, is_error));
+                        return Ok(jsonrpc_tool_result(id, &text, is_error, None));
                     }
                     _ => {
                         serde_json::json!({
@@ -2053,11 +2263,19 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
             name: "get_health",
             description: "Return server health, node/edge counts, last enriched commit, and language-server availability.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
+        },
+        ToolDefinition {
+            name: "get_capabilities",
+            description: "Return the current repository capability states, freshness, and indexing progress. Warming states are retryable.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "get_agent_strategy",
             description: "Return the recommended tool sequence and quick-reference for working with Lain.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "install_language_server",
@@ -2067,6 +2285,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "language": { "type": "string", "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'." } },
                 "required": ["language"]
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "register_job_webhook",
@@ -2076,6 +2295,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "url": { "type": "string" } },
                 "required": ["url"]
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "get_job_status",
@@ -2085,6 +2305,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "properties": { "job_id": { "type": "string" } },
                 "required": ["job_id"]
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
         ToolDefinition {
             name: "debug_sleep",
@@ -2093,6 +2314,7 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
                 "type": "object",
                 "properties": { "secs": { "type": "integer", "default": 1 } }
             }),
+            readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
     ]
 }
@@ -2901,6 +3123,146 @@ mod tests {
         assert!(
             !requires_repo_scope("query_graph"),
             "query_graph must not require scope; the resolver should be skipped before it sees the call",
+        );
+    }
+
+    async fn add_test_repo(
+        fed: &FederatedIndex,
+        root: &std::path::Path,
+        name: &str,
+    ) -> tempfile::TempDir {
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn crate::federation::repo_source::RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        fed.add_repo(src, root).await.unwrap();
+        src_dir
+    }
+
+    fn test_executor() -> ToolExecutor {
+        let graph = crate::graph::GraphDatabase::empty_read_only();
+        let overlay = crate::overlay::VolatileOverlay::new();
+        ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."))
+    }
+
+    /// M4 step 8: a repo-scoped tool call must gate only on the repo it
+    /// resolves to. A different, unhealthy repo in the same federation
+    /// must not block it — the single process-global handle this used to
+    /// consult (before `gate_for_dispatch` existed) could not tell the
+    /// two repos apart.
+    #[tokio::test]
+    async fn repo_scoped_gating_is_unaffected_by_a_different_repos_health() {
+        use crate::server::federation::health::RepoHealth;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _healthy_src = add_test_repo(&fed, tmp.path(), "healthy-repo").await;
+        let _broken_src = add_test_repo(&fed, tmp.path(), "broken-repo").await;
+        fed.get_repo(&RepoId::new("healthy-repo").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Ready);
+        fed.get_repo(&RepoId::new("broken-repo").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Unavailable);
+
+        let executor = test_executor();
+        let mut args = Map::new();
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("healthy-repo".into()),
+        );
+        assert!(
+            gate_for_dispatch(&executor, Some(&fed), "find_anchors", &args).is_none(),
+            "a call explicitly scoped to the healthy repo must not be gated by the broken one"
+        );
+
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("broken-repo".into()),
+        );
+        let gated = gate_for_dispatch(&executor, Some(&fed), "find_anchors", &args)
+            .expect("a call scoped to the broken repo must gate");
+        assert_eq!(gated.state, "unavailable_error");
+        assert_eq!(gated.blocking_repos, vec!["broken-repo"]);
+    }
+
+    /// M4 step 8: a federation-wide tool (`requires_repo_scope` ==
+    /// false) gates against every loaded repo and reports every blocking
+    /// repo id, sorted, regardless of `FederatedIndex::list_repos`'s
+    /// iteration order or which repo was added first.
+    #[tokio::test]
+    async fn federation_wide_tool_call_reports_every_blocking_repo_sorted() {
+        use crate::server::federation::health::RepoHealth;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _z = add_test_repo(&fed, tmp.path(), "zeta").await;
+        let _a = add_test_repo(&fed, tmp.path(), "alpha").await;
+        let _r = add_test_repo(&fed, tmp.path(), "ready-repo").await;
+        fed.get_repo(&RepoId::new("zeta").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Degraded);
+        fed.get_repo(&RepoId::new("alpha").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Indexing);
+        fed.get_repo(&RepoId::new("ready-repo").unwrap())
+            .unwrap()
+            .set_health(RepoHealth::Ready);
+
+        let executor = test_executor();
+        let gated = gate_for_dispatch(&executor, Some(&fed), "query_graph", &Map::new())
+            .expect("query_graph must gate while alpha/zeta are not ready");
+        assert_eq!(gated.blocking_repos, vec!["alpha", "zeta"]);
+    }
+
+    /// AGENT_UX_ROADMAP.md M4 step 10: structural pin so a future change
+    /// can't quietly reintroduce a second startup-indexing path alongside
+    /// `await_startup_reindex` — the exact bug this milestone's backgrounded
+    /// coordinator replaced (a synchronous `build_core_memory().await`
+    /// before the transport came up, blocking `initialize`/`tools/list` on
+    /// a cold, large repository). Reads this file's own source rather than
+    /// running the server, so a regression is caught by `cargo test`
+    /// without needing a live process.
+    ///
+    /// `await_startup_reindex` must appear exactly 3 times: its own
+    /// definition, plus one call in `run_stdio` and one in `run_http` — no
+    /// more, no fewer. And `.build_core_memory()` must be called exactly
+    /// once in the whole file: inside `await_startup_reindex` itself, never
+    /// directly from either transport's `run_*` method.
+    #[test]
+    fn each_transport_has_exactly_one_startup_index_entry_point() {
+        // Scan only the production code above this test module — this
+        // very test's own source mentions the coordinator's name in its
+        // assertions, which would otherwise inflate the count it's
+        // checking.
+        let full_source = include_str!("handler.rs");
+        let boundary = full_source
+            .find("\nmod tests {")
+            .expect("this file must contain the `mod tests` boundary");
+        let source = &full_source[..boundary];
+
+        let coordinator_occurrences = source.matches("await_startup_reindex(").count();
+        assert_eq!(
+            coordinator_occurrences, 3,
+            "expected `await_startup_reindex(` to appear exactly 3 times in production \
+             code (its definition + one call from run_stdio + one call from run_http); \
+             found {coordinator_occurrences}. A different count means either a second \
+             startup-indexing entry point exists, or one of the two transports lost \
+             its call to the coordinator."
+        );
+
+        let direct_build_core_memory_calls = source.matches(".build_core_memory()").count();
+        assert_eq!(
+            direct_build_core_memory_calls, 1,
+            "expected exactly one direct `.build_core_memory()` call in this file's \
+             production code (inside `await_startup_reindex`); found \
+             {direct_build_core_memory_calls}. `run_stdio`/`run_http` must only reach \
+             indexing through the coordinator, never by awaiting build_core_memory \
+             directly — that was the pre-M4 blocking path this milestone replaced."
         );
     }
 }

@@ -21,7 +21,49 @@ on:
 permissions: {}
 
 jobs:
+  # Guards every build job below: a tag can be pushed to any commit,
+  # including one CI never ran on or one CI failed on. Without this,
+  # `git tag vX && git push --tags` ships binaries built from
+  # unverified source. `github.sha` on a tag-push event is already the
+  # target commit (not the tag object), so no peeling is needed.
+  ci-status-check:
+    name: Verify tagged commit passed CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require a passing full-battery CI run on main for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Two bugs in the original query, both found in PR #63 review:
+          #
+          # 1. No `branch`/`event` filter: the same commit can also have a
+          #    `push`-to-`dev` CI run, which is intentionally the cheap
+          #    fast lane (skips test-cross/capability/coverage/action-
+          #    contracts) -- accepting that run's "success" would ship a
+          #    release built from a commit that never ran the hardened
+          #    full battery. `branch=main&event=push` requires the run
+          #    that actually executed on `main`.
+          # 2. No `status` filter, and the API's default sort is most-
+          #    recently-created first: a queued/in-progress re-run (e.g.
+          #    someone re-running the job) outranks an earlier completed
+          #    success for the exact same commit, so `conclusion` reads
+          #    `null` -> "none" and a genuinely-passing commit fails the
+          #    release. `status=completed` restricts to runs that have
+          #    actually finished.
+          CONCLUSION=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${SHA}&branch=main&event=push&status=completed&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          echo "CI conclusion for commit $SHA on main: $CONCLUSION"
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::No successful, completed 'push' CI run on 'main' found for tagged commit $SHA (conclusion: $CONCLUSION). Release builds require the 'CI' workflow's full battery to have completed successfully on this exact commit via a push to main."
+            exit 1
+          fi
+
   version-check:
+    needs: ci-status-check
     runs-on: ubuntu-latest
     permissions:
       contents: read

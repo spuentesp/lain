@@ -61,9 +61,8 @@ pub fn hooks_dir() -> PathBuf {
 /// Reap session-token JSON files in the hooks dir that are older than
 /// `max_age`. Returns the number of files removed. Wishlist #12e fix:
 /// previously the hooks dir grew by one file per unique `agent_name`
-/// (often one per PPID) with no reap path; the doctor counted them
-/// but couldn't clean up. Caller decides the threshold — `lain doctor`
-/// uses 30 days, the CLI uses 7 days, tests can pass `Duration::ZERO`.
+/// (often one per PPID) with no reap path. A maintenance caller chooses
+/// the threshold; tests can pass `Duration::ZERO`.
 ///
 /// Files that don't parse as the expected JSON shape are left alone
 /// (a malformed file is more likely operator action than a stale

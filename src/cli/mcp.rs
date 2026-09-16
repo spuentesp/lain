@@ -211,8 +211,11 @@ pub async fn run_mcp(
 
     // Keep the volatile overlay fresh while the user edits. Without this
     // the overlay is never written to at all and every answer is only as
-    // current as the last reindex.
-    crate::server::ingest::background::start_source_watcher(workspace.clone(), server.clone());
+    // current as the last reindex. Waits (bounded) for the watcher's
+    // initial directory registration to confirm before returning — see
+    // `start_source_watcher` for why that barrier matters.
+    crate::server::ingest::background::start_source_watcher(workspace.clone(), server.clone())
+        .await;
     crate::server::ingest::background::spawn_ui_session_reaper(server.tool_executor.ctx.clone());
 
     // Re-index when the checkout moves to a new commit. Without this the

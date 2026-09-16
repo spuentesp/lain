@@ -6,8 +6,7 @@
 //! `Init`, `Agents`, `Projects`, and the old top-level `Use` are gone
 //! after the consolidation. `hooks` is the agent pre-edit hook entry
 //! point (claim/release against the server's presence registry).
-//! `doctor` is the "one version of truth" diagnostic for the
-//! installation — binary version + git sha + on-disk state.
+//! `doctor` is the read-only repository and MCP readiness diagnostic.
 //!
 //! `main` is sync. Only the `server` subcommand needs a tokio runtime,
 //! and we build a fresh one for it on demand rather than wrapping the
@@ -110,7 +109,23 @@ fn main() -> Result<()> {
             // env var (comma-separated), or the agent-harness cwd
             // walk-up. See `cli::mcp::resolve_workspaces` for the
             // full resolution policy.
-            let rt = tokio::runtime::Builder::new_current_thread()
+            // Milestone 4 (AGENT_UX_ROADMAP.md): the startup re-index now
+            // runs as a background task alongside the MCP protocol loop
+            // (see `LainMcpServer::run_stdio`/`run_http`) rather than
+            // being awaited before it starts. A single-thread runtime
+            // would still let a long synchronous git/parser call in that
+            // background task starve `initialize`/`ping`/`tools/list` —
+            // both tasks would be cooperatively scheduled on the same one
+            // OS thread. `max(2, available_parallelism)` guarantees the
+            // protocol loop always has its own thread to run on, even on
+            // a single-core sandbox where `available_parallelism()` could
+            // report 1.
+            let worker_threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .max(2);
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(worker_threads)
                 .enable_all()
                 .build()
                 .context("build tokio runtime for mcp subcommand")?;
@@ -135,12 +150,67 @@ fn main() -> Result<()> {
             tool,
             args,
         }) => lain::cli::oneshot::run_oneshot(workspace.as_deref(), &tool, &args),
-        Some(Commands::Doctor) => {
-            // `doctor` returns its own exit code (0 clean, 1 hard
-            // failure). Anything else (e.g. a network error from
-            // reqwest) collapses to 2 so we don't silently lie about
-            // a clean install.
-            std::process::exit(lain::cli::doctor::run_doctor().unwrap_or(2));
+        Some(Commands::Doctor {
+            json,
+            workspace,
+            probe_mcp,
+        }) => {
+            if probe_mcp {
+                return tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(lain::cli::doctor::run_probe(
+                        workspace.as_deref().context("probe workspace")?,
+                    ));
+            }
+            let code = match lain::cli::doctor::run_doctor(json, workspace.as_deref()) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("doctor failed: {error:#}");
+                    2
+                }
+            };
+            std::process::exit(code);
+        }
+        Some(Commands::Capabilities { json, workspace }) => {
+            let code = lain::cli::readiness::capabilities(json, workspace.as_deref())
+                .unwrap_or_else(|error| {
+                    eprintln!("capabilities failed: {error:#}");
+                    2
+                });
+            std::process::exit(code);
+        }
+        Some(Commands::Status { json, workspace }) => {
+            let code =
+                lain::cli::readiness::status(json, workspace.as_deref()).unwrap_or_else(|error| {
+                    eprintln!("status failed: {error:#}");
+                    2
+                });
+            std::process::exit(code);
+        }
+        Some(Commands::Setup {
+            workspace,
+            agent,
+            json,
+            dry_run,
+            print_config,
+            yes,
+            no_model,
+        }) => {
+            let code = lain::cli::setup::run_setup(lain::cli::setup::SetupOptions {
+                workspace,
+                agent,
+                json,
+                dry_run,
+                print_config,
+                yes,
+                no_model,
+            })
+            .unwrap_or_else(|error| {
+                eprintln!("setup failed: {error:#}");
+                2
+            });
+            std::process::exit(code);
         }
         None => {
             // No subcommand: print help.

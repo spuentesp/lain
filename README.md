@@ -3,6 +3,7 @@
 [![CI](https://github.com/spuentesp/lain/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/spuentesp/lain/actions/workflows/ci.yml)
 [![SafeSkill 88/100](https://img.shields.io/badge/SafeSkill-88%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/spuentesp-lain)
 [![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/spuentesp/lain)](https://scorecard.dev/viewer/?uri=github.com/spuentesp/lain)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14660/badge)](https://www.bestpractices.dev/projects/14660)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platforms: Linux | macOS | Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue)](.github/workflows/ci.yml)
 [![Rust 1.75 or newer](https://img.shields.io/badge/rust-1.75%20or%20newer-orange)](Cargo.toml)
@@ -236,6 +237,7 @@ LAIN exposes the following CLI commands:
 |---------|---------|
 | `lain server` | Start the MCP server (the headline). Reads `repos.yaml`, serves MCP tools + the Command Center dashboard. Hot-reloads the config when it changes. |
 | `lain mcp` | Single-repo MCP server on stdio. Walks up from cwd for `.git` — the stable "drop in a clone and run" entrypoint. No `repos.yaml` required. |
+| `lain setup` | Guided onboarding: detects the repository and languages, optionally installs the semantic model, configures one MCP client (`--agent claude-code` shells to `claude mcp add`; `--agent generic` writes `.mcp.json`), and verifies the result with a real MCP round trip. `--dry-run` and `--print-config` change nothing. |
 | `lain workspaces` | Manage `workspaces.yaml`. Create, list, show, activate (`use`), forget named groups of repos. |
 | `lain repos` | Manage `repos.yaml`. Add, list, remove a repo entry. |
 | `lain query` | Run a `query_graph` ops-array against the project's persisted graph. |
@@ -243,7 +245,9 @@ LAIN exposes the following CLI commands:
 | `lain init` | Scaffold a `repos.yaml` for the current directory. Walks up for `.git`, then writes a minimal config pointing at the discovered workspace. |
 | `lain ask` | Single-user LLM-assisted query (uses `semantic_search` when an embedding model is loaded; falls back to lexical heuristics via `explain_symbol`). |
 | `lain hooks` | Agent pre-edit hook entry point: `claim` / `release` files, `overlap-check` for commit-time symbol overlap, `lock` / `unlock` for the zero-daemon filesystem-fallback layer. |
-| `lain doctor` | "One version of truth" diagnostic. Checks binary version + git SHA, hook script presence, config/hooks dirs (reaping session files older than 30 days), presence registry, and — when `LAIN_URL`/`LAIN_SERVER_URL` is set — both server reachability **and the live MCP surface**, calling `tools/list` and failing if it errors or advertises zero tools. Exits 0 clean, 1 on a hard failure. |
+| `lain doctor` | Read-only repository diagnosis. Reports binary identity, persisted graph freshness, structural and optional semantic capability states, installation paths, and an MCP initialize/tools-list probe. Use `--json` for the versioned machine-readable report and `--workspace PATH` outside the target clone. Exit codes are 0 ready, 1 usable but degraded, and 2 unusable. |
+| `lain capabilities` | Print the four canonical capability states and repository freshness. Add `--json` for agent-readable output. |
+| `lain status` | Print aggregate repository, index, and MCP readiness. Add `--json` for the versioned status object. |
 | `lain schema` | Emit the canonical tool-surface schema dump (`dump [--out PATH]` defaults to `./docs/tool-schema.json`). Pair with `make schema && git diff --exit-code docs/tool-schema.json` in CI to fail on schema drift. |
 | `scripts/demo.sh` | Capability demonstration and benchmark. Boots a real server against a synthetic repo whose call graph is known by construction, checks lain's answers against that ground truth (not merely that it answered), then benchmarks the same tools against this repo at ~3.5k nodes. `--quick` skips the build and benchmark phases; `--json FILE` writes machine-readable results; `--force-build` overrides `--quick` / `--no-build`; `--allow-stale` skips the binary-freshness check. Exits non-zero if any check fails (or if the binary is older than any source file and `--allow-stale` was not passed). |
 
@@ -322,7 +326,7 @@ query_prefix = "Represent this sentence for searching relevant passages: "
 ## Troubleshooting
 
 - **First-time setup issues?** See [QUICKSTART.md § First aid](docs/QUICKSTART.md#first-aid).
-- **Run diagnostics**: `lain doctor` verifies binary freshness, hook installation, active presence sessions, and MCP tool reachability.
+- **Run diagnostics**: `lain doctor` reports repository and MCP readiness without changing files; `lain doctor --json` emits the same result for scripts and agents.
 - **Hand-edit not picked up?** The hot-reload watcher is non-recursive and uses atomic rename. Editing the file in place (`vim repos.yaml`) triggers a notify event within ~1 s. If you moved the file across directories, save it back into the project directory.
 - **Repo stuck in `indexing` / `degraded` / `unavailable`?**
   ```bash

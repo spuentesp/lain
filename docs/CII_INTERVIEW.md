@@ -132,7 +132,7 @@ confirm them.
 
 > [x] Yes
 >
-> Rust 2021 edition. Stable toolchain ≥1.75 (per `Cargo.toml`).
+> Rust 2021 edition. Stable toolchain ≥1.82 (recommended ≥1.85 per `CONTRIBUTING.md`).
 
 ---
 
@@ -143,14 +143,14 @@ confirm them.
 > [x] Yes
 >
 > 1100+ tests across `tests/`, `tests/use_cases/`, `tests/e2e/`,
-> `tests/mcp/`. CI runs on every push (dev gets fast lane, main
-> gets full hardened battery — see PR #50).
+> and Rust unit/doc tests in `src/`. CI runs on every push (dev gets fast lane,
+> main gets full hardened battery — see PR #50).
 
 ### ☐ D2. Does the project use static analysis tools?
 
 > [x] Yes
 >
-> `cargo clippy -- -D warnings` enforced in CI (see
+> `cargo clippy --workspace --all-targets` enforced in CI (see
 > `.github/workflows/ci.yml`'s `lint` job). CodeQL also runs via
 > `.github/workflows/codeql.yml`.
 
@@ -159,7 +159,7 @@ confirm them.
 > [x] Yes
 >
 > `CONTRIBUTING.md` "Coding conventions" section + `cargo fmt
-> --check` enforced in CI.
+> --all -- --check` enforced in CI.
 
 ### ☐ D4. Does the project have a code review process?
 
@@ -193,36 +193,36 @@ confirm them.
 
 > [x] Yes
 >
-> TLS via `rustls 0.23` (default crypto provider `aws-lc-rs`,
-> via reqwest 0.12). No custom crypto code.
+> TLS via `rustls 0.23` with the `ring` cryptographic provider
+> (via `reqwest 0.12`). No custom crypto code.
 
 ### ☐ E2. Does the project have a process for reporting security vulnerabilities?
 
 > [x] Yes
 >
 > `SECURITY.md` defines the reporting channel
-> (GitHub Security Advisories + `security@spuentes.dev`),
+> (GitHub Security Advisories), with `security@spuentes.dev`
+> documented in `CONTRIBUTING.md` as direct maintainer contact.
 > 90-day disclosure window, 5/10 business-day ack SLAs, CVE
 > assignment via GH advisories.
 
 ### ☐ E3. **Has the project had any vulnerabilities in the past 12 months?**
 
 > [x] **Yes.** The OSV.dev dependency scan flagged 25 unique
-> advisories in the 30 days preceding 2026-09-15. All have been
-> triaged and 16 are already closed (PRs #52, #53, #54, #56, #57);
-> the remaining 8 are documented in `docs/VULNS.md` with explicit
-> plans. Zero external vulnerability reports received in the
+> advisories against the dependency graph. 17 are already closed
+> (PRs #52, #53, #54, #56, #57); the remaining 8 transitive items
+> are documented in `docs/VULNS.md` with explicit plans. Zero external
+> vulnerability reports received through disclosure channels in the
 > project's public lifetime.
 
 ### ☐ E4. **Did the project respond to past vulnerabilities?**
 
 > [x] **Yes.** Every cleared advisory has a public commit message
 > referencing the advisory ID (e.g., `fix(deps): reqwest 0.11->0.12
-> + rustls 0.21->0.23 + aws-lc-rs (closes 6 OSV vulns)`). The
+> + rustls 0.21->0.23 (closes 6 OSV vulns)`). The
 > OpenSSF Scorecard weekly cron runs every Monday 05:17 UTC and
 > posts SARIF to the Security tab; advisories are caught
-> before users encounter them. Public changelog documents every
-> fix per release.
+> proactively. Public changelog documents every fix per release.
 
 ### ☐ E5. **Does the project follow secure software design principles?**
 
@@ -235,20 +235,20 @@ confirm them.
 >   `docs/SUPPLY_CHAIN.md` (consumer question: "Is this `lain`
 >   binary what the maintainer actually built, with the
 >   dependencies they say it has?"); SLSA L2 provenance;
->   per-binary SBOM; OIDC-based publishing (no long-lived secrets).
+>   per-binary CycloneDX JSON SBOM; OIDC-based publishing (no long-lived secrets).
 > - **OWASP Top 10 for LLM Applications** — input validation on
 >   every JSON-RPC dispatch (serde deserialization errors don't
 >   panic); output encoding for HTML responses; the agent
 >   surface (`tools/list`) is the canonical contract and is
 >   schema-drift-gated in CI.
 > - **CNCF Supply Chain Levels** — pinned actions by SHA,
->   default-deny permissions at workflow level, branch
+>   default-deny / read-only permissions at workflow level, branch
 >   protection on `main` (1 approval + agent-contract gate),
->   dev-PR-to-dev tiered CI (fast lane) vs main-PR-to-main
->   (full hardened battery).
+>   concurrency cancellation on core CI, dev-PR-to-dev tiered CI
+>   (fast lane) vs main-PR-to-main (full hardened battery).
 > - **RustAPI / secure Rust guidelines** — `unsafe_code = "warn"`
 >   lint set in `Cargo.toml`'s `[lints.rust]` section; `cargo
->   clippy -- -D warnings` enforces lint-as-error in CI.
+>   clippy --workspace --all-targets` enforces linting in CI.
 
 ---
 

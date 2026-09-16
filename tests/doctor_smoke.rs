@@ -1,57 +1,218 @@
-//! Smoke test for `lain doctor` — runs the binary, asserts exit 0
-//! and that the diagnostic carries binary / git / hooks info.
-//!
-//! This is the wishlist item #6 ("one version of truth") verification:
-//! the operator runs `lain doctor` and gets a single page that
-//! confirms the binary version, the git sha it was built from,
-//! and the on-disk state of the hook scripts + config + hooks dirs.
+//! Repository diagnosis and protocol regressions, with isolated user state.
 
+use lain::graph::GraphDatabase;
+use serde_json::Value;
 use std::process::Command;
+use tempfile::TempDir;
 
-fn lain() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_lain"))
+struct Fixture {
+    repo: TempDir,
+    home: TempDir,
+}
+
+impl Fixture {
+    fn new(indexed: bool) -> Self {
+        let fixture = Self {
+            repo: tempfile::tempdir().unwrap(),
+            home: tempfile::tempdir().unwrap(),
+        };
+        let repo = git2::Repository::init(fixture.repo.path()).unwrap();
+        std::fs::write(fixture.repo.path().join(".gitignore"), ".lain/\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(".gitignore")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        let commit = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        if indexed {
+            std::fs::create_dir(fixture.repo.path().join(".lain")).unwrap();
+            let graph = GraphDatabase::new(&fixture.repo.path().join(".lain/graph.bin")).unwrap();
+            graph.set_last_commit(commit.to_string()).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(graph.save_to_disk())
+                .unwrap();
+        }
+        fixture
+    }
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lain"));
+        cmd.arg("doctor")
+            .current_dir(self.repo.path())
+            .env("HOME", self.home.path())
+            .env("XDG_CONFIG_HOME", self.home.path().join("config"))
+            .env("XDG_STATE_HOME", self.home.path().join("state"))
+            .env_remove("LAIN_URL")
+            .env_remove("LAIN_SERVER_URL")
+            .env_remove("LAIN_EMBEDDING_MODEL")
+            .env_remove("LAIN_WORKSPACE");
+        cmd
+    }
+    fn json(&self, code: i32) -> Value {
+        let out = self.command().arg("--json").output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["server_version"], env!("CARGO_PKG_VERSION"));
+        value
+    }
 }
 
 #[test]
-fn lain_doctor_runs_and_exits_zero() {
-    let out = lain().args(["doctor"]).output().expect("run doctor");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "lain doctor failed (status {:?}): {stdout}",
-        out.status.code()
+fn current_snapshot_is_ready_without_optional_model_or_user_directories() {
+    let fixture = Fixture::new(true);
+    let before = std::fs::read(fixture.repo.path().join(".lain/graph.bin")).unwrap();
+    let report = fixture.json(0);
+    assert_eq!(report["agent_ready"], true);
+    assert_eq!(report["transport"]["kind"], "stdio_probe");
+    assert_eq!(report["transport"]["healthy"], true);
+    assert!(report["transport"]["tools_count"].as_u64().unwrap() > 0);
+    assert_eq!(
+        report["capabilities"]["semantic_search"]["state"],
+        "unavailable_optional"
     );
-    // Header should appear at the top.
-    assert!(stdout.contains("lain doctor"), "missing header: {stdout}");
-    // Check 1: binary version + git sha.
-    assert!(
-        stdout.contains("binary") && stdout.contains("version"),
-        "missing binary version line: {stdout}"
+    assert_eq!(report["installation"]["config_dir_state"], "missing");
+    assert_eq!(std::fs::read_dir(fixture.home.path()).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read(fixture.repo.path().join(".lain/graph.bin")).unwrap(),
+        before
     );
-    assert!(
-        stdout.to_lowercase().contains("git") || stdout.contains("commit"),
-        "missing git-sha info: {stdout}"
+    let human = fixture.command().output().unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8(human.stdout).unwrap();
+    for expected in [
+        "lain doctor",
+        "binary version",
+        "commit",
+        "config dir",
+        "hooks dir",
+        "hook script",
+        "Agent-ready: YES",
+    ] {
+        assert!(text.contains(expected), "{text}");
+    }
+}
+
+#[test]
+fn missing_index_is_unusable_and_diagnosis_does_not_create_it() {
+    let fixture = Fixture::new(false);
+    let report = fixture.json(2);
+    assert_eq!(report["agent_ready"], false);
+    assert!(report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["code"] == "graph_missing"));
+    assert!(!fixture.repo.path().join(".lain").exists());
+}
+
+#[test]
+fn corrupt_index_is_reported_and_preserved() {
+    let fixture = Fixture::new(true);
+    let graph = fixture.repo.path().join(".lain/graph.bin");
+    std::fs::write(&graph, b"corrupt graph").unwrap();
+    let report = fixture.json(2);
+    assert!(report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["code"] == "graph_corrupt"
+            && p["remediation"].as_str().unwrap().contains("backup")));
+    assert_eq!(std::fs::read(graph).unwrap(), b"corrupt graph");
+}
+
+#[test]
+fn dirty_snapshot_is_usable_but_degraded() {
+    let fixture = Fixture::new(true);
+    std::fs::write(fixture.repo.path().join("new.rs"), "fn example() {}\n").unwrap();
+    let report = fixture.json(1);
+    assert_eq!(report["agent_ready"], true);
+    assert_eq!(report["capabilities"]["symbols"]["state"], "stale_usable");
+    assert_eq!(report["repository"]["working_tree_dirty"], true);
+    assert_eq!(report["repository"]["working_tree_overlay"], false);
+}
+
+#[test]
+fn missing_repository_is_structured_even_when_parent_is_a_repository() {
+    let fixture = Fixture::new(false);
+    let out = fixture
+        .command()
+        .args(["--json", "--workspace"])
+        .arg(fixture.home.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["repository"], Value::Null);
+    assert_eq!(report["problems"][0]["code"], "repository_not_found");
+}
+
+#[test]
+fn diagnosis_keeps_cached_sessions() {
+    let fixture = Fixture::new(true);
+    let hooks = fixture.home.path().join("config/lain/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let session = hooks.join("old.session");
+    std::fs::write(&session, "old cached session").unwrap();
+    // `set_times` needs write access to the handle on Windows (Unix's
+    // `utimensat` is more permissive about a read-only fd) -- a plain
+    // `File::open` handle fails with PermissionDenied there.
+    let file = std::fs::File::options().write(true).open(&session).unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    fixture.json(0);
+    assert_eq!(
+        std::fs::read_to_string(session).unwrap(),
+        "old cached session"
     );
 }
 
 #[test]
-fn lain_doctor_mentions_hook_and_config_dirs() {
-    let out = lain().args(["doctor"]).output().expect("run doctor");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "lain doctor failed: {stdout}");
-    // The four filesystem-facing checks should appear in the output.
-    assert!(
-        stdout.contains("hook"),
-        "missing hook-script check: {stdout}"
-    );
-    assert!(
-        stdout.contains("config"),
-        "missing config-dir check: {stdout}"
-    );
-    assert!(
-        stdout.contains("hooks dir"),
-        "missing hooks-dir check: {stdout}"
-    );
+fn capability_and_status_commands_project_the_same_readiness() {
+    let fixture = Fixture::new(true);
+    let doctor = fixture.json(0);
+    for command in ["capabilities", "status"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_lain"))
+            .args([command, "--json", "--workspace"])
+            .arg(fixture.repo.path())
+            .env("HOME", fixture.home.path())
+            .env("LAIN_CACHE_DIR", fixture.home.path().join("cache"))
+            .env_remove("LAIN_URL")
+            .env_remove("LAIN_SERVER_URL")
+            .env_remove("LAIN_EMBEDDING_MODEL")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema_version"], doctor["schema_version"]);
+        assert_eq!(value["server_version"], doctor["server_version"]);
+        assert_eq!(value["capabilities"], doctor["capabilities"]);
+        if command == "status" {
+            assert_eq!(value["agent_ready"], doctor["agent_ready"]);
+            assert!(value.get("indexing").is_some());
+        }
+    }
 }
 
 /// Regression test for the doctor `tools/list` happy path.
@@ -143,8 +304,9 @@ fn lain_doctor_reports_live_mcp_surface_against_real_server() {
     assert!(ready, "server never returned 200 from /health");
 
     // Run doctor with `LAIN_URL` pointing at the live server.
-    let doctor_out = Command::new(env!("CARGO_BIN_EXE_lain"))
-        .args(["doctor"])
+    let fixture = Fixture::new(true);
+    let doctor_out = fixture
+        .command()
         .env("LAIN_URL", format!("http://127.0.0.1:{port}"))
         .env("XDG_STATE_HOME", state.path())
         .output()

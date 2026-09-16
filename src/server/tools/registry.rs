@@ -85,6 +85,9 @@ pub struct ToolContext {
     /// swaps in the live `Arc<Mutex<RefreshOutcome>>` from the
     /// constructed `LainServer`.
     pub last_outcome: Arc<parking_lot::Mutex<crate::server::refresh::RefreshOutcome>>,
+    /// Single owner for startup indexing state. Health, discovery, and the
+    /// readiness gate read snapshots from this handle.
+    pub readiness: crate::server::readiness::ReadinessHandle,
     /// The federation, when the server runs in federation mode.
     ///
     /// `graph` / `workspace` above are bound at construction: to the one
@@ -155,6 +158,7 @@ impl ToolContext {
             last_outcome: Arc::new(parking_lot::Mutex::new(
                 crate::server::refresh::RefreshOutcome::skipped(),
             )),
+            readiness: crate::server::readiness::ReadinessHandle::default(),
             // Set by `with_federation` when the server runs in
             // federation mode; single-workspace executors leave it None
             // and `for_repo` is then a no-op.
@@ -361,6 +365,10 @@ impl ToolRegistry {
                     name: entry.0.name(),
                     description: entry.0.description(),
                     input_schema: schema,
+                    readiness: crate::server::tools::definitions::readiness_requirement(
+                        entry.0.name(),
+                    )
+                    .expect("every registered tool must declare a readiness requirement"),
                 }
             })
             .collect()
