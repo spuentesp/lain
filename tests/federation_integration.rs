@@ -1128,8 +1128,8 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     // the executor's `ctx.graph`. Before the fix this returned 0
     // because the executor was bound to the empty staging DB.
     let raw = lain::server::tools::handlers::metrics::find_anchors(
-        server.tool_executor.graph(),
-        server.tool_executor.overlay(),
+        server.ingest().graph(),
+        server.overlay(),
         10,
     )
     .expect("find_anchors should not error");
@@ -1140,7 +1140,7 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     let alpha_id = RepoId::new("alpha").unwrap();
     let alpha_repo = fed.get_repo(&alpha_id).expect("alpha repo present");
     let repo_graph = alpha_repo.db();
-    let executor_count = server.tool_executor.graph().node_count();
+    let executor_count = server.ingest().graph().node_count();
     let real_count = repo_graph.node_count();
     assert_eq!(
         executor_count, real_count,
@@ -1191,7 +1191,7 @@ async fn multi_repo_federation_falls_back_to_placeholder() {
     // empty (0 nodes), not bound to either repo. This is the
     // known limitation the next round-2 refactor will address.
     assert_eq!(
-        server.tool_executor.graph().node_count(),
+        server.ingest().graph().node_count(),
         0,
         "multi-repo federation still binds the placeholder; round-2 will fix this"
     );
@@ -1297,12 +1297,12 @@ async fn agent_a_query_then_agent_b_edit_then_agent_a_claim_sees_delta() {
     //    mirrors the BeyondCurrent contract and is structurally
     //    identical). Insert one no-op node first so the buffer's
     //    floor is established, then capture agent-A's pinned plan.
-    server.overlay.insert_node(lain::schema::GraphNode::new(
+    server.overlay().insert_node(lain::schema::GraphNode::new(
         NodeType::Function,
         "warmup".into(),
         "src/_warmup.rs".into(),
     ));
-    let rev_before_edit = server.overlay.current_revision();
+    let rev_before_edit = server.overlay().current_revision();
     assert!(
         rev_before_edit >= 1,
         "overlay floor must be >= 1 after the warmup insert; got {rev_before_edit}"
@@ -1318,8 +1318,8 @@ async fn agent_a_query_then_agent_b_edit_then_agent_a_claim_sees_delta() {
         "verify_token".into(),
         "src/auth.rs".into(),
     );
-    server.overlay.insert_node(edited_node);
-    let rev_after_edit = server.overlay.current_revision();
+    server.overlay().insert_node(edited_node);
+    let rev_after_edit = server.overlay().current_revision();
     assert!(
         rev_after_edit > rev_before_edit,
         "overlay revision must advance after insert_node; before={rev_before_edit} after={rev_after_edit}"
@@ -1406,9 +1406,9 @@ async fn agent_a_plan_revision_beyond_current_gets_note() {
     // make the claim land inside the window.
     let beyond_plan: u64 = 999_999;
     assert!(
-        beyond_plan > server.overlay.current_revision(),
+        beyond_plan > server.overlay().current_revision(),
         "test precondition: plan_revision must exceed current_revision ({}); got plan={beyond_plan}",
-        server.overlay.current_revision()
+        server.overlay().current_revision()
     );
 
     let (agent_id, token) = register(&server, "bob");

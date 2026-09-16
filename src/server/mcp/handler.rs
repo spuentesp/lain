@@ -701,8 +701,8 @@ pub(crate) async fn await_startup_reindex(
     };
     let started = std::time::SystemTime::now();
     let timeout = reindex_timeout.unwrap_or_else(crate::server::refresh::parse_reindex_timeout);
-    let last_outcome = server.last_outcome.clone();
-    let readiness = server.tool_executor.ctx.readiness.clone();
+    let last_outcome = server.refresh_handle().last_outcome().clone();
+    let readiness = server.ingest().tool_executor().ctx.readiness.clone();
     let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
         Ok(Ok(())) => {
             // AGENT_UX_ROADMAP.md Milestone 4, coordinator step 9: "a
@@ -717,7 +717,7 @@ pub(crate) async fn await_startup_reindex(
             if let Err(e) = server.sync_volatile_overlay().await {
                 eprintln!("final pre-ready overlay reconciliation failed (continuing): {e}");
             }
-            readiness.ready(server.graph.get_last_commit().ok().flatten());
+            readiness.ready(server.ingest().graph().get_last_commit().ok().flatten());
             crate::server::refresh::RefreshOutcome::ok(started)
         }
         Ok(Err(e)) => {
@@ -738,7 +738,7 @@ pub(crate) async fn await_startup_reindex(
         }
     };
     *last_outcome.lock() = outcome;
-    notify_capabilities_changed(notifier.as_ref(), &server.tool_executor).await;
+    notify_capabilities_changed(notifier.as_ref(), server.ingest().tool_executor()).await;
 }
 
 impl LainMcpServer {
@@ -841,7 +841,7 @@ impl LainMcpServer {
     pub fn with_server(mut self, server: Arc<LainServer>) -> Self {
         let presence = Arc::clone(server.presence());
         let occupancy = Arc::clone(server.occupancy());
-        let last_outcome = Arc::clone(&server.last_outcome);
+        let last_outcome = Arc::clone(server.refresh_handle().last_outcome());
         // `executor.ctx` is `pub`; mutate it in place so handlers reading
         // through `&ctx.presence` / `&ctx.occupancy` observe the live
         // registries.
@@ -1273,7 +1273,7 @@ async fn handle_request(
         let bucket_key = crate::server::auth::bearer_token(auth_header.unwrap_or(""))
             .unwrap_or_else(|| auth_header.unwrap_or("anonymous").to_string());
         if let Some(srv) = server.as_deref() {
-            if let Err(reason) = srv.auth.check_bearer(auth_header) {
+            if let Err(reason) = srv.auth_handle_inner().auth().check_bearer(auth_header) {
                 let body_bytes = serde_json::to_vec(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "error": {"code": -32001, "message": reason.message()},
@@ -1285,7 +1285,7 @@ async fn handle_request(
                     .body(full_body(Bytes::from(body_bytes)))
                     .unwrap());
             }
-            if let Err(retry_after) = srv.auth.check_rate(&bucket_key) {
+            if let Err(retry_after) = srv.auth_handle_inner().auth().check_rate(&bucket_key) {
                 let body_bytes = serde_json::to_vec(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "error": {"code": -32002, "message": "rate limit exceeded"},
@@ -1346,7 +1346,7 @@ async fn handle_request(
             .get("last-event-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let events_log = server.events_log.clone();
+        let events_log = server.audit_handle().events_log().clone();
         let (tx, rx) = mpsc::unbounded_channel::<std::io::Result<Bytes>>();
         tokio::spawn(async move {
             use crate::server::sse::serve_sse;

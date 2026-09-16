@@ -46,6 +46,21 @@ impl FederationHandle {
         self.federation.as_ref()
     }
 
+    /// The shared workspaces lock for federation-mode servers with workspaces.
+    pub fn federation_workspaces(&self) -> Option<&Arc<RwLock<WorkspacesFile>>> {
+        self.federation_workspaces.as_ref()
+    }
+
+    /// The federation transport (Http or Stdio).
+    pub fn federation_transport(&self) -> Option<Transport> {
+        self.federation_transport
+    }
+
+    /// The federation HTTP port (None for stdio or single-workspace).
+    pub fn federation_port(&self) -> Option<u16> {
+        self.federation_port
+    }
+
     /// Transport for the active MCP server. `None` for single-workspace
     /// servers (not federation-mode); some for federation-mode.
     pub fn transport(&self) -> Option<Transport> {
