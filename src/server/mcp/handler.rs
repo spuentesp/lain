@@ -6,7 +6,7 @@ use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::repo_id::RepoId;
 use crate::server::LainServer;
-use crate::state::ActiveWorkspace;
+use crate::state;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
@@ -378,280 +378,6 @@ async fn dispatch_tool_call(
     };
     if let Some(result) = invoke_inventory(&ctx, name, args_map.clone()) {
         return tool_result(name, result);
-    }
-
-    if let Some(fed) = federation {
-        match name {
-            "list_repos" => {
-                let repos = crate::server::mcp::federation_tools::list_repos(fed);
-                return (
-                    serde_json::to_string(&repos)
-                        .unwrap_or_else(|e| format!("serialization error: {e}")),
-                    false,
-                );
-            }
-            "get_repo_info" => {
-                let repo_id_str = match args_map.get("repo_id").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => {
-                        return ("Missing required argument: repo_id".to_string(), true);
-                    }
-                };
-                let rid = match crate::federation::repo_id::RepoId::new(repo_id_str) {
-                    Ok(r) => r,
-                    Err(e) => return (format!("{e}"), true),
-                };
-                return match crate::server::mcp::federation_tools::get_repo_info(fed, &rid) {
-                    Ok(info) => {
-                        let mut value: serde_json::Value =
-                            serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
-                        let active_edits = server
-                            .map(|s| {
-                                let occupancy = s.occupancy();
-                                let active = s.presence().list_active(false);
-                                active
-                                    .iter()
-                                    .filter(|sess| {
-                                        let claims = occupancy.list_for_agent(&sess.id);
-                                        !claims.is_empty()
-                                    })
-                                    .count()
-                            })
-                            .unwrap_or(0);
-                        if let Some(obj) = value.as_object_mut() {
-                            obj.insert(
-                                "active_edits".to_string(),
-                                serde_json::Value::Number(active_edits.into()),
-                            );
-                        }
-                        (
-                            serde_json::to_string(&value)
-                                .unwrap_or_else(|e| format!("serialization error: {e}")),
-                            false,
-                        )
-                    }
-                    Err(e) => (format!("{e}"), true),
-                };
-            }
-            "get_federation_health" => {
-                let health = crate::server::mcp::federation_tools::get_federation_health(fed);
-                return (
-                    serde_json::to_string(&health)
-                        .unwrap_or_else(|e| format!("serialization error: {e}")),
-                    false,
-                );
-            }
-            "search_org" => {
-                let query = match args_map.get("query").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => {
-                        return ("Missing required argument: query".to_string(), true);
-                    }
-                };
-                let limit: usize = match args_map.get("limit") {
-                    Some(serde_json::Value::Number(n)) => match n.as_u64() {
-                        Some(u) => u as usize,
-                        None => {
-                            return (
-                                "Invalid argument: limit must be a non-negative integer"
-                                    .to_string(),
-                                true,
-                            );
-                        }
-                    },
-                    Some(serde_json::Value::String(s)) => match s.parse::<usize>() {
-                        Ok(u) => u,
-                        Err(_) => {
-                            return (
-                                "Invalid argument: limit must be a non-negative integer"
-                                    .to_string(),
-                                true,
-                            );
-                        }
-                    },
-                    _ => {
-                        return ("Missing required argument: limit".to_string(), true);
-                    }
-                };
-                let hits = crate::server::mcp::federation_tools::search_org(fed, query, limit);
-                return (
-                    serde_json::to_string(&hits)
-                        .unwrap_or_else(|e| format!("serialization error: {e}")),
-                    false,
-                );
-            }
-            "get_cross_repo_blast_radius" => {
-                let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => {
-                        return ("Missing required argument: symbol".to_string(), true);
-                    }
-                };
-                let depth_owned =
-                    match crate::server::tools::utils::required_str_arg(&args_map, "depth") {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return (e.to_string(), true);
-                        }
-                    };
-                let depth = match parse_depth_range(&depth_owned) {
-                    Ok(r) => r,
-                    Err(e) => return (e, true),
-                };
-                return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius(
-                    fed, symbol, depth,
-                ) {
-                    Ok(r) => (
-                        serde_json::to_string(&r)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                    ),
-                    Err(e) => (format!("{e}"), true),
-                };
-            }
-            "get_cross_repo_blast_radius_for_repo" => {
-                let repo_id = match args_map.get("repo_id").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => {
-                        return ("Missing required argument: repo_id".to_string(), true);
-                    }
-                };
-                let symbol = match args_map.get("symbol").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => {
-                        return ("Missing required argument: symbol".to_string(), true);
-                    }
-                };
-                let depth_owned =
-                    match crate::server::tools::utils::required_str_arg(&args_map, "depth") {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return (e.to_string(), true);
-                        }
-                    };
-                let depth = match parse_depth_range(&depth_owned) {
-                    Ok(r) => r,
-                    Err(e) => return (e, true),
-                };
-                return match crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(
-                    fed, repo_id, symbol, depth,
-                ) {
-                    Ok(r) => (
-                        serde_json::to_string(&r)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                    ),
-                    Err(e) => (format!("{e}"), true),
-                };
-            }
-            _ => {}
-        }
-    }
-
-    if let Some(workspaces_lock) = workspaces {
-        let workspaces: &crate::federation::workspace::WorkspacesFile = &workspaces_lock.read();
-        match name {
-            "list_workspaces" => {
-                let active = ActiveWorkspace::load().ok().flatten();
-                let infos = crate::server::mcp::federation_tools::list_workspaces(
-                    workspaces,
-                    active.as_ref(),
-                );
-                return (
-                    serde_json::to_string(&infos)
-                        .unwrap_or_else(|e| format!("serialization error: {e}")),
-                    false,
-                );
-            }
-            "get_active_workspace" => {
-                let fed_ref = match federation {
-                    Some(f) => f,
-                    None => {
-                        return (
-                            LainError::Workspace(
-                                "get_active_workspace requires federation mode".into(),
-                            )
-                            .to_string(),
-                            true,
-                        );
-                    }
-                };
-                return match crate::server::mcp::federation_tools::get_active_workspace(
-                    fed_ref, workspaces,
-                ) {
-                    Ok(info) => (
-                        serde_json::to_string(&info)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                    ),
-                    Err(e) => (format!("{e}"), true),
-                };
-            }
-            "get_workspace" => {
-                let name_arg = args_map.get("name").and_then(|v| v.as_str());
-                let name_str = match name_arg {
-                    Some(s) => s.to_string(),
-                    None => return ("Missing required argument: name".to_string(), true),
-                };
-                let detail = match federation {
-                    Some(fed) => crate::server::mcp::federation_tools::get_workspace(
-                        fed, workspaces, &name_str,
-                    ),
-                    None => match workspaces.workspaces.iter().find(|w| w.name == name_str) {
-                        Some(ws) => Ok(crate::server::mcp::federation_tools::WorkspaceDetail {
-                            name: ws.name.clone(),
-                            description: ws.description.clone(),
-                            source: None,
-                            members: ws
-                                .members
-                                .iter()
-                                .map(
-                                    |m| crate::server::mcp::federation_tools::WorkspaceRepoInfo {
-                                        repo_id: m.clone(),
-                                        path: String::new(),
-                                        health: "not_loaded".into(),
-                                    },
-                                )
-                                .collect(),
-                        }),
-                        None => Err(crate::error::LainError::NotFound(format!(
-                            "workspace {name_str}"
-                        ))),
-                    },
-                };
-                return match detail {
-                    Ok(d) => (
-                        serde_json::to_string(&d)
-                            .unwrap_or_else(|e| format!("serialization error: {e}")),
-                        false,
-                    ),
-                    Err(e) => (format!("{e}"), true),
-                };
-            }
-            "get_workspace_graph" => {
-                let filter = args_map.get("filter").and_then(|v| v.as_str());
-                return match federation {
-                    Some(fed) => {
-                        match crate::server::mcp::federation_tools::get_workspace_graph(
-                            fed, workspaces, filter,
-                        ) {
-                            Ok(graph) => (
-                                serde_json::to_string(&graph)
-                                    .unwrap_or_else(|e| format!("serialization error: {e}")),
-                                false,
-                            ),
-                            Err(e) => (format!("{e}"), true),
-                        }
-                    }
-                    None => (
-                        LainError::Workspace("get_workspace_graph requires federation mode".into())
-                            .to_string(),
-                        true,
-                    ),
-                };
-            }
-            _ => {}
-        }
     }
 
     if let Some(fed) = federation {
@@ -3385,4 +3111,257 @@ inventory::submit!(McpToolEntry {
 inventory::submit!(McpToolEntry {
     name: "request_reload",
     handler: request_reload_handler
+});
+
+// -------------------------------------------------------------------------
+// Federation + workspace tool wrappers (Phase 3.2 followup).
+//
+// Like the presence/audit macros above, these declare a free-function
+// wrapper + `inventory::submit!` block. Federation tools need
+// `ctx.federation` (a `FederatedIndex`); workspace tools need
+// `ctx.workspaces` (an `Arc<RwLock<WorkspacesFile>>`); some need both
+// (workspace tools that resolve to a repo set).
+// -------------------------------------------------------------------------
+
+fn fed_required<'a>(ctx: &'a McpContext<'a>) -> Result<&'a FederatedIndex, String> {
+    ctx.federation
+        .ok_or_else(|| "federation not configured on this server".to_string())
+}
+
+fn workspaces_required<'a>(
+    ctx: &'a McpContext<'a>,
+) -> Result<&'a Arc<RwLock<crate::federation::workspace::WorkspacesFile>>, String> {
+    ctx.workspaces
+        .ok_or_else(|| "workspaces not configured on this server".to_string())
+}
+
+fn args_map<'a>(
+    args: &'a serde_json::Value,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, String> {
+    args.as_object()
+        .ok_or_else(|| "args must be a JSON object".to_string())
+}
+
+fn list_repos_handler(
+    ctx: &McpContext,
+    _args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let repos = crate::server::mcp::federation_tools::list_repos(fed);
+    serde_json::to_value(repos).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "list_repos",
+    handler: list_repos_handler
+});
+
+fn get_repo_info_handler(
+    ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let map = args_map(&args)?;
+    let repo_id_str = map
+        .get("repo_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: repo_id".to_string())?;
+    let rid = crate::federation::repo_id::RepoId::new(repo_id_str).map_err(|e| e.to_string())?;
+    let info = crate::server::mcp::federation_tools::get_repo_info(fed, &rid)
+        .map_err(|e| e.to_string())?;
+
+    // Enrich with the count of agents currently editing this repo, so
+    // the SPA can render the badge without a second round-trip.
+    let mut value = serde_json::to_value(&info).map_err(|e| e.to_string())?;
+    let active_edits = ctx
+        .server
+        .map(|s| {
+            let occupancy = s.occupancy();
+            let active = s.presence().list_active(false);
+            active
+                .iter()
+                .filter(|sess| !occupancy.list_for_agent(&sess.id).is_empty())
+                .count()
+        })
+        .unwrap_or(0);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "active_edits".to_string(),
+            serde_json::Value::Number(active_edits.into()),
+        );
+    }
+    Ok(value)
+}
+inventory::submit!(McpToolEntry {
+    name: "get_repo_info",
+    handler: get_repo_info_handler
+});
+
+fn get_federation_health_handler(
+    ctx: &McpContext,
+    _args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let health = crate::server::mcp::federation_tools::get_federation_health(fed);
+    serde_json::to_value(health).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "get_federation_health",
+    handler: get_federation_health_handler
+});
+
+fn search_org_handler(
+    ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let map = args_map(&args)?;
+    let query =
+        crate::server::tools::utils::required_str_arg(map, "query").map_err(|e| e.to_string())?;
+    let limit: usize = match map.get("limit") {
+        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+            Some(u) => u as usize,
+            None => {
+                return Err("Invalid argument: limit must be a non-negative integer".to_string());
+            }
+        },
+        _ => 10,
+    };
+    let matches = crate::server::mcp::federation_tools::search_org(fed, &query, limit);
+    serde_json::to_value(matches).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "search_org",
+    handler: search_org_handler
+});
+
+fn cross_repo_blast_radius_common(
+    fed: &FederatedIndex,
+    map: &serde_json::Map<String, serde_json::Value>,
+    depth_range: std::ops::Range<u32>,
+) -> Result<crate::server::mcp::federation_tools::CrossRepoBlastRadius, String> {
+    let symbol =
+        crate::server::tools::utils::required_str_arg(map, "symbol").map_err(|e| e.to_string())?;
+    crate::server::mcp::federation_tools::get_cross_repo_blast_radius(fed, &symbol, depth_range)
+        .map_err(|e| e.to_string())
+}
+
+fn get_cross_repo_blast_radius_handler(
+    ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let map = args_map(&args)?;
+    let depth_str =
+        crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
+    let depth =
+        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+    let result = cross_repo_blast_radius_common(fed, map, depth)?;
+    serde_json::to_value(result).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "get_cross_repo_blast_radius",
+    handler: get_cross_repo_blast_radius_handler
+});
+
+fn get_cross_repo_blast_radius_for_repo_handler(
+    ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let map = args_map(&args)?;
+    let depth_str =
+        crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
+    let depth =
+        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+    let symbol =
+        crate::server::tools::utils::required_str_arg(map, "symbol").map_err(|e| e.to_string())?;
+    let repo_id_str = map
+        .get("repo_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: repo_id".to_string())?;
+    let result = crate::server::mcp::federation_tools::get_cross_repo_blast_radius_for_repo(
+        fed,
+        repo_id_str,
+        &symbol,
+        depth,
+    )
+    .map_err(|e| e.to_string())?;
+    serde_json::to_value(result).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "get_cross_repo_blast_radius_for_repo",
+    handler: get_cross_repo_blast_radius_for_repo_handler
+});
+
+fn list_workspaces_handler(
+    ctx: &McpContext,
+    _args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let workspaces_lock = workspaces_required(ctx)?;
+    let active = crate::state::ActiveWorkspace::load().ok().flatten();
+    let list = crate::server::mcp::federation_tools::list_workspaces(
+        &*workspaces_lock.read(),
+        active.as_ref(),
+    );
+    serde_json::to_value(list).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "list_workspaces",
+    handler: list_workspaces_handler
+});
+
+fn get_active_workspace_handler(
+    ctx: &McpContext,
+    _args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let workspaces_lock = workspaces_required(ctx)?;
+    let info =
+        crate::server::mcp::federation_tools::get_active_workspace(fed, &*workspaces_lock.read())
+            .map_err(|e| e.to_string())?;
+    serde_json::to_value(info).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "get_active_workspace",
+    handler: get_active_workspace_handler
+});
+
+fn get_workspace_handler(
+    ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let workspaces_lock = workspaces_required(ctx)?;
+    let map = args_map(&args)?;
+    let name =
+        crate::server::tools::utils::required_str_arg(map, "name").map_err(|e| e.to_string())?;
+    let detail =
+        crate::server::mcp::federation_tools::get_workspace(fed, &*workspaces_lock.read(), &name)
+            .map_err(|e| e.to_string())?;
+    serde_json::to_value(detail).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "get_workspace",
+    handler: get_workspace_handler
+});
+
+fn get_workspace_graph_handler(
+    ctx: &McpContext,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let fed = fed_required(ctx)?;
+    let workspaces_lock = workspaces_required(ctx)?;
+    let map = args_map(&args)?;
+    let filter_str = map.get("filter").and_then(|v| v.as_str());
+    let graph = crate::server::mcp::federation_tools::get_workspace_graph(
+        fed,
+        &*workspaces_lock.read(),
+        filter_str,
+    )
+    .map_err(|e| e.to_string())?;
+    serde_json::to_value(graph).map_err(|e| e.to_string())
+}
+inventory::submit!(McpToolEntry {
+    name: "get_workspace_graph",
+    handler: get_workspace_graph_handler
 });
