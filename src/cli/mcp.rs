@@ -216,7 +216,9 @@ pub async fn run_mcp(
     // `start_source_watcher` for why that barrier matters.
     crate::server::ingest::background::start_source_watcher(workspace.clone(), server.clone())
         .await;
-    crate::server::ingest::background::spawn_ui_session_reaper(server.tool_executor.ctx.clone());
+    crate::server::ingest::background::spawn_ui_session_reaper(
+        server.ingest().tool_executor().ctx.clone(),
+    );
 
     // Re-index when the checkout moves to a new commit. Without this the
     // graph never advances past the commit it was first built from.
@@ -227,9 +229,10 @@ pub async fn run_mcp(
     // against `server.tool_executor.graph` directly. The re-index
     // timeout is wired through to run_stdio so the spawn honors
     // it (or the env var if None).
-    let mcp = crate::server::mcp::handler::LainMcpServer::new(server.tool_executor.clone())
-        .with_server(std::sync::Arc::new(server))
-        .with_reindex_timeout(reindex_timeout);
+    let mcp =
+        crate::server::mcp::handler::LainMcpServer::new(server.ingest().tool_executor().clone())
+            .with_server(std::sync::Arc::new(server))
+            .with_reindex_timeout(reindex_timeout);
     mcp.run_stdio()
         .await
         .map_err(|e| anyhow!("MCP stdio run failed: {e}"))?;

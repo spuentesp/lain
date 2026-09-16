@@ -27,6 +27,16 @@ impl RefreshState {
         }
     }
 
+    /// Borrowed handle to the most-recent re-index outcome.
+    pub fn last_outcome(&self) -> &Arc<Mutex<RefreshOutcome>> {
+        &self.last_outcome
+    }
+
+    /// Borrowed handle to the sync-status bookkeeping.
+    pub fn sync_status(&self) -> &SyncStatus {
+        &self.sync_status
+    }
+
     /// Last successful sync time. Updated via [`Self::record_sync`];
     /// consumed by `get_server_status`.
     pub fn last_sync_at(&self) -> SystemTime {

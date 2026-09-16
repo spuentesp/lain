@@ -85,6 +85,11 @@ impl PresenceLayer {
         &self.presence_event_tx
     }
 
+    /// Modification time of the presence state file as of our last load.
+    pub fn presence_state_seen(&self) -> &Arc<Mutex<Option<std::time::SystemTime>>> {
+        &self.presence_state_seen
+    }
+
     /// Emit a presence event: append it to the durable events log
     /// (assigning its monotonic `event_id`) and broadcast the
     /// `(event_id, event)` pair to all subscribers. This is the only

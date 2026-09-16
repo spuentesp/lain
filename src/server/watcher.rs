@@ -162,7 +162,7 @@ impl FileWatcher {
     pub fn start(self, workspace: PathBuf, server: LainServer) -> oneshot::Receiver<usize> {
         let file_sender = self.sender.clone();
         let receiver = self.receiver;
-        let git = Arc::clone(&server.git);
+        let git = Arc::clone(server.ingest().git());
 
         // The watcher thread body lives in `run_watcher_thread` so
         // production *and* tests share one closure and one command
@@ -697,7 +697,8 @@ mod tests {
             LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
         for _ in 0..4 {
             server
-                .lsp_pool
+                .ingest()
+                .lsp_pool()
                 .next()
                 .lock()
                 .await
@@ -706,16 +707,16 @@ mod tests {
         let path = root.path().join("lib.rs");
         fs::write(&path, "pub fn old_name() {}\n").unwrap();
         process_file(&server, &path).await.unwrap();
-        let old = server.overlay.get_all_nodes();
+        let old = server.overlay().get_all_nodes();
         assert_eq!(old.len(), 1);
         fs::write(&path, "pub fn new_name() {}\n").unwrap();
         process_file(&server, &path).await.unwrap();
-        assert!(server.overlay.get_node(&old[0].id).is_none());
-        assert_eq!(server.overlay.get_all_nodes().len(), 1);
+        assert!(server.overlay().get_node(&old[0].id).is_none());
+        assert_eq!(server.overlay().get_all_nodes().len(), 1);
         fs::remove_file(&path).unwrap();
         assert!(is_watched_file(&path));
         process_file(&server, &path).await.unwrap();
-        assert!(server.overlay.get_all_nodes().is_empty());
+        assert!(server.overlay().get_all_nodes().is_empty());
     }
 
     /// RAII guard that restores a directory's mode to `0o755` on drop, so the

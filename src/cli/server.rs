@@ -199,7 +199,9 @@ pub async fn run_server(
 
     // Reap expired `/ui/...` sessions; the HTTP transport creates one per
     // interactive blast-radius link and nothing ever removed them.
-    crate::server::ingest::background::spawn_ui_session_reaper(server.tool_executor.ctx.clone());
+    crate::server::ingest::background::spawn_ui_session_reaper(
+        server.ingest().tool_executor().ctx.clone(),
+    );
 
     info!(
         "lain server: starting on {:?} transport (port {})",

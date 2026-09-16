@@ -21,15 +21,15 @@ impl LainServer {
         // Defensive gate: sidecar processes should never call build_core_memory,
         // but if a future refactor routes them here, bail out cleanly instead
         // of corrupting the shared on-disk graph.
-        if self.graph.is_read_only() {
+        if self.ingest().graph().is_read_only() {
             return Ok(());
         }
         let scan_start = std::time::Instant::now();
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
         });
-        let (latest_commit, latest_time) = self.git.lock().get_latest_commit_info()?;
-        let last_commit = self.graph.get_last_commit()?;
+        let (latest_commit, latest_time) = self.ingest().git().lock().get_latest_commit_info()?;
+        let last_commit = self.ingest().graph().get_last_commit()?;
         self.readiness().update(|snapshot| {
             snapshot.target_commit = Some(latest_commit.clone());
         });
@@ -53,10 +53,10 @@ impl LainServer {
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
             info!("Incremental update since {}", last);
-            self.git.lock().get_changed_files_since(last)?
+            self.ingest().git().lock().get_changed_files_since(last)?
         } else {
             info!("Full repository scan");
-            self.git.lock().get_all_tracked_files()?
+            self.ingest().git().lock().get_all_tracked_files()?
         };
 
         if files.is_empty() {
@@ -65,9 +65,13 @@ impl LainServer {
             // without sweeping strands the deleted file's nodes while
             // advancing the marker past the commit that removed them.
             info!("No files to scan; sweeping orphans.");
-            sweep_orphans(&self.config.workspace, &self.graph, &self.git.lock());
-            self.graph.set_last_commit(latest_commit)?;
-            self.graph.save_to_disk().await?;
+            sweep_orphans(
+                &self.ingest().config().workspace,
+                &self.ingest().graph(),
+                &self.ingest().git().lock(),
+            );
+            self.ingest().graph().set_last_commit(latest_commit)?;
+            self.ingest().graph().save_to_disk().await?;
             return Ok(());
         }
 
@@ -77,8 +81,8 @@ impl LainServer {
             .as_secs() as i64;
 
         // Batch files into chunks to reduce task spawning overhead
-        let files_per_batch = self.tuning.ingestion.files_per_batch;
-        let max_files = self.tuning.ingestion.max_files_per_scan;
+        let files_per_batch = self.ingest().tuning().ingestion.files_per_batch;
+        let max_files = self.ingest().tuning().ingestion.max_files_per_scan;
         let files_to_scan: Vec<_> = files.iter().take(max_files).cloned().collect();
         let file_chunks: Vec<Vec<PathBuf>> = files_to_scan
             .chunks(files_per_batch)
@@ -98,15 +102,15 @@ impl LainServer {
 
         let mut set = tokio::task::JoinSet::new();
         for chunk in file_chunks {
-            let lsp = self.lsp_pool.next();
-            let workspace = self.config.workspace.clone();
+            let lsp = self.ingest().lsp_pool().next();
+            let workspace = self.ingest().config().workspace.clone();
             let commit_hash = latest_commit.clone();
             let git_time = latest_time;
             // `RepoNamespace` is `Copy`; capturing by value gives the
             // spawned task an owned `RepoNamespace` to borrow from, instead
-            // of borrowing `&self.id_namespace` which would dangle past
+            // of borrowing `&self.ingest().id_namespace()` which would dangle past
             // `self`'s lifetime.
-            let namespace = self.id_namespace;
+            let namespace = *self.ingest().id_namespace();
 
             set.spawn(async move {
                 scan_file_batch(
@@ -128,7 +132,7 @@ impl LainServer {
         let mut all_external_refs = Vec::new();
         let mut all_static_refs: Vec<StaticFileRef> = Vec::new();
         let mut all_pattern_refs: Vec<PatternRef> = Vec::new();
-        let batch_size = self.tuning.ingestion.ingest_batch_size;
+        let batch_size = self.ingest().tuning().ingestion.ingest_batch_size;
 
         let mut scanned = 0usize;
         let mut failed = 0usize;
@@ -146,7 +150,8 @@ impl LainServer {
                 files.len()
             );
         }
-        let scan_timeout = std::time::Duration::from_secs(self.tuning.ingestion.scan_timeout_secs);
+        let scan_timeout =
+            std::time::Duration::from_secs(self.ingest().tuning().ingestion.scan_timeout_secs);
 
         while let Some(res) = set.join_next().await {
             // Check timeout - abort remaining tasks and break
@@ -204,17 +209,21 @@ impl LainServer {
                             .collect::<HashSet<_>>()
                             .into_iter()
                             .collect();
-                        if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
+                        if let Err(e) = self
+                            .ingest()
+                            .graph()
+                            .replace_nodes_for_paths(&paths, &batch_nodes)
+                        {
                             warn!("Batch node write error: {}", e);
                         }
-                        insert_edges_best_effort(&self.graph, &batch_edges, "batch");
+                        insert_edges_best_effort(&self.ingest().graph(), &batch_edges, "batch");
                         // Durably persist the flush. The in-memory inserts above
                         // are lost if the outer re-index timeout drops this task,
                         // which is why a 90s budget could never converge: every
                         // batch of parsing was discarded. Writing here means a
                         // killed run still leaves progress on disk and successive
                         // runs converge instead of restarting from the same graph.
-                        if let Err(e) = self.graph.save_to_disk().await {
+                        if let Err(e) = self.ingest().graph().save_to_disk().await {
                             warn!("Batch persist error: {}", e);
                         }
                         batch_nodes.clear();
@@ -244,10 +253,14 @@ impl LainServer {
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
-            if let Err(e) = self.graph.replace_nodes_for_paths(&paths, &batch_nodes) {
+            if let Err(e) = self
+                .ingest()
+                .graph()
+                .replace_nodes_for_paths(&paths, &batch_nodes)
+            {
                 warn!("Final batch node write error: {}", e);
             }
-            insert_edges_best_effort(&self.graph, &batch_edges, "final batch");
+            insert_edges_best_effort(&self.ingest().graph(), &batch_edges, "final batch");
         }
 
         info!("Scanned {} files, {} failed, collected {} external refs, {} static refs, {} pattern refs",
@@ -262,24 +275,28 @@ impl LainServer {
             all_external_refs.len()
         );
         let call_edges = super::resolve::resolve_call_edges(
-            &self.graph,
-            &self.config.workspace,
+            &self.ingest().graph(),
+            &self.ingest().config().workspace,
             &all_external_refs,
             None,
             None,
         );
         info!("Ingesting {} call edges", call_edges.len());
-        insert_edges_reporting(&self.graph, &call_edges, "call")?;
+        insert_edges_reporting(&self.ingest().graph(), &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
         info!(
             "Resolving {} tree-sitter static references...",
             all_static_refs.len()
         );
-        let static_edges =
-            super::resolve::resolve_static_edges(&self.graph, &all_static_refs, None, None);
+        let static_edges = super::resolve::resolve_static_edges(
+            &self.ingest().graph(),
+            &all_static_refs,
+            None,
+            None,
+        );
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
-        insert_edges_reporting(&self.graph, &static_edges, "static")?;
+        insert_edges_reporting(&self.ingest().graph(), &static_edges, "static")?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
         info!(
@@ -287,10 +304,10 @@ impl LainServer {
             all_pattern_refs.len()
         );
         let pattern_edges = super::resolve::resolve_pattern_edges(
-            &self.graph,
+            &self.ingest().graph(),
             &all_pattern_refs,
             super::resolve::PatternLimits::from_tuning(
-                &self.tuning,
+                &self.ingest().tuning(),
                 super::resolve::PatternLimits::DEFAULT,
             ),
         );
@@ -298,7 +315,7 @@ impl LainServer {
             "Ingesting {} cross-boundary pattern edges",
             pattern_edges.len()
         );
-        insert_edges_reporting(&self.graph, &pattern_edges, "pattern")?;
+        insert_edges_reporting(&self.ingest().graph(), &pattern_edges, "pattern")?;
 
         // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
         // WebSocket. Runs after the symbol nodes exist, because
@@ -310,9 +327,9 @@ impl LainServer {
         // — could never appear in a graph, while `describe_schema`
         // advertised them and `get_cross_runtime_callers` read them.
         let sensor_counts = crate::server::sensors::run_all(
-            &self.graph,
-            &self.config.workspace,
-            &self.id_namespace,
+            &self.ingest().graph(),
+            &self.ingest().config().workspace,
+            &self.ingest().id_namespace(),
         );
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
@@ -320,11 +337,11 @@ impl LainServer {
 
         // 4. Temporal Analysis Phase: Co-changes
         let co_change_pairs = {
-            let git = self.git.lock();
+            let git = self.ingest().git().lock();
             git.analyze_co_changes(
-                self.tuning.ingestion.cochange_commit_window,
-                self.tuning.ingestion.cochange_min_pair_count,
-                self.tuning.ingestion.cochange_max_commit_files,
+                self.ingest().tuning().ingestion.cochange_commit_window,
+                self.ingest().tuning().ingestion.cochange_min_pair_count,
+                self.ingest().tuning().ingestion.cochange_max_commit_files,
             )
             .unwrap_or_default()
         };
@@ -332,27 +349,29 @@ impl LainServer {
             .into_iter()
             .map(|p| (p.file1, p.file2, p.co_change_count))
             .collect();
-        self.graph.insert_co_change_edges(&co_change_tuples)?;
+        self.ingest()
+            .graph()
+            .insert_co_change_edges(&co_change_tuples)?;
 
         // 5. Enrichment Phase: Topological Algorithms (synchronous, fast)
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Enriching;
         });
         info!("Enriching topology: Calculating anchors and depths...");
-        self.graph.calculate_anchor_scores()?;
-        self.graph.calculate_depths()?;
+        self.ingest().graph().calculate_anchor_scores()?;
+        self.ingest().graph().calculate_depths()?;
 
         // 6. NLP Phase: Spawn lazy background enrichment (non-blocking)
         // Pre-warm top anchor nodes first so first semantic queries return quickly
         // Then queue the rest for background processing
-        let graph_clone = self.graph.clone();
-        let embedder_clone = self.embedder.clone();
-        let nlp_prewarm_count = self.tuning.ingestion.nlp_prewarm_count;
-        let nlp_batch_size = self.tuning.ingestion.nlp_batch_size;
-        let nlp_budget_per_pass = self.tuning.ingestion.nlp_budget_per_pass;
+        let graph_clone = self.ingest().graph().clone();
+        let embedder_clone = self.ingest().embedder().clone();
+        let nlp_prewarm_count = self.ingest().tuning().ingestion.nlp_prewarm_count;
+        let nlp_batch_size = self.ingest().tuning().ingestion.nlp_batch_size;
+        let nlp_budget_per_pass = self.ingest().tuning().ingestion.nlp_budget_per_pass;
         // The NLP pass runs detached, so it needs its own copy of the
         // workspace root to resolve workspace-relative node paths.
-        let ws_for_nlp = self.config.workspace.clone();
+        let ws_for_nlp = self.ingest().config().workspace.clone();
         tokio::spawn(async move {
             let all_nodes = graph_clone.get_all_nodes();
             // Top anchors get embedded first (pre-warm)
@@ -450,7 +469,7 @@ impl LainServer {
         // a partial one, "not scanned this round" is indistinguishable from
         // "gone", and sweeping would delete live nodes.
         if !partial {
-            match self.git.lock().get_all_tracked_files() {
+            match self.ingest().git().lock().get_all_tracked_files() {
                 Ok(tracked_paths) => {
                     // Reduced with the same helper the scanner mints node paths
                     // with. Comparing git's absolute paths against relative node
@@ -458,9 +477,9 @@ impl LainServer {
                     // full sweep rather than as an error.
                     let tracked: HashSet<String> = tracked_paths
                         .iter()
-                        .map(|p| crate::graph::graph_path(&self.config.workspace, p))
+                        .map(|p| crate::graph::graph_path(&self.ingest().config().workspace, p))
                         .collect();
-                    match self.graph.prune_orphans(&tracked) {
+                    match self.ingest().graph().prune_orphans(&tracked) {
                         Ok(0) => info!("Orphan sweep: nothing to prune"),
                         Ok(n) => info!("Orphan sweep: pruned {n} nodes for untracked files"),
                         Err(e) => warn!("Orphan sweep failed: {e}"),
@@ -484,16 +503,16 @@ impl LainServer {
                 scanned, failed
             );
         } else {
-            self.graph.set_last_commit(latest_commit)?;
+            self.ingest().graph().set_last_commit(latest_commit)?;
         }
-        self.graph.save_to_disk().await?;
+        self.ingest().graph().save_to_disk().await?;
 
         // Bump the overlay freshness so the indexer doesn't read as
         // "stale" the moment the server comes up. The index path
         // doesn't insert through the overlay (it writes the static
         // graph), so without this touch every freshly-indexed server
         // would start with `Overlay freshness: stale`.
-        self.overlay.touch();
+        self.overlay().touch();
 
         let duration = scan_start.elapsed();
 
@@ -526,30 +545,32 @@ impl LainServer {
     }
 
     pub async fn sync_volatile_overlay(&self) -> Result<(), LainError> {
-        if self.graph.is_read_only() {
+        if self.ingest().graph().is_read_only() {
             return Ok(());
         }
         // The snapshot, removals, and replacements form one reconciliation.
         // Direct process_change calls use the same lock.
-        let _guard = self.process_change_lock.lock().await;
-        let changes = self.git.lock().get_uncommitted_changes()?;
-        let root = &self.config.workspace;
+        let _guard = self.ingest().process_change_lock().lock().await;
+        let changes = self.ingest().git().lock().get_uncommitted_changes()?;
+        let root = &self.ingest().config().workspace;
         let current_paths: HashSet<String> = changes
             .iter()
             .map(|change| graph_path(root, &change.path))
             .collect();
         let head = self
-            .git
+            .ingest()
+            .git()
             .lock()
             .get_latest_commit_info()
             .ok()
             .map(|(h, _)| h);
         let graph_caught_up = match head {
-            Some(h) => self.graph.get_last_commit()?.as_deref() == Some(h.as_str()),
+            Some(h) => self.ingest().graph().get_last_commit()?.as_deref() == Some(h.as_str()),
             None => false,
         };
         let stale: Vec<String> = self
-            .overlay_paths
+            .ingest()
+            .overlay_paths()
             .lock()
             .keys()
             .filter(|path| !current_paths.contains(*path))
@@ -570,12 +591,17 @@ impl LainServer {
     // Caller holds process_change_lock. Publish removal before any replacement
     // insert so a subscriber never deletes the newly inserted copy of an ID.
     fn remove_owned_overlay_path(&self, key: &str) {
-        let ids = self.overlay_paths.lock().remove(key).unwrap_or_default();
+        let ids = self
+            .ingest()
+            .overlay_paths()
+            .lock()
+            .remove(key)
+            .unwrap_or_default();
         if ids.is_empty() {
             return;
         }
         for id in &ids {
-            self.overlay.remove_node(id);
+            self.overlay().remove_node(id);
         }
         crate::server::overlay::broadcast_overlay_diff(OverlayDiff {
             revision: self.next_revision(),
@@ -586,15 +612,15 @@ impl LainServer {
     }
 
     pub async fn process_change(&self, path: &Path) -> Result<(), LainError> {
-        if self.graph.is_read_only() {
+        if self.ingest().graph().is_read_only() {
             return Ok(());
         }
-        let _guard = self.process_change_lock.lock().await;
+        let _guard = self.ingest().process_change_lock().lock().await;
         self.process_change_locked(path).await
     }
 
     async fn process_change_locked(&self, path: &Path) -> Result<(), LainError> {
-        let key = graph_path(&self.config.workspace, path);
+        let key = graph_path(&self.ingest().config().workspace, path);
         if !path.is_file() {
             self.remove_owned_overlay_path(&key);
             return Ok(());
@@ -609,10 +635,14 @@ impl LainServer {
         // unavailable. URGENT FIXES #3 follow-up.
         use crate::server::lsp::HierarchicalSymbol;
         let symbols: Option<Vec<HierarchicalSymbol>> = {
-            let lsp = self.lsp_pool.next();
+            let lsp = self.ingest().lsp_pool().next();
             let mut lsp = lsp.lock().await;
             match lsp
-                .get_document_symbols_hierarchical(path, &self.config.workspace, &self.id_namespace)
+                .get_document_symbols_hierarchical(
+                    path,
+                    &self.ingest().config().workspace,
+                    &self.ingest().id_namespace(),
+                )
                 .await
             {
                 Ok(s) if !s.is_empty() => Some(s),
@@ -629,7 +659,7 @@ impl LainServer {
         // Tree-sitter fallback when LSP fails or returns empty.
         // Mirrors `RepoIndex::process_overlay_change`: read the file,
         // mint one `GraphNode` per `SymbolDef`, namespace-namespaced
-        // by `self.id_namespace` so the overlay id matches the
+        // by `self.ingest().id_namespace()` so the overlay id matches the
         // static-graph id minted by `scan_file_structure`.
         let symbols: Vec<HierarchicalSymbol> = match symbols {
             Some(s) => s,
@@ -637,7 +667,7 @@ impl LainServer {
                 let Ok(content) = std::fs::read_to_string(path) else {
                     return Ok(());
                 };
-                let graph_key = graph_path(&self.config.workspace, path);
+                let graph_key = graph_path(&self.ingest().config().workspace, path);
                 crate::treesitter::extract_definitions(path, &content)
                     .into_iter()
                     .map(|d| HierarchicalSymbol {
@@ -645,12 +675,12 @@ impl LainServer {
                             d.kind,
                             d.name.clone(),
                             graph_key.clone(),
-                            &self.id_namespace,
+                            &self.ingest().id_namespace(),
                         )
                         .with_location_in(
                             d.line_start,
                             d.line_end,
-                            &self.id_namespace,
+                            &self.ingest().id_namespace(),
                         ),
                         children: vec![],
                     })
@@ -662,18 +692,18 @@ impl LainServer {
         // Track the workspace-relative path + the ids we inserted
         // there so the next `sync_volatile_overlay` cycle can purge
         // by id if this path drops out of the changes list.
-        let workspace_root = self.config.workspace.clone();
+        let workspace_root = self.ingest().config().workspace.clone();
         let key = graph_path(&workspace_root, path);
         let mut new_ids: Vec<String> = Vec::with_capacity(symbols.len());
         for symbol in symbols {
-            self.overlay.insert_node(symbol.node.clone());
+            self.overlay().insert_node(symbol.node.clone());
             // Broadcast the new node to any subscribed sidecar. The
             // read-only gate above (`is_read_only`) ensures this only
             // runs for owners.
             self.broadcast_overlay_insert(symbol.node.clone());
             new_ids.push(symbol.node.id);
         }
-        self.overlay_paths.lock().insert(key, new_ids);
+        self.ingest().overlay_paths().lock().insert(key, new_ids);
         Ok(())
     }
 }
@@ -1122,7 +1152,8 @@ mod readiness_progress_tests {
             .lsp_pool_size;
         for _ in 0..pool_size {
             server
-                .lsp_pool
+                .ingest()
+                .lsp_pool()
                 .next()
                 .lock()
                 .await
@@ -1167,7 +1198,7 @@ mod readiness_progress_tests {
         );
         assert_eq!(
             snapshot.target_commit,
-            server.graph.get_last_commit().unwrap()
+            server.ingest().graph().get_last_commit().unwrap()
         );
         // `build_core_memory` only reports progress; only the startup
         // coordinator (`await_startup_reindex`) decides `ready`/`failed`,
@@ -1232,7 +1263,7 @@ mod readiness_progress_tests {
         // after a successful pass: publish `ready`.
         server
             .readiness()
-            .ready(server.graph.get_last_commit().ok().flatten());
+            .ready(server.ingest().graph().get_last_commit().ok().flatten());
         let attempt_after_ready = server.readiness().snapshot().attempt_id;
         assert_eq!(
             server.readiness().snapshot().state,
@@ -1339,7 +1370,7 @@ mod readiness_progress_tests {
         let snapshot = server.readiness().snapshot();
         assert_eq!(snapshot.files_total, Some(1));
         // ...but must not have advanced the indexed-commit marker to HEAD.
-        assert_eq!(server.graph.get_last_commit().unwrap(), None);
+        assert_eq!(server.ingest().graph().get_last_commit().unwrap(), None);
     }
 }
 
@@ -1358,7 +1389,7 @@ mod reconciliation_lock_tests {
             .success());
         let server =
             LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
-        let guard = server.process_change_lock.lock().await;
+        let guard = server.ingest().process_change_lock().lock().await;
         let budget = std::time::Duration::from_millis(30);
         assert!(tokio::time::timeout(budget, server.sync_volatile_overlay())
             .await

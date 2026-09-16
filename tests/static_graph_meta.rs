@@ -14,7 +14,8 @@ fn make_test_server(graph_gen: Option<SystemTime>) -> LainServer {
     let mem_path = tmp.path().join(".lain/graph.bin");
     let server = LainServer::new(tmp.path(), &mem_path, None).expect("LainServer::new");
     if let Some(start) = graph_gen {
-        *server.last_outcome.lock() = lain::server::refresh::RefreshOutcome::ok(start);
+        *server.refresh_handle().last_outcome().lock() =
+            lain::server::refresh::RefreshOutcome::ok(start);
     }
     server
 }
@@ -44,7 +45,7 @@ fn static_graph_generation_timestamp_when_ok() {
 #[test]
 fn static_graph_generation_none_when_failed() {
     let server = make_test_server(None);
-    *server.last_outcome.lock() =
+    *server.refresh_handle().last_outcome().lock() =
         lain::server::refresh::RefreshOutcome::failed(SystemTime::now(), "synthetic".to_string());
     assert_eq!(
         server.static_graph_generation_unix(),
@@ -57,7 +58,8 @@ fn static_graph_generation_none_when_failed() {
 #[test]
 fn static_graph_generation_none_when_timeout() {
     let server = make_test_server(None);
-    *server.last_outcome.lock() = lain::server::refresh::RefreshOutcome::timeout(SystemTime::now());
+    *server.refresh_handle().last_outcome().lock() =
+        lain::server::refresh::RefreshOutcome::timeout(SystemTime::now());
     assert_eq!(
         server.static_graph_generation_unix(),
         None,

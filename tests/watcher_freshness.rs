@@ -1208,7 +1208,8 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
     server.build_core_memory().await.expect("build_core_memory");
 
     let static_id = server
-        .graph
+        .ingest()
+        .graph()
         .find_node_by_name("shared_symbol")
         .expect("static graph should contain shared_symbol after build_core_memory")
         .id
@@ -1237,7 +1238,7 @@ async fn overlay_and_static_have_matching_ids_for_same_symbol_no_lsp() {
         .expect("sync_volatile_overlay");
 
     let overlay_id = server
-        .overlay
+        .overlay()
         .get_all_nodes()
         .into_iter()
         .find(|n| n.name == "shared_symbol")
@@ -1350,7 +1351,7 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
     std::fs::write(&target, "pub fn shared_symbol() -> u32 { 0 }\n").unwrap();
     std::fs::write(target.clone(), "pub fn shared_symbol() -> u32 { 1 }\n").unwrap();
     server.sync_volatile_overlay().await.expect("initial sync");
-    let initial_count = server.overlay.get_all_nodes().len();
+    let initial_count = server.overlay().get_all_nodes().len();
     assert!(
         initial_count >= 1,
         "initial sync should populate the overlay"
@@ -1396,7 +1397,7 @@ async fn process_change_serializes_concurrent_calls_via_lock() {
     // could interleave and leave the overlay with duplicates or with
     // `overlay_paths` showing ids that aren't in the overlay.
     let names: Vec<_> = server
-        .overlay
+        .overlay()
         .get_all_nodes()
         .into_iter()
         .map(|n| (n.name.clone(), n.id.clone()))
@@ -1446,7 +1447,7 @@ async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable()
     // static-graph id — that's covered by the cross_namespace test
     // in PR #14. Here we just assert the overlay is non-empty after
     // the tree-sitter fallback fires.)
-    let nodes = server.overlay.get_all_nodes();
+    let nodes = server.overlay().get_all_nodes();
     let scratch = nodes
         .iter()
         .find(|n| n.name == "scratch_symbol")
@@ -1465,9 +1466,10 @@ async fn process_change_populates_overlay_via_tree_sitter_when_lsp_unavailable()
 
 // Mark each multiplexer unavailable without mutating process-wide PATH.
 async fn disable_rust_lsp(server: &LainServer) {
-    for _ in 0..server.tuning.ingestion.lsp_pool_size {
+    for _ in 0..server.ingest().tuning().ingestion.lsp_pool_size {
         server
-            .lsp_pool
+            .ingest()
+            .lsp_pool()
             .next()
             .lock()
             .await
@@ -1512,7 +1514,11 @@ async fn repeated_refresh_keeps_sidecar_equal_to_owner() {
             ids.sort();
             ids
         };
-        assert_eq!(ids(&sidecar), ids(&server.overlay), "contents: {contents}");
+        assert_eq!(
+            ids(&sidecar),
+            ids(&server.overlay()),
+            "contents: {contents}"
+        );
     }
 }
 
@@ -1524,18 +1530,18 @@ async fn direct_changes_replace_renamed_empty_and_deleted_symbols() {
     for name in ["before", "after"] {
         std::fs::write(&path, format!("pub fn {name}() {{}}\n")).unwrap();
         server.process_change(&path).await.unwrap();
-        let nodes = server.overlay.get_all_nodes();
+        let nodes = server.overlay().get_all_nodes();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].name, name);
     }
     std::fs::write(&path, "// empty").unwrap();
     server.process_change(&path).await.unwrap();
-    assert!(server.overlay.get_all_nodes().is_empty());
+    assert!(server.overlay().get_all_nodes().is_empty());
     std::fs::write(&path, "pub fn deleted() {}\n").unwrap();
     server.process_change(&path).await.unwrap();
     std::fs::remove_file(&path).unwrap();
     server.process_change(&path).await.unwrap();
-    assert!(server.overlay.get_all_nodes().is_empty());
+    assert!(server.overlay().get_all_nodes().is_empty());
 }
 
 #[tokio::test]
@@ -1549,12 +1555,12 @@ async fn overlapping_reconciliations_retract_previous_symbol_ids() {
     let (a, b) = tokio::join!(server.sync_volatile_overlay(), server.process_change(&path));
     a.unwrap();
     b.unwrap();
-    let nodes = server.overlay.get_all_nodes();
+    let nodes = server.overlay().get_all_nodes();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].name, "current_name");
     std::fs::remove_file(path).unwrap();
     server.sync_volatile_overlay().await.unwrap();
-    assert!(server.overlay.get_all_nodes().is_empty());
+    assert!(server.overlay().get_all_nodes().is_empty());
 }
 
 #[tokio::test]
@@ -1592,7 +1598,7 @@ async fn deleting_last_tracked_file_prunes_and_persists_both_pipelines() {
             assert!(!repo.nodes().is_empty());
         } else {
             server.build_core_memory().await.unwrap();
-            assert!(!server.graph.get_all_nodes().is_empty());
+            assert!(!server.ingest().graph().get_all_nodes().is_empty());
         }
         git(&["rm", "-q", "lib.rs"]);
         git(&["commit", "-qm", "empty repo"]);
@@ -1605,7 +1611,7 @@ async fn deleting_last_tracked_file_prunes_and_persists_both_pipelines() {
                 .is_empty());
         } else {
             server.build_core_memory().await.unwrap();
-            assert!(server.graph.get_all_nodes().is_empty());
+            assert!(server.ingest().graph().get_all_nodes().is_empty());
             assert!(GraphDatabase::new(&root.join("graph.bin"))
                 .unwrap()
                 .get_all_nodes()

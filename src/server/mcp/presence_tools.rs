@@ -39,18 +39,18 @@ use serde_json::{json, Value};
 /// hex string. `None` when the session has since expired, which is
 /// itself useful: the holder is gone.
 fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
-    server.presence.get(id).map(|s| s.name)
+    server.presence().get(id).map(|s| s.name)
 }
 
 pub(crate) fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
     let session = server
-        .presence
+        .presence()
         .by_token(token)
         .ok_or("unknown session token")?;
     // Best-effort: the session was just resolved, so this only fails on
     // a race with expiry, in which case the caller's own work still
     // proceeds on the session it already holds.
-    let _ = server.presence.heartbeat(&session.id, token);
+    let _ = server.presence().heartbeat(&session.id, token);
     Ok(session)
 }
 
@@ -80,14 +80,16 @@ fn run_register_agent_inner(server: &LainServer, a: RegisterAgentArgs) -> Result
         .map(AgentMode::parse)
         .unwrap_or(AgentMode::Interactive);
     let parent = a.parent_session_id.map(AgentId);
-    let session = server.presence.register(a.name, kind, mode, a.pid, parent);
+    let session = server
+        .presence()
+        .register(a.name, kind, mode, a.pid, parent);
     server.emit_presence_event(PresenceEvent::AgentJoined(session.clone()));
     // Report the TTL this session actually gets, not the registry
     // default — background agents are reaped faster than interactive
     // ones, and an agent that plans around the wrong number loses its
     // claims without warning.
     let expires_at_unix = crate::server::time::unix_secs_u64(session.started_at)
-        + server.presence.expires_after_for(&session.mode).as_secs();
+        + server.presence().expires_after_for(&session.mode).as_secs();
     Ok(json!({
         "agent_id": session.id.as_str(),
         "session_token": session.session_token,
@@ -109,7 +111,7 @@ pub fn run_heartbeat(server: &LainServer, args: Value) -> Result<Value, String> 
 fn run_heartbeat_inner(server: &LainServer, a: HeartbeatArgs) -> Result<Value, String> {
     let agent_id = AgentId(a.agent_id);
     server
-        .presence
+        .presence()
         .heartbeat(&agent_id, &a.session_token)
         .map_err(|e| e.to_string())?;
     // Wishlist #5 fix: refresh the staleness clock on every claim the
@@ -118,7 +120,7 @@ fn run_heartbeat_inner(server: &LainServer, a: HeartbeatArgs) -> Result<Value, S
     // occupancy registries have separate locks, so this is two
     // separate calls; the staleness clock now advances as long as both
     // succeed (the presence call above already errored on auth).
-    server.occupancy.touch(&agent_id);
+    server.occupancy().touch(&agent_id);
     Ok(json!({ "ok": true }))
 }
 
@@ -135,12 +137,12 @@ pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value,
         include_background: None,
     });
     let sessions = server
-        .presence
+        .presence()
         .list_active(a.include_background.unwrap_or(false));
     let out: Vec<Value> = sessions
         .into_iter()
         .map(|s| {
-            let claims = server.occupancy.list_for_agent(&s.id);
+            let claims = server.occupancy().list_for_agent(&s.id);
             json!({
                 "agent_id": s.id.as_str(),
                 "name": s.name,
@@ -164,7 +166,7 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
     server.refresh_shared_presence();
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
-    let claims = server.occupancy.list_for_agent(&session.id);
+    let claims = server.occupancy().list_for_agent(&session.id);
     let parent_session_id = session
         .parent_session_id
         .as_ref()
@@ -204,7 +206,7 @@ pub fn run_list_subagents(server: &LainServer, args: Value) -> Result<Value, Str
     let session = authenticate(server, &a.session_token)?;
     let parent_id = session.id.clone();
     let mut children: Vec<Value> = Vec::new();
-    for child in server.presence.list_active(true) {
+    for child in server.presence().list_active(true) {
         if child.parent_session_id.as_ref() == Some(&parent_id) {
             children.push(json!({
                 "agent_id": child.id.as_str(),
@@ -305,7 +307,7 @@ pub fn run_get_world_state(server: &LainServer, args: Value) -> Result<Value, St
     let a: GetWorldStateArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let plan = a
         .plan_revision
-        .unwrap_or_else(|| server.overlay.current_revision());
+        .unwrap_or_else(|| server.overlay().current_revision());
     let ws = compute_world_state(server, plan, &a.symbols, &std::collections::HashSet::new());
     serde_json::to_value(ws).map_err(|e| e.to_string())
 }
@@ -372,12 +374,12 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     // request is trivially held — which would make every unknown name
     // look like a retraction.
     let held_before: std::collections::HashSet<String> = server
-        .occupancy
+        .occupancy()
         .list_for_agent(&session.id)
         .into_iter()
         .flat_map(|c| c.symbols)
         .collect();
-    let mut result = server.occupancy.claim_with_session(&session, requests);
+    let mut result = server.occupancy().claim_with_session(&session, requests);
     // Populate `world_state` only when the caller supplied a
     // `plan_revision`. The brief's Step 3 pseudocode:
     //   1. Check each requested symbol against the static graph and
@@ -416,8 +418,8 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         // We snapshot the agent's full claim set once and partition
         // it per granted path so a multi-file claim still produces
         // one audit line per granted file.
-        let all_claims = server.occupancy.list_for_agent(&session.id);
-        let landed_revision = server.overlay.current_revision();
+        let all_claims = server.occupancy().list_for_agent(&session.id);
+        let landed_revision = server.overlay().current_revision();
         let audit_dir = server.state_dir_for_audit();
         let ts_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -544,7 +546,7 @@ fn compute_world_state(
     // else was simply never indexed.
     held_before: &std::collections::HashSet<String>,
 ) -> WorldState {
-    let current = server.overlay.current_revision();
+    let current = server.overlay().current_revision();
 
     // ── (a) Static-graph retract detection ─────────────────────────────
     // The brief's pseudocode names `FederatedIndex::symbol_to_repos`
@@ -577,7 +579,7 @@ fn compute_world_state(
     }
 
     // ── (b) Overlay diffs since `plan` ─────────────────────────────────
-    let overlay_diffs = match server.overlay.diffs_since(plan) {
+    let overlay_diffs = match server.overlay().diffs_since(plan) {
         Ok(ds) => ds,
         Err(err) => match err {
             LookupResult::BeyondCurrent => {
@@ -644,7 +646,7 @@ fn symbol_exists_in_static_graph(server: &LainServer, sym: &str) -> bool {
             Err(_) => false,
         }
     } else {
-        server.graph.find_node_by_name(sym).is_some()
+        server.ingest().graph().find_node_by_name(sym).is_some()
     }
 }
 
@@ -721,7 +723,7 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
         .into_iter()
         .map(|f| std::path::PathBuf::from(f.path))
         .collect();
-    let released = server.occupancy.release(&session.id, &paths);
+    let released = server.occupancy().release(&session.id, &paths);
     for path in &released {
         server.emit_presence_event(PresenceEvent::ClaimReleased {
             agent_id: session.id.clone(),
@@ -742,12 +744,12 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         serde_json::from_value(args).unwrap_or(ListOccupancyArgs { path: None });
     let entries: Vec<OccupancyEntry> = if let Some(p) = a.path.as_deref() {
         server
-            .occupancy
+            .occupancy()
             .list_for_path(std::path::Path::new(p))
             .into_iter()
             .collect()
     } else {
-        server.occupancy.list_all()
+        server.occupancy().list_all()
     };
     let out: Vec<Value> = entries.into_iter().map(|e| {
         // `last_seen_unix` is the heartbeat of the first live agent
@@ -757,7 +759,7 @@ pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, Str
         // dropped because it would be silently empty for sessions
         // that had expired but still had artifacts on disk.
         let last_seen_unix: Option<u64> = e.agents.iter()
-            .filter_map(|id| server.presence.get(id))
+            .filter_map(|id| server.presence().get(id))
             .next()
             .map(|s| crate::server::time::unix_secs_u64(s.last_heartbeat));
         json!({
@@ -795,7 +797,7 @@ pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> 
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
-    let claims = server.occupancy.list_for_agent(&session.id);
+    let claims = server.occupancy().list_for_agent(&session.id);
     Ok(json!(claims
         .into_iter()
         .map(|c| json!({
@@ -960,7 +962,8 @@ fn runtime_conflict_severity(
                 .map(|node| node.node_type)
         } else {
             server
-                .graph
+                .ingest()
+                .graph()
                 .find_node_by_name(symbol)
                 .map(|node| node.node_type)
         }
