@@ -10,20 +10,17 @@ should live in one place (`sensors/util.rs` and the `Sensor` trait
 default impls) rather than being reimplemented per sensor. This
 check enforces the future invariant:
 
-  - The five known sensor basenames (proto, openapi, graphql, http,
-    websocket) may continue to use the legacy free-function shape
-    until Phase 3.1 (sensor trait + inventory) lands. New sensor
-    files MUST follow the trait shape — they need a unit struct +
-    `inventory::submit!(SensorEntry(&…))`.
-
   - No sensor file may contain TWO copies of the
     `ignore::WalkBuilder::new(root).hidden(true).git_ignore(true)`
-    walker shell. Today each known sensor has exactly one; a new
-    file that adds a second is a copy-paste drift.
+    walker shell. After Phase 3.1 (walker extraction), every sensor
+    has zero such shells — the shared walker lives in
+    `sensors/util.rs` and the per-file loops call
+    `util::walk_workspace(root)`. A new file that re-introduces one
+    in-line is a copy-paste drift.
 
-The known-basename list is a shrinking baseline; when Phase 3.1
-ships, every entry should be removed and the check will enforce the
-trait shape uniformly.
+  - Every sensor file must follow the trait shape: a unit struct +
+    `inventory::submit!(SensorEntry(&…))`. There is no legacy
+    exemption; the Phase 3.1 migration is complete.
 
 Exit codes:
   0  — no new violations
@@ -39,16 +36,10 @@ import sys
 DEFAULT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SENSORS_DIRNAME = os.path.join("src", "server", "sensors")
 
-# Sensor basenames that pre-date the `Sensor` trait. When Phase 3.1
-# lands and each one becomes `impl Sensor for XSensor`, remove its
-# entry here so the check enforces the trait shape uniformly.
-KNOWN_LEGACY_SENSORS = {
-    "proto_sensor",
-    "openapi_sensor",
-    "graphql_sensor",
-    "http_sensor",
-    "websocket_sensor",
-}
+# Phase 3.1 (walker extraction) is complete: every sensor file under
+# `sensors/` follows the trait shape — `pub struct XxxSensor;`,
+# `impl Sensor for XxxSensor`, and `inventory::submit!(SensorEntry(&…))`.
+# The check below enforces that uniformly, with no legacy exemption.
 
 WALKER_PATTERN = re.compile(
     r"ignore::WalkBuilder::new\(root\)\s*\.\s*hidden\(true\)",
@@ -89,8 +80,6 @@ def violations(root: str) -> list[str]:
                 f"(expected at most 1; the shared walker lives in "
                 f"sensors/util.rs or the Sensor trait)"
             )
-        if base in KNOWN_LEGACY_SENSORS:
-            continue
         submits = INVENTORY_SUBMIT_PATTERN.findall(text)
         if not submits:
             out.append(

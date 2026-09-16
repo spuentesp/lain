@@ -140,41 +140,6 @@ pub fn parse_graphql(content: &str, schema_path: &str) -> Vec<GraphQlOperation> 
     operations
 }
 
-/// Find resolver in graph by field name
-fn find_resolver(graph: &GraphDatabase, field_name: &str) -> Option<GraphNode> {
-    graph
-        .find_node_by_name(field_name)
-        .or_else(|| graph.find_node_by_name(&to_camel_case(field_name)))
-        .or_else(|| graph.find_node_by_name(&to_snake_case(field_name)))
-}
-
-fn to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
-        }
-        result.push(c.to_ascii_lowercase());
-    }
-    result
-}
-
-fn to_camel_case(name: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize = false;
-    for c in name.chars() {
-        if c == '_' {
-            capitalize = true;
-        } else if capitalize {
-            result.push(c.to_ascii_uppercase());
-            capitalize = false;
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
 /// Enrich graph with GraphQL operations
 pub fn enrich_with_graphql(
     graph: &GraphDatabase,
@@ -214,7 +179,9 @@ pub fn enrich_with_graphql(
         node.signature = Some(op.type_name.clone());
         graph.upsert_node(node)?;
 
-        if let Some(resolver) = find_resolver(graph, &op.field_name) {
+        if let Some(resolver) =
+            crate::server::sensors::util::find_handler_in_graph(graph, &op.field_name)
+        {
             let edge = GraphEdge::new(EdgeType::Uses, resolver.id.clone(), node_id);
             graph.insert_edge(&edge)?;
             count += 1;
@@ -232,12 +199,7 @@ pub fn scan_workspace(
 ) -> Result<usize, LainError> {
     let mut count = 0;
 
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
-
-    for entry in walker.flatten() {
+    for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             // `" gql"` — with a leading space — could never match any

@@ -14,6 +14,7 @@ pub mod graphql_sensor;
 pub mod http_sensor;
 pub mod openapi_sensor;
 pub mod proto_sensor;
+pub mod util;
 pub mod websocket_sensor;
 
 use crate::error::LainError;
