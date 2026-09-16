@@ -1101,11 +1101,7 @@ mod tests {
         // size=4 by `RepoIndex::new` (see the constructor above), so
         // four `next()` calls cover every multiplexer.
         for _ in 0..4 {
-            ri.lsp
-                .next()
-                .lock()
-                .await
-                .mark_unavailable("rust-analyzer");
+            ri.lsp.next().lock().await.mark_unavailable("rust-analyzer");
         }
 
         let signal = ri.indexed_signal();

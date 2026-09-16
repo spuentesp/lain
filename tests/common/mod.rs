@@ -422,10 +422,8 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
                     "explain_symbol",
                     serde_json::json!({"symbol": name}),
                 );
-                let is_error = env
-                    .pointer("/result/isError")
-                    .and_then(|v| v.as_bool())
-                    == Some(true);
+                let is_error =
+                    env.pointer("/result/isError").and_then(|v| v.as_bool()) == Some(true);
                 let text = env
                     .pointer("/result/content/0/text")
                     .and_then(|v| v.as_str())
@@ -443,9 +441,7 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
                     break;
                 }
                 if !not_found {
-                    panic!(
-                        "explain_symbol({name}) returned an unexpected error envelope: {env}"
-                    );
+                    panic!("explain_symbol({name}) returned an unexpected error envelope: {env}");
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
