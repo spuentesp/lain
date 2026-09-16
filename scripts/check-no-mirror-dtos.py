@@ -32,16 +32,22 @@ DEFAULT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DTO_PATH = os.path.join("src", "server", "mcp", "federation_tools", "dto.rs")
 SCHEMA_PATH = os.path.join("src", "server", "schema.rs")
 
-# Known mirrors awaiting Phase 3.3 deletion. When that lands, remove
-# both entries and the check enforces the "no mirrors at all" invariant.
-KNOWN_MIRRORS = {"GraphNode", "GraphEdge"}
+# Known intentional wire types that overlap with schema fields but
+# are NOT mirrors. `SymbolMatch` is a cross-repo search projection
+# (has `global_id` and `kind` which don't exist on GraphNode); the
+# 3-field overlap (name, path, repo_id) is incidental. The Phase 3.3
+# mirror DTOs (`dto::GraphNode`, `dto::GraphEdge`) were deleted when
+# `schema::GraphNode`/`GraphEdge` were extended with the federation
+# fields, so this set is empty as of Phase 3.3.
+KNOWN_MIRRORS = set()
 
 # A dto struct is considered a "mirror" if at least this many of its
 # field names (after stripping the `_id` suffix that `schema::*` adds
 # on graph-edge fields) appear in the same schema struct. The bar
-# is 3 so that common projection fields (`name`, `path`) don't trip
-# the check on unrelated DTOs like `RepoInfo` or `SymbolMatch`.
-MIRROR_FIELD_OVERLAP = 3
+# is 4 so that common projection fields (`name`, `path`, `repo_id`)
+# don't trip the check on legitimate DTOs like `SymbolMatch`,
+# `RepoInfo`, `WorkspaceRepoInfo`, etc.
+MIRROR_FIELD_OVERLAP = 4
 
 STRUCT_RE = re.compile(
     r"^\s*pub\s+struct\s+([A-Za-z_][A-Za-z_0-9]*)\s*\{",
