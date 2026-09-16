@@ -23,6 +23,7 @@
 pub mod background;
 pub mod config;
 pub mod constructors;
+pub mod handles;
 pub mod ingestion;
 pub mod jobs;
 pub mod resolve;
