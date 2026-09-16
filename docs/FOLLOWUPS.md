@@ -5,40 +5,64 @@ was deliberately deferred to keep those PRs small. Each entry
 points at the source PR, the section of the plan it came from,
 and a one-line scope summary.
 
-Last update: after PR #66 (M4 step 8 + annotations + CI enrichment)
-merged to `dev`. Stays on `0.7.4-rc1`; release cut is separate
-scope.
+Last update: 2026-09-16, refreshed against HEAD (past PR #66, #72,
+#74, #75, #77). Stays on `0.7.4-rc1`; release cut is separate scope.
 
-## From `docs/M4-step-8-plan.md` (PR #66 deferred)
+Two items originally logged here after PR #66 are now resolved and
+have been removed from this file:
+
+- **Cross-repo annotation routing** — fixed in `33f9373
+  fix(annotations+readiness): address Copilot review findings`.
+  `target_to_repo` in `src/server/mcp/annotation_tools.rs` now
+  resolves `AnnotationTarget::Repo { repo_id }` against the
+  federation registry and rejects unknown repos, instead of pinning
+  every row to the single registered repo.
+- **Cold repo `last_indexed_commit` serializing as `Some("0")`** —
+  fixed in `6db4354 fix(federation): null last_indexed_commit until a
+  successful index pass`. `FederatedIndex::per_repo_readiness` now
+  gates `last_indexed_commit` and the wall-clock stamp on
+  `indexed_signal`, returning `None` until a real index pass lands —
+  see the comment at `src/server/federation/federated_index.rs:304`,
+  which cites this file's old entry #6 as its acceptance criterion.
+
+The two `docs/M4-step-8-plan.md` items below are still open; that
+plan file itself was never committed to `dev` (PR #66 merged only its
+implementation, not the planning doc), so there is no in-tree or
+git-history copy to link back to — the acceptance criteria captured
+here are the only surviving record of that plan's scope.
+
+## From `docs/M4-step-8-plan.md` (no longer in the tree; PR #66 deferred)
 
 ### Cooperative cancellation token
-- **Source:** `docs/M4-step-8-plan.md` §2 — plumb a
+- **Source:** the original `docs/M4-step-8-plan.md` §2 — plumb a
   `tokio_util::sync::CancellationToken` through every long-running
   phase (`RepoIndex::index`, `RepoSource::clone_into`,
   `Workspace::reload`, watcher, federation aggregate, MCP body
   collect).
+- **Still not started:** confirmed 2026-09-16, no
+  `CancellationToken` anywhere in `src/`.
 - **Why deferred:** invasive refactor that touches every
   long-running phase. Doesn't fit the "easiest wins first"
   framing the user asked for.
 - **Where to land:** next planning round. Should land BEFORE
-  M4 can be marked ✅ — the design section requires this to
-  pass the "blocked-indexer responsiveness test".
+  M4 can be marked ✅ — `docs/AGENT_UX_ROADMAP.md` milestone 4
+  stays 🟡 specifically on this and the item below.
 - **Acceptance:** TCP-RST mid-`/mcp` request returns control
   within budget; SIGINT triggers shutdown join within 30s;
   `cargo test --workspace` still passes.
 
 ### `spawn_blocking` isolation
-- **Source:** `docs/M4-step-8-plan.md` §3 — new
+- **Source:** the original `docs/M4-step-8-plan.md` §3 — new
   `src/server/ingest/blocking.rs` with an `offthread(cancel, f)`
   helper; batch the per-file hot loops.
+- **Still not started:** confirmed 2026-09-16, no `blocking.rs` or
+  `offthread` in `src/server/ingest/`.
 - **Why deferred:** invasive — restructures every git / fs /
   parser call site.
 - **Side benefit:** this PR will fill in the
-  `PerRepoReadiness::outstanding_files` counter (currently
-  always 0 — see `RepoIndex::outstanding_files` doc) and the
-  live staleness resolver for `File`/`Symbol` targets (currently
-  hard-coded `true` because the registry has no federation
-  backend access).
+  `PerRepoReadiness::outstanding_files` counter — confirmed
+  2026-09-16 it is still always 0 (`AtomicU64::new(0)` in
+  `src/server/federation/repo_index.rs`, never incremented).
 - **Acceptance:** federation cold-boot wall-clock drops
   measurably on the canonical fixture; `RUST_LOG=trace` shows
   file-walk phases on blocking threads, not on the async
@@ -50,6 +74,8 @@ scope.
 - **Source:** PR #66 deferred items. The `summaries_for_targets`
   helper at `src/server/mcp/annotation_tools.rs` is in place; the
   wiring into the existing markdown bodies is the missing piece.
+- **Still not started:** confirmed 2026-09-16, no `Open annotations`
+  / `open_annotations` text anywhere in `src/`.
 - **Why deferred:** the existing markdown bodies have many
   callers (the human-facing UI + several test fixtures pinning
   the prose shape); a follow-up that just adds the new section
@@ -61,38 +87,19 @@ scope.
   existing UI tests still pass (the new section is appended,
   not inserted into the middle).
 
-### Cross-repo annotation routing
-- **Source:** PR #66 deferred items. `TargetSpec` already
-  supports `kind: 'repo', repo_id: '...'`; `AnnotationRegistry`
-  pins every row to the single registered repo so cross-repo
-  targets silently fall into the wrong store.
-- **Acceptance:** `add_annotation(target={kind:'repo', repo_id:'<registered>'})`
-  lands in the right per-repo store; `list_annotations` returns
-  it from a cross-repo query without filtering by repo; handoff
-  notes cross federation boundaries.
-
 ### `tests/annotations_e2e.rs` and `tests/handoff_e2e.rs`
 - **Source:** PR #66 deferred items. The unit tests in
   `src/server/annotations.rs` cover storage round-trip, body
   validation, filter, staleness, UTF-8 boundary truncation.
   The e2e tests ride on the same dispatcher wiring and were
   dropped as a smaller marginal addition.
+- **Still not started:** confirmed 2026-09-16, neither file
+  exists under `tests/`.
 - **Acceptance:** write→read→resolve→stale-detection flows
   exercised through the MCP dispatcher end-to-end (not just the
   storage layer); handoff flow exercised through
   register_agent → leave_handoff_note → unregister →
   re-register → get_pending_handoffs.
-
-## Pre-existing, not introduced by PR #66
-
-### Cold repo `last_indexed_commit` serializes as `Some("0")` instead of `None`
-- **Source:** `db.get_last_commit()` in `src/server/graph.rs`
-  returns `Some(string)` after the loader has run once, even
-  when no commit was reached. Surfaces through
-  `FederatedIndex::per_repo_readiness` and `get_capabilities`.
-- **Acceptance:** `get_capabilities.repositories[].last_indexed_commit`
-  is `null` until a successful index pass has reached a commit,
-  then the actual commit string.
 
 ## Release flow
 
