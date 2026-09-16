@@ -64,7 +64,11 @@ echo "OK: agent-b saw conflict"
 #    python3 to parse rather than grep on escaped text. `LAIN_URL` is the
 #    bare server URL per the new convention; append `/mcp` for direct
 #    JSON-RPC calls (the `lain hooks` CLI does this internally).
-TMP=$(mktemp)
+# Same TMPDIR-under-trap pattern as federation_dashboard_e2e.sh:
+# keep the response file under TMPDIR so the EXIT trap cleans it
+# up even if curl or python3 fails before the explicit `rm -f`
+# below. Default mktemp writes to /tmp and leaks on non-zero exit.
+TMP=$(mktemp -p "$TMPDIR" -t mcp-response.XXXXXX)
 curl -s -X POST "$LAIN_URL/mcp" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_active_agents","arguments":{}},"id":1}' \
   > "$TMP"

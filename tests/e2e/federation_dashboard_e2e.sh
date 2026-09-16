@@ -89,7 +89,12 @@ sys.exit(0 if (f and f.get("repos")) else 1)
 done
 
 echo "==> GET /health (should include federation blob)"
-TMP=$(mktemp)
+# Place the response file under WORKDIR so the existing EXIT trap's
+# `rm -rf "${WORKDIR}"` cleans it up even if curl or python3 fails
+# before the explicit `rm -f "$TMP"` below runs. Without `-p
+# "${WORKDIR}"`, mktemp writes to /tmp and the file leaks on
+# non-zero exit.
+TMP=$(mktemp -p "${WORKDIR}" -t federation-health.XXXXXX)
 curl -s "${BASE}/health" > "$TMP"
 # `python3 - "$TMP"` makes Python read its *script* from stdin (the
 # heredoc below) and pass "$TMP" as argv[1]. The previous form
