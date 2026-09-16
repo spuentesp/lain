@@ -280,12 +280,18 @@ jobs:
           # entirely -- this job would then silently re-validate an
           # older, already-validated release while claiming to gate the
           # one that just published. `workflow_run.head_branch` carries
-          # the triggering tag name for a tag-push-triggered workflow, so
-          # prefer that; fall back to `gh release view` only when neither
-          # an explicit input nor a workflow_run tag is available (e.g.
-          # manual dispatch with no `tag` input).
+          # the triggering tag name *only* when that Release run was
+          # itself triggered by a tag push -- `workflow_run.event` must
+          # be checked too. Release.yml also has a `workflow_dispatch`
+          # trigger (the publish-npm-retry escape hatch), which can be
+          # dispatched against a branch ref like `main`; a completed run
+          # from that path reports `head_branch: main` and a bare
+          # `event_name == 'workflow_run'` check would misread "main" as
+          # a release tag, causing "release not found" 404s. Confirmed
+          # live 2026-09-16 right after adding that dispatch trigger.
           TAG="$TAG_INPUT"
-          if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "workflow_run" ]; then
+          if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "workflow_run" ] \
+             && [ "${{ github.event.workflow_run.event }}" = "push" ]; then
             TAG="${{ github.event.workflow_run.head_branch }}"
           fi
           if [ -z "$TAG" ]; then
