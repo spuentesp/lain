@@ -16,9 +16,9 @@ inputs:
     required: false
     default: 'lain-health'
   lain-version:
-    description: 'Lain release tag to install. The default must track the latest release; the version-drift job in ci.yml fails the build if it does not. Bump on every release.'
+    description: 'Lain release tag to install. The default must track the latest release; the version-drift job in ci.yml fails the build if it does not. Bump on every release. NOTE (2026-09-16): pinned to v0.6.1, not the nominally-latest v0.6.2, because v0.6.2''s published binary reports "lain 0.6.1" via --version (a pre-existing release-pipeline bug from before check-release-version.py''s --binary verification step existed) — install-binary.sh rejects it as a version mismatch. Bump straight to the next real (non-rc) release once one exists rather than to v0.6.2.'
     required: false
-    default: 'v0.6.2'
+    default: 'v0.6.1'
   reindex-timeout:
     description: 'Seconds to wait for the cold-start re-index. Lain defaults to 300s; the action bumps to 600s because the first run on a repo pays the full cost.'
     required: false
