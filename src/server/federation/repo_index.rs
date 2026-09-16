@@ -174,6 +174,21 @@ pub struct RepoIndex {
     /// construction and is stable for the lifetime of the
     /// `RepoIndex`. URGENT FIXES #2.
     pub(crate) id_namespace: crate::schema::RepoNamespace,
+    /// Fires after every successful `index()` or `index_forced()`.
+    /// Closes the cold-boot race between the per-repo graph becoming
+    /// visible and a tool call landing on the just-bound HTTP
+    /// listener: the dispatcher awaits this with a 200 ms budget when
+    /// the active repo's per-repo graph is empty, so a resolve that
+    /// arrives in the cold-boot window either sees the freshly-indexed
+    /// graph (signal fired during the wait) or returns its existing
+    /// NotFound (budget elapsed, indexer still running — the test's
+    /// `wait_for_repo_index` then re-polls). `notify_one` is used so a
+    /// permit is buffered for one late-arriving waiter; after that the
+    /// signal returns to its un-fired state until the next successful
+    /// index. The race the user described in the bug report — per-repo
+    /// graph and federation backend observable at different points —
+    /// is what this signal unifies.
+    indexed: Arc<tokio::sync::Notify>,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -262,6 +277,7 @@ impl RepoIndex {
             last_overlay_lsp_failures: std::sync::atomic::AtomicU32::new(0),
             cross_repo_resolver: parking_lot::Mutex::new(None),
             id_namespace,
+            indexed: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -271,6 +287,17 @@ impl RepoIndex {
     /// with a guessed budget. Production code does not need it.
     pub fn overlay_updated(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.overlay_updated)
+    }
+
+    /// Handle on the [`Notify`] this index fires after every successful
+    /// `index()` or `index_forced()`. The MCP dispatcher awaits it
+    /// with a 200 ms budget when the active repo's per-repo graph is
+    /// empty, so a tool call landing in the cold-boot window wakes
+    /// up to a populated graph instead of an empty placeholder.
+    /// `notify_one` is the same shape as `overlay_updated` above —
+    /// one buffered permit, then back to un-fired state.
+    pub fn indexed_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.indexed)
     }
 
     /// Number of files whose overlay refresh was skipped due to LSP
@@ -432,6 +459,14 @@ impl RepoIndex {
 
         *self.last_indexed.write() = SystemTime::now();
         self.set_health(RepoHealth::Ready);
+        // Cold-boot race closure: the dispatcher awaits this on the
+        // active repo when the per-repo graph is empty. Firing it
+        // here (and only on success) means a resolve that lands
+        // between boot and the next `index_forced` either wakes up
+        // to a populated graph or, if the budget elapsed first,
+        // returns its existing NotFound for the test's poll loop to
+        // retry on.
+        self.indexed.notify_one();
         Ok(())
     }
 
@@ -505,6 +540,10 @@ impl RepoIndex {
 
         *self.last_indexed.write() = SystemTime::now();
         self.set_health(RepoHealth::Ready);
+        // Same cold-boot race closure as `index()`: a tool call that
+        // arrives during a watcher-driven re-index gets the same
+        // bounded-wait window the boot path gets.
+        self.indexed.notify_one();
         Ok(())
     }
 
@@ -1011,6 +1050,77 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<RepoIndex>();
         assert_send_sync::<Arc<RepoIndex>>();
+    }
+
+    /// A fresh `RepoIndex` exposes the `indexed_signal` handle as a
+    /// `Notify` with no buffered permits. The dispatcher's bounded
+    /// wait therefore blocks until `index()` actually fires — the
+    /// exact shape that closes the cold-boot race whose symptom was
+    /// the "Node not found for handle" flake in
+    /// `feat_negative_paths_end_to_end` (closed in commit `3436a51`
+    /// together with the test-fixture tempdir-lifetime fix).
+    #[tokio::test]
+    async fn indexed_signal_starts_unfired_and_fires_after_successful_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(src_dir.path()).unwrap();
+        // `git2::Repository::init` leaves HEAD pointing at an unborn
+        // branch; the indexer reads `get_latest_commit_info()` which
+        // errors with "reference 'refs/heads/master' not found" on an
+        // unborn repo. Seed an empty initial commit so the head is
+        // born (matches what `tests/common::mod.rs::git_init_committed`
+        // does for the federation e2e tests).
+        {
+            let sig = git2::Signature::now("test", "test@lain").unwrap();
+            let tree_oid = {
+                let mut idx = repo.index().unwrap();
+                idx.write_tree().unwrap()
+            };
+            let tree = repo.find_tree(tree_oid).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+        // `lib.rs` with one function so tree-sitter can extract a
+        // symbol and the indexer succeeds without an LSP server.
+        std::fs::write(
+            src_dir.path().join("lib.rs"),
+            "pub fn indexed_signal_marker() {}\n",
+        )
+        .unwrap();
+        let src: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new("idx").unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        let ri = Arc::new(RepoIndex::new(src, tmp.path()).unwrap());
+        // Mark the language server unavailable so the indexer falls
+        // back to tree-sitter without trying to spawn rust-analyzer —
+        // same pattern as the existing tests in this module. Without
+        // this, a host with no rust-analyzer on PATH would block the
+        // LSP request on its own startup timeout instead of taking
+        // the fast fallback path. `LspPool::new` is constructed with
+        // size=4 by `RepoIndex::new` (see the constructor above), so
+        // four `next()` calls cover every multiplexer.
+        for _ in 0..4 {
+            ri.lsp.next().lock().await.mark_unavailable("rust-analyzer");
+        }
+
+        let signal = ri.indexed_signal();
+        // `index_forced` skips the commit-hash short-circuit and
+        // walks every tracked file — the right call for a fresh
+        // fixture where the per-repo graph is empty.
+        ri.index_forced()
+            .await
+            .expect("index_forced should succeed with tree-sitter fallback");
+
+        // The signal is now ready: a wait bounded at 100 ms must
+        // return Ok(_) because the permit is buffered (not consumed
+        // before any waiter arrives).
+        let notified = signal.notified();
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
+        assert!(
+            outcome.is_ok(),
+            "indexed_signal should be ready immediately after index_forced returns Ok"
+        );
     }
     #[tokio::test]
     async fn deactivation_clears_owned_overlay_and_stops_watcher() {

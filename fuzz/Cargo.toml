@@ -1,0 +1,61 @@
+[package]
+name = "lain-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Empty `[workspace]` so `cargo +nightly fuzz build` (run from
+# this dir by .github/workflows/fuzz-nightly.yml) doesn't discover
+# the root workspace's `members = ["."]` and try to build the entire
+# main crate as part of fuzz target compilation. See PR #55 review.
+[workspace]
+
+# Stub the binary crate so the fuzz targets can `use lain::...`.
+# `lain` lives in the parent workspace; cargo-fuzz's build script
+# rewrites this path before building the fuzz harness.
+[dependencies]
+lain = { path = ".." }
+
+# Pull in the same serde family the production code uses, so the
+# fuzz targets can deserialize the same types the server does.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# libfuzzer-sys is required at compile time for the fuzz targets
+# (each `#[libfuzzer_sys::fuzz_target]` attribute expands to a
+# `libfuzzer` harness symbol). It must be a normal `[dependencies]`
+# entry — the fuzz targets are `[[bin]]`, not tests, so
+# `[dev-dependencies]` is not in scope when `cargo +nightly fuzz
+# build` links them.
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "federation_config"
+path = "fuzz_targets/federation_config.rs"
+
+[[bin]]
+name = "mcp_envelope"
+path = "fuzz_targets/mcp_envelope.rs"
+
+[[bin]]
+name = "graph_node"
+path = "fuzz_targets/graph_node.rs"
+
+[[bin]]
+name = "path_canonicalize"
+path = "fuzz_targets/path_canonicalize.rs"
+
+[[bin]]
+name = "mcp_request_dispatch"
+path = "fuzz_targets/mcp_request_dispatch.rs"
+
+[[bin]]
+name = "repo_source_load"
+path = "fuzz_targets/repo_source_load.rs"
+
+[profile.release]
+debug = 1

@@ -64,9 +64,16 @@ echo "OK: agent-b saw conflict"
 #    python3 to parse rather than grep on escaped text. `LAIN_URL` is the
 #    bare server URL per the new convention; append `/mcp` for direct
 #    JSON-RPC calls (the `lain hooks` CLI does this internally).
-ACTIVE=$(curl -s -X POST "$LAIN_URL/mcp" -H 'Content-Type: application/json' \
+# Same TMPDIR-under-trap pattern as federation_dashboard_e2e.sh:
+# keep the response file under TMPDIR so the EXIT trap cleans it
+# up even if curl or python3 fails before the explicit `rm -f`
+# below. Default mktemp writes to /tmp and leaks on non-zero exit.
+TMP=$(mktemp -p "$TMPDIR" -t mcp-response.XXXXXX)
+curl -s -X POST "$LAIN_URL/mcp" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_active_agents","arguments":{}},"id":1}' \
-  | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]["content"][0]["text"]; print(len(json.loads(r)))')
+  > "$TMP"
+ACTIVE=$(python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]["content"][0]["text"]; print(len(json.loads(r)))' < "$TMP")
+rm -f "$TMP"
 if [ "$ACTIVE" -lt 2 ]; then
   echo "FAIL: expected 2 active agents, got $ACTIVE"
   exit 1
@@ -78,9 +85,12 @@ echo "OK: 2 active agents in server"
 echo "OK: agent-a released auth.rs"
 
 # 8. Verify occupancy.
-OCC=$(curl -s -X POST "$LAIN_URL/mcp" -H 'Content-Type: application/json' \
+TMP=$(mktemp)
+curl -s -X POST "$LAIN_URL/mcp" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_occupancy","arguments":{"path":"'$TMPDIR/repos/auth-svc/auth.rs'"}},"id":1}' \
-  | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]["content"][0]["text"]; print(len(json.loads(r)))')
+  > "$TMP"
+OCC=$(python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]["content"][0]["text"]; print(len(json.loads(r)))' < "$TMP")
+rm -f "$TMP"
 echo "OK: occupancy query returned $OCC entry/entries"
 
 echo "E2E PASS"

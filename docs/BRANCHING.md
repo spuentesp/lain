@@ -68,9 +68,10 @@ merge.
 
 ## What counts as "agent contract"
 
-The `lain/agent-contract` status is published by
-[`.github/workflows/agent-contract.yml`](.github/workflows/agent-contract.yml)
-on every CI workflow_run completion. It aggregates three CI jobs:
+The `lain/agent-contract` status is published by the `agent-contract`
+job inside [`.github/workflows/ci.yml`](.github/workflows/ci.yml), not
+by a separate workflow. It runs as part of every CI invocation and
+aggregates three sibling CI jobs:
 
 - `Capability suite (demo.sh)` — scripts/demo.sh ground-truth checks
 - `Tool schema matches docs/tool-schema.json` — schema-drift gate
@@ -121,3 +122,34 @@ For an urgent fix that can't wait for `dev` to settle:
   via reviewed PRs. Direct push is blocked.
 - **Not immutable history.** Squash-merge and rebase-merge are both
   allowed. Force-pushes on protected branches are blocked.
+
+## CI expectations per branch
+
+`ci.yml` is tiered so the dev branch gets the fast lane and `main`
+gets the full hardened battery. The gating is per-job via inline
+`if:` conditions reading `github.ref` and `github.base_ref` directly
+— job-level `if:` can't read workflow `env`, so a shared
+`FULL_BATTERY` env var isn't an option. Heavy jobs use:
+
+```yaml
+if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+```
+
+to scope themselves to push-to-main and PR-to-main only:
+
+| Job | dev / PR-to-dev | main / PR-to-main |
+|---|---|---|
+| `test` (Ubuntu) | ✓ | ✓ |
+| `test-cross` (macOS + Windows) | — | ✓ |
+| `lint`, `npm-shim`, `schema-drift`, `health-badge` | ✓ | ✓ |
+| `capability` (demo.sh 113 ground-truth checks) | — | ✓ |
+| `coverage` (llvm-cov) | — | ✓ |
+| `version-drift`, `action-contracts` | — | ✓ |
+
+A workflow-level `concurrency:` block cancels superseded runs for
+the same ref, so rapid-fire commits to `dev` don't pile up.
+
+This tiering keeps the dev → main signal cheap (~5 min on dev)
+while preserving the full battery as the merge gate on main.
+
+For the agent-facing summary, see the top-level `AGENTS.md`.

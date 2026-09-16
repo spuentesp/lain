@@ -351,8 +351,21 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // rebind `graph` / `workspace` to whichever repo the caller
     // resolved. The bindings above stay as the default for calls that
     // name no repo, which is the whole story in single-repo mode.
+    //
+    // For single-repo federation the cold-boot race closure
+    // (`ToolRegistry::dispatch` awaits the active repo's
+    // `indexed_signal` when the per-repo graph is empty) needs the
+    // signal threaded through here too. Multi-repo callers go through
+    // `ToolContext::for_repo`, which rebinds per call.
     let mut tool_executor = tool_executor;
     tool_executor.ctx = tool_executor.ctx.with_federation(Arc::clone(&federation));
+    if federation.list_repos().len() == 1 {
+        if let Some((only_id, _)) = federation.list_repos().into_iter().next() {
+            if let Some(repo) = federation.get_repo(&only_id) {
+                tool_executor.ctx = tool_executor.ctx.with_indexed_signal(repo.indexed_signal());
+            }
+        }
+    }
     let tool_executor = tool_executor;
 
     // Build the LainMcpServer eagerly so any wiring problems surface

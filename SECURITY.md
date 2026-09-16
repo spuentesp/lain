@@ -20,13 +20,12 @@ anything older is best-effort.
 
 ## Reporting a Vulnerability
 
-**Primary channel:** GitHub Security Advisories — open a private report
-via the repo's *Security* tab → *Report a vulnerability*. This routes
-through GitHub's disclosure flow and gives us a private fork to develop
-the fix in.
+**Report privately:** [Report a vulnerability through GitHub Security Advisories](https://github.com/spuentesp/lain/security/advisories/new).
+The report stays private while we investigate and prepare a fix.
+Please don't include vulnerability details in public issues.
 
-**Fallback:** email the maintainer at the address listed on the GitHub
-profile if the Advisories flow is unavailable for any reason.
+**Published advisories:** [Security advisories for Lain](https://github.com/spuentesp/lain/security/advisories)
+describe disclosed vulnerabilities and available fixes.
 
 ### Disclosure timeline
 

@@ -1,14 +1,34 @@
 name: CI
 
-# Triggers on both main and dev. Job-level `if:` conditions keep
-# `version-drift`, `coverage`, and the agent-required jobs scoped to
-# main where they belong; the rest of the matrix runs on both
-# branches so PRs targeting dev drive the agent-contract rollup.
+# Two-tier CI: cheap battery on dev/PR-to-dev, full hardened on
+# main and PR-to-main. Job-level `if: FULL_BATTERY_EXPR` (see below)
+# keeps the matrix lean on dev without splitting the workflow file.
+#
+# The condition is inlined into each gated job's `if:` rather than
+# read from a shared `env:` var: job-level `if:` only has access to
+# the `github`, `inputs`, and `needs` contexts (confirmed via
+# actionlint -- `env` is not among them, even for workflow-level env
+# vars, and referencing it there invalidates the whole workflow file
+# at schedule time with zero jobs run). `github.*` alone is enough
+# for this condition, so no extra job is needed to smuggle it through
+# `needs.*.outputs` either.
+#
+#   dev push / PR-to-dev:  ubuntu-only test + lint + npm-shim
+#                          + health-badge + schema-drift (~5 min)
+#   main push / PR-to-main: full matrix + capability + coverage
+#                          + version-drift + action-contracts (~20 min)
+#
+# `concurrency:` cancels superseded runs so rapid-fire commits
+# don't pile up behind each other.
 on:
   push:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,9 +47,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Fast lane: Linux only. macos/windows cells move to the
+        # `test-cross` job below, which is gated on full_battery.
+        os: [ubuntu-latest]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install dependencies (ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -74,16 +96,53 @@ jobs:
         shell: bash
         run: |
           cd tests/js
-          npm ci || npm install
+          npm ci
           npm test
+
+  test-cross:
+    # Cross-platform (macOS + Windows) cells. Only runs on full
+    # battery — i.e. push to main or PR targeting main. Saves
+    # ~10 min/runner on every dev push and PR-to-dev.
+    name: Cargo Test cross-platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+        shell: bash
+        run: cargo build --bin lain
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --workspace
+
+      - name: Module declarations resolve to committed files
+        shell: bash
+        run: bash scripts/check-mod-resolution.sh
 
   capability:
     name: Capability suite (demo.sh)
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install dependencies
         run: |
@@ -119,7 +178,7 @@ jobs:
       statuses: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Self-reference: use the action at HEAD, the same commit the
       # workflow is shipping in. Consumers pin to a tag (see the
       # action's README); the same repo cannot pin to a tag that
@@ -136,17 +195,25 @@ jobs:
       contents: read
     # The drift check runs on main, where release tags are pushed.
     # On PRs the comparison would fail the moment a new tag is cut,
-    # before the bump PR can land. Run only on push to main.
+    # before the bump PR can land -- confirmed live: this job failed
+    # on this exact PR when v0.7.4-rc1 was cut mid-review, before
+    # action.yml's pinned default caught up. Push-to-main only, not
+    # the broader full-battery condition the other gated jobs share.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract pinned version from action.yml
         id: pinned
         run: |
           # Print from the `lain-version:` line to the first `default:`
-          # line, then extract the vX.Y.Z token. Robust to YAML layout.
+          # line, then extract the vX.Y.Z token. The regex accepts an
+          # optional pre-release suffix (`-rc1`, `-beta.2`, etc.) so the
+          # same extractor keeps working when the next release is a
+          # pre-release; without this, `v0.7.4-rc1` would silently
+          # produce an empty match and the drift check would error out
+          # the first time a pre-release is cut.
           PINNED=$(sed -n '/lain-version:/,/default:/p' .github/actions/lain-health-badge/action.yml \
-            | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+            | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?" | head -1)
           if [ -z "$PINNED" ]; then
             echo "::error::could not parse lain-version default from action.yml"
             exit 1
@@ -186,7 +253,7 @@ jobs:
     # the three test-matrix cells pick up the rest. Failures here
     # block merge regardless of the test matrix's color.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
@@ -229,7 +296,7 @@ jobs:
     # A non-empty `git diff` on the regenerated file fails CI,
     # forcing the PR to include the regenerated snapshot.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -269,7 +336,7 @@ jobs:
       run:
         working-directory: npm-shim
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # Node 20 was deprecated on github-actions runners on
@@ -277,27 +344,28 @@ jobs:
           # npm-shim's `engines.node` is `>=18`, so 22 is in range.
           node-version: '22'
       - name: Install dependencies
-        run: npm ci || npm install
+        run: npm ci
       - name: Run tests
         run: npm test
 
 
   coverage:
-    # Coverage run is intentionally restricted to push-to-main. PRs
-    # already pay the `cargo test --workspace` cost on every OS; adding
-    # a coverage build per PR would lengthen the queue without changing
-    # the merge signal (codecov.io still annotates PRs from the latest
-    # main-branch upload). Until a baseline is chosen, the upload
-    # never fails CI: `fail_ci_if_error: false` plus codecov.yml's
+    # Coverage run is intentionally restricted to full_battery
+    # (push-to-main or PR-to-main). PRs already pay the `cargo test
+    # --workspace` cost on every OS; adding a coverage build per PR
+    # would lengthen the queue without changing the merge signal
+    # (codecov.io still annotates PRs from the latest main-branch
+    # upload). Until a baseline is chosen, the upload never fails
+    # CI: `fail_ci_if_error: false` plus codecov.yml's
     # target=0/threshold=0 settings keep the badge dark until the
     # first deliberate baseline PR.
     name: Coverage (cargo llvm-cov)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install dependencies
         run: |
@@ -346,15 +414,18 @@ jobs:
   action-contracts:
     name: Badge and release contracts
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: Release metadata consistency
         run: python scripts/check-release-version.py
+      - name: Release provenance export tests
+        run: python scripts/test_release_provenance.py
       - name: Release gate regression tests
         run: python scripts/test_release_version.py
       # METADATA.toml / server.json / sync-server-json.py drift gate.
@@ -368,3 +439,74 @@ jobs:
         run: bash .github/actions/lain-health-badge/tests/test_extract_added_fns.sh
       - name: Installer checks
         run: bash tests/install-test.sh
+
+  # Publishes the `lain/agent-contract` commit status directly from
+  # this workflow run, instead of the separate agent-contract.yml's
+  # `workflow_run: [CI]` rollup. That indirection never actually fired
+  # for a PR's own commit -- confirmed live: dozens of prior PR-branch
+  # CI completions, zero corresponding agent-contract runs, only ever
+  # firing from CI runs already on `main` (i.e. post-merge). Since
+  # `lain/agent-contract` is a required branch-protection check, this
+  # meant no PR could ever satisfy it before merge; only an admin
+  # bypass got PRs in. Running the aggregation as a job in this same
+  # workflow fires deterministically for every push and pull_request,
+  # on every branch, with no separate trigger to go stale.
+  #
+  # Same aggregate rule as before: PASS iff every agent-relevant job
+  # (capability, schema-drift, npm-shim) is success or skipped.
+  #
+  # For pull_request events from forks, GitHub downgrades the
+  # default `GITHUB_TOKEN` to read-only, so the `gh api ... statuses/...`
+  # POST below would 403. The branch protection check is still required
+  # on fork PRs, but it can never be satisfied from inside a fork-PR
+  # workflow run; that's a separate problem (the cross-repo status
+  # publishing pattern, see PR #43 / `docs/BRANCHING.md`). Here we
+  # just skip the job cleanly on fork PRs so it doesn't surface as a
+  # confusing CI failure.
+  agent-contract:
+    name: Publish agent-contract status
+    needs: [capability, schema-drift, npm-shim]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Aggregate into lain/agent-contract commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CAPABILITY: ${{ needs.capability.result }}
+          SCHEMA_DRIFT: ${{ needs.schema-drift.result }}
+          NPM_SHIM: ${{ needs.npm-shim.result }}
+        run: |
+          set -euo pipefail
+
+          # `github.sha` on a pull_request event is the ephemeral
+          # merge commit, not the PR's actual head commit -- posting a
+          # status there would be invisible to the PR branch of the
+          # protection check it's meant to satisfy. Use the real head
+          # SHA for PRs; `github.sha` is already correct for push.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
+
+          status="success"
+          total=0
+          passed=0
+          for result in "$CAPABILITY" "$SCHEMA_DRIFT" "$NPM_SHIM"; do
+            total=$((total + 1))
+            if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
+              passed=$((passed + 1))
+            else
+              status="failure"
+            fi
+          done
+          summary="${passed}/${total} agent-contract jobs green"
+          echo "Rollup for ${SHA}: ${summary} -> ${status}"
+
+          gh api "repos/${{ github.repository }}/statuses/${SHA}" \
+            --method POST \
+            --field state="$status" \
+            --field description="$summary" \
+            --field context='lain/agent-contract'

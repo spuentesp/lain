@@ -56,7 +56,10 @@ for i in $(seq 1 300); do
     if curl -s -m 1 "$URL/health" >/dev/null 2>&1; then break; fi
     sleep 1
 done
-curl -s -m 2 "$URL/health" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("server ready:", d.get("status"), "| repos:", [r["id"]+":"+r["health"] for r in d.get("federation",{}).get("repos",[])])' || { echo "FAIL: server did not start"; tail -5 "$WORK/server.log"; exit 1; }
+TMP=$(mktemp)
+curl -s -m 2 "$URL/health" > "$TMP"
+python3 -c 'import sys,json; d=json.load(sys.stdin); print("server ready:", d.get("status"), "| repos:", [r["id"]+":"+r["health"] for r in d.get("federation",{}).get("repos",[])])' < "$TMP" || { echo "FAIL: server did not start"; tail -5 "$WORK/server.log"; exit 1; }
+rm -f "$TMP"
 
 call_tool() {  # name args outfile → prints wall seconds
     local name="$1" args="$2" out="$3"

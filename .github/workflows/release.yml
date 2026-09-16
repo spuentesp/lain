@@ -26,12 +26,31 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: Verify release tag and package metadata
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME"
+      # Compute SOURCE_DATE_EPOCH as a Unix-epoch INTEGER and consume
+      # it via `needs.version-check.outputs.epoch`.
+      #
+      # History of attempts that "looked right" but silently failed:
+      #
+      # 1. shell form `echo "epoch=$(date -d '...' +%s)" >> ...` (PR #43)
+      # 2. python heredoc redirect to $GITHUB_OUTPUT       (PR #45)
+      # 3. python + direct echo to $GITHUB_OUTPUT          (this branch)
+      #
+      # All three wrote the value to the file correctly (verified
+      # by a debug `tail` echo), but GitHub Actions never registered
+      # the output key. Build jobs continued to see SOURCE_DATE_EPOCH='',
+      # and macOS-arm64's ring/tree-sitter iOS assembly then failed
+      # with "environment variable 'SOURCE_DATE_EPOCH' ('') must be
+      # a non-negative decimal integer".
+      #
+      # Build jobs now compute their own epoch locally from the same
+      # `github.event.repository.updated_at` value. Same fixed value
+      # across jobs in a single run, no cross-job output needed.
 
   build-linux:
     needs: version-check
@@ -39,28 +58,39 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
+      # setup-python moves up so SOURCE_DATE_EPOCH can be computed
+      # via Python before the cargo build step. Within-job GITHUB_ENV
+      # writes are reliable; cross-job outputs were silently dropped
+      # (see version-check comment for the full history).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Compute SOURCE_DATE_EPOCH
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        run: |
+          EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
       # Reproducible-build environment variables. SOURCE_DATE_EPOCH
-      # normalizes embedded timestamps; CARGO_INCREMENTAL=0 drops
+      # is set via GITHUB_ENV above; CARGO_INCREMENTAL=0 drops
       # absolute-path incremental compilation artifacts. Full
       # byte-identical reproduction still requires a pinned
       # rust-toolchain.toml, which is the next iteration.
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-unknown-linux-gnu
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-unknown-linux-gnu/release/lain
@@ -76,17 +106,35 @@ jobs:
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           format: cyclonedx-json
-          artifact: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          output-file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cdx.json
+          upload-release-assets: false
       - name: Attest build provenance
+        id: provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+      - name: Export signed provenance for release downloads
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          ARTIFACT_PATH: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/export-release-provenance.py "$BUNDLE_PATH" "$ARTIFACT_PATH"
+          gh attestation verify "$ARTIFACT_PATH" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ARTIFACT_PATH.sigstore.json" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF"
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.sha256
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.cdx.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.sigstore.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz.intoto.jsonl
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -97,23 +145,30 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Compute SOURCE_DATE_EPOCH
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        run: |
+          EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target aarch64-apple-darwin
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/aarch64-apple-darwin/release/lain
@@ -129,17 +184,35 @@ jobs:
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           format: cyclonedx-json
-          artifact: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+          file: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+          output-file: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
+          upload-release-assets: false
       - name: Attest build provenance
+        id: provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+      - name: Export signed provenance for release downloads
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          ARTIFACT_PATH: release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/export-release-provenance.py "$BUNDLE_PATH" "$ARTIFACT_PATH"
+          gh attestation verify "$ARTIFACT_PATH" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ARTIFACT_PATH.sigstore.json" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF"
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sha256
             release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.cdx.json
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.sigstore.json
+            release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz.intoto.jsonl
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -150,24 +223,32 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Extract version
         shell: bash
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         id: version
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Compute SOURCE_DATE_EPOCH
+        env:
+          UPDATED_AT: ${{ github.event.repository.updated_at }}
+        shell: bash
+        run: |
+          EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
+          echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+          echo "epoch-debug=$EPOCH"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
       - name: Build
         env:
-          SOURCE_DATE_EPOCH: ${{ github.event.repository.updated_at }}
           CARGO_INCREMENTAL: '0'
         run: cargo build --release --target x86_64-pc-windows-msvc
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
       - name: Verify built version before publishing
         shell: bash
         run: python scripts/check-release-version.py --tag "$GITHUB_REF_NAME" --binary target/x86_64-pc-windows-msvc/release/lain.exe
@@ -185,17 +266,35 @@ jobs:
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           format: cyclonedx-json
-          artifact: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+          file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+          output-file: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cdx.json
+          upload-release-assets: false
       - name: Attest build provenance
+        id: provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+      - name: Export signed provenance for release downloads
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          ARTIFACT_PATH: release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/export-release-provenance.py "$BUNDLE_PATH" "$ARTIFACT_PATH"
+          gh attestation verify "$ARTIFACT_PATH" --repo "$GITHUB_REPOSITORY" \
+            --bundle "$ARTIFACT_PATH.sigstore.json" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF"
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.sha256
             release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.cdx.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.sigstore.json
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz.intoto.jsonl
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -209,9 +308,9 @@ jobs:
     needs: [build-linux, build-macos-arm64, build-windows]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
@@ -226,15 +325,19 @@ jobs:
       - name: Compute aggregate SHA256SUMS
         run: |
           cd artifacts
-          python scripts/compute-sha256.py lain-*-*.tar.gz > /tmp/sums.txt
+          version="${GITHUB_REF_NAME#v}"
+          python ../scripts/compute-sha256.py \
+            "lain-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+            "lain-${version}-aarch64-apple-darwin.tar.gz" \
+            "lain-${version}-x86_64-pc-windows-msvc.tar.gz" > SHA256SUMS
           # Compute writes sidecars, but we only want the aggregate
-          # file. Move the SUMs into a single SHA256SUMS file.
+          # file. The output above contains all tarball hashes.
           rm -f lain-*-*.tar.gz.sha256
-          mv /tmp/sums.txt SHA256SUMS
           cat SHA256SUMS
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: artifacts/SHA256SUMS
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -245,7 +348,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
@@ -262,6 +365,70 @@ jobs:
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: server.json
+          fail_on_unmatched_files: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish the npm shim to the @spuentesp/lain-mcp package on the
+  # public npm registry. This is the check that flips the OpenSSF
+  # Scorecard `Packaging` check from -1 to 10 — the existing release
+  # workflow uploads binaries via softprops/action-gh-release, but
+  # scorecard only recognises `npm publish` / `cargo publish` /
+  # `gem push` as a "packaging workflow".
+  #
+  # Authentication uses npm Trusted Publishing (OIDC), not a long-lived
+  # token. The job's `id-token: write` permission is what makes this
+  # work — npm picks up `ACTIONS_ID_TOKEN_REQUEST_TOKEN` /
+  # `ACTIONS_ID_TOKEN_REQUEST_URL` from the runner env automatically.
+  # The trusted-publisher is configured once at
+  # https://www.npmjs.com/package/@spuentesp/lain-mcp/access
+  # (Repository: spuentesp/lain, Workflow filename: release.yml).
+  # This means no NPM_TOKEN secret to manage, rotate, or leak, and
+  # the resulting `--provenance` attestation carries a verifiable
+  # repo + workflow identity instead of a generic npm provenance.
+  #
+  # The postinstall downloads the binary from this repo's GitHub
+  # release, so this job must run *after* the release assets are
+  # uploaded.
+  publish-npm:
+    needs: [publish-server-json]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        id: version
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'  # npm 11.5.1+ for Trusted Publishing OIDC
+          registry-url: 'https://registry.npmjs.org'
+      - name: Sync npm-shim version to release tag
+        working-directory: npm-shim
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = "package.json";
+            const pkg = JSON.parse(fs.readFileSync(path));
+            pkg.version = process.env.VERSION;
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          '
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+      - name: Publish to npm
+        working-directory: npm-shim
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # npm defaults to the `latest` dist-tag for every publish, which
+          # would silently make a 0.7.4-rc1 the recommended install for
+          # `npm install @spuentesp/lain-mcp`. Detect a prerelease suffix
+          # (anything after a `-` in the version) and route the publish
+          # to the `next` tag instead, leaving `latest` for stable cuts.
+          case "$VERSION" in
+            *-*) TAG_FLAG="--tag next" ;;
+            *)    TAG_FLAG="" ;;
+          esac
+          npm publish --provenance --access public $TAG_FLAG
