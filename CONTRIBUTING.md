@@ -26,7 +26,7 @@ node npm-shim/scripts/install.test.js && \
 For end-to-end coverage, run [`scripts/demo.sh`](scripts/demo.sh). It
 exercises the agent contract (tool schema, capability suite, npm-shim)
 against a sandbox repo and is what the
-[`lain/agent-contract`](.github/workflows/agent-contract.yml) rollup
+[`lain/agent-contract`](.github/workflows/ci.yml#jobs) rollup
 status check is built on.
 
 A quick sanity check at any time: `cargo run -- doctor`. It validates

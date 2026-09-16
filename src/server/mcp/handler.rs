@@ -9,7 +9,7 @@ use crate::server::LainServer;
 use crate::state::ActiveWorkspace;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
-use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -1778,8 +1778,51 @@ async fn handle_request(
 
     // POST /mcp -> JSON-RPC
     if method == Method::POST && path == "/mcp" {
-        let body = req.collect().await?;
-        let body_bytes = body.to_bytes();
+        // Reject up-front any request that declares a body larger than
+        // what an MCP client could legitimately need. 4 MiB is generous
+        // for any tool-call payload we accept (the largest legitimate
+        // body we see is `extract_strings`/`extract_refs_with_locals`
+        // outputs from a single repo, which fit in tens of KB). Clients
+        // that omit Content-Length (chunked encoding) are still bounded
+        // by `Limited` below; this short-circuit just avoids buffering
+        // a known-oversize body before rejecting it.
+        const MAX_MCP_BODY_BYTES: u64 = 4 * 1024 * 1024;
+        if let Some(cl) = req.headers().get(hyper::header::CONTENT_LENGTH) {
+            if let Some(declared) = cl.to_str().ok().and_then(|s| s.parse::<u64>().ok()) {
+                if declared > MAX_MCP_BODY_BYTES {
+                    return Ok(Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .header("Content-Type", "application/json")
+                        .body(full_body(Bytes::from_static(
+                            b"{\"error\":\"body exceeds 4 MiB limit\"}",
+                        )))
+                        .unwrap());
+                }
+            }
+        }
+        let body_bytes = match Limited::new(req.into_body(), MAX_MCP_BODY_BYTES as usize)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(_overflow) => {
+                // The only failure modes are (a) the body exceeded
+                // MAX_MCP_BODY_BYTES — which is the design — or (b) the
+                // client disconnected mid-stream. Both surface as the
+                // same error from `Limited::collect`. For (a) return
+                // 413 so the client knows it overshot; for (b) 413 is
+                // still a fine answer (the body wasn't going to arrive
+                // anyway). Don't log: the cap is the contract, not a
+                // misbehavior.
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from_static(
+                        b"{\"error\":\"body exceeds 4 MiB limit\"}",
+                    )))
+                    .unwrap());
+            }
+        };
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
         let rpc_response = match serde_json::from_str::<serde_json::Value>(&body_str) {

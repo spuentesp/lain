@@ -50,14 +50,18 @@ inventory.
 
 | Advisory | Crate | Status |
 |---|---|---|
-| `RUSTSEC-2025-0141` | bincode@1.3.3 | bincode 1.x is unmaintained. Migrate to bincode 2.x, postcard, or rmp-serde. |
-| `RUSTSEC-2024-0436` | paste@1.0.15 | paste is unmaintained. Switch to `pastey` (drop-in API). |
-| `RUSTSEC-2025-0134` | rustls-pemfile@1.0.4 | 1.x branch unmaintained. Use rustls 0.23+ (uses 2.x). |
+| `RUSTSEC-2024-0436` | paste@1.0.15 | paste is unmaintained. Switch to `pastey` (drop-in API). The rustls 0.23+ upgrade (Bucket B) did *not* drop paste as predicted — it's still in the lockfile and needs its own PR. |
 
-These three will be cleared by the rustls 0.23+ upgrade in
-Bucket B (it transitively drops paste and rustls-pemfile). bincode
-needs a separate migration PR — search the codebase for `bincode::`
-to scope the work.
+rustls-pemfile was cleared by the rustls 0.23+ upgrade. bincode
+was migrated to 2.0.x in PR #57 and is no longer in this bucket
+(see the resolved list below).
+
+## Resolved (kept here so the audit trail survives)
+
+| Advisory | Crate | Resolved by |
+|---|---|---|
+| `RUSTSEC-2025-0141` | bincode@1.3.3 → 2.0.1 | PR #57 (closes 1 OSV vuln). `bincode::serde::*` calls in `src/server/graph.rs` and `src/server/federation/manifest.rs` use `bincode::config::legacy()` so the migration is backwards-compatible with pre-existing on-disk state. |
+| `RUSTSEC-2025-0134` | rustls-pemfile@1.0.4 | rustls 0.21→0.23 bump in PR #53 (the lockfile no longer pulls rustls-pemfile; rustls 0.23 uses its 2.x branch internally). |
 
 ## Bucket E — git2 (separate PR)
 

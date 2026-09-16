@@ -10,7 +10,7 @@
 [![SBOM](https://img.shields.io/badge/SBOM-CycloneDX-blueviolet)](https://github.com/spuentesp/lain/releases/latest)
 [![Build Provenance](https://img.shields.io/badge/Provenance-SLSA_L2-success)](docs/VERIFICATION.md)
 [![MCP tools](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/spuentesp/lain/main/.github/badges/mcp-tools.json)](https://github.com/spuentesp/lain/blob/main/docs/tool-schema.json)
-[![Agent contract](https://github.com/spuentesp/lain/actions/workflows/agent-contract.yml/badge.svg?branch=main)](https://github.com/spuentesp/lain/actions/workflows/agent-contract.yml)
+[![Agent contract](https://github.com/spuentesp/lain/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/spuentesp/lain/actions/workflows/ci.yml?query=event%3Apush+branch%3Amain+job%3Aagent-contract)
 
 > **Structural Code Intelligence & Multi-Agent Coordination for AI Assistants.**
 > Give your coding agents an in-memory graph brain instead of making them guess from flat text.

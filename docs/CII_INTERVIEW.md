@@ -268,10 +268,11 @@ confirm them.
 
 ### ☐ F3. Does the project have a continuous integration system?
 
-> [x] **Yes.** GitHub Actions across 9 workflows (`.github/workflows/`):
-> `ci.yml` (tiered), `codeql.yml`, `dependency-review.yml`,
-> `release.yml`, `safeskill.yml`, `scorecard.yml`, `agent-contract.yml`,
-> `mcp-tools-count.yml`, `fuzz-nightly.yml`, `federation-nightly.yml`.
+> [x] **Yes.** GitHub Actions across 8 workflows (`.github/workflows/`):
+> `ci.yml` (tiered, hosts the `lain/agent-contract` rollup job),
+> `codeql.yml`, `dependency-review.yml`, `release.yml`, `safeskill.yml`,
+> `scorecard.yml`, `mcp-tools-count.yml`, `fuzz-nightly.yml`,
+> `federation-nightly.yml`.
 
 ### ☐ F4. Does the project use a static type system?
 
