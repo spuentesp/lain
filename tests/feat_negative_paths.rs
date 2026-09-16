@@ -87,8 +87,23 @@ fn boot_server(port: u16) -> ServerGuard {
     // graph is non-empty and `find_anchors`/`get_blast_radius`/
     // `explain_symbol`/etc. have real symbols to look up. The repo
     // id is the directory basename, `repo`.
-    let project = tempfile::tempdir().unwrap();
-    let repo_dir = project.path().join("repo");
+    //
+    // The tempdirs MUST outlive the spawned child: `tempfile::TempDir`'s
+    // `Drop` calls `remove_dir_all`, which would delete the fixture
+    // files out from under the child process while it's still serving
+    // requests. We `Box::leak` the three handles so they survive past
+    // `boot_server` returning; the test process reuses the tempdir
+    // root until the OS (or `tmpreaper`) cleans it. The pre-leak
+    // baseline intermittently flaked `feat_negative_paths_end_to_end`
+    // (~20% locally) because the drop ran between `boot_server`
+    // returning and the watcher's first `index_forced`; the child
+    // then re-walked an empty `get_all_tracked_files()` (every path
+    // failed `is_file()`) and `prune_orphans` wiped the graph
+    // mid-test. See the diagnostic log under `LAIN_DEBUG_COLD_BOOT`
+    // for the trace.
+    let project: tempfile::TempDir = tempfile::tempdir().unwrap();
+    let project_path: std::path::PathBuf = project.keep();
+    let repo_dir = project_path.join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
     std::fs::create_dir_all(repo_dir.join("src")).unwrap();
     std::fs::write(
@@ -111,10 +126,10 @@ fn boot_server(port: u16) -> ServerGuard {
         .unwrap_or("repo")
         .to_string();
 
-    let data_dir = project.path().join("data");
+    let data_dir = project_path.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
     std::fs::write(
-        project.path().join("repos.yaml"),
+        project_path.join("repos.yaml"),
         format!(
             "data_dir: {}\nrepos:\n  - id: {}\n    source:\n      type: workspace_dir\n      path: {}\n",
             data_dir.display(),
@@ -124,7 +139,7 @@ fn boot_server(port: u16) -> ServerGuard {
     )
     .unwrap();
     std::fs::write(
-        project.path().join("workspaces.yaml"),
+        project_path.join("workspaces.yaml"),
         format!(
             "workspaces:\n  - name: feat-negative\n    members: [{}]\n",
             repo_id
@@ -132,8 +147,10 @@ fn boot_server(port: u16) -> ServerGuard {
     )
     .unwrap();
 
-    let state = tempfile::tempdir().unwrap();
-    let xdg_config = tempfile::tempdir().unwrap();
+    let state: tempfile::TempDir = tempfile::tempdir().unwrap();
+    let state_path: std::path::PathBuf = state.keep();
+    let xdg_config: tempfile::TempDir = tempfile::tempdir().unwrap();
+    let xdg_config_path: std::path::PathBuf = xdg_config.keep();
 
     let stderr_path = std::env::temp_dir().join(format!("feat-negative-stderr-{port}.log"));
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();
@@ -148,11 +165,11 @@ fn boot_server(port: u16) -> ServerGuard {
             "--workspace",
             "auto",
             "--config",
-            project.path().join("repos.yaml").to_str().unwrap(),
+            project_path.join("repos.yaml").to_str().unwrap(),
         ])
-        .env("XDG_STATE_HOME", state.path())
-        .env("XDG_CONFIG_HOME", xdg_config.path())
-        .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
+        .env("XDG_STATE_HOME", &state_path)
+        .env("XDG_CONFIG_HOME", &xdg_config_path)
+        .env("LAIN_JOB_STORE", state_path.join("jobs.json"))
         .env_remove("LAIN_EMBEDDING_MODEL")
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))

@@ -399,20 +399,53 @@ pub fn wait_for_repo_index(host: &str, wait_for_symbol: &[&str]) {
         // `explain_symbol` with each requested handle so we wait for
         // the per-repo graph specifically — the same path the
         // failing tools will use.
+        //
+        // Use `tools_call_envelope` (not `tools_call_text`) so the
+        // poll can observe an isError=true response without panicking.
+        // The cold-boot race closure in `ToolRegistry::dispatch` —
+        // which awaits the active repo's `indexed_signal` with a 200 ms
+        // budget when the per-repo graph is empty — converts the
+        // pre-index "Node not found" miss into a small per-poll wait,
+        // so the loop now mostly observes isError=true on each poll
+        // until the indexer fires the signal and the next poll
+        // succeeds. `tools_call_text` panics on isError=true, which
+        // would turn the bounded wait into a panic before the test
+        // ever sees the populated graph.
         let start = std::time::Instant::now();
         for &name in wait_for_symbol {
             loop {
                 if start.elapsed() > Duration::from_secs(30) {
                     panic!("symbol `{name}` never resolved through per-repo resolver within 30s on {host}");
                 }
-                let resp =
-                    tools_call_text(host, "explain_symbol", serde_json::json!({"symbol": name}));
-                // `explain_symbol` returns isError=true with
-                // "Node not found for handle" before the indexer
-                // catches up. Anything else means the per-repo
-                // resolver found it.
-                if !resp.contains("\"isError\":true") || !resp.contains("Node not found") {
+                let env = tools_call_envelope(
+                    host,
+                    "explain_symbol",
+                    serde_json::json!({"symbol": name}),
+                );
+                let is_error = env
+                    .pointer("/result/isError")
+                    .and_then(|v| v.as_bool())
+                    == Some(true);
+                let text = env
+                    .pointer("/result/content/0/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let not_found = text.contains("Node not found");
+                // Only break when the resolver actually found the
+                // symbol. `is_error && not_found` is the cold-boot
+                // miss and stays in the loop; `is_error && !not_found`
+                // is a different error (e.g. empty graph, parse
+                // error) that we'd want to surface — panic with the
+                // full envelope so the failure is debuggable instead
+                // of timing out.
+                if !is_error {
                     break;
+                }
+                if !not_found {
+                    panic!(
+                        "explain_symbol({name}) returned an unexpected error envelope: {env}"
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }

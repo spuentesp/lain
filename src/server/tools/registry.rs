@@ -95,6 +95,18 @@ pub struct ToolContext {
     /// into the args; this handle is what lets [`Self::for_repo`] turn
     /// that id back into the right graph and checkout.
     pub federation: Option<Arc<crate::server::federation::federated_index::FederatedIndex>>,
+    /// Per-repo "indexed" notification for the cold-boot race closure.
+    ///
+    /// `RepoIndex::indexed_signal` is fired after every successful
+    /// `index()` / `index_forced()`. The MCP dispatcher awaits this
+    /// with a 200 ms budget when the active repo's per-repo graph is
+    /// empty, so a tool call that lands in the cold-boot window wakes
+    /// up to a populated graph instead of an empty placeholder (the
+    /// race that intermittently flaked `feat_negative_paths_end_to_end`
+    /// before the per-repo and federation graphs had a shared "indexed"
+    /// signal). `None` in single-workspace mode and in tests that don't
+    /// wire a federation — the dispatcher's wait is then a no-op.
+    pub indexed_signal: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl ToolContext {
@@ -145,6 +157,10 @@ impl ToolContext {
             // federation mode; single-workspace executors leave it None
             // and `for_repo` is then a no-op.
             federation: None,
+            // Set by `with_indexed_signal` for federation-mode servers;
+            // single-workspace executors leave it None and the
+            // dispatcher's cold-boot wait is then a no-op.
+            indexed_signal: None,
         }
     }
 
@@ -154,6 +170,15 @@ impl ToolContext {
         fed: Arc<crate::server::federation::federated_index::FederatedIndex>,
     ) -> Self {
         self.federation = Some(fed);
+        self
+    }
+
+    /// Attach the active repo's `indexed_signal`. Federation-mode
+    /// servers set this once on the single-repo binding; multi-repo
+    /// callers go through `for_repo`, which rebinds the signal per
+    /// call. The dispatcher's cold-boot race closure depends on it.
+    pub fn with_indexed_signal(mut self, signal: Arc<tokio::sync::Notify>) -> Self {
+        self.indexed_signal = Some(signal);
         self
     }
 
@@ -171,6 +196,13 @@ impl ToolContext {
         let repo = fed.get_repo(&rid)?;
         let mut bound = self.clone();
         bound.graph = repo.db().clone();
+        // Cold-boot race closure: the active repo's indexed signal is
+        // what the dispatcher awaits when this repo's per-repo graph
+        // is empty. Without this rebind, the single-repo binding's
+        // signal (or `None` in multi-repo mode) would be used for
+        // every per-repo call, which is wrong in multi-repo
+        // federation.
+        bound.indexed_signal = Some(repo.indexed_signal());
         let root = repo.source().local_path().to_path_buf();
         // Git-backed tools (history, diff, branch status) read through
         // `git`, so it has to follow the repo too — otherwise they keep
@@ -252,6 +284,16 @@ impl std::fmt::Debug for ToolHandlerEntry {
 pub struct ToolRegistry;
 
 impl ToolRegistry {
+    /// Budget for the cold-boot race closure: a tool call that lands
+    /// while the active repo's per-repo graph is empty (between
+    /// `repo.index()` completing and the next `index_forced()`, or in
+    /// the first boot window before any index has populated the
+    /// graph) waits up to this long for the indexer's
+    /// `indexed_signal` to fire. Below the existing
+    /// `wait_for_repo_index` polling interval (200 ms) for
+    /// `list_repos`, so the test's overall wait budget doesn't grow.
+    const COLD_BOOT_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
     /// Iterate all registered tools and dispatch by name.
     pub async fn dispatch(
         ctx: &ToolContext,
@@ -275,6 +317,30 @@ impl ToolRegistry {
             },
             None => ctx,
         };
+        // Cold-boot race closure: when the per-repo graph is empty,
+        // await the active repo's `indexed_signal` with a bounded
+        // 200 ms budget so a tool call that lands in the cold-boot
+        // window wakes up to a populated graph instead of the empty
+        // placeholder. After the first successful `index()` pass
+        // the graph has data, `node_count() > 0`, and the wait is
+        // skipped — no latency cost in steady state.
+        // `indexed_signal` is `Some` only in federation mode after
+        // `for_repo` (multi-repo) or the LainServer's single-repo
+        // binding (single-repo); in single-workspace mode and tests
+        // that don't wire a federation it's `None` and the wait is
+        // a no-op.
+        //
+        // The test fixture's `wait_for_repo_index` previously used
+        // `tools_call_text`, which panics on `isError=true`, so the
+        // first cold-boot miss turned into a panic instead of a
+        // retry. That helper now uses `tools_call_envelope` (see
+        // the doc comment there) so the bounded wait below surfaces
+        // the actual race window and the test can poll through it.
+        if ctx.graph.node_count() == 0 {
+            if let Some(signal) = ctx.indexed_signal.as_ref() {
+                let _ = tokio::time::timeout(Self::COLD_BOOT_WAIT, signal.notified()).await;
+            }
+        }
         for entry in iter::<ToolHandlerEntry>() {
             if entry.0.name() == name {
                 return entry.0.call(ctx, args).await;
