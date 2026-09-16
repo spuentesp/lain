@@ -64,41 +64,6 @@ impl OpenApiOperation {
     }
 }
 
-/// Find handler in graph by operationId
-fn find_handler(graph: &GraphDatabase, operation_id: &str) -> Option<GraphNode> {
-    graph
-        .find_node_by_name(operation_id)
-        .or_else(|| graph.find_node_by_name(&to_snake_case(operation_id)))
-        .or_else(|| graph.find_node_by_name(&to_camel_case(operation_id)))
-}
-
-fn to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() && i > 0 {
-            result.push('_');
-        }
-        result.push(c.to_ascii_lowercase());
-    }
-    result
-}
-
-fn to_camel_case(name: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize = false;
-    for c in name.chars() {
-        if c == '_' {
-            capitalize = true;
-        } else if capitalize {
-            result.push(c.to_ascii_uppercase());
-            capitalize = false;
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
 /// Parse OpenAPI spec and extract operations
 pub fn parse_openapi(content: &str, spec_path: &str) -> Vec<OpenApiOperation> {
     // Try JSON first, then YAML using serde_yaml
@@ -173,7 +138,9 @@ pub fn enrich_with_openapi(
         };
         graph.upsert_node(route_node)?;
 
-        if let Some(handler) = find_handler(graph, &op.operation_id) {
+        if let Some(handler) =
+            crate::server::sensors::util::find_handler_in_graph(graph, &op.operation_id)
+        {
             let edge = GraphEdge::new(EdgeType::CallsHttp, route_id, handler.id.clone());
             graph.insert_edge(&edge)?;
             count += 1;
@@ -210,12 +177,7 @@ pub fn scan_workspace(
 ) -> Result<usize, LainError> {
     let mut count = 0;
 
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
-
-    for entry in walker.flatten() {
+    for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
