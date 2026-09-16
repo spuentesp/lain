@@ -31,9 +31,8 @@ pub mod server_status;
 pub mod workspace;
 
 pub use dto::{
-    ActiveWorkspaceInfo, CrossRepoBlastRadius, FederationHealth, GraphEdge, GraphNode,
-    RecentProjectEntry, RepoInfo, SymbolMatch, WorkspaceDetail, WorkspaceGraph, WorkspaceInfo,
-    WorkspaceRepoInfo,
+    ActiveWorkspaceInfo, CrossRepoBlastRadius, FederationHealth, RecentProjectEntry, RepoInfo,
+    SymbolMatch, WorkspaceDetail, WorkspaceGraph, WorkspaceInfo, WorkspaceRepoInfo,
 };
 pub use federation::{
     get_cross_repo_blast_radius, get_cross_repo_blast_radius_for_repo, get_federation_health,
