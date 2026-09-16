@@ -13,10 +13,10 @@ use crate::server::revision_log::{LookupResult, RevisionLog};
 use parking_lot::{Mutex, RwLock};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-pub use sidecar::subscribe;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+pub use sidecar::subscribe;
 pub use stream::{
     broadcast_overlay_diff, subscribe_apply, subscribe_channel, OverlayDiff, RevisionId,
 };
