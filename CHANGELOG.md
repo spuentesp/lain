@@ -27,6 +27,77 @@ All notable changes to LAIN are documented here. Versions follow
   on `claim_files_accepts_string_form_files` and
   `get_recent_activity_tool_groups_by_path` in `tests/presence.rs`.
   Both tests now run on Windows after the underlying fixes.
+- **`Formula/lain.rb` v0.7.4-rc1 download URLs and sha256 sums now
+  match the actual published release.** The formula declared
+  `version "0.7.4-rc1"` but its `url`/`sha256` lines still pointed
+  at the `v0.7.3` tarballs — meaning every supported Homebrew
+  install fetched the old binary and the formula's own
+  `assert_match "lain 0.7.4-rc1"` test would fail against it.
+  Updated all three platform blocks (macOS arm64, Linux x86_64,
+  Windows x86_64) to point at the real `v0.7.4-rc1` assets on the
+  GitHub release. Hashes pulled from the per-asset `.sha256` files
+  uploaded alongside the binaries.
+- **v0.7.4-rc1 GitHub release is now flagged as `prerelease: true`.**
+  The release was published without the pre-release flag set, so
+  npm's `latest` dist-tag handling didn't differentiate it from a
+  final release. Marked it via the GitHub releases API so any
+  consumer keying off the flag (npm `next` vs `latest`, downstream
+  tooling that hides pre-releases, etc.) gets the right signal.
+- **`/mcp` HTTP body is now bounded at 4 MiB.** The handler used to
+  do `req.collect().await?` with no size cap, so a single oversized
+  POST could exhaust server memory. Added a Content-Length
+  precheck (returns 413 immediately if the header advertises a body
+  > 4 MiB) and wrapped the stream in `http_body_util::Limited` so
+  chunked-encoded bodies without Content-Length hit the same 413
+  cap. The 4 MiB cap is generous for any legitimate MCP tool-call
+  payload we accept.
+- **`tests/e2e/federation_dashboard_e2e.sh` and
+  `tests/e2e/multiplayer-hooks.sh` no longer leak response files
+  on failure.** Both scripts used `mktemp` (no `-p`), so the
+  response file landed in `/tmp` and survived any non-zero exit
+  before the explicit `rm -f "$TMP"`. Switched to
+  `mktemp -p "${WORKDIR}"` (resp. `$TMPDIR`) so the existing
+  EXIT trap's `rm -rf` catches them on every exit path.
+- **`fuzz/fuzz_targets/path_canonicalize.rs` now compiles.**
+  `canonical_claim_path` in `src/server/presence.rs` was declared
+  `fn` (crate-private) so the fuzz target's
+  `use lain::server::presence::canonical_claim_path;` failed.
+  Made it `pub`; the function is documented and used by 4
+  internal call sites, so exposing it as part of the public API
+  surface is intentional.
+- **`agent-contract` CI job now skips cleanly on fork PRs.**
+  GitHub downgrades `GITHUB_TOKEN` to read-only for
+  `pull_request` events from forks, so the job's
+  `gh api ... statuses/...` POST would 403 every fork-PR run.
+  Added a fork guard to the `if:` (plus a comment pointing at
+  the separate cross-repo status publishing problem for the
+  branch-protection check itself).
+- **`ci.yml` version-drift extractor now accepts pre-release
+  tags.** The regex `v[0-9]+\.[0-9]+\.[0-9]+` would silently
+  produce an empty match for `v0.7.4-rc1` (or any future
+  `-rcN`/`-beta.N`). Extended to
+  `v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?` so the same extractor
+  keeps working across stable and pre-release tags.
+- **`npm-shim/package-lock.json` regenerated to match `package.json`.**
+  The package metadata was at `0.7.4-rc1` but the lockfile's
+  top-level `version` + `packages[""].version` were still
+  `0.7.3`. Ran `npm install` in `npm-shim/`; no transitive deps
+  changed (the package has no production deps), only the
+  metadata aligned.
+- **`docs/BRANCHING.md`, `docs/CII_OWNER_ATTESTATIONS.md`,
+  `docs/SUPPLY_CHAIN.md`, and `docs/VULNS.md` refreshed.** Four
+  stale claims surfaced by automated review on this PR:
+  the BRANCHING `if: ${{ env.full-battery }}` line that was
+  actually inline `github.ref`/`github.base_ref`; the CII
+  attestation's false "default crypto provider aws-lc-rs"
+  claim (Cargo.toml still uses reqwest's `rustls-tls` feature
+  which pulls ring) and "all inputs are bounded" claim (now
+  true with the `/mcp` cap above); the SUPPLY_CHAIN example
+  that claimed `version-check` exposes an `epoch` output (it
+  doesn't — that path was silently dropped, see release.yml
+  for the actual per-build-job local computation); and
+  VULNS.md's bucket-D which still listed `bincode@1.3.3` as
+  unfixed when PR #57 had already migrated it to 2.0.x.
 - **`tests/multi_agent_concurrency.rs`** replaces eleven raw
   `Some("src/...")` literal assertions with a local
   `path_components_eq` helper, matching the existing helper in
