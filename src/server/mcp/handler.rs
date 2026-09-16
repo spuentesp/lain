@@ -3187,7 +3187,15 @@ fn search_org_handler(
     let map = args_map(&args)?;
     let query =
         crate::server::tools::utils::required_str_arg(map, "query").map_err(|e| e.to_string())?;
-    let limit = map.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let limit: usize = match map.get("limit") {
+        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+            Some(u) => u as usize,
+            None => {
+                return Err("Invalid argument: limit must be a non-negative integer".to_string());
+            }
+        },
+        _ => 10,
+    };
     let matches = crate::server::mcp::federation_tools::search_org(fed, &query, limit);
     serde_json::to_value(matches).map_err(|e| e.to_string())
 }
