@@ -4,8 +4,8 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
-use crate::server::tools::utils::resolve_node;
 use crate::server::tools::utils::format_duration;
+use crate::server::tools::utils::resolve_node;
 use std::collections::HashSet;
 
 pub fn explore_architecture(
