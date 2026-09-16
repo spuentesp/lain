@@ -272,6 +272,7 @@ BODY=$(mktemp)
 # affect and how widely?".
 PR_IMPACT=""
 PR_NUMBER=""
+FILES_JSON=""
 if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "${GITHUB_EVENT_PATH}" ]; then
   PR_NUMBER=$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null)
 fi

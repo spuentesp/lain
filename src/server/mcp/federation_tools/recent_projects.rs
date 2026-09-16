@@ -58,6 +58,7 @@ pub fn list_recent_projects() -> Result<Vec<RecentProjectEntry>, LainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::XdgGuard;
     use std::path::PathBuf;
 
     /// Build a `repos.yaml` + optional `workspaces.yaml` next to each
@@ -99,32 +100,6 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| boxed(&path)));
         if let Err(e) = result {
             std::panic::resume_unwind(e);
-        }
-    }
-
-    /// RAII guard that points `XDG_CONFIG_HOME` at a tempdir for the
-    /// duration of a test, restoring the previous value on drop. Used
-    /// only by the production end-to-end test below; the other tests
-    /// in this module prefer the `_in` helpers which don't touch the
-    /// env var at all.
-    struct XdgGuard {
-        prev: Option<String>,
-    }
-
-    impl XdgGuard {
-        fn new(dir: &std::path::Path) -> Self {
-            let prev = std::env::var("XDG_CONFIG_HOME").ok();
-            std::env::set_var("XDG_CONFIG_HOME", dir);
-            Self { prev }
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
         }
     }
 
