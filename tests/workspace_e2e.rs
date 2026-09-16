@@ -265,11 +265,12 @@ async fn workspace_mcp_get_workspace_graph_filters_correctly() {
     let workspaces = WorkspacesFile::load(tmp.path().join("workspaces.yaml").as_path()).unwrap();
     let graph = get_workspace_graph(&fed, &workspaces, None).expect("graph should succeed");
     for n in &graph.nodes {
+        let repo = n.repo_id.as_deref().unwrap_or("");
         assert!(
-            n.repo_id == "shared" || n.repo_id == "db-client",
+            repo == "shared" || repo == "db-client",
             "node '{}' should be in workspace subset, got repo_id='{}'",
             n.name,
-            n.repo_id
+            repo
         );
     }
 }

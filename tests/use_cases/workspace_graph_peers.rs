@@ -27,6 +27,7 @@
 #[allow(clippy::duplicate_mod)]
 mod common;
 use common::git_init_committed;
+use lain::schema::EdgeType;
 
 #[tokio::test]
 async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
@@ -174,20 +175,16 @@ async fn get_workspace_graph_includes_cross_repo_same_symbol_peers() {
     }
 
     let peer_edge_exists = edges.iter().any(|e| {
-        let src = &e.source;
-        let tgt = &e.target;
-        // `edge_type` is already a `String` (`GraphEdge::edge_type` in
-        // dto.rs); `format!("{:?}", ...)` on a `String` re-quotes it
-        // (`"CrossRepoSameSymbol"` with literal quote chars), which can
-        // never equal the bare comparison string below. This assertion
-        // was previously discarded (`let _ = peer_edge_exists;`), so the
-        // bug was dormant until the edge started actually materializing.
+        let src = &e.source_id;
+        let tgt = &e.target_id;
+        // `edge_type` is a schema `EdgeType` enum after 3.3 — match the
+        // variant directly rather than comparing against a Debug string.
         let et = &e.edge_type;
         let pair_ab = src.contains("a:Function:src/lib.rs:shared_helper")
             && tgt.contains("b:Function:src/lib.rs:shared_helper");
         let pair_ba = src.contains("b:Function:src/lib.rs:shared_helper")
             && tgt.contains("a:Function:src/lib.rs:shared_helper");
-        (pair_ab || pair_ba) && et == "CrossRepoSameSymbol"
+        (pair_ab || pair_ba) && *et == EdgeType::CrossRepoSameSymbol
     });
 
     // Pin the node-level contract first: the workspace graph

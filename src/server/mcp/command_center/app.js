@@ -838,14 +838,22 @@ function normalizeGraphPayload(payload) {
       name: typeof n.name === 'string' ? n.name : n.id,
       path: typeof n.path === 'string' ? n.path : '',
       repo_id: typeof n.repo_id === 'string' ? n.repo_id : '',
-      kind: typeof n.kind === 'string' ? n.kind : '',
+      // Wire format moved from dto::GraphNode (kind: String) to
+      // schema::GraphNode (node_type: NodeType enum serialized as
+      // its variant name). Read the wire field and keep the SPA's
+      // internal field name `kind` so the rest of the dashboard is
+      // unchanged.
+      kind: typeof n.node_type === 'string' ? n.node_type : '',
     }));
   const ids = new Set(nodes.map(n => n.id));
   const edges = rawEdges
-    .filter(e => e && ids.has(e.source) && ids.has(e.target))
+    .filter(e => e && ids.has(e.source_id) && ids.has(e.target_id))
     .map(e => ({
-      source: e.source,
-      target: e.target,
+      // Same pattern as nodes: read wire fields (source_id,
+      // target_id) into the SPA's pre-existing internal field names
+      // so downstream code is unchanged.
+      source: e.source_id,
+      target: e.target_id,
       edge_type: typeof e.edge_type === 'string' ? e.edge_type : '',
       cross_repo: e.cross_repo === true,
     }));
