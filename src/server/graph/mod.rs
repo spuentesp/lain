@@ -1,7 +1,13 @@
 //! Stable In-Memory Graph Database using petgraph
 //!
 //! Uses petgraph's StableGraph for robust graph operations and
-//! bincode for high-performance binary persistence.
+//! bincode for high-performance binary persistence. The on-disk
+//! representation, version checks, and read-only inspection live
+//! in [`persist`].
+
+mod persist;
+
+pub use persist::{GraphInspectionError, PATH_FORMAT_VERSION, inspect_persisted_graph};
 
 use crate::error::LainError;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
@@ -10,20 +16,10 @@ use parking_lot::RwLock;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use petgraph::Direction;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
-
-/// Bumped whenever the meaning of `GraphNode.path` changes. Version 2 is
-/// the switch from mixed absolute/relative paths to a single
-/// workspace-relative form. A graph written by an older lain deserializes
-/// fine (the bincode layout is unchanged) but its keys are absolute, so
-/// merging it into a v2 graph would double every node instead of updating
-/// it. `load_from_disk` therefore discards anything that isn't v2 and lets
-/// the caller rebuild from source.
-pub const PATH_FORMAT_VERSION: u32 = 2;
 
 /// The canonical graph key for a file: workspace-relative, forward-slashed.
 ///
@@ -41,52 +37,6 @@ pub const PATH_FORMAT_VERSION: u32 = 2;
 pub fn graph_path(workspace: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(workspace).unwrap_or(path);
     crate::server::path_util::posix_string(rel)
-}
-
-#[derive(Serialize, Deserialize)]
-struct GraphState {
-    graph: StableGraph<GraphNode, GraphEdge>,
-    index_map: HashMap<String, NodeIndex>,
-    last_commit: Option<String>,
-    /// Absent in graphs written before the canonical-path change; serde
-    /// defaults it to 0, which fails the version check and forces a rebuild.
-    #[serde(default)]
-    path_format_version: u32,
-}
-
-/// Strict, read-only inspection for diagnostics. Unlike the runtime loader,
-/// this preserves the distinction between corrupt and missing graph data.
-pub fn inspect_persisted_graph(path: &Path) -> Result<Option<String>, GraphInspectionError> {
-    let data = std::fs::read(path).map_err(GraphInspectionError::Io)?;
-    let state: GraphState = bincode::serde::decode_from_slice(&data, bincode::config::legacy())
-        .map(|(state, _)| state)
-        .map_err(GraphInspectionError::Corrupt)?;
-    if state.path_format_version != PATH_FORMAT_VERSION {
-        return Err(GraphInspectionError::Incompatible(
-            state.path_format_version,
-        ));
-    }
-    if state.index_map.len() != state.graph.node_count()
-        || state
-            .index_map
-            .iter()
-            .any(|(id, index)| state.graph.node_weight(*index).map(|node| &node.id) != Some(id))
-    {
-        return Err(GraphInspectionError::InvalidIndex);
-    }
-    Ok(state.last_commit)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum GraphInspectionError {
-    #[error("cannot read graph: {0}")]
-    Io(std::io::Error),
-    #[error("cannot decode graph: {0}")]
-    Corrupt(bincode::error::DecodeError),
-    #[error("graph path format {0} is incompatible with this binary")]
-    Incompatible(u32),
-    #[error("graph index does not match its nodes")]
-    InvalidIndex,
 }
 
 #[derive(Clone)]
@@ -1543,22 +1493,25 @@ impl GraphDatabase {
         })
     }
 
+    /// Build a snapshot of this graph in its on-disk representation.
+    /// Used by the save/load/export paths to keep the snapshot
+    /// construction in one place.
+    fn build_state(&self) -> persist::GraphState {
+        let index_map: HashMap<String, NodeIndex> = self
+            .index_map
+            .iter()
+            .map(|r| (r.key().clone(), *r.value()))
+            .collect();
+        let last_commit = self.last_commit.read().clone();
+        persist::GraphState::new(self.graph.read().clone(), index_map, last_commit)
+    }
+
     /// Save graph to disk asynchronously (non-blocking)
     pub async fn save_to_disk(&self) -> Result<(), LainError> {
         self.check_writable()?;
         // Clone state under lock (fast)
         let (data, persistence_path) = {
-            let state = GraphState {
-                path_format_version: PATH_FORMAT_VERSION,
-                graph: self.graph.read().clone(),
-                index_map: self
-                    .index_map
-                    .iter()
-                    .map(|r| (r.key().clone(), *r.value()))
-                    .collect(),
-                last_commit: self.last_commit.read().clone(),
-            };
-            let data = bincode::serde::encode_to_vec(&state, bincode::config::legacy())
+            let data = persist::encode_state(&self.build_state())
                 .map_err(|e| LainError::Database(e.to_string()))?;
             let persistence_path = self.persistence_path.clone();
             (data, persistence_path)
@@ -1573,17 +1526,7 @@ impl GraphDatabase {
     }
 
     pub fn save_to_disk_sync(&self) -> Result<(), LainError> {
-        let state = GraphState {
-            path_format_version: PATH_FORMAT_VERSION,
-            graph: self.graph.read().clone(),
-            index_map: self
-                .index_map
-                .iter()
-                .map(|r| (r.key().clone(), *r.value()))
-                .collect(),
-            last_commit: self.last_commit.read().clone(),
-        };
-        let data = bincode::serde::encode_to_vec(&state, bincode::config::legacy())
+        let data = persist::encode_state(&self.build_state())
             .map_err(|e| LainError::Database(e.to_string()))?;
         crate::cli::io::write_file_atomic(&self.persistence_path, &data)
             .map_err(|e| LainError::Database(e.to_string()))?;
@@ -1602,20 +1545,17 @@ impl GraphDatabase {
         // path used to `?` the deserialize error straight out of
         // `GraphDatabase::new`, which turned any format change into a startup
         // crash instead of a rebuild.
-        let state: GraphState =
-            match bincode::serde::decode_from_slice(&data, bincode::config::legacy())
-                .map(|(state, _)| state)
-            {
-                Ok(state) => state,
-                Err(e) => {
-                    warn!(
-                        "Ignoring unreadable graph at {}: {e}. Starting empty; \
+        let state = match persist::decode_state(&data) {
+            Ok((state, _)) => state,
+            Err(e) => {
+                warn!(
+                    "Ignoring unreadable graph at {}: {e}. Starting empty; \
                      the next index pass will rebuild it.",
-                        self.persistence_path.display()
-                    );
-                    return Ok(());
-                }
-            };
+                    self.persistence_path.display()
+                );
+                return Ok(());
+            }
+        };
 
         if state.path_format_version != PATH_FORMAT_VERSION {
             warn!(
@@ -1651,17 +1591,8 @@ impl GraphDatabase {
     }
 
     pub fn export_to_json(&self) -> Result<String, LainError> {
-        let state = GraphState {
-            path_format_version: PATH_FORMAT_VERSION,
-            graph: self.graph.read().clone(),
-            index_map: self
-                .index_map
-                .iter()
-                .map(|r| (r.key().clone(), *r.value()))
-                .collect(),
-            last_commit: self.last_commit.read().clone(),
-        };
-        serde_json::to_string_pretty(&state).map_err(|e| LainError::Database(e.to_string()))
+        serde_json::to_string_pretty(&self.build_state())
+            .map_err(|e| LainError::Database(e.to_string()))
     }
 }
 
