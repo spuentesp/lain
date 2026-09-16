@@ -6,7 +6,7 @@
 //! - `list_annotations`           — read with filters + live-staleness
 //! - `resolve_annotation`         — close an open annotation
 //! - `leave_handoff_note`         — write a workspace-scoped note for
-//!                                  the next agent that registers
+//!   the next agent that registers
 //! - `get_pending_handoffs`       — list notes left by previous agents
 //!
 //! The five `pub fn run_*` functions take `&LainServer` and return
