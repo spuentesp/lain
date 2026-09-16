@@ -62,6 +62,8 @@ def main() -> int:
             "    pub id: String,\n"
             "    pub name: String,\n"
             "    pub path: String,\n"
+            "    pub signature: String,\n"
+            "    pub docstring: String,\n"
             "    pub extra_field: String,\n"
             "}\n"
         )

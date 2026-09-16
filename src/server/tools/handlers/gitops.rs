@@ -54,24 +54,7 @@ pub fn get_commit_history(
     let mut result = String::from("## Commit History\n\n");
     for commit in commits {
         // Format the timestamp (time is i64 - Unix timestamp)
-        let time_str = if commit.time > 0 {
-            let duration = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let diff = duration - commit.time;
-            if diff < 60 {
-                format!("{}s ago", diff)
-            } else if diff < 3600 {
-                format!("{}m ago", diff / 60)
-            } else if diff < 86400 {
-                format!("{}h ago", diff / 3600)
-            } else {
-                format!("{}d ago", diff / 86400)
-            }
-        } else {
-            "unknown".to_string()
-        };
+        let time_str = crate::server::tools::utils::format_ago(commit.time);
 
         let first_line = commit
             .message

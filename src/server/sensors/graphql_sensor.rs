@@ -254,3 +254,27 @@ pub fn scan_workspace(
 
     Ok(count)
 }
+
+/// Unit-struct Sensor impl. Discovery via
+/// `inventory::submit!(SensorEntry(&GraphQlSensor))` below; no central
+/// registry to edit.
+pub struct GraphQlSensor;
+
+impl crate::server::sensors::Sensor for GraphQlSensor {
+    fn name(&self) -> &'static str {
+        "graphql"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::Graphql
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &std::path::Path,
+        namespace: &crate::schema::RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace(graph, root, namespace)
+    }
+}
+
+inventory::submit!(crate::server::sensors::SensorEntry(&GraphQlSensor));

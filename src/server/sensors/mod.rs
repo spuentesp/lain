@@ -2,6 +2,13 @@
 //!
 //! Scans spec files to enrich existing graph nodes with cross-runtime
 //! API surface information (gRPC, HTTP, GraphQL, WebSocket, etc.).
+//!
+//! Sensors are registered via [`inventory::submit!`] at static-init
+//! time and iterated by [`run_all`]. Adding a new sensor means
+//! `impl Sensor for XxxSensor` + one `inventory::submit!` line in the
+//! sensor's module — no central registry to edit, no
+//! `dispatch_tool_call`-style match ladder to grow. See
+//! [`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#sensor-pattern-one-concern-per-file-one-trait-shared).
 
 pub mod graphql_sensor;
 pub mod http_sensor;
@@ -9,66 +16,15 @@ pub mod openapi_sensor;
 pub mod proto_sensor;
 pub mod websocket_sensor;
 
+use crate::error::LainError;
 use crate::graph::GraphDatabase;
+use crate::schema::RepoNamespace;
 pub use graphql_sensor::GraphQlOperation;
 pub use http_sensor::HttpRoute;
 pub use openapi_sensor::OpenApiOperation;
 pub use proto_sensor::ProtoService;
 use std::path::Path;
 pub use websocket_sensor::WebSocketEndpoint;
-
-/// Run every protocol sensor over `root`, returning how many nodes/edges
-/// each contributed.
-///
-/// The sensors were written, compiled (all but `http_sensor`, which was
-/// not even declared as a module) and never called: no path in
-/// `ingest/` referenced this module, so `HttpRoute`, `CallsHttp` and
-/// `Implements` could not appear in any graph. `describe_schema`
-/// advertised those types anyway and `get_cross_runtime_callers` — whose
-/// entire job is reading them — answered nothing for every symbol in
-/// every codebase.
-///
-/// Each sensor is independent: one failing is logged and skipped rather
-/// than aborting ingestion, because a malformed `.proto` in a corner of
-/// the tree must not cost the caller their call graph.
-///
-/// `namespace` is threaded through to every `GraphNode::generate_id`
-/// call so two federation repos with identical `(type, path, name)`
-/// route entries (e.g. `GET /health`) mint distinct ids and don't
-/// silently overwrite each other on merge. Pre-fix every sensor
-/// hardcoded `RepoNamespace::for_test()` here, which made the
-/// per-repo namespace plumbing moot for the protocol-sensor layer
-/// (URGENT FIXES #2 follow-up).
-pub fn run_all(
-    graph: &GraphDatabase,
-    root: &Path,
-    namespace: &crate::schema::RepoNamespace,
-) -> SensorCounts {
-    let mut counts = SensorCounts::default();
-
-    match http_sensor::scan_workspace_routes(graph, root, namespace) {
-        Ok(n) => counts.http_routes = n,
-        Err(e) => tracing::warn!("http sensor failed for {:?}: {e}", root),
-    }
-    match openapi_sensor::scan_workspace(graph, root, namespace) {
-        Ok(n) => counts.openapi = n,
-        Err(e) => tracing::warn!("openapi sensor failed for {:?}: {e}", root),
-    }
-    match proto_sensor::scan_workspace(graph, root, namespace) {
-        Ok(n) => counts.proto = n,
-        Err(e) => tracing::warn!("proto sensor failed for {:?}: {e}", root),
-    }
-    match graphql_sensor::scan_workspace(graph, root, namespace) {
-        Ok(n) => counts.graphql = n,
-        Err(e) => tracing::warn!("graphql sensor failed for {:?}: {e}", root),
-    }
-    match websocket_sensor::scan_workspace(graph, root, namespace) {
-        Ok(n) => counts.websocket = n,
-        Err(e) => tracing::warn!("websocket sensor failed for {:?}: {e}", root),
-    }
-
-    counts
-}
 
 /// What [`run_all`] contributed, per sensor.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +40,69 @@ impl SensorCounts {
     pub fn total(&self) -> usize {
         self.http_routes + self.openapi + self.proto + self.graphql + self.websocket
     }
+
+    fn add(&mut self, field: SensorCountField, n: usize) {
+        match field {
+            SensorCountField::HttpRoutes => self.http_routes += n,
+            SensorCountField::Openapi => self.openapi += n,
+            SensorCountField::Proto => self.proto += n,
+            SensorCountField::Graphql => self.graphql += n,
+            SensorCountField::Websocket => self.websocket += n,
+        }
+    }
+}
+
+/// Which `SensorCounts` field this sensor's count contributes to.
+/// Lets each sensor pick its bucket via the trait without `run_all`
+/// needing a per-sensor match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorCountField {
+    HttpRoutes,
+    Openapi,
+    Proto,
+    Graphql,
+    Websocket,
+}
+
+/// A registered protocol sensor. Each impl contributes its `scan`
+/// results to one bucket of [`SensorCounts`] and is discovered by
+/// `run_all` via the `inventory` collection.
+pub trait Sensor: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn count_field(&self) -> SensorCountField;
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &Path,
+        namespace: &RepoNamespace,
+    ) -> Result<usize, LainError>;
+}
+
+/// Inventory wrapper so each sensor can `inventory::submit!(SensorEntry(&…))`.
+pub struct SensorEntry(pub &'static (dyn Sensor + 'static));
+inventory::collect!(SensorEntry);
+
+/// Run every registered protocol sensor over `root`, returning how
+/// many nodes/edges each contributed.
+///
+/// Each sensor is independent: one failing is logged and skipped
+/// rather than aborting ingestion, because a malformed `.proto` in a
+/// corner of the tree must not cost the caller their call graph.
+///
+/// `namespace` is threaded through to every `GraphNode::generate_id`
+/// call so two federation repos with identical `(type, path, name)`
+/// route entries (e.g. `GET /health`) mint distinct ids and don't
+/// silently overwrite each other on merge.
+pub fn run_all(graph: &GraphDatabase, root: &Path, namespace: &RepoNamespace) -> SensorCounts {
+    let mut counts = SensorCounts::default();
+    for entry in inventory::iter::<SensorEntry>() {
+        let sensor = entry.0;
+        match sensor.scan(graph, root, namespace) {
+            Ok(n) => counts.add(sensor.count_field(), n),
+            Err(e) => tracing::warn!("{} sensor failed for {:?}: {e}", sensor.name(), root),
+        }
+    }
+    counts
 }
 
 #[cfg(test)]

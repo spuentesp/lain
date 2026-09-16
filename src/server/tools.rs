@@ -19,7 +19,6 @@ use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
 use crate::server::tools::registry::{ToolContext, ToolContextDeps, ToolRegistry};
-use crate::server::tools::utils::get_str_arg;
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use reqwest::Client;
@@ -460,11 +459,15 @@ impl ToolExecutor {
             "get_capabilities" => return self.get_capabilities(),
             "get_agent_strategy" => return self.get_agent_strategy(),
             "install_language_server" => {
-                let lang = get_str_arg(arguments, "language");
+                let lang = arguments
+                    .and_then(|a| a.get("language").and_then(|v| v.as_str()))
+                    .unwrap_or("");
                 return self.install_language_server(lang).await;
             }
             "register_job_webhook" => {
-                let url = get_str_arg(arguments, "url");
+                let url = arguments
+                    .and_then(|a| a.get("url").and_then(|v| v.as_str()))
+                    .unwrap_or("");
                 let mut hooks = self.job_webhooks.lock().await;
                 if !hooks.contains(&url.to_string()) {
                     hooks.push(url.to_string());
@@ -472,7 +475,9 @@ impl ToolExecutor {
                 return Ok(format!("Webhook registered: {}", url));
             }
             "get_job_status" => {
-                let job_id = get_str_arg(arguments, "job_id");
+                let job_id = arguments
+                    .and_then(|a| a.get("job_id").and_then(|v| v.as_str()))
+                    .unwrap_or("");
                 let guard = self.jobs.lock();
                 match guard.get(job_id) {
                     Some(job) => return Ok(serde_json::to_string(job).unwrap_or_default()),

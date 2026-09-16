@@ -99,27 +99,10 @@ pub struct WorkspaceDetail {
     pub members: Vec<WorkspaceRepoInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GraphNode {
-    pub id: String,
-    pub name: String,
-    pub path: String,
-    pub repo_id: String,
-    pub kind: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GraphEdge {
-    pub source: String,
-    pub target: String,
-    pub edge_type: String,
-    pub cross_repo: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceGraph {
-    pub nodes: Vec<GraphNode>,
-    pub edges: Vec<GraphEdge>,
+    pub nodes: Vec<crate::schema::GraphNode>,
+    pub edges: Vec<crate::schema::GraphEdge>,
     pub truncated: bool,
 }
 
