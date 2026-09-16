@@ -151,6 +151,26 @@ impl ReadinessHandle {
             });
         });
     }
+
+    /// AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md §"Cooperative
+    /// cancellation token"): publish `unavailable_error` with the
+    /// stable `index_cancelled` problem code. Distinct from
+    /// `failed()` because shutdown is not a failure: `retryable:
+    /// false` (the user explicitly asked for shutdown), and the
+    /// remediation is the empty message — there's nothing to fix.
+    pub fn cancelled(&self) {
+        self.update(|snapshot| {
+            snapshot.state = IndexState::UnavailableError;
+            snapshot.completed_at_unix_ms = Some(unix_ms());
+            snapshot.retry_after_ms = None;
+            snapshot.problem = Some(Problem {
+                code: "index_cancelled".into(),
+                message: "indexing cancelled by server shutdown".into(),
+                remediation: "Restart the server to begin a fresh indexing pass.".into(),
+                retryable: false,
+            });
+        });
+    }
 }
 
 /// Schema-version-1 contract: the server does not adjust this per attempt.

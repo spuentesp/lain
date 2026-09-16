@@ -59,6 +59,14 @@ pub enum LainError {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    /// Cooperative shutdown observed. Returned by long-running phases
+    /// (`build_core_memory`, `index_one_repo`, watchers) when the
+    /// server-owned `CancellationToken` is cancelled mid-pass. The
+    /// `AwaitStartup`/`background_sync` callers translate this into
+    /// `unavailable_error` with code `index_cancelled`.
+    #[error("Operation cancelled")]
+    Cancelled,
+
     #[error("Other error: {0}")]
     Other(String),
 
