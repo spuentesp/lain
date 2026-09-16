@@ -52,18 +52,40 @@ REGISTRY_IMPL_PATH = os.path.join(
 # sub-registry (Phase 3.2 partial); federation and workspace arms are
 # the remaining migration target.
 KNOWN_DISPATCH_ARMS = {
-    "list_repos",
-    "get_repo_info",
-    "get_federation_health",
-    "search_org",
+    "add_annotation",
+    "claim_files",
+    "detect_overlap",
+    "get_active_workspace",
+    "get_audit_log",
     "get_cross_repo_blast_radius",
     "get_cross_repo_blast_radius_for_repo",
-    "list_workspaces",
-    "get_active_workspace",
+    "get_federation_health",
+    "get_pending_handoffs",
+    "get_recent_activity",
+    "get_reload_status",
+    "get_repo_info",
+    "get_server_status",
     "get_workspace",
     "get_workspace_graph",
+    "get_world_state",
+    "heartbeat",
+    "leave_handoff_note",
+    "list_active_agents",
+    "list_annotations",
+    "list_occupancy",
+    "list_recent_projects",
+    "list_repos",
+    "list_subagents",
+    "list_workspaces",
+    "my_claims",
+    "register_agent",
+    "release_files",
+    "request_reload",
+    "resolve_annotation",
+    "search_org",
+    "who_am_i",
 }
-ARM_GROWTH_BUDGET = 3
+ARM_GROWTH_BUDGET = 0
 
 
 def _slurp(path: str) -> str:
