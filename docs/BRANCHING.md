@@ -126,9 +126,16 @@ For an urgent fix that can't wait for `dev` to settle:
 ## CI expectations per branch
 
 `ci.yml` is tiered so the dev branch gets the fast lane and `main`
-gets the full hardened battery. Job-level `if: ${{ env.full-battery }}`
-conditions scope the heavy jobs to main-only pushes and PR-to-main
-PRs:
+gets the full hardened battery. The gating is per-job via inline
+`if:` conditions reading `github.ref` and `github.base_ref` directly
+— job-level `if:` can't read workflow `env`, so a shared
+`FULL_BATTERY` env var isn't an option. Heavy jobs use:
+
+```yaml
+if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')
+```
+
+to scope themselves to push-to-main and PR-to-main only:
 
 | Job | dev / PR-to-dev | main / PR-to-main |
 |---|---|---|

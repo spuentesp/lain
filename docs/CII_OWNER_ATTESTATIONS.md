@@ -141,10 +141,14 @@ click through the form:
 - **Quality / style**: `cargo fmt --check` and `cargo clippy -- -D
   warnings` enforced in CI.
 - **Crypto usage**: TLS via `rustls 0.23` (default crypto provider
-  `aws-lc-rs`); no custom crypto.
+  `ring` — `aws-lc-rs` migration is a tracked follow-up in
+  `docs/VULNS.md`, bucket B); no custom crypto.
 - **Parsed input**: JSON-RPC 2.0 messages via `serde_json`; YAML
-  config via `serde_yaml`. All inputs are bounded (`mktemp`,
-  `tempfile::tempdir`, and similar to prevent DoS).
+  config via `serde_yaml`. All inputs are bounded: filesystem paths
+  via `mktemp` / `tempfile::tempdir`; the `/mcp` HTTP body via a
+  4 MiB cap (Content-Length precheck + `http_body_util::Limited`
+  stream cap, returns 413 on overflow — see
+  `src/server/mcp/handler.rs`).
 
 These together justify the **passing** tier (5/10 scorecard
 points). Higher tiers (silver at 7, gold at 10) require more

@@ -85,17 +85,18 @@ Why syft over cargo-cyclonedx:
 Each `cargo build` runs with:
 
 ```yaml
-SOURCE_DATE_EPOCH: ${{ needs.version-check.outputs.epoch }}
-CARGO_INCREMENTAL: '0'
+env:
+  SOURCE_DATE_EPOCH: <integer>
+  CARGO_INCREMENTAL: '0'
 ```
 
 `SOURCE_DATE_EPOCH` is a **Unix-epoch integer** (e.g. `1757889033`),
-not an ISO timestamp. The `version-check` job computes it once via
-GNU `date -d "$GITHUB_REPOSITORY_UPDATED_AT" +%s` (ubuntu runner),
-and downstream build jobs consume the integer via
-`needs.version-check.outputs.epoch`. That gives all three platform
-builds (Linux, macOS, Windows) the same fixed value for this run,
-so the resulting binaries are reproducible against each other.
+not an ISO timestamp. Each build job computes it locally from the
+same `github.event.repository.updated_at` value via Python's
+`datetime.fromisoformat(...).timestamp()`, writing the result to
+`$GITHUB_ENV`. That gives all three platform builds (Linux, macOS,
+Windows) the same fixed value for this run, so the resulting
+binaries are reproducible against each other.
 
 Earlier versions of this workflow passed the raw ISO string from
 `github.event.repository.updated_at` directly. `cc` rejects that on
@@ -106,8 +107,13 @@ error: environment variable 'SOURCE_DATE_EPOCH' ('2026-09-14T23:10:33Z')
        must be a non-negative decimal integer <= 253402300799
 ```
 
-The integer conversion sidesteps that, and the cross-job output
-sidesteps the GNU-vs-BSD `date` portability gap.
+An earlier revision (PR #43 → #45) also tried to compute the
+integer once in `version-check` and pass it across jobs via
+`needs.version-check.outputs.epoch`. GitHub Actions silently
+dropped the output key, and build jobs continued to see an empty
+`SOURCE_DATE_EPOCH`. The current "compute locally in each build
+job" shape avoids both problems — `$GITHUB_ENV` writes within a
+single job are reliable, no cross-job outputs needed.
 
 `CARGO_INCREMENTAL=0` disables incremental compilation artifacts that
 would otherwise embed absolute paths.
