@@ -1055,8 +1055,10 @@ mod tests {
     /// A fresh `RepoIndex` exposes the `indexed_signal` handle as a
     /// `Notify` with no buffered permits. The dispatcher's bounded
     /// wait therefore blocks until `index()` actually fires — the
-    /// exact shape that closes the cold-boot race in
-    /// `feat_negative_paths_end_to_end`.
+    /// exact shape that closes the cold-boot race whose symptom was
+    /// the "Node not found for handle" flake in
+    /// `feat_negative_paths_end_to_end` (closed in commit `3436a51`
+    /// together with the test-fixture tempdir-lifetime fix).
     #[tokio::test]
     async fn indexed_signal_starts_unfired_and_fires_after_successful_index() {
         let tmp = tempfile::tempdir().unwrap();

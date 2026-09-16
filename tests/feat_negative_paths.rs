@@ -91,16 +91,20 @@ fn boot_server(port: u16) -> ServerGuard {
     // The tempdirs MUST outlive the spawned child: `tempfile::TempDir`'s
     // `Drop` calls `remove_dir_all`, which would delete the fixture
     // files out from under the child process while it's still serving
-    // requests. We `Box::leak` the three handles so they survive past
-    // `boot_server` returning; the test process reuses the tempdir
-    // root until the OS (or `tmpreaper`) cleans it. The pre-leak
-    // baseline intermittently flaked `feat_negative_paths_end_to_end`
-    // (~20% locally) because the drop ran between `boot_server`
+    // requests. We call `TempDir::keep()` on each so the dirs survive
+    // past `boot_server` returning; the test process reuses the
+    // tempdir root until the OS (or `tmpreaper`) cleans it.
+    //
+    // History: before the keep() fix, `feat_negative_paths_end_to_end`
+    // was a ~20% local flake. The drop ran between `boot_server`
     // returning and the watcher's first `index_forced`; the child
     // then re-walked an empty `get_all_tracked_files()` (every path
     // failed `is_file()`) and `prune_orphans` wiped the graph
-    // mid-test. See the diagnostic log under `LAIN_DEBUG_COLD_BOOT`
-    // for the trace.
+    // mid-test, surfacing as "Node not found for handle: orchestrate"
+    // once the 30 s `wait_for_repo_index` budget elapsed. With `keep()`
+    // in place the test is a hard gate (verified at 25/25 in commit
+    // `3436a51`; see `tests/common/mod.rs::wait_for_repo_index` for
+    // the cold-boot-window polling companion).
     let project: tempfile::TempDir = tempfile::tempdir().unwrap();
     let project_path: std::path::PathBuf = project.keep();
     let repo_dir = project_path.join("repo");

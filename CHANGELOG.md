@@ -71,6 +71,36 @@ All notable changes to LAIN are documented here. Versions follow
   starvation window on every platform. The test still passes on
   Linux (behavior-neutral change); the macOS gate stays until a
   real macOS runner confirms the mitigation removes the flake.
+- **Cold-boot "Node not found for handle" race in
+  `feat_negative_paths_end_to_end` — promoted from flake to hard
+  gate.** The symptom was a ~20–25% intermittent failure on
+  `feat_negative_paths_end_to_end` that surfaced two bugs stacked
+  on top of each other:
+  1. *Root cause (test fixture):* `tests/feat_negative_paths.rs::
+     boot_server` declared three `tempfile::TempDir` values as
+     locals; on return, `Drop` ran `remove_dir_all` while the
+     spawned `lain server` child was still serving requests. The
+     watcher's first `index_forced` then re-walked an empty
+     `get_all_tracked_files()` and `prune_orphans` wiped the
+     per-repo graph. Switched to `TempDir::keep()` so the dirs
+     outlive the fixture.
+  2. *Real but secondary cold-boot race (library code):* the
+     per-repo `RepoIndex` and the federation backend did not share
+     an "indexed" signal, so a tool call landing in the cold-boot
+     window could see an empty per-repo graph even after
+     `index()` returned. Added `RepoIndex::indexed_signal` (a
+     `tokio::sync::Notify` fired after every successful
+     `index()` / `index_forced()`) and a 200 ms bounded wait in the
+     MCP dispatcher when `ctx.graph` is empty, with a fail-through
+     to the existing federation fallback. Also switched
+     `tests/common/mod.rs::wait_for_repo_index` from
+     `tools_call_text` to `tools_call_envelope` so it can poll
+     through the cold-boot window instead of panicking on
+     `isError=true`.
+  Reliability: `feat_negative_paths_end_to_end` was ~75% baseline,
+  25/25 after both fixes (verified locally on commit `3436a51`).
+  `feat_negative_paths_end_to_end` is now treated as a hard-gate
+  test in CI — no special `#[ignore]` or runner-level tolerance.
 
 ### Investigated (no change)
 

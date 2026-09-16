@@ -101,11 +101,13 @@ pub struct ToolContext {
     /// `index()` / `index_forced()`. The MCP dispatcher awaits this
     /// with a 200 ms budget when the active repo's per-repo graph is
     /// empty, so a tool call that lands in the cold-boot window wakes
-    /// up to a populated graph instead of an empty placeholder (the
-    /// race that intermittently flaked `feat_negative_paths_end_to_end`
-    /// before the per-repo and federation graphs had a shared "indexed"
-    /// signal). `None` in single-workspace mode and in tests that don't
-    /// wire a federation — the dispatcher's wait is then a no-op.
+    /// up to a populated graph instead of an empty placeholder. This
+    /// closes the cold-boot race whose symptom was the
+    /// "Node not found for handle" flake in
+    /// `feat_negative_paths_end_to_end` (fixed in commit `3436a51`
+    /// together with the test-fixture tempdir-lifetime fix). `None`
+    /// in single-workspace mode and in tests that don't wire a
+    /// federation — the dispatcher's wait is then a no-op.
     pub indexed_signal: Option<Arc<tokio::sync::Notify>>,
 }
 
