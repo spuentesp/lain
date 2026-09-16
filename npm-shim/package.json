@@ -1,6 +1,6 @@
 {
   "name": "@spuentesp/lain-mcp",
-  "version": "0.7.4-rc1",
+  "version": "0.7.4",
   "mcpName": "io.github.spuentesp/lain",
   "description": "High-performance knowledge graph MCP server for AI coding agents with semantic search.",
   "keywords": [

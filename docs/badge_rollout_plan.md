@@ -1,17 +1,28 @@
 # Badge rollout plan
 
 > **Status update (README cleanup pass).** Steps 4, 5, 10, and 11 were
-> reverted from the README: MIT and Platforms are self-asserted, not
-> external signals; the MCP tools count badge had drifted stale (67 vs.
-> the live 73) with nothing regenerating it on every push; and Agent
-> Contract never got the dedicated rollup workflow Step 11 specifies —
-> it shipped pointing at the same `ci.yml` badge URL as the plain CI
-> badge, so it rendered as a silent duplicate rather than a distinct
-> signal. Steps 1–3 and 6–9 (CI, Scorecard, SafeSkill, MSRV, SBOM,
-> Provenance) remain in the README as verified-accurate external or
-> build-derived signals. Re-add 4/5/10/11 only alongside the
-> infrastructure that keeps them honest (an MCP-tools regeneration step
-> in CI, and Step 11's real rollup workflow, respectively).
+> reverted from the README. Steps 1–3 and 6–9 (CI, Scorecard, SafeSkill,
+> MSRV, SBOM, Provenance) remain in the README as verified-accurate
+> external or build-derived signals.
+>
+> **Policy (2026-09-16): the README badge row only carries badges that
+> prove a quality or attribute via an external or build-derived signal
+> — never a self-asserted claim.** License and platform support are
+> already stated in the repo (`LICENSE`, `Cargo.toml`, CI matrix); a
+> badge that just repeats them adds a visual claim with no independent
+> verification behind it. Under this policy:
+>
+> - **Steps 4 (License: MIT) and 5 (Supported Platforms) are OUT —
+>   permanently, not deferred.** See the retired write-ups under each
+>   step below.
+> - **Step 10 (MCP Tools count) is retired** — see the note under
+>   Step 10 below (unrelated reason: the regeneration workflow was
+>   failing and nothing consumed its output).
+> - **Step 11 (Agent Contract) stays open**, because it *is* a
+>   build-derived signal — it just shipped pointing at the same
+>   `ci.yml` badge URL as the plain CI badge, rendering as a silent
+>   duplicate rather than a distinct one. Re-add it once it has its own
+>   distinct badge source.
 
 Companion to `docs/AGENT_UX_ROADMAP.md`. Each step is independently shippable.
 Steps are ordered by the two waves proposed for README impact: the cheap
@@ -31,8 +42,8 @@ work" plan and are listed only at the bottom for visibility.
 | 1  | GitHub Actions / CI Passing               | ~10 min         | very high     | missing                 | add    |
 | 2  | OpenSSF Scorecard                         | 30–60 min       | very high     | already wired           | verify |
 | 3  | SafeSkill 88/100                          | already done    | high          | already wired           | verify |
-| 4  | License: MIT                              | already done    | medium        | already wired           | verify |
-| 5  | Supported Platforms                       | ~10 min         | medium-high   | missing                 | add    |
+| 4  | License: MIT                              | n/a             | n/a           | already wired           | **out — self-asserted, not a proof signal** |
+| 5  | Supported Platforms                       | n/a             | n/a           | missing                 | **out — self-asserted, not a proof signal** |
 | 6  | Rust MSRV                                 | ~10 min         | medium        | missing                 | add    |
 | 7  | Codecov / Coverage                        | 1–2 h           | high if good  | missing                 | add    |
 | 8  | SBOM Available                            | 1–2 h           | high          | artifact exists         | add    |
@@ -50,15 +61,15 @@ work" plan and are listed only at the bottom for visibility.
 [![CI](https://github.com/spuentesp/lain/actions/workflows/ci.yml/badge.svg)](…)
 [![SafeSkill 88/100](…)](…)
 [![OpenSSF Scorecard](…)](…)
-[![License: MIT](…)](…)
-[![Platforms: Linux | macOS | Windows](…)](…)
 [![Rust 1.75 or newer](…)](…)
 [![Codecov](…)](…)
 [![SBOM](…)](…)
 [![Build Provenance](…)](…)
-[![MCP Tools | <count>](…)](…)
 [![Agent Contract | Passing](…)](…)
 ```
+
+License and Platforms are out permanently (self-asserted, not a proof
+signal — see the policy note above). MCP Tools is retired (see Step 10).
 
 ---
 
@@ -136,60 +147,27 @@ README (`README.md:4`); re-verify the badge target and the workflow.
 
 ---
 
-### Step 4 · License: MIT (verify)
+### Step 4 · License: MIT — OUT
 
-**Why:** standard OSS credibility signal. The file is correct; the
-badge just needs to exist in the README cluster.
-
-**Files**
-
-- `README.md` — add a Shields static badge so the visual claim matches
-  the file:
-
-```markdown
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-```
-
-- `LICENSE` — no edit (already MIT, year 2026, spuentesp).
-
-**Acceptance**
-
-- Badge clickable from README resolves to the `LICENSE` file at the repo
-  root, file header matches the badge label.
-
-**Effort:** ~2 min.
+> **2026-09-16:** Out permanently, not deferred. A README badge only
+> earns a place by proving a quality or attribute through an external
+> or build-derived signal (see the policy note at the top of this
+> document). `LICENSE` already states MIT at the repo root — a badge
+> restating it is a self-asserted claim with nothing behind it but the
+> file it's next to. If this comes back, it needs a reason beyond
+> "it's free to add," e.g. an external license-scanner signal.
 
 ---
 
-### Step 5 · Supported Platforms badge
+### Step 5 · Supported Platforms badge — OUT
 
-**Why:** the project advertises Linux / macOS / Windows in CI; the badge
-should advertise the same on the README so a reader doesn't have to
-click through.
-
-**Files**
-
-- `README.md` — add a Shields static badge in the cluster:
-
-```markdown
-[![Platforms: Linux | macOS | Windows](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue)](…)
-```
-
-Link it to the CI matrix definition (`.github/workflows/ci.yml`) so the
-claim is self-auditing.
-
-**Caveat to document**
-
-- The badge claims what the CI matrix covers. If the matrix drops or
-  adds a platform, the badge text must change in the same PR. Pin this
-  in `docs/CI.md` with a one-line note.
-
-**Acceptance**
-
-- README badge text matches the literal `os:` entries in
-  `.github/workflows/ci.yml`.
-
-**Effort:** ~10 min.
+> **2026-09-16:** Out permanently, not deferred. Same policy as Step 4:
+> the CI matrix in `.github/workflows/ci.yml` already states which
+> platforms are covered — a static Shields badge repeating that list is
+> a self-asserted claim, not an external or build-derived one, and it
+> would silently drift the moment the matrix changes without a CI gate
+> forcing the badge text to move with it. Not worth the drift risk for
+> a badge that only restates something already visible in the repo.
 
 ---
 
@@ -329,7 +307,16 @@ verification command.
 
 ---
 
-### Step 10 · MCP Tools | <count> (LAIN-specific)
+### Step 10 · MCP Tools | <count> (LAIN-specific) — RETIRED
+
+> **2026-09-16:** `.github/workflows/mcp-tools-count.yml` was built per
+> the design below, but the badge it feeds was already reverted from
+> the README (see the status note above), and the workflow itself was
+> failing on every push to `main` with nothing consuming its output.
+> Removed the workflow and the orphaned `.github/badges/mcp-tools.json`
+> artifact rather than fix a job that serves a badge nobody renders. If
+> the MCP-tools-count badge comes back, re-derive this design from
+> scratch against whatever regeneration path is live at that time.
 
 **Why:** more marketing value than half the generic badges — it proves
 LAIN is not a toy MCP server. Hard-coding the number drifts every time
@@ -472,21 +459,31 @@ the version-number machinery is settled.
 
 Each step is a single PR. Land in order; do not skip ahead.
 
-- [ ] Step 1 — CI badge
-- [ ] Step 2 — verify Scorecard
-- [ ] Step 3 — verify SafeSkill
-- [ ] Step 4 — MIT badge
-- [ ] Step 5 — Platforms badge
-- [ ] Step 6 — MSRV badge
-- [ ] Step 7 — Codecov (gated on baseline)
-- [ ] Step 8 — SBOM badge
-- [ ] Step 9 — Provenance badge
-- [ ] Step 10 — MCP tools count badge workflow
-- [ ] Step 11 — Agent contract rollup workflow
+- [x] Step 1 — CI badge (live in README)
+- [x] Step 2 — verify Scorecard (live in README)
+- [x] Step 3 — verify SafeSkill (live in README)
+- [x] Step 4 — out permanently (self-asserted, not a proof signal)
+- [x] Step 5 — out permanently (self-asserted, not a proof signal)
+- [x] Step 6 — MSRV badge (live in README)
+- [ ] Step 7 — Codecov (infra live in `ci.yml` + `codecov.yml`; badge withheld until a deliberate baseline PR — a product decision, not missing work)
+- [x] Step 8 — SBOM badge (live in README)
+- [x] Step 9 — Provenance badge (live in README)
+- [x] Step 10 — retired (workflow removed 2026-09-16, badge not in README)
+- [ ] Step 11 — Agent contract badge (the rollup itself is live — `agent-contract` job in `ci.yml` publishes the `lain/agent-contract` commit status that branch protection requires, per `docs/BRANCHING.md` — but it's a commit status, not a workflow run, so it can't badge via the naive "point Shields at the workflow's own badge.svg" trick without duplicating the plain CI badge, which is exactly what got reverted before. Open task: have that job also emit a small Shields-endpoint JSON, same shape as the retired Step 10 file, so the badge reflects the status distinctly.)
 
 ## Definition of done (overall)
 
-- All ten active steps land green on `main`.
+- **Current state (2026-09-16):** Steps 1, 2, 3, 6, 8, 9 are done and
+  live in the README. Steps 4 and 5 are **out permanently** — the
+  README badge row only carries external or build-derived proof
+  signals, never a self-asserted claim. Step 7's infrastructure is
+  done; its badge is deliberately withheld pending a baseline-PR
+  decision. Step 10 is retired. **Step 11 is the only step with real
+  remaining engineering work** — badging the existing
+  `lain/agent-contract` commit status distinctly from the plain CI
+  badge.
+- All active steps (excluding the out/retired ones above) land green
+  on `main`.
 - README renders the full badge row with no broken images / 404s.
 - No step in this document edits `Cargo.toml` `version`,
   `npm-shim/package.json` `version`, the release tag input, or any other

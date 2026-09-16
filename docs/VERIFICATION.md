@@ -8,7 +8,7 @@ for *why* these checks exist.
 ## What ships in a release
 
 The updated release workflow publishes the files below for new tags.
-Historical releases, including `v0.7.3`, may lack checksums, SBOMs, or
+Historical releases predating `v0.7.4` may lack checksums, SBOMs, or
 provenance; these files are not retroactively generated.
 
 | File | What it is |
@@ -16,8 +16,9 @@ provenance; these files are not retroactively generated.
 | `lain-<ver>-<target>.tar.gz` | The compressed `lain` binary |
 | `lain-<ver>-<target>.tar.gz.sha256` | `<hash>  <filename>` for that tarball |
 | `lain-<ver>-<target>.tar.gz.cdx.json` | CycloneDX SBOM of that tarball |
-| `lain-<ver>-<target>.tar.gz.sigstore.json` | Full signed attestation bundle |
+| `lain-<ver>-<target>.tar.gz.sigstore.json` | Full signed attestation bundle (build provenance) |
 | `lain-<ver>-<target>.tar.gz.intoto.jsonl` | Signed in-toto envelope extracted from that bundle |
+| `lain-<ver>-<target>.tar.gz.cosign.bundle.json` | Direct cosign keyless signature over the tarball's bytes |
 | `SHA256SUMS` | `<hash>  <filename>` for all three tarballs |
 | `server.json` | MCP registry manifest |
 
@@ -28,6 +29,15 @@ GitHub Actions' OIDC identity during the build and discoverable via
 which produces provenance meeting [SLSA v1.0 Build Level 2](https://slsa.dev/spec/v1.0/levels) —
 the claim the README's "Build Provenance" badge links here to substantiate.
 
+Separately, each tarball also carries a direct `cosign` keyless
+signature (`.cosign.bundle.json`), produced by
+[`sigstore/cosign-installer`](https://github.com/sigstore/cosign-installer)
++ `cosign sign-blob` using the same GitHub Actions OIDC identity via
+Fulcio/Rekor. This is independent of the provenance attestation above:
+it's a direct statement "this exact blob was signed by this identity,"
+verifiable with only the `cosign` CLI — no `gh` / GitHub API call
+required, useful for verifying outside a GitHub-aware environment.
+
 The supported `<target>` triples today are:
 
 - `x86_64-unknown-linux-gnu`
@@ -37,7 +47,7 @@ The supported `<target>` triples today are:
 ## Verification flow
 
 The example below uses Linux x86_64. Set `VER` to a release that includes
-the files listed above; `v0.7.3` does not include them.
+the files listed above; releases before `v0.7.4` do not include them (some, lacking these artifacts entirely, have been removed -- see CHANGELOG.md).
 
 ### 1. Download the artifact and its checksums
 
@@ -108,6 +118,26 @@ The attestation is signed using GitHub Actions' OIDC identity during the
 build, binding the artifact to the specific commit and workflow run
 that produced it. If the tarball was modified in transit, or if a
 fork's release workflow claimed to produce it, this command fails.
+
+### 3b. Verify the cosign signature (alternative, no `gh` required)
+
+```bash
+gh release download "v${VER}" --repo spuentesp/lain \
+  --pattern "lain-${VER}-${TARGET}.tar.gz.cosign.bundle.json"
+
+cosign verify-blob \
+  --bundle "lain-${VER}-${TARGET}.tar.gz.cosign.bundle.json" \
+  --certificate-identity-regexp "^https://github.com/spuentesp/lain/\.github/workflows/release\.yml@refs/tags/v.*$" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "lain-${VER}-${TARGET}.tar.gz"
+# expected output ends with:
+# Verified OK
+```
+
+This checks the same underlying claim as step 3 (the tarball was built
+and signed by this repo's `release.yml`, via GitHub's OIDC identity),
+but only needs the `cosign` CLI — useful in environments without `gh`
+or GitHub API access.
 
 ### 4. Inspect the SBOM (optional)
 

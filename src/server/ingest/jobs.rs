@@ -5,7 +5,7 @@ impl LainServer {
     /// Run periodic sync every interval_seconds
     pub async fn run_background_sync(&self, interval_secs: u64) {
         // Sidecars never re-ingest; the owner drives that work.
-        if self.graph.is_read_only() {
+        if self.ingest().graph().is_read_only() {
             return;
         }
         let interval = tokio::time::Duration::from_secs(interval_secs);
@@ -13,14 +13,15 @@ impl LainServer {
             tokio::time::sleep(interval).await;
             info!("Background sync: checking for updates...");
             let commit = self
-                .git
+                .ingest()
+                .git()
                 .lock()
                 .get_latest_commit_info()
                 .map(|(commit, _)| commit)
                 .inspect_err(|e| warn!("Background sync: failed to get commit info: {}", e))
                 .ok();
             if let Some(commit) = commit {
-                if let Ok(Some(last)) = self.graph.get_last_commit() {
+                if let Ok(Some(last)) = self.ingest().graph().get_last_commit() {
                     if last != commit {
                         info!("Background sync: new commits detected, triggering sync");
                         let s = self.clone();
@@ -41,7 +42,7 @@ impl LainServer {
                                     );
                                 }
                                 s.readiness()
-                                    .ready(s.graph.get_last_commit().ok().flatten());
+                                    .ready(s.ingest().graph().get_last_commit().ok().flatten());
                             }
                             Err(e) => {
                                 warn!("Background sync failed: {}", e);

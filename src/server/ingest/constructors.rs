@@ -429,10 +429,28 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     );
 
     let now = SystemTime::now();
-    let server = LainServer {
-        presence_state_seen: Arc::new(Mutex::new(None)),
-        config: LainConfig {
-            workspace: ws,
+
+    // PR 3.7: assemble the 9 partition handles with the federation
+    // wiring populated, then fold them into a LainServer.
+    let presence_state_seen = Arc::new(Mutex::new(None));
+    let overlay_paths = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let overlay_revision = Arc::new(AtomicU64::new(0));
+    let id_namespace = crate::schema::RepoNamespace::fresh();
+    let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let overlay_updated = Arc::new(Notify::new());
+
+    let presence_handle = Arc::new(super::handles::PresenceLayer::new(
+        Arc::clone(&presence_state_seen),
+        presence,
+        occupancy,
+        presence_event_tx.clone(),
+        repos_yaml.as_deref(),
+        ws.as_path(),
+    ));
+
+    let ingest_handle = Arc::new(super::handles::IngestHandle::new(
+        LainConfig {
+            workspace: ws.clone(),
             memory_path: mem_path.clone(),
         },
         graph,
@@ -443,32 +461,60 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         lsp_pool,
         tool_executor,
         tuning,
-        overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
-        overlay_revision: Arc::new(AtomicU64::new(0)),
-        id_namespace: crate::schema::RepoNamespace::fresh(),
-        federation: Some(federation),
-        federation_workspaces: workspaces_lock,
-        federation_transport: Some(transport),
-        federation_port: Some(port),
-        started_at: now,
-        sync_status: crate::server::sync_status::SyncStatus::new(now),
-        repos_yaml,
-        reload_bus: Arc::new(ReloadBus::new()),
-        presence,
-        occupancy,
-        presence_event_tx,
-        last_outcome: Arc::new(parking_lot::Mutex::new(
+        id_namespace,
+        Arc::clone(&overlay_paths),
+        Arc::clone(&process_change_lock),
+        Arc::clone(&overlay_updated),
+        Arc::clone(&overlay_revision),
+    ));
+
+    let refresh_handle = Arc::new(super::handles::RefreshState::new(
+        Arc::new(parking_lot::Mutex::new(
             crate::server::refresh::RefreshOutcome::skipped(),
         )),
-        attribution: default_attribution_backend(),
-        auth: Arc::new(AuthState::from_env()),
-        events_log: events_log.clone(),
-        process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
-        overlay_updated: Arc::new(Notify::new()),
-        annotations: crate::server::annotations::AnnotationRegistry::open_best_effort(
-            &crate::config::state_dir(),
-        ),
-    };
+        crate::server::sync_status::SyncStatus::new(now),
+    ));
+
+    let federation_handle = Arc::new(super::handles::FederationHandle::new(
+        Some(federation),
+        workspaces_lock,
+        Some(transport),
+        Some(port),
+        repos_yaml,
+    ));
+
+    let audit_handle = Arc::new(super::handles::AuditState::new(events_log.clone()));
+
+    let hot_reload_handle = Arc::new(super::handles::HotReloadBus::new(
+        Arc::new(ReloadBus::new()),
+    ));
+
+    let auth_handle = Arc::new(super::handles::AuthHandle::new(Arc::new(
+        AuthState::from_env(),
+    )));
+
+    let attribution_handle = Arc::new(super::handles::AttributionState::new(
+        default_attribution_backend(),
+    ));
+
+    let lifecycle_handle = Arc::new(super::handles::LifecycleInfo::new(now));
+
+    let annotations = crate::server::annotations::AnnotationRegistry::open_best_effort(
+        &crate::config::state_dir(),
+    );
+
+    let server = LainServer::from_handles(
+        ingest_handle,
+        refresh_handle,
+        federation_handle,
+        presence_handle,
+        audit_handle,
+        hot_reload_handle,
+        auth_handle,
+        attribution_handle,
+        lifecycle_handle,
+        annotations,
+    );
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
     // when the file exists, and install a persist callback so every
     // subsequent mutation (claim, release, register, expire) flushes
@@ -570,43 +616,88 @@ impl LainServer {
         // borrows the path; we clone the Arc into the struct below.
         let events_log_path = LainServer::events_log_path_from_config(memory_path);
         let events_log = Arc::new(EventsLog::open(&events_log_path).expect("open events.jsonl"));
-        let server = Self {
-            presence_state_seen: Arc::new(Mutex::new(None)),
+
+        // PR 3.7: assemble the 9 partition handles, then fold them
+        // into a LainServer façade. The fields on each handle are
+        // populated from the values built above; the LainServer struct
+        // itself now holds only `Arc<XxxHandle>` slots.
+
+        let presence_state_seen = Arc::new(Mutex::new(None));
+        let overlay_paths = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let overlay_revision = Arc::new(AtomicU64::new(0));
+        let id_namespace = crate::schema::RepoNamespace::fresh();
+        let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let overlay_updated = Arc::new(Notify::new());
+
+        let presence_handle = Arc::new(super::handles::PresenceLayer::new(
+            Arc::clone(&presence_state_seen),
+            Arc::new(PresenceRegistry::new()),
+            Arc::new(OccupancyMap::new()),
+            presence_event_tx.clone(),
+            None,
+            workspace,
+        ));
+
+        let ingest_handle = Arc::new(super::handles::IngestHandle::new(
             config,
             graph,
             overlay,
             embedder,
-            federation_workspaces: None,
             cross_encoder,
             git,
             lsp_pool,
             tool_executor,
             tuning,
-            overlay_paths: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
-            overlay_revision: Arc::new(AtomicU64::new(0)),
-            id_namespace: crate::schema::RepoNamespace::fresh(),
-            federation: None,
-            federation_transport: None,
-            federation_port: None,
-            started_at: now,
-            sync_status: crate::server::sync_status::SyncStatus::new(now),
-            repos_yaml: None,
-            reload_bus: Arc::new(ReloadBus::new()),
-            presence: Arc::new(PresenceRegistry::new()),
-            occupancy: Arc::new(OccupancyMap::new()),
-            presence_event_tx,
-            last_outcome: Arc::new(parking_lot::Mutex::new(
+            id_namespace,
+            Arc::clone(&overlay_paths),
+            Arc::clone(&process_change_lock),
+            Arc::clone(&overlay_updated),
+            Arc::clone(&overlay_revision),
+        ));
+
+        let refresh_handle = Arc::new(super::handles::RefreshState::new(
+            Arc::new(parking_lot::Mutex::new(
                 crate::server::refresh::RefreshOutcome::skipped(),
             )),
-            attribution: default_attribution_backend(),
-            auth: Arc::new(AuthState::from_env()),
-            events_log: events_log.clone(),
-            process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
-            overlay_updated: Arc::new(Notify::new()),
-            annotations: crate::server::annotations::AnnotationRegistry::open_best_effort(
-                &crate::config::state_dir(),
-            ),
-        };
+            crate::server::sync_status::SyncStatus::new(now),
+        ));
+
+        let federation_handle = Arc::new(super::handles::FederationHandle::new(
+            None, None, None, None, None,
+        ));
+
+        let audit_handle = Arc::new(super::handles::AuditState::new(events_log.clone()));
+
+        let hot_reload_handle = Arc::new(super::handles::HotReloadBus::new(Arc::new(
+            ReloadBus::new(),
+        )));
+
+        let auth_handle = Arc::new(super::handles::AuthHandle::new(Arc::new(
+            AuthState::from_env(),
+        )));
+
+        let attribution_handle = Arc::new(super::handles::AttributionState::new(
+            default_attribution_backend(),
+        ));
+
+        let lifecycle_handle = Arc::new(super::handles::LifecycleInfo::new(now));
+
+        let annotations = crate::server::annotations::AnnotationRegistry::open_best_effort(
+            &crate::config::state_dir(),
+        );
+
+        let server = Self::from_handles(
+            ingest_handle,
+            refresh_handle,
+            federation_handle,
+            presence_handle,
+            audit_handle,
+            hot_reload_handle,
+            auth_handle,
+            attribution_handle,
+            lifecycle_handle,
+            annotations,
+        );
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists. Idempotent: missing file is a no-op.
         // JSON / IO errors here propagate so a corrupted snapshot

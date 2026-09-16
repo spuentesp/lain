@@ -26,14 +26,14 @@ async fn query_graph_includes_occupancy() {
     let server = LainServer::new(tmp.path(), &mem, None).expect("server");
 
     // Register an agent and claim the file.
-    let agent = server.presence.register(
+    let agent = server.presence().register(
         "alice".into(),
         AgentKind::ClaudeCode,
         AgentMode::Interactive,
         None,
         None,
     );
-    let _ = server.occupancy.claim(
+    let _ = server.occupancy().claim(
         &agent.id,
         vec![ClaimRequest {
             path: std::path::PathBuf::from("a.rs"),
@@ -48,7 +48,7 @@ async fn query_graph_includes_occupancy() {
     // `query_graph` handler uses to build its `occupancy.active_agents`
     // payload. Same handler, same code path as the production tool.
     let entry = server
-        .occupancy
+        .occupancy()
         .list_for_path(&std::path::PathBuf::from("a.rs"));
     assert!(
         entry.is_some(),
@@ -401,8 +401,8 @@ async fn lain_server_exposes_presence_and_occupancy() {
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
     let server = LainServer::new(tmp.path(), &mem, None).expect("server");
-    assert!(server.presence.list_active(true).is_empty());
-    assert!(server.occupancy.list_all().is_empty());
+    assert!(server.presence().list_active(true).is_empty());
+    assert!(server.occupancy().list_all().is_empty());
 }
 
 /// `serve_sse` must convert each broadcast `PresenceEvent` into an
@@ -533,7 +533,7 @@ async fn presence_tool_dispatchers_round_trip() {
     let server_arc = std::sync::Arc::new(server);
 
     // Subscribe BEFORE register_agent so we don't miss AgentJoined.
-    let mut events = server_arc.presence_event_tx.subscribe();
+    let mut events = server_arc.presence_event_tx().subscribe();
 
     // 1. register_agent returns id + token + expiry.
     let v = run_register_agent(
@@ -1399,9 +1399,9 @@ async fn to_old_path_fires_via_run_claim_files() {
             format!("smoke_f{:04}", i),
             format!("/tmp/synthetic/f{:04}.rs", i),
         );
-        let _ = server_arc.overlay.insert_node(node);
+        let _ = server_arc.overlay().insert_node(node);
     }
-    let current = server_arc.overlay.current_revision();
+    let current = server_arc.overlay().current_revision();
     assert!(
         current > 256,
         "current revision must exceed ring buffer capacity to trigger TooOld; got {}",
@@ -1410,7 +1410,7 @@ async fn to_old_path_fires_via_run_claim_files() {
 
     // Register an agent and claim with plan_revision=0 — that should hit
     // the TooOld branch in compute_world_state.
-    let session = server_arc.presence.register(
+    let session = server_arc.presence().register(
         "tooold".into(),
         AgentKind::ClaudeCode,
         AgentMode::Interactive,
@@ -1508,7 +1508,7 @@ async fn get_world_state_tool_returns_retracted_and_beyond_current() {
     );
 
     // 4) BeyondCurrent path with verbatim spec note
-    let cur = server.overlay.current_revision();
+    let cur = server.overlay().current_revision();
     let r = lain::server::mcp::presence_tools::run_get_world_state(
         &server,
         json!({"symbols": ["a"], "plan_revision": cur + 9999}),
@@ -1582,21 +1582,21 @@ async fn get_recent_activity_tool_groups_by_path() {
     let p_other = format!("{}delta.rs", prefix);
 
     // Register 3 agents
-    let alice = server.presence.register(
+    let alice = server.presence().register(
         format!("alice_{}", run_id),
         AgentKind::ClaudeCode,
         AgentMode::Interactive,
         None,
         None,
     );
-    let bob = server.presence.register(
+    let bob = server.presence().register(
         format!("bob_{}", run_id),
         AgentKind::ClaudeCode,
         AgentMode::Interactive,
         None,
         None,
     );
-    let carol = server.presence.register(
+    let carol = server.presence().register(
         format!("carol_{}", run_id),
         AgentKind::ClaudeCode,
         AgentMode::Interactive,
@@ -1898,7 +1898,7 @@ async fn any_authenticated_tool_call_extends_the_session() {
     let agent_id = v["agent_id"].as_str().unwrap().to_string();
     let token = v["session_token"].as_str().unwrap().to_string();
 
-    let before = server.presence.by_token(&token).unwrap().last_heartbeat;
+    let before = server.presence().by_token(&token).unwrap().last_heartbeat;
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     // `my_claims` is not the heartbeat tool — it is ordinary work.
@@ -1908,7 +1908,7 @@ async fn any_authenticated_tool_call_extends_the_session() {
     )
     .unwrap();
 
-    let after = server.presence.by_token(&token).unwrap().last_heartbeat;
+    let after = server.presence().by_token(&token).unwrap().last_heartbeat;
     assert!(
         after > before,
         "an authenticated tool call must count as proof of life"
@@ -2096,7 +2096,7 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
 
     // An unresolvable holder has a claim in occupancy without a live session in presence
     let departed = AgentId("departed-uuid".into());
-    server.occupancy.claim(
+    server.occupancy().claim(
         &departed,
         vec![ClaimRequest {
             path: std::path::PathBuf::from("auth.rs"),
@@ -2145,16 +2145,16 @@ async fn session_removal_cleans_up_claims_and_locks() {
     .unwrap();
 
     assert!(server
-        .occupancy
+        .occupancy()
         .list_for_path(std::path::Path::new("auth.rs"))
         .is_some());
 
     // Alice's session goes away via presence.remove: must release claims and lock leases
-    server.presence.remove(&AgentId(alice.0.clone()));
+    server.presence().remove(&AgentId(alice.0.clone()));
 
     // Occupancy map must have no claims for auth.rs
     assert!(server
-        .occupancy
+        .occupancy()
         .list_for_path(std::path::Path::new("auth.rs"))
         .is_none());
 
@@ -2196,9 +2196,9 @@ async fn unregister_agent_cleans_up_claims_and_emits_event() {
 
     let released = server.unregister_agent(&alice_id);
     assert_eq!(released, vec![std::path::PathBuf::from("src/lib.rs")]);
-    assert!(server.presence.get(&alice_id).is_none());
+    assert!(server.presence().get(&alice_id).is_none());
     assert!(server
-        .occupancy
+        .occupancy()
         .list_for_path(std::path::Path::new("src/lib.rs"))
         .is_none());
 
@@ -2272,7 +2272,7 @@ async fn claim_files_accepts_string_form_files() {
     assert_eq!(v["conflicts"].as_array().unwrap().len(), 0);
 
     // The claim actually landed: `my_claims` sees `src/a.rs`.
-    let claims = server.occupancy.list_for_agent(&AgentId(alice.0.clone()));
+    let claims = server.occupancy().list_for_agent(&AgentId(alice.0.clone()));
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].path.to_string_lossy(), "src/a.rs");
 }

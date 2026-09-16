@@ -56,14 +56,6 @@ fn extract_websocket_patterns(content: &str) -> Vec<(String, String, u32)> {
     endpoints
 }
 
-/// Find handler by name in graph
-fn find_handler(graph: &GraphDatabase, name: &str) -> Option<GraphNode> {
-    if name.is_empty() {
-        return None;
-    }
-    graph.find_node_by_name(name)
-}
-
 /// Enrich graph with WebSocket endpoints
 pub fn enrich_with_websocket(
     graph: &GraphDatabase,
@@ -112,7 +104,9 @@ pub fn enrich_with_websocket(
         graph.upsert_node(node)?;
 
         if !handler_name.is_empty() {
-            if let Some(handler) = find_handler(graph, &handler_name) {
+            if let Some(handler) =
+                crate::server::sensors::util::find_handler_in_graph(graph, &handler_name)
+            {
                 let edge = GraphEdge::new(EdgeType::Uses, handler.id.clone(), node_id);
                 graph.insert_edge(&edge)?;
                 count += 1;
@@ -135,12 +129,7 @@ pub fn scan_workspace(
 ) -> Result<usize, LainError> {
     let mut count = 0;
 
-    let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .build();
-
-    for entry in walker.flatten() {
+    for entry in crate::server::sensors::util::walk_workspace(root) {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ["js", "ts", "jsx", "tsx", "py", "go", "rs"].contains(&ext) {
