@@ -68,9 +68,10 @@ merge.
 
 ## What counts as "agent contract"
 
-The `lain/agent-contract` status is published by
-[`.github/workflows/agent-contract.yml`](.github/workflows/agent-contract.yml)
-on every CI workflow_run completion. It aggregates three CI jobs:
+The `lain/agent-contract` status is published by the `agent-contract`
+job inside [`.github/workflows/ci.yml`](.github/workflows/ci.yml), not
+by a separate workflow. It runs as part of every CI invocation and
+aggregates three sibling CI jobs:
 
 - `Capability suite (demo.sh)` — scripts/demo.sh ground-truth checks
 - `Tool schema matches docs/tool-schema.json` — schema-drift gate
