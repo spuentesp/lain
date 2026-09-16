@@ -91,9 +91,14 @@ done
 echo "==> GET /health (should include federation blob)"
 TMP=$(mktemp)
 curl -s "${BASE}/health" > "$TMP"
-python3 <<PYEOF < "$TMP"
+# `python3 - "$TMP"` makes Python read its *script* from stdin (the
+# heredoc below) and pass "$TMP" as argv[1]. The previous form
+# `python3 <<PYEOF < "$TMP"` had the trailing `< "$TMP"` override the
+# heredoc as stdin, so Python tried to execute the JSON file as source
+# instead of running the assertions below.
+python3 - "$TMP" <<'PYEOF'
 import json, sys
-data = json.load(sys.stdin)
+data = json.load(open(sys.argv[1]))
 assert "federation" in data, "federation blob missing from /health"
 f = data["federation"]
 assert f is not None, "federation should not be null in federation mode"
