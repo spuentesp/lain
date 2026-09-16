@@ -838,22 +838,17 @@ function normalizeGraphPayload(payload) {
       name: typeof n.name === 'string' ? n.name : n.id,
       path: typeof n.path === 'string' ? n.path : '',
       repo_id: typeof n.repo_id === 'string' ? n.repo_id : '',
-      // Wire format moved from dto::GraphNode (kind: String) to
-      // schema::GraphNode (node_type: NodeType enum serialized as
-      // its variant name). Read the wire field and keep the SPA's
-      // internal field name `kind` so the rest of the dashboard is
-      // unchanged.
-      kind: typeof n.node_type === 'string' ? n.node_type : '',
+      // Wire format: schema::GraphNode serializes `node_type` (the
+      // NodeType enum) as its variant name. Pass it through.
+      node_type: typeof n.node_type === 'string' ? n.node_type : '',
     }));
   const ids = new Set(nodes.map(n => n.id));
   const edges = rawEdges
     .filter(e => e && ids.has(e.source_id) && ids.has(e.target_id))
     .map(e => ({
-      // Same pattern as nodes: read wire fields (source_id,
-      // target_id) into the SPA's pre-existing internal field names
-      // so downstream code is unchanged.
-      source: e.source_id,
-      target: e.target_id,
+      // Wire format: schema::GraphEdge serializes source_id/target_id.
+      source_id: e.source_id,
+      target_id: e.target_id,
       edge_type: typeof e.edge_type === 'string' ? e.edge_type : '',
       cross_repo: e.cross_repo === true,
     }));
@@ -903,7 +898,9 @@ function applyFilters(graph, state) {
   const acceptedKinds = state.kinds;
   for (const n of graph.nodes) {
     const repoOk = acceptedRepos.has(n.repo_id);
-    const kindOk = acceptedKinds.has(n.kind);
+    // Read either field so the filter works on raw payloads (tests) and
+    // on payloads that have already been through normalizeGraphPayload.
+    const kindOk = acceptedKinds.has(n.node_type);
     if (!repoOk || !kindOk) {
       hiddenNodeIds.add(n.id);
     } else {
@@ -914,8 +911,8 @@ function applyFilters(graph, state) {
     const touchingCross = new Set();
     for (const e of graph.edges) {
       if (e.cross_repo) {
-        touchingCross.add(e.source);
-        touchingCross.add(e.target);
+        touchingCross.add(e.source_id);
+        touchingCross.add(e.target_id);
       }
     }
     for (const n of graph.nodes) {
@@ -925,8 +922,13 @@ function applyFilters(graph, state) {
   const visibleEdges = [];
   const hiddenEdgeIds = new Set();
   for (const e of graph.edges) {
-    const sHidden = hiddenNodeIds.has(e.source);
-    const tHidden = hiddenNodeIds.has(e.target);
+    // Edge endpoints may use either wire-field name (source_id/target_id)
+    // or internal-field name (source/target) depending on whether the
+    // payload has been through normalizeGraphPayload.
+    const sId = e.source_id;
+    const tId = e.target_id;
+    const sHidden = hiddenNodeIds.has(sId);
+    const tHidden = hiddenNodeIds.has(tId);
     if (sHidden || tHidden) {
       hiddenEdgeIds.add(e);
     } else {
@@ -961,10 +963,10 @@ function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
   // Build adjacency lookup once: id -> Set<id> for edge neighbours.
   const adj = new Map();
   for (const e of workspaceGraph.edges) {
-    if (!adj.has(e.source)) adj.set(e.source, new Set());
-    if (!adj.has(e.target)) adj.set(e.target, new Set());
-    adj.get(e.source).add(e.target);
-    adj.get(e.target).add(e.source);
+    if (!adj.has(e.source_id)) adj.set(e.source_id, new Set());
+    if (!adj.has(e.target_id)) adj.set(e.target_id, new Set());
+    adj.get(e.source_id).add(e.target_id);
+    adj.get(e.target_id).add(e.source_id);
   }
 
   // Build two indexes for candidate lookup:
@@ -1023,7 +1025,7 @@ function computeAnchorVisibleSet(anchors, workspaceGraph, opts = {}) {
   }
   const visibleEdges = [];
   for (const e of workspaceGraph.edges) {
-    if (visibleIds.has(e.source) && visibleIds.has(e.target)) visibleEdges.push(e);
+    if (visibleIds.has(e.source_id) && visibleIds.has(e.target_id)) visibleEdges.push(e);
   }
   return { nodes: visibleNodes, edges: visibleEdges, hiddenNodeIds };
 }
@@ -1040,7 +1042,7 @@ function parseGlobalId(id) {
   if (typeof id !== 'string') return null;
   const m = id.match(/^([^:]+):([^:]+):(.+):([^:]+)$/);
   if (!m) return null;
-  return { repo_id: m[1], kind: m[2], path: m[3], name: m[4] };
+  return { repo_id: m[1], node_type: m[2], path: m[3], name: m[4] };
 }
 
 // Build a visible-set from a `get_cross_repo_blast_radius_for_repo` JSON
@@ -1084,7 +1086,7 @@ function applyFocalGraph(payload, focalSymbol) {
         name: n.name,
         path: n.path || '',
         repo_id: repoId,
-        kind: n.kind || 'Function',
+        node_type: n.node_type || 'Function',
       });
       // Connect every entry to the focal symbol as a star. Only emit the
       // intra-repo edge when the focal symbol actually lives in this
@@ -1128,7 +1130,7 @@ function applyFocalGraph(payload, focalSymbol) {
       name: focalSymbol,
       path: '',
       repo_id: focalRepo || 'unknown',
-      kind: 'Function',
+      node_type: 'Function',
     });
   }
   return { nodes, edges, truncated: !!(payload && payload.truncated) };
@@ -1165,7 +1167,7 @@ function paintLegend(graph, palette, container) {
 
   for (const repo of repos) {
     for (const kind of kinds) {
-      const hasData = graph.nodes.some(n => n.repo_id === repo && n.kind === kind);
+      const hasData = graph.nodes.some(n => n.repo_id === repo && n.node_type === kind);
       const cell = document.createElement('div');
       cell.className = 'graph-legend-cell' + (hasData ? '' : ' is-empty');
       const repoCls = palette.get(repo) || 'graph-repo-fallback';
@@ -1270,7 +1272,7 @@ function applyFiltersToDom(svgEl, graph, state) {
   const computed = applyFilters(graph, state);
   const hiddenNodes = computed.hiddenNodeIds;
   const visibleEdgeKeys = new Set(computed.visibleEdges.map(e =>
-    e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`
+    e.source_id < e.target_id ? `${e.source_id}|${e.target_id}` : `${e.target_id}|${e.source_id}`
   ));
   svgEl.querySelectorAll('.graph-node').forEach(p => {
     p.classList.toggle('is-hidden', hiddenNodes.has(p.dataset.nodeId));
@@ -1396,7 +1398,7 @@ function drawGraphSvg(svgEl, graph) {
   // uses the same key format to look up which edges stay visible.
   const nodes = graph.nodes.map(n => Object.assign({}, n));
   const links = graph.edges.map(e => {
-    const src = e.source, tgt = e.target;
+    const src = e.source_id, tgt = e.target_id;
     const key = src < tgt ? `${src}|${tgt}` : `${tgt}|${src}`;
     return Object.assign({}, e, { __key: key });
   });
@@ -1440,10 +1442,10 @@ function drawGraphSvg(svgEl, graph) {
   // Precompute neighbours for hover focus.
   const neighboursById = new Map();
   for (const e of graph.edges) {
-    if (!neighboursById.has(e.source)) neighboursById.set(e.source, new Set());
-    if (!neighboursById.has(e.target)) neighboursById.set(e.target, new Set());
-    neighboursById.get(e.source).add(e.target);
-    neighboursById.get(e.target).add(e.source);
+    if (!neighboursById.has(e.source_id)) neighboursById.set(e.source_id, new Set());
+    if (!neighboursById.has(e.target_id)) neighboursById.set(e.target_id, new Set());
+    neighboursById.get(e.source_id).add(e.target_id);
+    neighboursById.get(e.target_id).add(e.source_id);
   }
 
   // Tooltip — styled <g class="graph-tooltip"> following the cursor. Updated by
@@ -1472,8 +1474,8 @@ function drawGraphSvg(svgEl, graph) {
       node.classed('is-focus', n => n.id === d.id);
       node.classed('is-neighbour', n => neighboursById.get(d.id)?.has(n.id));
       link.classed('is-dim', e => {
-        const sId = (typeof e.source === 'object') ? e.source.id : e.source;
-        const tId = (typeof e.target === 'object') ? e.target.id : e.target;
+        const sId = (typeof e.source_id === 'object') ? e.source_id.id : e.source_id;
+        const tId = (typeof e.target_id === 'object') ? e.target_id.id : e.target_id;
         return sId !== d.id && tId !== d.id;
       });
       updateTooltip(d, event);
@@ -1620,20 +1622,20 @@ function setFocalRowVisible(visible) {
 // stays scannable.
 function disambiguateFocalSearch(query, workspaceGraph, anchors) {
   const q = String(query || '').trim().toLowerCase();
-  if (!q) return { kind: 'none' };
+  if (!q) return { node_type: 'none' };
   const seen = new Map(); // key: `${repo_id || ''}::${name.toLowerCase()}` -> candidate
   const addCandidate = (name, repo_id, path, kind) => {
     if (!name) return;
     const repoKey = repo_id || '';
     const key = `${repoKey}::${name.toLowerCase()}`;
     if (seen.has(key)) return;
-    seen.set(key, { name, repo_id: repo_id || null, path: path || null, kind: kind || null });
+    seen.set(key, { name, repo_id: repo_id || null, path: path || null, node_type: kind || null });
   };
   if (workspaceGraph && Array.isArray(workspaceGraph.nodes)) {
     for (const n of workspaceGraph.nodes) {
       if (!n || !n.name) continue;
       if (String(n.name).toLowerCase().includes(q)) {
-        addCandidate(n.name, n.repo_id, n.path, n.kind);
+        addCandidate(n.name, n.repo_id, n.path, n.node_type || n.kind);
       }
     }
   }
@@ -1645,14 +1647,14 @@ function disambiguateFocalSearch(query, workspaceGraph, anchors) {
       }
     }
   }
-  if (seen.size === 0) return { kind: 'none' };
+  if (seen.size === 0) return { node_type: 'none' };
   if (seen.size === 1) {
     const [only] = seen.values();
-    return { kind: 'single', repo_id: only.repo_id, name: only.name };
+    return { node_type: 'single', repo_id: only.repo_id, name: only.name };
   }
   // Multiple matches: cap at 10 so the disambiguation panel stays scannable.
   const candidates = Array.from(seen.values()).slice(0, 10);
-  return { kind: 'multiple', candidates };
+  return { node_type: 'multiple', candidates };
 }
 
 // V2 polish (item #2) pure half: pick the render strategy for a
@@ -1742,19 +1744,19 @@ function wireGraphControls(state, onChange) {
         // an empty-state hint with the query echoed back.
         const fileAnchors = (state && state.fileAnchors) || null;
         const decision = disambiguateFocalSearch(q, state.workspaceGraph, fileAnchors);
-        if (decision.kind === 'multiple') {
+        if (decision.node_type === 'multiple') {
           // Render the disambiguation panel without touching the canvas
           // (the previous visible set, if any, stays put).
           renderFocalDisambiguation(q, decision.candidates);
           state.searchQuery = q;
           return;
         }
-        if (decision.kind === 'none') {
+        if (decision.node_type === 'none') {
           renderFocalSearchEmpty(q);
           state.searchQuery = q;
           return;
         }
-        // decision.kind === 'single'
+        // decision.node_type === 'single'
         state.focalSymbol = decision.name;
         state.focalRepoId  = decision.repo_id;
         state.searchQuery = q;
