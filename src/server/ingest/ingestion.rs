@@ -1,3 +1,4 @@
+use super::blocking::offthread;
 use super::scan::{scan_file_batch, PatternRef, StaticFileRef};
 use super::LainServer;
 use crate::error::LainError;
@@ -8,6 +9,7 @@ use crate::schema::{GraphEdge, GraphNode};
 use crate::server::overlay::{OverlayDiff, VolatileOverlay};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -39,7 +41,19 @@ impl LainServer {
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
         });
-        let (latest_commit, latest_time) = self.ingest().git().lock().get_latest_commit_info()?;
+        // AGENT_UX_ROADMAP.md M4 follow-up: route the libgit2 commit
+        // lookup through `offthread`. Pre-fix this ran on the Tokio
+        // worker; a slow git operation (e.g. a packed-refs refresh
+        // on a huge monorepo) would block the worker holding the
+        // `AsyncMutex<GitSensor>` for as long as it took. The
+        // `Arc<Mutex<GitSensor>>` is cloned and the parking_lot lock
+        // is acquired *inside* the closure so no guard crosses the
+        // await boundary.
+        let git_sensor = Arc::clone(self.ingest().git());
+        let (latest_commit, latest_time) = offthread(cancel.clone(), move || {
+            git_sensor.lock().get_latest_commit_info()
+        })
+        .await?;
         let last_commit = self.ingest().graph().get_last_commit()?;
         self.readiness().update(|snapshot| {
             snapshot.target_commit = Some(latest_commit.clone());
@@ -68,10 +82,19 @@ impl LainServer {
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
             info!("Incremental update since {}", last);
-            self.ingest().git().lock().get_changed_files_since(last)?
+            let last = last.clone();
+            let git_sensor = Arc::clone(self.ingest().git());
+            offthread(cancel.clone(), move || {
+                git_sensor.lock().get_changed_files_since(&last)
+            })
+            .await?
         } else {
             info!("Full repository scan");
-            self.ingest().git().lock().get_all_tracked_files()?
+            let git_sensor = Arc::clone(self.ingest().git());
+            offthread(cancel.clone(), move || {
+                git_sensor.lock().get_all_tracked_files()
+            })
+            .await?
         };
 
         if files.is_empty() {
@@ -388,13 +411,20 @@ impl LainServer {
             return Err(LainError::Cancelled);
         }
         let co_change_pairs = {
-            let git = self.ingest().git().lock();
-            git.analyze_co_changes(
-                self.ingest().tuning().ingestion.cochange_commit_window,
-                self.ingest().tuning().ingestion.cochange_min_pair_count,
-                self.ingest().tuning().ingestion.cochange_max_commit_files,
-            )
-            .unwrap_or_default()
+            let window = self.ingest().tuning().ingestion.cochange_commit_window;
+            let min_pair = self.ingest().tuning().ingestion.cochange_min_pair_count;
+            let max_files = self.ingest().tuning().ingestion.cochange_max_commit_files;
+            let git_sensor = Arc::clone(self.ingest().git());
+            match offthread(cancel.clone(), move || {
+                git_sensor
+                    .lock()
+                    .analyze_co_changes(window, min_pair, max_files)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => Vec::new(),
+            }
         };
         let co_change_tuples: Vec<_> = co_change_pairs
             .into_iter()
@@ -546,7 +576,12 @@ impl LainServer {
                 info!("build_core_memory: cancelled before orphan sweep");
                 return Err(LainError::Cancelled);
             }
-            match self.ingest().git().lock().get_all_tracked_files() {
+            let git_sensor = Arc::clone(self.ingest().git());
+            let tracked_paths_result = offthread(cancel.clone(), move || {
+                git_sensor.lock().get_all_tracked_files()
+            })
+            .await;
+            match tracked_paths_result {
                 Ok(tracked_paths) => {
                     // Reduced with the same helper the scanner mints node paths
                     // with. Comparing git's absolute paths against relative node

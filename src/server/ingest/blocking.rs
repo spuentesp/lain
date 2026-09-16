@@ -46,7 +46,10 @@ where
     R: Send + 'static,
 {
     let join = tokio::task::spawn_blocking(move || f());
-    Offthread { cancel, join: Some(join) }
+    Offthread {
+        cancel,
+        join: Some(join),
+    }
 }
 
 /// Future returned by [`offthread`]. Polls the underlying
@@ -120,18 +123,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn offthread_returns_the_closures_result() {
         let cancel = CancellationToken::new();
-        let result: Result<i32, LainError> =
-            offthread(cancel, || Ok(42)).await;
+        let result: Result<i32, LainError> = offthread(cancel, || Ok(42)).await;
         assert_eq!(result.unwrap(), 42);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn offthread_propagates_closure_errors() {
         let cancel = CancellationToken::new();
-        let result: Result<i32, LainError> = offthread(cancel, || {
-            Err(LainError::Other("boom".into()))
-        })
-        .await;
+        let result: Result<i32, LainError> =
+            offthread(cancel, || Err(LainError::Other("boom".into()))).await;
         assert!(matches!(result, Err(LainError::Other(_))));
     }
 
@@ -140,8 +140,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let started = std::time::Instant::now();
-        let result: Result<i32, LainError> =
-            offthread(cancel, || Ok(1)).await;
+        let result: Result<i32, LainError> = offthread(cancel, || Ok(1)).await;
         assert!(matches!(result, Err(LainError::Cancelled)));
         // The fast-path should not have waited for the blocking
         // thread pool at all.
