@@ -1251,6 +1251,12 @@ Avoid stack traces by default. Offer `--verbose` / `RUST_LOG` for diagnostics.
 
 # Suggested implementation order
 
+> Trust and visibility signals (README badges: CI, Scorecard, SafeSkill,
+> MSRV, SBOM, provenance, and the pending Agent Contract badge) are
+> tracked separately in [`docs/badge_rollout_plan.md`](badge_rollout_plan.md)
+> rather than as a numbered phase here — that work is independently
+> shippable and orthogonal to the milestones below.
+
 ## Phase A — Distribution foundation
 
 1. Release artifact naming and checksums.

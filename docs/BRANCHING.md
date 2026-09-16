@@ -27,11 +27,21 @@ The previous model — push directly to `main` — was fine when there was
 one maintainer and no audit pressure. It stopped being fine once we
 added the OpenSSF Scorecard badge: Scorecard's `Code-Review` and
 `Branch-Protection` checks were both at 0, and the badge reflected
-that. Both went to 10 the day we turned on:
+that. We turned on:
 
 - `main` requires 1 approval + green `lain/agent-contract`.
 - `dev` requires green `lain/agent-contract`.
 - Force pushes and direct deletion are blocked on both.
+
+**These settings alone did not move the score to 10.** Confirmed
+live against `api.securityscorecards.dev` on 2026-09-16:
+`Branch-Protection` is 5 and `Code-Review` is still 0, because
+`enforce_admins` is `false` on `main` — every PR so far has been
+merged by the repo admin with only bot `COMMENTED` reviews, never a
+human `APPROVED` one, so the 1-approval requirement has never
+actually been exercised. See [`docs/SCORECARD.md`](SCORECARD.md) for
+the full root-cause writeup; this is a single-maintainer structural
+limit, not a misconfiguration to patch quietly.
 
 ## Branch protection rules
 
