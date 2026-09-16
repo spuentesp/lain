@@ -96,7 +96,7 @@ etc. follow the same pattern.
 **Severity: med** (reduces the dispatch match by ~150 more lines;
 unblocks 3.7)
 
-Phase 3.2 (PR 6f) migrated 17 of the 27 special-case tools
+Phase 3.2 (PR 6f) migrated 17 of the 26 special-case tools
 (presence, audit, status, reload) to the inventory sub-registry.
 Federation (`list_repos`, `get_repo_info`, `get_federation_health`,
 `search_org`, `get_cross_repo_blast_radius`,
@@ -104,10 +104,6 @@ Federation (`list_repos`, `get_repo_info`, `get_federation_health`,
 (`list_workspaces`, `get_active_workspace`, `get_workspace`,
 `get_workspace_graph`) are still on match arms in
 `src/server/mcp/handler.rs:dispatch_tool_call`.
-
-(Note: the count of "26" was wrong — there are 6 federation + 4
-workspace + 17 migrated = 27 total. The original audit summary
-undercounted federation tools by one.)
 
 **Files**
 
