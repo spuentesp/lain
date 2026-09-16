@@ -7,7 +7,7 @@
 
 mod persist;
 
-pub use persist::{GraphInspectionError, PATH_FORMAT_VERSION, inspect_persisted_graph};
+pub use persist::{inspect_persisted_graph, GraphInspectionError, PATH_FORMAT_VERSION};
 
 use crate::error::LainError;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
