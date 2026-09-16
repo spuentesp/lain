@@ -197,3 +197,27 @@ pub fn scan_workspace(
 
     Ok(count)
 }
+
+/// Unit-struct Sensor impl. Discovery via
+/// `inventory::submit!(SensorEntry(&ProtoSensor))` below; no central
+/// registry to edit.
+pub struct ProtoSensor;
+
+impl crate::server::sensors::Sensor for ProtoSensor {
+    fn name(&self) -> &'static str {
+        "proto"
+    }
+    fn count_field(&self) -> crate::server::sensors::SensorCountField {
+        crate::server::sensors::SensorCountField::Proto
+    }
+    fn scan(
+        &self,
+        graph: &GraphDatabase,
+        root: &std::path::Path,
+        namespace: &crate::schema::RepoNamespace,
+    ) -> Result<usize, LainError> {
+        scan_workspace(graph, root, namespace)
+    }
+}
+
+inventory::submit!(crate::server::sensors::SensorEntry(&ProtoSensor));
