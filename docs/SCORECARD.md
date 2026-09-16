@@ -25,7 +25,7 @@ on 2026-09-16. **Overall score: 7.9/10** (up from 5.0 on 2026-09-14).
 | Branch-Protection | 5 | see root cause below |
 | Contributors | 3 | single maintainer — structural, not fixable |
 | Code-Review | 0 | see root cause below |
-| Signed-Releases | 2 | SLSA provenance attestation present; Scorecard wants `.sig`/`.asc` — only 1 of 5 recent releases has one |
+| Signed-Releases | 2 | see root cause below — this repo's own prior claim about what the check wants was wrong |
 
 ## Root cause: Code-Review (0) and Branch-Protection (5)
 
@@ -53,22 +53,53 @@ at 3: single-maintainer reality, not a bug to "tighten."
 
 ## Recommended next moves, ranked by value ÷ effort
 
-### 1. Signed-Releases (2 → 10) — ~30 min
+### 1. Signed-Releases (2 → 10) — this repo's own prior write-up here was wrong
 
-`release.yml` already calls `actions/attest-build-provenance@v2.4.0`
-(confirmed live at lines 156/234/316), which produces a SLSA-style
-provenance attestation signed by GitHub's OIDC token, but Scorecard's
-`Signed-Releases` check specifically wants `.sig`/`.asc`/`.pem`/`.gpg`
-files attached to the release — hence 2/10 instead of 0, but still not
-10.
+**Correction (2026-09-16):** this doc previously claimed Scorecard's
+`Signed-Releases` check "does not recognize the SLSA attestation" and
+specifically wants `.sig`/`.asc`/`.pem`/`.gpg` files, recommending a
+`cosign sign-blob` addition to the release pipeline. That was checked
+directly against [Scorecard's own check
+documentation](https://github.com/ossf/scorecard/blob/main/docs/checks/internal/checks.yaml)
+on 2026-09-16 and **is false**: the check explicitly recognizes
+`*.sigstore`, `*.sigstore.json`, and gives the *maximum* score of 10
+specifically when `*.intoto.jsonl` (SLSA provenance) is present. It
+samples the 30 most recent releases per artifact and does not verify
+the signatures, just checks for their presence.
 
-Cheapest path: add `cosign sign-blob` with keyless OIDC after the
-provenance step. Output to `release/lain-${VER}-${TARGET}.tar.gz.sig`
-and add it to the `softprops/action-gh-release` upload list.
+`release.yml` already produces exactly `*.sigstore.json` and
+`*.intoto.jsonl` per binary via `actions/attest-build-provenance` +
+`scripts/export-release-provenance.py` (confirmed live at
+lines 156/234/316) — **the pipeline is already fully compliant.**
+The real reason the live score is 2/10, confirmed by checking actual
+release assets on 2026-09-16:
 
-This touches the release pipeline, so it should be its own PR with a
-dry-run review before any new release ships — not bundled into a docs
-pass.
+| Release | Has `.sigstore.json` / `.intoto.jsonl`? |
+|---|---|
+| v0.7.4-rc1 | yes |
+| v0.7.3 | no |
+| v0.7.2 | no |
+| v0.7.1 | no |
+| v0.7.0 | no |
+
+Only the single most recent release was cut after the provenance-export
+step landed in the pipeline; every older release predates it. Scorecard
+is correctly reporting that 1 of the last 5 releases is signed — it's
+a release-history problem, not a pipeline gap.
+
+**Do not add cosign or any other signing mechanism** — there is nothing
+missing to build. Two real options, both a maintainer decision rather
+than something to change unilaterally:
+
+1. **Do nothing.** The ratio improves automatically as new releases
+   are cut with the current pipeline and eventually dominate the
+   30-release sample window. Slow, but zero risk.
+2. **Delete the pre-provenance releases** (v0.7.0–v0.7.3) so the
+   sample window only contains compliant releases. Faster, but
+   deleting published GitHub releases is a destructive, hard-to-reverse
+   action that could break anyone who downloaded from or scripted
+   against those specific release tags — needs an explicit maintainer
+   call, not something to do as part of a docs pass.
 
 ### 2. Branch-Protection / Code-Review — process decision, not a patch
 
