@@ -467,6 +467,7 @@ impl AnnotationStore {
 
 /// Reconstruct a [`AnnotationTarget`] from a row's `target_kind`
 /// + `target_id` columns. Used by the live-staleness pass on read.
+///
 /// Returns `None` if the row has an unrecognized `target_kind` (the
 /// caller treats this as stale).
 fn annotation_target_from_row(a: &Annotation) -> Option<AnnotationTarget> {
@@ -651,7 +652,7 @@ impl AnnotationRegistry {
             out.append(&mut from_repo);
         }
         // Stable order: newest first across all repos.
-        out.sort_by(|a, b| b.created_at_unix_ms.cmp(&a.created_at_unix_ms));
+        out.sort_by_key(|a| std::cmp::Reverse(a.created_at_unix_ms));
         if let Some(limit) = filter.limit {
             out.truncate(limit as usize);
         }

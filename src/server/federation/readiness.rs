@@ -53,6 +53,7 @@ pub struct PerRepoReadiness {
     /// - `Ready`            → `Ready`
     /// - `Indexing`         → `WarmingUp`
     /// - `Degraded`/`Unavailable`/`Missing` → `UnavailableError`
+    ///
     /// `StaleUsable` is reserved for the future "graph caught up but
     /// the working tree has unpushed edits" state.
     pub staleness: crate::server::readiness::CapabilityState,
