@@ -131,7 +131,7 @@ fn boot_server(
     // `3436a51`; see `tests/common/mod.rs::wait_for_repo_index` for
     // the cold-boot-window polling companion).
     let project: tempfile::TempDir = tempfile::tempdir().unwrap();
-    let project_path: std::path::PathBuf = project.keep();
+    let project_path: std::path::PathBuf = project.path().to_path_buf();
     let repo_dir = project_path.join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
     std::fs::create_dir_all(repo_dir.join("src")).unwrap();
@@ -177,9 +177,9 @@ fn boot_server(
     .unwrap();
 
     let state: tempfile::TempDir = tempfile::tempdir().unwrap();
-    let state_path: std::path::PathBuf = state.keep();
+    let state_path: std::path::PathBuf = state.path().to_path_buf();
     let xdg_config: tempfile::TempDir = tempfile::tempdir().unwrap();
-    let xdg_config_path: std::path::PathBuf = xdg_config.keep();
+    let xdg_config_path: std::path::PathBuf = xdg_config.path().to_path_buf();
 
     let stderr_path = std::env::temp_dir().join(format!("feat-negative-stderr-{port}.log"));
     let stderr_file = std::fs::File::create(&stderr_path).unwrap();

@@ -64,6 +64,11 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "run_clippy"
             | "get_world_state"
             | "get_recent_activity"
+            | "add_annotation"
+            | "list_annotations"
+            | "resolve_annotation"
+            | "leave_handoff_note"
+            | "get_pending_handoffs"
     ) {
         return Some(GraphIndependent);
     }

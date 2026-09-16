@@ -491,6 +491,46 @@ async fn dispatch_tool_call(
                 crate::server::mcp::audit_tools::run_get_recent_activity,
             );
         }
+        "add_annotation" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::annotation_tools::run_add_annotation,
+            );
+        }
+        "list_annotations" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::annotation_tools::run_list_annotations,
+            );
+        }
+        "resolve_annotation" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::annotation_tools::run_resolve_annotation,
+            );
+        }
+        "leave_handoff_note" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::annotation_tools::run_leave_handoff_note,
+            );
+        }
+        "get_pending_handoffs" => {
+            return dispatch_presence_tool_outcome(
+                server,
+                name,
+                &args_map,
+                crate::server::mcp::annotation_tools::run_get_pending_handoffs,
+            );
+        }
         _ => {}
     }
 

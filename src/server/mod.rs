@@ -36,6 +36,7 @@ pub mod readiness;
 pub mod reload;
 
 // Multiplayer awareness
+pub mod annotations;
 pub mod attribution;
 pub mod presence;
 pub mod presence_lock;

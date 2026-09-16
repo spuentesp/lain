@@ -12,6 +12,7 @@ pub mod utils;
 pub mod utils_tests;
 
 use crate::error::LainError;
+use crate::federation::repo_id::RepoId;
 use crate::git::GitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
@@ -556,6 +557,17 @@ impl ToolExecutor {
         if let Some(fed) = self.ctx.federation.as_ref() {
             use crate::server::federation::readiness::repo_health_to_snapshot;
 
+            // M4 step 8 deep-fields: per-repo `indexed_signal`,
+            // `last_indexed_commit`, `last_indexed_at_unix_ms`,
+            // `outstanding_files`, `staleness` — sourced from
+            // `FederatedIndex::per_repo_readiness` so the snapshot
+            // path and the wire payload can't drift.
+            let readiness = fed.per_repo_readiness();
+            let readiness_by_id: std::collections::HashMap<RepoId, _> = readiness
+                .into_iter()
+                .map(|r| (r.repo_id.clone(), r))
+                .collect();
+
             let mut repos = fed.list_repos();
             repos.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
@@ -571,7 +583,18 @@ impl ToolExecutor {
                         worst_retry_after_ms = snapshot.retry_after_ms;
                     }
                     let caps = capabilities_for(structural, snapshot.retry_after_ms, semantic_stub);
-                    serde_json::json!({ "id": id.as_str(), "capabilities": caps })
+                    let r = readiness_by_id.get(id);
+                    serde_json::json!({
+                        "id": id.as_str(),
+                        "capabilities": caps,
+                        "indexed_signal": r.map(|r| r.indexed_signal).unwrap_or(false),
+                        "last_indexed_commit": r.and_then(|r| r.last_indexed_commit.clone()),
+                        "last_indexed_at_unix_ms": r.and_then(|r| r.last_indexed_at_unix_ms),
+                        "outstanding_files": r.map(|r| r.outstanding_files).unwrap_or(0),
+                        "staleness": r.map(|r| serde_json::to_value(r.staleness).ok())
+                            .and_then(|v| v)
+                            .unwrap_or(serde_json::Value::Null),
+                    })
                 })
                 .collect();
             let aggregate = capabilities_for(worst, worst_retry_after_ms, semantic_stub);

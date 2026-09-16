@@ -151,6 +151,60 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
             p.insert("type".into(), "integer".into());
             p.insert("description".into(), "max results".into());
         }
+        // Annotation / handoff schema. Object/array/integer so a
+        // schema-following client serialises them correctly instead
+        // of the JSON-string fallback the default branch would
+        // produce.
+        "target" => {
+            p.insert("type".into(), "object".into());
+            p.insert(
+                "description".into(),
+                "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.".into(),
+            );
+            p.insert(
+                "properties".into(),
+                serde_json::json!({
+                    "kind": { "type": "string", "enum": ["symbol", "file", "repo", "edge"] },
+                    "symbol": { "type": "string" },
+                    "file": { "type": "string" },
+                    "repo_id": { "type": "string" },
+                    "from": { "type": "string" },
+                    "to": { "type": "string" }
+                }),
+            );
+        }
+        "refs" => {
+            p.insert("type".into(), "array".into());
+            p.insert(
+                "items".into(),
+                serde_json::json!({ "$ref": "#/properties/target" }),
+            );
+            p.insert(
+                "description".into(),
+                "Cross-references to other annotation targets.".into(),
+            );
+        }
+        "since_unix_ms" => {
+            p.insert("type".into(), "integer".into());
+            p.insert(
+                "description".into(),
+                "Filter to rows with created_at_unix_ms >= this value.".into(),
+            );
+        }
+        "status" => {
+            p.insert("type".into(), "string".into());
+            p.insert(
+                "enum".into(),
+                serde_json::json!(["open", "resolved", "stale"]),
+            );
+        }
+        "scope" => {
+            p.insert("type".into(), "string".into());
+            p.insert(
+                "description".into(),
+                "Handoff scope: 'workspace' | 'repo:<id>' | 'agent_kind:<k>'.".into(),
+            );
+        }
         // Booleans must be typed: the generic fallback is `string`, and
         // a schema-respecting client would send "true" as text, which
         // `serde_json::from_value::<Option<bool>>` rejects — the same

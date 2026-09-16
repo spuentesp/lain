@@ -42,7 +42,7 @@ fn agent_name(server: &LainServer, id: &AgentId) -> Option<String> {
     server.presence.get(id).map(|s| s.name)
 }
 
-fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
+pub(crate) fn authenticate(server: &LainServer, token: &str) -> Result<AgentSession, String> {
     let session = server
         .presence
         .by_token(token)

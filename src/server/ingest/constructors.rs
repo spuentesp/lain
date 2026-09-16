@@ -465,6 +465,9 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         events_log: events_log.clone(),
         process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
         overlay_updated: Arc::new(Notify::new()),
+        annotations: crate::server::annotations::AnnotationRegistry::open_best_effort(
+            &crate::config::state_dir(),
+        ),
     };
     // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
     // when the file exists, and install a persist callback so every
@@ -600,6 +603,9 @@ impl LainServer {
             events_log: events_log.clone(),
             process_change_lock: Arc::new(tokio::sync::Mutex::new(())),
             overlay_updated: Arc::new(Notify::new()),
+            annotations: crate::server::annotations::AnnotationRegistry::open_best_effort(
+                &crate::config::state_dir(),
+            ),
         };
         // Hydrate presence + occupancy from `~/.local/lain/state/<stem>.json`
         // when the file exists. Idempotent: missing file is a no-op.
