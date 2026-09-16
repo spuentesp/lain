@@ -77,9 +77,7 @@ pub fn inspect_persisted_graph(path: &Path) -> Result<Option<String>, GraphInspe
     let data = std::fs::read(path).map_err(GraphInspectionError::Io)?;
     let (state, _) = decode_state(&data).map_err(GraphInspectionError::Corrupt)?;
     if state.path_format_version != PATH_FORMAT_VERSION {
-        return Err(GraphInspectionError::Incompatible(
-            state.path_format_version,
-        ));
+        return Err(GraphInspectionError::Incompatible(state.path_format_version));
     }
     if state.index_map.len() != state.graph.node_count()
         || state
