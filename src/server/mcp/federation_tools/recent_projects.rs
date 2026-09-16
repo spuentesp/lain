@@ -106,27 +106,9 @@ mod tests {
     /// duration of a test, restoring the previous value on drop. Used
     /// only by the production end-to-end test below; the other tests
     /// in this module prefer the `_in` helpers which don't touch the
-    /// env var at all.
-    struct XdgGuard {
-        prev: Option<String>,
-    }
-
-    impl XdgGuard {
-        fn new(dir: &std::path::Path) -> Self {
-            let prev = std::env::var("XDG_CONFIG_HOME").ok();
-            std::env::set_var("XDG_CONFIG_HOME", dir);
-            Self { prev }
-        }
-    }
-
-    impl Drop for XdgGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
-    }
+    /// env var at all. The canonical implementation lives in
+    /// `crate::test_util::XdgGuard`; this `use` brings it into scope.
+    use crate::test_util::XdgGuard;
 
     #[test]
     fn list_recent_projects_returns_empty_when_file_missing() {

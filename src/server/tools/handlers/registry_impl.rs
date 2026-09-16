@@ -8,7 +8,7 @@
 use crate::error::LainError;
 use crate::server::tools::handlers;
 use crate::server::tools::registry::{ToolCapability, ToolContext, ToolHandler, ToolHandlerEntry};
-use crate::server::tools::utils::{bool_arg, opt_str_arg, required_str_arg, u32_arg, usize_arg};
+use crate::server::tools::utils::{bool_arg, required_str_arg, str_arg, u32_arg, usize_arg};
 use async_trait::async_trait;
 use inventory;
 use serde_json::{Map, Value};
@@ -39,7 +39,7 @@ fn ui_link(ctx: &ToolContext) -> crate::server::tools::UiLink<'_> {
 // ─── Handler macros ────────────────────────────────────────────────────────────
 
 // Arg-extraction helpers (`str_arg`, `required_str_arg`, `usize_arg`,
-// `bool_arg`, `u32_arg`, `opt_str_arg`) are imported from
+// `bool_arg`, `u32_arg`, `str_arg`) are imported from
 // `crate::server::tools::utils` so handler modules and integration
 // tests share one canonical set.
 
@@ -266,7 +266,7 @@ impl ToolHandler for GetLayeredMapHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let layer = usize_arg(args, "layer").unwrap_or(0);
-        let granularity = opt_str_arg(args, "granularity");
+        let granularity = str_arg(args, "granularity");
         handlers::navigation::get_layered_map(&ctx.graph, &ctx.overlay, layer, &granularity)
     }
 }
@@ -751,10 +751,10 @@ impl ToolHandler for RunBuildHandler {
     ) -> Result<String, LainError> {
         // Default cwd to the workspace so the tool works without an explicit
         // `cwd` argument.
-        let cwd = if opt_str_arg(args, "cwd").is_empty() {
+        let cwd = if str_arg(args, "cwd").is_empty() {
             ctx.workspace.to_string_lossy().to_string()
         } else {
-            opt_str_arg(args, "cwd")
+            str_arg(args, "cwd")
         };
         let release = bool_arg(args, "release").unwrap_or(false);
         handlers::execution::run_build(
@@ -789,15 +789,15 @@ impl ToolHandler for RunTestsHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let cwd = if opt_str_arg(args, "cwd").is_empty() {
+        let cwd = if str_arg(args, "cwd").is_empty() {
             ctx.workspace.to_string_lossy().to_string()
         } else {
-            opt_str_arg(args, "cwd")
+            str_arg(args, "cwd")
         };
-        let filter = if opt_str_arg(args, "filter").is_empty() {
+        let filter = if str_arg(args, "filter").is_empty() {
             None
         } else {
-            Some(opt_str_arg(args, "filter"))
+            Some(str_arg(args, "filter"))
         };
         let timeout_secs = usize_arg(args, "timeout_secs");
         handlers::execution::run_tests(
@@ -833,10 +833,10 @@ impl ToolHandler for RunClippyHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let cwd = if opt_str_arg(args, "cwd").is_empty() {
+        let cwd = if str_arg(args, "cwd").is_empty() {
             ctx.workspace.to_string_lossy().to_string()
         } else {
-            opt_str_arg(args, "cwd")
+            str_arg(args, "cwd")
         };
         let fix = bool_arg(args, "fix").unwrap_or(false);
         handlers::execution::run_clippy(
@@ -963,10 +963,10 @@ impl ToolHandler for GetFileDiffHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let path = if opt_str_arg(args, "path").is_empty() {
+        let path = if str_arg(args, "path").is_empty() {
             None
         } else {
-            Some(opt_str_arg(args, "path"))
+            Some(str_arg(args, "path"))
         };
         handlers::gitops::get_file_diff(&ctx.git, path.as_deref())
     }
@@ -1098,10 +1098,10 @@ impl ToolHandler for GetCoverageSummaryHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let module_path = if opt_str_arg(args, "module_path").is_empty() {
+        let module_path = if str_arg(args, "module_path").is_empty() {
             None
         } else {
-            Some(opt_str_arg(args, "module_path"))
+            Some(str_arg(args, "module_path"))
         };
         handlers::testing::get_coverage_summary(&ctx.graph, &ctx.overlay, module_path.as_deref())
     }

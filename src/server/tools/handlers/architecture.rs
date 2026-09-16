@@ -5,6 +5,7 @@ use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
 use crate::server::tools::utils::resolve_node;
+use crate::server::tools::utils::format_duration;
 use std::collections::HashSet;
 
 pub fn explore_architecture(
@@ -327,18 +328,6 @@ pub fn get_master_map(
     }
 
     Ok(output)
-}
-
-fn format_duration(seconds: i64) -> String {
-    if seconds < 60 {
-        format!("{}s ago", seconds)
-    } else if seconds < 3600 {
-        format!("{}m ago", seconds / 60)
-    } else if seconds < 86400 {
-        format!("{}h ago", seconds / 3600)
-    } else {
-        format!("{}d ago", seconds / 86400)
-    }
 }
 
 /// Analyzes the codebase for architectural observations:
