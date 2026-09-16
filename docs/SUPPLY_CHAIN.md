@@ -124,13 +124,27 @@ iteration of this workflow will add those. For now, the provenance
 attestation guarantees binary↔commit binding even when the bytes
 aren't identical across runs.
 
+### 5. Cosign keyless signature
+
+**Reverses an earlier decision in this doc** (see git history) that
+argued `attest-build-provenance` alone was sufficient and a cosign
+signature would just double the signature surface. Added back
+2026-09-16: `sigstore/cosign-installer` + `cosign sign-blob --bundle`,
+same GitHub Actions OIDC identity via Fulcio/Rekor, output at
+`<tarball>.cosign.bundle.json`.
+
+The two are not fully redundant even though they use the same
+underlying trust root: `attest-build-provenance` produces a SLSA
+*provenance* attestation (a claim about how the artifact was built)
+verified through GitHub's own attestation API; cosign's signature is
+a direct claim about the artifact's bytes, verifiable with only the
+`cosign` CLI and no GitHub API dependency. The value is independent
+verifiability, not additional cryptographic strength — both trace back
+to the same OIDC/Fulcio root of trust, so a compromised workflow
+compromises both.
+
 ## What does NOT ship in the release (and why)
 
-- **Cosign signatures.** `actions/attest-build-provenance` covers
-  the same ground with OIDC, doesn't require the maintainer to manage
-  a separate signing key, and is verifiable via the GitHub-native
-  `gh attestation verify`. Adding cosign on top would double the
-  signature surface without doubling the security value.
 - **SLSA Level 3 hardened builders.** Level 2 (what we ship) requires
   provenance from a hosted build platform — which GitHub Actions is.
   Level 3 also requires an isolated, ephemeral build environment;
