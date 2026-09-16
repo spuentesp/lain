@@ -1040,5 +1040,147 @@
       "type": "object"
     },
     "name": "get_recent_activity"
+  },
+  {
+    "description": "Add an annotation (note | warning | todo | investigation | fix) targeting a symbol, file, repo, or edge. Body is 1..=4096 bytes. Returns { id, created_at_unix_ms, repo_id }. Author defaults to the authenticated session_token if `author` is omitted.",
+    "inputSchema": {
+      "properties": {
+        "author": {
+          "description": "author",
+          "type": "string"
+        },
+        "body": {
+          "description": "body",
+          "type": "string"
+        },
+        "kind": {
+          "description": "agent kind, e.g. claude-code | codex | kimi | agy (any string is accepted)",
+          "type": "string"
+        },
+        "refs": {
+          "description": "refs",
+          "type": "string"
+        },
+        "session_token": {
+          "description": "session_token",
+          "type": "string"
+        },
+        "target": {
+          "description": "target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "kind",
+        "body"
+      ],
+      "type": "object"
+    },
+    "name": "add_annotation"
+  },
+  {
+    "description": "List annotations with optional filters: target (symbol | file | repo | edge), author, kind, status, limit (default 100). Live-staleness pass marks targets that no longer exist in the graph as status='stale'. Returns { annotations: [Annotation] }.",
+    "inputSchema": {
+      "properties": {
+        "author": {
+          "description": "author",
+          "type": "string"
+        },
+        "kind": {
+          "description": "agent kind, e.g. claude-code | codex | kimi | agy (any string is accepted)",
+          "type": "string"
+        },
+        "limit": {
+          "description": "max results",
+          "type": "integer"
+        },
+        "status": {
+          "description": "status",
+          "type": "string"
+        },
+        "target": {
+          "description": "target",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_annotations"
+  },
+  {
+    "description": "Mark an open annotation as resolved by the calling agent (or by `resolved_by`). Returns { resolved: Annotation }. Annotations already resolved return an error so a typo'd id is loud.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "id",
+          "type": "string"
+        },
+        "resolved_by": {
+          "description": "resolved_by",
+          "type": "string"
+        },
+        "session_token": {
+          "description": "session_token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "resolve_annotation"
+  },
+  {
+    "description": "Leave a workspace-scoped note for the next agent that registers. Stored as an open Note annotation; expires after 24h. Body may carry a `[scope:<s>]` prefix for filtering on the read side. Returns { id, expires_at_unix_ms }. Single-repo mode only for now.",
+    "inputSchema": {
+      "properties": {
+        "author": {
+          "description": "author",
+          "type": "string"
+        },
+        "body": {
+          "description": "body",
+          "type": "string"
+        },
+        "refs": {
+          "description": "refs",
+          "type": "string"
+        },
+        "scope": {
+          "description": "scope",
+          "type": "string"
+        },
+        "session_token": {
+          "description": "session_token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "type": "object"
+    },
+    "name": "leave_handoff_note"
+  },
+  {
+    "description": "List open handoff notes from prior agents. Filters: scope (workspace | repo:<id> | agent_kind:<k>), since_unix_ms. Returns { handoffs: [Annotation] } — only kind=note, status=open rows within the 24h TTL.",
+    "inputSchema": {
+      "properties": {
+        "scope": {
+          "description": "scope",
+          "type": "string"
+        },
+        "since_unix_ms": {
+          "description": "since_unix_ms",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_pending_handoffs"
   }
 ]
