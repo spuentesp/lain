@@ -206,9 +206,14 @@ jobs:
         id: pinned
         run: |
           # Print from the `lain-version:` line to the first `default:`
-          # line, then extract the vX.Y.Z token. Robust to YAML layout.
+          # line, then extract the vX.Y.Z token. The regex accepts an
+          # optional pre-release suffix (`-rc1`, `-beta.2`, etc.) so the
+          # same extractor keeps working when the next release is a
+          # pre-release; without this, `v0.7.4-rc1` would silently
+          # produce an empty match and the drift check would error out
+          # the first time a pre-release is cut.
           PINNED=$(sed -n '/lain-version:/,/default:/p' .github/actions/lain-health-badge/action.yml \
-            | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+            | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?" | head -1)
           if [ -z "$PINNED" ]; then
             echo "::error::could not parse lain-version default from action.yml"
             exit 1
@@ -449,10 +454,19 @@ jobs:
   #
   # Same aggregate rule as before: PASS iff every agent-relevant job
   # (capability, schema-drift, npm-shim) is success or skipped.
+  #
+  # For pull_request events from forks, GitHub downgrades the
+  # default `GITHUB_TOKEN` to read-only, so the `gh api ... statuses/...`
+  # POST below would 403. The branch protection check is still required
+  # on fork PRs, but it can never be satisfied from inside a fork-PR
+  # workflow run; that's a separate problem (the cross-repo status
+  # publishing pattern, see PR #43 / `docs/BRANCHING.md`). Here we
+  # just skip the job cleanly on fork PRs so it doesn't surface as a
+  # confusing CI failure.
   agent-contract:
     name: Publish agent-contract status
     needs: [capability, schema-drift, npm-shim]
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
     runs-on: ubuntu-latest
     permissions:
       statuses: write
