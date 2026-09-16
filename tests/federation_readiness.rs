@@ -177,6 +177,54 @@ async fn per_repo_readiness_reports_indexed_signal_after_first_successful_index(
         "last_indexed_at_unix_ms must be populated, got {:?}",
         r1.last_indexed_at_unix_ms
     );
+    // Acceptance criterion for docs/FOLLOWUPS.md entry #6:
+    // `last_indexed_commit` is non-null exactly when a successful
+    // index pass has reached a commit. Pinning the concrete git
+    // hash would tie the test to the fixture's commit, which is
+    // already created by `new_git_repo`. A non-empty, hex-looking
+    // string is enough to prove the gate flipped.
+    assert!(
+        r1.last_indexed_commit.is_some(),
+        "after a successful index, last_indexed_commit must be Some, got {:?}",
+        r1.last_indexed_commit
+    );
+}
+
+#[tokio::test]
+async fn per_repo_readiness_nulls_last_indexed_commit_until_index_runs() {
+    // Cold-repo wire shape: between `add_repo` and the first
+    // successful `index_forced()`, `last_indexed_commit` and
+    // `last_indexed_at_unix_ms` must be `None`. Before the fix
+    // the disk-hydrated `last_commit` leaked through and
+    // `get_capabilities.repositories[].last_indexed_commit`
+    // surfaced a value that the in-process graph had not yet
+    // reached — see docs/FOLLOWUPS.md entry #6.
+    let tmp = tempfile::tempdir().unwrap();
+    let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+    let src_dir = new_git_repo();
+    let src: Box<dyn lain::federation::repo_source::RepoSource> = Box::new(
+        WorkspaceDirSource::new(RepoId::new("r").unwrap(), src_dir.path().to_path_buf()).unwrap(),
+    );
+    fed.add_repo(src, tmp.path()).await.unwrap();
+
+    // No indexing yet. The wire contract must report null commit
+    // and null timestamp regardless of what the persisted
+    // graph.bin happens to say.
+    let r0 = &fed.per_repo_readiness()[0];
+    assert!(
+        !r0.indexed_signal,
+        "indexed_signal must start false on a freshly added repo"
+    );
+    assert!(
+        r0.last_indexed_commit.is_none(),
+        "cold repo last_indexed_commit must be None until indexed_signal flips true, got {:?}",
+        r0.last_indexed_commit
+    );
+    assert!(
+        r0.last_indexed_at_unix_ms.is_none(),
+        "cold repo last_indexed_at_unix_ms must be None until indexed_signal flips true, got {:?}",
+        r0.last_indexed_at_unix_ms
+    );
 }
 
 #[tokio::test]
