@@ -39,11 +39,18 @@ use tracing::info;
 
 #[derive(Clone)]
 pub struct LainServer {
+    // =========================================================================
+    // Presence
+    // =========================================================================
     /// Modification time of the presence state file as of our last
     /// load. Lets `with_shared_presence` skip re-reading a file no peer
     /// has touched — the reload exists to see other processes' writes,
     /// and re-parsing our own is pure cost on a hot path.
     pub(crate) presence_state_seen: Arc<Mutex<Option<std::time::SystemTime>>>,
+
+    // =========================================================================
+    // Ingest
+    // =========================================================================
     pub config: LainConfig,
     pub graph: GraphDatabase,
     pub overlay: VolatileOverlay,
@@ -96,6 +103,10 @@ pub struct LainServer {
     /// follow-up: the watcher and `process_change` paths use this
     /// when minting new overlay nodes.
     pub(crate) id_namespace: crate::schema::RepoNamespace,
+
+    // =========================================================================
+    // Refresh
+    // =========================================================================
     /// Outcome of the most recent startup re-index. Written by the
     /// re-index spawn in `LainMcpServer::run_stdio` / `run_http`;
     /// read by `ToolExecutor::get_health` and (in step 3) by the tool
@@ -106,17 +117,30 @@ pub struct LainServer {
     /// Monotonic counter used as the `revision` field of every
     /// `OverlayDiff` this process broadcasts.
     pub(crate) overlay_revision: Arc<AtomicU64>,
+
+    // =========================================================================
+    // Federation
+    // =========================================================================
     /// Federation handle. `Some` for federation-mode servers (constructed
     /// via `with_federation`); `None` for single-workspace servers
     /// (constructed via `new`).
     pub(crate) federation: Option<Arc<FederatedIndex>>,
+
+    // =========================================================================
+    // Auth
+    // =========================================================================
     /// Per-key auth + rate limit (P0 #1). Populated from `LAIN_API_KEYS`
     /// and `LAIN_RATE_LIMIT_RPM` env vars at server startup. Cloned into
     /// the HTTP request handler so dev mode (no env) stays zero-cost.
     pub auth: Arc<crate::server::auth::AuthState>,
+
     /// Per-repo annotation registry (M4 plan §4.2). Lazily opens
     /// per-repo SQLite stores under `<state_dir>/annotations/`.
     pub annotations: Arc<crate::server::annotations::AnnotationRegistry>,
+
+    // =========================================================================
+    // Audit
+    // =========================================================================
     /// Durable SSE event log (P1 #2). Captures every `PresenceEvent`
     /// broadcast on the SSE channel with a monotonic `event_id: u64`,
     /// supports replay-after-id via `events.jsonl` so SSE subscribers
@@ -141,6 +165,10 @@ pub struct LainServer {
     pub(crate) federation_transport: Option<super::config::Transport>,
     /// Port chosen at `with_federation` time. Consumed by `serve`.
     pub(crate) federation_port: Option<u16>,
+
+    // =========================================================================
+    // Lifecycle
+    // =========================================================================
     /// Process start time, captured at construction. Immutable for the
     /// life of the server; surfaced via `get_server_status`.
     pub(crate) started_at: SystemTime,
@@ -153,6 +181,10 @@ pub struct LainServer {
     /// to record the project in `~/.config/lain/recent_projects` and to
     /// tag the server status payload.
     pub(crate) repos_yaml: Option<PathBuf>,
+
+    // =========================================================================
+    // Hot reload
+    // =========================================================================
     /// Hot-reload signal bus. Always allocated (single-workspace and
     /// federation-mode servers both hold one); the actual rebuild loop
     /// is only spawned in federation mode. Wrapped in `Arc` so the
@@ -177,6 +209,10 @@ pub struct LainServer {
     /// registry/occupancy state itself remains consistent on the
     /// server side).
     pub presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
+
+    // =========================================================================
+    // Attribution
+    // =========================================================================
     /// Strategy used by the background attribution watcher to map a
     /// workspace path to the PID that wrote it. The `lain server` CLI
     /// picks this at startup based on platform (`ProcFsBackend` on
