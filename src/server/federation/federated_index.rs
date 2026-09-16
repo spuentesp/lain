@@ -433,6 +433,7 @@ impl FederatedIndex {
                 source_id: src.clone(),
                 target_id: resolved_target,
                 weight: edge.weight,
+                cross_repo: false,
             });
         }
         self.backend.upsert_edges_batch(&batch)?;
@@ -511,6 +512,7 @@ impl FederatedIndex {
                     source_id: src.clone(),
                     target_id: edge.target_id.clone(),
                     weight: edge.weight,
+                    cross_repo: false,
                 });
             }
             self.backend.upsert_edges_batch(&external_batch)?;
@@ -622,6 +624,7 @@ impl FederatedIndex {
                     source_id: new_node.id.clone(),
                     target_id: target_gid,
                     weight: Some(sim),
+                    cross_repo: true,
                 });
             }
         }

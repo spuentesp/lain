@@ -4,12 +4,12 @@
 //! `FederatedIndex`.
 
 use super::dto::{
-    ActiveWorkspaceInfo, GraphEdge, GraphNode, WorkspaceDetail, WorkspaceGraph, WorkspaceInfo,
-    WorkspaceRepoInfo,
+    ActiveWorkspaceInfo, WorkspaceDetail, WorkspaceGraph, WorkspaceInfo, WorkspaceRepoInfo,
 };
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::workspace::{WorkspaceSourceConfig, WorkspacesFile};
+use crate::schema::{GraphEdge, GraphNode};
 use crate::state::ActiveWorkspace;
 
 fn source_label(s: &Option<WorkspaceSourceConfig>) -> Option<String> {
@@ -190,13 +190,14 @@ pub fn get_workspace_graph(
             truncated = true;
             break;
         }
-        nodes.push(GraphNode {
-            id: n.id.clone(),
-            name: n.name.clone(),
-            path: n.path.clone(),
-            repo_id,
-            kind,
-        });
+        let mut wire = GraphNode::new(n.node_type, n.name.clone(), n.path.clone());
+        wire.id = n.id.clone();
+        wire.repo_id = if repo_id.is_empty() {
+            None
+        } else {
+            Some(repo_id)
+        };
+        nodes.push(wire);
     }
     let node_ids: std::collections::HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
 
@@ -220,12 +221,10 @@ pub fn get_workspace_graph(
             (Some(a), Some(b)) => a.repo_id() != b.repo_id(),
             _ => false,
         };
-        edges.push(GraphEdge {
-            source: e.source_id,
-            target: e.target_id,
-            edge_type: kind,
-            cross_repo,
-        });
+        let mut wire = GraphEdge::new(e.edge_type, e.source_id, e.target_id);
+        wire.weight = e.weight;
+        wire.cross_repo = cross_repo;
+        edges.push(wire);
     }
 
     Ok(WorkspaceGraph {

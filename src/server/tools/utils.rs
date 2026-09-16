@@ -213,25 +213,6 @@ pub fn ambiguity_note(chosen: &GraphNode, others: &[GraphNode]) -> String {
 // `resolve_node_at_location` existed only for `augment_knowledge`, which
 // was removed as dead; nothing else ever called it.
 
-/// Extract string argument
-pub fn get_str_arg<'a>(args: Option<&'a Map<String, Value>>, key: &str) -> &'a str {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-}
-
-/// Extract usize argument
-pub fn get_usize_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<usize> {
-    args.and_then(|a| a.get(key))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-}
-
-/// Extract boolean argument
-pub fn get_bool_arg(args: Option<&Map<String, Value>>, key: &str) -> Option<bool> {
-    args.and_then(|a| a.get(key)).and_then(|v| v.as_bool())
-}
-
 /// Extract a string argument from the args map. Returns an empty
 /// string when the key is missing or the value isn't a string.
 /// Use [`required_str_arg`] when an empty fallback would be wrong.
@@ -293,10 +274,37 @@ pub fn u32_arg(args: &Map<String, Value>, key: &str) -> Option<u32> {
     args.get(key).and_then(|v| v.as_u64()).map(|n| n as u32)
 }
 
-/// Extract an optional string argument, returning an empty string
-/// when missing. Equivalent to `str_arg(args, key)`.
-pub fn opt_str_arg(args: &Map<String, Value>, key: &str) -> String {
-    str_arg(args, key)
+/// Render a duration in seconds as a coarse "X{s,m,h,d} ago" string.
+///
+/// Ladder: < 1 min → seconds, < 1 h → minutes, < 1 d → hours, else days.
+/// Negative inputs are rendered as "Ns ago" with the absolute value
+/// (the git history path can see negative diffs when the commit's
+/// recorded time is in the future relative to a slightly stale clock).
+pub fn format_duration(seconds: i64) -> String {
+    let s = seconds.unsigned_abs();
+    if s < 60 {
+        format!("{seconds}s ago")
+    } else if s < 3600 {
+        format!("{}m ago", seconds / 60)
+    } else if s < 86400 {
+        format!("{}h ago", seconds / 3600)
+    } else {
+        format!("{}d ago", seconds / 86400)
+    }
+}
+
+/// Like [`format_duration`] but takes a Unix timestamp and computes
+/// the "now - ts" diff. Returns "unknown" for non-positive timestamps
+/// (zero / negative git-time sentinels).
+pub fn format_ago(unix_secs: i64) -> String {
+    if unix_secs <= 0 {
+        return "unknown".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    format_duration(now - unix_secs)
 }
 
 /// Build enriched text for embedding: name + signature + docstring + path

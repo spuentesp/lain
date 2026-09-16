@@ -143,10 +143,10 @@ test('classifyWorkspacesResult: an unparseable body yields an empty list', () =>
 test('normalizeGraphPayload: a well-formed payload survives intact', () => {
   const out = app.normalizeGraphPayload({
     nodes: [
-      { id: 'r::a', name: 'a', path: 'src/a.rs', repo_id: 'r', kind: 'Function' },
-      { id: 'r::b', name: 'b', path: 'src/b.rs', repo_id: 'r', kind: 'Function' },
+      { id: 'r::a', name: 'a', path: 'src/a.rs', repo_id: 'r', node_type: 'Function' },
+      { id: 'r::b', name: 'b', path: 'src/b.rs', repo_id: 'r', node_type: 'Function' },
     ],
-    edges: [{ source: 'r::a', target: 'r::b', edge_type: 'Calls', cross_repo: false }],
+    edges: [{ source_id: 'r::a', target_id: 'r::b', edge_type: 'Calls', cross_repo: false }],
     truncated: false,
   });
   assert.strictEqual(out.nodes.length, 2);
@@ -156,10 +156,10 @@ test('normalizeGraphPayload: a well-formed payload survives intact', () => {
 
 test('normalizeGraphPayload: drops edges with a dangling endpoint', () => {
   const out = app.normalizeGraphPayload({
-    nodes: [{ id: 'r::a', name: 'a', path: '', repo_id: 'r', kind: 'Function' }],
+    nodes: [{ id: 'r::a', name: 'a', path: '', repo_id: 'r', node_type: 'Function' }],
     edges: [
-      { source: 'r::a', target: 'r::gone', edge_type: 'Calls' },
-      { source: 'r::missing', target: 'r::a', edge_type: 'Calls' },
+      { source_id: 'r::a', target_id: 'r::gone', edge_type: 'Calls' },
+      { source_id: 'r::missing', target_id: 'r::a', edge_type: 'Calls' },
     ],
   });
   assert.strictEqual(out.edges.length, 0, 'd3.forceLink throws on unknown node ids');
@@ -238,10 +238,10 @@ test('nodeRadius: 5/6/7 by role', () => {
 test('applyFilters: drops node when repo unselected', () => {
   const graph = {
     nodes: [
-      { id: 'a', repo_id: 'r1', kind: 'Function' },
-      { id: 'b', repo_id: 'r2', kind: 'Function' },
+      { id: 'a', repo_id: 'r1', node_type: 'Function' },
+      { id: 'b', repo_id: 'r2', node_type: 'Function' },
     ],
-    edges: [{ source: 'a', target: 'b', cross_repo: false }],
+    edges: [{ source_id: 'a', target_id: 'b', cross_repo: false }],
   };
   const state = {
     repos: new Set(['r1']),
@@ -258,8 +258,8 @@ test('applyFilters: drops node when repo unselected', () => {
 test('applyFilters: drops node when kind unselected', () => {
   const graph = {
     nodes: [
-      { id: 'a', repo_id: 'r1', kind: 'Function' },
-      { id: 'b', repo_id: 'r1', kind: 'Method' },
+      { id: 'a', repo_id: 'r1', node_type: 'Function' },
+      { id: 'b', repo_id: 'r1', node_type: 'Method' },
     ],
     edges: [],
   };
@@ -277,13 +277,13 @@ test('applyFilters: drops node when kind unselected', () => {
 test('applyFilters: crossRepoOnly drops nodes that have no cross-repo edge', () => {
   const graph = {
     nodes: [
-      { id: 'a', repo_id: 'r1', kind: 'Function' },
-      { id: 'b', repo_id: 'r1', kind: 'Function' },
-      { id: 'c', repo_id: 'r2', kind: 'Function' },
+      { id: 'a', repo_id: 'r1', node_type: 'Function' },
+      { id: 'b', repo_id: 'r1', node_type: 'Function' },
+      { id: 'c', repo_id: 'r2', node_type: 'Function' },
     ],
     edges: [
-      { source: 'a', target: 'b', cross_repo: false },
-      { source: 'a', target: 'c', cross_repo: true  },
+      { source_id: 'a', target_id: 'b', cross_repo: false },
+      { source_id: 'a', target_id: 'c', cross_repo: true  },
     ],
   };
   const state = {
@@ -302,11 +302,11 @@ test('applyFilters: crossRepoOnly drops nodes that have no cross-repo edge', () 
 test('applyFilters: edge drops when either endpoint hidden', () => {
   const graph = {
     nodes: [
-      { id: 'a', repo_id: 'r1', kind: 'Function' },
-      { id: 'b', repo_id: 'r2', kind: 'Function' },
+      { id: 'a', repo_id: 'r1', node_type: 'Function' },
+      { id: 'b', repo_id: 'r2', node_type: 'Function' },
     ],
     edges: [
-      { source: 'a', target: 'b', cross_repo: true },
+      { source_id: 'a', target_id: 'b', cross_repo: true },
     ],
   };
   const state = {
@@ -324,9 +324,9 @@ test('applyFilters: edge drops when either endpoint hidden', () => {
 test('computeAnchorVisibleSet: anchor with no incident edges is itself visible', () => {
   const anchors = [{ name: 'orphan', repo_id: 'r1' }];
   const workspaceGraph = {
-    nodes: [{ id: 'a', name: 'orphan', repo_id: 'r1', kind: 'Function' },
-            { id: 'b', name: 'others', repo_id: 'r1', kind: 'Function' }],
-    edges: [{ source: 'b', target: 'b2', cross_repo: false }],
+    nodes: [{ id: 'a', name: 'orphan', repo_id: 'r1', node_type: 'Function' },
+            { id: 'b', name: 'others', repo_id: 'r1', node_type: 'Function' }],
+    edges: [{ source_id: 'b', target_id: 'b2', cross_repo: false }],
   };
   const out = app.computeAnchorVisibleSet(anchors, workspaceGraph);
   assert.equal(out.nodes.length, 1);
@@ -341,9 +341,9 @@ test('computeAnchorVisibleSet: two anchors sharing a neighbour dedup the neighbo
             { id: 'nb', name: 'b', repo_id: 'r1' },
             { id: 'shared', name: 'shared', repo_id: 'r1' }],
     edges: [
-      { source: 'na',    target: 'shared', cross_repo: false },
-      { source: 'nb',    target: 'shared', cross_repo: false },
-      { source: 'other', target: 'shared', cross_repo: false },
+      { source_id: 'na',    target_id: 'shared', cross_repo: false },
+      { source_id: 'nb',    target_id: 'shared', cross_repo: false },
+      { source_id: 'other', target_id: 'shared', cross_repo: false },
     ],
   };
   const out = app.computeAnchorVisibleSet(anchors, workspaceGraph);
@@ -358,11 +358,11 @@ test('computeAnchorVisibleSet: two anchors sharing a neighbour dedup the neighbo
 
 test('computeAnchorVisibleSet: neighbourhood cap limits per-anchor contribution', () => {
   const anchors = [{ name: 'hub', repo_id: 'r1' }];
-  const nodes = [{ id: 'hub', name: 'hub', repo_id: 'r1', kind: 'Function' }];
+  const nodes = [{ id: 'hub', name: 'hub', repo_id: 'r1', node_type: 'Function' }];
   const edges = [];
   for (let i = 0; i < 30; i++) {
-    nodes.push({ id: `n${i}`, name: `n${i}`, repo_id: 'r1', kind: 'Function' });
-    edges.push({ source: 'hub', target: `n${i}`, cross_repo: false });
+    nodes.push({ id: `n${i}`, name: `n${i}`, repo_id: 'r1', node_type: 'Function' });
+    edges.push({ source_id: 'hub', target_id: `n${i}`, cross_repo: false });
   }
   const out = app.computeAnchorVisibleSet(anchors, { nodes, edges }, { maxNeighboursPerAnchor: 5 });
   // 1 anchor + capped 5 neighbours = 6 visible.
@@ -410,11 +410,11 @@ test('applyFocalGraph: builds visible set from by_repo JSON with cross-repo edge
   const payload = {
     by_repo: {
       bytes: [
-        { name: 'data_mut', repo_id: 'bytes', kind: 'Function', path: 'src/foo.rs' },
+        { name: 'data_mut', repo_id: 'bytes', node_type: 'Function', path: 'src/foo.rs' },
         { name: 'Bytes',    repo_id: 'bytes', kind: 'Class',    path: 'src/bar.rs' },
       ],
       tokio: [
-        { name: 'tokio',    repo_id: 'tokio', kind: 'Function', path: 'src/lib.rs' },
+        { name: 'tokio',    repo_id: 'tokio', node_type: 'Function', path: 'src/lib.rs' },
       ],
     },
     total_count: 3,
@@ -454,7 +454,7 @@ test('parseGlobalId: parses the federation "<repo>:<Kind>:<path>:<name>" shape',
   const out = app.parseGlobalId('bytes:Function:src/bytes.rs:from');
   assert.deepStrictEqual(out, {
     repo_id: 'bytes',
-    kind: 'Function',
+    node_type: 'Function',
     path: 'src/bytes.rs',
     name: 'from',
   });
@@ -465,7 +465,7 @@ test('parseGlobalId: tolerates colons in the path segment', () => {
   // inside the path; the regex must not split on them.
   const out = app.parseGlobalId('repo:Class:C:\\path\\to\\file.rs:Foo');
   assert.equal(out.repo_id, 'repo');
-  assert.equal(out.kind,    'Class');
+  assert.equal(out.node_type,    'Class');
   assert.equal(out.path,    'C:\\path\\to\\file.rs');
   assert.equal(out.name,    'Foo');
 });
@@ -542,18 +542,18 @@ test('computeAnchorVisibleSet: explicit repo_id matches only that repo (no cross
 test('disambiguateFocalSearch: empty query → none', () => {
   assert.deepStrictEqual(
     app.disambiguateFocalSearch('', null, null),
-    { kind: 'none' },
+    { node_type: 'none' },
   );
   assert.deepStrictEqual(
     app.disambiguateFocalSearch('   ', null, null),
-    { kind: 'none' },
+    { node_type: 'none' },
   );
 });
 
 test('disambiguateFocalSearch: no workspace graph and no anchors → none', () => {
   assert.deepStrictEqual(
     app.disambiguateFocalSearch('hello', null, null),
-    { kind: 'none' },
+    { node_type: 'none' },
   );
 });
 
@@ -563,7 +563,7 @@ test('disambiguateFocalSearch: single match in workspace graph → single', () =
     { id: 'r1::b', name: 'baz',     repo_id: 'r1' },
   ]};
   const out = app.disambiguateFocalSearch('foo', wg, null);
-  assert.deepStrictEqual(out, { kind: 'single', repo_id: 'r1', name: 'foo_bar' });
+  assert.deepStrictEqual(out, { node_type: 'single', repo_id: 'r1', name: 'foo_bar' });
 });
 
 test('disambiguateFocalSearch: single match (case-insensitive substring)', () => {
@@ -571,7 +571,7 @@ test('disambiguateFocalSearch: single match (case-insensitive substring)', () =>
     { id: 'r1::a', name: 'MyStruct', repo_id: 'r1' },
   ]};
   const out = app.disambiguateFocalSearch('myst', wg, null);
-  assert.deepStrictEqual(out, { kind: 'single', repo_id: 'r1', name: 'MyStruct' });
+  assert.deepStrictEqual(out, { node_type: 'single', repo_id: 'r1', name: 'MyStruct' });
 });
 
 test('disambiguateFocalSearch: multiple matches across repos → multiple', () => {
@@ -581,7 +581,7 @@ test('disambiguateFocalSearch: multiple matches across repos → multiple', () =
     { id: 'r1::b', name: 'Buf',   repo_id: 'r1' },
   ]};
   const out = app.disambiguateFocalSearch('Bytes', wg, null);
-  assert.strictEqual(out.kind, 'multiple');
+  assert.strictEqual(out.node_type, 'multiple');
   assert.strictEqual(out.candidates.length, 2);
   const repos = out.candidates.map(c => c.repo_id).sort();
   assert.deepStrictEqual(repos, ['r1', 'r2']);
@@ -597,7 +597,7 @@ test('disambiguateFocalSearch: dedupes same (repo_id, name) across workspace gra
     { name: 'Bytes', repo_id: 'r2' },  // new
   ];
   const out = app.disambiguateFocalSearch('Bytes', wg, anchors);
-  assert.strictEqual(out.kind, 'multiple');
+  assert.strictEqual(out.node_type, 'multiple');
   assert.strictEqual(out.candidates.length, 2,
     `expected dedup to 2 unique (repo_id, name) pairs, got ${out.candidates.length}`);
 });
@@ -609,7 +609,7 @@ test('disambiguateFocalSearch: caps multiple list at 10 candidates', () => {
     repo_id: `r${i % 5}`,
   }));
   const out = app.disambiguateFocalSearch('helper', wg, anchors);
-  assert.strictEqual(out.kind, 'multiple');
+  assert.strictEqual(out.node_type, 'multiple');
   assert.strictEqual(out.candidates.length, 10);
 });
 

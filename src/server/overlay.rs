@@ -2,13 +2,13 @@
 //!
 //! In-memory graph that mirrors uncommitted Git diffs for real-time synchronization.
 //!
-//! Also exposes a thin `subscribe` helper used by the sidecar runtime to
-//! mirror the owner's volatile overlay across processes.
+//! Transport-side subscription helpers (HTTP snapshot / NDJSON stream
+//! clients) live in [`sidecar`]; broadcast and apply-loop types live
+//! in [`stream`]. This module is just the data type and its CRUD.
 
-use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
-
-mod sidecar;
+pub mod sidecar;
 pub mod stream;
+use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use crate::server::revision_log::{LookupResult, RevisionLog};
 use parking_lot::{Mutex, RwLock};
 use petgraph::graph::{DiGraph, NodeIndex};

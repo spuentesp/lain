@@ -6,7 +6,7 @@ pub mod server;
 pub mod state;
 
 #[cfg(test)]
-pub(crate) mod test_util;
+pub mod test_util;
 
 // Re-export the top-level clap `Command` factory at the crate root so
 // tests and external callers can inspect the rendered help without

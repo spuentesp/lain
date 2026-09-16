@@ -375,6 +375,19 @@ pub struct GraphNode {
     pub commit_hash: Option<String>,
     #[serde(default)]
     pub is_hydrated: bool,
+    /// Federation-only: the repo this node came from. `None` for
+    /// single-workspace graphs (the `repo_id` is implicit). When the
+    /// workspace endpoint serializes a node graph, every entry has
+    /// `Some(_)` because the federation is the only path that emits
+    /// this field — but the schema accepts absence for backward
+    /// compatibility with single-workspace consumers.
+    ///
+    /// Note: `#[serde(default)]` only — no `skip_serializing_if`, since
+    /// bincode 2.x's positional encoding breaks if Option fields are
+    /// elided on a per-instance basis. JSON readers tolerate the
+    /// `"repo_id": null` for None.
+    #[serde(default)]
+    pub repo_id: Option<String>,
 }
 
 /// Per-repository UUID namespace for `GraphNode` ids. Mints a stable
@@ -514,6 +527,7 @@ impl GraphNode {
             last_git_sync: None,
             commit_hash: None,
             is_hydrated: true,
+            repo_id: None,
         }
     }
 
@@ -577,6 +591,10 @@ pub struct GraphEdge {
     pub source_id: String,
     pub target_id: String,
     pub weight: Option<f32>,
+    /// Federation-only: `true` when source and target belong to
+    /// different repos. `false` (default) for single-workspace graphs.
+    #[serde(default)]
+    pub cross_repo: bool,
 }
 
 impl GraphEdge {
@@ -586,6 +604,7 @@ impl GraphEdge {
             source_id,
             target_id,
             weight: None,
+            cross_repo: false,
         }
     }
 }
