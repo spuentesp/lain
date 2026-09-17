@@ -617,7 +617,10 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].kind, "todo");
         assert_eq!(summaries[0].author, "spuentesp");
-        assert_eq!(summaries[0].body_excerpt, "Why does this surface a UI link for stdio mode?");
+        assert_eq!(
+            summaries[0].body_excerpt,
+            "Why does this surface a UI link for stdio mode?"
+        );
         // `target_id` is the canonical "<kind>:<id>" form written by
         // `canonical_target_id` — verify the `symbol:` prefix
         // explicitly so a future refactor of the canonicalization
@@ -630,7 +633,10 @@ mod tests {
             symbol: "resolved-one".into(),
         }];
         let empty = summaries_for_targets_in_registry(&registry, &rid, &targets_other);
-        assert!(empty.is_empty(), "resolved rows must not appear in the open-only lookup");
+        assert!(
+            empty.is_empty(),
+            "resolved rows must not appear in the open-only lookup"
+        );
     }
 
     /// The civil-from-days formatter should match `chrono`-style

@@ -171,8 +171,7 @@ fn add_annotation_response(
             "target": target,
         }),
     );
-    serde_json::from_str(&resp)
-        .unwrap_or_else(|e| panic!("add_annotation not JSON: {e}\n{resp}"))
+    serde_json::from_str(&resp).unwrap_or_else(|e| panic!("add_annotation not JSON: {e}\n{resp}"))
 }
 
 /// `add_annotation` returns the new row's id; `list_annotations`
@@ -238,7 +237,9 @@ fn add_list_resolve_roundtrip() {
     let resolved_v: serde_json::Value = serde_json::from_str(&resolved)
         .unwrap_or_else(|e| panic!("resolve_annotation not JSON: {e}\n{resolved}"));
     assert_eq!(
-        resolved_v.pointer("/resolved/status").and_then(|v| v.as_str()),
+        resolved_v
+            .pointer("/resolved/status")
+            .and_then(|v| v.as_str()),
         Some("resolved"),
         "resolve_annotation must report the new status byte-exactly"
     );

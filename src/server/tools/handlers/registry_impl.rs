@@ -1402,11 +1402,11 @@ inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));
 /// annotations on file- or repo-typed targets would change the
 /// semantic of "what is this symbol about" in surprising ways.
 fn open_annotations_for_symbol(ctx: &ToolContext, symbol: &str) -> String {
+    use crate::federation::repo_id::RepoId;
+    use crate::server::annotations::AnnotationTarget;
     use crate::server::mcp::annotation_tools::{
         format_open_annotations_section, summaries_for_targets_in_registry,
     };
-    use crate::server::annotations::AnnotationTarget;
-    use crate::federation::repo_id::RepoId;
 
     // Federation-mode only: a single-repo federation or a multi-repo
     // one with the dispatcher's `repo_id` injection lands here with

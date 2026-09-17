@@ -30,9 +30,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{
-    free_port, git_init_committed, tools_call_text, wait_for_repo_index, ServerGuard,
-};
+use common::{free_port, git_init_committed, tools_call_text, wait_for_repo_index, ServerGuard};
 
 /// Single-repo federation fixture with one Rust crate that defines
 /// a single function `handoff_target`. `leave_handoff_note` in
