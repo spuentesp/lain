@@ -149,17 +149,33 @@ claude mcp add lain -- lain mcp
 ```
 
 ### Cursor / Windsurf
-Add to your MCP configuration (`cursor settings > Features > MCP` or `mcp.json`):
-```json
-{
-  "mcpServers": {
-    "lain": {
-      "command": "lain",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+lain setup --agent cursor
 ```
+Writes `~/.cursor/mcp.json` (the file Cursor reads directly).
+Windsurf shares the same config schema, so this command works
+for Windsurf too.
+
+### VS Code
+```bash
+lain setup --agent vscode
+```
+Writes `.vscode/mcp.json` if it exists (project-scoped) or
+`mcp.json` in your user-config dir otherwise. Details in
+`docs/COOKBOOK.md`.
+
+### Codex / Continue
+```bash
+lain setup --agent codex     # uses `codex mcp add` when the CLI is on PATH
+lain setup --agent continue  # writes ~/.continue/config.json
+```
+
+### Hand-written JSON (any other MCP host)
+```bash
+lain setup --agent generic
+```
+Writes `.mcp.json` at the workspace root. See `docs/COOKBOOK.md`
+for the exact schema.
 
 ### Multi-Repo Server Mode (HTTP)
 Run LAIN as a shared service across multiple repositories:

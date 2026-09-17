@@ -241,7 +241,11 @@ pub async fn start_source_watcher(workspace: PathBuf, server: crate::server::Lai
         return;
     }
     tracing::info!("source file watcher: watching {:?}", workspace);
-    let ready = crate::server::watcher::FileWatcher::new().start(workspace, server);
+    // AGENT_UX_ROADMAP.md M4 follow-up: pass the server-owned
+    // cancel token into the watcher so a shutdown doesn't have to
+    // wait for a slow LSP round-trip on a large file burst.
+    let cancel = server.lifecycle_handle().cancel_token();
+    let ready = crate::server::watcher::FileWatcher::new().start(workspace, server, cancel);
     match tokio::time::timeout(std::time::Duration::from_secs(5), ready).await {
         Ok(Ok(watched)) => {
             tracing::debug!("source file watcher: {watched} directories registered");

@@ -30,6 +30,8 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
         name,
         "get_health"
             | "get_capabilities"
+            | "find_symbol"
+            | "search_code"
             | "get_agent_strategy"
             | "get_server_status"
             | "list_recent_projects"
@@ -97,6 +99,9 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "run_enrichment"
             | "sync_state"
             | "get_context_for_prompt"
+            | "get_context"
+            | "find_related"
+            | "assess_change"
             | "get_code_snippet"
             | "get_call_sites"
             | "find_untested_functions"

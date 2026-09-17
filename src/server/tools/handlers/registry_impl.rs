@@ -156,6 +156,48 @@ impl ToolHandler for ArchitecturalObservationsHandler {
 }
 inventory::submit!(ToolHandlerEntry(&ArchitecturalObservationsHandler));
 
+/// AGENT_UX_ROADMAP.md Milestone 5: one-call bootstrap context
+/// for a fresh agent. Returns a stable JSON payload with
+/// repository / architecture / capabilities / recommended_actions
+/// sections; the M6 semantic tools (find_symbol, assess_change,
+/// find_related, search_code) are listed with `available: false`
+/// until M6 lands so an agent doesn't call a missing tool.
+pub struct UnderstandRepositoryHandler;
+#[async_trait]
+impl ToolHandler for UnderstandRepositoryHandler {
+    fn name(&self) -> &'static str {
+        "understand_repository"
+    }
+    fn description(&self) -> &'static str {
+        "One-call bootstrap context: repository identity, top anchors, entry points, \
+         capability states, and the intent->tool mapping the agent should reach for \
+         first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and \
+         hasn't yet explored the codebase."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"budget_tokens":{"type":"integer","description":"Soft token budget for the payload; default 3000."}},"required":[]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        let budget_tokens = usize_arg(args, "budget_tokens");
+        handlers::architecture::understand_repository(
+            &ctx.workspace,
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.git,
+            &ctx.readiness,
+            budget_tokens,
+        )
+    }
+}
+inventory::submit!(ToolHandlerEntry(&UnderstandRepositoryHandler));
+
 // ─── Navigation Domain ─────────────────────────────────────────────────────────
 
 pub struct TraceDependencyHandler;
@@ -1107,3 +1149,222 @@ impl ToolHandler for GetCoverageSummaryHandler {
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetCoverageSummaryHandler));
+
+// ─── Semantic Domain (M6) ────────────────────────────────────────────────────
+
+/// AGENT_UX_ROADMAP.md Milestone 6: `find_symbol` ("Where is X?").
+/// Use this before `explain_symbol` / `get_context` / `assess_change`
+/// to disambiguate names that occur in multiple files; the
+/// underlying call sites accept a `path` argument for that.
+/// Reach for the low-level `query_graph` with a `find` op for
+/// structural searches; this tool is the cheap lexical index
+/// path. No semantic model needed.
+pub struct FindSymbolHandler;
+#[async_trait]
+impl ToolHandler for FindSymbolHandler {
+    fn name(&self) -> &'static str {
+        "find_symbol"
+    }
+    fn description(&self) -> &'static str {
+        "Returns every graph node matching `name`, optionally narrowed \
+         by `path_hint` (substring) and `type_filter` (function / \
+         struct / trait / module / file). Use this when an agent says \
+         'where is X?' and the low-level tools would otherwise force \
+         a per-name lookup per match. Cost: cheap (graph index hit)."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string"}},"required":["name"]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        handlers::semantic::find_symbol(&ctx.graph, &ctx.overlay, args)
+    }
+}
+inventory::submit!(ToolHandlerEntry(&FindSymbolHandler));
+
+/// AGENT_UX_ROADMAP.md Milestone 6: `get_context` ("Explain X").
+/// Composes `explain_symbol`, `get_call_sites`, `trace_dependency`,
+/// and `get_code_snippet`. Use this instead of calling each
+/// individually — the section layout is consistent so the agent
+/// can pattern-match the headers (`## Definition`, `## Callers`,
+/// `## Callees`, `## Source`).
+pub struct GetContextHandler;
+#[async_trait]
+impl ToolHandler for GetContextHandler {
+    fn name(&self) -> &'static str {
+        "get_context"
+    }
+    fn description(&self) -> &'static str {
+        "One-call dossier for a symbol: definition, callers, \
+         callees, and source body excerpt. Use this when an agent \
+         says 'explain X' or 'what is X?' and the goal is a single \
+         Markdown payload the agent can quote back. Cost: medium; \
+         scales with `depth`. Low-level alternative: call each of \
+         explain_symbol / get_call_sites / trace_dependency \
+         individually."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"integer","minimum":0,"maximum":3}},"required":["symbol"]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        handlers::semantic::get_context(
+            &ctx.workspace,
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.occupancy,
+            args,
+        )
+        .await
+    }
+}
+inventory::submit!(ToolHandlerEntry(&GetContextHandler));
+
+/// AGENT_UX_ROADMAP.md Milestone 6: `find_related` ("What is
+/// connected to X?"). Composes `trace_dependency`,
+/// `get_coupling_radar`, and `semantic_search` (when an NLP model
+/// is loaded; the semantic section degrades gracefully without
+/// one). Use this instead of calling the three composition
+/// pieces individually.
+pub struct FindRelatedHandler;
+#[async_trait]
+impl ToolHandler for FindRelatedHandler {
+    fn name(&self) -> &'static str {
+        "find_related"
+    }
+    fn description(&self) -> &'static str {
+        "Graph neighbors, co-change partners, and (optional) \
+         semantic neighbors for a symbol in one call. Use this when \
+         an agent says 'what is connected to X?' or wants to \
+         understand blast radius without committing to a single \
+         change yet. The semantic section is omitted when no \
+         embedding model is loaded; the co-change section is \
+         gated by `include_coupling=false`. Cost: medium."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"limit":{"type":"integer"}},"required":["symbol"]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        handlers::semantic::find_related(
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.workspace,
+            &ctx.embedder,
+            &ctx.cross_encoder,
+            &ctx.embedding_cache,
+            &ctx.tuning,
+            args,
+            ui_link(ctx),
+        )
+        .await
+    }
+}
+inventory::submit!(ToolHandlerEntry(&FindRelatedHandler));
+
+/// AGENT_UX_ROADMAP.md Milestone 6: `assess_change` ("What breaks
+/// if I change X?"). Composes `get_blast_radius`,
+/// `get_call_sites`, `find_untested_functions`, and
+/// `get_coupling_radar`. Use this before any actual edit; the
+/// `risk` summary at the end is the single-line verdict an agent
+/// can quote back to a human.
+pub struct AssessChangeHandler;
+#[async_trait]
+impl ToolHandler for AssessChangeHandler {
+    fn name(&self) -> &'static str {
+        "assess_change"
+    }
+    fn description(&self) -> &'static str {
+        "Pre-edit impact assessment: direct + transitive \
+         dependents, untested dependents, co-change partners, and \
+         a one-line risk verdict (low / medium / high). Use this \
+         when an agent says 'what breaks if I change X?' or wants \
+         to evaluate a change before editing. Cost: medium; scales \
+         with the depth of the call graph."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"depth":{"type":"string"},"include_tests":{"type":"boolean"},"limit":{"type":"integer"}},"required":["symbol"]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        handlers::semantic::assess_change(
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.workspace,
+            args,
+            ui_link(ctx),
+        )
+        .await
+    }
+}
+inventory::submit!(ToolHandlerEntry(&AssessChangeHandler));
+
+/// AGENT_UX_ROADMAP.md Milestone 6: `search_code` ("Find code that
+/// does Y"). Mode-dispatched: `lexical` (graph name index),
+/// `semantic` (NLP model — needs `SemanticRequired`), or `auto`
+/// (default; tries semantic first, falls back to lexical and
+/// records the fallback in the response).
+pub struct SearchCodeHandler;
+#[async_trait]
+impl ToolHandler for SearchCodeHandler {
+    fn name(&self) -> &'static str {
+        "search_code"
+    }
+    fn description(&self) -> &'static str {
+        "Find code by name, intent, or pattern. `mode=lexical` \
+         (default) uses the graph name index and works without an \
+         embedding model; `mode=semantic` uses local ONNX \
+         embeddings and requires a loaded model (`install.sh \
+         --download-model`). `mode=auto` (the default) tries \
+         semantic first and falls back to lexical; the response \
+         records `fell_back=true` so the agent can tell. Cost: \
+         cheap for lexical, medium for semantic."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"query":{"type":"string"},"mode":{"type":"string","enum":["lexical","semantic","auto"]},"limit":{"type":"integer"}},"required":["query"]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        handlers::semantic::search_code(
+            &ctx.workspace,
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.embedder,
+            &ctx.cross_encoder,
+            &ctx.embedding_cache,
+            &ctx.tuning,
+            args,
+        )
+    }
+}
+inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));
