@@ -173,9 +173,9 @@ mod tests {
         let cancel_clone = cancel.clone();
         // Fire cancellation in 50 ms; the closure sleeps for 5 s.
         // `_ = tokio::spawn(...)` would trip clippy::let_underscore_future;
-        // bind the JoinHandle instead — the spawn handle isn't observed
-        // (we only care that the task runs to completion and the
-        // cancel lands), so dropping is the right move.
+        // bind the JoinHandle instead — the spawn handle isn't
+        // observed (we only care that the task runs to completion
+        // and the cancel lands), so dropping it is the right move.
         let _: tokio::task::JoinHandle<()> = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             cancel_clone.cancel();

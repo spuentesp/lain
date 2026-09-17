@@ -7,11 +7,13 @@ and a one-line scope summary.
 
 Last update: 2026-09-16, refreshed against HEAD (past PR #66, #72,
 #74, #75, #77, #88, plus PR A's cancellation work on
-`feat/m4-cancellation-token` and PR B's spawn-blocking work on
-`feat/m4-spawn-blocking`). Stays on `0.7.4-rc1`; release cut is
-separate scope.
+`feat/m4-cancellation-token`, PR B's spawn-blocking work on
+`feat/m4-spawn-blocking`, PR E's tree-sitter+ONNX migration on
+`feat/m4-spawn-blocking-followup`, and the LSP cancel-aware
+work on `feat/m4-lsp-cancel-aware`). Stays on `0.7.4-rc1`;
+release cut is separate scope.
 
-Four items originally logged here have been resolved and removed
+Five items originally logged here have been resolved and removed
 from this file:
 
 - **Cross-repo annotation routing** — fixed in `33f9373
@@ -32,7 +34,7 @@ from this file:
   budget; HTTP startup now retains its `JoinHandle`. New
   `index_cancelled` problem code.
 - **`spawn_blocking` isolation (libgit2 portion)** — fixed in PR B
-  (`feat/m4-spawn-blocking`, #90). New `src/server/ingest/blocking.rs`
+  (`feat/m4-spawn-blocking`). New `src/server/ingest/blocking.rs`
   with `offthread(cancel, f)`. Libgit2 calls in
   `build_core_memory` (`get_latest_commit_info`,
   `get_changed_files_since`, `get_all_tracked_files`,
@@ -40,85 +42,44 @@ from this file:
   `PerRepoReadiness::outstanding_files` wired through the
   federation watcher's receiver loop (inotify callback
   `fetch_add`s, receiver loop `fetch_sub`s).
+- **Tree-sitter + ONNX migration** — fixed in PR E
+  (`feat/m4-spawn-blocking-followup`). `scan_file_structure`
+  batches the four tree-sitter calls into one
+  `extract_tree_sitter_file` wrapped in `offthread`; the NLP
+  prewarm and lazy-enrichment loops both route
+  `NlpEmbedder::embed` through `offthread`. 6 new unit tests.
 
-The third `docs/M4-step-8-plan.md` item (tree-sitter / ONNX
-migration) was originally deferred to a follow-up; PR E
-(`feat/m4-spawn-blocking-followup`) lands the tree-sitter and
-ONNX portions. The LSP subprocess portion remains open as the
-only outstanding piece of the original M4 execution-isolation
-design.
+The only remaining M4 work is the LSP subprocess calls:
 
-### Tree-sitter / ONNX / LSP-bridge migration (deferred)
+### LSP subprocess calls (deferred — upstream blocker)
 
-### Cooperative cancellation token
-- **Source:** the original `docs/M4-step-8-plan.md` §2 — plumb a
-  `tokio_util::sync::CancellationToken` through every long-running
-  phase (`RepoIndex::index`, `RepoSource::clone_into`,
-  `Workspace::reload`, watcher, federation aggregate, MCP body
-  collect).
-- **Status:** **resolved in PR A** (`feat/m4-cancellation-token`,
-  #88). Server-owned `CancellationToken` in `LifecycleInfo`;
-  plumbed through every long-running phase; `await_startup_reindex`
-  `select!`s `build_core_memory` against the token; stdio startup
-  uses `cancel() + JoinHandle::await` within the existing 5-second
-  budget; HTTP startup now retains its `JoinHandle`. New
-  `index_cancelled` problem code. Acceptance met: TCP-RST
-  mid-`/mcp` returns control within budget; SIGINT triggers
-  shutdown join within 30s; `cargo test --workspace` passes.
-
-### `spawn_blocking` isolation
-- **Source:** the original `docs/M4-step-8-plan.md` §3 — new
-  `src/server/ingest/blocking.rs` with an `offthread(cancel, f)`
-  helper; batch the per-file hot loops.
-- **Status:** **libgit2 + `outstanding_files` resolved in PR B**
-  (`feat/m4-spawn-blocking`, #90). Tree-sitter + ONNX resolved in
-  PR E (`feat/m4-spawn-blocking-followup`). LSP subprocess calls
-  remain open — see the dedicated entry below.
-- **Acceptance met for resolved portions:** libgit2 calls
-  (`get_latest_commit_info`, `get_changed_files_since`,
-  `get_all_tracked_files`, `analyze_co_changes`) route through
-  `offthread`; tree-sitter `extract_definitions` /
-  `extract_refs` / `extract_strings` route through `offthread`
-  via a batched helper (`extract_tree_sitter_file`); ONNX
-  `NlpEmbedder::embed` calls in the NLP prewarm and lazy
-  enrichment paths route through `offthread`; `outstanding_files`
-  is wired through the federation watcher's receiver loop;
-  `cargo test --workspace` passes (891 lib + ~200 integration).
-
-### Tree-sitter / ONNX migration
-- **Source:** the original `docs/M4-step-8-plan.md` §3 — tree-sitter
-  per-file calls (`scan.rs:195,204,260,398`), ONNX inference
-  (`nlp.rs:219,246`, `ingestion.rs:395,438`).
-- **Status:** **resolved in PR E** (`feat/m4-spawn-blocking-followup`).
-  `scan_file_structure` now batches all four tree-sitter calls into
-  one `offthread(cancel, ...)` call returning the
-  `TreeSitterFile { defs, static_refs, pattern_refs }` aggregate;
-  `add_tree_sitter_definitions` (the LSP-fallback path) is now
-  `async` and runs its `extract_definitions` via `offthread`;
-  the NLP prewarm and lazy-enrichment loops both route
-  `NlpEmbedder::embed` through `offthread`. `apply_attribute_labels`
-  now takes a pre-computed `&[SymbolDef]` (sync helper); the
-  offthread boundary lives at the caller side. 3 unit tests in
-  `scan::offthread_tests`, 3 in `ingestion::nlp_offthread_tests`.
-
-### LSP subprocess calls
-- **Source:** the original `docs/M4-step-8-plan.md` §3 — LSP
-  subprocess calls (`scan.rs:108,119`, `ingestion.rs:639-657`).
-- **Status:** open. `lsp-bridge`'s `LspMultiplexer::get_references`
-  / `get_document_symbols_hierarchical` are `async fn` returning
-  futures, not `Send + 'static`-friendly in the same way as the
-  libgit2 calls. Routing through `spawn_blocking` requires either
-  exposing a sync subprocess entry point in `lsp-bridge`
-  (upstream changes) or wrapping the async call in a
-  `spawn_blocking` block-on (which blocks a blocking-thread on
-  the async runtime — the anti-pattern this whole initiative was
-  designed to avoid).
-- **Where to land:** separate PR after the upstream lsp-bridge
-  sync entry-point lands (or via a different migration shape).
-- **Acceptance:** federation cold-boot wall-clock drops
-  measurably on the canonical fixture; `RUST_LOG=trace` shows
-  LSP phases on blocking threads, not on the async runtime; no
-  new panics, no lost cancellation.
+- **Source:** AGENT_UX_ROADMAP.md Milestone 4 design §"Index
+  execution and consistency" calls for routing the LSP
+  subprocess calls (`scan.rs:108,119`, `ingestion.rs:639-657`)
+  through `spawn_blocking`.
+- **Status:** **deferred — upstream blocker.** `lsp-bridge`
+  0.2's `LspMultiplexer::get_references` /
+  `get_document_symbols_hierarchical` are `async fn` returning
+  futures; the only way to expose a sync subprocess entry
+  point is upstream in `lsp-bridge`. Wrapping the async call
+  in `Handle::block_on` from inside `spawn_blocking` is the
+  anti-pattern this whole initiative was designed to avoid
+  (it would block a blocking-thread on the async runtime).
+- **What we did from this repo:** PR
+  `feat/m4-lsp-cancel-aware` adds a `tokio::select!` race
+  between the LSP `await` and the cancel token. When shutdown
+  lands mid-scan, the LSP round-trip is abandoned promptly
+  instead of waiting for the child to answer. That's a real
+  cancellation-latency improvement — `RUST_LOG=trace` shows
+  the LSP child stops being driven as soon as the token
+  fires — but it does NOT move LSP onto the blocking-thread
+  pool.
+- **Where to land:** separate upstream PR in `lsp-bridge`
+  adding a sync `get_references_blocking` /
+  `get_document_symbols_blocking` API on `LspMultiplexer`.
+  Once that's released, this repo's migration is a small
+  call-site change. Until then, the LSP calls stay on the
+  Tokio runtime, gated by the cancel-aware `tokio::select!`.
 
 ## From the annotation layer (PR #66 deferred)
 

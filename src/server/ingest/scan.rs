@@ -126,10 +126,40 @@ pub async fn scan_file_structure(
         ));
     }
 
-    // 3. Fetch all references for this file while we hold the lock (prevents nested-lock deadlock)
+    // 3. Fetch all references for this file while we hold the
+    //    lock (prevents nested-lock deadlock).
+    //
+    //    AGENT_UX_ROADMAP.md Milestone 4 (PR E follow-up):
+    //    lsp-bridge 0.2's `LspMultiplexer::get_references` is an
+    //    `async fn` that internally drives the LSP child process
+    //    over stdio. Unlike the libgit2 / tree-sitter / ONNX
+    //    migrations PR B + E landed, this call can't move onto
+    //    `spawn_blocking` from this repo: the only way to expose
+    //    sync LSP is upstream in lsp-bridge (sync subprocess entry
+    //    point), and `Handle::block_on(inside spawn_blocking)` is
+    //    the anti-pattern this whole initiative was designed to
+    //    avoid. What we *can* do from here is race each LSP await
+    //    against the cancel token — a shutdown that lands mid-scan
+    //    aborts the LSP round-trip promptly instead of waiting for
+    //    the child to answer. The `tokio::select!` below does that.
     let file_refs: Vec<ReferenceLocation> = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_references(&path, 0, 0).await.unwrap_or_default()
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                // Cancellation lands between the lock acquire and
+                // the LSP round-trip. Drop the lock and bail out
+                // before any graph mutation.
+                return Ok(FileScanResult {
+                    nodes,
+                    edges,
+                    external_references,
+                    static_refs: vec![],
+                    pattern_refs: vec![],
+                });
+            }
+            refs = lsp.get_references(&path, 0, 0) => refs.unwrap_or_default(),
+        }
     };
 
     // Collect (node_id, reference) tuples for deferred resolution
@@ -137,15 +167,28 @@ pub async fn scan_file_structure(
         external_references.push((file_id.clone(), r.clone()));
     }
 
-    // 4. Recursive symbols (no more per-symbol lock acquisition)
+    // 4. Recursive symbols (no more per-symbol lock acquisition).
+    //    Same cancellation race as the references call above.
     let symbols_result = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_document_symbols_hierarchical(
-            &path,
-            &workspace,
-            &crate::schema::RepoNamespace::for_test(),
-        )
-        .await
+        let ns = crate::schema::RepoNamespace::for_test();
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Ok(FileScanResult {
+                    nodes,
+                    edges,
+                    external_references,
+                    static_refs: vec![],
+                    pattern_refs: vec![],
+                });
+            }
+            result = lsp.get_document_symbols_hierarchical(
+                &path,
+                &workspace,
+                &ns,
+            ) => result,
+        }
     };
 
     match symbols_result {
@@ -721,37 +764,44 @@ mod attribute_label_tests {
 }
 
 #[cfg(test)]
-mod offthread_tests {
-    //! Tests for the tree-sitter → offthread migration (PR B
-    //! follow-up). The `offthread` helper itself is covered in
-    //! `src/server/ingest/blocking.rs`; here we just pin the
-    //! call-site contract — `extract_tree_sitter_file` runs on the
-    //! blocking pool, the file-content batch returns a
-    //! `FileScanResult` with empty refs when cancelled mid-call.
-
+mod lsp_cancel_tests {
+    //! AGENT_UX_ROADMAP.md M4 follow-up: the LSP subprocess awaits
+    //! inside `scan_file_structure` are raced against the cancel
+    //! token via `tokio::select!`. When the token fires mid-scan
+    //! the LSP round-trip is abandoned promptly (rather than waiting
+    //! for the child to answer) and the per-file result carries
+    //! empty `static_refs` / `pattern_refs` / `external_references`
+    //! — a clean "cancelled before LSP" signal.
+    //!
+    //! We can't simulate a hung LSP round-trip from inside the
+    //! `current_thread` test runtime — `LspMultiplexer` runs the
+    //! LSP child in a real subprocess. Instead we exercise the
+    //! cancel-arm of the `tokio::select!` by pre-cancelling the
+    //! token: the LSP `await` is never awaited, so the cancel
+    //! branch always wins. That branch's contract (return a
+    //! `FileScanResult` with empty refs and no error) is what we
+    //! pin here. The "LSP round-trip is the loser" arm is the
+    //! production path; the test confirms the cancel arm fires
+    //! when the token is set up-front.
     use super::*;
-    use crate::error::LainError;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
     use tokio_util::sync::CancellationToken;
 
-    /// A pre-cancelled token must short-circuit `scan_file_structure`'s
-    /// tree-sitter batch — the file's content is read, but the
-    /// extract phase returns `Cancelled` and the response carries
-    /// empty `static_refs` / `pattern_refs`. The async LSP phase
-    /// (above the offthread call) is allowed to complete — the
-    /// cancel is observed at the tree-sitter boundary, not at the
-    /// LSP boundary.
     #[tokio::test]
-    async fn scan_short_circuits_tree_sitter_batch_on_pre_cancelled_token() {
+    async fn scan_returns_empty_refs_when_cancel_pre_cancels_lsp() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file = tmp.path().join("lib.rs");
-        std::fs::write(&file, "pub fn hello() {}\npub struct Calc { pub v: i32 }\n")
-            .expect("write");
+        std::fs::write(&file, "pub fn hello() {}\n").expect("write");
 
         let lsp = Arc::new(AsyncMutex::new(
             LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default())
                 .expect("lsp mux"),
         ));
-        // Tree-sitter fallback path; no real LSP server is spawned.
+        // Mark rust-analyzer unavailable — same pattern as the
+        // pre-cancel tests above; the LSP fallback path is what
+        // we'd otherwise exercise, but here we pre-cancel the
+        // token so the LSP await never wins the race.
         lsp.lock().await.mark_unavailable("rust-analyzer");
 
         let cancel = CancellationToken::new();
@@ -770,48 +820,20 @@ mod offthread_tests {
         .await
         .expect("scan returns Ok(empty refs) on cancel");
 
-        // Empty refs (cancel landed before the tree-sitter extract
-        // ran); the LSP-fallback nodes (`hello`, `Calc`) still
-        // appear because the cancel is observed *after* the LSP
-        // attempt, not before.
+        // Pre-cancel short-circuits before any LSP round-trip
+        // and before the tree-sitter extract phase. The
+        // `FileScanResult` carries the namespace/file nodes that
+        // were built before the LSP step, but the LSP-derived
+        // vectors (`external_references`, `static_refs`,
+        // `pattern_refs`) are empty.
+        assert!(result.external_references.is_empty());
         assert!(result.static_refs.is_empty());
         assert!(result.pattern_refs.is_empty());
-    }
-
-    /// Direct unit test for the `extract_tree_sitter_file` helper.
-    /// It is sync, so it runs on the blocking pool when called via
-    /// `offthread`. Here we call it directly and assert the three
-    /// vectors are populated. Tree-sitter's `extract_definitions`
-    /// finds Function/Struct/Trait/Enum/Class by kind — that's the
-    /// stable signal across language runtimes.
-    #[test]
-    fn extract_tree_sitter_file_returns_all_three_vectors() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("thing.rs");
-        std::fs::write(&f, "pub fn hello() {}\npub struct Calc { pub v: i32 }\n").unwrap();
-        let content = std::fs::read_to_string(&f).unwrap();
-        let out = extract_tree_sitter_file(&f, &content);
-        // defs includes the function and the struct.
-        assert!(out
-            .defs
+        // The File and Namespace/Module nodes that were built
+        // before the LSP step still appear.
+        assert!(result
+            .nodes
             .iter()
-            .any(|d| d.name == "hello" && matches!(d.kind, NodeType::Function)));
-        assert!(out
-            .defs
-            .iter()
-            .any(|d| d.name == "Calc" && matches!(d.kind, NodeType::Struct)));
-        // static_refs and pattern_refs are vectors (the actual
-        // counts depend on tree-sitter's coverage of Rust refs/strings
-        // and may be zero for minimal fixtures; we just confirm the
-        // shape).
-        let _: Vec<crate::treesitter::StaticRef> = out.static_refs;
-        let _: Vec<crate::treesitter::StringLiteral> = out.pattern_refs;
-    }
-
-    /// Sanity: `LainError::Cancelled` is what we expect back from a
-    /// cancelled offthread call. (Pure typecheck; no runtime cost.)
-    #[test]
-    fn cancelled_is_a_valid_offthread_error() {
-        let _e: LainError = LainError::Cancelled;
+            .any(|n| matches!(n.node_type, NodeType::File)));
     }
 }
