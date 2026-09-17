@@ -8,6 +8,7 @@ pub mod impact;
 pub mod metrics;
 pub mod navigation;
 pub mod search;
+pub mod semantic;
 // `filesystem` (read_file / list_directory / find_files) was removed:
 // 112 lines of handler and 151 lines of tests for three functions that
 // were never registered as MCP tools, so no agent could reach them. The

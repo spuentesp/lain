@@ -6,17 +6,16 @@ points at the source PR, the section of the plan it came from,
 and a one-line scope summary.
 
 Last update: 2026-09-16, refreshed against HEAD (past PR #66, #72,
-#74, #75, #77). Stays on `0.7.4-rc1`; release cut is separate scope.
+#74, #75, #77, #88, plus PR A's cancellation work on
+`feat/m4-cancellation-token` and PR B's spawn-blocking work on
+`feat/m4-spawn-blocking`). Stays on `0.7.4-rc1`; release cut is
+separate scope.
 
 Four items originally logged here have been resolved and removed
 from this file:
 
 - **Cross-repo annotation routing** — fixed in `33f9373
   fix(annotations+readiness): address Copilot review findings`.
-  `target_to_repo` in `src/server/mcp/annotation_tools.rs` now
-  resolves `AnnotationTarget::Repo { repo_id }` against the
-  federation registry and rejects unknown repos, instead of pinning
-  every row to the single registered repo.
 - **Cold repo `last_indexed_commit` serializing as `Some("0")`** —
   fixed in `6db4354 fix(federation): null last_indexed_commit until a
   successful index pass`. `FederatedIndex::per_repo_readiness` now
@@ -49,7 +48,7 @@ ONNX portions. The LSP subprocess portion remains open as the
 only outstanding piece of the original M4 execution-isolation
 design.
 
-## From `docs/M4-step-8-plan.md` (no longer in the tree; PR #66 deferred)
+### Tree-sitter / ONNX / LSP-bridge migration (deferred)
 
 ### Cooperative cancellation token
 - **Source:** the original `docs/M4-step-8-plan.md` §2 — plumb a

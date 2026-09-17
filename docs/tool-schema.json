@@ -1,5 +1,67 @@
 [
   {
+    "description": "Graph neighbors, co-change partners, and (optional) semantic neighbors for a symbol in one call. Use this when an agent says 'what is connected to X?' or wants to understand blast radius without committing to a single change yet. The semantic section is omitted when no embedding model is loaded; the co-change section is gated by `include_coupling=false`. Cost: medium.",
+    "inputSchema": {
+      "properties": {
+        "include_coupling": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "find_related"
+  },
+  {
+    "description": "One-call dossier for a symbol: definition, callers, callees, and source body excerpt. Use this when an agent says 'explain X' or 'what is X?' and the goal is a single Markdown payload the agent can quote back. Cost: medium; scales with `depth`. Low-level alternative: call each of explain_symbol / get_call_sites / trace_dependency individually.",
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "maximum": 3,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_context"
+  },
+  {
+    "description": "Returns every graph node matching `name`, optionally narrowed by `path_hint` (substring) and `type_filter` (function / struct / trait / module / file). Use this when an agent says 'where is X?' and the low-level tools would otherwise force a per-name lookup per match. Cost: cheap (graph index hit).",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path_hint": {
+          "type": "string"
+        },
+        "type_filter": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "find_symbol"
+  },
+  {
     "description": "Provides a structural estimate of code coverage based on call graph connectivity",
     "inputSchema": {
       "properties": {
@@ -330,6 +392,56 @@
     "name": "list_entry_points"
   },
   {
+    "description": "Find code by name, intent, or pattern. `mode=lexical` (default) uses the graph name index and works without an embedding model; `mode=semantic` uses local ONNX embeddings and requires a loaded model (`install.sh --download-model`). `mode=auto` (the default) tries semantic first and falls back to lexical; the response records `fell_back=true` so the agent can tell. Cost: cheap for lexical, medium for semantic.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "mode": {
+          "enum": [
+            "lexical",
+            "semantic",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search_code"
+  },
+  {
+    "description": "Pre-edit impact assessment: direct + transitive dependents, untested dependents, co-change partners, and a one-line risk verdict (low / medium / high). Use this when an agent says 'what breaks if I change X?' or wants to evaluate a change before editing. Cost: medium; scales with the depth of the call graph.",
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "type": "string"
+        },
+        "include_tests": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "assess_change"
+  },
+  {
     "description": "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns",
     "inputSchema": {
       "properties": {
@@ -343,6 +455,15 @@
       "type": "object"
     },
     "name": "get_coupling_radar"
+  },
+  {
+    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_entry_points"
   },
   {
     "description": "Calculates the transitive impact and ripple effect of changing a symbol",
@@ -435,6 +556,20 @@
       "type": "object"
     },
     "name": "trace_dependency"
+  },
+  {
+    "description": "One-call bootstrap context: repository identity, top anchors, entry points, capability states, and the intent->tool mapping the agent should reach for first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and hasn't yet explored the codebase.",
+    "inputSchema": {
+      "properties": {
+        "budget_tokens": {
+          "description": "Soft token budget for the payload; default 3000.",
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "understand_repository"
   },
   {
     "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
