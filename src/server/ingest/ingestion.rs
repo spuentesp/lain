@@ -105,7 +105,7 @@ impl LainServer {
             info!("No files to scan; sweeping orphans.");
             sweep_orphans(
                 &self.ingest().config().workspace,
-                &self.ingest().graph(),
+                self.ingest().graph(),
                 &self.ingest().git().lock(),
             );
             if cancel.is_cancelled() {
@@ -274,7 +274,7 @@ impl LainServer {
                         {
                             warn!("Batch node write error: {}", e);
                         }
-                        insert_edges_best_effort(&self.ingest().graph(), &batch_edges, "batch");
+                        insert_edges_best_effort(self.ingest().graph(), &batch_edges, "batch");
                         // Durably persist the flush. The in-memory inserts above
                         // are lost if the outer re-index timeout drops this task,
                         // which is why a 90s budget could never converge: every
@@ -318,7 +318,7 @@ impl LainServer {
             {
                 warn!("Final batch node write error: {}", e);
             }
-            insert_edges_best_effort(&self.ingest().graph(), &batch_edges, "final batch");
+            insert_edges_best_effort(self.ingest().graph(), &batch_edges, "final batch");
         }
 
         info!("Scanned {} files, {} failed, collected {} external refs, {} static refs, {} pattern refs",
@@ -337,14 +337,14 @@ impl LainServer {
             all_external_refs.len()
         );
         let call_edges = super::resolve::resolve_call_edges(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &self.ingest().config().workspace,
             &all_external_refs,
             None,
             None,
         );
         info!("Ingesting {} call edges", call_edges.len());
-        insert_edges_reporting(&self.ingest().graph(), &call_edges, "call")?;
+        insert_edges_reporting(self.ingest().graph(), &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
         if cancel.is_cancelled() {
@@ -356,13 +356,13 @@ impl LainServer {
             all_static_refs.len()
         );
         let static_edges = super::resolve::resolve_static_edges(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &all_static_refs,
             None,
             None,
         );
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
-        insert_edges_reporting(&self.ingest().graph(), &static_edges, "static")?;
+        insert_edges_reporting(self.ingest().graph(), &static_edges, "static")?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
         if cancel.is_cancelled() {
@@ -374,10 +374,10 @@ impl LainServer {
             all_pattern_refs.len()
         );
         let pattern_edges = super::resolve::resolve_pattern_edges(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &all_pattern_refs,
             super::resolve::PatternLimits::from_tuning(
-                &self.ingest().tuning(),
+                self.ingest().tuning(),
                 super::resolve::PatternLimits::DEFAULT,
             ),
         );
@@ -385,7 +385,7 @@ impl LainServer {
             "Ingesting {} cross-boundary pattern edges",
             pattern_edges.len()
         );
-        insert_edges_reporting(&self.ingest().graph(), &pattern_edges, "pattern")?;
+        insert_edges_reporting(self.ingest().graph(), &pattern_edges, "pattern")?;
 
         // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
         // WebSocket. Runs after the symbol nodes exist, because
@@ -397,9 +397,9 @@ impl LainServer {
         // — could never appear in a graph, while `describe_schema`
         // advertised them and `get_cross_runtime_callers` read them.
         let sensor_counts = crate::server::sensors::run_all(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &self.ingest().config().workspace,
-            &self.ingest().id_namespace(),
+            self.ingest().id_namespace(),
         );
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
@@ -410,7 +410,7 @@ impl LainServer {
             info!("build_core_memory: cancelled after pattern resolve");
             return Err(LainError::Cancelled);
         }
-        let co_change_pairs = {
+        let co_change_pairs: Vec<crate::git::CoChangePair> = {
             let window = self.ingest().tuning().ingestion.cochange_commit_window;
             let min_pair = self.ingest().tuning().ingestion.cochange_min_pair_count;
             let max_files = self.ingest().tuning().ingestion.cochange_max_commit_files;
@@ -423,6 +423,7 @@ impl LainServer {
             .await
             {
                 Ok(v) => v,
+                Err(LainError::Cancelled) => return Err(LainError::Cancelled),
                 Err(_) => Vec::new(),
             }
         };
@@ -779,7 +780,7 @@ impl LainServer {
                 .get_document_symbols_hierarchical(
                     path,
                     &self.ingest().config().workspace,
-                    &self.ingest().id_namespace(),
+                    self.ingest().id_namespace(),
                 )
                 .await
             {
@@ -813,12 +814,12 @@ impl LainServer {
                             d.kind,
                             d.name.clone(),
                             graph_key.clone(),
-                            &self.ingest().id_namespace(),
+                            self.ingest().id_namespace(),
                         )
                         .with_location_in(
                             d.line_start,
                             d.line_end,
-                            &self.ingest().id_namespace(),
+                            self.ingest().id_namespace(),
                         ),
                         children: vec![],
                     })
