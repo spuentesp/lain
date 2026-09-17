@@ -37,19 +37,34 @@ fn attribution_auto_claims_via_pid_on_linux() {
     );
     let _h = watcher.start();
 
-    // Give the inotify watcher thread a moment to register its watch
-    // before we touch the file. inotify only reports events that happen
-    // after the watch is set up; a write before the watch is ready
-    // is silently dropped by the kernel.
-    std::thread::sleep(Duration::from_millis(100));
-
-    // Touch the file from THIS process — the registered PID should match.
-    std::fs::write(&file, "fn login() { changed }").unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    // A fixed pre-sleep guessing when the inotify watcher thread has
+    // registered its watch (inotify drops writes that happen before the
+    // watch is armed) plus a fixed post-sleep guessing when the event
+    // has been processed both flaked under CI scheduling jitter
+    // (confirmed live 2026-09-17). `AttributionWatcher` exposes no
+    // readiness signal to poll instead, but re-writing the file is
+    // itself observable once the watch *is* armed -- any write after
+    // that point produces an event. Loop write+poll instead of a single
+    // shot: each iteration both re-arms the "watch might not be ready
+    // yet" case and gives more time for "event not processed yet".
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut claims = Vec::new();
+    let mut attempt = 0u32;
+    while std::time::Instant::now() < deadline {
+        attempt += 1;
+        std::fs::write(&file, format!("fn login() {{ changed {attempt} }}")).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        claims = occupancy.list_for_agent(&s.id);
+        if !claims.is_empty() {
+            break;
+        }
+    }
 
     // The agent should now have an auto-claim on auth.rs.
-    let claims = occupancy.list_for_agent(&s.id);
-    assert!(!claims.is_empty(), "expected auto-claim, got: {claims:?}");
+    assert!(
+        !claims.is_empty(),
+        "expected auto-claim after {attempt} write attempt(s), got: {claims:?}"
+    );
 }
 
 #[test]
