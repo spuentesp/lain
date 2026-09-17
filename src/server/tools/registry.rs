@@ -13,6 +13,7 @@ use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
 use crate::overlay::VolatileOverlay;
+use crate::server::annotations::AnnotationRegistry;
 use crate::server::presence::{OccupancyMap, PresenceRegistry};
 use crate::server::tools::UiSession;
 use crate::tuning::TuningConfig;
@@ -112,6 +113,18 @@ pub struct ToolContext {
     /// in single-workspace mode and in tests that don't wire a
     /// federation — the dispatcher's wait is then a no-op.
     pub indexed_signal: Option<Arc<tokio::sync::Notify>>,
+    /// Per-repo annotation store shared with the `LainServer` orchestrator.
+    /// Tools that surface architectural context (`explain_symbol`,
+    /// `get_blast_radius`) read this to append an `### Open annotations`
+    /// section so an agent's first call about a symbol surfaces the
+    /// human notes left there. Initialized to a temp-dir-backed
+    /// best-effort registry so standalone / sidecar executors that don't
+    /// carry a `LainServer` still construct successfully; `with_server`
+    /// (or `with_annotations`) swaps in the live registry once the
+    /// orchestrator is built. Annotations are read-only here — write
+    /// paths stay on the dedicated MCP tools so the dispatcher gate
+    /// still applies.
+    pub annotations: Arc<AnnotationRegistry>,
 }
 
 impl ToolContext {
@@ -167,7 +180,26 @@ impl ToolContext {
             // single-workspace executors leave it None and the
             // dispatcher's cold-boot wait is then a no-op.
             indexed_signal: None,
+            // Default to a temp-dir-backed best-effort registry so a
+            // standalone executor (one that never wires a `LainServer`)
+            // can still construct without panicking. `with_annotations`
+            // and `LainMcpServer::with_server` swap this for the live
+            // registry once the orchestrator is built. No annotation
+            // data lives in the temp dir for the default case —
+            // `summaries_for_targets` walks an empty store and returns
+            // an empty vector, so the appended `### Open annotations`
+            // section is suppressed by the same `is_empty()` guard the
+            // followup tests pin.
+            annotations: AnnotationRegistry::open_best_effort(&std::env::temp_dir()),
         }
+    }
+
+    /// Install a live annotation registry. `LainMcpServer::with_server`
+    /// uses this when it has the orchestrator in hand; tests construct
+    /// one off a tempdir directly.
+    pub fn with_annotations(mut self, registry: Arc<AnnotationRegistry>) -> Self {
+        self.annotations = registry;
+        self
     }
 
     /// Attach the federation so per-repo tools can be rebound per call.

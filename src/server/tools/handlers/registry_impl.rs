@@ -416,14 +416,16 @@ impl ToolHandler for GetBlastRadiusHandler {
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
         let include_coupling = bool_arg(args, "include_coupling").unwrap_or(false);
-        handlers::impact::get_blast_radius(
+        let mut out = handlers::impact::get_blast_radius(
             &ctx.graph,
             &ctx.overlay,
             &symbol,
             include_coupling,
             ui_link(ctx),
         )
-        .await
+        .await?;
+        out.push_str(&open_annotations_for_symbol(ctx, &symbol));
+        Ok(out)
     }
 }
 inventory::submit!(ToolHandlerEntry(&GetBlastRadiusHandler));
@@ -588,13 +590,15 @@ impl ToolHandler for ExplainSymbolHandler {
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
-        handlers::metrics::explain_symbol(
+        let mut out = handlers::metrics::explain_symbol(
             &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
             &ctx.occupancy,
             &symbol,
-        )
+        )?;
+        out.push_str(&open_annotations_for_symbol(ctx, &symbol));
+        Ok(out)
     }
 }
 inventory::submit!(ToolHandlerEntry(&ExplainSymbolHandler));
@@ -1368,3 +1372,59 @@ impl ToolHandler for SearchCodeHandler {
     }
 }
 inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));
+
+// ─── Cross-cutting: open-annotations appendix for explain/blast ────────────
+//
+// `explain_symbol` and `get_blast_radius` both surface an
+// `### Open annotations` section so the agent's first call about a
+// symbol surfaces the human notes left there (FOLLOWUPS.md
+// "Auto-include in `explain_symbol` / `get_blast_radius` markdown").
+// This helper does the lookup against the live annotation registry
+// attached to the executor's `ToolContext` and formats the appendix
+// the way `annotation_tools::format_open_annotations_section` lays it
+// out. Returning an empty string when no annotations match keeps the
+// wire contract unchanged for the common case.
+
+/// Render the `### Open annotations` section to append to
+/// `explain_symbol` / `get_blast_radius` output for the given
+/// symbol. Returns an empty string when:
+/// - the executor has no live annotation registry wired (default
+///   temp-dir backend has no rows for any repo), OR
+/// - the active federation has no repos to attribute annotations to
+///   (single-workspace mode without a federation), OR
+/// - the lookup itself finds no open annotations on the symbol.
+///
+/// Lookups happen by `AnnotationTarget::Symbol { symbol }`. The
+/// target filter inside the annotation store is exact-match by
+/// `(kind, target)`, so a caller asking about `orchestrate` will
+/// only see annotations whose target was explicitly `Symbol
+/// { "orchestrate" }`. That is intentional — auto-including
+/// annotations on file- or repo-typed targets would change the
+/// semantic of "what is this symbol about" in surprising ways.
+fn open_annotations_for_symbol(ctx: &ToolContext, symbol: &str) -> String {
+    use crate::server::mcp::annotation_tools::{
+        format_open_annotations_section, summaries_for_targets_in_registry,
+    };
+    use crate::server::annotations::AnnotationTarget;
+    use crate::federation::repo_id::RepoId;
+
+    // Federation-mode only: a single-repo federation or a multi-repo
+    // one with the dispatcher's `repo_id` injection lands here with
+    // `ctx.federation = Some(_)`. Single-workspace executors carry
+    // `federation = None` and have no per-repo store to attribute
+    // annotations to, so the lookup is skipped — the same trade-off
+    // the dedicated annotation MCP tools already make via
+    // `target_to_repo`.
+    let Some(fed) = ctx.federation.as_ref() else {
+        return String::new();
+    };
+    let Some((rid, _)) = fed.list_repos().first().cloned() else {
+        return String::new();
+    };
+    let repo = RepoId::new(rid.as_str()).unwrap_or(rid);
+    let targets = [AnnotationTarget::Symbol {
+        symbol: symbol.to_string(),
+    }];
+    let summaries = summaries_for_targets_in_registry(&ctx.annotations, &repo, &targets);
+    format_open_annotations_section(&summaries)
+}
