@@ -610,16 +610,618 @@ fn failed_replacement_detail(add_error: String, previous_config: Option<String>)
     }
 }
 
+// ─── Codex (M8) ─────────────────────────────────────────────────────────────
+//
+// Codex has its own CLI for safe MCP config editing
+// (`codex mcp add <name> -- <command> [args...]`). Use it when
+// available; fall back to a direct edit of `~/.codex/config.toml`
+// when the CLI is missing so the adapter still works in CI or
+// minimal installs.
+
+/// `true` if the `codex` CLI is invocable on `PATH`.
+fn codex_cli_available() -> bool {
+    Command::new("codex")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve `~/.codex/config.toml`. Honours `$CODEX_HOME` first so a
+/// CI matrix or a sandboxed dev box can override the path without
+/// mutating the user's real config dir.
+fn codex_config_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CODEX_HOME") {
+        if !p.is_empty() {
+            return PathBuf::from(p).join("config.toml");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".codex/config.toml")
+}
+
+/// Build the `[mcp_servers.lain]` table entry Codex expects.
+fn build_codex_entry(exe: &Path, model: Option<&Path>) -> Value {
+    let mut entry = json!({
+        "command": exe.display().to_string(),
+        "args": ["mcp"],
+    });
+    if let Some(model) = model {
+        entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
+    }
+    entry
+}
+
+/// Merge `entry` into `path`'s `[mcp_servers]` table under
+/// `server_name`, preserving every other key. Codex's `config.toml`
+/// is TOML; we parse with the `toml` crate already in `Cargo.toml`,
+/// preserve the document order via `toml::Value::Table`, and emit
+/// the result via `toml::to_string_pretty`. Refuses (rather than
+/// silently rewrites) a file that isn't valid TOML — same contract
+/// as the JSON adapters.
+fn merge_codex_toml(path: &Path, server_name: &str, entry: Value) -> Result<toml::Value> {
+    let mut doc: toml::Value = if path.is_file() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        text.parse::<toml::Value>().with_context(|| {
+            format!(
+                "{} contains invalid TOML; nothing was changed",
+                path.display()
+            )
+        })?
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+    let toml::Value::Table(ref mut root) = doc else {
+        return Err(anyhow!(
+            "{} does not contain a TOML table at the top level; nothing was changed",
+            path.display()
+        ));
+    };
+    let servers = root
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let toml::Value::Table(ref mut servers_tbl) = servers else {
+        return Err(anyhow!(
+            "{}'s `mcp_servers` key is not a TOML table; nothing was changed",
+            path.display()
+        ));
+    };
+    // `serde_json::Value` -> `toml::Value` is lossy in theory but the
+    // shape we build (`command`/`args`/`env`) maps cleanly. The
+    // conversion is explicit so any future schema addition is a
+    // single grep site.
+    let toml_entry: toml::Value = toml::Value::try_from(&entry)
+        .map_err(|e| anyhow!("could not convert codex entry to TOML: {e}"))?;
+    servers_tbl.insert(server_name.to_string(), toml_entry);
+    Ok(doc)
+}
+
+fn configure_codex(
+    root: &Path,
+    exe: &Path,
+    model: Option<&Path>,
+    opts: &SetupOptions,
+) -> ConfigurationOutcome {
+    let config_path = codex_config_path();
+    let target = config_path.display().to_string();
+
+    // Prefer the CLI when available; fall back to a direct TOML edit.
+    if codex_cli_available() {
+        let mut add_args: Vec<String> = vec![
+            "mcp".into(),
+            "add".into(),
+            "lain".into(),
+            "--".into(),
+            exe.display().to_string(),
+            "mcp".into(),
+        ];
+        if let Some(m) = model {
+            add_args.push("-e".into());
+            add_args.push(format!("LAIN_EMBEDDING_MODEL={}", m.display()));
+        }
+        let command_line = format!("codex {}", add_args.join(" "));
+
+        if opts.print_config {
+            println!("{command_line}");
+            return ConfigurationOutcome {
+                agent: "codex".into(),
+                state: ConfigurationState::Printed,
+                target: Some("codex mcp".into()),
+                detail: Some(command_line),
+            };
+        }
+        if opts.dry_run {
+            return ConfigurationOutcome {
+                agent: "codex".into(),
+                state: ConfigurationState::WouldConfigure,
+                target: Some("codex mcp".into()),
+                detail: Some(command_line),
+            };
+        }
+        return match Command::new("codex").args(&add_args).output() {
+            Ok(out) if out.status.success() => ConfigurationOutcome {
+                agent: "codex".into(),
+                state: ConfigurationState::Configured,
+                target: Some("codex mcp".into()),
+                detail: None,
+            },
+            Ok(out) => ConfigurationOutcome {
+                agent: "codex".into(),
+                state: ConfigurationState::Failed,
+                target: Some("codex mcp".into()),
+                detail: Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            },
+            Err(e) => ConfigurationOutcome {
+                agent: "codex".into(),
+                state: ConfigurationState::Failed,
+                target: Some("codex mcp".into()),
+                detail: Some(e.to_string()),
+            },
+        };
+    }
+
+    // Fallback: direct TOML edit.
+    let entry_json = build_codex_entry(exe, model);
+    let merged = match merge_codex_toml(&config_path, "lain", entry_json) {
+        Ok(v) => v,
+        Err(e) => {
+            return ConfigurationOutcome {
+                agent: "codex".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!("{e:#}")),
+            }
+        }
+    };
+    let pretty = toml::to_string_pretty(&merged).unwrap_or_default();
+
+    if opts.print_config {
+        println!("{pretty}");
+        return ConfigurationOutcome {
+            agent: "codex".into(),
+            state: ConfigurationState::Printed,
+            target: Some(target),
+            detail: None,
+        };
+    }
+    if opts.dry_run {
+        return ConfigurationOutcome {
+            agent: "codex".into(),
+            state: ConfigurationState::WouldConfigure,
+            target: Some(target),
+            detail: Some(pretty),
+        };
+    }
+    if config_path.is_file() {
+        if let Err(e) = backup_file(&config_path) {
+            return ConfigurationOutcome {
+                agent: "codex".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!(
+                    "backup before write failed: {e:#}; nothing was changed"
+                )),
+            };
+        }
+    }
+    match write_file_atomic(&config_path, pretty) {
+        Ok(()) => ConfigurationOutcome {
+            agent: "codex".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: None,
+        },
+        Err(e) => ConfigurationOutcome {
+            agent: "codex".into(),
+            state: ConfigurationState::Failed,
+            target: Some(target),
+            detail: Some(e.to_string()),
+        },
+    }
+}
+
+// ─── Cursor (M8) ─────────────────────────────────────────────────────────────
+//
+// Cursor reads `~/.cursor/mcp.json` directly — no stable CLI. The
+// JSON shape matches the generic adapter (`mcpServers` map, name-keyed
+// entries); the only difference is the file path. Reusing
+// `merge_mcp_json` keeps the preservation-of-other-settings contract
+// consistent with the other JSON adapters.
+
+fn cursor_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".cursor/mcp.json")
+}
+
+fn configure_cursor(
+    root: &Path,
+    exe: &Path,
+    model: Option<&Path>,
+    opts: &SetupOptions,
+) -> ConfigurationOutcome {
+    let config_path = cursor_config_path();
+    let target = config_path.display().to_string();
+    let entry = build_mcp_server_entry(exe, model);
+    let merged = match merge_mcp_json(&config_path, "lain", entry) {
+        Ok(v) => v,
+        Err(e) => {
+            return ConfigurationOutcome {
+                agent: "cursor".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!("{e:#}")),
+            }
+        }
+    };
+    let pretty = serde_json::to_string_pretty(&merged).unwrap_or_default();
+
+    if opts.print_config {
+        println!("{pretty}");
+        return ConfigurationOutcome {
+            agent: "cursor".into(),
+            state: ConfigurationState::Printed,
+            target: Some(target),
+            detail: None,
+        };
+    }
+    if opts.dry_run {
+        return ConfigurationOutcome {
+            agent: "cursor".into(),
+            state: ConfigurationState::WouldConfigure,
+            target: Some(target),
+            detail: Some(pretty),
+        };
+    }
+    if config_path.is_file() {
+        if let Err(e) = backup_file(&config_path) {
+            return ConfigurationOutcome {
+                agent: "cursor".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!(
+                    "backup before write failed: {e:#}; nothing was changed"
+                )),
+            };
+        }
+    }
+    match write_file_atomic(&config_path, format!("{pretty}\n")) {
+        Ok(()) => ConfigurationOutcome {
+            agent: "cursor".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: None,
+        },
+        Err(e) => ConfigurationOutcome {
+            agent: "cursor".into(),
+            state: ConfigurationState::Failed,
+            target: Some(target),
+            detail: Some(e.to_string()),
+        },
+    }
+}
+
+// ─── VS Code (M8) ───────────────────────────────────────────────────────────
+//
+// VS Code reads `.vscode/mcp.json` (project-scoped) or `mcp.json`
+// (user-scoped). Project-scoped takes precedence when present — a
+// developer might have committed `.vscode/mcp.json` deliberately,
+// and silently overwriting it would surprise them.
+
+fn vscode_user_config_path() -> Option<PathBuf> {
+    // `dirs::config_dir()` returns the per-user config root
+    // (`$XDG_CONFIG_HOME` / `~/Library/Application Support` /
+    // `%APPDATA%`). VS Code lives in a `Code/User/` subdir on each
+    // platform — see
+    // https://code.visualstudio.com/docs/configs — and uses `mcp.json`
+    // for the modern MCP config.
+    let cfg = dirs::config_dir()?;
+    Some(cfg.join("Code").join("User").join("mcp.json"))
+}
+
+fn vscode_resolve_target(workspace_root: &Path) -> (PathBuf, bool) {
+    let project_path = workspace_root.join(".vscode").join("mcp.json");
+    if project_path.is_file() {
+        (project_path, true)
+    } else if let Some(user_path) = vscode_user_config_path() {
+        (user_path, false)
+    } else {
+        // No user dir available (extremely rare; sandbox without
+        // HOME). Fall back to the project-scoped path even though
+        // it doesn't exist yet — the write step will create it.
+        (project_path, true)
+    }
+}
+
+fn configure_vscode(
+    root: &Path,
+    exe: &Path,
+    model: Option<&Path>,
+    opts: &SetupOptions,
+) -> ConfigurationOutcome {
+    let (config_path, project_scoped) = vscode_resolve_target(root);
+    let target = config_path.display().to_string();
+
+    // VS Code's modern MCP config uses `servers` (not `mcpServers`)
+    // and requires an explicit `"type": "stdio"`. Reusing
+    // `merge_mcp_json` works because it operates on a generic object;
+    // we just point it at the `servers` key instead of
+    // `mcpServers`.
+    let mut entry = json!({
+        "type": "stdio",
+        "command": exe.display().to_string(),
+        "args": ["mcp"],
+    });
+    if let Some(model) = model {
+        entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
+    }
+    let merged = match merge_vscode_json(&config_path, "lain", entry) {
+        Ok(v) => v,
+        Err(e) => {
+            return ConfigurationOutcome {
+                agent: "vscode".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!("{e:#}")),
+            }
+        }
+    };
+    let pretty = serde_json::to_string_pretty(&merged).unwrap_or_default();
+
+    if opts.print_config {
+        println!("{pretty}");
+        return ConfigurationOutcome {
+            agent: "vscode".into(),
+            state: ConfigurationState::Printed,
+            target: Some(target),
+            detail: if project_scoped {
+                Some("project-scoped".to_string())
+            } else {
+                None
+            },
+        };
+    }
+    if opts.dry_run {
+        return ConfigurationOutcome {
+            agent: "vscode".into(),
+            state: ConfigurationState::WouldConfigure,
+            target: Some(target),
+            detail: Some(pretty),
+        };
+    }
+    if config_path.is_file() {
+        if let Err(e) = backup_file(&config_path) {
+            return ConfigurationOutcome {
+                agent: "vscode".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!(
+                    "backup before write failed: {e:#}; nothing was changed"
+                )),
+            };
+        }
+    }
+    match write_file_atomic(&config_path, format!("{pretty}\n")) {
+        Ok(()) => ConfigurationOutcome {
+            agent: "vscode".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: if project_scoped {
+                Some("project-scoped".to_string())
+            } else {
+                None
+            },
+        },
+        Err(e) => ConfigurationOutcome {
+            agent: "vscode".into(),
+            state: ConfigurationState::Failed,
+            target: Some(target),
+            detail: Some(e.to_string()),
+        },
+    }
+}
+
+/// Merge `entry` into `path`'s top-level `"servers"` object (VS
+/// Code's modern MCP config location), preserving every other key.
+/// Same preservation contract as the JSON adapters.
+fn merge_vscode_json(path: &Path, server_name: &str, entry: Value) -> Result<Value> {
+    let mut root: Value = if path.is_file() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "{} contains invalid JSON; nothing was changed",
+                path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+    let Some(root_obj) = root.as_object_mut() else {
+        return Err(anyhow!(
+            "{} does not contain a JSON object at the top level; nothing was changed",
+            path.display()
+        ));
+    };
+    let servers = root_obj.entry("servers").or_insert_with(|| json!({}));
+    let Some(servers_obj) = servers.as_object_mut() else {
+        return Err(anyhow!(
+            "{}'s \"servers\" key is not an object; nothing was changed",
+            path.display()
+        ));
+    };
+    servers_obj.insert(server_name.to_string(), entry);
+    Ok(root)
+}
+
+// ─── Continue (M8) ───────────────────────────────────────────────────────────
+//
+// Continue reads `~/.continue/config.json`. The MCP-server list lives
+// under `experimental.modelContextProtocolServers` and is an array,
+// not a map — the apply step removes any existing `lain` entry then
+// appends the new one. Same atomic-write / backup contract as the
+// other JSON adapters.
+
+fn continue_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".continue/config.json")
+}
+
+fn merge_continue_json(path: &Path, server_name: &str, entry: Value) -> Result<Value> {
+    let mut root: Value = if path.is_file() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "{} contains invalid JSON; nothing was changed",
+                path.display()
+            )
+        })?
+    } else {
+        json!({})
+    };
+    let Some(root_obj) = root.as_object_mut() else {
+        return Err(anyhow!(
+            "{} does not contain a JSON object at the top level; nothing was changed",
+            path.display()
+        ));
+    };
+    let experimental = root_obj.entry("experimental").or_insert_with(|| json!({}));
+    let Some(experimental_obj) = experimental.as_object_mut() else {
+        return Err(anyhow!(
+            "{}'s \"experimental\" key is not an object; nothing was changed",
+            path.display()
+        ));
+    };
+    let servers = experimental_obj
+        .entry("modelContextProtocolServers")
+        .or_insert_with(|| json!([]));
+    let Some(servers_arr) = servers.as_array_mut() else {
+        return Err(anyhow!(
+            "{}'s `experimental.modelContextProtocolServers` is not an array; \
+             nothing was changed",
+            path.display()
+        ));
+    };
+    // Dedup by `name`: remove any existing entry for this server
+    // before appending the new one. The roadmap's preservation
+    // contract is "leave every other key untouched" — we leave
+    // other servers in the array intact, just remove this one's
+    // prior version.
+    servers_arr.retain(|s| {
+        s.get("name")
+            .and_then(|n| n.as_str())
+            .map(|n| n != server_name)
+            .unwrap_or(true)
+    });
+    servers_arr.push(entry);
+    Ok(root)
+}
+
+fn build_continue_entry(exe: &Path, model: Option<&Path>) -> Value {
+    let mut entry = json!({
+        "name": "lain",
+        "transport": "stdio",
+        "command": exe.display().to_string(),
+        "args": ["mcp"],
+    });
+    if let Some(model) = model {
+        entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
+    }
+    entry
+}
+
+fn configure_continue(
+    _root: &Path,
+    exe: &Path,
+    model: Option<&Path>,
+    opts: &SetupOptions,
+) -> ConfigurationOutcome {
+    let config_path = continue_config_path();
+    let target = config_path.display().to_string();
+    let entry = build_continue_entry(exe, model);
+    let merged = match merge_continue_json(&config_path, "lain", entry) {
+        Ok(v) => v,
+        Err(e) => {
+            return ConfigurationOutcome {
+                agent: "continue".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!("{e:#}")),
+            }
+        }
+    };
+    let pretty = serde_json::to_string_pretty(&merged).unwrap_or_default();
+
+    if opts.print_config {
+        println!("{pretty}");
+        return ConfigurationOutcome {
+            agent: "continue".into(),
+            state: ConfigurationState::Printed,
+            target: Some(target),
+            detail: None,
+        };
+    }
+    if opts.dry_run {
+        return ConfigurationOutcome {
+            agent: "continue".into(),
+            state: ConfigurationState::WouldConfigure,
+            target: Some(target),
+            detail: Some(pretty),
+        };
+    }
+    if config_path.is_file() {
+        if let Err(e) = backup_file(&config_path) {
+            return ConfigurationOutcome {
+                agent: "continue".into(),
+                state: ConfigurationState::Failed,
+                target: Some(target),
+                detail: Some(format!(
+                    "backup before write failed: {e:#}; nothing was changed"
+                )),
+            };
+        }
+    }
+    match write_file_atomic(&config_path, format!("{pretty}\n")) {
+        Ok(()) => ConfigurationOutcome {
+            agent: "continue".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: None,
+        },
+        Err(e) => ConfigurationOutcome {
+            agent: "continue".into(),
+            state: ConfigurationState::Failed,
+            target: Some(target),
+            detail: Some(e.to_string()),
+        },
+    }
+}
+
 fn prompt_agent_choice() -> String {
     println!();
     println!("  Choose an agent");
     println!("  › 1) Claude Code");
-    println!("    2) Generic MCP");
+    println!("    2) Codex");
+    println!("    3) Cursor");
+    println!("    4) VS Code");
+    println!("    5) Continue");
+    println!("    6) Generic MCP");
     print!("> ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_ok() && line.trim() == "1" {
-        return "claude-code".to_string();
+    if std::io::stdin().read_line(&mut line).is_ok() {
+        match line.trim() {
+            "1" => return "claude-code".to_string(),
+            "2" => return "codex".to_string(),
+            "3" => return "cursor".to_string(),
+            "4" => return "vscode".to_string(),
+            "5" => return "continue".to_string(),
+            "6" => return "generic".to_string(),
+            _ => {}
+        }
     }
     "generic".to_string()
 }
@@ -741,16 +1343,24 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         None if !opts.json && is_stdin_tty() => prompt_agent_choice(),
         None => "generic".to_string(),
     };
-    if agent != "generic" && agent != "claude-code" {
+    if !matches!(
+        agent.as_str(),
+        "generic" | "claude-code" | "codex" | "cursor" | "vscode" | "continue",
+    ) {
         return Err(anyhow!(
-            "unknown --agent '{agent}'; supported values: generic, claude-code"
+            "unknown --agent '{agent}'; supported values: \
+             generic, claude-code, codex, cursor, vscode, continue"
         ));
     }
 
-    let configuration = if agent == "claude-code" {
-        configure_claude_code(&exe, semantic.model_path.as_deref(), &opts)
-    } else {
-        configure_generic(&root, &exe, semantic.model_path.as_deref(), &opts)
+    let configuration = match agent.as_str() {
+        "claude-code" => configure_claude_code(&exe, semantic.model_path.as_deref(), &opts),
+        "codex" => configure_codex(&root, &exe, semantic.model_path.as_deref(), &opts),
+        "cursor" => configure_cursor(&root, &exe, semantic.model_path.as_deref(), &opts),
+        "vscode" => configure_vscode(&root, &exe, semantic.model_path.as_deref(), &opts),
+        "continue" => configure_continue(&root, &exe, semantic.model_path.as_deref(), &opts),
+        // "generic" — the fallthrough.
+        _ => configure_generic(&root, &exe, semantic.model_path.as_deref(), &opts),
     };
 
     let verification =
@@ -832,6 +1442,10 @@ fn print_human(report: &SetupReport) {
     println!();
     let agent_label = match report.configuration.agent.as_str() {
         "claude-code" => "Claude Code",
+        "codex" => "Codex",
+        "cursor" => "Cursor",
+        "vscode" => "VS Code",
+        "continue" => "Continue",
         other => other,
     };
     match report.configuration.state {
@@ -1134,5 +1748,415 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".mcp.json.bak-"))
             .collect();
         assert_eq!(backups.len(), 1, "exactly one backup after one re-run");
+    }
+
+    // ─── M8: codex adapter ───────────────────────────────────────────────
+    //
+    // Each adapter gets three tests: empty-config idempotent re-run,
+    // preservation of unrelated settings, malformed input. The
+    // real-CLI delegation path is covered by
+    // `scripts/test_client_recipes.sh` (which CI runs against
+    // installed editor binaries), not here — unit tests pin the
+    // file-write fallback path that runs in the absence of the
+    // `codex` CLI on `PATH`.
+    //
+    // The four M8 adapter tests mutate process-global env vars
+    // (`HOME`, `CODEX_HOME`, `XDG_CONFIG_HOME`) so each adapter's
+    // path resolver picks up the fixture's tempdir. Cargo runs
+    // tests in parallel by default; without serialization a
+    // concurrent cursor test can blow away the codex test's
+    // `HOME` mid-run. The `SERIAL` mutex below keeps the env-mutating
+    // tests serial. They are fast (no I/O outside a tempdir) so
+    // serialization cost is negligible.
+
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn codex_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        std::env::set_var("HOME", fake_home.as_os_str());
+        std::env::set_var("CODEX_HOME", fake_home.join(".codex"));
+        std::env::remove_var("PATH"); // ensure `codex` CLI is not found
+        (tmp, fake_home)
+    }
+
+    #[test]
+    fn codex_empty_config_writes_lain_entry() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = codex_fixture();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("codex".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_codex(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let cfg = fake_home.join(".codex/config.toml");
+        assert!(cfg.is_file(), "codex fallback wrote {}", cfg.display());
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let parsed: toml::Value = text.parse().unwrap();
+        assert!(
+            parsed["mcp_servers"]["lain"]["command"].as_str() == Some("/usr/bin/lain"),
+            "codex entry should have the right command; got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn codex_preserves_unrelated_entries() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = codex_fixture();
+        let cfg_dir = fake_home.join(".codex");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.toml"),
+            "[mcp_servers.OtherServer]\ncommand = \"/usr/bin/other\"\nargs = [\"serve\"]\n\
+             [model]\nname = \"gpt-5\"\n",
+        )
+        .unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("codex".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_codex(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let parsed: toml::Value = std::fs::read_to_string(cfg_dir.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(parsed["mcp_servers"]["OtherServer"].is_table());
+        assert!(parsed["model"]["name"].as_str() == Some("gpt-5"));
+        assert!(parsed["mcp_servers"]["lain"].is_table());
+    }
+
+    #[test]
+    fn codex_malformed_input_returns_failed() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = codex_fixture();
+        let cfg_dir = fake_home.join(".codex");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.toml"), "this is not [valid toml").unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("codex".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_codex(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Failed));
+        assert!(
+            out.detail.as_deref().unwrap_or("").contains("invalid TOML"),
+            "detail should name the parse failure; got: {:?}",
+            out.detail
+        );
+    }
+
+    // ─── M8: cursor adapter ──────────────────────────────────────────────
+
+    fn cursor_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        std::env::set_var("HOME", fake_home.as_os_str());
+        (tmp, fake_home)
+    }
+
+    #[test]
+    fn cursor_empty_config_writes_lain_entry() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = cursor_fixture();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("cursor".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_cursor(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let cfg = fake_home.join(".cursor/mcp.json");
+        assert!(cfg.is_file());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed["mcpServers"]["lain"]["command"], "/usr/bin/lain");
+    }
+
+    #[test]
+    fn cursor_preserves_unrelated_entries() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = cursor_fixture();
+        let cursor_dir = fake_home.join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        std::fs::write(
+            cursor_dir.join("mcp.json"),
+            r#"{
+  "mcpServers": {
+    "Other": {"command": "/usr/bin/other", "args": ["serve"]}
+  },
+  "theme": "dark"
+}"#,
+        )
+        .unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("cursor".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_cursor(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(cursor_dir.join("mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(parsed["mcpServers"]["Other"]["command"], "/usr/bin/other");
+        assert_eq!(parsed["theme"], "dark");
+        assert_eq!(parsed["mcpServers"]["lain"]["command"], "/usr/bin/lain");
+    }
+
+    #[test]
+    fn cursor_malformed_input_returns_failed() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = cursor_fixture();
+        let cursor_dir = fake_home.join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        std::fs::write(cursor_dir.join("mcp.json"), "{not valid json").unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("cursor".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_cursor(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Failed));
+        assert!(out.detail.as_deref().unwrap_or("").contains("invalid JSON"));
+    }
+
+    // ─── M8: vscode adapter ───────────────────────────────────────────────
+
+    fn vscode_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        std::env::set_var("HOME", fake_home.as_os_str());
+        std::fs::create_dir_all(tmp.path().join(".vscode")).unwrap();
+        (tmp, fake_home)
+    }
+
+    #[test]
+    fn vscode_writes_user_scoped_when_no_project_scoped() {
+        let _guard = SERIAL.lock().unwrap();
+        let (tmp, fake_home) = vscode_fixture();
+        // `dirs::config_dir()` honours `$XDG_CONFIG_HOME` on Linux;
+        // setting it explicitly here makes the test independent of
+        // whatever other env state previous tests left behind (the
+        // SERIAL mutex keeps the env-var mutation sequential, but
+        // this is the cleaner assertion anyway).
+        std::env::set_var("XDG_CONFIG_HOME", fake_home.join(".config"));
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("vscode".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_vscode(
+            tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let cfg = fake_home.join(".config/Code/User/mcp.json");
+        assert!(
+            cfg.is_file(),
+            "vscode wrote user-scoped config: {}",
+            cfg.display()
+        );
+    }
+
+    #[test]
+    fn vscode_writes_project_scoped_when_present() {
+        let _guard = SERIAL.lock().unwrap();
+        let (tmp, _fake_home) = vscode_fixture();
+        // Project-scoped config already exists.
+        std::fs::write(
+            tmp.path().join(".vscode/mcp.json"),
+            r#"{"servers": {"Other": {"type": "stdio", "command": "/bin/other"}}}"#,
+        )
+        .unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("vscode".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_vscode(
+            tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let parsed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join(".vscode/mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed["servers"]["lain"]["type"], "stdio");
+        assert_eq!(parsed["servers"]["Other"]["command"], "/bin/other");
+    }
+
+    // ─── M8: continue adapter ─────────────────────────────────────────────
+
+    fn continue_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        std::env::set_var("HOME", fake_home.as_os_str());
+        (tmp, fake_home)
+    }
+
+    #[test]
+    fn continue_writes_lain_in_model_context_protocol_servers() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = continue_fixture();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("continue".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_continue(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let cfg = fake_home.join(".continue/config.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let servers = parsed["experimental"]["modelContextProtocolServers"]
+            .as_array()
+            .expect("modelContextProtocolServers must be an array");
+        let lain = servers
+            .iter()
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("lain"))
+            .expect("a lain entry must exist in the array");
+        assert_eq!(lain["transport"], "stdio");
+        assert_eq!(lain["command"], "/usr/bin/lain");
+    }
+
+    #[test]
+    fn continue_dedups_existing_lain_entry() {
+        let _guard = SERIAL.lock().unwrap();
+        let (_tmp, fake_home) = continue_fixture();
+        let continue_dir = fake_home.join(".continue");
+        std::fs::create_dir_all(&continue_dir).unwrap();
+        // Two `lain` entries already in the array; the apply step
+        // should reduce to one.
+        std::fs::write(
+            continue_dir.join("config.json"),
+            r#"{
+  "experimental": {
+    "modelContextProtocolServers": [
+      {"name": "Other", "command": "/usr/bin/other", "transport": "stdio"},
+      {"name": "lain", "command": "/old/lain", "transport": "stdio"},
+      {"name": "lain", "command": "/older/lain", "transport": "stdio"}
+    ]
+  }
+}"#,
+        )
+        .unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("continue".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+        };
+        let out = configure_continue(
+            _tmp.path(),
+            std::path::Path::new("/usr/bin/lain"),
+            None,
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        let parsed: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(continue_dir.join("config.json")).unwrap(),
+        )
+        .unwrap();
+        let servers = parsed["experimental"]["modelContextProtocolServers"]
+            .as_array()
+            .unwrap();
+        let lain_entries: Vec<&serde_json::Value> = servers
+            .iter()
+            .filter(|s| s.get("name").and_then(|v| v.as_str()) == Some("lain"))
+            .collect();
+        assert_eq!(
+            lain_entries.len(),
+            1,
+            "duplicate lain entries must be deduplicated; got: {servers:?}"
+        );
+        assert_eq!(lain_entries[0]["command"], "/usr/bin/lain");
     }
 }

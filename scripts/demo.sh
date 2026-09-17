@@ -278,6 +278,79 @@ check "GET /styles.css serves"              "200" "$(http_code "$URL/styles.css"
 check "GET /assets/d3.v7.min.js serves"     "200" "$(http_code "$URL/assets/d3.v7.min.js")"
 check "GET /events (SSE) serves"            "200" "$(http_code "$URL/events")"
 
+# ══ 1.5. Client recipes (AGENT_UX_ROADMAP M8) ═════════════════════════════
+#
+# The four new adapters (codex, cursor, vscode, continue) write
+# per-editor config files when given a fake HOME. The CLI-delegation
+# path (codex) falls back to direct TOML edit when the `codex` CLI
+# isn't on PATH, which is always the case in CI today.
+section "1.5. Client recipes (AGENT_UX_ROADMAP M8)"
+
+CLIENT_FAKE_HOME="$WORK/client-fixtures"
+mkdir -p "$CLIENT_FAKE_HOME"
+
+# `setup` rejects unknown --agent values; the new dispatch gate
+# accepts all six. Run with `--json` so the dispatch gate's
+# rejection (if any) is machine-readable rather than buried in
+# stderr.
+AGENT_REJECT=$(
+    HOME="$CLIENT_FAKE_HOME" XDG_CONFIG_HOME="$CLIENT_FAKE_HOME/.config" \
+        "$LAIN" setup --workspace "$SUBJECT" --agent bogus-agent --json --no-model 2>&1 || true
+)
+check_contains "setup rejects unknown --agent" "supported values" "$AGENT_REJECT"
+check_contains "setup lists all 6 supported values" "codex" "$AGENT_REJECT"
+check_contains "setup lists all 6 supported values" "cursor" "$AGENT_REJECT"
+check_contains "setup lists all 6 supported values" "vscode" "$AGENT_REJECT"
+check_contains "setup lists all 6 supported values" "continue" "$AGENT_REJECT"
+
+# Cursor: writes ~/.cursor/mcp.json. Re-running is a no-op.
+HOME="$CLIENT_FAKE_HOME/cursor" "$LAIN" setup --workspace "$SUBJECT" \
+    --agent cursor --yes --no-model --print-config > "$CLIENT_FAKE_HOME/cursor.out" 2>&1
+check_contains "cursor adapter writes ~/.cursor/mcp.json" '"mcpServers"' \
+    "$(cat "$CLIENT_FAKE_HOME/cursor.out")"
+check_contains "cursor adapter names the server 'lain'" '"lain"' \
+    "$(cat "$CLIENT_FAKE_HOME/cursor.out")"
+
+# VS Code: writes .vscode/mcp.json when project-scoped exists,
+# otherwise the user-scoped path under $XDG_CONFIG_HOME.
+HOME="$CLIENT_FAKE_HOME/vscode" XDG_CONFIG_HOME="$CLIENT_FAKE_HOME/vscode/.config" \
+    "$LAIN" setup --workspace "$SUBJECT" --agent vscode --yes --no-model --print-config \
+    > "$CLIENT_FAKE_HOME/vscode.out" 2>&1
+check_contains "vscode adapter emits `servers.lain` schema" '"servers"' \
+    "$(cat "$CLIENT_FAKE_HOME/vscode.out")"
+check_contains "vscode adapter names the server 'lain'" '"lain"' \
+    "$(cat "$CLIENT_FAKE_HOME/vscode.out")"
+
+# Continue: writes ~/.continue/config.json under
+# experimental.modelContextProtocolServers.
+HOME="$CLIENT_FAKE_HOME/continue" "$LAIN" setup --workspace "$SUBJECT" \
+    --agent continue --yes --no-model --print-config > "$CLIENT_FAKE_HOME/continue.out" 2>&1
+check_contains "continue adapter emits the experimental block" '"experimental"' \
+    "$(cat "$CLIENT_FAKE_HOME/continue.out")"
+check_contains "continue adapter emits modelContextProtocolServers" 'modelContextProtocolServers' \
+    "$(cat "$CLIENT_FAKE_HOME/continue.out")"
+
+# Codex: prefers `codex mcp add` when the CLI is on PATH; otherwise
+# falls back to a direct TOML edit. CI doesn't install the CLI, so
+# the fallback path is what we exercise here.
+HOME="$CLIENT_FAKE_HOME/codex" CODEX_HOME="$CLIENT_FAKE_HOME/codex/.codex" \
+    "$LAIN" setup --workspace "$SUBJECT" --agent codex --yes --no-model --print-config \
+    > "$CLIENT_FAKE_HOME/codex.out" 2>&1
+if command -v codex >/dev/null 2>&1; then
+    check_contains "codex adapter delegates to codex mcp add" "codex mcp add" \
+        "$(cat "$CLIENT_FAKE_HOME/codex.out")"
+else
+    check_contains "codex adapter falls back to direct TOML edit" '\[mcp_servers\]' \
+        "$(cat "$CLIENT_FAKE_HOME/codex.out")"
+fi
+
+# Generic: writes .mcp.json at the workspace root. Re-running is a
+# no-op (the .mcp.json already contains exactly one lain entry).
+HOME="$CLIENT_FAKE_HOME/generic" "$LAIN" setup --workspace "$SUBJECT" \
+    --agent generic --yes --no-model --print-config > "$CLIENT_FAKE_HOME/generic.out" 2>&1
+LAIN_COUNT_AFTER=$(grep -c '"lain"' "$CLIENT_FAKE_HOME/generic.out" || true)
+check "generic adapter is idempotent (one lain entry)" "1" "$LAIN_COUNT_AFTER"
+
 # ══ 2. Structural code intelligence, against known ground truth ═══════
 section "2. Code intelligence (asserted against the fixture)"
 
