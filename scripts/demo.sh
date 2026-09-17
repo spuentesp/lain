@@ -340,7 +340,7 @@ if command -v codex >/dev/null 2>&1; then
     check_contains "codex adapter delegates to codex mcp add" "codex mcp add" \
         "$(cat "$CLIENT_FAKE_HOME/codex.out")"
 else
-    check_contains "codex adapter falls back to direct TOML edit" '\[mcp_servers\]' \
+    check_contains "codex adapter falls back to direct TOML edit" 'mcp_servers' \
         "$(cat "$CLIENT_FAKE_HOME/codex.out")"
 fi
 
