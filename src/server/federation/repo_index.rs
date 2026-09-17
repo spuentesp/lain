@@ -227,10 +227,9 @@ pub struct RepoIndex {
     /// through every long-running phase in the federation pipeline
     /// (`index_one_repo`, the receiver loop spawned by
     /// `start_watcher`, and the watcher-driven `index_forced` /
-    /// `sync_overlay` cycles). `FederatedIndex::install_overlay`
-    /// shares one token across all repos via `cancel_token()`; a
-    /// `FederatedIndex::shutdown` call (or its `Drop`) cancels the
-    /// parent token, which propagates to every child clone here.
+    /// `sync_overlay` cycles). Federation callers pass a clone
+    /// into `IndexRequest` so the LSP subprocess calls in
+    /// `scan_file_structure` abort promptly when the token fires.
     cancel: CancellationToken,
 }
 

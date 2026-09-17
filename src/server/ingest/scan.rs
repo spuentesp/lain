@@ -4,6 +4,7 @@ use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 /// A raw call/type-usage reference from tree-sitter, not yet resolved to node IDs.
@@ -39,6 +40,7 @@ pub async fn scan_file_structure(
     git_sync: i64,
     commit_hash: String,
     namespace: &crate::schema::RepoNamespace,
+    cancel: CancellationToken,
 ) -> Result<FileScanResult, LainError> {
     // The canonical graph key for this file. Every node minted below and
     // every ref emitted for the resolve phase uses this exact string — if a
@@ -103,10 +105,40 @@ pub async fn scan_file_structure(
         ));
     }
 
-    // 3. Fetch all references for this file while we hold the lock (prevents nested-lock deadlock)
+    // 3. Fetch all references for this file while we hold the
+    //    lock (prevents nested-lock deadlock).
+    //
+    //    AGENT_UX_ROADMAP.md Milestone 4 (PR E follow-up):
+    //    lsp-bridge 0.2's `LspMultiplexer::get_references` is an
+    //    `async fn` that internally drives the LSP child process
+    //    over stdio. Unlike the libgit2 / tree-sitter / ONNX
+    //    migrations PR B + E landed, this call can't move onto
+    //    `spawn_blocking` from this repo: the only way to expose
+    //    sync LSP is upstream in lsp-bridge (sync subprocess entry
+    //    point), and `Handle::block_on(inside spawn_blocking)` is
+    //    the anti-pattern this whole initiative was designed to
+    //    avoid. What we *can* do from here is race each LSP await
+    //    against the cancel token — a shutdown that lands mid-scan
+    //    aborts the LSP round-trip promptly instead of waiting for
+    //    the child to answer. The `tokio::select!` below does that.
     let file_refs: Vec<ReferenceLocation> = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_references(&path, 0, 0).await.unwrap_or_default()
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                // Cancellation lands between the lock acquire and
+                // the LSP round-trip. Drop the lock and bail out
+                // before any graph mutation.
+                return Ok(FileScanResult {
+                    nodes,
+                    edges,
+                    external_references,
+                    static_refs: vec![],
+                    pattern_refs: vec![],
+                });
+            }
+            refs = lsp.get_references(&path, 0, 0) => refs.unwrap_or_default(),
+        }
     };
 
     // Collect (node_id, reference) tuples for deferred resolution
@@ -114,15 +146,28 @@ pub async fn scan_file_structure(
         external_references.push((file_id.clone(), r.clone()));
     }
 
-    // 4. Recursive symbols (no more per-symbol lock acquisition)
+    // 4. Recursive symbols (no more per-symbol lock acquisition).
+    //    Same cancellation race as the references call above.
     let symbols_result = {
         let mut lsp = lsp_mux.lock().await;
-        lsp.get_document_symbols_hierarchical(
-            &path,
-            &workspace,
-            &crate::schema::RepoNamespace::for_test(),
-        )
-        .await
+        let ns = crate::schema::RepoNamespace::for_test();
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Ok(FileScanResult {
+                    nodes,
+                    edges,
+                    external_references,
+                    static_refs: vec![],
+                    pattern_refs: vec![],
+                });
+            }
+            result = lsp.get_document_symbols_hierarchical(
+                &path,
+                &workspace,
+                &ns,
+            ) => result,
+        }
     };
 
     match symbols_result {
@@ -232,6 +277,7 @@ pub async fn scan_file_batch(
     git_sync: i64,
     commit_hash: String,
     namespace: &crate::schema::RepoNamespace,
+    cancel: CancellationToken,
 ) -> Vec<Result<FileScanResult, LainError>> {
     let mut results = Vec::with_capacity(paths.len());
     for path in paths {
@@ -243,6 +289,7 @@ pub async fn scan_file_batch(
             git_sync,
             commit_hash.clone(),
             namespace,
+            cancel.clone(),
         )
         .await;
         results.push(result);
@@ -461,6 +508,7 @@ mod tests {
             0,
             "abc".to_string(),
             &crate::schema::RepoNamespace::for_test(),
+            CancellationToken::new(),
         )
         .await
         .expect("scan ok");
@@ -528,6 +576,7 @@ mod tests {
             0,
             "abc".to_string(),
             &crate::schema::RepoNamespace::for_test(),
+            CancellationToken::new(),
         )
         .await
         .expect("scan ok");
@@ -621,5 +670,80 @@ mod attribute_label_tests {
         nodes[0].label = Some("preset".into());
         apply_attribute_labels(&f, src, &mut nodes);
         assert_eq!(nodes[0].label.as_deref(), Some("preset"));
+    }
+}
+
+#[cfg(test)]
+mod lsp_cancel_tests {
+    //! AGENT_UX_ROADMAP.md M4 follow-up: the LSP subprocess awaits
+    //! inside `scan_file_structure` are raced against the cancel
+    //! token via `tokio::select!`. When the token fires mid-scan
+    //! the LSP round-trip is abandoned promptly (rather than waiting
+    //! for the child to answer) and the per-file result carries
+    //! empty `static_refs` / `pattern_refs` / `external_references`
+    //! — a clean "cancelled before LSP" signal.
+    //!
+    //! We can't simulate a hung LSP round-trip from inside the
+    //! `current_thread` test runtime — `LspMultiplexer` runs the
+    //! LSP child in a real subprocess. Instead we exercise the
+    //! cancel-arm of the `tokio::select!` by pre-cancelling the
+    //! token: the LSP `await` is never awaited, so the cancel
+    //! branch always wins. That branch's contract (return a
+    //! `FileScanResult` with empty refs and no error) is what we
+    //! pin here. The "LSP round-trip is the loser" arm is the
+    //! production path; the test confirms the cancel arm fires
+    //! when the token is set up-front.
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn scan_returns_empty_refs_when_cancel_pre_cancels_lsp() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(&file, "pub fn hello() {}\n").expect("write");
+
+        let lsp = Arc::new(AsyncMutex::new(
+            LspMultiplexer::new(tmp.path(), &crate::tuning::RuntimeConfig::default())
+                .expect("lsp mux"),
+        ));
+        // Mark rust-analyzer unavailable — same pattern as the
+        // pre-cancel tests above; the LSP fallback path is what
+        // we'd otherwise exercise, but here we pre-cancel the
+        // token so the LSP await never wins the race.
+        lsp.lock().await.mark_unavailable("rust-analyzer");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = scan_file_structure(
+            file,
+            tmp.path().to_path_buf(),
+            lsp,
+            0,
+            0,
+            "abc".to_string(),
+            &crate::schema::RepoNamespace::for_test(),
+            cancel,
+        )
+        .await
+        .expect("scan returns Ok(empty refs) on cancel");
+
+        // Pre-cancel short-circuits before any LSP round-trip
+        // and before the tree-sitter extract phase. The
+        // `FileScanResult` carries the namespace/file nodes that
+        // were built before the LSP step, but the LSP-derived
+        // vectors (`external_references`, `static_refs`,
+        // `pattern_refs`) are empty.
+        assert!(result.external_references.is_empty());
+        assert!(result.static_refs.is_empty());
+        assert!(result.pattern_refs.is_empty());
+        // The File and Namespace/Module nodes that were built
+        // before the LSP step still appear.
+        assert!(result
+            .nodes
+            .iter()
+            .any(|n| matches!(n.node_type, NodeType::File)));
     }
 }

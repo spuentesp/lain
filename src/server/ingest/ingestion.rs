@@ -38,6 +38,10 @@ impl LainServer {
             return Err(LainError::Cancelled);
         }
         let scan_start = std::time::Instant::now();
+        // AGENT_UX_ROADMAP.md M4 follow-up: the server-owned
+        // cancellation token observes every phase boundary, including
+        // the LSP subprocess awaits inside `scan_file_structure`.
+        let cancel = self.lifecycle_handle().cancel_token();
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
         });
@@ -160,6 +164,7 @@ impl LainServer {
             // of borrowing `&self.ingest().id_namespace()` which would dangle past
             // `self`'s lifetime.
             let namespace = *self.ingest().id_namespace();
+            let cancel_for_spawn = cancel.clone();
 
             set.spawn(async move {
                 scan_file_batch(
@@ -170,6 +175,7 @@ impl LainServer {
                     git_time,
                     commit_hash,
                     &namespace,
+                    cancel_for_spawn,
                 )
                 .await
             });
@@ -942,11 +948,13 @@ pub struct IndexRequest<'a> {
     pub source_repo: Option<&'a crate::federation::repo_id::RepoId>,
     pub namespace: &'a crate::schema::RepoNamespace,
     pub force: bool,
-    /// AGENT_UX_ROADMAP.md M4 follow-up: cooperative shutdown
-    /// signal observed at every phase boundary. The federation
-    /// caller (`RepoIndex::index`) passes the server-owned token
-    /// from `LifecycleInfo`; tests pass a fresh one.
-    pub cancel: &'a CancellationToken,
+    /// AGENT_UX_ROADMAP.md M4 follow-up: cooperative cancellation
+    /// token observed by the LSP subprocess calls in
+    /// `scan_file_structure`. Federation callers pass the
+    /// server-owned token so a shutdown that lands mid-scan aborts
+    /// the LSP round-trip promptly instead of waiting for the
+    /// child to answer.
+    pub cancel: &'a tokio_util::sync::CancellationToken,
 }
 
 pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> {
@@ -1066,6 +1074,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         // reference, so the spawned task borrows from the captured
         // value (which lives for the closure's lifetime).
         let namespace = *namespace;
+        let cancel_for_spawn = cancel.clone();
 
         set.spawn(async move {
             scan_file_batch(
@@ -1076,6 +1085,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
                 git_time,
                 commit_hash,
                 &namespace,
+                cancel_for_spawn,
             )
             .await
         });
