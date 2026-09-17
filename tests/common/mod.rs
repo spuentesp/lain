@@ -313,6 +313,105 @@ fn boot_server_impl(port: u16, repos_yaml_path: &Path, cwd: Option<&Path>) -> Se
     ServerGuard { child, stderr_path }
 }
 
+/// Spawn `lain server` with the per-test state / config / job-store
+/// pinned under a caller-provided root. The three pinned paths keep
+/// per-test state isolated so annotations / handoffs / audit lines
+/// don't leak across runs.
+///
+/// `state_root` is typically a tempdir the caller already owns; the
+/// three pinned env vars live at `{state_root}/state`,
+/// `{state_root}/config`, `{state_root}/jobs.json`. `stderr_label`
+/// shows up in the captured stderr log path so a CI failure can be
+/// matched to its test file.
+///
+/// This is the building block every annotation / handoff-style
+/// e2e test uses. The original `boot_server` does not pin these
+/// dirs because the federation tests share a state dir for their
+/// own reasons; this helper exists for tests that want hermetic
+/// state.
+pub fn boot_server_with_pinning(
+    port: u16,
+    repos_yaml_path: &Path,
+    state_root: &Path,
+    stderr_label: &str,
+) -> ServerGuard {
+    use std::process::{Command, Stdio};
+
+    let stderr_path = std::env::temp_dir().join(format!("{stderr_label}-stderr-{port}.log"));
+    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_lain"))
+        .args([
+            "server",
+            "--transport",
+            "http",
+            "--port",
+            &port.to_string(),
+            "--workspace",
+            "auto",
+            "--config",
+            repos_yaml_path.to_str().unwrap(),
+        ])
+        .env_remove("LAIN_EMBEDDING_MODEL")
+        .env("XDG_STATE_HOME", state_root.join("state"))
+        .env("XDG_CONFIG_HOME", state_root.join("config"))
+        .env("LAIN_JOB_STORE", state_root.join("jobs.json"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn lain server");
+    ServerGuard { child, stderr_path }
+}
+
+/// End-to-end boot for the annotation / handoff-style tests that
+/// only need a single-repo federation fixture and a handful of
+/// seed symbols visible before the first real call.
+///
+/// Free a port, spawn with pinning, wait for `/health`, then poll
+/// `list_repos` / `explain_symbol` until the requested symbols
+/// resolve. Returns the `host:port` string + the [`ServerGuard`]
+/// that drops the child.
+///
+/// Use this for per-use-case proving tests where the fixture is
+/// small and self-contained. Federation / cross-repo tests should
+/// use [`boot_federation`] (or compose [`boot_server`] /
+/// [`boot_server_with_pinning`] directly) instead.
+pub fn boot_annotation_like_server(
+    repos_yaml_path: &Path,
+    state_root: &Path,
+    stderr_label: &str,
+    wait_for_symbols: &[&str],
+) -> (String, ServerGuard) {
+    let port = free_port();
+    let host = format!("127.0.0.1:{port}");
+    let guard = boot_server_with_pinning(port, repos_yaml_path, state_root, stderr_label);
+    wait_for_health(&host, Duration::from_secs(60));
+    wait_for_repo_index(&host, wait_for_symbols);
+    (host, guard)
+}
+
+/// Register an agent and pull the `session_token` out of the
+/// response. The response shape is `{ ..., session_token: "..." }`;
+/// a regression in either the dispatcher path or the JSON envelope
+/// (e.g. a future rename of the field) fails this helper loudly.
+///
+/// `name` becomes the agent's display name. The test fixture can
+/// then use `session_token` to authenticate writes on behalf of
+/// the registered agent — annotations, handoffs, claim/release.
+pub fn register_agent_session(host: &str, name: &str) -> String {
+    let resp = tools_call_text(
+        host,
+        "register_agent",
+        serde_json::json!({"name": name, "mode": "interactive"}),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&resp)
+        .unwrap_or_else(|e| panic!("register_agent not JSON: {e}\n{resp}"));
+    parsed
+        .pointer("/session_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("missing session_token: {parsed}"))
+        .to_string()
+}
+
 /// Wait until `/health` returns 200, or panic with the captured
 /// stderr if it doesn't. Federation boot can be slow (tree-sitter +
 /// optional LSP per repo); 60s is the budget used by every existing

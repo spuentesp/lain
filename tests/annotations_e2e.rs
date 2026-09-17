@@ -34,8 +34,8 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{
-    free_port, git_init_committed, tools_call_envelope, tools_call_text, wait_for_repo_index,
-    ServerGuard,
+    boot_annotation_like_server, free_port, git_init_committed, register_agent_session,
+    tools_call_envelope, tools_call_text, wait_for_repo_index, ServerGuard,
 };
 
 /// Minimal single-repo federation fixture with one Rust crate that
@@ -99,57 +99,21 @@ impl AnnotationFixture {
 
 /// Same `XDG_STATE_HOME` / `XDG_CONFIG_HOME` / `LAIN_JOB_STORE`
 /// pinning the federation e2e uses — the state dir must be isolated
-/// so per-test annotations don't leak across runs.
-fn boot_annotation_server(fixture: &AnnotationFixture, port: u16) -> ServerGuard {
-    use std::process::{Command, Stdio};
-
-    let stderr_path = std::env::temp_dir().join(format!("annotations-e2e-stderr-{port}.log"));
-    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_lain"))
-        .args([
-            "server",
-            "--transport",
-            "http",
-            "--port",
-            &port.to_string(),
-            "--workspace",
-            "auto",
-            "--config",
-            fixture.repos_yaml().to_str().unwrap(),
-        ])
-        .env_remove("LAIN_EMBEDDING_MODEL")
-        .env("XDG_STATE_HOME", fixture.root.join("state"))
-        .env("XDG_CONFIG_HOME", fixture.root.join("config"))
-        .env("LAIN_JOB_STORE", fixture.root.join("jobs.json"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .expect("spawn lain server");
-    ServerGuard { child, stderr_path }
-}
-
+/// so per-test annotations don't leak across runs. Delegates to
+/// [`common::boot_annotation_like_server`] so the boot+pinning
+/// logic lives in one place across the annotation and handoff
+/// e2e suites.
 fn boot_and_wait(fixture: &AnnotationFixture) -> (String, ServerGuard) {
-    let port = free_port();
-    let host = format!("127.0.0.1:{port}");
-    let guard = boot_annotation_server(fixture, port);
-    common::wait_for_health(&host, std::time::Duration::from_secs(60));
-    wait_for_repo_index(&host, &["ann_target"]);
-    (host, guard)
+    boot_annotation_like_server(
+        &fixture.repos_yaml(),
+        &fixture.root,
+        "annotations-e2e",
+        &["ann_target"],
+    )
 }
 
 fn register_session(host: &str, name: &str) -> String {
-    let resp = tools_call_text(
-        host,
-        "register_agent",
-        serde_json::json!({"name": name, "mode": "interactive"}),
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&resp)
-        .unwrap_or_else(|e| panic!("register_agent not JSON: {e}\n{resp}"));
-    parsed
-        .pointer("/session_token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("missing session_token: {parsed}"))
-        .to_string()
+    register_agent_session(host, name)
 }
 
 /// Pin the byte-exact envelope the dispatcher returns for
