@@ -567,6 +567,7 @@ jobs:
         # as a flag, so the equivalent is set as an env var.
         env:
           CARGO_TARGET_DIR: target
+          LAIN_PERF_BUDGET_MULTIPLIER: '4.0'
         run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 
       - name: Upload to Codecov
