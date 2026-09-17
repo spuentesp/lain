@@ -30,6 +30,7 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
         name,
         "get_health"
             | "get_capabilities"
+            | "understand_repository"
             | "get_agent_strategy"
             | "get_server_status"
             | "list_recent_projects"
