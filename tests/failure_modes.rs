@@ -403,9 +403,19 @@ fn server_handles_concurrent_overloaded_clients() {
 
     let mut all_responses = Vec::with_capacity(N_CLIENTS);
     for h in handles {
-        let resp = h
-            .join()
-            .expect("client thread panicked during concurrent tools/list");
+        let resp = h.join().unwrap_or_else(|e| {
+            // `JoinHandle::join()`'s error is `Box<dyn Any + Send>`;
+            // its Debug impl just prints "Any { .. }" regardless of
+            // the actual panic payload, which is exactly the useless
+            // message this assertion used to produce. Downcast to
+            // recover the real panic string.
+            let msg = e
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_string());
+            panic!("client thread panicked during concurrent tools/list: {msg}");
+        });
         all_responses.push(resp);
     }
 
