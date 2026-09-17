@@ -52,6 +52,7 @@ fn extract_tree_sitter_file(path: &Path, content: &str) -> TreeSitterFile {
 }
 
 /// Pure structural scan without side effects (Map)
+#[allow(clippy::too_many_arguments)]
 pub async fn scan_file_structure(
     path: PathBuf,
     workspace: PathBuf,
@@ -284,6 +285,7 @@ pub async fn scan_file_structure(
 }
 
 /// Scan multiple files in a single task (batch processing for reduced task overhead)
+#[allow(clippy::too_many_arguments)]
 pub async fn scan_file_batch(
     paths: Vec<PathBuf>,
     workspace: PathBuf,
