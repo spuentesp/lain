@@ -620,6 +620,10 @@ fn failed_replacement_detail(add_error: String, previous_config: Option<String>)
 
 /// `true` if the `codex` CLI is invocable on `PATH`.
 fn codex_cli_available() -> bool {
+    #[cfg(test)]
+    if std::env::var_os("LAIN_TEST_DISABLE_CODEX_CLI").is_some() {
+        return false;
+    }
     Command::new("codex")
         .arg("--version")
         .stdout(Stdio::null())
@@ -700,7 +704,7 @@ fn merge_codex_toml(path: &Path, server_name: &str, entry: Value) -> Result<toml
 }
 
 fn configure_codex(
-    root: &Path,
+    _root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
@@ -837,7 +841,7 @@ fn cursor_config_path() -> PathBuf {
 }
 
 fn configure_cursor(
-    root: &Path,
+    _root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
@@ -1777,7 +1781,7 @@ mod tests {
         std::fs::create_dir_all(&fake_home).unwrap();
         std::env::set_var("HOME", fake_home.as_os_str());
         std::env::set_var("CODEX_HOME", fake_home.join(".codex"));
-        std::env::remove_var("PATH"); // ensure `codex` CLI is not found
+        std::env::set_var("LAIN_TEST_DISABLE_CODEX_CLI", "1");
         (tmp, fake_home)
     }
 
@@ -1988,6 +1992,8 @@ mod tests {
         let fake_home = tmp.path().join("home");
         std::fs::create_dir_all(&fake_home).unwrap();
         std::env::set_var("HOME", fake_home.as_os_str());
+        #[cfg(windows)]
+        std::env::set_var("APPDATA", fake_home.join("AppData/Roaming"));
         std::fs::create_dir_all(tmp.path().join(".vscode")).unwrap();
         (tmp, fake_home)
     }
@@ -2018,7 +2024,7 @@ mod tests {
             &opts,
         );
         assert!(matches!(out.state, ConfigurationState::Configured));
-        let cfg = fake_home.join(".config/Code/User/mcp.json");
+        let cfg = vscode_user_config_path().expect("vscode user config path must resolve");
         assert!(
             cfg.is_file(),
             "vscode wrote user-scoped config: {}",
@@ -2099,7 +2105,7 @@ mod tests {
         let lain = servers
             .iter()
             .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("lain"))
-            .expect("a lain entry must exist in the array");
+            .expect("a 'lain' server entry must exist in the array");
         assert_eq!(lain["transport"], "stdio");
         assert_eq!(lain["command"], "/usr/bin/lain");
     }
@@ -2155,7 +2161,7 @@ mod tests {
         assert_eq!(
             lain_entries.len(),
             1,
-            "duplicate lain entries must be deduplicated; got: {servers:?}"
+            "duplicate 'lain' server entries must be deduplicated; got: {servers:?}"
         );
         assert_eq!(lain_entries[0]["command"], "/usr/bin/lain");
     }
