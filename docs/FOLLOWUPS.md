@@ -20,7 +20,11 @@ from this file:
   fix(annotations+readiness): address Copilot review findings`.
 - **Cold repo `last_indexed_commit` serializing as `Some("0")`** —
   fixed in `6db4354 fix(federation): null last_indexed_commit until a
-  successful index pass`.
+  successful index pass`. `FederatedIndex::per_repo_readiness` now
+  gates `last_indexed_commit` and the wall-clock stamp on
+  `indexed_signal`, returning `None` until a real index pass lands —
+  see the comment at `src/server/federation/federated_index.rs:304`,
+  which cites this file's old entry #6 as its acceptance criterion.
 - **Cooperative cancellation token** — fixed in PR A
   (`feat/m4-cancellation-token`, #88). Server-owned
   `CancellationToken` in `LifecycleInfo`; plumbed through every

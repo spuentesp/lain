@@ -1,6 +1,7 @@
 use crate::error::LainError;
 use crate::lsp::{HierarchicalSymbol, LspMultiplexer, ReferenceLocation};
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::server::ingest::blocking::offthread;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -29,6 +30,25 @@ pub struct FileScanResult {
     pub external_references: Vec<(String, ReferenceLocation)>, // source_node_id, reference
     pub static_refs: Vec<StaticFileRef>,
     pub pattern_refs: Vec<PatternRef>,
+}
+
+/// All tree-sitter work for a single file, batched into one
+/// offthread call so we amortize the spawn_blocking round-trip
+/// across `extract_definitions` / `extract_refs` / `extract_strings`
+/// instead of paying it three times. Pure CPU work; no `Send`-hostile
+/// references cross the await boundary.
+struct TreeSitterFile {
+    defs: Vec<crate::treesitter::SymbolDef>,
+    static_refs: Vec<crate::treesitter::StaticRef>,
+    pattern_refs: Vec<crate::treesitter::StringLiteral>,
+}
+
+fn extract_tree_sitter_file(path: &Path, content: &str) -> TreeSitterFile {
+    TreeSitterFile {
+        defs: crate::treesitter::extract_definitions(path, content),
+        static_refs: crate::treesitter::extract_refs(path, content),
+        pattern_refs: crate::treesitter::extract_strings(path, content),
+    }
 }
 
 /// Pure structural scan without side effects (Map)
@@ -188,7 +208,9 @@ pub async fn scan_file_structure(
                         commit_hash: commit_hash.clone(),
                         namespace,
                     },
-                );
+                    cancel.clone(),
+                )
+                .await;
             } else {
                 for symbol in symbols {
                     process_symbol_recursive_enriched(
@@ -220,12 +242,18 @@ pub async fn scan_file_structure(
                     commit_hash: commit_hash.clone(),
                     namespace,
                 },
-            );
+                cancel.clone(),
+            )
+            .await;
         }
     }
 
-    // Tree-sitter static analysis: extract call, type-usage refs, and string literals from source
-    // Read file once — reuse content for both extractors
+    // Tree-sitter static analysis: extract call, type-usage refs,
+    // string literals, and definitions in one offthread call so
+    // we amortize the spawn_blocking round-trip. The closure
+    // captures only `Path` and `&str` (both Send + 'static-friendly);
+    // the result is the same three vectors the inline version
+    // produced, just produced off the async runtime.
     let (static_refs, pattern_refs) = if let Ok(content) = tokio::fs::read_to_string(&path).await {
         // Attribute labels, merged onto whatever produced the nodes.
         //
@@ -236,9 +264,38 @@ pub async fn scan_file_structure(
         // list. Tree-sitter reads the attribute reliably and we are
         // already parsing this file for refs, so take the labels from
         // there regardless of which path built the nodes.
-        apply_attribute_labels(&path, &content, &mut nodes);
+        //
+        // One offthread call covers extract_definitions (for the
+        // attribute labels), extract_refs (for static_refs), and
+        // extract_strings (for pattern_refs). A cancellation in
+        // any of them short-circuits the whole batch.
+        // `extract_tree_sitter_file` cannot fail (it just walks the
+        // AST), so the inner `Result` is always `Ok`. We still need
+        // to return `Result` from the offthread closure (the
+        // helper's contract), but the `??` after `await` flattens
+        // both layers — outer for cancel, inner for the closure's
+        // never-actual error.
+        let ts = match offthread(cancel.clone(), move || {
+            Ok::<TreeSitterFile, LainError>(extract_tree_sitter_file(&path, &content))
+        })
+        .await
+        {
+            Ok(t) => t,
+            Err(LainError::Cancelled) => {
+                return Ok(FileScanResult {
+                    nodes,
+                    edges,
+                    external_references,
+                    static_refs: vec![],
+                    pattern_refs: vec![],
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        apply_attribute_labels(&ts.defs, &mut nodes);
         let path_str = relative_path.clone();
-        let static_refs: Vec<StaticFileRef> = crate::treesitter::extract_refs(&path, &content)
+        let static_refs: Vec<StaticFileRef> = ts
+            .static_refs
             .into_iter()
             .map(|r| StaticFileRef {
                 file_path: path_str.clone(),
@@ -247,7 +304,8 @@ pub async fn scan_file_structure(
                 edge_type: r.edge_type,
             })
             .collect();
-        let pattern_refs: Vec<PatternRef> = crate::treesitter::extract_strings(&path, &content)
+        let pattern_refs: Vec<PatternRef> = ts
+            .pattern_refs
             .into_iter()
             .map(|r| PatternRef {
                 file_path: path_str.clone(),
@@ -305,8 +363,12 @@ pub async fn scan_file_batch(
 /// to name alone — the LSP's range starts at the doc comment or
 /// attribute while tree-sitter's starts at the definition, so the two
 /// rarely agree exactly. A node that already carries a label keeps it.
-fn apply_attribute_labels(path: &Path, content: &str, nodes: &mut [GraphNode]) {
-    let defs = crate::treesitter::extract_definitions(path, content);
+///
+/// `defs` is pre-computed by the caller (see
+/// [`extract_tree_sitter_file`]) so this function stays sync and
+/// trivially callable from tests. The offthread boundary lives at
+/// the caller side where the cancel token can be observed.
+fn apply_attribute_labels(defs: &[crate::treesitter::SymbolDef], nodes: &mut [GraphNode]) {
     if defs.is_empty() {
         return;
     }
@@ -440,11 +502,30 @@ struct ScanContext<'a> {
     namespace: &'a crate::schema::RepoNamespace,
 }
 
-fn add_tree_sitter_definitions(path: &Path, context: ScanContext<'_>) {
+async fn add_tree_sitter_definitions(
+    path: &Path,
+    context: ScanContext<'_>,
+    cancel: CancellationToken,
+) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
-    let defs = crate::treesitter::extract_definitions(path, &content);
+    // Run the tree-sitter extraction on the blocking pool; the
+    // graph mutation below happens back on the async runtime where
+    // the GraphDatabase's tokio mutex lives. Clone the path so the
+    // offthread closure (which requires `Send + 'static`) owns its
+    // own PathBuf.
+    let path_buf = path.to_path_buf();
+    let defs = match offthread(cancel, move || {
+        Ok::<Vec<crate::treesitter::SymbolDef>, LainError>(crate::treesitter::extract_definitions(
+            &path_buf, &content,
+        ))
+    })
+    .await
+    {
+        Ok(d) => d,
+        Err(_) => return,
+    };
     for def in defs {
         let mut node = GraphNode::new_in(
             def.kind,
@@ -636,6 +717,12 @@ mod attribute_label_tests {
                    }\n";
         std::fs::write(&f, src).unwrap();
 
+        // Pre-compute defs the way the production path does — via
+        // the tree-sitter extractor (the offthread wrapper is
+        // exercised in `tests/cancellation_token.rs`; here we just
+        // call the sync helper directly).
+        let defs = crate::treesitter::extract_definitions(&f, src);
+
         // Nodes as the LSP would hand them over: no labels at all.
         let mut nodes = vec![
             GraphNode::new(NodeType::Function, "prod".into(), "thing.rs".into()),
@@ -646,7 +733,7 @@ mod attribute_label_tests {
             ),
             GraphNode::new(NodeType::Function, "checks_async".into(), "thing.rs".into()),
         ];
-        apply_attribute_labels(&f, src, &mut nodes);
+        apply_attribute_labels(&defs, &mut nodes);
 
         let label = |n: &str| nodes.iter().find(|x| x.name == n).unwrap().label.clone();
         assert_eq!(label("checks_a_thing").as_deref(), Some("test"));
@@ -664,13 +751,14 @@ mod attribute_label_tests {
         let f = tmp.path().join("thing.rs");
         let src = "#[test]\nfn t() {}\n";
         std::fs::write(&f, src).unwrap();
+        let defs = crate::treesitter::extract_definitions(&f, src);
         let mut nodes = vec![GraphNode::new(
             NodeType::Function,
             "t".into(),
             "thing.rs".into(),
         )];
         nodes[0].label = Some("preset".into());
-        apply_attribute_labels(&f, src, &mut nodes);
+        apply_attribute_labels(&defs, &mut nodes);
         assert_eq!(nodes[0].label.as_deref(), Some("preset"));
     }
 }
