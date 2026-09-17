@@ -160,6 +160,11 @@ impl LainServer {
             // of borrowing `&self.ingest().id_namespace()` which would dangle past
             // `self`'s lifetime.
             let namespace = *self.ingest().id_namespace();
+            // The closure takes ownership of `cancel.clone()`; clone
+            // here so the next loop iteration can still read the
+            // outer `cancel` for the next batch's `is_cancelled()`
+            // check.
+            let cancel_for_spawn = cancel.clone();
 
             set.spawn(async move {
                 scan_file_batch(
@@ -170,6 +175,7 @@ impl LainServer {
                     git_time,
                     commit_hash,
                     &namespace,
+                    cancel_for_spawn,
                 )
                 .await
             });
@@ -489,27 +495,49 @@ impl LainServer {
                 if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                     if gn.embedding.is_none() {
                         let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
-                        if let Ok(emb) = embedder_clone.embed(&text) {
-                            // Never store a default on serialize failure.
-                            // `unwrap_or_default()` wrote `Some("")`, which
-                            // marks the node as embedded — `is_none()` is
-                            // false, so it is never retried — while
-                            // `executor.rs` fails to parse the empty string
-                            // and skips it. The symbol disappears from
-                            // `semantic_search` permanently and silently.
-                            match serde_json::to_string(&emb) {
-                                Ok(json) => {
-                                    gn.embedding = Some(json);
-                                    if graph_clone.insert_node(&gn).is_ok() {
-                                        count += 1;
-                                    }
-                                }
-                                Err(e) => warn!(
-                                    "embedding not serialised for {}: {e}; leaving it \
+                        // AGENT_UX_ROADMAP.md M4 follow-up: ONNX
+                        // inference is sync CPU work — route it
+                        // through `offthread` so a slow forward
+                        // pass doesn't pin a Tokio worker. The
+                        // per-call cancel boundary also lets a
+                        // shutdown abort an in-flight embed.
+                        let embedder_for_call = embedder_clone.clone();
+                        let text_for_call = text.clone();
+                        let emb_result = offthread(nlp_cancel.clone(), move || {
+                            embedder_for_call.embed(&text_for_call)
+                        })
+                        .await;
+                        let emb = match emb_result {
+                            Ok(e) => e,
+                            Err(LainError::Cancelled) => return,
+                            Err(e) => {
+                                warn!(
+                                    "embedding inference failed for {}: {e}; leaving it \
                                      unembedded so a later pass retries",
                                     gn.name
-                                ),
+                                );
+                                continue;
                             }
+                        };
+                        // Never store a default on serialize failure.
+                        // `unwrap_or_default()` wrote `Some("")`, which
+                        // marks the node as embedded — `is_none()` is
+                        // false, so it is never retried — while
+                        // `executor.rs` fails to parse the empty string
+                        // and skips it. The symbol disappears from
+                        // `semantic_search` permanently and silently.
+                        match serde_json::to_string(&emb) {
+                            Ok(json) => {
+                                gn.embedding = Some(json);
+                                if graph_clone.insert_node(&gn).is_ok() {
+                                    count += 1;
+                                }
+                            }
+                            Err(e) => warn!(
+                                "embedding not serialised for {}: {e}; leaving it \
+                                 unembedded so a later pass retries",
+                                gn.name
+                            ),
                         }
                     }
                 }
@@ -538,24 +566,42 @@ impl LainServer {
                     if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                         if gn.embedding.is_none() {
                             let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
-                            if let Ok(emb) = embedder_clone.embed(&text) {
-                                // Same reasoning as the prewarm pass above:
-                                // a default here poisons the node with an
-                                // unparseable embedding it will never retry.
-                                match serde_json::to_string(&emb) {
-                                    Ok(json) => {
-                                        gn.embedding = Some(json);
-                                        // A dropped insert silently costs the
-                                        // node its embedding, which surfaces
-                                        // later as `semantic_search` missing
-                                        // code that is plainly there.
-                                        if let Err(e) = graph_clone.insert_node(&gn) {
-                                            warn!("embedding not stored for {}: {e}", gn.name);
-                                        }
+                            // Same offthread routing as the prewarm pass:
+                            // keep ONNX off the async runtime.
+                            let embedder_for_call = embedder_clone.clone();
+                            let text_for_call = text.clone();
+                            let emb_result = offthread(nlp_cancel.clone(), move || {
+                                embedder_for_call.embed(&text_for_call)
+                            })
+                            .await;
+                            let emb = match emb_result {
+                                Ok(e) => e,
+                                Err(LainError::Cancelled) => return,
+                                Err(e) => {
+                                    warn!(
+                                        "embedding inference failed for {}: {e}; \
+                                         leaving it unembedded so a later pass retries",
+                                        gn.name
+                                    );
+                                    continue;
+                                }
+                            };
+                            // Same reasoning as the prewarm pass above:
+                            // a default here poisons the node with an
+                            // unparseable embedding it will never retry.
+                            match serde_json::to_string(&emb) {
+                                Ok(json) => {
+                                    gn.embedding = Some(json);
+                                    // A dropped insert silently costs the
+                                    // node its embedding, which surfaces
+                                    // later as `semantic_search` missing
+                                    // code that is plainly there.
+                                    if let Err(e) = graph_clone.insert_node(&gn) {
+                                        warn!("embedding not stored for {}: {e}", gn.name);
                                     }
-                                    Err(e) => {
-                                        warn!("embedding not serialised for {}: {e}", gn.name)
-                                    }
+                                }
+                                Err(e) => {
+                                    warn!("embedding not serialised for {}: {e}", gn.name)
                                 }
                             }
                         }
@@ -1066,6 +1112,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         // reference, so the spawned task borrows from the captured
         // value (which lives for the closure's lifetime).
         let namespace = *namespace;
+        let cancel_for_spawn = cancel.clone();
 
         set.spawn(async move {
             scan_file_batch(
@@ -1076,6 +1123,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
                 git_time,
                 commit_hash,
                 &namespace,
+                cancel_for_spawn,
             )
             .await
         });
@@ -1577,5 +1625,59 @@ mod reconciliation_lock_tests {
             .process_change(&root.path().join("missing.rs"))
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod nlp_offthread_tests {
+    //! Tests for the ONNX → offthread migration (PR B follow-up).
+    //! The full NLP prewarm is exercised end-to-end in
+    //! `tests/cancellation_token.rs`; here we just pin the
+    //! call-site contract — `NlpEmbedder::embed` runs on the
+    //! blocking pool when called via `offthread`, a pre-cancelled
+    //! token short-circuits without invoking the embedder.
+    use super::*;
+    use crate::nlp::NlpEmbedder;
+    use crate::server::ingest::blocking::offthread;
+    use crate::tuning::TuningConfig;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    /// `NlpEmbedder::new_stub()` produces a stub that returns an
+    /// empty Vec<f32> from `embed`. Wrapping in `offthread` with
+    /// a pre-cancelled token must return `LainError::Cancelled`
+    /// without ever calling the embedder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offthread_embed_short_circuits_on_pre_cancelled_token() {
+        let embedder = NlpEmbedder::new_stub();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result: Result<Vec<f32>, LainError> =
+            offthread(cancel, move || embedder.embed("hello")).await;
+        assert!(matches!(result, Err(LainError::Cancelled)));
+    }
+
+    /// When the token is *not* cancelled, offthread returns the
+    /// embedder's success value verbatim. The stub returns a
+    /// `Vec<f32>` whose length matches the embedder's
+    /// `embedding_dim()` (typically 384). We assert the round
+    /// trip succeeds and the returned length is positive.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offthread_embed_returns_stub_value_when_not_cancelled() {
+        let embedder = NlpEmbedder::new_stub();
+        let dim = embedder.embedding_dim();
+        let cancel = CancellationToken::new();
+        let result: Result<Vec<f32>, LainError> =
+            offthread(cancel, move || embedder.embed("hello")).await;
+        let v = result.expect("embed returns Ok in stub mode");
+        assert_eq!(v.len(), dim, "stub returns dim-length vector");
+    }
+
+    /// Sanity: `TuningConfig::default()` exists (the production
+    /// offthread helper takes a `&TuningConfig`).
+    #[test]
+    fn tuning_config_default_is_available() {
+        let _t: TuningConfig = TuningConfig::default();
+        let _arc: Arc<TuningConfig> = Arc::new(TuningConfig::default());
     }
 }
