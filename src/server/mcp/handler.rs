@@ -2991,7 +2991,7 @@ fn server_status_handler(
     ctx: &McpContext,
     _args: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    Ok(serde_json::to_value(ctx.status.render()).map_err(|e| e.to_string())?)
+    serde_json::to_value(ctx.status.render()).map_err(|e| e.to_string())
 }
 
 fn list_recent_projects_handler(
@@ -3204,9 +3204,9 @@ fn workspaces_required<'a>(
         .ok_or_else(|| "workspaces not configured on this server".to_string())
 }
 
-fn args_map<'a>(
-    args: &'a serde_json::Value,
-) -> Result<&'a serde_json::Map<String, serde_json::Value>, String> {
+fn args_map(
+    args: &serde_json::Value,
+) -> Result<&serde_json::Map<String, serde_json::Value>, String> {
     args.as_object()
         .ok_or_else(|| "args must be a JSON object".to_string())
 }
@@ -3369,7 +3369,7 @@ fn list_workspaces_handler(
     let workspaces_lock = workspaces_required(ctx)?;
     let active = crate::state::ActiveWorkspace::load().ok().flatten();
     let list = crate::server::mcp::federation_tools::list_workspaces(
-        &*workspaces_lock.read(),
+        &workspaces_lock.read(),
         active.as_ref(),
     );
     serde_json::to_value(list).map_err(|e| e.to_string())
@@ -3386,7 +3386,7 @@ fn get_active_workspace_handler(
     let fed = fed_required(ctx)?;
     let workspaces_lock = workspaces_required(ctx)?;
     let info =
-        crate::server::mcp::federation_tools::get_active_workspace(fed, &*workspaces_lock.read())
+        crate::server::mcp::federation_tools::get_active_workspace(fed, &workspaces_lock.read())
             .map_err(|e| e.to_string())?;
     serde_json::to_value(info).map_err(|e| e.to_string())
 }
@@ -3405,7 +3405,7 @@ fn get_workspace_handler(
     let name =
         crate::server::tools::utils::required_str_arg(map, "name").map_err(|e| e.to_string())?;
     let detail =
-        crate::server::mcp::federation_tools::get_workspace(fed, &*workspaces_lock.read(), &name)
+        crate::server::mcp::federation_tools::get_workspace(fed, &workspaces_lock.read(), &name)
             .map_err(|e| e.to_string())?;
     serde_json::to_value(detail).map_err(|e| e.to_string())
 }
@@ -3424,7 +3424,7 @@ fn get_workspace_graph_handler(
     let filter_str = map.get("filter").and_then(|v| v.as_str());
     let graph = crate::server::mcp::federation_tools::get_workspace_graph(
         fed,
-        &*workspaces_lock.read(),
+        &workspaces_lock.read(),
         filter_str,
     )
     .map_err(|e| e.to_string())?;

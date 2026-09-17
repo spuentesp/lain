@@ -214,7 +214,14 @@ pub struct RepoIndex {
     /// spawn_blocking follow-up PR will fill it in for hot-loop
     /// observability. Defined now to keep the wire shape stable
     /// across that work.
-    outstanding_files: std::sync::atomic::AtomicU64,
+    /// Depth of the watcher's bounded event channel at snapshot
+    /// time. `Arc`-wrapped so the inotify callback (increment
+    /// side) and the Tokio receiver loop (decrement side) share
+    /// one counter; `PerRepoReadiness::outstanding_files` reads
+    /// the same atomic and exposes it through
+    /// `get_capabilities`. Wired up in PR B
+    /// (`feat/m4-spawn-blocking`).
+    outstanding: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md §"Cooperative
     /// cancellation token"): server-owned shutdown signal threaded
     /// through every long-running phase in the federation pipeline
@@ -328,8 +335,8 @@ impl RepoIndex {
             id_namespace,
             indexed: Arc::new(tokio::sync::Notify::new()),
             indexed_at_least_once: std::sync::atomic::AtomicBool::new(false),
-            outstanding_files: std::sync::atomic::AtomicU64::new(0),
             cancel: CancellationToken::new(),
+            outstanding: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -346,6 +353,22 @@ impl RepoIndex {
     /// to cancel the parent token.
     pub fn cancel(&self) {
         self.cancel.cancel();
+    }
+
+    /// Read the current depth of the watcher's bounded mpsc
+    /// channel. Wired up in PR B (`feat/m4-spawn-blocking`) via
+    /// `fetch_add` on every watcher callback and `fetch_sub` on
+    /// every receiver-loop iteration.
+    pub fn outstanding_files(&self) -> u64 {
+        self.outstanding.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Owned clone of the `outstanding_files` atomic, used to
+    /// share the counter between the inotify callback (increment
+    /// side) and the Tokio receiver loop (decrement side). PR B
+    /// `feat/m4-spawn-blocking`.
+    pub(crate) fn outstanding_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        std::sync::Arc::clone(&self.outstanding)
     }
 
     /// Handle on the [`Notify`] the receiver task fires after each
@@ -390,15 +413,9 @@ impl RepoIndex {
     /// Current depth of the watcher's bounded event channel, exposed
     /// as `PerRepoReadiness::outstanding_files` so
     /// `get_capabilities` can show watcher back-pressure without
-    /// scraping the receiver task's internals. Currently stays at
-    /// 0 — the receiver loop's incr/decr is wired but the channel
-    /// capacity (1024) rarely fills in practice; the spawn_blocking
-    /// follow-up PR will fill it in for hot-loop observability.
-    pub fn outstanding_files(&self) -> u64 {
-        self.outstanding_files
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
+    /// scraping the receiver task's internals. Wired up in PR B
+    /// (`feat/m4-spawn-blocking`): the inotify callback
+    /// `fetch_add`s, the receiver loop `fetch_sub`s.
     /// Number of files whose overlay refresh was skipped due to LSP
     /// unavailability during the most recent `sync_overlay` cycle.
     /// Returns 0 if `sync_overlay` hasn't run yet, or if the cycle
@@ -707,7 +724,14 @@ impl RepoIndex {
         // because tests hold their own clone of the `Arc<Notify>`
         // and call `notified().await` once per event they want to
         // observe.
+        // PR B (spawn_blocking): the inotify callback `fetch_add`s
+        // this counter, the receiver loop `fetch_sub`s it. Cloned
+        // into both closures so they share the same atomic.
+        let outstanding = self.outstanding_arc();
+        let outstanding_for_task = std::sync::Arc::clone(&outstanding);
+
         let task = tokio::spawn(async move {
+            let outstanding = outstanding_for_task;
             // AGENT_UX_ROADMAP.md M4 follow-up: race each watcher
             // event against the cooperative cancel token. When
             // `deactivate()` cancels `self.cancel` (called from
@@ -717,6 +741,11 @@ impl RepoIndex {
             // to leave the per-repo graph in whatever partial state
             // the abort landed in).
             while let Some(res) = rx.recv().await {
+                // PR B (spawn_blocking): the matching `fetch_add`
+                // happened on the inotify thread *before* the
+                // corresponding `try_send` below, so we observe
+                // the prior event having left the channel.
+                outstanding.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(me_for_task) = weak.upgrade() else {
                     break;
                 };
@@ -794,8 +823,16 @@ impl RepoIndex {
         //   - `Closed`: receiver task has exited (RepoIndex is being
         //     dropped). Silently drop — there's no one to wake up.
         let tx_for_closure = tx.clone();
+        let outstanding_for_closure = outstanding;
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
+                // PR B (spawn_blocking): increment *before* the
+                // try_send so the receiver loop's matching
+                // fetch_sub observes a non-negative depth even if
+                // the channel is full and the send is dropped
+                // below.
+                outstanding_for_closure
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Err(e) = tx_for_closure.try_send(res) {
                     match e {
                         tokio::sync::mpsc::error::TrySendError::Full(_) => {

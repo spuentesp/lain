@@ -6,73 +6,69 @@ points at the source PR, the section of the plan it came from,
 and a one-line scope summary.
 
 Last update: 2026-09-16, refreshed against HEAD (past PR #66, #72,
-#74, #75, #77, plus the in-flight M4 cancellation-token work on
-`feat/m4-cancellation-token`). Stays on `0.7.4-rc1`; release cut
-is separate scope.
+#74, #75, #77, #88, plus PR A's cancellation work on
+`feat/m4-cancellation-token` and PR B's spawn-blocking work on
+`feat/m4-spawn-blocking`). Stays on `0.7.4-rc1`; release cut is
+separate scope.
 
-Three items originally logged here have been resolved and removed
+Four items originally logged here have been resolved and removed
 from this file:
 
 - **Cross-repo annotation routing** — fixed in `33f9373
   fix(annotations+readiness): address Copilot review findings`.
-  `target_to_repo` in `src/server/mcp/annotation_tools.rs` now
-  resolves `AnnotationTarget::Repo { repo_id }` against the
-  federation registry and rejects unknown repos, instead of pinning
-  every row to the single registered repo.
 - **Cold repo `last_indexed_commit` serializing as `Some("0")`** —
   fixed in `6db4354 fix(federation): null last_indexed_commit until a
-  successful index pass`. `FederatedIndex::per_repo_readiness` now
-  gates `last_indexed_commit` and the wall-clock stamp on
-  `indexed_signal`, returning `None` until a real index pass lands —
-  see the comment at `src/server/federation/federated_index.rs:304`,
-  which cites this file's old entry #6 as its acceptance criterion.
-- **Cooperative cancellation token** — fixed in PR A on branch
-  `feat/m4-cancellation-token`. Server-owned `CancellationToken`
-  lives in `LifecycleInfo` (one owner, `Drop` cancels); plumbed
-  through `build_core_memory`, `index_one_repo` (via the new
-  `IndexRequest::cancel` field), `sync_volatile_overlay`,
-  `process_change_locked`, the NLP prewarm task (via
-  `child_token`), `FileWatcher::start`, the federation watcher's
-  receiver loop, and the stdio/HTTP startup tasks. The stdio
-  startup task uses `cancel_token.cancel()` + `JoinHandle::await`
-  within the existing 5-second budget, replacing the previous
-  `AbortHandle::abort()`. The HTTP transport now retains the
-  `JoinHandle` it previously dropped. New stable problem code
-  `index_cancelled` distinguishes cooperative shutdown from
-  `index_failed`. End-to-end tests at `tests/cancellation_token.rs`
-  (7 tests, all green). Acceptance met: TCP-RST mid-`/mcp` returns
-  control within budget; SIGINT triggers shutdown join within 30s;
-  `cargo test --workspace` passes.
+  successful index pass`.
+- **Cooperative cancellation token** — fixed in PR A
+  (`feat/m4-cancellation-token`, #88). Server-owned
+  `CancellationToken` in `LifecycleInfo`; plumbed through every
+  long-running phase; `await_startup_reindex` `select!`s
+  `build_core_memory` against the token; stdio startup uses
+  `cancel() + JoinHandle::await` within the existing 5-second
+  budget; HTTP startup now retains its `JoinHandle`. New
+  `index_cancelled` problem code.
+- **`spawn_blocking` isolation** — fixed in PR B
+  (`feat/m4-spawn-blocking`). New `src/server/ingest/blocking.rs`
+  with `offthread(cancel, f)`. Libgit2 calls in
+  `build_core_memory` (`get_latest_commit_info`,
+  `get_changed_files_since`, `get_all_tracked_files`,
+  `analyze_co_changes`) routed through the blocking-thread pool;
+  `PerRepoReadiness::outstanding_files` wired through the
+  federation watcher's receiver loop (inotify callback
+  `fetch_add`s, receiver loop `fetch_sub`s).
 
-The one remaining `docs/M4-step-8-plan.md` item is still open; that
-plan file itself was never committed to `dev` (PR #66 merged only
-its implementation, not the planning doc), so there is no in-tree
-or git-history copy to link back to — the acceptance criteria
-captured here are the only surviving record of that plan's scope.
+The remaining M4 work — tree-sitter per-file work, ONNX inference,
+and LSP subprocess calls — is open as a follow-up:
 
-## From `docs/M4-step-8-plan.md` (no longer in the tree; PR #66 deferred)
+### Tree-sitter / ONNX / LSP-bridge migration (deferred)
 
-*(The cooperative-cancellation entry that used to live here was
-moved to the resolved-items block at the top of this file when
-PR A landed. The remaining entry below is the `spawn_blocking`
-carry-over — PR B per the AGENT_UX_ROADMAP plan.)*
-
-### `spawn_blocking` isolation
-- **Source:** the original `docs/M4-step-8-plan.md` §3 — new
-  `src/server/ingest/blocking.rs` with an `offthread(cancel, f)`
-  helper; batch the per-file hot loops.
-- **Still not started:** confirmed 2026-09-16, no `blocking.rs` or
-  `offthread` in `src/server/ingest/`.
-- **Why deferred:** invasive — restructures every git / fs /
-  parser call site.
-- **Side benefit:** this PR will fill in the
-  `PerRepoReadiness::outstanding_files` counter — confirmed
-  2026-09-16 it is still always 0 (`AtomicU64::new(0)` in
-  `src/server/federation/repo_index.rs`, never incremented).
-- **Acceptance:** federation cold-boot wall-clock drops
-  measurably on the canonical fixture; `RUST_LOG=trace` shows
-  file-walk phases on blocking threads, not on the async
-  runtime; no new panics, no lost cancellation.
+- **Source:** AGENT_UX_ROADMAP.md Milestone 4 design §"Index
+  execution and consistency" calls for routing all sync work
+  through `spawn_blocking`. PR B migrated the libgit2 layer
+  (the highest-impact per-pipeline calls); tree-sitter and ONNX
+  inference are CPU-bound and the same pattern applies, but the
+  LSP-bridge API is async (not sync) so its migration needs a
+  different shape — exposing a sync subprocess entry point or
+  wrapping the async call in `spawn_blocking` differently from
+  the GitSensor pattern.
+- **Status:** confirmed 2026-09-16, none of the three call sites
+  (`scan_file_structure`'s tree-sitter calls at
+  `src/server/ingest/scan.rs:195,204,260,398`; the
+  `NlpEmbedder::embed`/`embed_batch` calls at
+  `src/server/ingest/ingestion.rs:395,438` and `src/server/nlp.rs:219,246`;
+  and the LSP multiplexer calls at
+  `src/server/ingest/scan.rs:108,119`) are offthread-routed.
+- **Why deferred:** the LSP-bridge migration in particular
+  requires restructuring lsp-bridge's `async fn` API to expose a
+  sync subprocess-call entry point. Tree-sitter and ONNX are
+  simpler — drop the same `offthread` callsite shape — but
+  they're per-file work that runs once per index, so the wall-clock
+  win is smaller than the libgit2 layer PR B already landed.
+- **Where to land:** separate PR off `dev` (or the next milestone
+  pass). Acceptance: cold-boot wall-clock drops measurably on
+  the canonical fixture; `RUST_LOG=trace` shows file-walk and
+  tree-sitter phases on blocking threads, not on the async
+  runtime.
 
 ### `spawn_blocking` isolation
 - **Source:** the original `docs/M4-step-8-plan.md` §3 — new
