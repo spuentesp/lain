@@ -23,7 +23,26 @@ struct LspConfig {
 /// process must not hang the caller forever.
 const LSP_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum time for a single LSP request (references, document symbols).
-const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// Tightened from 5s to 1s as part of the LSP-flakiness workaround:
+/// each stuck LSP round-trip ties up the Tokio worker that holds the
+/// `LspMultiplexer` `AsyncMutex`, blocking every other file currently
+/// being scanned. 1s bounds the worst-case hold per call. The
+/// per-binary circuit breaker (see `record_failure`) handles the
+/// case where the LSP child is consistently slow — after 3 failures
+/// the binary is marked `unavailable` and the indexer falls back to
+/// tree-sitter for the rest of the process lifetime.
+const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+/// After this many consecutive LSP failures for a binary, mark it
+/// `unavailable` for the rest of the process lifetime. Operators
+/// observe the change via `get_supported_languages` / `get_health`
+/// and can restart `lain` to recover. We chose a process-lifetime
+/// circuit over a timer-based cooldown because (a) tree-sitter is a
+/// good-enough fallback for the consumer code paths we exercise
+/// today, and (b) recovery without operator action is a feature we
+/// don't need yet — if rust-analyzer fails 3 times in a row, restart
+/// is the right move anyway.
+const MAX_CONSECUTIVE_LSP_FAILURES: u32 = 3;
 
 const LANGUAGE_MAP: &[(&str, LspConfig)] = &[
     (
@@ -186,6 +205,14 @@ pub struct LspMultiplexer {
     started: HashSet<String>,
     /// binary name -> missing from system
     unavailable: HashSet<String>,
+    /// Per-binary consecutive-failure count for the circuit breaker.
+    /// Reset to 0 (entry removed) on any successful LSP round-trip.
+    /// When the count reaches [`MAX_CONSECUTIVE_LSP_FAILURES`], the
+    /// binary is added to `unavailable` so subsequent calls fall
+    /// back to tree-sitter without paying another timeout cost.
+    /// Process-lifetime only — recovery is operator-initiated (restart
+    /// `lain`). See the constant's doc comment for rationale.
+    consecutive_failures: HashMap<String, u32>,
     workspace: PathBuf,
 }
 
@@ -205,6 +232,7 @@ impl LspMultiplexer {
             registry,
             started: HashSet::new(),
             unavailable: HashSet::new(),
+            consecutive_failures: HashMap::new(),
             workspace: workspace.to_path_buf(),
         })
     }
@@ -301,38 +329,60 @@ impl LspMultiplexer {
         let uri = format!("file://{}", path.display());
 
         let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
-        self.bridge
-            .open_document(&server_id, &uri, &content)
-            .await
-            .map_err(|e| LainError::Lsp(e.to_string()))?;
+        if let Err(e) = self.bridge.open_document(&server_id, &uri, &content).await {
+            self.record_failure(&server_id);
+            return Err(LainError::Lsp(e.to_string()));
+        }
 
-        // Wait for LSP to analyze (intelligent polling)
+        // Wait for LSP to analyze (intelligent polling). Track the
+        // outcome so the circuit-breaker bookkeeping at the end of
+        // the function reflects it: a clean success clears any prior
+        // failure count; a timed-out / errored call increments the
+        // count and, at the threshold, marks the binary unavailable
+        // for the rest of the process. An empty-but-within-budget
+        // result does NOT count as a failure — the LSP simply hasn't
+        // indexed yet, and the polling loop is our way of waiting it
+        // out without paying the failure cost.
         let mut symbols = Vec::new();
+        let mut errored = false;
         let start = std::time::Instant::now();
         let poll_timeout = self.poll_timeout;
         let tick = self.poll_interval;
 
         while start.elapsed() < poll_timeout {
-            symbols = match tokio::time::timeout(
+            match tokio::time::timeout(
                 LSP_REQUEST_TIMEOUT,
                 self.bridge.get_document_symbols(&server_id, &uri),
             )
             .await
             {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Err(LainError::Lsp(e.to_string())),
-                Err(_) => {
-                    return Err(LainError::Lsp(format!(
-                        "document symbols request timed out for {}",
-                        server_id
-                    )))
+                Ok(Ok(s)) if !s.is_empty() => {
+                    symbols = s;
+                    break;
                 }
-            };
-
-            if !symbols.is_empty() {
-                break;
+                Ok(Ok(_)) => {} // empty — LSP hasn't indexed yet; keep polling
+                Ok(Err(e)) => {
+                    errored = true;
+                    symbols = Vec::new();
+                    tracing::debug!("document symbols error from {server_id}: {e}");
+                    break;
+                }
+                Err(_) => {
+                    errored = true;
+                    symbols = Vec::new();
+                    tracing::debug!(
+                        "document symbols request timed out for {server_id} after {LSP_REQUEST_TIMEOUT:?}"
+                    );
+                    break;
+                }
             }
             tokio::time::sleep(tick).await;
+        }
+
+        if errored {
+            self.record_failure(&server_id);
+        } else {
+            self.record_success(&server_id);
         }
 
         Ok(self.process_lsp_symbols(symbols, path, workspace, namespace))
@@ -401,14 +451,20 @@ impl LspMultiplexer {
         .await
         {
             Ok(Ok(l)) => l,
-            Ok(Err(e)) => return Err(LainError::Lsp(e.to_string())),
+            Ok(Err(e)) => {
+                self.record_failure(&server_id);
+                return Err(LainError::Lsp(e.to_string()));
+            }
             Err(_) => {
+                self.record_failure(&server_id);
                 return Err(LainError::Lsp(format!(
                     "find references request timed out for {}",
                     server_id
-                )))
+                )));
             }
         };
+
+        self.record_success(&server_id);
 
         let mut results = Vec::new();
         for loc in locations {
@@ -504,6 +560,38 @@ impl LspMultiplexer {
     /// processes that may hang during cleanup.
     pub fn mark_unavailable(&mut self, binary: &str) {
         self.unavailable.insert(binary.to_string());
+    }
+
+    /// Record one LSP failure for `binary`. After
+    /// [`MAX_CONSECUTIVE_LSP_FAILURES`] consecutive failures, the
+    /// binary is added to `unavailable` so subsequent `ensure_server`
+    /// calls short-circuit to the tree-sitter fallback path. The
+    /// transition is logged at WARN level because operators want to
+    /// know when LSP silently degrades.
+    fn record_failure(&mut self, binary: &str) {
+        let count = self
+            .consecutive_failures
+            .entry(binary.to_string())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        if *count >= MAX_CONSECUTIVE_LSP_FAILURES && !self.unavailable.contains(binary) {
+            warn!(
+                "LSP '{}' has failed {} times consecutively; \
+                 marking unavailable for the rest of this process lifetime. \
+                 Restart `lain` to recover.",
+                binary, count
+            );
+            self.unavailable.insert(binary.to_string());
+        }
+    }
+
+    /// Record one LSP success for `binary`. Resets the per-binary
+    /// failure counter so a previously-flaky LSP that recovers
+    /// gets a fresh budget. No-op if the binary has no failure
+    /// history — the common case is the steady-state where every
+    /// call succeeds.
+    fn record_success(&mut self, binary: &str) {
+        self.consecutive_failures.remove(binary);
     }
 
     pub async fn shutdown(&mut self) {
@@ -714,5 +802,114 @@ mod availability_tests {
             !reported.2,
             "an uninstalled binary must report unavailable even before any spawn attempt"
         );
+    }
+}
+
+#[cfg(test)]
+mod circuit_breaker_tests {
+    //! Per-binary circuit breaker for LSP flakiness. After
+    //! `MAX_CONSECUTIVE_LSP_FAILURES` consecutive errors for a binary,
+    //! the multiplexer marks it unavailable so subsequent calls fall
+    //! back to tree-sitter without paying another timeout cost.
+
+    use super::*;
+
+    fn make() -> LspMultiplexer {
+        LspMultiplexer::new(Path::new("."), &crate::tuning::RuntimeConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn three_consecutive_failures_mark_binary_unavailable() {
+        let mut m = make();
+        let binary = "rust-analyzer";
+
+        // First two failures don't trip — operator gets one or two
+        // warnings before the indexer silently degrades.
+        m.record_failure(binary);
+        m.record_failure(binary);
+        assert!(
+            !m.unavailable.contains(binary),
+            "two failures must not trip the breaker; got: {:?}",
+            m.unavailable
+        );
+
+        // Third failure trips.
+        m.record_failure(binary);
+        assert!(
+            m.unavailable.contains(binary),
+            "three consecutive failures must mark the binary unavailable"
+        );
+    }
+
+    #[test]
+    fn success_resets_failure_count() {
+        let mut m = make();
+        let binary = "rust-analyzer";
+
+        // Two failures, then a success — counter resets.
+        m.record_failure(binary);
+        m.record_failure(binary);
+        m.record_success(binary);
+        // Two more failures shouldn't trip because the count was
+        // cleared by the success.
+        m.record_failure(binary);
+        m.record_failure(binary);
+        assert!(
+            !m.unavailable.contains(binary),
+            "a success between failures must reset the counter; \
+             two follow-on failures shouldn't trip the breaker"
+        );
+
+        // Third follow-on failure trips.
+        m.record_failure(binary);
+        assert!(
+            m.unavailable.contains(binary),
+            "after the reset, three fresh failures must trip"
+        );
+    }
+
+    #[test]
+    fn failure_count_is_per_binary() {
+        // rust-analyzer and gopls are independent: failing one must
+        // not affect the other's circuit.
+        let mut m = make();
+        m.record_failure("rust-analyzer");
+        m.record_failure("gopls");
+        m.record_failure("rust-analyzer");
+        m.record_failure("gopls");
+        m.record_failure("rust-analyzer");
+        assert!(
+            m.unavailable.contains("rust-analyzer"),
+            "rust-analyzer should trip after 3 failures"
+        );
+        assert!(
+            !m.unavailable.contains("gopls"),
+            "gopls must remain available — its circuit is independent of rust-analyzer's"
+        );
+    }
+
+    #[test]
+    fn successful_call_does_not_increment_count() {
+        // The wiring rule is: error → increment, success → reset.
+        // A success on its own (no prior failure) is a no-op, not a
+        // bug. Pin that explicitly so a future "always increment"
+        // refactor doesn't accidentally penalise the steady state.
+        let mut m = make();
+        m.record_success("rust-analyzer");
+        assert!(m.consecutive_failures.is_empty());
+        assert!(!m.unavailable.contains("rust-analyzer"));
+    }
+
+    #[test]
+    fn record_failure_on_already_unavailable_binary_is_idempotent() {
+        // Calling record_failure on a binary that's already marked
+        // unavailable (via the existing `mark_unavailable` path or a
+        // prior trip) must not double-log or otherwise misbehave.
+        // The function is meant to be safe to call repeatedly.
+        let mut m = make();
+        m.mark_unavailable("rust-analyzer");
+        m.record_failure("rust-analyzer");
+        m.record_failure("rust-analyzer");
+        assert!(m.unavailable.contains("rust-analyzer"));
     }
 }
