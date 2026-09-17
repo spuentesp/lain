@@ -114,10 +114,30 @@ jobs:
             exit 0
           fi
 
+          # ci.yml defines the matrix/jobs these very checks run as --
+          # a change to its own logic must run the full battery to
+          # prove the new logic still works. Every *other* workflow
+          # file (release.yml, distribution-acceptance.yml, the
+          # lain-health-badge action, etc.) can't affect what `cargo
+          # test` does, so it's safe to fold into the general allowlist
+          # below. Confirmed live 2026-09-16/17: three separate
+          # CI-config-only PRs (none touching a line of Rust) each
+          # still paid for the full 3-OS matrix + Coverage + Capability
+          # suite because this classifier didn't recognize
+          # .github/workflows or .github/actions at all.
+          if echo "$CHANGED" | grep -qx '\.github/workflows/ci\.yml'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "ci.yml itself changed; running full matrix to validate it."
+            exit 0
+          fi
+
           # Conservative allowlist: every changed file must match one of
-          # these patterns for the run to count as docs-only. Anything
+          # these patterns for the run to count as docs-only (name kept
+          # for compatibility with the test-cross/capability/coverage
+          # jobs that already gate on this output -- it now also covers
+          # non-ci.yml CI config, not just prose docs). Anything
           # unrecognized counts as code.
-          NON_DOCS=$(echo "$CHANGED" | grep -vE '(\.md$|^docs/|^LICENSE$|^\.github/ISSUE_TEMPLATE/|^\.gitignore$)' || true)
+          NON_DOCS=$(echo "$CHANGED" | grep -vE '(\.md$|^docs/|^LICENSE$|^\.github/ISSUE_TEMPLATE/|^\.gitignore$|^\.github/workflows/|^\.github/actions/)' || true)
           if [ -z "$NON_DOCS" ]; then
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
             echo "All changed files match the docs-only allowlist."
@@ -501,9 +521,14 @@ jobs:
     # target=0/threshold=0 settings keep the badge dark until the
     # first deliberate baseline PR.
     name: Coverage (cargo llvm-cov)
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && github.event.pull_request.draft != true
+    # docs_only added 2026-09-17: this job has no bearing on prose docs
+    # or non-ci.yml CI config, and (unlike test-cross/capability) had no
+    # docs_only gate at all -- it paid for a full instrumented rebuild
+    # on every push/PR-to-main regardless of what changed.
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     steps:
