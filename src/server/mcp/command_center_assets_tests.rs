@@ -324,11 +324,15 @@ fn graph_picker_is_wired_once_from_init() {
 // fallback, never 500).
 
 use std::borrow::Cow;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Helper: clear any inherited `LAIN_DEV_SPA_DIR` so tests run in a
 /// known state. The dev-mode read is opt-in via env var. We snapshot
 /// and restore around each call to keep tests independent.
 fn with_cleared_dev_spa_dir<F: FnOnce() -> R, R>(f: F) -> R {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev = std::env::var_os("LAIN_DEV_SPA_DIR");
     std::env::remove_var("LAIN_DEV_SPA_DIR");
     let out = f();
@@ -343,6 +347,7 @@ fn with_cleared_dev_spa_dir<F: FnOnce() -> R, R>(f: F) -> R {
 /// restore the prior value. Mirrors `with_cleared_dev_spa_dir` but
 /// for the on-disk case.
 fn with_dev_spa_dir<F: FnOnce() -> R, R>(dir: &std::path::Path, f: F) -> R {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev = std::env::var_os("LAIN_DEV_SPA_DIR");
     std::env::set_var("LAIN_DEV_SPA_DIR", dir);
     let out = f();
@@ -364,15 +369,14 @@ fn dev_spa_dir_returns_none_when_env_unset() {
 
 #[test]
 fn dev_spa_dir_returns_none_when_path_does_not_exist() {
-    std::env::set_var(
-        "LAIN_DEV_SPA_DIR",
-        "/nonexistent/path/that/should/not/exist",
+    let result = with_dev_spa_dir(
+        std::path::Path::new("/nonexistent/path/that/should/not/exist"),
+        dev_spa_dir,
     );
     assert!(
-        dev_spa_dir().is_none(),
+        result.is_none(),
         "dev_spa_dir should be None when the path is not a directory"
     );
-    std::env::remove_var("LAIN_DEV_SPA_DIR");
 }
 
 #[test]

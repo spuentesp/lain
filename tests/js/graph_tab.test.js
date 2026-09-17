@@ -648,3 +648,125 @@ test('pickFocalErrorRender: empty error message → default banner', () => {
   assert.strictEqual(out.mode, 'preserve-and-banner');
   assert.ok(out.banner && typeof out.banner === 'string' && out.banner.length > 0);
 });
+
+// ── categorizeTool & groupTools (2026-09-17) ────────────────────────────────
+
+test('categorizeTool: categorizes known tools across domains', () => {
+  assert.strictEqual(app.categorizeTool('understand_repository'), 'Semantic');
+  assert.strictEqual(app.categorizeTool('find_symbol'), 'Semantic');
+  assert.strictEqual(app.categorizeTool('search_code'), 'Semantic');
+
+  assert.strictEqual(app.categorizeTool('find_anchors'), 'Architecture');
+  assert.strictEqual(app.categorizeTool('explore_architecture'), 'Architecture');
+  assert.strictEqual(app.categorizeTool('get_master_map'), 'Architecture');
+
+  assert.strictEqual(app.categorizeTool('assess_change'), 'Impact');
+  assert.strictEqual(app.categorizeTool('get_coupling_radar'), 'Impact');
+  assert.strictEqual(app.categorizeTool('get_file_diff'), 'Impact');
+
+  assert.strictEqual(app.categorizeTool('get_code_snippet'), 'Context');
+  assert.strictEqual(app.categorizeTool('explain_symbol'), 'Context');
+  assert.strictEqual(app.categorizeTool('get_context_for_prompt'), 'Context');
+
+  assert.strictEqual(app.categorizeTool('claim_files'), 'Multiplayer');
+  assert.strictEqual(app.categorizeTool('release_files'), 'Multiplayer');
+  assert.strictEqual(app.categorizeTool('list_active_agents'), 'Multiplayer');
+
+  assert.strictEqual(app.categorizeTool('list_workspaces'), 'Federation');
+  assert.strictEqual(app.categorizeTool('get_workspace_graph'), 'Federation');
+
+  assert.strictEqual(app.categorizeTool('run_build'), 'Execution');
+  assert.strictEqual(app.categorizeTool('run_tests'), 'Execution');
+});
+
+test('categorizeTool: falls back to System for unknown tools', () => {
+  assert.strictEqual(app.categorizeTool('unknown_custom_tool'), 'System');
+  assert.strictEqual(app.categorizeTool(''), 'System');
+  assert.strictEqual(app.categorizeTool(null), 'System');
+});
+
+test('groupTools: buckets tool lists correctly', () => {
+  const tools = [
+    { name: 'understand_repository', description: 'Semantic map' },
+    { name: 'find_anchors', description: 'Find key files' },
+    { name: 'assess_change', description: 'Impact assessment' },
+    { name: 'random_extension', description: 'Custom' },
+    null,
+    { invalid: true },
+  ];
+  const grouped = app.groupTools(tools);
+
+  assert.ok(grouped.Semantic.some(t => t.name === 'understand_repository'));
+  assert.ok(grouped.Architecture.some(t => t.name === 'find_anchors'));
+  assert.ok(grouped.Impact.some(t => t.name === 'assess_change'));
+  assert.ok(grouped.System.some(t => t.name === 'random_extension'));
+  assert.strictEqual(grouped.Multiplayer.length, 0);
+});
+
+test('groupTools: handles null, undefined, or empty arrays gracefully', () => {
+  const empty1 = app.groupTools(null);
+  assert.ok(Array.isArray(empty1.Semantic));
+  assert.strictEqual(empty1.Semantic.length, 0);
+
+  const empty2 = app.groupTools([]);
+  assert.ok(Array.isArray(empty2.Architecture));
+  assert.strictEqual(empty2.Architecture.length, 0);
+});
+
+// ── formatDiff & parseRiskVerdict (2026-09-17) ──────────────────────────────
+
+test('formatDiff: renders clean placeholder when empty', () => {
+  assert.ok(app.formatDiff('').includes('diff-empty'));
+  assert.ok(app.formatDiff(null).includes('diff-empty'));
+  assert.ok(app.formatDiff('   \n  ').includes('diff-empty'));
+});
+
+test('formatDiff: classes additions, deletions, hunks, and escapes HTML', () => {
+  const diff = [
+    '--- a/foo.rs',
+    '+++ b/foo.rs',
+    '@@ -1,3 +1,4 @@',
+    ' fn main() {',
+    '+    println!("<hello & world>");',
+    '-    println!("old");',
+    ' }',
+  ].join('\n');
+
+  const html = app.formatDiff(diff);
+  assert.ok(html.includes('diff-view'));
+  assert.ok(html.includes('diff-line-meta'));
+  assert.ok(html.includes('diff-line-hunk'));
+  assert.ok(html.includes('diff-line-add'));
+  assert.ok(html.includes('diff-line-del'));
+  assert.ok(html.includes('diff-line-ctx'));
+  // Ensure escaped HTML
+  assert.ok(html.includes('&lt;hello &amp; world&gt;'));
+  assert.ok(!html.includes('<hello & world>'));
+});
+
+test('parseRiskVerdict: detects risk levels accurately', () => {
+  assert.deepStrictEqual(app.parseRiskVerdict('High Risk: changes to core anchor'), {
+    risk: 'HIGH RISK',
+    class: 'risk-high',
+  });
+  assert.deepStrictEqual(app.parseRiskVerdict('Risk verdict: Medium - 3 dependents affected'), {
+    risk: 'MEDIUM RISK',
+    class: 'risk-medium',
+  });
+  assert.deepStrictEqual(app.parseRiskVerdict('Risk: Low - isolated symbol'), {
+    risk: 'LOW RISK',
+    class: 'risk-low',
+  });
+  assert.deepStrictEqual(app.parseRiskVerdict('This symbol is safe to change.'), {
+    risk: 'LOW RISK',
+    class: 'risk-low',
+  });
+  assert.deepStrictEqual(app.parseRiskVerdict('Completed dependency analysis.'), {
+    risk: 'ASSESSED',
+    class: 'risk-info',
+  });
+  assert.deepStrictEqual(app.parseRiskVerdict(null), {
+    risk: 'UNKNOWN',
+    class: 'risk-unknown',
+  });
+});

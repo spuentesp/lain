@@ -2070,13 +2070,385 @@ function wireGraphPicker() {
   });
 }
 
-// ── Tab: tools (MCP tool tester) ───────────────────────────────────────────
+// ── Tab: changes (Working tree changes, Diffs & Change Assessment) ───────────
+
+function formatDiff(diffText) {
+  if (!diffText || typeof diffText !== 'string' || diffText.trim().length === 0) {
+    return '<div class="diff-empty muted">No uncommitted changes for this file (working tree clean).</div>';
+  }
+  const lines = diffText.split('\n');
+  const rendered = lines.map(line => {
+    let cls = 'diff-line-ctx';
+    if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
+      cls = 'diff-line-meta';
+    } else if (line.startsWith('+')) {
+      cls = 'diff-line-add';
+    } else if (line.startsWith('-')) {
+      cls = 'diff-line-del';
+    } else if (line.startsWith('@@')) {
+      cls = 'diff-line-hunk';
+    }
+    return `<div class="diff-line ${cls}"><span class="diff-text">${escapeHtml(line)}</span></div>`;
+  }).join('');
+  return `<div class="diff-view">${rendered}</div>`;
+}
+
+function parseRiskVerdict(assessText) {
+  if (!assessText || typeof assessText !== 'string') return { risk: 'UNKNOWN', class: 'risk-unknown' };
+  const lower = assessText.toLowerCase();
+  if (lower.includes('high risk') || lower.includes('risk: high') || lower.includes('risk verdict: high')) {
+    return { risk: 'HIGH RISK', class: 'risk-high' };
+  }
+  if (lower.includes('medium risk') || lower.includes('risk: medium') || lower.includes('risk verdict: medium')) {
+    return { risk: 'MEDIUM RISK', class: 'risk-medium' };
+  }
+  if (lower.includes('low risk') || lower.includes('risk: low') || lower.includes('risk verdict: low') || lower.includes('safe to change')) {
+    return { risk: 'LOW RISK', class: 'risk-low' };
+  }
+  return { risk: 'ASSESSED', class: 'risk-info' };
+}
+
+async function renderChangesTab() {
+  const tab = document.getElementById('tab-changes');
+  if (!tab) return;
+  tab.innerHTML = `
+    <div class="changes-header">
+      <div class="changes-repo-badge">
+        <span class="muted">workspace:</span> <strong id="changes-repo-name">…</strong>
+        <span class="muted">head:</span> <code id="changes-repo-head">…</code>
+        <span id="changes-status-badge" class="changes-badge">checking…</span>
+      </div>
+      <p class="muted">Surface repository working tree changes, inspect file diffs, and assess symbol impact & risk before editing.</p>
+    </div>
+    <div class="changes-layout">
+      <div class="changes-sidebar">
+        <div class="changes-card">
+          <h4>Assess Symbol Change</h4>
+          <p class="muted">Analyze callers, transitive blast radius, untested callers & risk for a symbol.</p>
+          <div class="changes-input-group">
+            <input type="text" id="changes-symbol-input" placeholder="e.g. orchestrate, find_symbol…" aria-label="symbol to assess">
+            <button id="changes-assess-btn">Assess</button>
+          </div>
+          <div class="changes-suggestions" id="changes-suggestions">
+            <span class="muted">key anchors:</span>
+            <div id="changes-anchors-list" class="changes-chip-list"><span class="muted">loading…</span></div>
+          </div>
+        </div>
+        <div class="changes-card">
+          <h4>File Diff Inspection</h4>
+          <p class="muted">View working-tree git diffs for any modified or tracked file.</p>
+          <div class="changes-input-group">
+            <input type="text" id="changes-path-input" placeholder="e.g. src/lib.rs, Cargo.toml…" aria-label="file path for diff">
+            <button id="changes-diff-btn">Diff</button>
+          </div>
+        </div>
+        <div class="changes-card">
+          <h4>Hidden Coupling Radar</h4>
+          <p class="muted">Historical Git co-change partners based on commit history.</p>
+          <div class="changes-input-group">
+            <input type="text" id="changes-coupling-input" placeholder="e.g. core.rs, helpers.rs…" aria-label="symbol for coupling">
+            <button id="changes-coupling-btn">Radar</button>
+          </div>
+        </div>
+      </div>
+      <div class="changes-main">
+        <div class="changes-output-header">
+          <h3 id="changes-output-title">Change Assessment & Diff Output</h3>
+          <span id="changes-output-meta" class="muted">Select an anchor or enter a symbol/path on the left</span>
+        </div>
+        <div id="changes-output-body" class="changes-output-body">
+          <div class="empty-state-banner">
+            <p>Ready to inspect code changes.</p>
+            <p class="muted">Pick a symbol anchor on the left to run <code>assess_change</code>, or enter a file path to view its git diff.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const repoNameEl = tab.querySelector('#changes-repo-name');
+  const repoHeadEl = tab.querySelector('#changes-repo-head');
+  const badgeEl = tab.querySelector('#changes-status-badge');
+  const anchorsList = tab.querySelector('#changes-anchors-list');
+  const outBody = tab.querySelector('#changes-output-body');
+  const outTitle = tab.querySelector('#changes-output-title');
+  const outMeta = tab.querySelector('#changes-output-meta');
+
+  // 1. Fetch bootstrap / git state via understand_repository
+  try {
+    const r = await mcpCall('understand_repository', {});
+    const info = parseJson(r) || {};
+    const repo = info.repository || {};
+    const arch = info.architecture || {};
+
+    if (repoNameEl) repoNameEl.textContent = repo.name || 'default';
+    if (repoHeadEl) repoHeadEl.textContent = repo.head || 'HEAD';
+    if (badgeEl) {
+      if (repo.dirty) {
+        badgeEl.textContent = 'Dirty (Uncommitted Changes)';
+        badgeEl.className = 'changes-badge dirty';
+      } else {
+        badgeEl.textContent = 'Clean Working Tree';
+        badgeEl.className = 'changes-badge clean';
+      }
+    }
+
+    if (anchorsList) {
+      const anchors = Array.isArray(arch.anchors) ? arch.anchors : [];
+      if (anchors.length > 0) {
+        anchorsList.innerHTML = anchors.map(a => `<button class="changes-chip" data-anchor="${escapeHtml(a)}">${escapeHtml(a)}</button>`).join('');
+        anchorsList.querySelectorAll('.changes-chip').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const sym = btn.dataset.anchor;
+            const input = tab.querySelector('#changes-symbol-input');
+            if (input) input.value = sym;
+            runAssessment(sym);
+          });
+        });
+      } else {
+        anchorsList.innerHTML = '<span class="muted">none indexed</span>';
+      }
+    }
+  } catch (e) {
+    if (badgeEl) {
+      badgeEl.textContent = 'Status Unavailable';
+      badgeEl.className = 'changes-badge';
+    }
+    if (anchorsList) anchorsList.innerHTML = '<span class="muted">unavailable</span>';
+  }
+
+  // 2. Assess Change handler
+  async function runAssessment(symbol) {
+    if (!symbol || !symbol.trim()) return;
+    const sym = symbol.trim();
+    if (outTitle) outTitle.textContent = `Change Assessment: ${sym}`;
+    if (outMeta) outMeta.textContent = 'Analyzing blast radius, callers, untested functions & risk…';
+    if (outBody) outBody.innerHTML = '<div class="muted">Calling assess_change via MCP…</div>';
+    try {
+      const res = await mcpCall('assess_change', { symbol: sym });
+      const text = unwrapText(res) || JSON.stringify(res, null, 2);
+      const verdict = parseRiskVerdict(text);
+      if (outBody) {
+        outBody.innerHTML = `
+          <div class="assessment-verdict-banner ${verdict.class}">
+            <span class="verdict-tag">${escapeHtml(verdict.risk)}</span>
+            <span class="verdict-symbol">Symbol: <code>${escapeHtml(sym)}</code></span>
+          </div>
+          <pre class="changes-raw-output">${escapeHtml(text)}</pre>
+        `;
+      }
+      if (outMeta) outMeta.textContent = `Completed assessment for ${sym}`;
+    } catch (e) {
+      if (outBody) outBody.innerHTML = `<div class="error-banner">Assessment failed: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  // 3. Diff handler
+  async function runDiff(filePath) {
+    if (!filePath || !filePath.trim()) return;
+    const p = filePath.trim();
+    if (outTitle) outTitle.textContent = `File Diff: ${p}`;
+    if (outMeta) outMeta.textContent = 'Reading git diff…';
+    if (outBody) outBody.innerHTML = '<div class="muted">Fetching diff via MCP…</div>';
+    try {
+      const res = await mcpCall('get_file_diff', { path: p });
+      const text = unwrapText(res) || '';
+      if (outBody) {
+        outBody.innerHTML = formatDiff(text);
+      }
+      if (outMeta) outMeta.textContent = `Diff loaded for ${p}`;
+    } catch (e) {
+      if (outBody) outBody.innerHTML = `<div class="error-banner">Diff failed: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  // 4. Coupling radar handler
+  async function runCoupling(symbol) {
+    if (!symbol || !symbol.trim()) return;
+    const sym = symbol.trim();
+    if (outTitle) outTitle.textContent = `Coupling Radar: ${sym}`;
+    if (outMeta) outMeta.textContent = 'Detecting historical co-change patterns…';
+    if (outBody) outBody.innerHTML = '<div class="muted">Running get_coupling_radar via MCP…</div>';
+    try {
+      const res = await mcpCall('get_coupling_radar', { symbol: sym });
+      const text = unwrapText(res) || JSON.stringify(res, null, 2);
+      if (outBody) {
+        outBody.innerHTML = `
+          <div class="coupling-banner">
+            <strong>Historical Co-Change Partners</strong> for <code>${escapeHtml(sym)}</code>
+          </div>
+          <pre class="changes-raw-output">${escapeHtml(text)}</pre>
+        `;
+      }
+      if (outMeta) outMeta.textContent = `Coupling radar loaded for ${sym}`;
+    } catch (e) {
+      if (outBody) outBody.innerHTML = `<div class="error-banner">Coupling radar failed: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  // Wire buttons
+  const assessBtn = tab.querySelector('#changes-assess-btn');
+  const assessInput = tab.querySelector('#changes-symbol-input');
+  if (assessBtn && assessInput) {
+    assessBtn.addEventListener('click', () => runAssessment(assessInput.value));
+    assessInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runAssessment(assessInput.value); });
+  }
+
+  const diffBtn = tab.querySelector('#changes-diff-btn');
+  const diffInput = tab.querySelector('#changes-path-input');
+  if (diffBtn && diffInput) {
+    diffBtn.addEventListener('click', () => runDiff(diffInput.value));
+    diffInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runDiff(diffInput.value); });
+  }
+
+  const couplingBtn = tab.querySelector('#changes-coupling-btn');
+  const couplingInput = tab.querySelector('#changes-coupling-input');
+  if (couplingBtn && couplingInput) {
+    couplingBtn.addEventListener('click', () => runCoupling(couplingInput.value));
+    couplingInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runCoupling(couplingInput.value); });
+  }
+}
+
+// ── Tab: tools (MCP tool tester with domain categorization) ────────────────
+
+const TOOL_CATEGORY_MAP = {
+  // Semantic (M5/M6 Agent API)
+  understand_repository: 'Semantic',
+  find_symbol: 'Semantic',
+  get_context: 'Semantic',
+  find_related: 'Semantic',
+  search_code: 'Semantic',
+  semantic_search: 'Semantic',
+
+  // Architecture & Navigation
+  explore_architecture: 'Architecture',
+  get_master_map: 'Architecture',
+  get_layered_map: 'Architecture',
+  list_entry_points: 'Architecture',
+  find_anchors: 'Architecture',
+  navigate_to_anchor: 'Architecture',
+  get_anchor_score: 'Architecture',
+  get_context_depth: 'Architecture',
+  architectural_observations: 'Architecture',
+  suggest_refactor_targets: 'Architecture',
+  compare_modules: 'Architecture',
+  detect_overlap: 'Architecture',
+
+  // Impact & Dependencies
+  assess_change: 'Impact',
+  get_file_diff: 'Impact',
+  get_blast_radius: 'Impact',
+  get_coupling_radar: 'Impact',
+  trace_dependency: 'Impact',
+  get_call_sites: 'Impact',
+  get_call_chain: 'Impact',
+  get_cross_runtime_callers: 'Impact',
+  find_dead_code: 'Impact',
+
+  // Context & Source
+  get_code_snippet: 'Context',
+  explain_symbol: 'Context',
+  get_context_for_prompt: 'Context',
+  query_graph: 'Context',
+  describe_schema: 'Context',
+
+  // Multiplayer & Presence
+  who_am_i: 'Multiplayer',
+  list_active_agents: 'Multiplayer',
+  claim_files: 'Multiplayer',
+  release_files: 'Multiplayer',
+  list_occupancy: 'Multiplayer',
+  my_claims: 'Multiplayer',
+  heartbeat: 'Multiplayer',
+  list_subagents: 'Multiplayer',
+
+  // Annotations & Handoffs
+  add_annotation: 'Annotations',
+  list_annotations: 'Annotations',
+  resolve_annotation: 'Annotations',
+  leave_handoff_note: 'Annotations',
+  get_pending_handoffs: 'Annotations',
+
+  // Federation
+  list_repos: 'Federation',
+  get_repo_info: 'Federation',
+  get_federation_health: 'Federation',
+  search_org: 'Federation',
+  get_workspace_graph: 'Federation',
+  get_cross_repo_blast_radius: 'Federation',
+  get_cross_repo_blast_radius_for_repo: 'Federation',
+  get_active_workspace: 'Federation',
+  list_workspaces: 'Federation',
+
+  // Execution & Testing
+  run_build: 'Execution',
+  run_tests: 'Execution',
+  run_clippy: 'Execution',
+  find_untested_functions: 'Execution',
+  get_coverage_summary: 'Execution',
+  get_test_template: 'Execution',
+
+  // System & Operations
+  get_health: 'System',
+  get_capabilities: 'System',
+  get_server_status: 'System',
+  get_reload_status: 'System',
+  request_reload: 'System',
+  sync_state: 'System',
+  run_enrichment: 'System',
+  list_recent_projects: 'System',
+  get_audit_log: 'System',
+  get_agent_strategy: 'System',
+  get_world_state: 'System',
+  register_job_webhook: 'System',
+  get_job_status: 'System',
+  install_language_server: 'System',
+  debug_sleep: 'System',
+};
+
+const CATEGORY_ORDER = [
+  'Semantic',
+  'Architecture',
+  'Impact',
+  'Context',
+  'Multiplayer',
+  'Annotations',
+  'Federation',
+  'Execution',
+  'System',
+];
+
+function categorizeTool(name) {
+  return TOOL_CATEGORY_MAP[name] || 'System';
+}
+
+function groupTools(tools) {
+  const groups = {};
+  for (const cat of CATEGORY_ORDER) {
+    groups[cat] = [];
+  }
+  if (Array.isArray(tools)) {
+    for (const tool of tools) {
+      if (!tool || !tool.name) continue;
+      const cat = categorizeTool(tool.name);
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(tool);
+    }
+  }
+  return groups;
+}
 
 async function renderToolsTab() {
   const tab = document.getElementById('tab-tools');
   tab.innerHTML = `
     <div class="tools-layout">
-      <ul id="tools-list" class="tools-list"></ul>
+      <div class="tools-sidebar-panel">
+        <div class="tools-filter-bar">
+          <input type="search" id="tools-search" class="tools-search" placeholder="Search 75+ tools…" aria-label="Search tools">
+          <div id="tools-categories" class="tools-category-chips" role="tablist"></div>
+        </div>
+        <ul id="tools-list" class="tools-list"></ul>
+      </div>
       <div id="tool-form" class="tool-form"><p class="muted">Pick a tool on the left.</p></div>
     </div>
   `;
@@ -2097,20 +2469,87 @@ async function renderToolsTab() {
     tab.querySelector('#tool-form').textContent = 'tools/list failed: ' + e.message;
     return;
   }
+
+  const grouped = groupTools(list);
+  const categoriesContainer = tab.querySelector('#tools-categories');
   const ul = tab.querySelector('#tools-list');
-  for (const tool of list) {
-    const li = document.createElement('li');
-    li.innerHTML = `
-      <button data-name="${escapeHtml(tool.name)}">${escapeHtml(tool.name)}</button>
-      <span class="muted">${escapeHtml(tool.description || '')}</span>
-    `;
-    li.querySelector('button').addEventListener('click', () => {
-      document.querySelectorAll('#tools-list .active').forEach(el => el.classList.remove('active'));
-      li.classList.add('active');
-      renderToolForm(tool);
-    });
-    ul.appendChild(li);
+
+  let selectedCategory = 'all';
+  let searchQuery = '';
+
+  // Render category chips
+  const allCount = list.length;
+  let chipsHtml = `<button class="tool-cat-chip active" data-cat="all">All <span class="cat-count">${allCount}</span></button>`;
+  for (const cat of CATEGORY_ORDER) {
+    const count = (grouped[cat] || []).length;
+    if (count > 0) {
+      chipsHtml += `<button class="tool-cat-chip" data-cat="${escapeHtml(cat)}">${escapeHtml(cat)} <span class="cat-count">${count}</span></button>`;
+    }
   }
+  categoriesContainer.innerHTML = chipsHtml;
+
+  function populateList() {
+    ul.innerHTML = '';
+    const q = searchQuery.toLowerCase().trim();
+    for (const cat of CATEGORY_ORDER) {
+      if (selectedCategory !== 'all' && selectedCategory !== cat) continue;
+      const toolsInCat = (grouped[cat] || []).filter(t => {
+        if (!q) return true;
+        const nameMatch = (t.name || '').toLowerCase().includes(q);
+        const descMatch = (t.description || '').toLowerCase().includes(q);
+        return nameMatch || descMatch;
+      });
+
+      if (toolsInCat.length === 0) continue;
+
+      const headerLi = document.createElement('li');
+      headerLi.className = 'tools-group-header';
+      headerLi.innerHTML = `<span>${escapeHtml(cat)}</span><span class="group-count">${toolsInCat.length}</span>`;
+      ul.appendChild(headerLi);
+
+      for (const tool of toolsInCat) {
+        const li = document.createElement('li');
+        li.className = 'tool-item';
+        li.dataset.name = tool.name;
+        li.dataset.category = cat;
+        li.innerHTML = `
+          <button data-name="${escapeHtml(tool.name)}">${escapeHtml(tool.name)}</button>
+          <span class="muted">${escapeHtml(tool.description || '')}</span>
+        `;
+        li.querySelector('button').addEventListener('click', () => {
+          document.querySelectorAll('#tools-list .active').forEach(el => el.classList.remove('active'));
+          li.classList.add('active');
+          renderToolForm(tool);
+        });
+        ul.appendChild(li);
+      }
+    }
+    if (ul.children.length === 0) {
+      const emptyLi = document.createElement('li');
+      emptyLi.className = 'empty-tools-msg muted';
+      emptyLi.textContent = 'No tools match current filter.';
+      ul.appendChild(emptyLi);
+    }
+  }
+
+  populateList();
+
+  const searchInput = tab.querySelector('#tools-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      searchQuery = searchInput.value;
+      populateList();
+    });
+  }
+
+  categoriesContainer.querySelectorAll('.tool-cat-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      categoriesContainer.querySelectorAll('.tool-cat-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      selectedCategory = chip.dataset.cat;
+      populateList();
+    });
+  });
 }
 
 function renderToolForm(tool) {
@@ -2311,5 +2750,12 @@ if (typeof module !== 'undefined' && module.exports) {
     // V2 polish (2026-09-01):
     disambiguateFocalSearch,
     pickFocalErrorRender,
+    // Tool Domain Grouping & Changes Tab (2026-09-17):
+    categorizeTool,
+    groupTools,
+    formatDiff,
+    parseRiskVerdict,
+    TOOL_CATEGORY_MAP,
+    CATEGORY_ORDER,
   };
 }
