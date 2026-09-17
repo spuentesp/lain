@@ -868,12 +868,14 @@ impl LainMcpServer {
         let presence = Arc::clone(server.presence());
         let occupancy = Arc::clone(server.occupancy());
         let last_outcome = Arc::clone(server.refresh_handle().last_outcome());
+        let annotations = Arc::clone(server.annotations());
         // `executor.ctx` is `pub`; mutate it in place so handlers reading
         // through `&ctx.presence` / `&ctx.occupancy` observe the live
         // registries.
         self.executor.ctx.presence = presence;
         self.executor.ctx.occupancy = occupancy;
         self.executor.ctx.last_outcome = last_outcome;
+        self.executor.ctx.annotations = annotations;
         self.server = Some(server);
         self
     }
