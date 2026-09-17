@@ -598,10 +598,18 @@ pub fn understand_repository(
     //    `available` flag so the agent doesn't call a missing tool.
     let recommended_actions = json!([
         {"intent": "understand a symbol", "tool": "get_context_for_prompt", "available": true},
-        {"intent": "find where X is defined", "tool": "find_symbol",           "available": false, "note": "M6"},
-        {"intent": "assess a change",       "tool": "assess_change",         "available": false, "note": "M6"},
-        {"intent": "find related code",     "tool": "find_related",          "available": false, "note": "M6"},
-        {"intent": "search by concept",     "tool": "search_code",           "available": false, "note": "M6"},
+        // AGENT_UX_ROADMAP.md M6: the four semantic tools
+        // below landed in PR `feat/m6-semantic-agent-api`
+        // (#95). Each is registered via the inventory pattern
+        // (`semantic.rs` in the same directory) and reachable
+        // through `tools/list`. The M5-era `available: false`
+        // markers are dropped so an agent that asks
+        // `understand_repository` knows it can call them
+        // directly.
+        {"intent": "find where X is defined", "tool": "find_symbol",   "available": true},
+        {"intent": "assess a change",       "tool": "assess_change", "available": true},
+        {"intent": "find related code",     "tool": "find_related",  "available": true},
+        {"intent": "search by concept",     "tool": "search_code",   "available": true},
         {"intent": "blast radius",          "tool": "get_blast_radius",      "available": true},
         {"intent": "anchor / pillar",       "tool": "find_anchors",          "available": true},
         {"intent": "entry points",          "tool": "list_entry_points",     "available": true},
@@ -750,10 +758,14 @@ mod m5_tests {
         );
     }
 
-    /// `recommended_actions` lists M6 tools with `available: false`
-    /// so an agent doesn't call them before M6 lands.
+    /// `recommended_actions` lists M6 tools (`find_symbol`,
+    /// `assess_change`, `find_related`, `search_code`) with
+    /// `available: true` — the M5-era `available: false` marker
+    /// was dropped once M6 landed (PR
+    /// `feat/m6-semantic-agent-api`, #95) so an agent that asks
+    /// `understand_repository` knows it can call them directly.
     #[tokio::test(flavor = "current_thread")]
-    async fn recommended_actions_flag_m6_tools_as_unavailable() {
+    async fn recommended_actions_flag_m6_tools_as_available() {
         let payload = sample_payload().await;
         let arr = payload["recommended_actions"]
             .as_array()
@@ -770,8 +782,8 @@ mod m5_tests {
                 .find(|e| e["tool"] == tool)
                 .unwrap_or_else(|| panic!("missing entry for {tool}"));
             assert_eq!(
-                entry["available"], false,
-                "{tool} should be marked available=false until M6 lands"
+                entry["available"], true,
+                "{tool} should be marked available=true now that M6 has landed"
             );
         }
     }
