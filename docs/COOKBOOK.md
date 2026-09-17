@@ -162,6 +162,77 @@ tools in its tool picker.
 **Pitfalls:** some hosts cache the tool list per workspace; if
 you change the binary version, restart the host to force a refresh.
 
+### Recipe: add lain to Cursor
+
+```bash
+lain setup --agent cursor
+```
+
+Writes `~/.cursor/mcp.json` with the standard `mcpServers.lain`
+entry, preserving every other setting. Cursor reads that file
+directly — no CLI to shell out to. Verification: open Cursor,
+navigate to Settings → MCP, the `lain` server should appear as
+`connected` after the first agent turn.
+
+### Recipe: add lain to VS Code
+
+```bash
+lain setup --agent vscode
+```
+
+Resolves the config path as follows:
+1. If `<workspace>/.vscode/mcp.json` exists, the adapter edits
+   it in place (project-scoped — what the dev team committed).
+2. Otherwise writes to the user-scoped path
+   (`$XDG_CONFIG_HOME/Code/User/mcp.json` on Linux,
+   `~/Library/Application Support/Code/User/mcp.json` on macOS,
+   `%APPDATA%\Code\User\mcp.json` on Windows).
+
+The user-scoped path is what VS Code reads for MCP servers
+declared via the Settings UI. The adapter never silently
+overwrites a project-scoped config — if you committed one
+deliberately, that's the file that gets edited.
+
+Verification: in VS Code, run `MCP: List Servers` from the
+command palette; `lain` should appear with a green status.
+
+### Recipe: add lain to Continue.dev
+
+```bash
+lain setup --agent continue
+```
+
+Writes `~/.continue/config.json` under
+`experimental.modelContextProtocolServers` (an array of MCP
+server entries, one per editor integration). The adapter
+deduplicates by `name`: any existing `lain` entry is replaced
+by the freshly-configured one, and every other entry is left
+intact.
+
+Verification: open Continue, the `lain` model-context-protocol
+server should appear in the model dropdown.
+
+### Recipe: add lain to Codex
+
+```bash
+lain setup --agent codex
+```
+
+If the `codex` CLI is on `PATH`, the adapter shells out to it:
+
+```bash
+codex mcp add lain -- /usr/bin/lain mcp
+```
+
+This delegates JSON editing to the editor's own CLI rather than
+reimplementing safe-edit logic here. When the CLI isn't available,
+the adapter falls back to a direct edit of `$CODEX_HOME/config.toml`
+(or `~/.codex/config.toml` if `CODEX_HOME` is unset), preserving
+every other `[mcp_servers.*]` table.
+
+Verification: `codex mcp list` shows the `lain` server; opening
+Codex, the MCP tool picker exposes `mcp__lain__*`.
+
 ### Recipe: first useful query after install
 
 Once the agent is connected, two queries prove the integration
