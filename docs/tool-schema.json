@@ -1,26 +1,5 @@
 [
   {
-    "description": "Graph neighbors, co-change partners, and (optional) semantic neighbors for a symbol in one call. Use this when an agent says 'what is connected to X?' or wants to understand blast radius without committing to a single change yet. The semantic section is omitted when no embedding model is loaded; the co-change section is gated by `include_coupling=false`. Cost: medium.",
-    "inputSchema": {
-      "properties": {
-        "include_coupling": {
-          "type": "boolean"
-        },
-        "limit": {
-          "type": "integer"
-        },
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "find_related"
-  },
-  {
     "description": "One-call dossier for a symbol: definition, callers, callees, and source body excerpt. Use this when an agent says 'explain X' or 'what is X?' and the goal is a single Markdown payload the agent can quote back. Cost: medium; scales with `depth`. Low-level alternative: call each of explain_symbol / get_call_sites / trace_dependency individually.",
     "inputSchema": {
       "properties": {
@@ -383,6 +362,21 @@
     "name": "find_anchors"
   },
   {
+    "description": "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_coupling_radar"
+  },
+  {
     "description": "Identifies the architectural hearts of the system (main, App, etc.)",
     "inputSchema": {
       "properties": {},
@@ -442,9 +436,15 @@
     "name": "assess_change"
   },
   {
-    "description": "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns",
+    "description": "Graph neighbors, co-change partners, and (optional) semantic neighbors for a symbol in one call. Use this when an agent says 'what is connected to X?' or wants to understand blast radius without committing to a single change yet. The semantic section is omitted when no embedding model is loaded; the co-change section is gated by `include_coupling=false`. Cost: medium.",
     "inputSchema": {
       "properties": {
+        "include_coupling": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
         "symbol": {
           "type": "string"
         }
@@ -454,16 +454,7 @@
       ],
       "type": "object"
     },
-    "name": "get_coupling_radar"
-  },
-  {
-    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "list_entry_points"
+    "name": "find_related"
   },
   {
     "description": "Calculates the transitive impact and ripple effect of changing a symbol",

@@ -251,10 +251,10 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "70" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "76" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "69" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "75" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -456,11 +456,15 @@ for t in explore_architecture get_master_map get_layered_map list_entry_points \
          get_world_state get_server_status get_reload_status list_recent_projects \
          get_agent_strategy get_test_template navigate_to_anchor get_context_depth \
          get_anchor_score get_cross_runtime_callers get_audit_log sync_state \
-         run_enrichment get_file_diff
+         run_enrichment get_file_diff \
+         understand_repository find_symbol get_context find_related assess_change search_code
 do
   case "$t" in
-    get_context_for_prompt|navigate_to_anchor|get_context_depth|get_anchor_score|get_cross_runtime_callers)
+    get_context_for_prompt|navigate_to_anchor|get_context_depth|get_anchor_score|get_cross_runtime_callers|get_context|find_related|assess_change)
       OUT=$(call "$t" '{"symbol":"orchestrate"}') ;;
+    find_symbol) OUT=$(call "$t" '{"name":"orchestrate"}') ;;
+    search_code) OUT=$(call "$t" '{"query":"orchestrate"}') ;;
+    understand_repository) OUT=$(call "$t") ;;
     compare_modules) OUT=$(call "$t" '{"module_a":"src/core.rs","module_b":"src/helpers.rs"}') ;;
     get_test_template) OUT=$(call "$t" '{"symbol":"orchestrate"}') ;;
     get_file_diff) OUT=$(call "$t" '{"path":"src/core.rs"}') ;;
