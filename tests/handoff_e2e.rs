@@ -30,7 +30,10 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{free_port, git_init_committed, tools_call_text, wait_for_repo_index, ServerGuard};
+use common::{
+    boot_annotation_like_server, git_init_committed, register_agent_session, tools_call_text,
+    ServerGuard,
+};
 
 /// Single-repo federation fixture with one Rust crate that defines
 /// a single function `handoff_target`. `leave_handoff_note` in
@@ -89,56 +92,17 @@ impl HandoffFixture {
     }
 }
 
-fn boot_handoff_server(fixture: &HandoffFixture, port: u16) -> ServerGuard {
-    use std::process::{Command, Stdio};
-
-    let stderr_path = std::env::temp_dir().join(format!("handoff-e2e-stderr-{port}.log"));
-    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_lain"))
-        .args([
-            "server",
-            "--transport",
-            "http",
-            "--port",
-            &port.to_string(),
-            "--workspace",
-            "auto",
-            "--config",
-            fixture.repos_yaml().to_str().unwrap(),
-        ])
-        .env_remove("LAIN_EMBEDDING_MODEL")
-        .env("XDG_STATE_HOME", fixture.root.join("state"))
-        .env("XDG_CONFIG_HOME", fixture.root.join("config"))
-        .env("LAIN_JOB_STORE", fixture.root.join("jobs.json"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .expect("spawn lain server");
-    ServerGuard { child, stderr_path }
-}
-
 fn boot_and_wait(fixture: &HandoffFixture) -> (String, ServerGuard) {
-    let port = free_port();
-    let host = format!("127.0.0.1:{port}");
-    let guard = boot_handoff_server(fixture, port);
-    common::wait_for_health(&host, std::time::Duration::from_secs(60));
-    wait_for_repo_index(&host, &["handoff_target"]);
-    (host, guard)
+    boot_annotation_like_server(
+        &fixture.repos_yaml(),
+        &fixture.root,
+        "handoff-e2e",
+        &["handoff_target"],
+    )
 }
 
 fn register_session(host: &str, name: &str) -> String {
-    let resp = tools_call_text(
-        host,
-        "register_agent",
-        serde_json::json!({"name": name, "mode": "interactive"}),
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&resp)
-        .unwrap_or_else(|e| panic!("register_agent not JSON: {e}\n{resp}"));
-    parsed
-        .pointer("/session_token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("missing session_token: {parsed}"))
-        .to_string()
+    register_agent_session(host, name)
 }
 
 /// `leave_handoff_note` returns `{id, expires_at_unix_ms}`; the
