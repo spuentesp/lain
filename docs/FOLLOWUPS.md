@@ -55,31 +55,55 @@ The only remaining M4 work is the LSP subprocess calls:
 
 - **Source:** AGENT_UX_ROADMAP.md Milestone 4 design §"Index
   execution and consistency" calls for routing the LSP
-  subprocess calls (`scan.rs:108,119`, `ingestion.rs:639-657`)
-  through `spawn_blocking`.
-- **Status:** **deferred — upstream blocker.** `lsp-bridge`
-  0.2's `LspMultiplexer::get_references` /
-  `get_document_symbols_hierarchical` are `async fn` returning
-  futures; the only way to expose a sync subprocess entry
-  point is upstream in `lsp-bridge`. Wrapping the async call
-  in `Handle::block_on` from inside `spawn_blocking` is the
-  anti-pattern this whole initiative was designed to avoid
-  (it would block a blocking-thread on the async runtime).
-- **What we did from this repo:** PR
-  `feat/m4-lsp-cancel-aware` adds a `tokio::select!` race
-  between the LSP `await` and the cancel token. When shutdown
-  lands mid-scan, the LSP round-trip is abandoned promptly
-  instead of waiting for the child to answer. That's a real
-  cancellation-latency improvement — `RUST_LOG=trace` shows
-  the LSP child stops being driven as soon as the token
+  subprocess calls onto `spawn_blocking`, same treatment the
+  libgit2 calls got in PR `feat/m4-spawn-blocking` (#90) and
+  the tree-sitter / ONNX calls got in
+  `feat/m4-spawn-blocking-followup` (#98).
+- **Upstream pin:** `lsp-bridge = "0.2"` (crates.io), upstream
+  repo `ciresnave/lsp-bridge`. The async-only API on the
+  `LspBridge` type is the blocker — see `bridge.rs:224`
+  (`find_references`), `bridge.rs:717` (`get_document_symbols`),
+  and `bridge.rs:159` (`open_document`). All three are
+  `pub async fn` returning futures because the bridge drives the
+  LSP child over stdio via Tokio.
+- **Status:** **deferred — upstream blocker.** Our wrappers
+  (`src/server/lsp.rs::get_references`,
+  `::get_document_symbols_hierarchical`) call
+  `bridge.find_references(...)` and `bridge.get_document_symbols(...)`
+  directly, so the only way to expose a sync entry point that
+  works on a blocking-thread is upstream in `lsp-bridge`.
+  Wrapping the async call in `Handle::block_on` from inside
+  `spawn_blocking` is the anti-pattern this whole initiative
+  was designed to avoid — it would block a blocking-thread on
+  the async runtime.
+- **Where we land the upstream work:** the `ciresnave/lsp-bridge`
+  repo. We need a sync variant of the three hot-path methods
+  (`find_references_blocking`,
+  `get_document_symbols_blocking`, and probably
+  `open_document_blocking`) that internally drives its own
+  Tokio runtime scoped to the blocking thread, OR exposes the
+  raw stdio handle so a `spawn_blocking` closure on this side
+  can drive it directly. The latter is cleaner.
+- **What we did from this repo:** PR `feat/m4-lsp-cancel-aware`
+  (#101) adds a `tokio::select!` race between each LSP `await`
+  and the cancel token (`scan.rs:147-163` for `get_references`,
+  `scan.rs:181-188` for `get_document_symbols_hierarchical`).
+  When shutdown lands mid-scan, the LSP round-trip is abandoned
+  promptly instead of waiting for the child to answer. That's
+  a real cancellation-latency improvement — `RUST_LOG=trace`
+  shows the LSP child stops being driven as soon as the token
   fires — but it does NOT move LSP onto the blocking-thread
   pool.
-- **Where to land:** separate upstream PR in `lsp-bridge`
-  adding a sync `get_references_blocking` /
-  `get_document_symbols_blocking` API on `LspMultiplexer`.
-  Once that's released, this repo's migration is a small
-  call-site change. Until then, the LSP calls stay on the
-  Tokio runtime, gated by the cancel-aware `tokio::select!`.
+- **Migration on this side after upstream lands:** replace each
+  call site (`scan.rs:161`, `scan.rs:186`, `ingestion.rs:826`,
+  plus the inner `bridge.find_references` / `bridge.get_document_symbols`
+  call sites in `src/server/lsp.rs:399` and `src/server/lsp.rs:318`)
+  with the `_blocking` variant wrapped in
+  `tokio::task::spawn_blocking(move || ...)`. The
+  cancel-aware `tokio::select!` race moves to the *spawn* site,
+  not the LSP round-trip itself.
+- **Until then:** the LSP calls stay on the Tokio runtime, gated
+  by the cancel-aware `tokio::select!`.
 
 ## From the annotation layer (PR #66 deferred)
 
