@@ -416,7 +416,6 @@ impl RepoIndex {
     /// scraping the receiver task's internals. Wired up in PR B
     /// (`feat/m4-spawn-blocking`): the inotify callback
     /// `fetch_add`s, the receiver loop `fetch_sub`s.
-
     /// Number of files whose overlay refresh was skipped due to LSP
     /// unavailability during the most recent `sync_overlay` cycle.
     /// Returns 0 if `sync_overlay` hasn't run yet, or if the cycle
