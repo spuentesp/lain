@@ -1514,11 +1514,7 @@ async fn repeated_refresh_keeps_sidecar_equal_to_owner() {
             ids.sort();
             ids
         };
-        assert_eq!(
-            ids(&sidecar),
-            ids(&server.overlay()),
-            "contents: {contents}"
-        );
+        assert_eq!(ids(&sidecar), ids(server.overlay()), "contents: {contents}");
     }
 }
 

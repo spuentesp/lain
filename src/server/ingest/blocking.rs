@@ -45,9 +45,12 @@ where
     F: FnOnce() -> Result<R, LainError> + Send + 'static,
     R: Send + 'static,
 {
-    let join = tokio::task::spawn_blocking(move || f());
+    let cancel_for_fut = cancel.clone();
+    let cancel_fut = cancel_for_fut.cancelled_owned();
+    let join = tokio::task::spawn_blocking(f);
     Offthread {
         cancel,
+        cancel_fut: Some(Box::pin(cancel_fut)),
         join: Some(join),
     }
 }
@@ -56,6 +59,10 @@ where
 /// `JoinHandle` and the cancel token concurrently.
 pub(crate) struct Offthread<R> {
     cancel: CancellationToken,
+    /// Pinned `cancelled()` future. We store it so we can poll it
+    /// inside our own `poll` (registering the waker that wakes us
+    /// when cancellation lands) without needing an async context.
+    cancel_fut: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
     join: Option<JoinHandle<Result<R, LainError>>>,
 }
 
@@ -71,6 +78,20 @@ impl<R> Future for Offthread<R> {
                 join.abort();
             }
             return Poll::Ready(Err(LainError::Cancelled));
+        }
+
+        // Poll the cancellation future so its waker registers with
+        // our `Context`. When the token fires, the next poll returns
+        // `Poll::Ready(Err(LainError::Cancelled))` from the
+        // cancellation branch below and we abort the join handle.
+        if let Some(cancel_fut) = this.cancel_fut.as_mut() {
+            if Pin::new(cancel_fut).poll(cx).is_ready() {
+                if let Some(join) = this.join.take() {
+                    join.abort();
+                }
+                this.cancel_fut = None;
+                return Poll::Ready(Err(LainError::Cancelled));
+            }
         }
 
         let join = match this.join.as_mut() {
@@ -99,18 +120,7 @@ impl<R> Future for Offthread<R> {
                     ))))
                 }
             }
-            Poll::Pending => {
-                // Register a waker on the cancel token so the
-                // outer poll fires when cancellation lands. We don't
-                // care about the cancel-side `Ready` value itself —
-                // the next call to `poll` will observe it.
-                let _ = this.cancel.cancelled();
-                // We can't easily wake ourselves through the
-                // cancellation future without storing it, but
-                // `is_cancelled` returns true immediately on the
-                // next poll if the token fired while Pending.
-                Poll::Pending
-            }
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -147,6 +157,44 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_millis(100),
             "pre-cancelled token must short-circuit; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// AGENT_UX_ROADMAP.md M4 follow-up: cancelling the token
+    /// while the blocking closure is mid-flight must abort the
+    /// spawn_blocking task and resolve `Cancelled` within budget.
+    /// This exercises the polling path inside `Future::poll` —
+    /// not the fast-path — so it depends on the `cancel_fut`
+    /// waker being registered with the caller's `Context`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offthread_aborts_in_flight_work_when_token_fires() {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        // Fire cancellation in 50 ms; the closure sleeps for 5 s.
+        // `_ = tokio::spawn(...)` would trip clippy::let_underscore_future;
+        // bind the JoinHandle instead — the spawn handle isn't
+        // observed (we only care that the task runs to completion
+        // and the cancel lands), so dropping it is the right move.
+        let _: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+        let started = std::time::Instant::now();
+        let result: Result<i32, LainError> = offthread(cancel, || {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok(99)
+        })
+        .await;
+        assert!(
+            matches!(result, Err(LainError::Cancelled)),
+            "expected Cancelled; got {result:?}"
+        );
+        // Cancel lands ~50 ms in; offthread should resolve well
+        // under the 5 s sleep. Allow generous slack for slow CI.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancellation did not bound the work; took {:?}",
             started.elapsed()
         );
     }
