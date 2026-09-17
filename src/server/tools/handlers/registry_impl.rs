@@ -156,6 +156,48 @@ impl ToolHandler for ArchitecturalObservationsHandler {
 }
 inventory::submit!(ToolHandlerEntry(&ArchitecturalObservationsHandler));
 
+/// AGENT_UX_ROADMAP.md Milestone 5: one-call bootstrap context
+/// for a fresh agent. Returns a stable JSON payload with
+/// repository / architecture / capabilities / recommended_actions
+/// sections; the M6 semantic tools (find_symbol, assess_change,
+/// find_related, search_code) are listed with `available: false`
+/// until M6 lands so an agent doesn't call a missing tool.
+pub struct UnderstandRepositoryHandler;
+#[async_trait]
+impl ToolHandler for UnderstandRepositoryHandler {
+    fn name(&self) -> &'static str {
+        "understand_repository"
+    }
+    fn description(&self) -> &'static str {
+        "One-call bootstrap context: repository identity, top anchors, entry points, \
+         capability states, and the intent->tool mapping the agent should reach for \
+         first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and \
+         hasn't yet explored the codebase."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"budget_tokens":{"type":"integer","description":"Soft token budget for the payload; default 3000."}},"required":[]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        let budget_tokens = usize_arg(args, "budget_tokens");
+        handlers::architecture::understand_repository(
+            &ctx.workspace,
+            &ctx.graph,
+            &ctx.overlay,
+            &ctx.git,
+            &ctx.readiness,
+            budget_tokens,
+        )
+    }
+}
+inventory::submit!(ToolHandlerEntry(&UnderstandRepositoryHandler));
+
 // ─── Navigation Domain ─────────────────────────────────────────────────────────
 
 pub struct TraceDependencyHandler;

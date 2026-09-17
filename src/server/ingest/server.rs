@@ -125,6 +125,14 @@ impl LainServer {
         &self.lifecycle
     }
 
+    /// Owned clone of the server-owned lifecycle handle. Used by
+    /// shutdown paths and tests that need to move the handle into
+    /// a `'static` future (e.g. cancelling the token from a
+    /// separate `tokio::spawn`).
+    pub fn lifecycle_arc(&self) -> std::sync::Arc<LifecycleInfo> {
+        std::sync::Arc::clone(&self.lifecycle)
+    }
+
     // =============== Public façade (forwarding shims) ===============
     // Signatures and semantics are byte-identical to the pre-split
     // LainServer.

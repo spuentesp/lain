@@ -457,6 +457,15 @@
     "name": "get_coupling_radar"
   },
   {
+    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_entry_points"
+  },
+  {
     "description": "Calculates the transitive impact and ripple effect of changing a symbol",
     "inputSchema": {
       "properties": {
@@ -547,6 +556,20 @@
       "type": "object"
     },
     "name": "trace_dependency"
+  },
+  {
+    "description": "One-call bootstrap context: repository identity, top anchors, entry points, capability states, and the intent->tool mapping the agent should reach for first. AGENT_UX_ROADMAP.md Milestone 5. Useful when an agent just connected and hasn't yet explored the codebase.",
+    "inputSchema": {
+      "properties": {
+        "budget_tokens": {
+          "description": "Soft token budget for the payload; default 3000.",
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "understand_repository"
   },
   {
     "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
