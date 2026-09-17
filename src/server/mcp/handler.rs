@@ -695,6 +695,7 @@ pub(crate) async fn await_startup_reindex(
     server: Option<std::sync::Arc<LainServer>>,
     reindex_timeout: Option<std::time::Duration>,
     notifier: Option<std::sync::Arc<dyn McpServer>>,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     let Some(server) = server else {
         return;
@@ -703,7 +704,21 @@ pub(crate) async fn await_startup_reindex(
     let timeout = reindex_timeout.unwrap_or_else(crate::server::refresh::parse_reindex_timeout);
     let last_outcome = server.refresh_handle().last_outcome().clone();
     let readiness = server.ingest().tool_executor().ctx.readiness.clone();
-    let outcome = match tokio::time::timeout(timeout, server.build_core_memory()).await {
+    let outcome = match tokio::time::timeout(timeout, async {
+        // AGENT_UX_ROADMAP.md M4 follow-up: race the coordinator
+        // against the cancel token. `build_core_memory` already
+        // observes the same token internally at every phase boundary;
+        // this outer race lets the outer timeout (or an explicit
+        // cancel) win even if a phase is wedged in a non-cancellable
+        // sync block. The token wins on both sides.
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(crate::error::LainError::Cancelled),
+            r = server.build_core_memory() => r,
+        }
+    })
+    .await
+    {
         Ok(Ok(())) => {
             // AGENT_UX_ROADMAP.md Milestone 4, coordinator step 9: "a
             // successful base index without this step is not ready." The
@@ -721,9 +736,20 @@ pub(crate) async fn await_startup_reindex(
             crate::server::refresh::RefreshOutcome::ok(started)
         }
         Ok(Err(e)) => {
-            eprintln!("startup re-index failed: {e}");
-            readiness.failed(e.to_string());
-            crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
+            // AGENT_UX_ROADMAP.md M4 follow-up: a `Cancelled` here
+            // means the server-owned token won the outer race — a
+            // cooperative shutdown, not a real failure. Publish
+            // `unavailable_error` with `index_cancelled` (not
+            // `index_failed`) so `get_health` and `get_capabilities`
+            // both surface the right code.
+            if matches!(e, crate::error::LainError::Cancelled) {
+                readiness.cancelled();
+                crate::server::refresh::RefreshOutcome::cancelled(started)
+            } else {
+                eprintln!("startup re-index failed: {e}");
+                readiness.failed(e.to_string());
+                crate::server::refresh::RefreshOutcome::failed(started, e.to_string())
+            }
         }
         Err(_) => {
             eprintln!(
@@ -993,32 +1019,63 @@ impl LainMcpServer {
         // effort; a client that doesn't support it, or wasn't listening,
         // still gets the same answer by polling `get_capabilities`.
         //
-        // This is not full cooperative cancellation: the indexing
-        // coordinator has no cancellation token yet, so a clean shutdown
-        // below gives it a short bounded window to finish and otherwise
-        // hard-aborts it with `AbortHandle::abort()` rather than waiting
-        // indefinitely. Threading a real cancellation token through every
-        // scan/resolve/persist phase boundary is tracked separately
-        // (roadmap step 11) and intentionally not attempted here.
+        // AGENT_UX_ROADMAP.md M4 follow-up: full cooperative
+        // cancellation. The startup task receives the server-owned
+        // `CancellationToken` from `LifecycleInfo`; cancelling it
+        // observes every phase boundary in `build_core_memory` /
+        // `sync_volatile_overlay` and returns control within budget
+        // rather than the pre-fix `AbortHandle::abort()` which could
+        // interrupt the per-file `LspMultiplexer` call mid-flight.
         let notifier: Arc<dyn McpServer> = server.clone();
+        // AGENT_UX_ROADMAP.md M4 follow-up: full cooperative
+        // cancellation. The startup task receives the server-owned
+        // `CancellationToken` from `LifecycleInfo`; cancelling it
+        // observes every phase boundary in `build_core_memory` /
+        // `sync_volatile_overlay` and returns control within budget
+        // rather than the pre-fix `AbortHandle::abort()` which could
+        // interrupt the per-file `LspMultiplexer` call mid-flight.
+        let cancel = lain_server_for_reindex
+            .as_ref()
+            .map(|s| s.lifecycle_handle().cancel_token())
+            .unwrap_or_default();
         let startup_task = tokio::spawn(await_startup_reindex(
-            lain_server_for_reindex,
+            lain_server_for_reindex.clone(),
             reindex_timeout,
             Some(notifier),
+            cancel,
         ));
-        let startup_abort = startup_task.abort_handle();
+        // Retain the JoinHandle so the lifecycle handle (and therefore
+        // `LainServer::Drop` / `shutdown`) can bound-await it.
+        let stdio_lifecycle: Option<&crate::server::ingest::handles::LifecycleInfo> =
+            lain_server_for_reindex
+                .as_ref()
+                .map(|s| s.lifecycle_handle());
+        if let Some(lh) = stdio_lifecycle {
+            lh.install_startup_task(startup_task);
+        }
 
         let result = server.start().await;
 
-        // Give the background indexer a short window to reach a natural
-        // stopping point (or finish outright on a small repo) before
-        // hard-aborting it; either way we don't hold process exit open
-        // waiting on it indefinitely.
-        if tokio::time::timeout(std::time::Duration::from_secs(5), startup_task)
-            .await
-            .is_err()
-        {
-            startup_abort.abort();
+        // AGENT_UX_ROADMAP.md M4 follow-up: cooperative shutdown.
+        // Cancel the server-owned token (so the coordinator observes
+        // cancellation at its next phase boundary) and then bound-await
+        // the JoinHandle for the existing 5-second budget. The handle
+        // was installed via `lifecycle_handle().install_startup_task`
+        // above so the lifecycle slot is the one we drain here.
+        let _ = result;
+        if let Some(lh) = stdio_lifecycle {
+            lh.cancel();
+            if let Some(handle) = lh.take_startup_task() {
+                if tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "stdio: startup re-index did not observe cancellation within 5s; \
+                         task continues detached until the runtime reaps it"
+                    );
+                }
+            }
         }
 
         result
@@ -1036,20 +1093,33 @@ impl LainMcpServer {
         // Same backgrounded re-index as `run_stdio`; see there for the
         // full rationale. HTTP has no equivalent to stdio's "session
         // ended" moment (the accept loop below runs until the process is
-        // killed), so there is nowhere to bound-join this task before
-        // returning — it is left detached and reclaimed on process exit,
-        // the same way the NLP background-enrichment task spawned inside
-        // `build_core_memory` already is.
+        // killed), but unlike the pre-fix code we now retain the
+        // `JoinHandle` in `LifecycleInfo::startup_task` so a future
+        // `LainServer::shutdown` (or `Drop`) can cancel the
+        // server-owned token and bound-await the task. The transport's
+        // own loop keeps running until the runtime tears it down —
+        // the same shutdown story every other HTTP server in the
+        // project's stack uses — but the backgrounded indexer no
+        // longer races a teardown.
         //
         // No notifier: this transport is a plain request/response
         // JSON-RPC loop with no persistent connection to push an
         // unsolicited notification through. `get_capabilities` polling
         // is the only freshness signal HTTP clients get today.
-        tokio::spawn(await_startup_reindex(
+        let cancel = self
+            .server
+            .as_ref()
+            .map(|s| s.lifecycle_handle().cancel_token())
+            .unwrap_or_default();
+        let startup_task = tokio::spawn(await_startup_reindex(
             self.server.clone(),
             self.reindex_timeout,
             None,
+            cancel,
         ));
+        if let Some(server) = self.server.as_ref() {
+            server.lifecycle_handle().install_startup_task(startup_task);
+        }
 
         // Publish the real listener port so tool output can link to
         // `/ui/...` sessions; stdio mode leaves it at 0 (no links).

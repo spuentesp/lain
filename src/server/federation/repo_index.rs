@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::sync::CancellationToken;
 
 /// Top-level wall-clock budget for a single [`RepoIndex::index`] call.
 /// The inner stages already have their own per-request and per-scan
@@ -214,6 +215,16 @@ pub struct RepoIndex {
     /// observability. Defined now to keep the wire shape stable
     /// across that work.
     outstanding_files: std::sync::atomic::AtomicU64,
+    /// AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md §"Cooperative
+    /// cancellation token"): server-owned shutdown signal threaded
+    /// through every long-running phase in the federation pipeline
+    /// (`index_one_repo`, the receiver loop spawned by
+    /// `start_watcher`, and the watcher-driven `index_forced` /
+    /// `sync_overlay` cycles). `FederatedIndex::install_overlay`
+    /// shares one token across all repos via `cancel_token()`; a
+    /// `FederatedIndex::shutdown` call (or its `Drop`) cancels the
+    /// parent token, which propagates to every child clone here.
+    cancel: CancellationToken,
 }
 
 // `RepoIndex` is `Send + Sync` because every field is `Send + Sync`:
@@ -235,6 +246,18 @@ impl RepoIndex {
         let mut active = self.active.lock();
         *active = false;
         self.watcher.lock().take();
+        // AGENT_UX_ROADMAP.md M4 follow-up: cancel the cooperative
+        // shutdown token. The receiver task spawned by `start_watcher`
+        // observes this via `select!` and exits at the next phase
+        // boundary. `deactivate` is sync (called from `Drop`), so we
+        // can't `await` the JoinHandle here — the pre-fix code
+        // dropped it after `task.abort()`. We keep that semantics
+        // for symmetry and rely on the receiver's own observation
+        // of the token for graceful shutdown.
+        self.cancel.cancel();
+        if let Some(task) = self.watcher_task.lock().take() {
+            task.abort();
+        }
         if let Some(task) = self.watcher_task.lock().take() {
             task.abort();
         }
@@ -306,7 +329,23 @@ impl RepoIndex {
             indexed: Arc::new(tokio::sync::Notify::new()),
             indexed_at_least_once: std::sync::atomic::AtomicBool::new(false),
             outstanding_files: std::sync::atomic::AtomicU64::new(0),
+            cancel: CancellationToken::new(),
         })
+    }
+
+    /// Handle on the [`Notify`] the receiver task fires after each
+    /// `index()` + `sync_overlay()` cycle. Tests clone this and
+    /// the cancellation token so they can race shutdown against
+    /// the receiver's natural wake.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// Public test hook so a test can cancel without owning the
+    /// `RepoIndex`. Production code uses `FederatedIndex::shutdown`
+    /// to cancel the parent token.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
     }
 
     /// Handle on the [`Notify`] the receiver task fires after each
@@ -489,6 +528,7 @@ impl RepoIndex {
                 source_repo: Some(source_repo),
                 namespace: &self.id_namespace,
                 force: false,
+                cancel: &self.cancel,
             })
             .await
         };
@@ -579,6 +619,7 @@ impl RepoIndex {
                 source_repo: Some(source_repo),
                 namespace: &self.id_namespace,
                 force: true,
+                cancel: &self.cancel,
             })
             .await
         };
@@ -649,6 +690,12 @@ impl RepoIndex {
         const WATCHER_CHANNEL_DEPTH: usize = 1024;
         let (tx, mut rx) = mpsc::channel::<notify::Result<notify::Event>>(WATCHER_CHANNEL_DEPTH);
 
+        // AGENT_UX_ROADMAP.md M4 follow-up: clone the cancel token
+        // *before* the `tokio::spawn` so the spawn closure doesn't
+        // need to outlive `&self`. The clone is `Arc`-internal, so
+        // this is cheap.
+        let cancel = self.cancel.clone();
+
         // Receiver task: drains the channel and runs both the commit-based
         // pipeline (`index`) and the working-tree pipeline (`sync_overlay`)
         // per event. Runs in Tokio, so `.await` and `tokio::spawn` are sound.
@@ -661,6 +708,14 @@ impl RepoIndex {
         // and call `notified().await` once per event they want to
         // observe.
         let task = tokio::spawn(async move {
+            // AGENT_UX_ROADMAP.md M4 follow-up: race each watcher
+            // event against the cooperative cancel token. When
+            // `deactivate()` cancels `self.cancel` (called from
+            // `FederatedIndex::shutdown` / `RepoIndex::Drop`), this
+            // loop exits at the next idle moment instead of having
+            // to be `task.abort()`'d mid-`index_forced` (which used
+            // to leave the per-repo graph in whatever partial state
+            // the abort landed in).
             while let Some(res) = rx.recv().await {
                 let Some(me_for_task) = weak.upgrade() else {
                     break;
@@ -673,19 +728,40 @@ impl RepoIndex {
                     // re-scan for any edit the user hadn't committed
                     // yet, leaving the per-repo DB stuck at the
                     // previous commit (wishlist #17).
-                    if let Err(e) = me_for_task.index_forced().await {
-                        tracing::debug!(
-                            "[federation] watcher-triggered index failed for {:?}: {}",
-                            me_for_task.source.local_path(),
-                            e
-                        );
+                    //
+                    // AGENT_UX_ROADMAP.md M4 follow-up: race the
+                    // indexer against the cooperative cancel token.
+                    // `Cancelled` (vs an `Err` from the pipeline
+                    // itself) is the normal shutdown signal — don't
+                    // surface it as a watcher-triggered failure.
+                    if cancel.is_cancelled() {
+                        break;
                     }
-                    if let Err(e) = me_for_task.sync_overlay().await {
-                        tracing::debug!(
-                            "[federation] watcher-triggered overlay refresh failed for {:?}: {}",
-                            me_for_task.source.local_path(),
-                            e
-                        );
+                    let index_result = me_for_task.index_forced().await;
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if let Err(e) = index_result {
+                        if !matches!(e, LainError::Cancelled) {
+                            tracing::debug!(
+                                "[federation] watcher-triggered index failed for {:?}: {}",
+                                me_for_task.source.local_path(),
+                                e
+                            );
+                        }
+                    }
+                    let overlay_result = me_for_task.sync_overlay().await;
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if let Err(e) = overlay_result {
+                        if !matches!(e, LainError::Cancelled) {
+                            tracing::debug!(
+                                "[federation] watcher-triggered overlay refresh failed for {:?}: {}",
+                                me_for_task.source.local_path(),
+                                e
+                            );
+                        }
                     }
                 } else if let Err(e) = &res {
                     // Notify backend error (e.g. ENOSPC under inotify

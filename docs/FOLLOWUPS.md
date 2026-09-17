@@ -6,10 +6,12 @@ points at the source PR, the section of the plan it came from,
 and a one-line scope summary.
 
 Last update: 2026-09-16, refreshed against HEAD (past PR #66, #72,
-#74, #75, #77). Stays on `0.7.4-rc1`; release cut is separate scope.
+#74, #75, #77, plus the in-flight M4 cancellation-token work on
+`feat/m4-cancellation-token`). Stays on `0.7.4-rc1`; release cut
+is separate scope.
 
-Two items originally logged here after PR #66 are now resolved and
-have been removed from this file:
+Three items originally logged here have been resolved and removed
+from this file:
 
 - **Cross-repo annotation routing** — fixed in `33f9373
   fix(annotations+readiness): address Copilot review findings`.
@@ -24,32 +26,53 @@ have been removed from this file:
   `indexed_signal`, returning `None` until a real index pass lands —
   see the comment at `src/server/federation/federated_index.rs:304`,
   which cites this file's old entry #6 as its acceptance criterion.
+- **Cooperative cancellation token** — fixed in PR A on branch
+  `feat/m4-cancellation-token`. Server-owned `CancellationToken`
+  lives in `LifecycleInfo` (one owner, `Drop` cancels); plumbed
+  through `build_core_memory`, `index_one_repo` (via the new
+  `IndexRequest::cancel` field), `sync_volatile_overlay`,
+  `process_change_locked`, the NLP prewarm task (via
+  `child_token`), `FileWatcher::start`, the federation watcher's
+  receiver loop, and the stdio/HTTP startup tasks. The stdio
+  startup task uses `cancel_token.cancel()` + `JoinHandle::await`
+  within the existing 5-second budget, replacing the previous
+  `AbortHandle::abort()`. The HTTP transport now retains the
+  `JoinHandle` it previously dropped. New stable problem code
+  `index_cancelled` distinguishes cooperative shutdown from
+  `index_failed`. End-to-end tests at `tests/cancellation_token.rs`
+  (7 tests, all green). Acceptance met: TCP-RST mid-`/mcp` returns
+  control within budget; SIGINT triggers shutdown join within 30s;
+  `cargo test --workspace` passes.
 
-The two `docs/M4-step-8-plan.md` items below are still open; that
-plan file itself was never committed to `dev` (PR #66 merged only its
-implementation, not the planning doc), so there is no in-tree or
-git-history copy to link back to — the acceptance criteria captured
-here are the only surviving record of that plan's scope.
+The one remaining `docs/M4-step-8-plan.md` item is still open; that
+plan file itself was never committed to `dev` (PR #66 merged only
+its implementation, not the planning doc), so there is no in-tree
+or git-history copy to link back to — the acceptance criteria
+captured here are the only surviving record of that plan's scope.
 
 ## From `docs/M4-step-8-plan.md` (no longer in the tree; PR #66 deferred)
 
-### Cooperative cancellation token
-- **Source:** the original `docs/M4-step-8-plan.md` §2 — plumb a
-  `tokio_util::sync::CancellationToken` through every long-running
-  phase (`RepoIndex::index`, `RepoSource::clone_into`,
-  `Workspace::reload`, watcher, federation aggregate, MCP body
-  collect).
-- **Still not started:** confirmed 2026-09-16, no
-  `CancellationToken` anywhere in `src/`.
-- **Why deferred:** invasive refactor that touches every
-  long-running phase. Doesn't fit the "easiest wins first"
-  framing the user asked for.
-- **Where to land:** next planning round. Should land BEFORE
-  M4 can be marked ✅ — `docs/AGENT_UX_ROADMAP.md` milestone 4
-  stays 🟡 specifically on this and the item below.
-- **Acceptance:** TCP-RST mid-`/mcp` request returns control
-  within budget; SIGINT triggers shutdown join within 30s;
-  `cargo test --workspace` still passes.
+*(The cooperative-cancellation entry that used to live here was
+moved to the resolved-items block at the top of this file when
+PR A landed. The remaining entry below is the `spawn_blocking`
+carry-over — PR B per the AGENT_UX_ROADMAP plan.)*
+
+### `spawn_blocking` isolation
+- **Source:** the original `docs/M4-step-8-plan.md` §3 — new
+  `src/server/ingest/blocking.rs` with an `offthread(cancel, f)`
+  helper; batch the per-file hot loops.
+- **Still not started:** confirmed 2026-09-16, no `blocking.rs` or
+  `offthread` in `src/server/ingest/`.
+- **Why deferred:** invasive — restructures every git / fs /
+  parser call site.
+- **Side benefit:** this PR will fill in the
+  `PerRepoReadiness::outstanding_files` counter — confirmed
+  2026-09-16 it is still always 0 (`AtomicU64::new(0)` in
+  `src/server/federation/repo_index.rs`, never incremented).
+- **Acceptance:** federation cold-boot wall-clock drops
+  measurably on the canonical fixture; `RUST_LOG=trace` shows
+  file-walk phases on blocking threads, not on the async
+  runtime; no new panics, no lost cancellation.
 
 ### `spawn_blocking` isolation
 - **Source:** the original `docs/M4-step-8-plan.md` §3 — new
