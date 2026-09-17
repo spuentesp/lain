@@ -1,3 +1,4 @@
+use super::blocking::offthread;
 use super::scan::{scan_file_batch, PatternRef, StaticFileRef};
 use super::LainServer;
 use crate::error::LainError;
@@ -8,6 +9,8 @@ use crate::schema::{GraphEdge, GraphNode};
 use crate::server::overlay::{OverlayDiff, VolatileOverlay};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 impl LainServer {
@@ -24,15 +27,41 @@ impl LainServer {
         if self.ingest().graph().is_read_only() {
             return Ok(());
         }
+        // AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md): every long-
+        // running phase observes the server-owned cancellation token.
+        // A `Drop` on `LainServer` cancels it (via `LifecycleInfo`'s
+        // `Drop` impl), so a shutdown during a cold-boot re-index
+        // returns control promptly instead of running to completion.
+        let cancel = self.lifecycle_handle().cancel_token();
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled before discovering commit");
+            return Err(LainError::Cancelled);
+        }
         let scan_start = std::time::Instant::now();
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
         });
-        let (latest_commit, latest_time) = self.ingest().git().lock().get_latest_commit_info()?;
+        // AGENT_UX_ROADMAP.md M4 follow-up: route the libgit2 commit
+        // lookup through `offthread`. Pre-fix this ran on the Tokio
+        // worker; a slow git operation (e.g. a packed-refs refresh
+        // on a huge monorepo) would block the worker holding the
+        // `AsyncMutex<GitSensor>` for as long as it took. The
+        // `Arc<Mutex<GitSensor>>` is cloned and the parking_lot lock
+        // is acquired *inside* the closure so no guard crosses the
+        // await boundary.
+        let git_sensor = Arc::clone(self.ingest().git());
+        let (latest_commit, latest_time) = offthread(cancel.clone(), move || {
+            git_sensor.lock().get_latest_commit_info()
+        })
+        .await?;
         let last_commit = self.ingest().graph().get_last_commit()?;
         self.readiness().update(|snapshot| {
             snapshot.target_commit = Some(latest_commit.clone());
         });
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled after discovering commit");
+            return Err(LainError::Cancelled);
+        }
 
         if let Some(ref last) = last_commit {
             if last == &latest_commit {
@@ -53,10 +82,19 @@ impl LainServer {
         // 1. Parallel Map Phase: Scan files for structure and external references
         let files = if let Some(ref last) = last_commit {
             info!("Incremental update since {}", last);
-            self.ingest().git().lock().get_changed_files_since(last)?
+            let last = last.clone();
+            let git_sensor = Arc::clone(self.ingest().git());
+            offthread(cancel.clone(), move || {
+                git_sensor.lock().get_changed_files_since(&last)
+            })
+            .await?
         } else {
             info!("Full repository scan");
-            self.ingest().git().lock().get_all_tracked_files()?
+            let git_sensor = Arc::clone(self.ingest().git());
+            offthread(cancel.clone(), move || {
+                git_sensor.lock().get_all_tracked_files()
+            })
+            .await?
         };
 
         if files.is_empty() {
@@ -67,9 +105,13 @@ impl LainServer {
             info!("No files to scan; sweeping orphans.");
             sweep_orphans(
                 &self.ingest().config().workspace,
-                &self.ingest().graph(),
+                self.ingest().graph(),
                 &self.ingest().git().lock(),
             );
+            if cancel.is_cancelled() {
+                info!("build_core_memory: cancelled after orphan sweep");
+                return Err(LainError::Cancelled);
+            }
             self.ingest().graph().set_last_commit(latest_commit)?;
             self.ingest().graph().save_to_disk().await?;
             return Ok(());
@@ -102,6 +144,13 @@ impl LainServer {
 
         let mut set = tokio::task::JoinSet::new();
         for chunk in file_chunks {
+            // AGENT_UX_ROADMAP.md M4 follow-up: cancel between batches.
+            // Spawning new work after a cancel would keep the runtime
+            // busy past the shutdown budget.
+            if cancel.is_cancelled() {
+                info!("build_core_memory: cancelled before scan batch");
+                return Err(LainError::Cancelled);
+            }
             let lsp = self.ingest().lsp_pool().next();
             let workspace = self.ingest().config().workspace.clone();
             let commit_hash = latest_commit.clone();
@@ -111,6 +160,11 @@ impl LainServer {
             // of borrowing `&self.ingest().id_namespace()` which would dangle past
             // `self`'s lifetime.
             let namespace = *self.ingest().id_namespace();
+            // The closure takes ownership of `cancel.clone()`; clone
+            // here so the next loop iteration can still read the
+            // outer `cancel` for the next batch's `is_cancelled()`
+            // check.
+            let cancel_for_spawn = cancel.clone();
 
             set.spawn(async move {
                 scan_file_batch(
@@ -121,6 +175,7 @@ impl LainServer {
                     git_time,
                     commit_hash,
                     &namespace,
+                    cancel_for_spawn,
                 )
                 .await
             });
@@ -154,6 +209,15 @@ impl LainServer {
             std::time::Duration::from_secs(self.ingest().tuning().ingestion.scan_timeout_secs);
 
         while let Some(res) = set.join_next().await {
+            // AGENT_UX_ROADMAP.md M4 follow-up: cancel observed at every
+            // completed batch boundary. If we observe it after a batch
+            // finishes, abort the rest and bail out before any further
+            // persistence work runs.
+            if cancel.is_cancelled() {
+                info!("build_core_memory: cancelled mid-scan");
+                set.abort_all();
+                return Err(LainError::Cancelled);
+            }
             // Check timeout - abort remaining tasks and break
             if scan_start.elapsed() >= scan_timeout {
                 warn!(
@@ -216,7 +280,7 @@ impl LainServer {
                         {
                             warn!("Batch node write error: {}", e);
                         }
-                        insert_edges_best_effort(&self.ingest().graph(), &batch_edges, "batch");
+                        insert_edges_best_effort(self.ingest().graph(), &batch_edges, "batch");
                         // Durably persist the flush. The in-memory inserts above
                         // are lost if the outer re-index timeout drops this task,
                         // which is why a 90s budget could never converge: every
@@ -260,7 +324,7 @@ impl LainServer {
             {
                 warn!("Final batch node write error: {}", e);
             }
-            insert_edges_best_effort(&self.ingest().graph(), &batch_edges, "final batch");
+            insert_edges_best_effort(self.ingest().graph(), &batch_edges, "final batch");
         }
 
         info!("Scanned {} files, {} failed, collected {} external refs, {} static refs, {} pattern refs",
@@ -270,44 +334,56 @@ impl LainServer {
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Resolving;
         });
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled before resolve");
+            return Err(LainError::Cancelled);
+        }
         info!(
             "Resolving topology: Linking {} external references...",
             all_external_refs.len()
         );
         let call_edges = super::resolve::resolve_call_edges(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &self.ingest().config().workspace,
             &all_external_refs,
             None,
             None,
         );
         info!("Ingesting {} call edges", call_edges.len());
-        insert_edges_reporting(&self.ingest().graph(), &call_edges, "call")?;
+        insert_edges_reporting(self.ingest().graph(), &call_edges, "call")?;
 
         // 3b. Static Resolve Phase: tree-sitter derived Calls/Uses edges
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled after call resolve");
+            return Err(LainError::Cancelled);
+        }
         info!(
             "Resolving {} tree-sitter static references...",
             all_static_refs.len()
         );
         let static_edges = super::resolve::resolve_static_edges(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &all_static_refs,
             None,
             None,
         );
         info!("Ingesting {} static tree-sitter edges", static_edges.len());
-        insert_edges_reporting(&self.ingest().graph(), &static_edges, "static")?;
+        insert_edges_reporting(self.ingest().graph(), &static_edges, "static")?;
 
         // 3c. Pattern Resolve Phase: Cross-boundary semantic edges from string literals
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled after static resolve");
+            return Err(LainError::Cancelled);
+        }
         info!(
             "Resolving {} pattern references for cross-boundary detection...",
             all_pattern_refs.len()
         );
         let pattern_edges = super::resolve::resolve_pattern_edges(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &all_pattern_refs,
             super::resolve::PatternLimits::from_tuning(
-                &self.ingest().tuning(),
+                self.ingest().tuning(),
                 super::resolve::PatternLimits::DEFAULT,
             ),
         );
@@ -315,7 +391,7 @@ impl LainServer {
             "Ingesting {} cross-boundary pattern edges",
             pattern_edges.len()
         );
-        insert_edges_reporting(&self.ingest().graph(), &pattern_edges, "pattern")?;
+        insert_edges_reporting(self.ingest().graph(), &pattern_edges, "pattern")?;
 
         // 3d. Protocol sensors: HTTP routes, OpenAPI, proto, GraphQL,
         // WebSocket. Runs after the symbol nodes exist, because
@@ -327,23 +403,35 @@ impl LainServer {
         // — could never appear in a graph, while `describe_schema`
         // advertised them and `get_cross_runtime_callers` read them.
         let sensor_counts = crate::server::sensors::run_all(
-            &self.ingest().graph(),
+            self.ingest().graph(),
             &self.ingest().config().workspace,
-            &self.ingest().id_namespace(),
+            self.ingest().id_namespace(),
         );
         if sensor_counts.total() > 0 {
             info!("Protocol sensors contributed {:?}", sensor_counts);
         }
 
         // 4. Temporal Analysis Phase: Co-changes
-        let co_change_pairs = {
-            let git = self.ingest().git().lock();
-            git.analyze_co_changes(
-                self.ingest().tuning().ingestion.cochange_commit_window,
-                self.ingest().tuning().ingestion.cochange_min_pair_count,
-                self.ingest().tuning().ingestion.cochange_max_commit_files,
-            )
-            .unwrap_or_default()
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled after pattern resolve");
+            return Err(LainError::Cancelled);
+        }
+        let co_change_pairs: Vec<crate::git::CoChangePair> = {
+            let window = self.ingest().tuning().ingestion.cochange_commit_window;
+            let min_pair = self.ingest().tuning().ingestion.cochange_min_pair_count;
+            let max_files = self.ingest().tuning().ingestion.cochange_max_commit_files;
+            let git_sensor = Arc::clone(self.ingest().git());
+            match offthread(cancel.clone(), move || {
+                git_sensor
+                    .lock()
+                    .analyze_co_changes(window, min_pair, max_files)
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(LainError::Cancelled) => return Err(LainError::Cancelled),
+                Err(_) => Vec::new(),
+            }
         };
         let co_change_tuples: Vec<_> = co_change_pairs
             .into_iter()
@@ -357,6 +445,10 @@ impl LainServer {
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Enriching;
         });
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled before enrichment");
+            return Err(LainError::Cancelled);
+        }
         info!("Enriching topology: Calculating anchors and depths...");
         self.ingest().graph().calculate_anchor_scores()?;
         self.ingest().graph().calculate_depths()?;
@@ -372,7 +464,16 @@ impl LainServer {
         // The NLP pass runs detached, so it needs its own copy of the
         // workspace root to resolve workspace-relative node paths.
         let ws_for_nlp = self.ingest().config().workspace.clone();
+        // AGENT_UX_ROADMAP.md M4 follow-up: the detached NLP prewarm
+        // task gets a *child* token, so cancelling the server-owned
+        // token (via Drop / shutdown) is observed here too. A child
+        // token never cancels its parent; cancelling the parent
+        // cancels every child.
+        let nlp_cancel: CancellationToken = cancel.child_token();
         tokio::spawn(async move {
+            if nlp_cancel.is_cancelled() {
+                return;
+            }
             let all_nodes = graph_clone.get_all_nodes();
             // Top anchors get embedded first (pre-warm)
             let mut anchors: Vec<_> = all_nodes
@@ -389,30 +490,55 @@ impl LainServer {
             info!("NLP pre-warming {} anchor nodes...", prewarm.len());
             let mut count = 0;
             for node in &prewarm {
+                if nlp_cancel.is_cancelled() {
+                    return;
+                }
                 if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                     if gn.embedding.is_none() {
                         let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
-                        if let Ok(emb) = embedder_clone.embed(&text) {
-                            // Never store a default on serialize failure.
-                            // `unwrap_or_default()` wrote `Some("")`, which
-                            // marks the node as embedded — `is_none()` is
-                            // false, so it is never retried — while
-                            // `executor.rs` fails to parse the empty string
-                            // and skips it. The symbol disappears from
-                            // `semantic_search` permanently and silently.
-                            match serde_json::to_string(&emb) {
-                                Ok(json) => {
-                                    gn.embedding = Some(json);
-                                    if graph_clone.insert_node(&gn).is_ok() {
-                                        count += 1;
-                                    }
-                                }
-                                Err(e) => warn!(
-                                    "embedding not serialised for {}: {e}; leaving it \
+                        // AGENT_UX_ROADMAP.md M4 follow-up: ONNX
+                        // inference is sync CPU work — route it
+                        // through `offthread` so a slow forward
+                        // pass doesn't pin a Tokio worker. The
+                        // per-call cancel boundary also lets a
+                        // shutdown abort an in-flight embed.
+                        let embedder_for_call = embedder_clone.clone();
+                        let text_for_call = text.clone();
+                        let emb_result = offthread(nlp_cancel.clone(), move || {
+                            embedder_for_call.embed(&text_for_call)
+                        })
+                        .await;
+                        let emb = match emb_result {
+                            Ok(e) => e,
+                            Err(LainError::Cancelled) => return,
+                            Err(e) => {
+                                warn!(
+                                    "embedding inference failed for {}: {e}; leaving it \
                                      unembedded so a later pass retries",
                                     gn.name
-                                ),
+                                );
+                                continue;
                             }
+                        };
+                        // Never store a default on serialize failure.
+                        // `unwrap_or_default()` wrote `Some("")`, which
+                        // marks the node as embedded — `is_none()` is
+                        // false, so it is never retried — while
+                        // `executor.rs` fails to parse the empty string
+                        // and skips it. The symbol disappears from
+                        // `semantic_search` permanently and silently.
+                        match serde_json::to_string(&emb) {
+                            Ok(json) => {
+                                gn.embedding = Some(json);
+                                if graph_clone.insert_node(&gn).is_ok() {
+                                    count += 1;
+                                }
+                            }
+                            Err(e) => warn!(
+                                "embedding not serialised for {}: {e}; leaving it \
+                                 unembedded so a later pass retries",
+                                gn.name
+                            ),
                         }
                     }
                 }
@@ -426,33 +552,57 @@ impl LainServer {
             // Background lazy enrichment with backpressure
             let mut budget = nlp_budget_per_pass;
             for chunk in rest.chunks(nlp_batch_size) {
+                if nlp_cancel.is_cancelled() {
+                    return;
+                }
                 if budget == 0 {
                     break;
                 }
                 let to_embed: Vec<_> = chunk.iter().take(budget).cloned().collect();
                 let batch_len = to_embed.len();
                 for node in &to_embed {
+                    if nlp_cancel.is_cancelled() {
+                        return;
+                    }
                     if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
                         if gn.embedding.is_none() {
                             let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
-                            if let Ok(emb) = embedder_clone.embed(&text) {
-                                // Same reasoning as the prewarm pass above:
-                                // a default here poisons the node with an
-                                // unparseable embedding it will never retry.
-                                match serde_json::to_string(&emb) {
-                                    Ok(json) => {
-                                        gn.embedding = Some(json);
-                                        // A dropped insert silently costs the
-                                        // node its embedding, which surfaces
-                                        // later as `semantic_search` missing
-                                        // code that is plainly there.
-                                        if let Err(e) = graph_clone.insert_node(&gn) {
-                                            warn!("embedding not stored for {}: {e}", gn.name);
-                                        }
+                            // Same offthread routing as the prewarm pass:
+                            // keep ONNX off the async runtime.
+                            let embedder_for_call = embedder_clone.clone();
+                            let text_for_call = text.clone();
+                            let emb_result = offthread(nlp_cancel.clone(), move || {
+                                embedder_for_call.embed(&text_for_call)
+                            })
+                            .await;
+                            let emb = match emb_result {
+                                Ok(e) => e,
+                                Err(LainError::Cancelled) => return,
+                                Err(e) => {
+                                    warn!(
+                                        "embedding inference failed for {}: {e}; \
+                                         leaving it unembedded so a later pass retries",
+                                        gn.name
+                                    );
+                                    continue;
+                                }
+                            };
+                            // Same reasoning as the prewarm pass above:
+                            // a default here poisons the node with an
+                            // unparseable embedding it will never retry.
+                            match serde_json::to_string(&emb) {
+                                Ok(json) => {
+                                    gn.embedding = Some(json);
+                                    // A dropped insert silently costs the
+                                    // node its embedding, which surfaces
+                                    // later as `semantic_search` missing
+                                    // code that is plainly there.
+                                    if let Err(e) = graph_clone.insert_node(&gn) {
+                                        warn!("embedding not stored for {}: {e}", gn.name);
                                     }
-                                    Err(e) => {
-                                        warn!("embedding not serialised for {}: {e}", gn.name)
-                                    }
+                                }
+                                Err(e) => {
+                                    warn!("embedding not serialised for {}: {e}", gn.name)
                                 }
                             }
                         }
@@ -469,7 +619,16 @@ impl LainServer {
         // a partial one, "not scanned this round" is indistinguishable from
         // "gone", and sweeping would delete live nodes.
         if !partial {
-            match self.ingest().git().lock().get_all_tracked_files() {
+            if cancel.is_cancelled() {
+                info!("build_core_memory: cancelled before orphan sweep");
+                return Err(LainError::Cancelled);
+            }
+            let git_sensor = Arc::clone(self.ingest().git());
+            let tracked_paths_result = offthread(cancel.clone(), move || {
+                git_sensor.lock().get_all_tracked_files()
+            })
+            .await;
+            match tracked_paths_result {
                 Ok(tracked_paths) => {
                     // Reduced with the same helper the scanner mints node paths
                     // with. Comparing git's absolute paths against relative node
@@ -497,6 +656,10 @@ impl LainServer {
         self.readiness().update(|snapshot| {
             snapshot.phase = crate::server::readiness::IndexPhase::Persisting;
         });
+        if cancel.is_cancelled() {
+            info!("build_core_memory: cancelled before persist");
+            return Err(LainError::Cancelled);
+        }
         if partial {
             warn!(
                 "Partial index pass ({} files scanned, {} failed);                  leaving indexed-commit marker unchanged",
@@ -548,6 +711,14 @@ impl LainServer {
         if self.ingest().graph().is_read_only() {
             return Ok(());
         }
+        // AGENT_UX_ROADMAP.md M4 follow-up: observe the server-owned
+        // cancel token at the top of the reconciliation pass. Shutdown
+        // during a slow LSP round-trip on a large diff used to keep
+        // running until the loop drained; now it returns promptly.
+        let cancel = self.lifecycle_handle().cancel_token();
+        if cancel.is_cancelled() {
+            return Err(LainError::Cancelled);
+        }
         // The snapshot, removals, and replacements form one reconciliation.
         // Direct process_change calls use the same lock.
         let _guard = self.ingest().process_change_lock().lock().await;
@@ -581,6 +752,9 @@ impl LainServer {
             self.remove_owned_overlay_path(&path);
         }
         for change in changes {
+            if cancel.is_cancelled() {
+                return Err(LainError::Cancelled);
+            }
             if let Err(e) = self.process_change_locked(&change.path).await {
                 warn!("Failed to process change {:?}: {}", change.path, e);
             }
@@ -615,11 +789,22 @@ impl LainServer {
         if self.ingest().graph().is_read_only() {
             return Ok(());
         }
+        // Mirror sync_volatile_overlay: observe the cancel token
+        // before queueing behind the reconciliation lock. The lock
+        // itself can be held for a long time on a busy repo, and
+        // shutdown should not have to wait for it.
+        if self.lifecycle_handle().is_cancelled() {
+            return Err(LainError::Cancelled);
+        }
         let _guard = self.ingest().process_change_lock().lock().await;
         self.process_change_locked(path).await
     }
 
     async fn process_change_locked(&self, path: &Path) -> Result<(), LainError> {
+        let cancel = self.lifecycle_handle().cancel_token();
+        if cancel.is_cancelled() {
+            return Err(LainError::Cancelled);
+        }
         let key = graph_path(&self.ingest().config().workspace, path);
         if !path.is_file() {
             self.remove_owned_overlay_path(&key);
@@ -641,7 +826,7 @@ impl LainServer {
                 .get_document_symbols_hierarchical(
                     path,
                     &self.ingest().config().workspace,
-                    &self.ingest().id_namespace(),
+                    self.ingest().id_namespace(),
                 )
                 .await
             {
@@ -675,12 +860,12 @@ impl LainServer {
                             d.kind,
                             d.name.clone(),
                             graph_key.clone(),
-                            &self.ingest().id_namespace(),
+                            self.ingest().id_namespace(),
                         )
                         .with_location_in(
                             d.line_start,
                             d.line_end,
-                            &self.ingest().id_namespace(),
+                            self.ingest().id_namespace(),
                         ),
                         children: vec![],
                     })
@@ -804,6 +989,11 @@ pub struct IndexRequest<'a> {
     pub source_repo: Option<&'a crate::federation::repo_id::RepoId>,
     pub namespace: &'a crate::schema::RepoNamespace,
     pub force: bool,
+    /// AGENT_UX_ROADMAP.md M4 follow-up: cooperative shutdown
+    /// signal observed at every phase boundary. The federation
+    /// caller (`RepoIndex::index`) passes the server-owned token
+    /// from `LifecycleInfo`; tests pass a fresh one.
+    pub cancel: &'a CancellationToken,
 }
 
 pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> {
@@ -817,7 +1007,11 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         source_repo,
         namespace,
         force,
+        cancel,
     } = request;
+    if cancel.is_cancelled() {
+        return Err(LainError::Cancelled);
+    }
     let scan_start = std::time::Instant::now();
     let (latest_commit, latest_time) = git.get_latest_commit_info()?;
     let last_commit = graph.get_last_commit()?;
@@ -877,6 +1071,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
             "[federation] No files to scan for {:?}; sweeping orphans.",
             path
         );
+        if cancel.is_cancelled() {
+            return Err(LainError::Cancelled);
+        }
         sweep_orphans(path, graph, git);
         graph.set_last_commit(latest_commit)?;
         graph.save_to_disk_sync()?;
@@ -905,6 +1102,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
 
     let mut set = tokio::task::JoinSet::new();
     for chunk in file_chunks {
+        if cancel.is_cancelled() {
+            return Err(LainError::Cancelled);
+        }
         let lsp_mux = lsp_pool.next();
         let workspace = path.to_path_buf();
         let commit_hash = latest_commit.clone();
@@ -913,6 +1113,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         // reference, so the spawned task borrows from the captured
         // value (which lives for the closure's lifetime).
         let namespace = *namespace;
+        let cancel_for_spawn = cancel.clone();
 
         set.spawn(async move {
             scan_file_batch(
@@ -923,6 +1124,7 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
                 git_time,
                 commit_hash,
                 &namespace,
+                cancel_for_spawn,
             )
             .await
         });
@@ -939,6 +1141,10 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     let mut failed = 0usize;
 
     while let Some(res) = set.join_next().await {
+        if cancel.is_cancelled() {
+            set.abort_all();
+            return Err(LainError::Cancelled);
+        }
         match res {
             Ok(batch_results) => {
                 for file_result in batch_results {
@@ -1010,6 +1216,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     );
 
     // Resolve phase: link external references to internal nodes (CALLS)
+    if cancel.is_cancelled() {
+        return Err(LainError::Cancelled);
+    }
     let call_edges =
         super::resolve::resolve_call_edges(graph, path, &all_external_refs, resolver, source_repo);
     info!(
@@ -1020,6 +1229,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     insert_edges_reporting(graph, &call_edges, "call")?;
 
     // Static resolve: tree-sitter derived Calls/Uses edges
+    if cancel.is_cancelled() {
+        return Err(LainError::Cancelled);
+    }
     let static_edges =
         super::resolve::resolve_static_edges(graph, &all_static_refs, resolver, source_repo);
     info!(
@@ -1030,6 +1242,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     insert_edges_reporting(graph, &static_edges, "static")?;
 
     // Pattern resolve: cross-boundary detection
+    if cancel.is_cancelled() {
+        return Err(LainError::Cancelled);
+    }
     let pattern_edges = super::resolve::resolve_pattern_edges(
         graph,
         &all_pattern_refs,
@@ -1082,8 +1297,14 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     // reaching this point means the pass covered every changed file —
     // there is no partial case to gate on here, unlike the
     // single-workspace pipeline.
+    if cancel.is_cancelled() {
+        return Err(LainError::Cancelled);
+    }
     sweep_orphans(path, graph, git);
 
+    if cancel.is_cancelled() {
+        return Err(LainError::Cancelled);
+    }
     graph.set_last_commit(latest_commit)?;
     graph.save_to_disk_sync()?;
 
@@ -1405,5 +1626,59 @@ mod reconciliation_lock_tests {
             .process_change(&root.path().join("missing.rs"))
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod nlp_offthread_tests {
+    //! Tests for the ONNX → offthread migration (PR B follow-up).
+    //! The full NLP prewarm is exercised end-to-end in
+    //! `tests/cancellation_token.rs`; here we just pin the
+    //! call-site contract — `NlpEmbedder::embed` runs on the
+    //! blocking pool when called via `offthread`, a pre-cancelled
+    //! token short-circuits without invoking the embedder.
+    use super::*;
+    use crate::nlp::NlpEmbedder;
+    use crate::server::ingest::blocking::offthread;
+    use crate::tuning::TuningConfig;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    /// `NlpEmbedder::new_stub()` produces a stub that returns an
+    /// empty Vec<f32> from `embed`. Wrapping in `offthread` with
+    /// a pre-cancelled token must return `LainError::Cancelled`
+    /// without ever calling the embedder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offthread_embed_short_circuits_on_pre_cancelled_token() {
+        let embedder = NlpEmbedder::new_stub();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result: Result<Vec<f32>, LainError> =
+            offthread(cancel, move || embedder.embed("hello")).await;
+        assert!(matches!(result, Err(LainError::Cancelled)));
+    }
+
+    /// When the token is *not* cancelled, offthread returns the
+    /// embedder's success value verbatim. The stub returns a
+    /// `Vec<f32>` whose length matches the embedder's
+    /// `embedding_dim()` (typically 384). We assert the round
+    /// trip succeeds and the returned length is positive.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offthread_embed_returns_stub_value_when_not_cancelled() {
+        let embedder = NlpEmbedder::new_stub();
+        let dim = embedder.embedding_dim();
+        let cancel = CancellationToken::new();
+        let result: Result<Vec<f32>, LainError> =
+            offthread(cancel, move || embedder.embed("hello")).await;
+        let v = result.expect("embed returns Ok in stub mode");
+        assert_eq!(v.len(), dim, "stub returns dim-length vector");
+    }
+
+    /// Sanity: `TuningConfig::default()` exists (the production
+    /// offthread helper takes a `&TuningConfig`).
+    #[test]
+    fn tuning_config_default_is_available() {
+        let _t: TuningConfig = TuningConfig::default();
+        let _arc: Arc<TuningConfig> = Arc::new(TuningConfig::default());
     }
 }

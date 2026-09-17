@@ -159,7 +159,12 @@ impl FileWatcher {
     /// `WatcherTestHooks::ready_signal`, now also wired for production
     /// callers that need to sequence startup against it — see
     /// `start_source_watcher`).
-    pub fn start(self, workspace: PathBuf, server: LainServer) -> oneshot::Receiver<usize> {
+    pub fn start(
+        self,
+        workspace: PathBuf,
+        server: LainServer,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> oneshot::Receiver<usize> {
         let file_sender = self.sender.clone();
         let receiver = self.receiver;
         let git = Arc::clone(server.ingest().git());
@@ -181,6 +186,14 @@ impl FileWatcher {
             const BATCH_SIZE: usize = 20;
 
             loop {
+                // AGENT_UX_ROADMAP.md M4 follow-up: cooperative cancel
+                // observed at the top of every debounce tick. When the
+                // server-owned token is cancelled (via `LainServer::Drop`
+                // or `LainServer::shutdown`), the processor exits here
+                // instead of completing the current debounce window.
+                if cancel.is_cancelled() {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
 
                 // Drain everything queued during the debounce window, not

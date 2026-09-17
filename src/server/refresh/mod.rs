@@ -21,6 +21,10 @@ pub enum RefreshResult {
     /// state at the timeout is whatever the worker had written so
     /// far (likely partial).
     Timeout,
+    /// The re-index was cancelled by a cooperative shutdown signal.
+    /// Not a failure — the user explicitly asked for it. The graph
+    /// state is whatever the worker had written so far.
+    Cancelled,
     /// The re-index returned an error (e.g. git lock contention,
     /// LSP server failed to start). The graph is unchanged.
     Failed(String),
@@ -35,6 +39,7 @@ impl RefreshResult {
             RefreshResult::Skipped => "skipped",
             RefreshResult::Timeout => "timed out",
             RefreshResult::Failed(_) => "failed",
+            RefreshResult::Cancelled => "cancelled",
         }
     }
 }
@@ -91,6 +96,19 @@ impl RefreshOutcome {
         }
     }
 
+    /// AGENT_UX_ROADMAP.md M4 follow-up: cooperative cancellation.
+    /// Distinct from `timeout` and `failed` so `get_health` and
+    /// `get_capabilities` can distinguish a user-initiated shutdown
+    /// from a real failure.
+    pub fn cancelled(started_at: SystemTime) -> Self {
+        Self {
+            started_at,
+            completed_at: Some(SystemTime::now()),
+            result: RefreshResult::Cancelled,
+            lsp_failures_last_cycle: 0,
+        }
+    }
+
     pub fn failed(started_at: SystemTime, e: impl Into<String>) -> Self {
         Self {
             started_at,
@@ -130,6 +148,14 @@ impl RefreshOutcome {
             RefreshResult::Failed(e) => Some(format!(
                 "⚠ startup re-index failed: {e}; serving existing graph"
             )),
+            // AGENT_UX_ROADMAP.md M4 follow-up: cooperative
+            // shutdown — not a failure, so the doctor surface
+            // shouldn't flag it. `index_cancelled` is the canonical
+            // signal for clients; the human-facing string here is
+            // the same one for consistency.
+            RefreshResult::Cancelled => {
+                Some("○ startup re-index cancelled by shutdown".to_string())
+            }
         }
     }
 

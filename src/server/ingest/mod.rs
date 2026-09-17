@@ -21,6 +21,7 @@
 //! - [`jobs`] — the background enrichment/co-change jobs.
 
 pub mod background;
+pub mod blocking;
 pub mod config;
 pub mod constructors;
 pub mod handles;
