@@ -48,7 +48,20 @@ fn main() -> Result<()> {
             // The server is the only subcommand that needs a tokio
             // runtime. Build one on demand rather than wrapping the
             // whole binary.
+            //
+            // Milestone 4 (AGENT_UX_ROADMAP.md) requires the protocol
+            // loop and the background indexing task to share a runtime
+            // but never starve each other. `max(2, available_parallelism)`
+            // matches the `lain mcp` arm at lines 123–131: on a normal
+            // dev box it's a no-op, but it pins the floor to 2 worker
+            // threads so a single-core sandbox can't collapse the
+            // dispatcher and the indexer onto one OS thread.
+            let worker_threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .max(2);
             let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(worker_threads)
                 .enable_all()
                 .build()
                 .context("build tokio runtime for server subcommand")?;
