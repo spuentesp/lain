@@ -401,33 +401,40 @@ async function driveSequence(page) {
   // (out of scope for this fix wave). The captured frame still
   // demonstrates focal mode activated (search filled, FOCAL row
   // visible), which is the user-visible fix Item 1 asked for.
-  await page.fill('[data-graph-search]', 'data_mut');
-  await new Promise(r => setTimeout(r, 800));   // 300 ms debounce + buffer
-  // The current SPA has two focal-search paths:
-  //   (a) single match → `graphState.mode = 'focal'` is set directly,
-  //       no disambiguation button is rendered.
-  //   (b) multiple matches → a disambiguation panel renders
-  //       `data-focal-candidate` buttons; clicking one activates
-  //       focal mode.
-  // We handle both: race the candidate-button appearance against the
-  // focal-row activation, and click only if the button shows up.
-  const candidate = await Promise.race([
-    page.waitForSelector('[data-focal-candidate]', { timeout: 5_000 })
-        .then(b => ({ kind: 'multiple', el: b }))
-        .catch(() => null),
-    page.waitForFunction(
-      () => document.querySelector('[data-filter-row="focal"][data-active="1"]'),
-      { timeout: 5_000 },
-    ).then(() => ({ kind: 'single' })).catch(() => null),
-  ]);
-  if (candidate && candidate.kind === 'multiple' && candidate.el) {
-    await candidate.el.click();
-  }
+  // Focal mode is the optional "Item 1" hero frame from PR
+  // feat/m4-lsp-cancel-aware. Anchor mode is the demo's baseline
+  // (and still shows graph data); if the focal-search path diverges
+  // from what the recorder expects, fall back to anchor mode rather
+  // than fail the whole recording.
+  let focalActivated = false;
   try {
+    await page.fill('[data-graph-search]', 'data_mut');
+    await new Promise(r => setTimeout(r, 800));   // 300 ms debounce + buffer
+    // The current SPA has two focal-search paths:
+    //   (a) single match → `graphState.mode = 'focal'` is set directly,
+    //       no disambiguation button is rendered.
+    //   (b) multiple matches → a disambiguation panel renders
+    //       `data-focal-candidate` buttons; clicking one activates
+    //       focal mode.
+    // We handle both: race the candidate-button appearance against the
+    // focal-row activation, and click only if the button shows up.
+    const candidate = await Promise.race([
+      page.waitForSelector('[data-focal-candidate]', { timeout: 5_000 })
+          .then(b => ({ kind: 'multiple', el: b }))
+          .catch(() => null),
+      page.waitForFunction(
+        () => document.querySelector('[data-filter-row="focal"][data-active="1"]'),
+        { timeout: 5_000 },
+      ).then(() => ({ kind: 'single' })).catch(() => null),
+    ]);
+    if (candidate && candidate.kind === 'multiple' && candidate.el) {
+      await candidate.el.click();
+    }
     await page.waitForFunction(
       () => document.querySelector('[data-filter-row="focal"][data-active="1"]'),
       { timeout: 8_000 },
     );
+    focalActivated = true;
   } catch (e) {
     // Diagnostic: dump page state so a future run can see what
     // blocked the focal row activation (search candidates, search
@@ -443,11 +450,18 @@ async function driveSequence(page) {
       selectedWorkspace: (document.getElementById('graph-workspace-select') || {}).value || null,
     }));
     await page.screenshot({ path: '/tmp/lain-record-spa-demo/debug-focal-failure.png', fullPage: true });
-    console.error('focal row did not activate; debug dump:', JSON.stringify(dump, null, 2));
-    throw e;
+    console.error('focal mode did not activate; falling back to anchor-mode demo. dump:', JSON.stringify(dump, null, 2));
+    console.error('error:', e.message);
+    // Don't throw — let the recording finish in anchor mode.
   }
-  await new Promise(r => setTimeout(r, 3000));   // let D3 settle the focal graph
-  await new Promise(r => setTimeout(r, 10000));  // bumped 6 s → 10 s; absorbs focal re-render
+  if (focalActivated) {
+    console.log('  focal mode activated');
+    await new Promise(r => setTimeout(r, 3000));   // let D3 settle the focal graph
+    await new Promise(r => setTimeout(r, 10000));  // bumped 6 s → 10 s; absorbs focal re-render
+  } else {
+    console.log('  anchor mode (focal fallback)');
+    await new Promise(r => setTimeout(r, 4000));   // settle the anchor-mode D3 layout
+  }
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
