@@ -130,21 +130,33 @@ impl ToolProfile {
 
 /// Count of `tools/list` entries that come from the *non-inventory*
 /// sources: the always-on server-status family plus the
-/// federation family when the server runs in federation mode. The
-/// caller adds the inventory-side count themselves with the same
-/// profile filter so we don't double-count.
+/// federation family when the server runs in federation mode
+/// plus the workspace family when the server runs in workspace
+/// mode. The caller adds the inventory-side count themselves with
+/// the same profile filter so we don't double-count.
 ///
-/// Workspace families (`list_workspaces`, `get_active_workspace`,
-/// `get_workspace`, `get_workspace_graph`) live on `LainMcpServer`
-/// outside the `ToolExecutor` boundary, so they're not reflected
-/// here. The reported count under workspace mode is therefore a
-/// lower bound by 4 — agents who care about the exact dispatch
-/// mirror should run `tools/list` and count the response.
-pub fn special_advertised_count(profile: ToolProfile, federation_active: bool) -> usize {
+/// All three flags are present on the signature even though
+/// `ToolContext` currently doesn't carry workspace state — the
+/// parameter is wired through `false` from both `get_capabilities`
+/// and `doctor.json` today, and a future PR that plumbs
+/// workspaces into `ToolContext` just swaps the call sites
+/// without changing the helper.
+///
+/// PR-fix-2 added `workspace_active` here so the helper is
+/// complete; PR that actually plumbs workspace state is a
+/// separate change.
+pub fn special_advertised_count(
+    profile: ToolProfile,
+    federation_active: bool,
+    workspace_active: bool,
+) -> usize {
     use crate::server::tools::profile::SemanticProfileFamlies as Fam;
     let mut count = Fam::SERVER_STATUS.len();
     if federation_active {
         count += Fam::FEDERATION.len();
+    }
+    if workspace_active {
+        count += Fam::WORKSPACE.len();
     }
     let _ = profile; // Currently profile-independent; surface area lives at the dispatch site.
     count
@@ -217,18 +229,34 @@ mod tests {
 
     #[test]
     fn special_advertised_count_with_no_federation() {
-        let n = special_advertised_count(ToolProfile::Semantic, false);
-        // server-status is always-on; federation off; workspace is out
-        // of scope for this helper (lives on LainMcpServer). So the
-        // answer is exactly the server-status family size.
+        let n = special_advertised_count(ToolProfile::Semantic, false, false);
+        // server-status is always-on; federation off; workspace off.
+        // The answer is exactly the server-status family size.
         assert_eq!(n, SemanticProfileFamlies::SERVER_STATUS.len());
     }
 
     #[test]
     fn special_advertised_count_with_federation() {
-        let n = special_advertised_count(ToolProfile::Semantic, true);
+        let n = special_advertised_count(ToolProfile::Semantic, true, false);
         let expected =
             SemanticProfileFamlies::SERVER_STATUS.len() + SemanticProfileFamlies::FEDERATION.len();
+        assert_eq!(n, expected);
+    }
+
+    #[test]
+    fn special_advertised_count_with_workspace() {
+        let n = special_advertised_count(ToolProfile::Semantic, false, true);
+        let expected =
+            SemanticProfileFamlies::SERVER_STATUS.len() + SemanticProfileFamlies::WORKSPACE.len();
+        assert_eq!(n, expected);
+    }
+
+    #[test]
+    fn special_advertised_count_with_federation_and_workspace() {
+        let n = special_advertised_count(ToolProfile::Semantic, true, true);
+        let expected = SemanticProfileFamlies::SERVER_STATUS.len()
+            + SemanticProfileFamlies::FEDERATION.len()
+            + SemanticProfileFamlies::WORKSPACE.len();
         assert_eq!(n, expected);
     }
 

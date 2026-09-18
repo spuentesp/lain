@@ -655,6 +655,13 @@ impl ToolExecutor {
             + crate::server::tools::profile::special_advertised_count(
                 profile,
                 self.ctx.federation.is_some(),
+                // Workspace state lives on `LainMcpServer`, not on
+                // `ToolContext`; plumbing it in is a separate
+                // change. Until then the count is exact for
+                // single-repo and federation modes, and a lower
+                // bound (by `WORKSPACE.len() = 4`) for workspace
+                // mode.
+                false,
             );
         serde_json::to_string(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
@@ -853,16 +860,33 @@ impl ToolExecutor {
     /// set as if they had hand-listed every language their
     /// repo uses.
     async fn install_language_servers(&self, extensions: &[String]) -> Result<String, LainError> {
-        let resolved: Vec<String> = if extensions.iter().any(|e| e == "auto") {
+        let needs_auto = extensions.iter().any(|e| e == "auto");
+        let explicit: Vec<String> = extensions
+            .iter()
+            .filter(|e| *e != "auto")
+            .cloned()
+            .collect();
+        let resolved: Vec<String> = if needs_auto {
             // `auto` expands to the workspace's tracked-file extensions.
             // We need a tracked-file list and the registry. The
             // `install_language_server` tool was previously single-tier
             // and not stdio-context-aware; here we go through git's
             // `get_all_tracked_files` (which is the same path the indexer
-            // uses, so we share its git config + cache).
-            self.resolve_auto_extensions()
+            // uses, so we share its git config + cache). PR-fix-2
+            // promotes git-discovery failures from silently empty to
+            // a typed `LainError::Config` so a non-git workspace
+            // caller gets a clear message instead of an empty
+            // success.
+            let auto = self.resolve_auto_extensions()?;
+            let mut merged = explicit;
+            for e in auto {
+                if !merged.contains(&e) {
+                    merged.push(e);
+                }
+            }
+            merged
         } else {
-            extensions.to_vec()
+            explicit
         };
 
         info!(
@@ -894,7 +918,7 @@ impl ToolExecutor {
     /// workspace) bubble up as a typed `LainError::Config` so the
     /// operator gets a clear message instead of a silently-empty
     /// batch.
-    fn resolve_auto_extensions(&self) -> Vec<String> {
+    fn resolve_auto_extensions(&self) -> Result<Vec<String>, LainError> {
         let workspace = self.ctx.workspace.clone();
         let lsp = Arc::clone(&self.ctx.lsp_pool.next());
         // Probe registry first (synchronous, just reads the inner HashMap).
@@ -906,13 +930,26 @@ impl ToolExecutor {
         let tracked = match git_sensor {
             Ok(g) => g.get_all_tracked_files().unwrap_or_default(),
             Err(e) => {
-                tracing::warn!(
-                    "install_language_servers([auto]): git sensor unavailable: {e}; returning []"
-                );
-                return Vec::new();
+                // The original PR (feat/multi-lsp-install) silently
+                // returned an empty Vec here — a real operator
+                // calling `extensions: ["auto"]` against a non-git
+                // workspace got no signal that anything went wrong.
+                // PR-fix-2 promotes this to a typed error so the
+                // tool envelope returns a clear "auto detection
+                // requires a git repository" message instead of an
+                // empty success.
+                return Err(LainError::Config(format!(
+                    "auto detection requires a git repository; \
+                     GitSensor::new({workspace_path:?}) failed: {e}. \
+                     Pass an explicit extensions list \
+                     (e.g. extensions: [\"rs\", \"py\"]) to bypass.",
+                    workspace_path = workspace.display()
+                )));
             }
         };
-        crate::server::lsp::detect_extensions_from_files(&tracked, &known)
+        Ok(crate::server::lsp::detect_extensions_from_files(
+            &tracked, &known,
+        ))
     }
 
     fn get_agent_strategy(&self) -> Result<String, LainError> {
