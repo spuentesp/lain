@@ -150,6 +150,62 @@ All notable changes to LAIN are documented here. Versions follow
   empty-name `File` nodes (source of heuristic edges) cannot
   be silently matched by `find_node_by_name("")`.
 
+### Tier-3 follow-ups
+
+- **`NodeType::Synthetic` for hub nodes.** Hub nodes (`Hub:
+  message_bus_publisher` etc.) are no longer typed as `Function`:
+  they aren't functions, they have no source location, and walking
+  into them via `Calls`/`Uses` produced nonsense answers. The new
+  variant carries `NodeType::Synthetic` in the schema, the
+  `presence_tools::symbol_weight` tier (1, with containers), and
+  the `describe_schema` doc surface. Agents that previously saw
+  hub nodes show up in `find_anchors` now see them filtered out by
+  the node-type filter `type_filter=function` — the correct
+  outcome, since heuristic evidence should be opt-in via
+  `get_blast_radius(..., include_weak_edges=true)` or
+  `explain_dispatch`, not by reading hub nodes as if they were
+  real functions.
+
+- **`dynamic_dispatch_sensor` regex precompilation.** The hot loop
+  in `scan_workspace_dispatch` now reads from a `Lazy<Vec<CompiledDetector>>`
+  rather than compiling 12 regexes per file per scan. On a
+  multi-thousand-file workspace, that's ~120k regex compilations
+  per scan avoided. The precompile also resolves the
+  `&str → EdgeType` and `&str → confidence` lookups once at static
+  init, leaving the per-file hot loop with seven lines and a
+  single allocation (the `GraphEdge` per match). Patterns that
+  fail to compile are silently dropped — the failure mode is
+  "this family never matches", which is honest and easier to spot
+  in test coverage than a panic at static-init time.
+
+- **`assess_change` defaults to `include_weak_edges=true`.** The
+  pre-edit risk verdict (low/medium/high) is meaningless if it
+  can't see dynamic-dispatch callers. A `bus.publish` site with
+  only heuristic callers previously reported `direct=0,
+  transitive=0, risk=low` and the agent would ship the regression
+  `explain_dispatch` was built to prevent. With `include_weak_edges=true`,
+  heuristic callers are tagged with `~` and `[heuristic,
+  conf=X.XX]` (the same format `get_blast_radius` already uses)
+  so agents can tell them apart from type-resolved calls.
+  `explain_dispatch` remains the diagnostic follow-up when the
+  verdict surfaces heuristic callers (it explains which detector
+  fired and whether runtime traces confirm them).
+
+- **Rust trait-object + async-spawn detectors.** Two new
+  detectors close the Tier-3 review point on Rust coverage that
+  was missed in the original sensor surface: `rust_trait_object`
+  matches `Box<dyn Trait>`, `Rc<dyn Trait>`, `Arc<dyn Trait>`
+  (where `Trait` is a user-defined identifier, not `Any`) at
+  confidence 0.6; `async_task_spawn` matches `tokio::spawn`,
+  `async_std::task::spawn`, `smol::spawn`, `executor::spawn`,
+  `workers::spawn` at confidence 0.5. Negative coverage pinned:
+  bare `spawn(` without a runtime namespace prefix does NOT
+  match (prose noise, not a dispatch surface). The two new
+  detectors together fill the gap that the original Tier-3
+  surface had on Rust — every other dynamic-dispatch family the
+  agent might reasonably hit now produces a heuristic edge
+  with a confidence score.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
