@@ -313,7 +313,19 @@ pub async fn assess_change(
 
     let direct_count = count_bullets(&direct);
     let transitive_count = count_bullets(&transitive);
-    let risk = if direct_count == 0 && transitive_count == 0 {
+    // The blast-radius output carries a separate section ("~ N heuristic
+    // caller(s) included") that the section extractors above don't see.
+    // When the static graph is empty but heuristic evidence exists, the
+    // verdict is NOT actually 'low' — the agent should treat it the
+    // same way it would treat explain_dispatch's
+    // 'insufficient_evidence' (or 'heuristic_only'). Surfacing this in
+    // the risk line is the single change that closes the gap.
+    let heuristic_only = direct_count == 0
+        && transitive_count == 0
+        && blast.contains("heuristic caller(s) included");
+    let risk = if heuristic_only {
+        "low* — heuristic-only (see ~ N heuristic caller(s) below)"
+    } else if direct_count == 0 && transitive_count == 0 {
         "low"
     } else if direct_count <= 3 && transitive_count <= 20 {
         "medium"
@@ -841,6 +853,88 @@ mod m6_tests {
         assert!(
             !out.contains("verdict: **low**"),
             "heuristic callers must not let assess_change report risk=low, got:\n{out}"
+        );
+    }
+
+    /// When the static graph is empty but a heuristic caller exists,
+    /// `assess_change` must surface that — the previous contract
+    /// reported `risk=low` in this case, which is the false negative
+    /// `explain_dispatch` was built to prevent. Pinned by the
+    /// `low* — heuristic-only` line on the verdict.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_heuristic_only_verdict_does_not_say_low() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_heuristic_only");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        // Single Function target — no static callers, only one
+        // BusTopic heuristic edge pointing at it.
+        let target = GraphNode::new(
+            NodeType::Function,
+            "fire_handler".to_string(),
+            "/src/handler.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let caller_id = GraphNode::generate_id(&NodeType::File, "/src/caller.py", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::File, String::new(), "/src/caller.py".to_string());
+                n.id = caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("fire_handler".to_string()),
+        );
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // The static graph is empty (no Calls/Uses edges) but the
+        // heuristic caller exists. Pre-fix: verdict was bare `low`
+        // and the agent would treat this as safe. Post-fix: verdict
+        // must be `low*` and carry a pointer to the heuristic
+        // section so the agent knows the static graph is empty by
+        // blind-spot, not by absence of callers.
+        assert!(
+            !out.contains("verdict: **low**\n") && !out.ends_with("verdict: **low**."),
+            "heuristic-only assess_change must not say bare risk=low, got:\n{out}"
+        );
+        assert!(
+            out.contains("heuristic-only") || out.contains("heuristic caller(s) included"),
+            "expected explicit heuristic marker in the verdict line, got:\n{out}"
         );
     }
 
