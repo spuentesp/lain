@@ -96,19 +96,6 @@ impl RuntimeTraceStore {
         GLOBAL.get_or_init(|| Self::new(StoreConfig::from_env()))
     }
 
-    /// For tests only — reset the global so the next `global()` call
-    /// constructs a fresh instance. Not exposed via `pub` to keep
-    /// production callers from clearing real telemetry state by
-    /// accident.
-    #[cfg(test)]
-    pub fn reset_global_for_tests() {
-        // OnceLock has no `take`; tests must rebuild via this seam
-        // only on first call. The first test in a process owns the
-        // global; later tests share it (which is fine because they
-        // typically construct their own store anyway).
-        let _ = GLOBAL.get(); // no-op, ensures init if requested above
-    }
-
     pub fn new(config: StoreConfig) -> Self {
         Self {
             inner: Arc::new(parking_lot::Mutex::new(Inner::default())),

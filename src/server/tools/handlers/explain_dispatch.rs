@@ -390,10 +390,12 @@ mod tests {
             )])
             .unwrap();
 
-        // Inject a runtime edge via the global store. We can't reach
-        // the private `inner` field from here, but the global is
-        // public, so we just call `ingest`.
-        let store = RuntimeTraceStore::global();
+        // Use a private store rather than the global. The global
+        // persists across tests in the same process (OnceLock), so
+        // any other test that ingests a span with the same trace_id
+        // would pollute this verdict. The doc comment on
+        // `build_with_store` explicitly notes this isolation contract.
+        let store = RuntimeTraceStore::new(crate::server::runtime_trace::StoreConfig::default());
         let parent_span = crate::server::runtime_trace::SpanRecord {
             trace_id: "trace-r1".into(),
             span_id: "parent".into(),
@@ -419,7 +421,7 @@ mod tests {
             map.get(s.span_id.as_str()).cloned()
         });
 
-        let report = build(&graph, &overlay, &target);
+        let report = build_with_store(&graph, &overlay, &target, &store);
         assert_eq!(report.verdict, "runtime_confirmed");
         assert_eq!(report.runtime_callers.len(), 1);
         assert_eq!(report.runtime_callers[0].trace_id, "trace-r1");
