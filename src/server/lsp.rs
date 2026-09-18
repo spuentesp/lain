@@ -1416,6 +1416,15 @@ impl LspPool {
         Arc::clone(&self.multiplexers[idx])
     }
 
+    /// Number of multiplexers in the pool. Read-only accessor
+    /// used by the cold-boot prewarm loop to log a parallelism
+    /// breakdown — `unique_exts.len()` round-robin'd across this
+    /// size, with each multiplexer serialising its share on the
+    /// inner `AsyncMutex`.
+    pub fn size(&self) -> usize {
+        self.multiplexers.len()
+    }
+
     /// Snapshot prewarm outcomes from every multiplexer in the pool
     /// and merge them into a single map keyed by LSP binary name.
     ///
