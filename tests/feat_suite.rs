@@ -205,6 +205,14 @@ fn boot_server(
         .env("XDG_STATE_HOME", state.path())
         .env("XDG_CONFIG_HOME", xdg_config.path())
         .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
+        // Boot in Full profile so the flagship-tool assertions in
+        // `feat_suite_end_to_end` (which expect every tool — including
+        // ones outside `SEMANTIC_PROFILE` like `find_anchors` and
+        // `query_graph` — to be visible) hold. Same rationale as
+        // tests/failure_modes::boot_server: the test's intent is to
+        // enumerate the *wire surface* of the server, which the
+        // Semantic profile (default since PR #63) also filters down.
+        .env("LAIN_TOOL_PROFILE", "full")
         .env_remove("LAIN_EMBEDDING_MODEL")
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
