@@ -580,7 +580,11 @@ impl LspMultiplexer {
         };
 
         // === Phase 2: bridge round-trips, no mux lock held ===
-        let Work { binary, server_id, path } = work;
+        let Work {
+            binary,
+            server_id,
+            path,
+        } = work;
 
         let uri = format!("file://{}", path.display());
         let content = match tokio::fs::read_to_string(&path).await {
@@ -590,9 +594,12 @@ impl LspMultiplexer {
                     "LSP prewarm: {} read_to_string failed: {} (path={:?})",
                     binary, e, path
                 );
-                self.record_prewarm(binary.clone(), PrewarmOutcome::Failed {
-                    reason: format!("read_to_string: {e}"),
-                });
+                self.record_prewarm(
+                    binary.clone(),
+                    PrewarmOutcome::Failed {
+                        reason: format!("read_to_string: {e}"),
+                    },
+                );
                 return;
             }
         };
@@ -621,9 +628,12 @@ impl LspMultiplexer {
                 "LSP prewarm: {} open_document failed: {} (uri={})",
                 binary, e, uri
             );
-            self.record_prewarm(binary.clone(), PrewarmOutcome::Failed {
-                reason: format!("open_document: {e}"),
-            });
+            self.record_prewarm(
+                binary.clone(),
+                PrewarmOutcome::Failed {
+                    reason: format!("open_document: {e}"),
+                },
+            );
             return;
         }
 
@@ -657,7 +667,9 @@ impl LspMultiplexer {
                     "LSP prewarm: {} bridge get_document_symbols failed: {} (elapsed={}ms, timeout={:?})",
                     binary, e, start.elapsed().as_millis(), timeout
                 );
-                PrewarmOutcome::Failed { reason: e.to_string() }
+                PrewarmOutcome::Failed {
+                    reason: e.to_string(),
+                }
             }
             Err(_) => PrewarmOutcome::TimedOut,
         };
@@ -669,11 +681,7 @@ impl LspMultiplexer {
     /// proceeding, spawns the LSP child. Returns `Done` when a
     /// Skipped / Failed outcome has already been recorded — the
     /// caller should drop out immediately.
-    async fn prewarm_phase1(
-        &mut self,
-        ext: &str,
-        sentinel_path: Option<&Path>,
-    ) -> Phase1Outcome {
+    async fn prewarm_phase1(&mut self, ext: &str, sentinel_path: Option<&Path>) -> Phase1Outcome {
         let config = match self.registry.get(ext) {
             Some(c) => c,
             None => {
@@ -962,15 +970,9 @@ impl LspMultiplexer {
         // batched response surfaces the timeout as `InstallOutcome
         // ::Failed` so the operator sees what happened — the batch
         // keeps going for the rest of the entries.
-        let output = match tokio::time::timeout(
-            LSP_INSTALL_TIMEOUT,
-            cmd.output(),
-        )
-        .await
-        {
-            Ok(res) => res.map_err(|e| LainError::Lsp(format!(
-                "Failed to execute install command: {}", e
-            )))?,
+        let output = match tokio::time::timeout(LSP_INSTALL_TIMEOUT, cmd.output()).await {
+            Ok(res) => res
+                .map_err(|e| LainError::Lsp(format!("Failed to execute install command: {}", e)))?,
             Err(_elapsed) => {
                 return Err(LainError::Lsp(format!(
                     "Install command for {} ({}) timed out after {:?}; \
@@ -2007,7 +2009,10 @@ mod prewarm_tests {
         assert!(matches!(outcome, Phase1Outcome::Done));
 
         // Skipped path must NOT have spawned an LSP child.
-        assert!(m.started.is_empty(), "started set must be empty after Skipped path");
+        assert!(
+            m.started.is_empty(),
+            "started set must be empty after Skipped path"
+        );
         assert!(
             m.unavailable.is_empty(),
             "unavailable set must be empty after Skipped path"
@@ -2025,12 +2030,9 @@ mod prewarm_tests {
         // Insert a known outcome so record_prewarm has real work to
         // do (a HashMap::insert under a no-op entry still does a
         // hash + probe; we want the real path).
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            async {
-                m.record_prewarm("rust-analyzer".to_string(), PrewarmOutcome::TimedOut);
-            },
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            m.record_prewarm("rust-analyzer".to_string(), PrewarmOutcome::TimedOut);
+        })
         .await
         .expect("first record_prewarm must release the mux within 2s");
         // Pre-state must reflect the insert.
@@ -2042,12 +2044,9 @@ mod prewarm_tests {
         // held the lock across the insert, the second call's
         // caller-side mutex would deadlock against itself (we
         // hold the only `Arc`).
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            async {
-                m.record_prewarm("pylsp".to_string(), PrewarmOutcome::SkippedUnavailable);
-            },
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            m.record_prewarm("pylsp".to_string(), PrewarmOutcome::SkippedUnavailable);
+        })
         .await
         .expect("second record_prewarm must release the mux within 2s");
     }

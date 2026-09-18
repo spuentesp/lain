@@ -133,13 +133,10 @@ impl DoctorReport {
 ///   file maps to `false` — server-mode errors don't block offline
 ///   diagnostics.
 fn detect_server_modes(root: &Path) -> (bool, bool) {
-    let federation_active = read_repos_yaml(root)
-        .map(|r| r.len() > 1)
-        .unwrap_or(false);
-    let workspace_active = crate::server::federation::workspace::WorkspacesFile::load(
-        &root.join("workspaces.yaml"),
-    )
-    .is_ok();
+    let federation_active = read_repos_yaml(root).map(|r| r.len() > 1).unwrap_or(false);
+    let workspace_active =
+        crate::server::federation::workspace::WorkspacesFile::load(&root.join("workspaces.yaml"))
+            .is_ok();
     (federation_active, workspace_active)
 }
 
@@ -150,14 +147,11 @@ fn read_repos_yaml(root: &Path) -> Option<Vec<String>> {
     let path = root.join("repos.yaml");
     let text = std::fs::read_to_string(&path).ok()?;
     let parsed: serde_json::Value = serde_yaml::from_str(&text).ok()?;
-    parsed
-        .get("repos")?
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
-                .collect()
-        })
+    parsed.get("repos")?.as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -190,8 +184,14 @@ mod detect_server_modes_tests {
         )
         .unwrap();
         let (fed, ws) = detect_server_modes(root.path());
-        assert!(!fed, "single-repo repos.yaml => federation_active must be false");
-        assert!(!ws, "single-repo repos.yaml doesn't affect workspace_active");
+        assert!(
+            !fed,
+            "single-repo repos.yaml => federation_active must be false"
+        );
+        assert!(
+            !ws,
+            "single-repo repos.yaml doesn't affect workspace_active"
+        );
     }
 
     /// Multi-repo `repos.yaml` (≥ 2 repos) must trigger federation
@@ -206,7 +206,10 @@ mod detect_server_modes_tests {
         )
         .unwrap();
         let (fed, ws) = detect_server_modes(root.path());
-        assert!(fed, "two repos in repos.yaml => federation_active must be true");
+        assert!(
+            fed,
+            "two repos in repos.yaml => federation_active must be true"
+        );
         assert!(!ws, "repos.yaml alone doesn't affect workspace_active");
     }
 
@@ -222,8 +225,14 @@ mod detect_server_modes_tests {
         )
         .unwrap();
         let (fed, ws) = detect_server_modes(root.path());
-        assert!(!fed, "workspaces.yaml alone doesn't affect federation_active");
-        assert!(ws, "workspaces.yaml present => workspace_active must be true");
+        assert!(
+            !fed,
+            "workspaces.yaml alone doesn't affect federation_active"
+        );
+        assert!(
+            ws,
+            "workspaces.yaml present => workspace_active must be true"
+        );
     }
 
     /// Both signals together must be reported independently. A
@@ -464,19 +473,11 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     let initial_advertised = match profile {
         crate::server::tools::profile::ToolProfile::Full => {
             registry.len()
-                + crate::server::tools::profile::special_advertised_count(
-                    profile,
-                    false,
-                    false,
-                )
+                + crate::server::tools::profile::special_advertised_count(profile, false, false)
         }
         crate::server::tools::profile::ToolProfile::Semantic => {
             inventory_in_profile
-                + crate::server::tools::profile::special_advertised_count(
-                    profile,
-                    false,
-                    false,
-                )
+                + crate::server::tools::profile::special_advertised_count(profile, false, false)
         }
     };
 
@@ -532,17 +533,13 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
             crate::server::tools::profile::ToolProfile::Full => {
                 registry.len()
                     + crate::server::tools::profile::special_advertised_count(
-                        profile,
-                        fed_active,
-                        ws_active,
+                        profile, fed_active, ws_active,
                     )
             }
             crate::server::tools::profile::ToolProfile::Semantic => {
                 inventory_in_profile
                     + crate::server::tools::profile::special_advertised_count(
-                        profile,
-                        fed_active,
-                        ws_active,
+                        profile, fed_active, ws_active,
                     )
             }
         };

@@ -1,11 +1,31 @@
 [
   {
-    "description": "One-call dossier for a symbol: definition, callers, callees, and source body excerpt. Use this when an agent says 'explain X' or 'what is X?' and the goal is a single Markdown payload the agent can quote back. Cost: medium; scales with `depth`. Low-level alternative: call each of explain_symbol / get_call_sites / trace_dependency individually.",
+    "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
+    "inputSchema": {
+      "properties": {
+        "min_fan_out": {
+          "type": "integer"
+        },
+        "min_pattern_files": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "architectural_observations"
+  },
+  {
+    "description": "Pre-edit impact assessment: direct + transitive dependents, untested dependents, co-change partners, and a one-line risk verdict (low / medium / high). Use this when an agent says 'what breaks if I change X?' or wants to evaluate a change before editing. Cost: medium; scales with the depth of the call graph.",
     "inputSchema": {
       "properties": {
         "depth": {
-          "maximum": 3,
-          "minimum": 0,
+          "type": "string"
+        },
+        "include_tests": {
+          "type": "boolean"
+        },
+        "limit": {
           "type": "integer"
         },
         "symbol": {
@@ -17,7 +37,111 @@
       ],
       "type": "object"
     },
-    "name": "get_context"
+    "name": "assess_change"
+  },
+  {
+    "description": "Compares stability and coupling metrics between two modules",
+    "inputSchema": {
+      "properties": {
+        "module_a": {
+          "type": "string"
+        },
+        "module_b": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "module_a",
+        "module_b"
+      ],
+      "type": "object"
+    },
+    "name": "compare_modules"
+  },
+  {
+    "description": "Returns the graph schema (node types, edge types, example queries) for LLM session initialization",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "describe_schema"
+  },
+  {
+    "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "explain_symbol"
+  },
+  {
+    "description": "Returns a high-level tree of files and modules up to a specific depth",
+    "inputSchema": {
+      "properties": {
+        "max_depth": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "explore_architecture"
+  },
+  {
+    "description": "Lists the top 10 most foundational/stable components in the codebase",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "find_anchors"
+  },
+  {
+    "description": "Identifies reachable nodes with zero incoming callers or usages",
+    "inputSchema": {
+      "properties": {
+        "like": {
+          "description": "Filter dead code semantically (e.g., \"auth handler\")",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "find_dead_code"
+  },
+  {
+    "description": "Graph neighbors, co-change partners, and (optional) semantic neighbors for a symbol in one call. Use this when an agent says 'what is connected to X?' or wants to understand blast radius without committing to a single change yet. The semantic section is omitted when no embedding model is loaded; the co-change section is gated by `include_coupling=false`. Cost: medium.",
+    "inputSchema": {
+      "properties": {
+        "include_coupling": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "find_related"
   },
   {
     "description": "Returns every graph node matching `name`, optionally narrowed by `path_hint` (substring) and `type_filter` (function / struct / trait / module / file). Use this when an agent says 'where is X?' and the low-level tools would otherwise force a per-name lookup per match. Cost: cheap (graph index hit).",
@@ -41,34 +165,6 @@
     "name": "find_symbol"
   },
   {
-    "description": "Provides a structural estimate of code coverage based on call graph connectivity",
-    "inputSchema": {
-      "properties": {
-        "module_path": {
-          "type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_coverage_summary"
-  },
-  {
-    "description": "Generates a test scaffold for a given function or type",
-    "inputSchema": {
-      "properties": {
-        "function_name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "function_name"
-      ],
-      "type": "object"
-    },
-    "name": "get_test_template"
-  },
-  {
     "description": "Identifies functions that may lack test coverage based on call graph analysis",
     "inputSchema": {
       "properties": {
@@ -82,6 +178,39 @@
     "name": "find_untested_functions"
   },
   {
+    "description": "Returns the architectural stability score for a specific symbol",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_anchor_score"
+  },
+  {
+    "description": "Calculates the transitive impact and ripple effect of changing a symbol",
+    "inputSchema": {
+      "properties": {
+        "include_coupling": {
+          "type": "boolean"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_blast_radius"
+  },
+  {
     "description": "Shows current branch and git status",
     "inputSchema": {
       "properties": {},
@@ -91,30 +220,23 @@
     "name": "get_branch_status"
   },
   {
-    "description": "Shows recent commit history with author and message",
+    "description": "Finds the exact path of function calls between two points",
     "inputSchema": {
       "properties": {
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_commit_history"
-  },
-  {
-    "description": "Shows uncommitted changes (staged and unstaged)",
-    "inputSchema": {
-      "properties": {
-        "path": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
           "type": "string"
         }
       },
-      "required": [],
+      "required": [
+        "from",
+        "to"
+      ],
       "type": "object"
     },
-    "name": "get_file_diff"
+    "name": "get_call_chain"
   },
   {
     "description": "Finds all callers of a given symbol",
@@ -153,6 +275,54 @@
     "name": "get_code_snippet"
   },
   {
+    "description": "Shows recent commit history with author and message",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_commit_history"
+  },
+  {
+    "description": "One-call dossier for a symbol: definition, callers, callees, and source body excerpt. Use this when an agent says 'explain X' or 'what is X?' and the goal is a single Markdown payload the agent can quote back. Cost: medium; scales with `depth`. Low-level alternative: call each of explain_symbol / get_call_sites / trace_dependency individually.",
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "maximum": 3,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_context"
+  },
+  {
+    "description": "Calculates layers of abstraction from the entry point for a symbol",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_context_depth"
+  },
+  {
     "description": "Builds LLM-optimized context for a symbol with signature, docstring, and relationships",
     "inputSchema": {
       "properties": {
@@ -171,6 +341,155 @@
     "name": "get_context_for_prompt"
   },
   {
+    "description": "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "get_coupling_radar"
+  },
+  {
+    "description": "Provides a structural estimate of code coverage based on call graph connectivity",
+    "inputSchema": {
+      "properties": {
+        "module_path": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_coverage_summary"
+  },
+  {
+    "description": "Find all protocol-level callers for a symbol (HTTP routes, gRPC services, GraphQL resolvers)",
+    "inputSchema": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_cross_runtime_callers"
+  },
+  {
+    "description": "Shows uncommitted changes (staged and unstaged)",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_file_diff"
+  },
+  {
+    "description": "Returns a 'slice' of the architecture at a specific depth from the entry point",
+    "inputSchema": {
+      "properties": {
+        "granularity": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_layered_map"
+  },
+  {
+    "description": "Get a high-level Staleness Report showing when each module was last synced from LSP and Git",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "get_master_map"
+  },
+  {
+    "description": "Generates a test scaffold for a given function or type",
+    "inputSchema": {
+      "properties": {
+        "function_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "function_name"
+      ],
+      "type": "object"
+    },
+    "name": "get_test_template"
+  },
+  {
+    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_entry_points"
+  },
+  {
+    "description": "Finds the most foundational 'Anchor' node that controls a given leaf function",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "navigate_to_anchor"
+  },
+  {
+    "description": "Execute a query against the graph using a JSON ops array",
+    "inputSchema": {
+      "properties": {
+        "query": {
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "query_graph"
+  },
+  {
+    "description": "Runs cargo build (optionally release) and returns build output and status",
+    "inputSchema": {
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "release": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_build"
+  },
+  {
     "description": "Runs cargo clippy with optional auto-fix and returns lint results with architectural context on failure",
     "inputSchema": {
       "properties": {
@@ -185,6 +504,15 @@
       "type": "object"
     },
     "name": "run_clippy"
+  },
+  {
+    "description": "Triggers a full architectural scan and enrichment pass",
+    "inputSchema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "run_enrichment"
   },
   {
     "description": "Runs cargo test with optional filter and returns test results",
@@ -204,186 +532,6 @@
       "type": "object"
     },
     "name": "run_tests"
-  },
-  {
-    "description": "Runs cargo build (optionally release) and returns build output and status",
-    "inputSchema": {
-      "properties": {
-        "cwd": {
-          "type": "string"
-        },
-        "release": {
-          "type": "boolean"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "run_build"
-  },
-  {
-    "description": "Forces a re-sync of the graph with the current Git HEAD state",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "sync_state"
-  },
-  {
-    "description": "Triggers a full architectural scan and enrichment pass",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "run_enrichment"
-  },
-  {
-    "description": "Find all protocol-level callers for a symbol (HTTP routes, gRPC services, GraphQL resolvers)",
-    "inputSchema": {
-      "properties": {
-        "node_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "node_id"
-      ],
-      "type": "object"
-    },
-    "name": "get_cross_runtime_callers"
-  },
-  {
-    "description": "Returns the graph schema (node types, edge types, example queries) for LLM session initialization",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "describe_schema"
-  },
-  {
-    "description": "Execute a query against the graph using a JSON ops array",
-    "inputSchema": {
-      "properties": {
-        "query": {
-          "type": "object"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "query_graph"
-  },
-  {
-    "description": "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
-    "inputSchema": {
-      "properties": {
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "suggest_refactor_targets"
-  },
-  {
-    "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "explain_symbol"
-  },
-  {
-    "description": "Identifies reachable nodes with zero incoming callers or usages",
-    "inputSchema": {
-      "properties": {
-        "like": {
-          "description": "Filter dead code semantically (e.g., \"auth handler\")",
-          "type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "find_dead_code"
-  },
-  {
-    "description": "Calculates layers of abstraction from the entry point for a symbol",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_context_depth"
-  },
-  {
-    "description": "Returns the architectural stability score for a specific symbol",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_anchor_score"
-  },
-  {
-    "description": "Lists the top 10 most foundational/stable components in the codebase",
-    "inputSchema": {
-      "properties": {
-        "limit": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "find_anchors"
-  },
-  {
-    "description": "Identifies 'Hidden Coupling' between files based on historical Git co-change patterns",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_coupling_radar"
-  },
-  {
-    "description": "Identifies the architectural hearts of the system (main, App, etc.)",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "list_entry_points"
   },
   {
     "description": "Find code by name, intent, or pattern. `mode=lexical` (default) uses the graph name index and works without an embedding model; `mode=semantic` uses local ONNX embeddings and requires a loaded model (`install.sh --download-model`). `mode=auto` (the default) tries semantic first and falls back to lexical; the response records `fell_back=true` so the agent can tell. Cost: cheap for lexical, medium for semantic.",
@@ -412,126 +560,26 @@
     "name": "search_code"
   },
   {
-    "description": "Pre-edit impact assessment: direct + transitive dependents, untested dependents, co-change partners, and a one-line risk verdict (low / medium / high). Use this when an agent says 'what breaks if I change X?' or wants to evaluate a change before editing. Cost: medium; scales with the depth of the call graph.",
+    "description": "Identifies 'God Objects' and high-debt refactor targets based on complexity and stability",
     "inputSchema": {
       "properties": {
-        "depth": {
-          "type": "string"
-        },
-        "include_tests": {
-          "type": "boolean"
-        },
         "limit": {
           "type": "integer"
-        },
-        "symbol": {
-          "type": "string"
         }
       },
-      "required": [
-        "symbol"
-      ],
+      "required": [],
       "type": "object"
     },
-    "name": "assess_change"
+    "name": "suggest_refactor_targets"
   },
   {
-    "description": "Graph neighbors, co-change partners, and (optional) semantic neighbors for a symbol in one call. Use this when an agent says 'what is connected to X?' or wants to understand blast radius without committing to a single change yet. The semantic section is omitted when no embedding model is loaded; the co-change section is gated by `include_coupling=false`. Cost: medium.",
-    "inputSchema": {
-      "properties": {
-        "include_coupling": {
-          "type": "boolean"
-        },
-        "limit": {
-          "type": "integer"
-        },
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "find_related"
-  },
-  {
-    "description": "Calculates the transitive impact and ripple effect of changing a symbol",
-    "inputSchema": {
-      "properties": {
-        "include_coupling": {
-          "type": "boolean"
-        },
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "get_blast_radius"
-  },
-  {
-    "description": "Get a high-level Staleness Report showing when each module was last synced from LSP and Git",
+    "description": "Forces a re-sync of the graph with the current Git HEAD state",
     "inputSchema": {
       "properties": {},
       "required": [],
       "type": "object"
     },
-    "name": "get_master_map"
-  },
-  {
-    "description": "Returns a 'slice' of the architecture at a specific depth from the entry point",
-    "inputSchema": {
-      "properties": {
-        "granularity": {
-          "type": "string"
-        },
-        "layer": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "get_layered_map"
-  },
-  {
-    "description": "Finds the most foundational 'Anchor' node that controls a given leaf function",
-    "inputSchema": {
-      "properties": {
-        "symbol": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "symbol"
-      ],
-      "type": "object"
-    },
-    "name": "navigate_to_anchor"
-  },
-  {
-    "description": "Finds the exact path of function calls between two points",
-    "inputSchema": {
-      "properties": {
-        "from": {
-          "type": "string"
-        },
-        "to": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "from",
-        "to"
-      ],
-      "type": "object"
-    },
-    "name": "get_call_chain"
+    "name": "sync_state"
   },
   {
     "description": "Recursively finds everything a symbol depends on",
@@ -561,54 +609,6 @@
       "type": "object"
     },
     "name": "understand_repository"
-  },
-  {
-    "description": "Analyzes the codebase for architectural patterns, cross-boundary couplings, and high-fan-out modules",
-    "inputSchema": {
-      "properties": {
-        "min_fan_out": {
-          "type": "integer"
-        },
-        "min_pattern_files": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "architectural_observations"
-  },
-  {
-    "description": "Compares stability and coupling metrics between two modules",
-    "inputSchema": {
-      "properties": {
-        "module_a": {
-          "type": "string"
-        },
-        "module_b": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "module_a",
-        "module_b"
-      ],
-      "type": "object"
-    },
-    "name": "compare_modules"
-  },
-  {
-    "description": "Returns a high-level tree of files and modules up to a specific depth",
-    "inputSchema": {
-      "properties": {
-        "max_depth": {
-          "type": "integer"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "explore_architecture"
   },
   {
     "description": "Return server health, node/edge counts, last enriched commit, and language-server availability.",

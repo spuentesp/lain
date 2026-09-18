@@ -298,10 +298,7 @@ impl LainServer {
                     "build_core_memory: LSP prewarm done — {} languages across {} multiplexers \
                      (~{} tasks per mux serialised on the inner mutex; bumping lsp_pool_size \
                      past {} in .lain/tuning.toml would give every language its own parallel slot)",
-                    n_exts,
-                    pool_size,
-                    max_per_mux,
-                    n_exts,
+                    n_exts, pool_size, max_per_mux, n_exts,
                 );
             } else {
                 info!(
