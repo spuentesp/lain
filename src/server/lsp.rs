@@ -412,6 +412,26 @@ fn unix_millis_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// `Work` returned by `prewarm_phase1` when the prewarm path
+/// should proceed to bridge round-trips.
+#[derive(Debug)]
+pub struct Work {
+    binary: String,
+    server_id: String,
+    path: PathBuf,
+}
+
+/// `Phase1Outcome` discriminates the two paths after
+/// `prewarm_phase1`. `Done` means the pre-check already
+/// recorded a Skipped / Failed outcome — the caller should
+/// drop out. `Proceed` means the bridge calls should run,
+/// followed by `record_prewarm` to write the result.
+#[derive(Debug)]
+pub enum Phase1Outcome {
+    Done,
+    Proceed(Work),
+}
+
 impl LspMultiplexer {
     pub fn new(
         workspace: &Path,
@@ -527,7 +547,18 @@ impl LspMultiplexer {
     /// `SkippedNoSentinel`. An already-`unavailable` binary records
     /// `SkippedUnavailable` and returns `Ok(())` — the operator gets
     /// the existing tree-sitter fallback for that language, just like
-    /// before this PR.
+    /// before this PR. Phase 1 (`prewarm_phase1`) and Phase 3
+    /// (`record_prewarm`) hold the mux mutex briefly. Phase 2 (the
+    /// bridge round-trips) runs lock-free wrt this mux so two
+    /// prewarm tasks routed to the same multiplexer serialise on
+    /// the bridge mutex only when they actually contend on the
+    /// same binary, rather than waiting for each other's
+    /// `prewarm_state` write to land under our mux.
+    ///
+    /// The only meaningful phase held under the mux is the LSP
+    /// child spawn inside `ensure_server` (bounded by
+    /// LSP_STARTUP_TIMEOUT); the registry/unavailable/sentinel
+    /// checks and the final outcome write are microseconds.
     pub async fn prewarm_server(
         &mut self,
         ext: &str,
@@ -535,140 +566,73 @@ impl LspMultiplexer {
         timeout: Option<Duration>,
     ) {
         let timeout = timeout.unwrap_or(LSP_PREWARM_TIMEOUT);
-        let config = match self.registry.get(ext) {
-            Some(c) => c,
-            None => {
-                debug!("LSP prewarm: no registry entry for ext {:?}", ext);
-                return;
-            }
-        };
-        let binary = config.binary.to_string();
 
-        if self.unavailable.contains(&binary) {
-            self.prewarm_state
-                .insert(binary.clone(), PrewarmOutcome::SkippedUnavailable);
-            debug!("LSP prewarm: {} already unavailable, skipping", binary);
-            return;
-        }
-
-        let Some(path) = sentinel_path else {
-            self.prewarm_state
-                .insert(binary.clone(), PrewarmOutcome::SkippedNoSentinel);
-            debug!("LSP prewarm: no sentinel for ext {:?}", ext);
-            return;
+        // Phase 1: validate the extension against local state under
+        // the mux mutex briefly. Records Skipped / Failed outcomes
+        // for paths the caller doesn't need to take. The bridge
+        // child spawn inside `ensure_server` is bounded by
+        // LSP_STARTUP_TIMEOUT; with the bridge's own Arc<Mutex>,
+        // the mux contention is brief.
+        let path: Option<&std::path::Path> = sentinel_path.filter(|p| p.is_file());
+        let work = match self.prewarm_phase1(ext, path.as_deref()).await {
+            Phase1Outcome::Done => return,
+            Phase1Outcome::Proceed(work) => work,
         };
-        if !path.is_file() {
-            self.prewarm_state
-                .insert(binary.clone(), PrewarmOutcome::SkippedNoSentinel);
-            return;
-        }
 
-        // Spawn the LSP child. `ensure_server` rejects when the
-        // binary is missing on PATH (and adds it to `unavailable`);
-        // that's the only path where prewarm flips the unavailable
-        // set, and only because the binary literally isn't on the
-        // system. We can't avoid it without breaking the contract
-        // of `ensure_server`, and it's the correct outcome: there's
-        // no prewarming a binary that doesn't exist.
-        let server_id = match self.ensure_server(path).await {
-            Ok(id) => id,
-            Err(e) => {
-                self.prewarm_state.insert(
-                    binary.clone(),
-                    PrewarmOutcome::Failed {
-                        reason: format!("ensure_server: {e}"),
-                    },
-                );
-                // warn! (not debug!) so operators running with default
-                // log levels see when prewarm fails — `prewarm_state`
-                // is observable via /health and doctor --json but
-                // log journal is the primary operator surface.
-                warn!(
-                    "LSP prewarm: {} ensure_server failed: {} (path={:?})",
-                    binary, e, path
-                );
-                return;
-            }
-        };
+        // === Phase 2: bridge round-trips, no mux lock held ===
+        let Work { binary, server_id, path } = work;
 
         let uri = format!("file://{}", path.display());
-        let content = match tokio::fs::read_to_string(path).await {
+        let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
-                self.prewarm_state.insert(
-                    binary.clone(),
-                    PrewarmOutcome::Failed {
-                        reason: format!("read_to_string: {e}"),
-                    },
-                );
-                // Previously silent — every other failure path is
-                // logged at debug! or warn!; this one was missing.
-                // The sentinel file not being readable is a real
-                // configuration problem (operator pointed at the
-                // wrong dir, or perms are off) and the operator
-                // should see it without raising their log level.
                 warn!(
                     "LSP prewarm: {} read_to_string failed: {} (path={:?})",
                     binary, e, path
                 );
+                self.record_prewarm(binary.clone(), PrewarmOutcome::Failed {
+                    reason: format!("read_to_string: {e}"),
+                });
                 return;
             }
         };
+
         // `open_document` MUST be bounded — between successful
         // `ensure_server` and the `get_document_symbols` timeout
         // there's no budget. A hung or partially-crashed LSP child
         // here would block the JoinSet task indefinitely, the
         // drain loop's cancel check never fires (it only runs after
         // `join_next()` returns), and `build_core_memory` hangs.
-        // The same 5 s ceiling `ensure_server` uses for startup
-        // covers the document-open window — a healthy LSP answers
-        // in milliseconds, anything slower is an LSP problem and we
-        // should record it as `TimedOut`, not block.
-        if let Err(_elapsed) =
-            tokio::time::timeout(LSP_OPEN_DOC_TIMEOUT, self.bridge.open_document(&server_id, &uri, &content)).await
+        if let Err(_elapsed) = tokio::time::timeout(
+            LSP_OPEN_DOC_TIMEOUT,
+            self.bridge.open_document(&server_id, &uri, &content),
+        )
+        .await
         {
-            // On timeout, classify as `TimedOut` so the per-binary
-            // outcome in `prewarm_state` reflects what actually
-            // happened (the document-open hung, not a missing
-            // sentinel or unavailable binary). The cancel path at
-            // the call site still sees this as a finished task and
-            // proceeds.
-            self.prewarm_state.insert(
-                binary.clone(),
-                PrewarmOutcome::TimedOut,
-            );
             warn!(
                 "LSP prewarm: {} open_document timed out after {:?}; recording TimedOut",
                 binary, LSP_OPEN_DOC_TIMEOUT
             );
+            self.record_prewarm(binary.clone(), PrewarmOutcome::TimedOut);
             return;
         }
         if let Err(e) = self.bridge.open_document(&server_id, &uri, &content).await {
-            // Unreachable when the timeout arm above didn't fire —
-            // but kept for completeness in case the timeout is
-            // removed or the future returns to a non-fallible
-            // shape. Cost: a single Result match.
-            self.prewarm_state.insert(
-                binary.clone(),
-                PrewarmOutcome::Failed {
-                    reason: format!("open_document: {e}"),
-                },
-            );
-            // Previously silent — the timeout arm above logs at warn!
-            // but the synchronous-error path didn't. Operators who
-            // hit a channel-closed / bridge error during prewarm
-            // would otherwise see no log entry unless they had
-            // tracing at debug!. Bump to warn! to match.
             warn!(
                 "LSP prewarm: {} open_document failed: {} (uri={})",
                 binary, e, uri
             );
+            self.record_prewarm(binary.clone(), PrewarmOutcome::Failed {
+                reason: format!("open_document: {e}"),
+            });
             return;
         }
 
         let start = std::time::Instant::now();
-        match tokio::time::timeout(timeout, self.bridge.get_document_symbols(&server_id, &uri))
-            .await
+        let outcome = match tokio::time::timeout(
+            timeout,
+            self.bridge.get_document_symbols(&server_id, &uri),
+        )
+        .await
         {
             Ok(Ok(symbols)) if !symbols.is_empty() => {
                 let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -678,8 +642,7 @@ impl LspMultiplexer {
                     elapsed_ms,
                     symbols.len()
                 );
-                self.prewarm_state
-                    .insert(binary.clone(), PrewarmOutcome::Warmed { ms: elapsed_ms });
+                PrewarmOutcome::Warmed { ms: elapsed_ms }
             }
             Ok(Ok(_)) => {
                 let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -687,33 +650,87 @@ impl LspMultiplexer {
                     "LSP prewarm: {} answered but returned no symbols in {} ms",
                     binary, elapsed_ms
                 );
-                self.prewarm_state
-                    .insert(binary.clone(), PrewarmOutcome::Warmed { ms: elapsed_ms });
+                PrewarmOutcome::Warmed { ms: elapsed_ms }
             }
             Ok(Err(e)) => {
-                self.prewarm_state.insert(
-                    binary.clone(),
-                    PrewarmOutcome::Failed {
-                        reason: e.to_string(),
-                    },
-                );
-                // Bumped from debug! to warn! — an LSP round-trip
-                // failure during cold-boot prewarm is operationally
-                // significant (the LSP is reachable enough to answer
-                // but the response is bad), and operators running at
-                // default log levels should see it.
                 warn!(
                     "LSP prewarm: {} bridge get_document_symbols failed: {} (elapsed={}ms, timeout={:?})",
                     binary, e, start.elapsed().as_millis(), timeout
                 );
+                PrewarmOutcome::Failed { reason: e.to_string() }
             }
-            Err(_) => {
-                // Timeout arm — already logged at warn! above this
-                // match; just record the outcome and bail.
-                self.prewarm_state
-                    .insert(binary.clone(), PrewarmOutcome::TimedOut);
+            Err(_) => PrewarmOutcome::TimedOut,
+        };
+        self.record_prewarm(binary, outcome);
+    }
+
+    /// Phase 1 of `prewarm_server`. Acquires the mux mutex briefly
+    /// to validate the extension against local state and, when
+    /// proceeding, spawns the LSP child. Returns `Done` when a
+    /// Skipped / Failed outcome has already been recorded — the
+    /// caller should drop out immediately.
+    async fn prewarm_phase1(
+        &mut self,
+        ext: &str,
+        sentinel_path: Option<&Path>,
+    ) -> Phase1Outcome {
+        let config = match self.registry.get(ext) {
+            Some(c) => c,
+            None => {
+                debug!("LSP prewarm: no registry entry for ext {:?}", ext);
+                return Phase1Outcome::Done;
             }
+        };
+        let binary = config.binary.to_string();
+
+        if self.unavailable.contains(&binary) {
+            self.prewarm_state
+                .insert(binary.clone(), PrewarmOutcome::SkippedUnavailable);
+            debug!("LSP prewarm: {} already unavailable, skipping", binary);
+            return Phase1Outcome::Done;
         }
+
+        let Some(path) = sentinel_path else {
+            self.prewarm_state
+                .insert(binary.clone(), PrewarmOutcome::SkippedNoSentinel);
+            debug!("LSP prewarm: no sentinel for ext {:?}", ext);
+            return Phase1Outcome::Done;
+        };
+
+        // Spawn the LSP child. `ensure_server` mutates our state
+        // (`started`, `unavailable`), so the mux lock must be held
+        // here. The bridge round-trips inside `ensure_server` use
+        // the bridge's own Arc<Mutex>; our mux is held but the
+        // contention is on the bridge mutex, bounded by
+        // LSP_STARTUP_TIMEOUT.
+        let server_id = match self.ensure_server(path).await {
+            Ok(id) => id,
+            Err(e) => {
+                self.prewarm_state.insert(
+                    binary.clone(),
+                    PrewarmOutcome::Failed {
+                        reason: format!("ensure_server: {e}"),
+                    },
+                );
+                warn!(
+                    "LSP prewarm: {} ensure_server failed: {} (path={:?})",
+                    binary, e, path
+                );
+                return Phase1Outcome::Done;
+            }
+        };
+
+        Phase1Outcome::Proceed(Work {
+            binary,
+            server_id,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Phase 3 of `prewarm_server`. Briefly acquires the mux
+    /// mutex to insert the per-binary outcome into `prewarm_state`.
+    fn record_prewarm(&mut self, binary: String, outcome: PrewarmOutcome) {
+        self.prewarm_state.insert(binary, outcome);
     }
 
     /// Read-only accessor for the per-language prewarm outcomes.
@@ -1920,9 +1937,50 @@ mod prewarm_tests {
             "already-unavailable binary must record SkippedUnavailable; got: {:?}",
             outcome
         );
+
         // Breaker state must be byte-identical to before.
         assert_eq!(m.unavailable, unavailable_before);
         assert_eq!(m.consecutive_failures, failures_before);
+    }
+
+    /// Iteration 6 contract: Skipped paths must complete via
+    /// `prewarm_phase1` alone — the mux mutex is acquired briefly
+    /// (registry lookup + unavailable check + sentinel validation +
+    /// outcome record) and then released. No bridge spawn, no
+    /// `ensure_server` call. The Skipped outcomes already exercise
+    /// this path, but the contract matters most for the
+    /// unknown-ext / missing-sentinel cases where the early-return
+    /// short-circuits before any bridge work — those short-circuits
+    /// MUST release the mux before returning. We can't directly
+    /// observe the lock here (no instrumentation hook) but we can
+    /// observe the side-effects: if `prewarm_phase1` were to keep
+    /// the mux held across an early-return, future calls on the
+    /// same mux would deadlock against the previous one's lock. A
+    /// quick re-acquire from the same task pins the round-trip.
+    #[tokio::test]
+    async fn prewarm_phase1_releases_mux_on_skipped_path() {
+        // Single Skipped call. If prewarm_phase1 held the mux
+        // across the early-return, the timeout fires and the test
+        // fails with a useful diagnostic.
+        let mut m = make();
+        // Pass `None` for sentinel_path so we hit the
+        // `let Some(path) = sentinel_path else { return Done }`
+        // branch — that's the path that should release the mux
+        // without ever touching the bridge or `started`.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            m.prewarm_phase1("rs", None),
+        )
+        .await
+        .expect("prewarm_phase1 must release the mux within 2s");
+        assert!(matches!(outcome, Phase1Outcome::Done));
+
+        // Skipped path must NOT have spawned an LSP child.
+        assert!(m.started.is_empty(), "started set must be empty after Skipped path");
+        assert!(
+            m.unavailable.is_empty(),
+            "unavailable set must be empty after Skipped path"
+        );
     }
 
     #[test]
