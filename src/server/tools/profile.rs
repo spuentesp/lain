@@ -33,6 +33,12 @@ pub const SEMANTIC_PROFILE: &[&str] = &[
     "find_related",
     "assess_change",
     "search_code",
+    // Dynamic-dispatch mitigation (Tiers 1-3): when get_blast_radius
+    // returns empty, explain_dispatch tells you whether the gap is
+    // because nothing calls you, or because static analysis can't see
+    // the dispatcher. Default-verdict `insufficient_evidence` triggers
+    // the smoke command path documented in get_agent_strategy.
+    "explain_dispatch",
     // Readiness / self-discovery
     "get_health",
     "get_capabilities",
@@ -182,10 +188,10 @@ mod tests {
     #[test]
     fn semantic_profile_is_small_and_curated() {
         let set = SEMANTIC_PROFILE;
-        // 14 hand-curated entries. Pinning a count catches "I added one
+        // 15 hand-curated entries. Pinning a count catches "I added one
         // more without realising" — if you add a tool, the change should
         // be conscious, not silent.
-        assert_eq!(set.len(), 14, "SEMANTIC_PROFILE drifted; review the list");
+        assert_eq!(set.len(), 15, "SEMANTIC_PROFILE drifted; review the list");
 
         // Sanity: every name in the list is non-empty and the list
         // contains no duplicates (Set semantics).

@@ -28,7 +28,7 @@ async fn test_blast_radius_leaf_node() {
     let overlay = VolatileOverlay::new();
 
     // c is a leaf — nothing calls c
-    let result = get_blast_radius(&graph, &overlay, "c", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "c", false, false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Leaf has no callers, so only c itself is in visited set
@@ -42,7 +42,7 @@ async fn test_blast_radius_b_node() {
     let overlay = VolatileOverlay::new();
 
     // b has two callers: a and x. Both should appear in blast radius.
-    let result = get_blast_radius(&graph, &overlay, "b", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "b", false, false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Should show a and x as dependents (at minimum)
@@ -55,7 +55,7 @@ async fn test_blast_radius_main_node() {
     let overlay = VolatileOverlay::new();
 
     // main is root — no incoming edges to main in our test graph
-    let result = get_blast_radius(&graph, &overlay, "main", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "main", false, false, None).await;
     assert!(result.is_ok());
     let text = result.unwrap();
     // Either no dependents found OR transitively affected nodes for root
@@ -67,7 +67,7 @@ async fn test_blast_radius_unknown_node() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
-    let result = get_blast_radius(&graph, &overlay, "nonexistent_symbol", false, None).await;
+    let result = get_blast_radius(&graph, &overlay, "nonexistent_symbol", false, false, None).await;
     assert!(result.is_err());
 }
 
@@ -80,7 +80,7 @@ async fn test_blast_radius_dedups_callers_and_count_matches_listing() {
     let graph = make_test_graph();
     let overlay = VolatileOverlay::new();
 
-    let text = get_blast_radius(&graph, &overlay, "b", false, None)
+    let text = get_blast_radius(&graph, &overlay, "b", false, false, None)
         .await
         .unwrap();
     assert_eq!(

@@ -202,6 +202,7 @@ proptest! {
                     &overlay,
                     &node.id,
                     false,
+                    false,
                     None,
                 ))
                 .expect("get_blast_radius");

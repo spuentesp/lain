@@ -281,7 +281,7 @@ pub async fn assess_change(
     );
 
     let blast = crate::server::tools::handlers::impact::get_blast_radius(
-        graph, overlay, &symbol, true, ui_link,
+        graph, overlay, &symbol, true, false, ui_link,
     )
     .await?;
     let callsites =

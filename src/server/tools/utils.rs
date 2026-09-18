@@ -16,6 +16,21 @@ pub fn resolve_node(
     overlay: &VolatileOverlay,
     handle: &str,
 ) -> Result<GraphNode, LainError> {
+    // Empty handle is almost always a caller bug, not a real symbol
+    // lookup. Reject it explicitly: before Tier 2 the empty-name
+    // lookup was always empty, so no caller tripped the new path; the
+    // Tier 2 sensor emits `File` nodes with `name=""` as the
+    // source of heuristic edges, and a future call to `find_node_by_name("")`
+    // would otherwise resolve to one of those file nodes and produce
+    // a confident, wrong "yes I found a node" answer. The structured
+    // error is what the failure-mode test (and any honest caller)
+    // expects.
+    if handle.is_empty() {
+        return Err(LainError::NotFound(
+            "Handle is empty — pass a symbol name, path, or node id".to_string(),
+        ));
+    }
+
     // Preserve the original spelling for IDs and names. A symbol name can
     // also be an existing directory (for example `target`), so resolving
     // paths first can hide a valid symbol.

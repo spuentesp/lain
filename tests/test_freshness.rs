@@ -47,7 +47,7 @@ async fn a_symbol_known_only_to_the_overlay_is_resolvable() {
     );
     overlay.insert_node(fresh.clone());
 
-    let out = get_blast_radius(&g, &overlay, "freshly_edited_fn", false, None)
+    let out = get_blast_radius(&g, &overlay, "freshly_edited_fn", false, false, None)
         .await
         .expect("a symbol present in the overlay must resolve");
     assert!(
@@ -122,7 +122,7 @@ async fn freshness_reflects_the_last_update_not_construction() {
         "a write must reset the freshness clock"
     );
 
-    let out = get_blast_radius(&g, &overlay, "compute", false, None)
+    let out = get_blast_radius(&g, &overlay, "compute", false, false, None)
         .await
         .unwrap();
     assert!(

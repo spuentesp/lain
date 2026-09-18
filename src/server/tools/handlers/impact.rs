@@ -52,11 +52,36 @@ async fn store_ui_session_and_append_link(
 /// How many dependents to name per section before summarizing.
 const LIST_CAP: usize = 20;
 
+/// Default minimum confidence a heuristic edge needs to pass through
+/// `get_blast_radius` without an explicit `include_weak_edges=true`
+/// flag. Overridable via the `LAIN_HEURISTIC_MIN_CONFIDENCE` env var
+/// (parsed at call time so operators can tune it without a restart).
+fn heuristic_min_confidence() -> f32 {
+    match std::env::var("LAIN_HEURISTIC_MIN_CONFIDENCE") {
+        Ok(s) => s.parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0),
+        Err(_) => 0.5,
+    }
+}
+
+/// True when an edge type counts as a "heuristic" caller that the
+/// static graph alone would miss. These are kept out of the main
+/// blast-radius list unless `include_weak_edges=true` or the
+/// per-edge confidence clears the env-var threshold.
+fn is_heuristic_edge(t: &crate::schema::EdgeType) -> bool {
+    matches!(
+        t,
+        crate::schema::EdgeType::DynamicDispatch
+            | crate::schema::EdgeType::BusTopic
+            | crate::schema::EdgeType::RouteMatches
+    )
+}
+
 pub async fn get_blast_radius(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     symbol: &str,
     include_coupling: bool,
+    include_weak_edges: bool,
     ui_sessions: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
     let (node, other_defs) =
@@ -99,6 +124,7 @@ pub async fn get_blast_radius(
     // Each unique node is counted once (first time it's visited)
     let mut lsp_resolved = 0u32;
     let mut tree_sitter_fallback = 0u32;
+    let mut heuristic_caller_count = 0u32;
 
     while let Some((id, depth)) = queue.pop_front() {
         if visited.contains(&id) {
@@ -115,7 +141,10 @@ pub async fn get_blast_radius(
         // and reindex. The overlay is the source of truth for "what
         // does the working tree currently have" — see `navigation.rs`
         // for the same dual-walk pattern.
-        let mut enqueue_caller = |source_id: String, caller: Option<&crate::schema::GraphNode>| {
+        let mut enqueue_caller = |source_id: String,
+                                  caller: Option<&crate::schema::GraphNode>,
+                                  is_heuristic: bool,
+                                  confidence: Option<f32>| {
             if visited.contains(&source_id) || !queued.insert(source_id.clone()) {
                 return;
             }
@@ -124,11 +153,16 @@ pub async fn get_blast_radius(
                 return;
             };
             let is_direct = depth == 0;
+            let prefix = if is_heuristic { "  ~ " } else { "  - " };
+            let conf_tag = match confidence {
+                Some(c) => format!(" [heuristic, conf={:.2}]", c),
+                None => String::new(),
+            };
             affected_names.push((
                 depth + 1,
                 format!(
-                    "  - {} ({:?}) in {}",
-                    caller.name, caller.node_type, caller.path
+                    "{}{} ({:?}) in {}{}",
+                    prefix, caller.name, caller.node_type, caller.path, conf_tag
                 ),
             ));
             session_nodes.push(BlastRadiusNode {
@@ -153,6 +187,9 @@ pub async fn get_blast_radius(
             } else {
                 tree_sitter_fallback += 1;
             }
+            if is_heuristic {
+                heuristic_caller_count += 1;
+            }
             queue.push_back((source_id, depth + 1));
         };
 
@@ -166,17 +203,37 @@ pub async fn get_blast_radius(
                 // exactly three callers reported 564 affected nodes,
                 // 16% of the graph, including symbols in files with no
                 // reference to it at all.
-                if !matches!(
+                let is_dependency = matches!(
                     e.edge_type,
                     crate::schema::EdgeType::Calls | crate::schema::EdgeType::Uses
-                ) {
+                );
+                let is_heuristic = is_heuristic_edge(&e.edge_type);
+
+                if !is_dependency && !is_heuristic {
                     continue;
                 }
+
+                // Heuristic edges respect `LAIN_HEURISTIC_MIN_CONFIDENCE`
+                // unless the caller asked for them explicitly. The
+                // threshold defaults to 0.5; tighter raises precision,
+                // looser widens the net.
+                if is_heuristic {
+                    let conf = e.weight.unwrap_or(0.0);
+                    if !include_weak_edges && conf < heuristic_min_confidence() {
+                        continue;
+                    }
+                }
+
                 // Static graph only stores the node id, not the node
                 // struct. Look up the node for the format fields.
                 let source_id = e.source_id.clone();
                 let caller_opt = graph.get_node(&source_id).ok().flatten();
-                enqueue_caller(source_id, caller_opt.as_ref());
+                enqueue_caller(
+                    source_id,
+                    caller_opt.as_ref(),
+                    is_heuristic,
+                    if is_heuristic { e.weight } else { None },
+                );
             }
         }
 
@@ -184,13 +241,22 @@ pub async fn get_blast_radius(
         // returns `(GraphNode, EdgeType)` directly so we don't need a
         // second node-id lookup. Filter to dependency edges here too.
         for (caller, edge_type) in overlay.get_incoming_edges(&id) {
-            if !matches!(
+            let is_dependency = matches!(
                 edge_type,
                 crate::schema::EdgeType::Calls | crate::schema::EdgeType::Uses
-            ) {
+            );
+            let is_heuristic = is_heuristic_edge(&edge_type);
+            if !is_dependency && !is_heuristic {
                 continue;
             }
-            enqueue_caller(caller.id.clone(), Some(&caller));
+            // Overlay carries no provenance yet. Treat as moderate
+            // confidence and honour the same threshold so the default
+            // view stays clean. Once Tier 3 attaches provenance to
+            // overlay edges this branch can read it instead.
+            if is_heuristic && !include_weak_edges && 0.5 < heuristic_min_confidence() {
+                continue;
+            }
+            enqueue_caller(caller.id.clone(), Some(&caller), is_heuristic, None);
         }
     }
 
@@ -207,6 +273,15 @@ pub async fn get_blast_radius(
         output.push_str(&format!(
             "\n\n⚠ Confidence: {}% ({} nodes via LSP, {} nodes via tree-sitter name-match)",
             confidence_pct, lsp_resolved, tree_sitter_fallback
+        ));
+    }
+    if heuristic_caller_count > 0 {
+        output.push_str(&format!(
+            "\n\n~ {} heuristic caller(s) included (dynamic dispatch / bus / router). \
+             Lines prefixed with `~` are pattern-matched, not type-resolved. \
+             Raise `LAIN_HEURISTIC_MIN_CONFIDENCE` to narrow, or pass \
+             include_weak_edges=false to suppress entirely.",
+            heuristic_caller_count
         ));
     }
 
@@ -363,4 +438,146 @@ pub async fn get_coupling_radar(
     }
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+    use crate::sensors::dynamic_dispatch_sensor::scan_workspace_dispatch;
+
+    fn temp_graph() -> (tempfile::TempDir, GraphDatabase) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        (dir, graph)
+    }
+
+    fn file_node(path: &str, ns: &RepoNamespace) -> GraphNode {
+        let id = GraphNode::generate_id(&NodeType::File, path, "", None, ns);
+        let mut n = GraphNode::new(NodeType::File, String::new(), path.to_string());
+        n.id = id;
+        n
+    }
+
+    fn target_node(name: &str, ns: &RepoNamespace) -> GraphNode {
+        let id = GraphNode::generate_id(&NodeType::Function, "src/api.py", name, None, ns);
+        let mut n = GraphNode::new(
+            NodeType::Function,
+            name.to_string(),
+            "src/api.py".to_string(),
+        );
+        n.id = id;
+        n
+    }
+
+    #[tokio::test]
+    async fn blast_radius_with_weak_edges_includes_heuristic_callers() {
+        let (dir, graph) = temp_graph();
+        std::fs::write(
+            dir.path().join("orders.py"),
+            "def publish():\n    bus.publish('orders', payload)\n",
+        )
+        .unwrap();
+        let ns = RepoNamespace::for_test();
+
+        // Run the sensor so the heuristic edge is in the graph.
+        let _ = scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let target = target_node("handle_order", &ns);
+        graph.upsert_node(target.clone()).unwrap();
+        // Force the heuristic edge to point at our target by replacing
+        // its target_id with the target's id. The sensor emits edges
+        // to a synthetic Hub, which is good for transitive coverage
+        // but not for this focused test.
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Function, "__hub__", hub_name, None, &ns);
+        let edge = GraphEdge {
+            edge_type: EdgeType::BusTopic,
+            source_id: file_node("orders.py", &ns).id,
+            target_id: target.id.clone(),
+            weight: Some(0.7),
+            cross_repo: false,
+            provenance: Some(EdgeProvenance::Heuristic {
+                detector: "message_bus_publisher".to_string(),
+                confidence: 0.7,
+            }),
+        };
+        graph.upsert_node(file_node("orders.py", &ns)).unwrap();
+        graph
+            .upsert_node({
+                let mut n = GraphNode::new(NodeType::Function, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph.insert_edges_batch(&[edge]).unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_blast_radius(&graph, &overlay, "handle_order", false, true, None)
+            .await
+            .unwrap();
+
+        assert!(
+            output.contains("heuristic") || output.contains("[heuristic"),
+            "expected heuristic tag in output, got:\n{output}"
+        );
+        assert!(
+            output.contains("conf=0.70"),
+            "expected confidence tag in output, got:\n{output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blast_radius_without_weak_edges_suppresses_below_threshold_callers() {
+        let (dir, graph) = temp_graph();
+        std::fs::write(
+            dir.path().join("orders.py"),
+            "def publish():\n    bus.publish('orders', payload)\n",
+        )
+        .unwrap();
+        let ns = RepoNamespace::for_test();
+
+        let _ = scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+        let target = target_node("handle_order", &ns);
+        graph.upsert_node(target.clone()).unwrap();
+        let hub_name = "Hub:serde_value";
+        let hub_id = GraphNode::generate_id(&NodeType::Function, "__hub__", hub_name, None, &ns);
+        graph.upsert_node(file_node("orders.py", &ns)).unwrap();
+        graph
+            .upsert_node({
+                let mut n = GraphNode::new(NodeType::Function, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        // Below default threshold (0.5) so the default
+        // include_weak_edges=false path should drop it.
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::DynamicDispatch,
+                source_id: file_node("orders.py", &ns).id,
+                target_id: target.id.clone(),
+                weight: Some(0.3),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "serde_value".to_string(),
+                    confidence: 0.3,
+                }),
+            }])
+            .unwrap();
+
+        let overlay = VolatileOverlay::new();
+        let output = get_blast_radius(&graph, &overlay, "handle_order", false, false, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !output.contains("[heuristic"),
+            "below-threshold heuristic edges must be suppressed when include_weak_edges=false, got:\n{output}"
+        );
+        assert!(
+            !output.contains("heuristic caller(s) included"),
+            "summary line must be absent when no heuristic edges pass"
+        );
+    }
 }

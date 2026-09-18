@@ -81,6 +81,12 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
             agent_name,
         } => crate::cli::hooks::unlock(&workspace_root, &path, &agent_name)
             .map_err(|e| anyhow::anyhow!("{e}")),
+        HooksAction::BackfillHeuristics {
+            workspace,
+            graph,
+            dry_run,
+        } => crate::cli::hooks::backfill_heuristics(&workspace, graph.as_deref(), dry_run)
+            .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 

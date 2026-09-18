@@ -112,6 +112,10 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "get_cross_repo_blast_radius"
             | "get_cross_repo_blast_radius_for_repo"
             | "get_workspace_graph"
+            // Tier 3 — dynamic-dispatch mitigation. Reads the static
+            // graph, the overlay, the heuristic sensor's edges, and
+            // the runtime trace store; needs the graph to be indexed.
+            | "explain_dispatch"
     ) {
         return Some(GraphRequired);
     }

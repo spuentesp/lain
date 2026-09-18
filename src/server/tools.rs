@@ -1039,8 +1039,18 @@ impl ToolExecutor {
         sections.push(
             "2. **Find specific symbol**: `trace_dependency` or `semantic_search`\n".to_string(),
         );
-        sections
-            .push("3. **Assess change risk**: `get_blast_radius` before modifying\n".to_string());
+        sections.push(
+            "3. **Assess change risk (composed)** — never trust a single tool. Run all four:\n\
+             - `get_blast_radius` (static edges from Tree-sitter + LSP)\n\
+             - `get_coupling_radar` on the touched paths (git co-change partners)\n\
+             - `find_anchors` on the file (high-fan-in hubs nearby)\n\
+             - `trace_dependency` for upstream callees + imports of any dispatcher\n\
+             If all four return empty, treat as **no static evidence** and run the smoke\n\
+             command before merging. See *Dynamic Dispatch Caveat* below. When in doubt,\n\
+             call `explain_dispatch` to get a single `verdict` (`insufficient_evidence` means\n\
+             the graph cannot see the dispatcher — do not treat as safe).\n"
+                .to_string(),
+        );
         sections.push(
             "4. **Understand coupling**: `get_coupling_radar` for hidden co-change patterns\n"
                 .to_string(),
@@ -1055,6 +1065,27 @@ impl ToolExecutor {
 
         sections.push(
             "\n*Use tools incrementally (N+1 approach) to avoid context window overflow.*\n"
+                .to_string(),
+        );
+
+        sections.push("\n## Dynamic Dispatch Caveat\n\n".to_string());
+        sections.push(
+            "An empty `get_blast_radius` means **no static edges found**, not **no impact**.\n\
+             Static analysis (Tree-sitter + LSP) cannot follow dynamic dispatch:\n\n\
+             - message buses (`bus.publish`, `kafka.send`, `EventEmitter.emit`)\n\
+             - DI containers (`container.resolve`, `provider.get`, `@inject`)\n\
+             - schema-driven routers (FastAPI decorators, Express handlers, gRPC `rpc`)\n\
+             - trait objects, `Box<dyn Any>`, `serde_json::Value`, reflection\n\n\
+             Before mutating any symbol whose blast radius is empty:\n\
+             1. Run `get_coupling_radar` on the touched paths.\n\
+             2. Run `find_anchors` on the file to surface nearby high-fan-in hubs.\n\
+             3. Check the repo's `docs/dynamic-boundaries.md` for documented dispatch points.\n\
+             4. Call `explain_dispatch <symbol>` to get a single `verdict` covering static,\n\
+                heuristic, runtime, and co-change signals. `insufficient_evidence` is the\n\
+                explicit \"we don't know — do not assume safe\" signal.\n\
+             5. If the file is NOT in `dynamic-boundaries.md` AND all three queries are\n\
+                empty AND `explain_dispatch` returns `insufficient_evidence`, proceed with\n\
+                the smoke command before merging. Otherwise require a broader smoke run.\n"
                 .to_string(),
         );
 
@@ -1195,6 +1226,43 @@ mod tests {
             strategy.contains("federation") || strategy.contains("Federation"),
             "strategy must mention federation mode",
         );
+    }
+
+    #[test]
+    fn get_agent_strategy_teaches_composed_blast_radius_protocol() {
+        let strategy = build_test_strategy();
+        for needle in [
+            "composed",
+            "get_blast_radius",
+            "get_coupling_radar",
+            "find_anchors",
+            "trace_dependency",
+        ] {
+            assert!(
+                strategy.contains(needle),
+                "strategy must mention {} in the composed blast-radius rule:\n{}",
+                needle,
+                strategy,
+            );
+        }
+    }
+
+    #[test]
+    fn get_agent_strategy_warns_about_dynamic_dispatch_blind_spot() {
+        let strategy = build_test_strategy();
+        for needle in [
+            "Dynamic Dispatch Caveat",
+            "no static edges",
+            "dynamic-boundaries.md",
+            "smoke",
+        ] {
+            assert!(
+                strategy.contains(needle),
+                "strategy must mention {} in the dynamic dispatch caveat:\n{}",
+                needle,
+                strategy,
+            );
+        }
     }
 
     fn build_test_strategy() -> String {

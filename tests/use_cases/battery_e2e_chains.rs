@@ -86,8 +86,10 @@ fn chain_search_to_anchors_to_blast_to_trace() {
     );
 
     // Step 3: get_blast_radius(real_hub) — confirm callers are listed.
-    let blast_text = tokio_test_run(get_blast_radius(&db, &overlay, "real_hub", false, None))
-        .expect("blast radius step");
+    let blast_text = tokio_test_run(get_blast_radius(
+        &db, &overlay, "real_hub", false, false, None,
+    ))
+    .expect("blast radius step");
     assert!(
         blast_text.contains("caller_zero"),
         "blast chain step: must list caller_zero as caller of real_hub; got: {blast_text}"
