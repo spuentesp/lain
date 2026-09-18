@@ -19,7 +19,7 @@ use crate::server::tools::UiSession;
 use crate::tuning::TuningConfig;
 use async_trait::async_trait;
 use inventory::iter;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -125,6 +125,15 @@ pub struct ToolContext {
     /// paths stay on the dedicated MCP tools so the dispatcher gate
     /// still applies.
     pub annotations: Arc<AnnotationRegistry>,
+    /// Workspace handle shared with the running `LainServer`. None
+    /// for standalone / sidecar executors that never wire a
+    /// `LainMcpServer`; the dispatcher routes workspace tools off
+    /// this when present. PR-fix-Item-1 also reads it from
+    /// `get_capabilities` so the advertised tool count is exact
+    /// under workspace mode (the previous PR shipped the helper
+    /// signature with `workspace_active` but the call sites
+    /// hard-coded `false`).
+    pub workspaces: Option<Arc<RwLock<crate::federation::workspace::WorkspacesFile>>>,
 }
 
 impl ToolContext {
@@ -191,7 +200,24 @@ impl ToolContext {
             // section is suppressed by the same `is_empty()` guard the
             // followup tests pin.
             annotations: AnnotationRegistry::open_best_effort(&std::env::temp_dir()),
+            // Default to `None` so standalone / sidecar executors
+            // (which never wire a `LainMcpServer`) construct
+            // successfully. `LainMcpServer` sets this from its
+            // constructor before the executor reaches any tool.
+            workspaces: None,
         }
+    }
+
+    /// Install the workspace handle shared with `LainMcpServer`.
+    /// Used by the MCP dispatcher to expose workspace tools and
+    /// (since PR-fix-Item-1) by `get_capabilities` to report an
+    /// exact `tool_profile.advertised_count` under workspace mode.
+    pub fn with_workspaces(
+        mut self,
+        workspaces: Arc<RwLock<crate::federation::workspace::WorkspacesFile>>,
+    ) -> Self {
+        self.workspaces = Some(workspaces);
+        self
     }
 
     /// Install a live annotation registry. `LainMcpServer::with_server`

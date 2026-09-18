@@ -19,6 +19,8 @@
 use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
 use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 /// Build a small fixture graph: 7 nodes with mixed kinds and edges.
 fn build_fixture() -> (tempfile::TempDir, GraphDatabase) {
@@ -858,5 +860,80 @@ async fn get_capabilities_reports_active_tool_profile_via_dispatcher() {
     assert!(
         profile.get("advertised_count").is_some(),
         "tool_profile.advertised_count must be populated: {json}"
+    );
+}
+
+/// PR-fix-Item-1: workspace-aware `advertised_count`.
+///
+/// Before this PR the `tool_profile.advertised_count` reported by
+/// `get_capabilities` was a *lower bound* under workspace mode: the
+/// helper signature already took `workspace_active`, but both call
+/// sites passed `false` because workspace state lived on
+/// `LainMcpServer`, not on `ToolContext`. The plumbing hop landed
+/// in PR-fix-Item-1: `LainMcpServer::with_federation_and_workspaces`
+/// now syncs the workspace handle into `executor.ctx.workspaces`,
+/// and `get_capabilities` reads it.
+///
+/// This test pins the wire-level behaviour by setting
+/// `ctx.workspaces` on the executor and asserting that
+/// `advertised_count` includes the workspace family
+/// (`SemanticProfileFamlies::WORKSPACE.len() = 4`).
+#[tokio::test]
+async fn get_capabilities_advertised_count_includes_workspace_when_active() {
+    use lain::server::federation::workspace::{WorkspaceSpec, WorkspacesFile};
+
+    // First call without workspaces — baseline.
+    let executor = build_test_executor();
+    let text = executor
+        .call("get_capabilities", None)
+        .await
+        .expect("baseline get_capabilities must succeed");
+    let baseline: serde_json::Value =
+        serde_json::from_str(&text).expect("get_capabilities JSON parse");
+    let baseline_count = baseline["tool_profile"]["advertised_count"]
+        .as_u64()
+        .expect("advertised_count must be a u64") as usize;
+
+    // Construct an empty workspaces file (no actual repos wired —
+    // the test only needs `Some(workspaces)` so get_capabilities
+    // reports the workspace family is active).
+    let workspaces = Arc::new(RwLock::new(WorkspacesFile {
+        default: None,
+        workspaces: vec![WorkspaceSpec {
+            name: "test-workspace".into(),
+            description: None,
+            source: None,
+            members: vec!["test-repo".into()],
+        }],
+    }));
+
+    // Build a second executor and inject the workspace handle. This
+    // mirrors the wiring hop in
+    // `LainMcpServer::with_federation_and_workspaces` (which can't
+    // be exercised here without a full `LainServer` boot, but the
+    // executor-side mutation is the only thing that matters for
+    // advertised_count).
+    let mut executor_ws = build_test_executor();
+    executor_ws.ctx.workspaces = Some(Arc::clone(&workspaces));
+    let text = executor_ws
+        .call("get_capabilities", None)
+        .await
+        .expect("workspace-mode get_capabilities must succeed");
+    let with_ws: serde_json::Value =
+        serde_json::from_str(&text).expect("get_capabilities JSON parse");
+    let with_ws_count = with_ws["tool_profile"]["advertised_count"]
+        .as_u64()
+        .expect("advertised_count must be a u64") as usize;
+
+    // The workspace-active advertised count should equal the
+    // baseline plus `SemanticProfileFamlies::WORKSPACE.len() = 4`.
+    let workspace_family_size = lain::server::tools::profile::SemanticProfileFamlies::WORKSPACE.len();
+    assert_eq!(
+        with_ws_count,
+        baseline_count + workspace_family_size,
+        "workspace-mode advertised_count ({}) must be baseline ({}) + workspace family ({})",
+        with_ws_count,
+        baseline_count,
+        workspace_family_size,
     );
 }

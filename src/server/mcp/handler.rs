@@ -864,6 +864,15 @@ impl LainMcpServer {
         workspaces: Arc<RwLock<crate::federation::workspace::WorkspacesFile>>,
     ) -> Self {
         let now = std::time::SystemTime::now();
+        // Sync the workspace handle into the executor's `ToolContext`
+        // so `get_capabilities` (and any future workspace-aware tool
+        // path) sees it. This mirrors the `with_server` mutation
+        // pattern for presence/occupancy/annotations: the dispatcher
+        // routes through `ToolExecutor::call`, which doesn't have
+        // direct access to `LainMcpServer`'s fields, so the wiring
+        // hop lives here.
+        let mut executor = executor;
+        executor.ctx.workspaces = Some(Arc::clone(&workspaces));
         Self {
             executor,
             federation: Some(federation),

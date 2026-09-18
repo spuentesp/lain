@@ -655,13 +655,12 @@ impl ToolExecutor {
             + crate::server::tools::profile::special_advertised_count(
                 profile,
                 self.ctx.federation.is_some(),
-                // Workspace state lives on `LainMcpServer`, not on
-                // `ToolContext`; plumbing it in is a separate
-                // change. Until then the count is exact for
-                // single-repo and federation modes, and a lower
-                // bound (by `WORKSPACE.len() = 4`) for workspace
-                // mode.
-                false,
+                // Workspace state is plumbed into ToolContext by
+                // `LainMcpServer::with_federation_and_workspaces`.
+                // Single-workspace and federation-only servers
+                // (constructed via `new` or `with_federation`) leave
+                // this at None, matching their actual surface.
+                self.ctx.workspaces.is_some(),
             );
         serde_json::to_string(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
