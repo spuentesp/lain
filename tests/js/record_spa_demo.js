@@ -20,7 +20,13 @@ const path = require('node:path');
 
 const LAIN_BIN = process.env.LAIN_BIN
   || path.resolve(__dirname, '..', '..', 'target', 'release', 'lain');
-const CHROMIUM_BIN = '/usr/bin/chromium';
+// Chromium binary location: env-override first, then Playwright's
+// bundled chromium under ~/.cache/ms-playwright/, then the legacy
+// /usr/bin/chromium fallback. The env-override path lets CI runners
+// pin a specific chromium build without touching this script.
+const CHROMIUM_BIN = process.env.CHROMIUM_BIN
+  || require('playwright').chromium.executablePath()
+  || '/usr/bin/chromium';
 
 // ── CLI args ────────────────────────────────────────────────────────────
 
@@ -355,7 +361,21 @@ async function driveSequence(page) {
       return svg && svg.querySelectorAll('path.graph-node').length > 0;
     }, { timeout: 15_000 });
   } catch (_) { /* empty-state acceptable */ }
-  await new Promise(r => setTimeout(r, 6000));
+  // The SPA attaches the search-input listener via `wireGraphControls`
+  // at the END of `renderGraphTab` (after the anchor-mode fetch).
+  // Wait for the `#graph-meta` element to settle past "Loading
+  // anchors…" — without this gate, the recorder's
+  // `fill('[data-graph-search]')` may run before the input has a
+  // listener, and the typed value is silently discarded (the search
+  // listener fires only after wireGraphControls attaches).
+  await page.waitForFunction(
+    () => {
+      const meta = document.getElementById('graph-meta');
+      return meta && !/loading anchors/i.test(meta.textContent || '');
+    },
+    { timeout: 60_000 },
+  );
+  await new Promise(r => setTimeout(r, 1500));   // let drawGraphSvg settle
   // Final-review fix wave: focalise the Graph tab so the recorded
   // hero frame shows the focal view, not the empty-state copy. The
   // search input is the user-facing pattern the spec calls out
@@ -383,10 +403,49 @@ async function driveSequence(page) {
   // visible), which is the user-visible fix Item 1 asked for.
   await page.fill('[data-graph-search]', 'data_mut');
   await new Promise(r => setTimeout(r, 800));   // 300 ms debounce + buffer
-  await page.waitForFunction(
-    () => document.querySelector('[data-filter-row="focal"][data-active="1"]'),
-    { timeout: 8_000 },
-  );
+  // The current SPA has two focal-search paths:
+  //   (a) single match → `graphState.mode = 'focal'` is set directly,
+  //       no disambiguation button is rendered.
+  //   (b) multiple matches → a disambiguation panel renders
+  //       `data-focal-candidate` buttons; clicking one activates
+  //       focal mode.
+  // We handle both: race the candidate-button appearance against the
+  // focal-row activation, and click only if the button shows up.
+  const candidate = await Promise.race([
+    page.waitForSelector('[data-focal-candidate]', { timeout: 5_000 })
+        .then(b => ({ kind: 'multiple', el: b }))
+        .catch(() => null),
+    page.waitForFunction(
+      () => document.querySelector('[data-filter-row="focal"][data-active="1"]'),
+      { timeout: 5_000 },
+    ).then(() => ({ kind: 'single' })).catch(() => null),
+  ]);
+  if (candidate && candidate.kind === 'multiple' && candidate.el) {
+    await candidate.el.click();
+  }
+  try {
+    await page.waitForFunction(
+      () => document.querySelector('[data-filter-row="focal"][data-active="1"]'),
+      { timeout: 8_000 },
+    );
+  } catch (e) {
+    // Diagnostic: dump page state so a future run can see what
+    // blocked the focal row activation (search candidates, search
+    // input value, focal row's current data-active).
+    const dump = await page.evaluate(() => ({
+      candidates: Array.from(document.querySelectorAll('[data-focal-candidate]')).map(b => ({
+        candidate: b.getAttribute('data-focal-candidate'),
+      })),
+      searchValue: (document.querySelector('[data-graph-search]') || {}).value || null,
+      focalActive: (document.querySelector('[data-filter-row="focal"]') || {}).getAttribute('data-active') || null,
+      graphEmpty: document.getElementById('graph-empty') ? document.getElementById('graph-empty').textContent.trim().slice(0, 200) : null,
+      graphMeta: document.getElementById('graph-meta') ? document.getElementById('graph-meta').textContent.trim().slice(0, 200) : null,
+      selectedWorkspace: (document.getElementById('graph-workspace-select') || {}).value || null,
+    }));
+    await page.screenshot({ path: '/tmp/lain-record-spa-demo/debug-focal-failure.png', fullPage: true });
+    console.error('focal row did not activate; debug dump:', JSON.stringify(dump, null, 2));
+    throw e;
+  }
   await new Promise(r => setTimeout(r, 3000));   // let D3 settle the focal graph
   await new Promise(r => setTimeout(r, 10000));  // bumped 6 s → 10 s; absorbs focal re-render
 }
@@ -447,7 +506,7 @@ async function main() {
     // payload spans every repo declared in the fixture's
     // `repos.yaml`. Catches a broken fixture before we burn a
     // recording session on it.
-    await probeFederationCrossRepoGraph(baseUrl, workdir, 30_000);
+    await probeFederationCrossRepoGraph(baseUrl, workdir, 180_000);
     console.log(`  federation probe passed`);
 
     browser = await chromium.launch({
