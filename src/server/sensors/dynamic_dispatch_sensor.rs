@@ -51,6 +51,15 @@ const CONFIDENCE_ASYNC_TASK_SPAWN: f32 = 0.5;
 /// to the static graph; the confidence matches reflection
 /// because the dispatch surface is similarly opaque.
 const CONFIDENCE_DYNAMIC_EVAL: f32 = 0.4;
+/// TypeScript `as any` / `as unknown as any` and `<any>` casts —
+/// the canonical escape hatch from the static type system. After
+/// one of these the runtime value carries `any` semantics, so
+/// any subsequent method call dispatches through the JavaScript
+/// prototype chain (no static dispatch). Pinned lower than
+/// `serde_value` because `as any` is often a temporary
+/// workaround rather than an architectural dispatch surface —
+/// the user usually intends to remove it.
+const CONFIDENCE_TYPE_ESCAPE: f32 = 0.3;
 
 /// Convention patterns per language family. Each entry is `(regex, detector)`;
 /// a file matching the regex in this list emits a heuristic edge tagged
@@ -151,6 +160,18 @@ const RAW_DETECTORS: &[(&str, &str, &str)] = &[
         "dynamic_eval",
         "DynamicDispatch",
     ),
+    // TypeScript type escape hatches: `as any`, `as unknown as any`
+    // (the canonical workaround when `as any` is forbidden by
+    // lint rules), and the legacy `<any>` cast. After any of these
+    // the value dispatches through the JavaScript prototype chain
+    // — the static type system has been told to look the other way.
+    // We anchor on `as any` / `<any>` with whitespace boundaries
+    // so prose like "cast as anything you like" doesn't match.
+    (
+        r"\bas\s+(unknown\s+)?any\b|\bas\s+any\s+as\s+any\b|<any>",
+        "type_escape",
+        "DynamicDispatch",
+    ),
 ];
 
 /// One precompiled detector. Building a `regex::Regex` per detector per
@@ -181,6 +202,7 @@ static DETECTORS: Lazy<Vec<CompiledDetector>> = Lazy::new(|| {
         "rust_trait_object" => CONFIDENCE_RUST_TRAIT_OBJECT,
         "async_task_spawn" => CONFIDENCE_ASYNC_TASK_SPAWN,
         "dynamic_eval" => CONFIDENCE_DYNAMIC_EVAL,
+        "type_escape" => CONFIDENCE_TYPE_ESCAPE,
         _ => 0.5,
     };
     let edge_type_for = |kind: &str| match kind {
@@ -755,6 +777,129 @@ mod tests {
             !detectors.contains("dynamic_eval"),
             "identifier prefixes (evaluate_, execution_, exec_, executable_) \
              must not trigger dynamic_eval: {detectors:?}"
+        );
+    }
+
+    /// TypeScript `as any` (and the lint-bypass `as unknown as any`,
+    /// and the legacy `<any>` cast) is the canonical escape hatch
+    /// from the static type system. After one of these, the value
+    /// dispatches through the JavaScript prototype chain at runtime
+    /// — the LSP can't follow. New `type_escape` detector at
+    /// confidence 0.3 (lower than reflection — `as any` is often a
+    /// temporary workaround rather than an architectural surface).
+    #[test]
+    fn typescript_as_any_emits_type_escape_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("client.ts"),
+            "function getUser(id: string): any {\n  return fetch(`/users/${id}`) as any;\n}\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detectors.contains("type_escape"),
+            "expected type_escape in {:?}",
+            detectors
+        );
+
+        // Confidence pinned at 0.3.
+        let edge = graph
+            .all_edges()
+            .into_iter()
+            .find(|e| matches!(
+                e.provenance,
+                Some(EdgeProvenance::Heuristic { ref detector, .. }) if detector == "type_escape"
+            ))
+            .expect("type_escape edge should exist");
+        let confidence = match edge.provenance.as_ref().unwrap() {
+            EdgeProvenance::Heuristic { confidence, .. } => *confidence,
+            _ => unreachable!(),
+        };
+        assert!(
+            (confidence - 0.3).abs() < 1e-6,
+            "type_escape confidence must be 0.3, got {confidence}"
+        );
+    }
+
+    /// `as unknown as any` — the canonical workaround when an
+    /// `eslint @typescript-eslint/no-explicit-any` rule forbids
+    /// bare `as any`. The detector must match this two-step cast.
+    #[test]
+    fn typescript_as_unknown_as_any_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("strict.ts"),
+            "const data = fetch('/x') as unknown as any;\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detectors.contains("type_escape"),
+            "as unknown as any must also trigger type_escape: {:?}",
+            detectors
+        );
+    }
+
+    /// Negative coverage: `as Anything` (capitalised, not the
+    /// `any` keyword) and `<Anything>` (generic, not the legacy
+    /// `<any>` cast) must NOT fire. The detector targets the literal
+    /// `any` keyword only.
+    #[test]
+    fn as_something_other_than_any_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("user_defined.ts"),
+            "interface Anything { value: string }\n\
+             function cast(): Anything { return { value: 'x' } as Anything; }\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !detectors.contains("type_escape"),
+            "user-defined `Anything` interface must not trigger type_escape: {:?}",
+            detectors
         );
     }
 }
