@@ -999,6 +999,117 @@ mod m6_tests {
         );
     }
 
+    /// Mixed static + heuristic callers must produce the regular
+    /// risk tier (medium / high) — NOT the bare `low` of the
+    /// truly-empty case AND NOT the `low*` of the heuristic-only
+    /// case. The heuristic evidence augments an already-existing
+    /// caller surface; it doesn't replace the count-based tier.
+    /// Pinned here so a future refactor that re-routes the
+    /// heuristic-only verdict into the mixed path is a
+    /// deliberate decision.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_mixed_static_and_heuristic_uses_normal_tier() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_mixed");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        // Target with one Calls edge (static caller) and one
+        // BusTopic heuristic edge pointing at it. The static edge
+        // alone would put us in the `medium` tier (1 direct
+        // caller ≤ 3). The heuristic edge should not flip the
+        // verdict to bare low or to `low*`.
+        let target = GraphNode::new(
+            NodeType::Function,
+            "process".to_string(),
+            "/src/processor.rs".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Static caller: `main` → `process` via Calls.
+        let static_caller = GraphNode::new(
+            NodeType::Function,
+            "main".to_string(),
+            "/src/main.rs".to_string(),
+        );
+        graph.upsert_node(static_caller.clone()).unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge::new(
+                EdgeType::Calls,
+                static_caller.id.clone(),
+                target.id.clone(),
+            )])
+            .unwrap();
+
+        // Heuristic caller: a separate file publishing to a bus
+        // that lands on `process`.
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let heuristic_caller_id =
+            GraphNode::generate_id(&NodeType::File, "/src/publisher.rs", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n = GraphNode::new(
+                    NodeType::File,
+                    String::new(),
+                    "/src/publisher.rs".to_string(),
+                );
+                n.id = heuristic_caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: heuristic_caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        let mut a = Map::new();
+        a.insert("symbol".to_string(), Value::String("process".to_string()));
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // The mixed case must NOT downgrade to either tier-3
+        // special verdict. The static caller's presence keeps the
+        // risk tier on the regular scale.
+        assert!(
+            !out.contains("verdict: **low**") && !out.contains("verdict: **low*"),
+            "mixed static+heuristic assess_change must NOT downgrade to \
+             bare low or low*, got:\n{out}"
+        );
+        assert!(
+            out.contains("verdict: **medium**") || out.contains("verdict: **high**"),
+            "mixed static+heuristic must report medium or high, got:\n{out}"
+        );
+        // And the heuristic evidence should still surface so
+        // the agent knows the runtime target has more callers
+        // than the static graph shows.
+        assert!(
+            out.contains("heuristic caller(s) included"),
+            "mixed case must still surface the heuristic evidence, got:\n{out}"
+        );
+    }
+
     /// Helper that wraps `search_code` with `cross_encoder` and
     /// `embedding_cache` defaulted to empty (so the lexical path
     /// is the only one exercised — that's what these unit tests
