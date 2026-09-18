@@ -635,17 +635,21 @@
     "name": "get_agent_strategy"
   },
   {
-    "description": "Install the language server for the given file extension (e.g. 'rs', 'py') or language name (e.g. 'rust').",
+    "description": "Install one or more language servers. Pass a single `{language}` to install one extension, or `extensions: ['rs','py','go',...,'auto']` to install in a batch. The string `'auto'` resolves to every language the workspace's tracked files use.",
     "inputSchema": {
       "properties": {
+        "extensions": {
+          "description": "Batched install. Each entry is an extension or language name; 'auto' expands to the workspace's tracked-file languages. When present, takes precedence over `language`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "language": {
-          "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'.",
+          "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'. Single-install path.",
           "type": "string"
         }
       },
-      "required": [
-        "language"
-      ],
       "type": "object"
     },
     "name": "install_language_server"

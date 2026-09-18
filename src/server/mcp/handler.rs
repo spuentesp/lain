@@ -472,6 +472,37 @@ pub(crate) fn inert_tool_names(
     }
 }
 
+/// Decide whether `tool_name` is visible under the active
+/// `ToolProfile`. The `Full` profile is the legacy "show everything"
+/// behaviour. The `Semantic` profile gates the surface to the
+/// curated `SEMANTIC_PROFILE` list, plus the federation / workspace /
+/// server-status families that are part of the contextual
+/// `tools/list` response (those are appended by the dispatcher
+/// from `FEDERATION_TOOL_DEFS`, `WORKSPACE_TOOL_DEFS`, and
+/// `SERVER_TOOL_DEFS`).
+///
+/// Unknown tools (those the dispatcher routes via
+/// `ToolExecutor::call_inner` but that aren't in
+/// `SEMANTIC_PROFILE`) are kept under both profiles: `get_health`,
+/// `get_capabilities`, and similar special-cased tools *must*
+/// remain reachable, and the semantic-profile curation already
+/// includes the ones an agent needs.
+pub(crate) fn profile_allows(
+    profile: crate::server::tools::profile::ToolProfile,
+    tool_name: &str,
+) -> bool {
+    use crate::server::tools::profile::{SemanticProfileFamlies, SEMANTIC_PROFILE};
+    match profile {
+        crate::server::tools::profile::ToolProfile::Full => true,
+        crate::server::tools::profile::ToolProfile::Semantic => {
+            SEMANTIC_PROFILE.contains(&tool_name)
+                || SemanticProfileFamlies::SERVER_STATUS.contains(&tool_name)
+                || SemanticProfileFamlies::FEDERATION.contains(&tool_name)
+                || SemanticProfileFamlies::WORKSPACE.contains(&tool_name)
+        }
+    }
+}
+
 #[async_trait]
 impl ServerHandler for LainHandler {
     async fn handle_list_tools_request(
@@ -527,6 +558,16 @@ impl ServerHandler for LainHandler {
         }
         // Server-status and recent-projects tools are always available.
         tools.extend(defs_to_tools(SERVER_TOOL_DEFS));
+
+        // Wire-level filter for the default Semantic tool profile.
+        // `LAIN_TOOL_PROFILE=full` opts in to the legacy 79-tool
+        // surface. The agent self-discovers the active profile via
+        // `get_capabilities.tool_profile` — surfacing that in the
+        // ListToolsResult itself would require every MCP SDK to
+        // honour `_meta`, which most don't, so we keep it in the
+        // dedicated capabilities endpoint.
+        let profile = crate::server::tools::profile::ToolProfile::from_env();
+        tools.retain(|t| profile_allows(profile, &t.name));
 
         Ok(ListToolsResult {
             tools,
@@ -1597,6 +1638,18 @@ async fn handle_request(
                         for t in defs_to_value_tools(SERVER_TOOL_DEFS) {
                             tools.push(t);
                         }
+                        // Same wire-level profile filter as the stdio
+                        // path. `LAIN_TOOL_PROFILE=full` opts back in to
+                        // the legacy 79-tool surface.
+                        let http_profile = crate::server::tools::profile::ToolProfile::from_env();
+                        let tools: Vec<serde_json::Value> = tools
+                            .into_iter()
+                            .filter(|t| {
+                                t.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .is_none_or(|n| profile_allows(http_profile, n))
+                            })
+                            .collect();
                         serde_json::json!({"jsonrpc": "2.0", "result": {"tools": tools}, "id": id})
                     }
                     "tools/call" => {
