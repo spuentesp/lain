@@ -234,6 +234,32 @@ All notable changes to LAIN are documented here. Versions follow
   `reset_global_for_tests` seam (`OnceLock` has no `take()`,
   the function was a no-op, and no caller existed).
 
+- **`dynamic_eval` detector closes the Python + JS gap.**
+  `eval()`, `exec()`, `pickle.loads()`, and `new Function()` are
+  direct string-to-code surfaces; anything reachable from the
+  loaded string is invisible to the static graph. New detector
+  matches these patterns at confidence 0.4 (matches reflection
+  tier) and tags them as `DynamicDispatch`. Two regression
+  tests pin the contract: a Python `pickle.loads` fixture and
+  a JS `eval` fixture — so a future Python-only tuning can't
+  silently miss the same risk in a JS codebase.
+
+- **`assess_change` surfaces heuristic-only honestly.** Pre-fix:
+  `assess_change` on a symbol with zero static callers and one
+  heuristic caller returned `risk=low` — the agent would treat
+  that as safe, exactly the regression `explain_dispatch` was
+  built to prevent. Post-fix: when the static graph is empty
+  but the blast-radius output carries the `heuristic caller(s)
+  included` marker, `assess_change` emits `risk=low* —
+  heuristic-only (see ~ N heuristic caller(s) below)` instead.
+  The asterisk is the agent-visible signal that the static
+  graph is empty by blind-spot, not by absence of callers.
+  Risk-tier ordering (`low*` → `medium` → `high`) is preserved
+  so any consumer that matched on the bare `low` word still
+  works. Two regression tests pin the new contract:
+  `assess_change_heuristic_only_verdict_does_not_say_low` and
+  the iter-17 `assess_change_surfaces_heuristic_callers_in_risk_verdict`.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
