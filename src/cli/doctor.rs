@@ -429,8 +429,17 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     // would diverge from a server that has overrides applied, but
     // the defaults are stable and useful enough for offline triage.
     let prewarm_knobs = crate::tuning::IngestionConfig::default();
+    // Accept the same opt-out values case-insensitively. An
+    // operator who runs `export LAIN_LSP_PREWARM=FALSE` (caps)
+    // shouldn't get a different answer than `LAIN_LSP_PREWARM=false`
+    // — the case-insensitive norm matches `LAIN_TOOL_PROFILE`.
+    // `""` (empty) is accepted because `export LAIN_LSP_PREWARM=` is
+    // the natural "set to empty" idiom in POSIX shells.
     let env_opt_out = matches!(
-        std::env::var("LAIN_LSP_PREWARM").ok().as_deref(),
+        std::env::var("LAIN_LSP_PREWARM")
+            .ok()
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref(),
         Some("false") | Some("0") | Some("")
     );
     // `advertised_count` matches what `tools/list` would return under
@@ -793,6 +802,60 @@ mod tests {
     /// surface, so an operator doing `doctor --json` against an
     /// offline server sees what `tools/list` will produce.
     ///
+    /// Env-var parsing for `LAIN_LSP_PREWARM` (Iter 9 audit).
+    ///
+    /// The handler matches three values case-insensitively:
+    /// `"false"`, `"0"`, `""`. An operator who sets
+    /// `LAIN_LSP_PREWARM=FALSE` (uppercase) or `LAIN_LSP_PREWARM=No`
+    /// gets the same outcome as the lowercase form, by design —
+    /// matches the case-insensitivity already documented for
+    /// `LAIN_TOOL_PROFILE`. Empty string is accepted because
+    /// `export LAIN_LSP_PREWARM=` is the natural shell idiom.
+    ///
+    /// NOTE: this test mutates env via std::env::set_var. To avoid
+    /// racing siblings, we serialise on a process-wide mutex.
+    #[test]
+    fn lain_lsp_prewarm_env_is_case_insensitive() {
+        use std::sync::Mutex;
+        // Lazy static: first-acquire creates the mutex; subsequent
+        // acquires reuse it. Poisoning is acceptable — tests
+        // recovering from a panic shouldn't share env state.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Snapshot pre-test state.
+        let prev = std::env::var("LAIN_LSP_PREWARM").ok();
+
+        // Cases that opt out.
+        for v in ["false", "FALSE", "False", "0", ""] {
+            std::env::set_var("LAIN_LSP_PREWARM", v);
+            // Re-invoke build_report (it reads env at call time)
+            // and assert env_opt_out is true.
+            let report = build_report(None).expect("build_report");
+            let report_json = serde_json::to_value(&report).unwrap();
+            assert_eq!(
+                report_json["lsp_prewarm"]["env_opt_out"], true,
+                "LAIN_LSP_PREWARM={v:?} must opt out (case-insensitive)"
+            );
+        }
+
+        // Cases that do NOT opt out.
+        for v in ["true", "yes", "1", "no", "off"] {
+            std::env::set_var("LAIN_LSP_PREWARM", v);
+            let report = build_report(None).expect("build_report");
+            let report_json = serde_json::to_value(&report).unwrap();
+            assert_eq!(
+                report_json["lsp_prewarm"]["env_opt_out"], false,
+                "LAIN_LSP_PREWARM={v:?} must NOT opt out (not in the opt-out set)"
+            );
+        }
+
+        // Restore.
+        match prev {
+            Some(v) => std::env::set_var("LAIN_LSP_PREWARM", v),
+            None => std::env::remove_var("LAIN_LSP_PREWARM"),
+        }
+    }
+
     /// Caveat: a test that mutates `LAIN_TOOL_PROFILE` or
     /// `LAIN_LSP_PREWARM` would race siblings that read them. We
     /// don't mutate env in these tests — env-driven paths are
