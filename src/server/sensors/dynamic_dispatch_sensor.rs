@@ -23,6 +23,8 @@
 use crate::error::LainError;
 use crate::graph::{graph_path, GraphDatabase};
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType, RepoNamespace};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::collections::HashSet;
 
 /// Confidence assigned to each heuristic family. Higher = more specific
@@ -42,7 +44,7 @@ const CONFIDENCE_REFLECTION: f32 = 0.4;
 /// not bare keywords) so prose comments and unrelated strings do not
 /// trigger false positives. Tightening further belongs in follow-up
 /// per-language detectors; this first cut trades recall for precision.
-const DETECTORS: &[(&str, &str, &str)] = &[
+const RAW_DETECTORS: &[(&str, &str, &str)] = &[
     // (regex, detector_name, edge_type_as_str)
     // Message-bus publishers.
     (
@@ -102,6 +104,52 @@ const DETECTORS: &[(&str, &str, &str)] = &[
     (r"^\s*dynamic\s+\w", "serde_value", "DynamicDispatch"),
 ];
 
+/// One precompiled detector. Building a `regex::Regex` per detector per
+/// file is the largest single cost in `scan_workspace_dispatch` on a
+/// multi-thousand-file workspace; precompiling once and threading the
+/// already-resolved `EdgeType` and confidence score through the hot
+/// loop cuts that cost out entirely.
+struct CompiledDetector {
+    regex: Regex,
+    edge_type: EdgeType,
+    confidence: f32,
+    detector: &'static str,
+}
+
+/// All detectors precompiled once on first access. Patterns that fail
+/// to compile are silently dropped — the failure mode is "this family
+/// never matches", which is honest (no false positives) and easier to
+/// notice in test coverage than a panic at static-init time.
+///
+/// Pre-resolving the `&str → EdgeType` and `&str → confidence` lookups
+/// also moves those match statements out of the per-file hot loop.
+static DETECTORS: Lazy<Vec<CompiledDetector>> = Lazy::new(|| {
+    let confidence_for = |detector: &str| match detector {
+        "message_bus_publisher" | "message_bus_subscriber" => CONFIDENCE_MESSAGE_BUS,
+        "container_resolve" => CONFIDENCE_CONTAINER_RESOLVE,
+        "schema_router" => CONFIDENCE_SCHEMA_ROUTER,
+        "serde_value" => CONFIDENCE_REFLECTION,
+        _ => 0.5,
+    };
+    let edge_type_for = |kind: &str| match kind {
+        "BusTopic" => EdgeType::BusTopic,
+        "RouteMatches" => EdgeType::RouteMatches,
+        _ => EdgeType::DynamicDispatch,
+    };
+    RAW_DETECTORS
+        .iter()
+        .filter_map(|(pat, detector, edge_kind)| {
+            let regex = Regex::new(pat).ok()?;
+            Some(CompiledDetector {
+                regex,
+                edge_type: edge_type_for(edge_kind),
+                confidence: confidence_for(detector),
+                detector,
+            })
+        })
+        .collect()
+});
+
 /// Walks the workspace, runs each detector over each source file, and
 /// inserts the resulting heuristic edges into `graph`. Returns the
 /// number of edges created.
@@ -143,30 +191,14 @@ pub fn scan_workspace_dispatch(
             graph.upsert_node(file_node)?;
         }
 
-        for (pat, detector, edge_kind) in DETECTORS {
-            let Ok(re) = regex::Regex::new(pat) else {
-                continue;
-            };
-            if !re.is_match(&content) {
+        for det in DETECTORS.iter() {
+            if !det.regex.is_match(&content) {
                 continue;
             }
 
-            let edge_type = match *edge_kind {
-                "BusTopic" => EdgeType::BusTopic,
-                "RouteMatches" => EdgeType::RouteMatches,
-                _ => EdgeType::DynamicDispatch,
-            };
-            let confidence = match *detector {
-                "message_bus_publisher" | "message_bus_subscriber" => CONFIDENCE_MESSAGE_BUS,
-                "container_resolve" => CONFIDENCE_CONTAINER_RESOLVE,
-                "schema_router" => CONFIDENCE_SCHEMA_ROUTER,
-                "serde_value" => CONFIDENCE_REFLECTION,
-                _ => 0.5,
-            };
-
             // Synthetic Hub target. Deterministic id per detector so
             // repeated scans converge on the same node.
-            let hub_name = format!("Hub:{}", detector);
+            let hub_name = format!("Hub:{}", det.detector);
             let hub_id =
                 GraphNode::generate_id(&NodeType::Synthetic, "__hub__", &hub_name, None, namespace);
 
@@ -177,14 +209,14 @@ pub fn scan_workspace_dispatch(
             }
 
             new_edges.push(GraphEdge {
-                edge_type: edge_type.clone(),
+                edge_type: det.edge_type.clone(),
                 source_id: file_id.clone(),
                 target_id: hub_id,
-                weight: Some(confidence),
+                weight: Some(det.confidence),
                 cross_repo: false,
                 provenance: Some(EdgeProvenance::Heuristic {
-                    detector: (*detector).to_string(),
-                    confidence,
+                    detector: det.detector.to_string(),
+                    confidence: det.confidence,
                 }),
             });
         }
