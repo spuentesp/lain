@@ -125,6 +125,29 @@ LAIN provides specialized MCP tools categorized by capability:
 - **`get_agent_strategy`** — Retrieves operational guidelines and strategic instructions for agents.
 - **`get_world_state`** — Summarizes active sessions, file claims, and graph freshness in a single compact call.
 
+### 7. Dynamic-Dispatch Synthesis
+
+Tree-sitter and LSP can't follow dynamic dispatch (message buses, DI
+containers, schema-driven routers, reflection). The static graph
+returns an empty `get_blast_radius` for any caller routed through
+those patterns, even when the application depends on the symbol.
+`explain_dispatch` closes the gap:
+
+- **`explain_dispatch <symbol>`** — Synthesizes four signals
+  (static callers, heuristic callers, runtime callers, git
+  co-change partners) and returns a single `verdict` field.
+  `insufficient_evidence` is the explicit "do not assume safe"
+  verdict when every signal is empty. Always call this before
+  mutating a symbol whose blast radius is empty.
+
+Behind the scenes: Tier 2 emits `BusTopic` / `DynamicDispatch` /
+`RouteMatches` edges from convention-pattern matches (message
+buses, DI containers, FastAPI decorators); Tier 3's
+`RuntimeTraceStore` will eventually absorb OpenTelemetry spans
+as `RuntimeCall` edges. Full reference: [docs/dynamic-dispatch.md](docs/dynamic-dispatch.md).
+
+### 8. Cold-boot LSP prewarm
+
 ### 7. Cold-boot LSP prewarm
 - On first start, LAIN warms up every language server your workspace uses
   (one warm-up `documentSymbol` call against a sentinel file per language)
@@ -133,7 +156,7 @@ LAIN provides specialized MCP tools categorized by capability:
   Opt out with `LAIN_LSP_PREWARM=false`. Per-binary warm-up state is
   visible via `GET /health` and `lain doctor --json`.
 
-### 8. Curated tool surface
+### 9. Curated tool surface
 - By default `tools/list` returns the **curated 14-tool semantic
   surface** — the M5 bootstrap (`understand_repository`), the M6
   high-level Agent API (`find_symbol`, `get_context`, `find_related`,
@@ -163,8 +186,11 @@ See [QUICKSTART.md](docs/QUICKSTART.md) for Homebrew, manual builds, non-interac
 
 | Env var | Effect |
 |---|---|
-| `LAIN_TOOL_PROFILE=full` | Restore the legacy 79-tool surface (default is the curated 14-tool `semantic`). |
+| `LAIN_TOOL_PROFILE=full` | Restore the legacy 79-tool surface (default is the curated 15-tool `semantic`). |
 | `LAIN_LSP_PREWARM=false` | Skip the cold-boot LSP prewarm pass (cold-cache LSPs may then trip the runtime 1 s breaker on first call). |
+| `LAIN_HEURISTIC_MIN_CONFIDENCE=0.5` | Minimum confidence a heuristic edge needs to appear in `get_blast_radius` without `include_weak_edges=true`. Lower = more permissive. |
+| `LAIN_TRACE_TTL_SECS=3600` | TTL for runtime edges in `RuntimeTraceStore`. Expired edges are purged on the next sweep. |
+| `LAIN_TRACE_MAX_EDGES=100000` | Maximum runtime edges the store keeps in memory. Oldest dropped first when exceeded. |
 
 Tunables (`.lain/tuning.toml`):
 
