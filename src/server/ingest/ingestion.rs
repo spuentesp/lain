@@ -223,6 +223,7 @@ impl LainServer {
             // happy path for "rust + rust in two crates" and not
             // worth special-casing for now.
             let pool = Arc::clone(self.ingest().lsp_pool());
+            let unique_exts_for_summary = unique_exts.clone();
             for ext in unique_exts.into_iter() {
                 if cancel.is_cancelled() {
                     debug!("build_core_memory: cancel observed before prewarm task for {ext}");
@@ -276,6 +277,38 @@ impl LainServer {
                     snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
                 });
                 return Err(LainError::Cancelled);
+            }
+            // Operator-facing summary. With `unique_exts.len() <=
+            // pool.multiplexers.len()` every language runs in
+            // parallel; larger language sets round-robin through
+            // the pool, so languages routed to the same multiplexer
+            // serialise on its inner `AsyncMutex`. The `max_per_mux`
+            // value is what an operator would need to bump
+            // `lsp_pool_size` past in `.lain/tuning.toml` to get
+            // full parallelism.
+            let pool_size = pool.size();
+            let n_exts = unique_exts_for_summary.len();
+            let max_per_mux = if pool_size == 0 {
+                0
+            } else {
+                (n_exts + pool_size - 1) / pool_size
+            };
+            if max_per_mux > 1 {
+                info!(
+                    "build_core_memory: LSP prewarm done — {} languages across {} multiplexers \
+                     (~{} tasks per mux serialised on the inner mutex; bumping lsp_pool_size \
+                     past {} in .lain/tuning.toml would give every language its own parallel slot)",
+                    n_exts,
+                    pool_size,
+                    max_per_mux,
+                    n_exts,
+                );
+            } else {
+                info!(
+                    "build_core_memory: LSP prewarm done — {} languages across {} multiplexers (full parallelism)",
+                    n_exts,
+                    pool_size,
+                );
             }
         }
 
