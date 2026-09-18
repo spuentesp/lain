@@ -168,10 +168,10 @@ pub fn scan_workspace_dispatch(
             // repeated scans converge on the same node.
             let hub_name = format!("Hub:{}", detector);
             let hub_id =
-                GraphNode::generate_id(&NodeType::Function, "__hub__", &hub_name, None, namespace);
+                GraphNode::generate_id(&NodeType::Synthetic, "__hub__", &hub_name, None, namespace);
 
             if seen_hubs.insert(hub_id.clone()) {
-                let mut hub_node = GraphNode::new(NodeType::Function, hub_name, String::new());
+                let mut hub_node = GraphNode::new(NodeType::Synthetic, hub_name, String::new());
                 hub_node.id = hub_id.clone();
                 hub_nodes.push(hub_node);
             }

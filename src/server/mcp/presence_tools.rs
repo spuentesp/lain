@@ -1015,7 +1015,8 @@ fn symbol_weight(kind: &NodeType) -> u32 {
         | NodeType::Constant
         | NodeType::HttpRoute
         | NodeType::Topic
-        | NodeType::Resource => 1,
+        | NodeType::Resource
+        | NodeType::Synthetic => 1,
     }
 }
 
