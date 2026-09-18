@@ -42,6 +42,20 @@ const LSP_OPEN_DOC_TIMEOUT: Duration = Duration::from_secs(5);
 /// falls back to tree-sitter for the rest of the process lifetime.
 /// ProcessExited failures route to the restart budget instead.
 const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+/// Maximum time to wait for the LSP install subprocess (`pip install
+/// python-lsp-server`, `npm install -g typescript-language-server`,
+/// `rustup component add rust-analyzer`, etc.) to return. Distinct
+/// from `LSP_REQUEST_TIMEOUT` (which gates an in-flight LSP
+/// round-trip). Installs CAN be slow over a slow network or on
+/// the first invocation, so 5 minutes is generous — but anything
+/// longer than that almost certainly means the subprocess is
+/// waiting on stdin (a forgotten `[y/N]` prompt, an interactive
+/// credential request) and the agent should not block waiting for
+/// it. On timeout, `install_server` returns a typed `Lsp` error
+/// with the elapsed time so the dispatcher's batched response
+/// surfaces it as `InstallOutcome::Failed` without blocking the
+/// rest of the batch.
+const LSP_INSTALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// After this many consecutive LSP failures for a binary, mark it
 /// `unavailable` for the rest of the process lifetime. Operators
 /// observe the change via `get_supported_languages` / `get_health`
@@ -889,10 +903,32 @@ impl LspMultiplexer {
             cmd.args(&parts[1..]);
         }
 
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| LainError::Lsp(format!("Failed to execute install command: {}", e)))?;
+        // Bound the install subprocess with LSP_INSTALL_TIMEOUT.
+        // Without this, an interactive prompt or a slow-network hang
+        // can block `install_servers` (and therefore the whole
+        // `extensions: ["auto"]` path) indefinitely. The dispatcher's
+        // batched response surfaces the timeout as `InstallOutcome
+        // ::Failed` so the operator sees what happened — the batch
+        // keeps going for the rest of the entries.
+        let output = match tokio::time::timeout(
+            LSP_INSTALL_TIMEOUT,
+            cmd.output(),
+        )
+        .await
+        {
+            Ok(res) => res.map_err(|e| LainError::Lsp(format!(
+                "Failed to execute install command: {}", e
+            )))?,
+            Err(_elapsed) => {
+                return Err(LainError::Lsp(format!(
+                    "Install command for {} ({}) timed out after {:?}; \
+                     likely waiting on stdin (forgotten prompt) or a \
+                     hung network. Re-run with the command run \
+                     manually if needed.",
+                    resolved_ext, config.binary, LSP_INSTALL_TIMEOUT
+                )));
+            }
+        };
 
         if output.status.success() {
             self.unavailable.remove(config.binary);
