@@ -27,6 +27,9 @@ fn test_ingestion_config_default() {
     assert_eq!(config.nlp_prewarm_count, 20);
     assert_eq!(config.nlp_batch_size, 50);
     assert_eq!(config.nlp_budget_per_pass, 20);
+    assert_eq!(config.lsp_prewarm_timeout_secs, 30);
+    assert_eq!(config.lsp_prewarm_max_files, 50);
+    assert!(!config.lsp_prewarm_opt_out);
     assert_eq!(config.ui_session_ttl_secs, 600);
     assert_eq!(config.default_query_limit, 100);
 }

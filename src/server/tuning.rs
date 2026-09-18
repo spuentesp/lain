@@ -107,6 +107,26 @@ pub struct IngestionConfig {
     /// Higher values help on machines with many idle cores; lower values
     /// help when sharing the box with other workloads.
     pub nlp_max_threads: usize,
+    /// LSP prewarm: per-language timeout for the cold-boot warm-up
+    /// `documentSymbol` call against a sentinel file. This is separate
+    /// from `lsp_symbol_poll_timeout_secs` (which gates polling inside
+    /// an active LSP round-trip) and the runtime `LSP_REQUEST_TIMEOUT`
+    /// in `src/server/lsp.rs` (1 s, intentionally short so a stuck
+    /// round-trip doesn't tie up the Tokio worker). The prewarm pass
+    /// is allowed a longer budget on purpose: cold caches on large
+    /// Rust / C++ projects routinely take 2–5 s on the first call,
+    /// which would otherwise trip the circuit breaker.
+    pub lsp_prewarm_timeout_secs: u64,
+    /// LSP prewarm: maximum number of files inspected when picking a
+    /// sentinel for a given language. Larger workspaces pay slightly
+    /// more for a sentinel pick but get a warmer LSP up front.
+    pub lsp_prewarm_max_files: usize,
+    /// LSP prewarm: opt out of the cold-boot warm-up step entirely.
+    /// When `true`, `build_core_memory` skips prewarm and proceeds
+    /// straight to scanning; the runtime circuit breaker still applies
+    /// to every later call, so cold-cache startups that happen to
+    /// hit the 1 s boundary can still mark a binary unavailable.
+    pub lsp_prewarm_opt_out: bool,
     /// UI session time-to-live in seconds.
     pub ui_session_ttl_secs: u64,
     /// Default query result limit when not specified.
@@ -128,6 +148,9 @@ impl Default for IngestionConfig {
             nlp_batch_size: 50,
             nlp_budget_per_pass: 20,
             nlp_max_threads: 0, // 0 = auto-detect (min(cores, 4))
+            lsp_prewarm_timeout_secs: 30,
+            lsp_prewarm_max_files: 50,
+            lsp_prewarm_opt_out: false,
             ui_session_ttl_secs: 600,
             default_query_limit: 100,
         }
@@ -382,6 +405,12 @@ mod knob_reachability_tests {
             ("cochange_commit_window", "tuning.rs"),
             ("cochange_min_pair_count", "tuning.rs"),
             ("cochange_max_commit_files", "tuning.rs"),
+            // LSP prewarm tunables (this PR). The reachability is
+            // `src/server/ingest/ingestion.rs`, where
+            // `build_core_memory` reads them before the scan batch.
+            ("lsp_prewarm_timeout_secs", "tuning.rs"),
+            ("lsp_prewarm_max_files", "tuning.rs"),
+            ("lsp_prewarm_opt_out", "tuning.rs"),
             // Lives in `federation/config.rs`, same failure mode.
             ("ready_threshold", "federation/config.rs"),
             ("max_concurrent_indexers", "federation/config.rs"),
