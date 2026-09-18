@@ -22,6 +22,14 @@ struct LspConfig {
 /// rust-analyzer can be slow on first startup, but a crashed or defunct
 /// process must not hang the caller forever.
 const LSP_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time to wait for the post-startup `open_document` call
+/// during a cold-boot prewarm. Distinct from `LSP_STARTUP_TIMEOUT`
+/// (which gates the child spawn) and from `LSP_REQUEST_TIMEOUT`
+/// (which gates the documentSymbol round-trip). A hung or partially-
+/// crashed LSP child between successful startup and the documentSymbol
+/// call would otherwise block the prewarm JoinSet task indefinitely
+/// and surface as a `build_core_memory` hang.
+const LSP_OPEN_DOC_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum time for a single LSP request (references, document symbols).
 ///
 /// Tightened from 5s to 1s as part of the LSP-flakiness workaround:
@@ -575,7 +583,40 @@ impl LspMultiplexer {
                 return;
             }
         };
+        // `open_document` MUST be bounded — between successful
+        // `ensure_server` and the `get_document_symbols` timeout
+        // there's no budget. A hung or partially-crashed LSP child
+        // here would block the JoinSet task indefinitely, the
+        // drain loop's cancel check never fires (it only runs after
+        // `join_next()` returns), and `build_core_memory` hangs.
+        // The same 5 s ceiling `ensure_server` uses for startup
+        // covers the document-open window — a healthy LSP answers
+        // in milliseconds, anything slower is an LSP problem and we
+        // should record it as `TimedOut`, not block.
+        if let Err(_elapsed) =
+            tokio::time::timeout(LSP_OPEN_DOC_TIMEOUT, self.bridge.open_document(&server_id, &uri, &content)).await
+        {
+            // On timeout, classify as `TimedOut` so the per-binary
+            // outcome in `prewarm_state` reflects what actually
+            // happened (the document-open hung, not a missing
+            // sentinel or unavailable binary). The cancel path at
+            // the call site still sees this as a finished task and
+            // proceeds.
+            self.prewarm_state.insert(
+                binary.clone(),
+                PrewarmOutcome::TimedOut,
+            );
+            warn!(
+                "LSP prewarm: {} open_document timed out after {:?}; recording TimedOut",
+                binary, LSP_OPEN_DOC_TIMEOUT
+            );
+            return;
+        }
         if let Err(e) = self.bridge.open_document(&server_id, &uri, &content).await {
+            // Unreachable when the timeout arm above didn't fire —
+            // but kept for completeness in case the timeout is
+            // removed or the future returns to a non-fallible
+            // shape. Cost: a single Result match.
             self.prewarm_state.insert(
                 binary.clone(),
                 PrewarmOutcome::Failed {
