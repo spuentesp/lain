@@ -148,8 +148,19 @@ impl LainServer {
         // Honors:
         //   * `lsp_prewarm_opt_out` — operator-supplied escape hatch.
         //   * the server cancel token — shutdown during prewarm
-        //     doesn't pin the binary against a cold LSP child.
+        //     resets the readiness phase before returning, so the
+        //     agent-visible `get_capabilities.phase` doesn't get
+        //     stuck on `prewarming_lsp`.
         //   * `lsp_prewarm_max_files` — sentinel scan is bounded.
+        //
+        // Parallelism: one task per language via `JoinSet` so a 20-
+        // language monorepo doesn't spend 20 × LSP_PREWARM_TIMEOUT
+        // serially. Multiplexer contention falls out naturally — two
+        // languages that route to the same `LspMultiplexer`
+        // serialise on its inner `AsyncMutex`, which is fine: the
+        // fast path (multiplexer already running) completes in
+        // milliseconds and the slow path is gated by
+        // `lsp_prewarm_timeout_secs` per task.
         //
         // `prewarm_server` uses `LSP_PREWARM_TIMEOUT` (30 s default)
         // and never touches the runtime circuit breaker, so even a
@@ -169,29 +180,76 @@ impl LainServer {
                 .into_iter()
                 .collect();
             let prewarm_max = self.ingest().tuning().ingestion.lsp_prewarm_max_files;
+            let prewarm_timeout_secs = self.ingest().tuning().ingestion.lsp_prewarm_timeout_secs;
             info!(
-                "build_core_memory: LSP prewarm starting for {} files ({} languages)",
+                "build_core_memory: LSP prewarm starting for {} files ({} languages, timeout {}s each, parallel)",
                 files_to_scan.len(),
-                unique_exts.len()
+                unique_exts.len(),
+                prewarm_timeout_secs
             );
 
-            for ext in &unique_exts {
+            let mut prewarm_set = tokio::task::JoinSet::new();
+            // Take a pool snapshot once at the boundary; each task
+            // reaches for `lsp_pool().next()` on its own and routes
+            // the result through `Arc<AsyncMutex<LspMultiplexer>>` —
+            // because the multiplexer is keyed by binary rather
+            // than by language, two tasks whose languages share a
+            // binary will serialise on the same mutex. That's the
+            // happy path for "rust + rust in two crates" and not
+            // worth special-casing for now.
+            let pool = Arc::clone(self.ingest().lsp_pool());
+            for ext in unique_exts.into_iter() {
                 if cancel.is_cancelled() {
-                    info!("build_core_memory: cancelled during LSP prewarm");
-                    return Err(LainError::Cancelled);
+                    debug!("build_core_memory: cancel observed before prewarm task for {ext}");
+                    break;
                 }
                 let sentinel =
-                    crate::server::lsp::pick_prewarm_sentinel(ext, &files_to_scan, prewarm_max);
-                let timeout = std::time::Duration::from_secs(
-                    self.ingest().tuning().ingestion.lsp_prewarm_timeout_secs,
-                );
-                let mplex = self.ingest().lsp_pool().next();
-                let mut lsp = mplex.lock().await;
-                lsp.prewarm_server(ext, sentinel.as_deref(), Some(timeout))
-                    .await;
+                    crate::server::lsp::pick_prewarm_sentinel(&ext, &files_to_scan, prewarm_max);
+                let cancel_for_task = cancel.clone();
+                let pool_for_task = Arc::clone(&pool);
+                prewarm_set.spawn(async move {
+                    let mplex = pool_for_task.next();
+                    let mut lsp = mplex.lock().await;
+                    let timeout = std::time::Duration::from_secs(prewarm_timeout_secs);
+                    lsp.prewarm_server(&ext, sentinel.as_deref(), Some(timeout))
+                        .await;
+                    if cancel_for_task.is_cancelled() {
+                        tracing::debug!("LSP prewarm task for {ext} observed cancel");
+                    }
+                });
+            }
+            // Drain.
+            while let Some(res) = prewarm_set.join_next().await {
+                if cancel.is_cancelled() {
+                    // Re-check after each task. If we observe cancel
+                    // mid-drain, abort the rest so a 20-language repo
+                    // doesn't hold us for 30s × remaining.
+                    prewarm_set.abort_all();
+                    // Reset readiness to the pre-prewarm phase
+                    // (Discovering) before returning. Without this
+                    // the readiness snapshot stays pinned at
+                    // PrewarmingLsp and the operator-visible
+                    // `get_capabilities.phase` looks stuck.
+                    self.readiness().update(|snapshot| {
+                        snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
+                    });
+                    debug!("build_core_memory: cancelled during LSP prewarm drain");
+                    return Err(LainError::Cancelled);
+                }
+                // `res` is `Result<(), JoinError>`. A JoinError means
+                // the task panicked or was aborted. Aborting is a
+                // cooperative signal; panicking would indicate a bug
+                // somewhere in `prewarm_server`.
+                if let Err(e) = res {
+                    if e.is_panic() {
+                        tracing::warn!("LSP prewarm task panicked: {e}");
+                    }
+                }
             }
             if cancel.is_cancelled() {
-                info!("build_core_memory: cancelled after LSP prewarm");
+                self.readiness().update(|snapshot| {
+                    snapshot.phase = crate::server::readiness::IndexPhase::Discovering;
+                });
                 return Err(LainError::Cancelled);
             }
         }
@@ -1416,6 +1474,62 @@ mod readiness_progress_tests {
             .unwrap()
             .success());
         root
+    }
+
+    /// When the server's cancel token fires during the LSP
+    /// prewarm phase, `build_core_memory` returns
+    /// `LainError::Cancelled` AND the readiness snapshot's `phase`
+    /// is reset to `Discovering` rather than left dangling on
+    /// `PrewarmingLsp`. Without this fix the operator-visible
+    /// `get_capabilities.phase` looked frozen on a successful
+    /// shutdown — the snapshot never recovered until the next
+    /// indexing pass moved it forward again.
+    ///
+    /// Pin down both halves of the contract: the return is
+    /// `Cancelled`, AND the readiness snapshot is reset.
+    #[tokio::test]
+    async fn build_core_memory_resets_readiness_on_prewarm_cancel() {
+        let root = git_fixture_with_one_file();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        // Cancel before `build_core_memory` runs. The prewarm path
+        // observes the token at the top of its loop, returns
+        // `Cancelled`, and resets the readiness phase. Driving
+        // the cancel from the outside (rather than racing inside
+        // the test) makes the test deterministic on slow CI
+        // runners where prewarm would otherwise complete before
+        // the test thread could cancel.
+        server.lifecycle_handle().cancel();
+
+        let result = server.build_core_memory().await;
+        match result {
+            Err(LainError::Cancelled) => {}
+            Err(other) => {
+                panic!("expected LainError::Cancelled from a cancelled prewarm, got {other:?}")
+            }
+            Ok(()) => {
+                panic!("build_core_memory returned Ok after the cancel token fired during prewarm")
+            }
+        }
+
+        // Readiness must be Discovering, not stuck on PrewarmingLsp.
+        // The whole point of the fix in this PR is that an agent
+        // polling get_capabilities after the cancel does not see a
+        // frozen phase.
+        let snapshot = server.readiness().snapshot();
+        assert_eq!(
+            snapshot.phase,
+            crate::server::readiness::IndexPhase::Discovering,
+            "readiness.phase must reset to Discovering on prewarm cancel, got {:?}",
+            snapshot.phase
+        );
+        assert_ne!(
+            snapshot.phase,
+            crate::server::readiness::IndexPhase::PrewarmingLsp,
+            "readiness.phase must not stay on PrewarmingLsp after cancel"
+        );
     }
 
     /// Mark every multiplexer in the server's LSP pool unavailable so

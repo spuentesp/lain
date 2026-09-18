@@ -311,7 +311,16 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
                 })
                 .count();
             inventory_in_profile
-                + crate::server::tools::profile::special_advertised_count(profile, false)
+                + crate::server::tools::profile::special_advertised_count(
+                    profile, false,
+                    // Workspace state doesn't reach doctor — server
+                    // mode (federation vs single) and workspace
+                    // mode aren't distinguished from the offline
+                    // diagnostic. Operators running a workspace
+                    // server see a slightly higher count in the
+                    // live `get_capabilities.tool_profile`.
+                    false,
+                )
         }
     };
 
