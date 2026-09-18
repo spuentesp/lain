@@ -281,7 +281,15 @@ pub async fn assess_change(
     );
 
     let blast = crate::server::tools::handlers::impact::get_blast_radius(
-        graph, overlay, &symbol, true, false, ui_link,
+        // `include_weak_edges=true`: the pre-edit risk verdict below
+        // is meaningless if it can't see dynamic-dispatch callers. A
+        // `bus.publish` site with only heuristic callers would
+        // otherwise report `direct=0, transitive=0, risk=low` and the
+        // agent would ship the regression `explain_dispatch` was
+        // built to prevent. Heuristic callers are tagged with `~`
+        // and `[heuristic, conf=X.XX]` so the agent can tell them
+        // apart from type-resolved calls.
+        graph, overlay, &symbol, true, true, ui_link,
     )
     .await?;
     let callsites =
