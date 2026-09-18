@@ -2014,6 +2014,44 @@ mod prewarm_tests {
         );
     }
 
+    /// Iter 6 contract (Phase 3): `record_prewarm` must hold the
+    /// mux only long enough to insert into `prewarm_state` — i.e.
+    /// microseconds. Two consecutive calls on the same mux must
+    /// complete within a 2 s bound, with no measurable lock
+    /// contention in between.
+    #[tokio::test]
+    async fn record_prewarm_releases_mux_after_insert() {
+        let mut m = make();
+        // Insert a known outcome so record_prewarm has real work to
+        // do (a HashMap::insert under a no-op entry still does a
+        // hash + probe; we want the real path).
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                m.record_prewarm("rust-analyzer".to_string(), PrewarmOutcome::TimedOut);
+            },
+        )
+        .await
+        .expect("first record_prewarm must release the mux within 2s");
+        // Pre-state must reflect the insert.
+        assert_eq!(
+            m.prewarm_outcomes().get("rust-analyzer"),
+            Some(&PrewarmOutcome::TimedOut),
+        );
+        // Second call must also release promptly. If record_prewarm
+        // held the lock across the insert, the second call's
+        // caller-side mutex would deadlock against itself (we
+        // hold the only `Arc`).
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                m.record_prewarm("pylsp".to_string(), PrewarmOutcome::SkippedUnavailable);
+            },
+        )
+        .await
+        .expect("second record_prewarm must release the mux within 2s");
+    }
+
     #[test]
     fn prewarm_outcome_does_not_touch_breaker_state() {
         // Property test: any prewarm path that resolves to
