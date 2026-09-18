@@ -1262,14 +1262,27 @@ impl LainMcpServer {
 /// federation-aware shape can be unit-tested without spinning up an
 /// HTTP harness. When `federation` is `None` (single-workspace mode)
 /// the `federation` field serializes as JSON `null`; when `Some` it
+/// Build the JSON body returned by `GET /health`. Extracted so the
+/// federation-aware shape can be unit-tested without spinning up an
+/// HTTP harness. When `federation` is `None` (single-workspace mode)
+/// the `federation` field serializes as JSON `null`; when `Some` it
 /// carries the repo roster and aggregate stats so the UI can detect
 /// federation mode without a separate `tools/call` round-trip.
+///
+/// `lsp_prewarm` carries the outcome of the cold-boot prewarm pass
+/// per LSP binary. `None` means the call site has no LSP pool
+/// available (e.g. background health probes), so the field is
+/// omitted entirely. `Some(map)` always materialises a
+/// `lsp_prewarm` JSON object — even when empty — so an agent can
+/// distinguish "the prewarm path ran and produced nothing yet"
+/// from "this endpoint doesn't know about prewarm".
 fn build_health_body(
     nodes: usize,
     edges: usize,
     federation: Option<&FederatedIndex>,
+    lsp_prewarm: Option<&std::collections::HashMap<String, crate::server::lsp::PrewarmOutcome>>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "status": "ok",
         "server": "lain",
         "version": env!("CARGO_PKG_VERSION"),
@@ -1277,7 +1290,47 @@ fn build_health_body(
         "graph_edges": edges,
         "tools_count": crate::tools::registry::ToolRegistry::definitions().len(),
         "federation": federation.map(federation_blob),
-    })
+    });
+    if let Some(outcomes) = lsp_prewarm {
+        let prewarm_map = outcomes
+            .iter()
+            .map(|(binary, outcome)| (binary.clone(), prewarm_outcome_to_json(outcome)))
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        body.as_object_mut()
+            .unwrap()
+            .insert("lsp_prewarm".into(), serde_json::Value::Object(prewarm_map));
+    }
+    body
+}
+
+/// Encode a single `PrewarmOutcome` as a structured JSON value so
+/// the failure reason (truncated to ~200 chars) survives a
+/// `get_health` round-trip. The shape is `{ status, ms?, reason? }`
+/// — `ms` for `Warmed`, `reason` for `Failed`, neither for the
+/// skip / timed-out states.
+fn prewarm_outcome_to_json(outcome: &crate::server::lsp::PrewarmOutcome) -> serde_json::Value {
+    use crate::server::lsp::PrewarmOutcome;
+    match outcome {
+        PrewarmOutcome::Warmed { ms } => {
+            serde_json::json!({ "status": "warmed", "ms": ms })
+        }
+        PrewarmOutcome::TimedOut => serde_json::json!({ "status": "timed_out" }),
+        PrewarmOutcome::Failed { reason } => {
+            // Truncate to keep `/health` cheap to scrape; full reason
+            // is in `tracing` logs.
+            let truncated: String = reason.chars().take(200).collect();
+            serde_json::json!({
+                "status": "failed",
+                "reason": truncated,
+            })
+        }
+        PrewarmOutcome::SkippedNoSentinel => {
+            serde_json::json!({ "status": "skipped_no_sentinel" })
+        }
+        PrewarmOutcome::SkippedUnavailable => {
+            serde_json::json!({ "status": "skipped_unavailable" })
+        }
+    }
 }
 
 /// Render the federation summary embedded in `/health`. The
@@ -1421,7 +1474,11 @@ async fn handle_request(
     // GET /health -> health check with graph stats
     if method == Method::GET && path == "/health" {
         let (nodes, edges) = executor.graph().get_stats();
-        let health = build_health_body(nodes, edges, federation.as_deref());
+        // Snapshot prewarm outcomes once. The aggregation walks every
+        // multiplexer under the pool; cheap and bounded — the call
+        // site is operator-facing, latency budgets are generous.
+        let prewarm = Some(executor.ctx.lsp_pool.aggregate_prewarm_outcomes().await);
+        let health = build_health_body(nodes, edges, federation.as_deref(), prewarm.as_ref());
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -2424,7 +2481,7 @@ mod tests {
             ))
             .unwrap();
 
-        let body = build_health_body(0, 0, Some(&fed));
+        let body = build_health_body(0, 0, Some(&fed), None);
 
         // Top-level keys are preserved.
         assert_eq!(body["status"], "ok");
@@ -2503,11 +2560,123 @@ mod tests {
     /// `null` so the UI knows to render single-repo chrome.
     #[test]
     fn health_response_has_null_federation_when_unset() {
-        let body = build_health_body(0, 0, None);
+        let body = build_health_body(0, 0, None, None);
         assert!(
             body.get("federation").map(|v| v.is_null()).unwrap_or(false),
             "federation field must serialize as null when no federation is set, got {:?}",
             body.get("federation"),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // LSP prewarm visibility (PR-fix-1).
+    //
+    // The cold-boot prewarm pass records an outcome per LSP binary
+    // (`Warmed { ms }`, `TimedOut`, `Failed { reason }`,
+    // `SkippedNoSentinel`, `SkippedUnavailable`). Until this PR the
+    // state lived on `LspMultiplexer::prewarm_state` and was only
+    // visible via `tracing` logs. These tests pin the wire shape so
+    // an operator hitting `GET /health` (or `lain doctor --json`) sees
+    // the actual cold-boot state.
+
+    #[test]
+    fn health_response_omits_lsp_prewarm_when_pool_unavailable() {
+        // Tests where the LSP pool isn't reachable pass `None` — the
+        // `lsp_prewarm` field is omitted entirely. An agent that sees
+        // the field is missing can interpret it as "this endpoint
+        // doesn't know about prewarm" (e.g. background probes) rather
+        // than "prewarm produced nothing."
+        let body = build_health_body(0, 0, None, None);
+        assert!(
+            body.get("lsp_prewarm").is_none(),
+            "lsp_prewarm must be omitted when None, got {:?}",
+            body.get("lsp_prewarm"),
+        );
+    }
+
+    #[test]
+    fn health_response_serializes_prewarm_outcomes_per_binary() {
+        // Build a synthetic prewarm map and confirm the wire shape
+        // pins down to `{ binary: {status, ms?} }`. `ms` only appears
+        // for `Warmed`; `reason` only for `Failed`.
+        use crate::server::lsp::PrewarmOutcome;
+        use std::collections::HashMap;
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "rust-analyzer".to_string(),
+            PrewarmOutcome::Warmed { ms: 1247 },
+        );
+        outcomes.insert("clangd".to_string(), PrewarmOutcome::TimedOut);
+        outcomes.insert(
+            "jdtls".to_string(),
+            PrewarmOutcome::Failed {
+                reason: "binary not on PATH".to_string(),
+            },
+        );
+        outcomes.insert("pylsp".to_string(), PrewarmOutcome::SkippedNoSentinel);
+        outcomes.insert("gopls".to_string(), PrewarmOutcome::SkippedUnavailable);
+
+        let body = build_health_body(0, 0, None, Some(&outcomes));
+        let prewarm = body
+            .get("lsp_prewarm")
+            .expect("lsp_prewarm must be present");
+
+        let rust = prewarm.get("rust-analyzer").expect("rust-analyzer entry");
+        assert_eq!(rust.get("status"), Some(&serde_json::json!("warmed")));
+        assert_eq!(rust.get("ms"), Some(&serde_json::json!(1247)));
+
+        let clangd = prewarm.get("clangd").expect("clangd entry");
+        assert_eq!(clangd.get("status"), Some(&serde_json::json!("timed_out")));
+        assert!(clangd.get("ms").is_none(), "timed_out has no ms field");
+
+        let jdtls = prewarm.get("jdtls").expect("jdtls entry");
+        assert_eq!(jdtls.get("status"), Some(&serde_json::json!("failed")));
+        assert_eq!(
+            jdtls.get("reason"),
+            Some(&serde_json::json!("binary not on PATH"))
+        );
+
+        let pylsp = prewarm.get("pylsp").expect("pylsp entry");
+        assert_eq!(
+            pylsp.get("status"),
+            Some(&serde_json::json!("skipped_no_sentinel"))
+        );
+
+        let gopls = prewarm.get("gopls").expect("gopls entry");
+        assert_eq!(
+            gopls.get("status"),
+            Some(&serde_json::json!("skipped_unavailable"))
+        );
+    }
+
+    #[test]
+    fn health_response_truncates_long_failure_reasons() {
+        // The `reason` field is capped at ~200 chars to keep `/health`
+        // cheap for an agent that scrapes it. The full reason
+        // remains in `tracing::debug!` log lines that retain the raw
+        // text.
+        use crate::server::lsp::PrewarmOutcome;
+        use std::collections::HashMap;
+        let mut outcomes = HashMap::new();
+        outcomes.insert(
+            "rust-analyzer".to_string(),
+            PrewarmOutcome::Failed {
+                reason: "x".repeat(2000),
+            },
+        );
+        let body = build_health_body(0, 0, None, Some(&outcomes));
+        let rust = body
+            .get("lsp_prewarm")
+            .and_then(|p| p.get("rust-analyzer"))
+            .expect("rust-analyzer entry");
+        let reason = rust
+            .get("reason")
+            .and_then(|r| r.as_str())
+            .expect("reason should serialise as a string");
+        assert!(
+            reason.chars().count() <= 200,
+            "reason truncated to 200 chars, got {}",
+            reason.chars().count()
         );
     }
 
