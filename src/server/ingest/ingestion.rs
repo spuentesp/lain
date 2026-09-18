@@ -1557,6 +1557,150 @@ mod readiness_progress_tests {
         );
     }
 
+    /// `lsp_prewarm_skip_extensions` must actually filter languages out
+    /// of the prewarm pass. The knob-reachability test pins that the
+    /// field is *referenced* by production code; this test pins that
+    /// the filter *works*. Without it a refactor that silently breaks
+    /// the skip logic (e.g. accidentally re-including the filtered
+    /// extension after a `.collect()` dedup change) would still pass
+    /// every other test in this module.
+    ///
+    /// Fixture: a git repo with both `lib.rs` and `test.py`. Tuning
+    /// is set to `lsp_prewarm_skip_extensions = ["rs"]` via the
+    /// workspace's `.lain/tuning.toml` (which `LainServer::new`
+    /// loads via `tuning::load_tuning_config`). Both LSP binaries are
+    /// pre-marked unavailable so the post-prewarm `prewarm_state`
+    /// records a deterministic outcome per binary — `pylsp` reaches
+    /// `prewarm_server` and lands as `SkippedUnavailable`; `rust-analyzer`
+    /// never reaches `prewarm_server` because it's filtered out
+    /// before the JoinSet is built.
+    #[tokio::test]
+    async fn lsp_prewarm_skip_extensions_actually_filters_languages() {
+        use crate::server::lsp::PrewarmOutcome;
+
+        let root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(root.path())
+            .status()
+            .unwrap()
+            .success());
+        for (k, v) in [
+            ("user.email", "readiness-test@lain"),
+            ("user.name", "readiness-test"),
+        ] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+        }
+        std::fs::create_dir_all(root.path().join(".lain")).unwrap();
+        std::fs::write(
+            root.path().join(".lain").join("tuning.toml"),
+            "[ingestion]\nlsp_prewarm_skip_extensions = [\"rs\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        std::fs::write(root.path().join("test.py"), "def hello(): pass\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "fixture"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success());
+
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+
+        // Mark every multiplexer in the pool as unavailable for both
+        // rust-analyzer AND pylsp. The existing helper only marks
+        // rust-analyzer; for this test we need both so the post-
+        // prewarm `prewarm_state` has a known outcome per binary
+        // (SkippedUnavailable). Marking only rust-analyzer would
+        // leave pylsp eligible to actually try to spawn, which can
+        // hang on `LspProcess::Drop` per the `disable_real_lsp`
+        // helper's doc comment.
+        let pool_size = crate::tuning::load_tuning_config(root.path())
+            .ingestion
+            .lsp_pool_size;
+        for _ in 0..pool_size {
+            let mplex = server.ingest().lsp_pool().next();
+            let mut guard = mplex.lock().await;
+            guard.mark_unavailable("rust-analyzer");
+            guard.mark_unavailable("pylsp");
+        }
+
+        // Run the full indexing pipeline. The prewarm phase runs
+        // first; the scan phase that follows is what most of the
+        // test runtime pays for. We bound it with a generous
+        // timeout so CI flakiness on the scan side doesn't show up
+        // as a flake in this test.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            server.build_core_memory(),
+        )
+        .await
+        .expect("build_core_memory must complete within 60s with skip-list applied");
+
+        // Aggregate the per-multiplexer prewarm state. Every
+        // multiplexer recorded the same outcomes for the same
+        // binary, so the union is the merged answer.
+        let outcomes = server
+            .ingest()
+            .lsp_pool()
+            .aggregate_prewarm_outcomes()
+            .await;
+
+        // The whole point: rust-analyzer never reached
+        // prewarm_server because the skip-list filtered it out
+        // before the JoinSet was built. The prewarm_state hash
+        // must NOT contain a rust-analyzer key.
+        assert!(
+            !outcomes.contains_key("rust-analyzer"),
+            "rust-analyzer must be excluded from prewarm_state when \
+             lsp_prewarm_skip_extensions = [\"rs\"]; got {:?}",
+            outcomes
+        );
+
+        // The non-skipped language (pylsp) DID reach prewarm_server
+        // and landed as SkippedUnavailable (we marked pylsp
+        // unavailable above). The test would also pass if pylsp's
+        // outcome were TimedOut or Failed — the contract we're
+        // pinning is "skipped extensions are excluded, not-skipped
+        // extensions still go through prewarm_server".
+        match outcomes.get("pylsp") {
+            Some(PrewarmOutcome::SkippedUnavailable) => {}
+            Some(other) => panic!(
+                "pylsp entry must be SkippedUnavailable after the skip-list \
+                 filter; got {other:?}. outcomes={outcomes:?}"
+            ),
+            None => panic!(
+                "pylsp must appear in prewarm_state — the skip list only \
+                 excluded rust-analyzer, not pylsp; outcomes={outcomes:?}"
+            ),
+        }
+
+        // The prewarm phase must complete normally (not stuck on
+        // PrewarmingLsp after build_core_memory returns). The
+        // cancel-reset test pins the cancel path; this test pins
+        // the normal-completion path.
+        let snapshot = server.readiness().snapshot();
+        assert_ne!(
+            snapshot.phase,
+            crate::server::readiness::IndexPhase::PrewarmingLsp,
+            "readiness.phase must advance past PrewarmingLsp when \
+             prewarm completes normally; got {:?}",
+            snapshot.phase
+        );
+    }
+
     /// Mark every multiplexer in the server's LSP pool unavailable so
     /// `build_core_memory` takes the tree-sitter fallback path instead of
     /// spawning a real `rust-analyzer`. Mirrors the same guard in
