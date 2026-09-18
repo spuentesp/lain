@@ -119,6 +119,151 @@ impl DoctorReport {
     }
 }
 
+/// Read the same on-disk signals the live server uses to decide
+/// whether federation / workspace tools are wired into the
+/// dispatcher. Returns `(federation_active, workspace_active)`.
+///
+/// * Federation mode is `true` when `<root>/repos.yaml` parses as a
+///   `repos:` list with **more than one entry**. A single-repo
+///   file is single-workspace mode and doesn't add the federation
+///   family to the advertised surface.
+///
+/// * Workspace mode is `true` when `<root>/workspaces.yaml` exists
+///   and parses as a `WorkspacesFile`. A missing or unparseable
+///   file maps to `false` — server-mode errors don't block offline
+///   diagnostics.
+fn detect_server_modes(root: &Path) -> (bool, bool) {
+    let federation_active = read_repos_yaml(root)
+        .map(|r| r.len() > 1)
+        .unwrap_or(false);
+    let workspace_active = crate::server::federation::workspace::WorkspacesFile::load(
+        &root.join("workspaces.yaml"),
+    )
+    .is_ok();
+    (federation_active, workspace_active)
+}
+
+/// Read `repos.yaml` next to `root` and return the parsed repo list
+/// length. `None` means the file is absent or failed to parse — both
+/// collapse to "no federation signal" in `detect_server_modes`.
+fn read_repos_yaml(root: &Path) -> Option<Vec<String>> {
+    let path = root.join("repos.yaml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_yaml::from_str(&text).ok()?;
+    parsed
+        .get("repos")?
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
+}
+
+#[cfg(test)]
+mod detect_server_modes_tests {
+    use super::*;
+
+    /// `detect_server_modes` must return `(false, false)` when the
+    /// root has no `repos.yaml` and no `workspaces.yaml`. This is
+    /// the single-repo default — every doctor report falls back
+    /// to this when neither file is present.
+    #[test]
+    fn detect_server_modes_returns_false_false_with_no_files() {
+        let root = tempfile::tempdir().unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(!fed, "no repos.yaml => federation_active must be false");
+        assert!(!ws, "no workspaces.yaml => workspace_active must be false");
+    }
+
+    /// Single-repo `repos.yaml` must NOT trigger federation mode.
+    /// Federation is "more than one repo"; a single-repo file is
+    /// the same as no file at the wire level (single-workspace
+    /// server). Federation tools only register when the operator
+    /// has explicitly configured multiple repos.
+    #[test]
+    fn detect_server_modes_single_repo_is_not_federation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("repos.yaml"),
+            "repos:\n  - id: only-repo\n    source:\n      type: workspace_dir\n      path: /tmp\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(!fed, "single-repo repos.yaml => federation_active must be false");
+        assert!(!ws, "single-repo repos.yaml doesn't affect workspace_active");
+    }
+
+    /// Multi-repo `repos.yaml` (≥ 2 repos) must trigger federation
+    /// mode. The federation family should now be reflected in
+    /// `advertised_count`.
+    #[test]
+    fn detect_server_modes_multi_repo_triggers_federation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("repos.yaml"),
+            "repos:\n  - id: a\n    source:\n      type: workspace_dir\n      path: /tmp/a\n  - id: b\n    source:\n      type: workspace_dir\n      path: /tmp/b\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(fed, "two repos in repos.yaml => federation_active must be true");
+        assert!(!ws, "repos.yaml alone doesn't affect workspace_active");
+    }
+
+    /// `workspaces.yaml` must trigger workspace mode regardless of
+    /// `repos.yaml` presence. Workspace and federation are
+    /// orthogonal.
+    #[test]
+    fn detect_server_modes_workspaces_yaml_triggers_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("workspaces.yaml"),
+            "workspaces:\n  - name: test-ws\n    members: [\"x\"]\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(!fed, "workspaces.yaml alone doesn't affect federation_active");
+        assert!(ws, "workspaces.yaml present => workspace_active must be true");
+    }
+
+    /// Both signals together must be reported independently. A
+    /// workspace server with multiple repos should show both
+    /// flags = true so advertised_count includes both families.
+    #[test]
+    fn detect_server_modes_both_signals_independent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("repos.yaml"),
+            "repos:\n  - id: a\n    source:\n      type: workspace_dir\n      path: /tmp/a\n  - id: b\n    source:\n      type: workspace_dir\n      path: /tmp/b\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("workspaces.yaml"),
+            "workspaces:\n  - name: ws\n    members: [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(fed, "both files => federation_active true");
+        assert!(ws, "both files => workspace_active true");
+    }
+
+    /// Malformed YAML must NOT panic; it collapses to "false"
+    /// silently. Doctor is offline diagnostics — server-mode
+    /// errors don't block it.
+    #[test]
+    fn detect_server_modes_malformed_yaml_collapses_to_false() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("workspaces.yaml"),
+            "this is: not: valid: yaml: [[[",
+        )
+        .unwrap();
+        let (fed, ws) = detect_server_modes(root.path());
+        assert!(!fed);
+        assert!(!ws, "malformed workspaces.yaml must collapse to false");
+    }
+}
+
 fn directory_state(path: &Path) -> &'static str {
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => "present",
@@ -289,36 +434,38 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
         Some("false") | Some("0") | Some("")
     );
     // `advertised_count` matches what `tools/list` would return under
-    // this profile, approximated. We don't have a live `LspPool`
-    // here (doctor runs without booting a server), so the count is:
-    //   * Full profile:      registry total
-    //   * Semantic profile:  (inventory tools whose name is in
-    //                         SEMANTIC_PROFILE) + SERVER_STATUS.len()
-    // Both approximations omit workspace-mode tools (those live on
-    // `LainMcpServer`, not on this code path); operators using a
-    // workspace server will see a slightly higher count in the
-    // server's own `get_capabilities.tool_profile.advertised_count`.
+    // this profile. Federation and workspace modes are detected
+    // from disk once `root` is known below — they read the same
+    // on-disk signals the dispatcher uses (`repos.yaml` for
+    // federation, `workspaces.yaml` for workspace). When either
+    // file is missing or fails to parse, the corresponding flag
+    // is `false`: server-mode errors don't block offline
+    // diagnostics. Without a discovered root (no git repo),
+    // both flags default to `false` and the count matches the
+    // single-workspace snapshot.
     let registry = crate::tools::registry::ToolRegistry::definitions();
-    let advertised = match profile {
-        crate::server::tools::profile::ToolProfile::Full => registry.len(),
-        crate::server::tools::profile::ToolProfile::Semantic => {
-            let inventory_in_profile = registry
+    let inventory_in_profile = registry
+        .iter()
+        .filter(|d| {
+            crate::server::tools::profile::SEMANTIC_PROFILE
                 .iter()
-                .filter(|d| {
-                    crate::server::tools::profile::SEMANTIC_PROFILE
-                        .iter()
-                        .any(|name| *name == d.name)
-                })
-                .count();
+                .any(|name| *name == d.name)
+        })
+        .count();
+    let initial_advertised = match profile {
+        crate::server::tools::profile::ToolProfile::Full => {
+            registry.len()
+                + crate::server::tools::profile::special_advertised_count(
+                    profile,
+                    false,
+                    false,
+                )
+        }
+        crate::server::tools::profile::ToolProfile::Semantic => {
             inventory_in_profile
                 + crate::server::tools::profile::special_advertised_count(
-                    profile, false,
-                    // Workspace state doesn't reach doctor — server
-                    // mode (federation vs single) and workspace
-                    // mode aren't distinguished from the offline
-                    // diagnostic. Operators running a workspace
-                    // server see a slightly higher count in the
-                    // live `get_capabilities.tool_profile`.
+                    profile,
+                    false,
                     false,
                 )
         }
@@ -345,7 +492,7 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
         installation: installation(),
         tool_profile: ToolProfileReport {
             name: profile.as_str(),
-            advertised_count: advertised,
+            advertised_count: initial_advertised,
         },
         lsp_prewarm: LspPrewarmKnobs {
             timeout_secs: prewarm_knobs.lsp_prewarm_timeout_secs,
@@ -363,6 +510,35 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
         .map_err(anyhow::Error::from)
         .and_then(|start| crate::cli::workspace::walk_up_for_git(&start))
         .and_then(|root| root.ok_or_else(|| anyhow!("No Git repository found.")));
+    // Once `root` is known, recompute the advertised count with
+    // the actual federation / workspace signals read from disk.
+    // The count may grow by `FEDERATION.len()` (if repos.yaml
+    // indicates a multi-repo setup) or `WORKSPACE.len()` (if
+    // workspaces.yaml is present) — both are exactly what the live
+    // server reports on `tools/list`, so the offline doctor.json
+    // matches the live wire shape.
+    if let Ok(ref r) = root {
+        let (fed_active, ws_active) = detect_server_modes(r);
+        let recomputed = match profile {
+            crate::server::tools::profile::ToolProfile::Full => {
+                registry.len()
+                    + crate::server::tools::profile::special_advertised_count(
+                        profile,
+                        fed_active,
+                        ws_active,
+                    )
+            }
+            crate::server::tools::profile::ToolProfile::Semantic => {
+                inventory_in_profile
+                    + crate::server::tools::profile::special_advertised_count(
+                        profile,
+                        fed_active,
+                        ws_active,
+                    )
+            }
+        };
+        report.tool_profile.advertised_count = recomputed;
+    }
     match root {
         Err(error) => report.problem(
             "repository_not_found",
