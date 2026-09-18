@@ -7,6 +7,38 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **LSP cold-boot prewarm.** On every server start, each language
+  server the workspace actually uses gets one warm-up
+  `documentSymbol` call against a sentinel file (largest by
+  mtime, bounded by `lsp_prewarm_max_files`) before `build_core_memory`
+  reaches the scan batch. Cold-cache `rust-analyzer` / `clangd` no
+  longer trip the runtime 1 s circuit breaker on the first real
+  call (introduced in #112), so they stay out of tree-sitter-only
+  fallback. New `IngestionConfig` knobs: `lsp_prewarm_timeout_secs`
+  (default 30), `lsp_prewarm_max_files` (50), `lsp_prewarm_opt_out`
+  (false). Readiness.phase advances through a new `PrewarmingLsp`
+  state so operators see warm-up progress via `get_capabilities`
+  and the Command Center. The prewarm path is fully isolated from
+  the runtime circuit breaker — a slow / failing prewarm never
+  marks a binary `unavailable`. Per-language opt-out via
+  `lsp_prewarm_skip_extensions` (Vec<String>; default empty) for
+  monorepos that mix languages whose LSPs are intentionally
+  unavailable.
+
+- **Batched `install_language_server` with auto-detect.** The
+  existing single-install tool now accepts a batched `extensions`
+  array, plus a special `"auto"` entry that expands to every
+  language the workspace's tracked files use. Response carries a
+  per-extension outcome (`installed`, `already_installed`,
+  `unknown_ext`, `no_install_cmd`, `failed`) so an agent can
+  decide whether to retry without parsing free-text errors.
+  Idempotent: any binary already on PATH reports
+  `already_installed` without spawning a duplicate install
+  command. Backward compatible — passing `{language: "rust"}`
+  works exactly as before. The `"auto"` entry now returns a
+  typed `LainError::Config` instead of silently empty when the
+  workspace isn't a git repository.
+
 - **Semantic-default tool profile.** `tools/list` now returns the
   curated 14-tool semantic surface by default — the M5 bootstrap
   (`understand_repository`), the M6 high-level Agent API
@@ -24,6 +56,30 @@ All notable changes to LAIN are documented here. Versions follow
   `docs/tool-schema.json` is unchanged: schema-drift CI still
   validates the fully-populated shape, only the runtime wire
   shrinks.
+
+- **LSP prewarm visibility + operator knobs.** `GET /health` now
+  includes `lsp_prewarm: { binary: { status, ms?, reason? } }` —
+  one entry per LSP binary that ran warm-up, with status
+  `warmed` / `timed_out` / `failed` / `skipped_no_sentinel` /
+  `skipped_unavailable` (snake_case). `lain doctor --json` reports
+  the active `tool_profile.{name, advertised_count}` and the
+  resolved `lsp_prewarm.{timeout_secs, max_files, opt_out,
+  env_opt_out}`. Federation and workspace modes are detected from
+  disk (`repos.yaml` multi-repo / `workspaces.yaml` present), so
+  the offline `doctor.json` snapshot matches what the live server
+  reports on `tools/list`. Workspace-aware advertised_count is
+  exact under all modes: the workspace handle is plumbed from
+  `LainMcpServer` into `ToolContext` so `get_capabilities`
+  reflects the live wire; doctor reads `workspaces.yaml` from disk
+  to compute the same count offline.
+
+- **README TL;DR + quickstart-tools callouts.** README's "See
+  it run" lists cold-boot prewarm; "What can AI Agents ask LAIN?"
+  gained sections 7 (prewarm) and 8 (curated profile); "TL;DR —
+  Install in 30 Seconds" gained an `Operator knobs` table covering
+  `LAIN_TOOL_PROFILE`, `LAIN_LSP_PREWARM`, and the three prewarm
+  tunables with `lain doctor --json` as the diagnostic surface.
+  `docs/quickstart-tools.md` was updated alongside.
 
 ## [0.7.4] — 2026-09-16
 
