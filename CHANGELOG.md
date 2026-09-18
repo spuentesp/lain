@@ -313,6 +313,20 @@ All notable changes to LAIN are documented here. Versions follow
   `typescript_as_unknown_as_any_matches`, and the negative
   coverage `as_something_other_than_any_does_not_match`.
 
+- **Mixed static + heuristic risk-tier pinned.** The fourth
+  vertex of the `assess_change` risk-tier contract:
+  `N static + N heuristic → regular tier (medium / high)`. The
+  mixed case must NOT downgrade to either tier-3 special
+  verdict — the static caller's presence keeps the risk tier
+  on the regular scale; the heuristic evidence augments an
+  already-existing caller surface but doesn't replace the
+  count-based tier. Pinned by
+  `assess_change_mixed_static_and_heuristic_uses_normal_tier`:
+  verdict is medium or high (not bare `low` or `low*`), and
+  the heuristic evidence still surfaces in the body so the
+  agent knows the runtime target has more callers than the
+  static graph shows.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
