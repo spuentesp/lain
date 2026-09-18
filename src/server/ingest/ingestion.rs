@@ -172,17 +172,42 @@ impl LainServer {
                 snapshot.phase = crate::server::readiness::IndexPhase::PrewarmingLsp;
                 snapshot.files_total = Some(files_to_scan.len() as u64);
             });
+            let skip_extensions: std::collections::HashSet<String> = self
+                .ingest()
+                .tuning()
+                .ingestion
+                .lsp_prewarm_skip_extensions
+                .iter()
+                .cloned()
+                .collect();
             let unique_exts: Vec<String> = files_to_scan
                 .iter()
                 .filter_map(|p| p.extension().and_then(|e| e.to_str()))
                 .map(|e| e.to_string())
+                // Per-language opt-out: an extension listed in
+                // `lsp_prewarm_skip_extensions` is filtered out of
+                // the prewarm pass. The skip is logged so operators
+                // can audit the configuration at startup; an
+                // unconfigured `tuning.toml` filters nothing.
+                .filter(|e| {
+                    if skip_extensions.contains(e) {
+                        debug!(
+                            "build_core_memory: skipping LSP prewarm for extension {:?} \
+                             (lsp_prewarm_skip_extensions)",
+                            e
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
             let prewarm_max = self.ingest().tuning().ingestion.lsp_prewarm_max_files;
             let prewarm_timeout_secs = self.ingest().tuning().ingestion.lsp_prewarm_timeout_secs;
             info!(
-                "build_core_memory: LSP prewarm starting for {} files ({} languages, timeout {}s each, parallel)",
+                "build_core_memory: LSP prewarm starting for {} files ({} languages after skip-list, timeout {}s each, parallel)",
                 files_to_scan.len(),
                 unique_exts.len(),
                 prewarm_timeout_secs

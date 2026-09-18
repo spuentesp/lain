@@ -127,6 +127,21 @@ pub struct IngestionConfig {
     /// to every later call, so cold-cache startups that happen to
     /// hit the 1 s boundary can still mark a binary unavailable.
     pub lsp_prewarm_opt_out: bool,
+    /// LSP prewarm: per-language opt-out list. Any extension in
+    /// this set is filtered out of the prewarm pass before its
+    /// sentinel selection. Useful when a monorepo mixes languages
+    /// whose LSPs are intentionally unavailable (e.g. generated
+    /// `.js` under `.gitignore_info`) — skipping the prewarm for
+    /// those means the warm-up phase completes faster and the
+    /// runtime 1 s boundary isn't tripped trying to talk to an LSP
+    /// the workspace has explicitly opted out of. Empty by default;
+    /// operators can list languages via `.lain/tuning.toml`:
+    ///
+    /// ```toml
+    /// [ingestion]
+    /// lsp_prewarm_skip_extensions = ["js", "css"]
+    /// ```
+    pub lsp_prewarm_skip_extensions: Vec<String>,
     /// UI session time-to-live in seconds.
     pub ui_session_ttl_secs: u64,
     /// Default query result limit when not specified.
@@ -151,6 +166,7 @@ impl Default for IngestionConfig {
             lsp_prewarm_timeout_secs: 30,
             lsp_prewarm_max_files: 50,
             lsp_prewarm_opt_out: false,
+            lsp_prewarm_skip_extensions: Vec::new(),
             ui_session_ttl_secs: 600,
             default_query_limit: 100,
         }
@@ -411,6 +427,7 @@ mod knob_reachability_tests {
             ("lsp_prewarm_timeout_secs", "tuning.rs"),
             ("lsp_prewarm_max_files", "tuning.rs"),
             ("lsp_prewarm_opt_out", "tuning.rs"),
+            ("lsp_prewarm_skip_extensions", "tuning.rs"),
             // Lives in `federation/config.rs`, same failure mode.
             ("ready_threshold", "federation/config.rs"),
             ("max_concurrent_indexers", "federation/config.rs"),
