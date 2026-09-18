@@ -173,7 +173,14 @@ Tunables (`.lain/tuning.toml`):
 lsp_prewarm_timeout_secs = 30   # per-language prewarm budget; default 30
 lsp_prewarm_max_files     = 50  # sentinel-pick scan ceiling; default 50
 lsp_prewarm_opt_out       = false
+lsp_prewarm_skip_extensions = ["js", "css"]  # per-language opt-out; default []
 ```
+
+`lsp_prewarm_skip_extensions` filters the languages that get a warm-up
+call. Useful when a monorepo mixes languages whose LSPs are
+intentionally unavailable (e.g. generated JS under `.gitignore_info`).
+Empty by default so unconfigured `.lain/tuning.toml` doesn't surprise
+operators — list the languages to skip.
 
 `lain doctor --json` reports the active `tool_profile.name` and the
 resolved `lsp_prewarm` knobs at the top level, so an offline
