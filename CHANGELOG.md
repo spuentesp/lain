@@ -260,6 +260,23 @@ All notable changes to LAIN are documented here. Versions follow
   `assess_change_heuristic_only_verdict_does_not_say_low` and
   the iter-17 `assess_change_surfaces_heuristic_callers_in_risk_verdict`.
 
+- **`assess_change` truly-empty blast radius pins `risk=low`.**
+  The risk-verdict tier relies on `count_bullets` to distinguish
+  a truly-empty blast radius from a populated one. The old
+  implementation matched any line whose trimmed prefix was
+  `- `, which counted the section header itself (`- Direct
+  dependents (0):`) as a bullet — a symbol with zero callers
+  was therefore classified as `direct=1 / transitive=2 /
+  risk=medium`. Tightening the bullet marker to two-space
+  indent matches what `get_blast_radius` actually emits for the
+  `affected_names` list. The new
+  `assess_change_truly_empty_blast_radius_says_low` test pins
+  the third vertex of the contract: `0 static + 0 heuristic =
+  bare risk=low` (no asterisk, no heuristic marker). The
+  iter-21 `low*` heuristic now lives strictly in the
+  `0 static + N heuristic` vertex and cannot leak into the
+  truly-safe path.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
