@@ -1962,11 +1962,17 @@ pub(crate) fn special_tool_definitions() -> Vec<crate::tools::definitions::ToolD
         },
         ToolDefinition {
             name: "install_language_server",
-            description: "Install the language server for the given file extension (e.g. 'rs', 'py') or language name (e.g. 'rust').",
+            description: "Install one or more language servers. Pass a single `{language}` to install one extension, or `extensions: ['rs','py','go',...,'auto']` to install in a batch. The string `'auto'` resolves to every language the workspace's tracked files use.",
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": { "language": { "type": "string", "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'." } },
-                "required": ["language"]
+                "properties": {
+                    "language": { "type": "string", "description": "File extension like 'rs'/'py' OR language name like 'rust'/'python'. Single-install path." },
+                    "extensions": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Batched install. Each entry is an extension or language name; 'auto' expands to the workspace's tracked-file languages. When present, takes precedence over `language`."
+                    }
+                }
             }),
             readiness: crate::tools::definitions::ReadinessRequirement::GraphIndependent,
         },
