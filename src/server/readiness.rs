@@ -21,6 +21,15 @@ pub enum IndexState {
 #[serde(rename_all = "snake_case")]
 pub enum IndexPhase {
     Discovering,
+    /// Cold-boot warm-up of every LSP the workspace needs before
+    /// `Scanning` starts. Distinct from `Scanning` because the
+    /// prewarm pass uses [`crate::server::lsp::LSP_PREWARM_TIMEOUT`]
+    /// (30 s default) and does NOT touch the runtime circuit
+    /// breaker — a slow prewarm is the whole point. Surfaced
+    /// through `get_capabilities` so agents see "PrewarmingLsp"
+    /// in the readiness snapshot instead of "Scanning" while the
+    /// first LSP round-trip is taking 5 s on a cold cache.
+    PrewarmingLsp,
     Scanning,
     Resolving,
     Enriching,

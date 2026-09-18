@@ -135,6 +135,67 @@ impl LainServer {
             .map(|chunk| chunk.to_vec())
             .collect();
 
+        // LSP cold-boot prewarm: fire one `documentSymbol` request per
+        // language actually present in the scan set before we hand
+        // off to the scan batch. A blocked, in-process cold cache
+        // (rust-analyzer loading crates.io indices, clangd parsing
+        // templated headers) routinely takes 2–5 s on the first call
+        // — without this, the very first scan chunk would either
+        // time out the first real `documentSymbol` against the 1 s
+        // production boundary (PR #112) or quietly fall back to
+        // tree-sitter and miss macro-resolved symbols.
+        //
+        // Honors:
+        //   * `lsp_prewarm_opt_out` — operator-supplied escape hatch.
+        //   * the server cancel token — shutdown during prewarm
+        //     doesn't pin the binary against a cold LSP child.
+        //   * `lsp_prewarm_max_files` — sentinel scan is bounded.
+        //
+        // `prewarm_server` uses `LSP_PREWARM_TIMEOUT` (30 s default)
+        // and never touches the runtime circuit breaker, so even a
+        // stuck cold LSP cannot promote itself to `unavailable` from
+        // this path.
+        let lsp_prewarm_opt_out = self.ingest().tuning().ingestion.lsp_prewarm_opt_out;
+        if !lsp_prewarm_opt_out && !files_to_scan.is_empty() {
+            self.readiness().update(|snapshot| {
+                snapshot.phase = crate::server::readiness::IndexPhase::PrewarmingLsp;
+                snapshot.files_total = Some(files_to_scan.len() as u64);
+            });
+            let unique_exts: Vec<String> = files_to_scan
+                .iter()
+                .filter_map(|p| p.extension().and_then(|e| e.to_str()))
+                .map(|e| e.to_string())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            let prewarm_max = self.ingest().tuning().ingestion.lsp_prewarm_max_files;
+            info!(
+                "build_core_memory: LSP prewarm starting for {} files ({} languages)",
+                files_to_scan.len(),
+                unique_exts.len()
+            );
+
+            for ext in &unique_exts {
+                if cancel.is_cancelled() {
+                    info!("build_core_memory: cancelled during LSP prewarm");
+                    return Err(LainError::Cancelled);
+                }
+                let sentinel =
+                    crate::server::lsp::pick_prewarm_sentinel(ext, &files_to_scan, prewarm_max);
+                let timeout = std::time::Duration::from_secs(
+                    self.ingest().tuning().ingestion.lsp_prewarm_timeout_secs,
+                );
+                let mplex = self.ingest().lsp_pool().next();
+                let mut lsp = mplex.lock().await;
+                lsp.prewarm_server(ext, sentinel.as_deref(), Some(timeout))
+                    .await;
+            }
+            if cancel.is_cancelled() {
+                info!("build_core_memory: cancelled after LSP prewarm");
+                return Err(LainError::Cancelled);
+            }
+        }
+
         // `files_total` is fixed for this attempt the moment the scan is
         // planned; it does not shrink or grow even if the scan later times
         // out or aborts early — that partial-ness shows up as
