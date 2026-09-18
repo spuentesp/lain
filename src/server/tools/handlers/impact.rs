@@ -490,7 +490,7 @@ mod tests {
         // to a synthetic Hub, which is good for transitive coverage
         // but not for this focused test.
         let hub_name = "Hub:message_bus_publisher";
-        let hub_id = GraphNode::generate_id(&NodeType::Function, "__hub__", hub_name, None, &ns);
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
         let edge = GraphEdge {
             edge_type: EdgeType::BusTopic,
             source_id: file_node("orders.py", &ns).id,
@@ -505,7 +505,8 @@ mod tests {
         graph.upsert_node(file_node("orders.py", &ns)).unwrap();
         graph
             .upsert_node({
-                let mut n = GraphNode::new(NodeType::Function, hub_name.to_string(), String::new());
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
                 n.id = hub_id.clone();
                 n
             })
@@ -541,11 +542,12 @@ mod tests {
         let target = target_node("handle_order", &ns);
         graph.upsert_node(target.clone()).unwrap();
         let hub_name = "Hub:serde_value";
-        let hub_id = GraphNode::generate_id(&NodeType::Function, "__hub__", hub_name, None, &ns);
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
         graph.upsert_node(file_node("orders.py", &ns)).unwrap();
         graph
             .upsert_node({
-                let mut n = GraphNode::new(NodeType::Function, hub_name.to_string(), String::new());
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
                 n.id = hub_id.clone();
                 n
             })

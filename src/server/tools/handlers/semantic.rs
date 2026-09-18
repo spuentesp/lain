@@ -462,6 +462,7 @@ fn node_type_label(nt: &NodeType) -> &'static str {
         NodeType::Topic => "topic",
         NodeType::Resource => "resource",
         NodeType::Schema => "schema",
+        NodeType::Synthetic => "synthetic",
     }
 }
 

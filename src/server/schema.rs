@@ -26,6 +26,12 @@ pub enum NodeType {
     Topic,     // Message queue topic (Kafka, RabbitMQ)
     Resource,  // IaC resource (Terraform, k8s)
     Schema,    // Data schema (OpenAPI, Protobuf, JSON Schema)
+    // Synthetic node produced by a heuristic detector. The naming
+    // convention is `Hub:<detector>` (e.g. `Hub:message_bus_publisher`)
+    // and the node carries no source location — it stands in for every
+    // receiver the static graph cannot resolve. Tag any query that
+    // pulls these in with a confidence filter, or skip them entirely.
+    Synthetic,
 }
 
 impl NodeType {
@@ -57,6 +63,7 @@ impl NodeType {
             NodeType::Topic,
             NodeType::Resource,
             NodeType::Schema,
+            NodeType::Synthetic,
         ]
     }
 
@@ -95,11 +102,19 @@ impl NodeType {
             // Emitted by `http_sensor` and `openapi_sensor`, which
             // `sensors::run_all` now runs from both ingest pipelines.
             | NodeType::HttpRoute => true,
+            // `dynamic_dispatch_sensor` emits one `Hub:<detector>`
+            // node per detector that fires; the receiver type is
+            // unknowable from the static graph alone, so the
+            // synthetic node is the only honest indexer-side
+            // representation. Confidence is propagated via
+            // `EdgeProvenance::Heuristic` rather than this type.
+            | NodeType::Synthetic
             // No producer anywhere in the codebase. The sensors cover
             // HTTP, OpenAPI, proto, GraphQL and WebSocket; none of them
             // emits a queue topic, an IaC resource, or a standalone
             // schema node. Writing an indexer is the prerequisite for
             // advertising these, not wiring one up.
+            => true,
             NodeType::Topic | NodeType::Resource | NodeType::Schema => false,
         }
     }
@@ -130,6 +145,13 @@ impl NodeType {
             NodeType::Topic => "A message queue topic (Kafka, RabbitMQ)",
             NodeType::Resource => "An IaC resource (Terraform, k8s)",
             NodeType::Schema => "A data schema (OpenAPI, Protobuf, JSON Schema)",
+            NodeType::Synthetic => {
+                "A synthetic node produced by a heuristic detector (e.g. \
+                 Hub:message_bus_publisher). Carries no source location and \
+                 stands in for a receiver the static graph cannot resolve. \
+                 Filter to confidence-bearing edges only — see \
+                 `EdgeProvenance::Heuristic`."
+            }
         }
     }
 
