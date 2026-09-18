@@ -748,6 +748,102 @@ mod m6_tests {
         assert!(res.is_err(), "expected NotFound, got {res:?}");
     }
 
+    /// `assess_change` must surface heuristic (dynamic-dispatch)
+    /// callers in the risk verdict — the regression iter 14 closed.
+    /// Without this, a `bus.publish` site with only heuristic callers
+    /// would report `direct=0, transitive=0, risk=low` and the agent
+    /// would ship the regression `explain_dispatch` was built to
+    /// prevent.
+    ///
+    /// The fixture below builds a graph with one `parse` target
+    /// (the symbol under assessment) and one BusTopic heuristic edge
+    /// pointing at it. With `include_weak_edges=true` (the iter 14
+    /// default), the transitive list must include the heuristic
+    /// caller line tagged with `[heuristic, conf=...]`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_surfaces_heuristic_callers_in_risk_verdict() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_heuristic");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let target = GraphNode::new(
+            NodeType::Function,
+            "handle_order".to_string(),
+            "/src/orders.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Heuristic edge: orders.py → Hub:message_bus_publisher. We
+        // swap the synthetic hub's id for the target's so the BFS
+        // walks into the symbol under assessment (mirrors the
+        // existing blast-radius heuristic test fixture).
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let caller_id = GraphNode::generate_id(&NodeType::File, "/src/orders.py", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::File, String::new(), "/src/orders.py".to_string());
+                n.id = caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("handle_order".to_string()),
+        );
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // Pre-iter-14: a symbol with one heuristic caller and zero
+        // type-resolved callers would report risk=low and no heuristic
+        // tag in the transitive section. Post-iter-14: the heuristic
+        // caller surfaces and the verdict reflects it.
+        assert!(
+            out.contains("[heuristic") || out.contains("heuristic caller(s) included"),
+            "expected heuristic marker in assess_change output, got:\n{out}"
+        );
+        assert!(
+            out.contains("conf=0.70") || out.contains("confidence"),
+            "expected confidence tag in assess_change output, got:\n{out}"
+        );
+        // Risk must NOT be `low` — a single heuristic caller at 0.7
+        // confidence is enough to push the verdict above the empty-
+        // blast-radius threshold.
+        assert!(
+            !out.contains("verdict: **low**"),
+            "heuristic callers must not let assess_change report risk=low, got:\n{out}"
+        );
+    }
+
     /// Helper that wraps `search_code` with `cross_encoder` and
     /// `embedding_cache` defaulted to empty (so the lexical path
     /// is the only one exercised — that's what these unit tests
