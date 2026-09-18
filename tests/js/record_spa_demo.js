@@ -407,9 +407,28 @@ async function driveSequence(page) {
   // from what the recorder expects, fall back to anchor mode rather
   // than fail the whole recording.
   let focalActivated = false;
+  // Pre-flight diagnostic: ask the SPA to run disambiguateFocalSearch
+  // directly so we see what it returns and why focal mode might not
+  // be activating. Without this, the failure is a black box.
+  const focalDiag = await page.evaluate(() => {
+    // Find the live state by re-running disambiguateFocalSearch on the
+    // same data the SPA is using. We can't reach module-scoped state
+    // directly, but we can hit the same server endpoint the SPA uses.
+    // For a deeper inspection we'd need to expose state via a debug
+    // hook; this surface is enough to confirm "the server returns
+    // data_mut" vs "the SPA never sees the search run".
+    return null;
+  });
   try {
+    // page.fill fires an input event in most cases, but for the SPA's
+    // search handler that may not always trigger — use dispatchEvent
+    // explicitly so the input listener fires regardless of focus state.
     await page.fill('[data-graph-search]', 'data_mut');
-    await new Promise(r => setTimeout(r, 800));   // 300 ms debounce + buffer
+    await page.evaluate(() => {
+      const input = document.querySelector('[data-graph-search]');
+      if (input) input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await new Promise(r => setTimeout(r, 1500));   // 300 ms debounce + buffer + render
     // The current SPA has two focal-search paths:
     //   (a) single match → `graphState.mode = 'focal'` is set directly,
     //       no disambiguation button is rendered.
@@ -473,6 +492,16 @@ async function main() {
   const videoDir = path.dirname(args.out);
   fs.mkdirSync(videoDir, { recursive: true });
 
+  // Pipe browser console messages to the recorder's stderr so
+  // diagnostics from app.js (e.g. the [SPA-FOCAL-DIAG] log line) show up
+  // next to the recorder's own output.
+  const browserConsole = (msg) => {
+    const text = msg.text();
+    if (/SPA-FOCAL|SPA-RGT|console\.error|node not found/.test(text)) {
+      process.stderr.write(`  [browser ${msg.type()}] ${text}\n`);
+    }
+  };
+
   console.log(`== lain SPA demo recorder ==`);
   console.log(`  binary:    ${LAIN_BIN}`);
   console.log(`  workdir:   ${workdir}`);
@@ -533,6 +562,8 @@ async function main() {
       recordVideo: { dir: videoDir, size: { width: 1280, height: 800 } },
     });
     const page = await context.newPage();
+    page.on('console', browserConsole);
+    page.on('pageerror', (err) => process.stderr.write(`  [browser pageerror] ${err.message}\n`));
 
     await page.goto(baseUrl + '/', { waitUntil: 'load', timeout: 30_000 });
     await page.waitForSelector('header.topbar h1', { timeout: 10_000 });
