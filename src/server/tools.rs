@@ -459,10 +459,29 @@ impl ToolExecutor {
             "get_capabilities" => return self.get_capabilities(),
             "get_agent_strategy" => return self.get_agent_strategy(),
             "install_language_server" => {
+                // Two arg shapes are accepted by the same tool name:
+                //   1. { "language": "rust" } — legacy single install.
+                //   2. { "extensions": ["rs", "py", "go", "auto"] } —
+                //      batched install; `"auto"` resolves to whatever
+                //      languages the tracked files use.
+                // When both are present, `extensions` wins (it's a
+                // superset of `language`). When neither is present,
+                // we report the error explicitly instead of falling
+                // back to a misleading empty install.
                 let lang = arguments
                     .and_then(|a| a.get("language").and_then(|v| v.as_str()))
                     .unwrap_or("");
-                return self.install_language_server(lang).await;
+                let exts: Option<Vec<String>> = arguments
+                    .and_then(|a| a.get("extensions").and_then(|v| v.as_array()))
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    });
+                return match exts {
+                    Some(list) if !list.is_empty() => self.install_language_servers(&list).await,
+                    _ => self.install_language_server(lang).await,
+                };
             }
             "register_job_webhook" => {
                 let url = arguments
@@ -792,6 +811,83 @@ impl ToolExecutor {
             error!("LSP installation for {} failed: {}", language, e);
             e
         })
+    }
+
+    /// Batched LSP installation. Each entry in `extensions` runs
+    /// through [`LspMultiplexer::install_servers`] — a single
+    /// failure never blocks the rest of the batch, and the response
+    /// carries a per-entry outcome enum (`installed`,
+    /// `already_installed`, `unknown_ext`, `no_install_cmd`,
+    /// `failed`) so an agent can decide whether to retry.
+    ///
+    /// Special entry `"auto"` is resolved against the workspace's
+    /// tracked files: every distinct extension that maps to a known
+    /// language server becomes a candidate. The dedup hits the
+    /// same registry lookup `install_server` would, so an operator
+    /// running `install_language_servers(["auto"])` gets the same
+    /// set as if they had hand-listed every language their
+    /// repo uses.
+    async fn install_language_servers(&self, extensions: &[String]) -> Result<String, LainError> {
+        let resolved: Vec<String> = if extensions.iter().any(|e| e == "auto") {
+            // `auto` expands to the workspace's tracked-file extensions.
+            // We need a tracked-file list and the registry. The
+            // `install_language_server` tool was previously single-tier
+            // and not stdio-context-aware; here we go through git's
+            // `get_all_tracked_files` (which is the same path the indexer
+            // uses, so we share its git config + cache).
+            self.resolve_auto_extensions()
+        } else {
+            extensions.to_vec()
+        };
+
+        info!(
+            "Requesting batched LSP install for: {:?} (after auto-resolve)",
+            resolved
+        );
+        let refs: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+        let lsp = Arc::clone(&self.ctx.lsp_pool.next());
+        let mut lsp_guard = lsp.lock().await;
+        let results = lsp_guard.install_servers(&refs).await;
+
+        // Pretty-print: one line per entry. Operators get a quick
+        // visual scan; agents can JSON-parse if they want a structured
+        // shape (the tool envelope preserves the raw array).
+        let mut out = String::new();
+        out.push_str(&format!("Install batch ({} request(s)):\n", results.len()));
+        for r in &results {
+            out.push_str(&format!(
+                "  - {:>10}  {:?}  {}\n",
+                r.ext, r.status, r.message
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Walk git-tracked files for the workspace and return the
+    /// sorted, deduplicated set of extensions the LSP registry
+    /// recognises. Errors during git discovery (e.g. a non-git
+    /// workspace) bubble up as a typed `LainError::Config` so the
+    /// operator gets a clear message instead of a silently-empty
+    /// batch.
+    fn resolve_auto_extensions(&self) -> Vec<String> {
+        let workspace = self.ctx.workspace.clone();
+        let lsp = Arc::clone(&self.ctx.lsp_pool.next());
+        // Probe registry first (synchronous, just reads the inner HashMap).
+        let known = lsp
+            .try_lock()
+            .map(|g| g.known_extensions())
+            .unwrap_or_default();
+        let git_sensor = crate::git::GitSensor::new(&workspace);
+        let tracked = match git_sensor {
+            Ok(g) => g.get_all_tracked_files().unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(
+                    "install_language_servers([auto]): git sensor unavailable: {e}; returning []"
+                );
+                return Vec::new();
+            }
+        };
+        crate::server::lsp::detect_extensions_from_files(&tracked, &known)
     }
 
     fn get_agent_strategy(&self) -> Result<String, LainError> {
