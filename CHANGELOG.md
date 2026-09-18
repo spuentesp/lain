@@ -206,6 +206,34 @@ All notable changes to LAIN are documented here. Versions follow
   agent might reasonably hit now produces a heuristic edge
   with a confidence score.
 
+- **`assess_change` regression test for the heuristic-caller
+  path.** A new unit test in
+  `src/server/tools/handlers/semantic.rs` builds a fixture with
+  one `BusTopic` heuristic edge pointing at the symbol under
+  assessment and pins the contract that the output must
+  contain the heuristic marker (`[heuristic` /
+  `heuristic caller(s) included`), the confidence tag
+  (`conf=0.70`), and a non-`low` risk verdict. Without this
+  test, a future refactor could silently re-introduce the
+  false-negative iter 14 closed. The test also caught a real
+  fixture bug along the way: the `File` node representing the
+  call site was never `upsert_node`'d, so `insert_edges_batch`
+  silently dropped the edge as orphan and `get_edges_to`
+  returned `[]` — a useful confirmation that the
+  silent-drop-on-orphan behaviour is itself worth pinning in
+  a follow-up test.
+
+- **`explain_dispatch` tests no longer use the global store.**
+  `RuntimeTraceStore::global()` is a process-wide `OnceLock` —
+  once a test ingests a span into it, that span persists for the
+  lifetime of the test process. The
+  `verdict_distinguishes_runtime_confirmed_from_runtime_only`
+  test was the only one using the global; it now constructs a
+  fresh `RuntimeTraceStore::new(StoreConfig::default())` and
+  calls `build_with_store` directly. Removed the now-unused
+  `reset_global_for_tests` seam (`OnceLock` has no `take()`,
+  the function was a no-op, and no caller existed).
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
