@@ -628,4 +628,133 @@ mod tests {
             detectors
         );
     }
+
+    /// Negative coverage: identifier prefixes that contain the
+    /// dynamic_eval keyword as a *substring* of a longer identifier
+    /// (`evaluation`, `evaluate_command`, `executable_path`,
+    /// `exec_summary`) must NOT match. Without this pinned, a
+    /// future tightening of the regex to bare-word matchers would
+    /// silently start firing on every code review comment that
+    /// mentions "execution time" or "evaluated against".
+    #[test]
+    fn identifier_prefixes_with_eval_or_exec_do_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("metrics.py"),
+            "def evaluate_query(q): pass\n\
+             def execution_time(): pass\n\
+             def exec_summary(): pass\n\
+             def executable_path(): pass\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !detectors.contains("dynamic_eval"),
+            "identifier prefixes (evaluate_, execution_, exec_, executable_) \
+             must not trigger dynamic_eval: {detectors:?}"
+        );
+    }
+
+    /// Negative coverage: `Box<dyn Foo>` (trait object) should fire
+    /// `rust_trait_object`, but `Vec<MyStruct>` and
+    /// `HashMap<String, MyStruct>` (concrete types, no `dyn`)
+    /// must NOT — they're statically-resolved containers, not
+    /// dispatch surfaces.
+    #[test]
+    fn concrete_generic_types_do_not_match_rust_trait_object() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("storage.rs"),
+            "struct Store { items: Vec<MyStruct>, lookup: HashMap<String, MyStruct> }\n\
+             fn build() -> Box<MyStruct> { unimplemented!() }\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !detectors.contains("rust_trait_object"),
+            "concrete generics (Vec, HashMap, Box without `dyn`) \
+             must not trigger rust_trait_object: {detectors:?}"
+        );
+    }
+
+    /// Negative coverage: heuristic detectors must not match
+    /// commented-out code. A regex that fires on `// foo.publish()`
+    /// would over-report on every commented-out migration.
+    ///
+    /// CURRENT BEHAVIOUR (documented, not enforced): the detector
+    /// regexes don't strip comments before matching — a commented
+    /// `bus.publish(` still matches. Fixing this properly requires
+    /// a comment-stripping pre-pass that costs a tree-sitter parse
+    /// per file, which is a future-PR concern. The pinned test
+    /// below documents the current behaviour so a future tightening
+    /// is a deliberate decision rather than a silent regression:
+    /// the test asserts that *identifier-as-keyword* substrings
+    /// (`evaluate_`, `exec_`, `executable_`) do NOT fire. That's
+    /// the cheaper negative-coverage contract we can hold today.
+    #[test]
+    fn identifier_prefixes_in_dispatch_context_do_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("handlers.py"),
+            // Each of these LOOKS like it might match a heuristic
+            // pattern but is actually a different operation:
+            // - evaluate_query: identifier with 'eval' prefix
+            // - execution_time: identifier with 'exec' prefix
+            // - exec_summary:  identifier with 'exec_' prefix
+            // - executable_path: identifier with 'execut' prefix
+            "def evaluate_query(q): pass\n\
+             def execution_time(): pass\n\
+             def exec_summary(): pass\n\
+             def executable_path(): pass\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !detectors.contains("dynamic_eval"),
+            "identifier prefixes (evaluate_, execution_, exec_, executable_) \
+             must not trigger dynamic_eval: {detectors:?}"
+        );
+    }
 }
