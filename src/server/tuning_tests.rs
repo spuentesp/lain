@@ -30,6 +30,9 @@ fn test_ingestion_config_default() {
     assert_eq!(config.lsp_prewarm_timeout_secs, 30);
     assert_eq!(config.lsp_prewarm_max_files, 50);
     assert!(!config.lsp_prewarm_opt_out);
+    // PR-fix-Item-2: per-language prewarm opt-out. Default empty
+    // so unconfigured tuning.toml filters nothing.
+    assert!(config.lsp_prewarm_skip_extensions.is_empty());
     assert_eq!(config.ui_session_ttl_secs, 600);
     assert_eq!(config.default_query_limit, 100);
 }
