@@ -319,6 +319,27 @@ pub enum PrewarmOutcome {
     SkippedUnavailable,
 }
 
+/// Wire-friendly display: snake_case strings that match the JSON
+/// convention agents expect when grepping the response. The `ms`
+/// field on `Warmed` and the `reason` on `Failed` are appended in
+/// parentheses so a single string carries the latency / failure
+/// reason without requiring a structured payload. The structured
+/// form is what's emitted over the wire in `get_health` (built
+/// manually at the call site because the enum lives on the
+/// internal `LspMultiplexer` and isn't worth a public `Serialize`
+/// round-trip just for one health endpoint).
+impl std::fmt::Display for PrewarmOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrewarmOutcome::Warmed { ms } => write!(f, "warmed ({ms}ms)"),
+            PrewarmOutcome::TimedOut => f.write_str("timed_out"),
+            PrewarmOutcome::Failed { reason } => write!(f, "failed ({reason})"),
+            PrewarmOutcome::SkippedNoSentinel => f.write_str("skipped_no_sentinel"),
+            PrewarmOutcome::SkippedUnavailable => f.write_str("skipped_unavailable"),
+        }
+    }
+}
+
 /// What happened when an `install_servers` batch tried to install
 /// one extension. Lifted into the wire response so an agent can
 /// distinguish "it already worked" from "you should retry" without
@@ -1281,6 +1302,34 @@ impl LspPool {
     pub fn next(&self) -> Arc<AsyncMutex<LspMultiplexer>> {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.multiplexers.len();
         Arc::clone(&self.multiplexers[idx])
+    }
+
+    /// Snapshot prewarm outcomes from every multiplexer in the pool
+    /// and merge them into a single map keyed by LSP binary name.
+    ///
+    /// Used by `/health` (and by `doctor --json`) to surface the
+    /// cold-boot warm-up state without binding an agent to a
+    /// specific multiplexer. Because prewarm happens at most once
+    /// per binary in any single process lifetime (the prewarm
+    /// state is monotonically inserted), the merged map is
+    /// well-defined: a binary that prewarmed on two different
+    /// multiplexers would conflict, but `prewarm_server` is the
+    /// only writer and it routes through `ensure_server` keyed on
+    /// binary, so that contention never happens in practice.
+    ///
+    /// Async because the multiplexers behind the pool are guarded
+    /// by `Arc<AsyncMutex<LspMultiplexer>>`. The lock hold is
+    /// bounded by the size of each per-mux `prewarm_state` (small),
+    /// so a /health handler call doesn't block long.
+    pub async fn aggregate_prewarm_outcomes(&self) -> HashMap<String, PrewarmOutcome> {
+        let mut merged = HashMap::new();
+        for mplex in &self.multiplexers {
+            let guard = mplex.lock().await;
+            for (binary, outcome) in guard.prewarm_outcomes() {
+                merged.insert(binary.clone(), outcome.clone());
+            }
+        }
+        merged
     }
 
     /// Shutdown all multiplexers in the pool
