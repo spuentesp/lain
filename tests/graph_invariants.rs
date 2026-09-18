@@ -320,3 +320,79 @@ fn test_graph_batch_edge_insert() {
         assert!(!outgoing.is_empty());
     }
 }
+
+/// `insert_edges_batch` silently drops edges whose endpoints are
+/// both missing from the index — and the production caller
+/// (`insert_edges_reporting`) emits a `warn!` carrying the
+/// dropped count so the operator learns about it. The function
+/// returns the count, but no test was pinning that contract;
+/// iter-17 found the silent-drop behavior the hard way when an
+/// `assess_change` fixture forgot to upsert one endpoint.
+///
+/// Pinned: a batch with one valid edge, one edge whose source
+/// is missing, and one edge whose target is missing must
+/// return `dropped == 2` and the valid edge must be in the
+/// graph afterwards. This is the property the production
+/// warning depends on.
+#[test]
+fn insert_edges_batch_reports_dropped_count_for_orphan_edges() {
+    let graph = make_test_graph();
+
+    // Pick two real nodes from the fixture as the valid pair.
+    let nodes = graph.get_all_nodes();
+    assert!(nodes.len() >= 2, "fixture should have ≥2 nodes");
+    let src = nodes[0].id.clone();
+    let tgt = nodes[1].id.clone();
+
+    // Synthetic source/target IDs that don't exist in the index.
+    // The format mimics `GraphNode::generate_id`'s output but
+    // with a stable test-only UUID so we never accidentally
+    // collide with a real node.
+    let orphan_src = "orphan-src-00000000-0000-0000-0000-000000000000".to_string();
+    let orphan_tgt = "orphan-tgt-11111111-1111-1111-1111-111111111111".to_string();
+
+    let batch = vec![
+        // Valid edge — both endpoints in the index.
+        GraphEdge::new(EdgeType::Calls, src.clone(), tgt.clone()),
+        // Missing source — `false, true` arm: held for federation
+        // drain. Counts as dropped only if BOTH endpoints are
+        // missing; with source missing the edge goes to the
+        // `pending_external_edges` queue, not the dropped
+        // counter.
+        GraphEdge::new(EdgeType::Calls, orphan_src.clone(), tgt.clone()),
+        // Missing target — `true, false` arm: held for federation
+        // drain. Same as above.
+        GraphEdge::new(EdgeType::Calls, src.clone(), orphan_tgt.clone()),
+        // Both endpoints missing — `false, _` arm: truly orphan,
+        // counted in `dropped`. THIS is the silent-drop case
+        // `insert_edges_reporting` warns about.
+        GraphEdge::new(EdgeType::Calls, orphan_src.clone(), orphan_tgt.clone()),
+    ];
+
+    let dropped = graph
+        .insert_edges_batch(&batch)
+        .expect("insert_edges_batch should not error on orphans");
+    // The match arm is `(false, _) => dropped`. That is:
+    //   - source missing AND target present: dropped (orphan)
+    //   - source missing AND target missing: dropped (orphan)
+    //   - source present AND target missing: NOT dropped; held for
+    //     federation drain (the source is local so we know which
+    //     repo the edge came from, and project_repo can rewrite
+    //     the missing target through the local-to-global map).
+    //
+    // So our batch of 4 (1 valid + 3 broken) drops 2: the
+    // missing-source edges. The missing-target edge is held for
+    // the federation to resolve later.
+    assert_eq!(
+        dropped, 2,
+        "exactly the two missing-source edges must be counted as dropped; \
+         the missing-target edge goes to pending_external_edges, not dropped"
+    );
+
+    // The valid edge made it into the graph.
+    let outgoing = graph.get_edges_from(&src).expect("get_edges_from");
+    assert!(
+        outgoing.iter().any(|e| e.target_id == tgt),
+        "the valid edge must be persisted; orphans must not steal it"
+    );
+}
