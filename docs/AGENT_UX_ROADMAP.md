@@ -1014,7 +1014,27 @@ The payload should respect a token/size budget:
 
 # Milestone 6 — A small semantic Agent API
 
-**Status: ⬜ Not started.** None of `find_symbol` / `get_context` / `find_related` / `assess_change` / `search_code` exist. ("Semantic" here means intent-organized, not embedding-based — don't confuse this with the semantic-search *model*, which Milestone 2's `lain setup` already auto-installs.)
+**Status: 🟢 Implemented.** The five semantic tools (`find_symbol`,
+`get_context`, `find_related`, `assess_change`, `search_code`)
+landed via `feat/m6-semantic-agent-api` (#95); the
+`recommended_actions` map in `understand_repository` flipped
+their availability flags via `feat/m5-m6-flags` (#103). The
+wire-level filter that makes them the default `tools/list`
+response (`LAIN_TOOL_PROFILE=semantic` by default, `=full`
+opt-out) shipped as a follow-up. ("Semantic" here means
+intent-organized, not embedding-based — don't confuse it with
+the semantic-search *model*, which Milestone 2's `lain setup`
+already auto-installs.)
+
+The semantics layer is also explicit about NOT removing the
+79-tool detailed surface — `LAIN_TOOL_PROFILE=full` opts back
+in to everything, and `get_agent_strategy` is kept inside the
+default semantic surface as an escape hatch that returns the
+full markdown documentation on demand. Operationally that
+means a default install feels like 14 tools and an opt-out
+flip recovers the full 79; an LLM agent that doesn't self-
+discover `get_agent_strategy` will still have the curated
+high-level surface to lean on.
 
 ## Problem
 

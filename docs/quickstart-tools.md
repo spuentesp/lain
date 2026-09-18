@@ -6,6 +6,17 @@ Quick reference for LAIN MCP tools.
 > in `README.md` — `lain repos add`, `lain workspaces create`, and
 > `lain server --config ./repos.yaml`.
 
+> **Tool profile.** By default, `tools/list` returns the curated
+> 14-tool semantic surface (the M5 bootstrap + the M6 high-level
+> Agent API + readiness + multiplayer essentials), with a few
+> contextual additions depending on the server's mode
+> (federation / workspace / server-status). The legacy 79-tool
+> surface is reachable via `LAIN_TOOL_PROFILE=full`. The active
+> profile is reported through `get_capabilities.tool_profile` so
+> agents self-discover the filter on first connect. See
+> `docs/AGENT_UX_ROADMAP.md` §"Milestone 6" for the design
+> rationale.
+
 ## Project Management (CLI)
 
 A project is a directory containing `repos.yaml` (and optionally
@@ -39,10 +50,34 @@ Check server health, LSP status, and repository info.
 ```
 
 ### install_language_server
-Install a language server.
+Install one or more language servers. The legacy single-install
+shape still works:
 ```json
 { "name": "install_language_server", "arguments": { "language": "rust" } }
 ```
+
+The batched shape accepts either an explicit list of extensions
+or the special string `"auto"`, which expands to every language
+the workspace's tracked files use:
+```json
+{ "name": "install_language_server",
+  "arguments": { "extensions": ["rs", "py", "go", "auto"] } }
+```
+
+Each entry runs independently — a single failure never blocks
+the rest. The response carries a per-extension outcome so an
+agent can decide whether to retry without parsing free-text
+errors:
+- `installed` — install command ran and exited 0
+- `already_installed` — binary was already on PATH; idempotent
+- `unknown_ext` — name did not match the LANGUAGE_MAP
+- `no_install_cmd` — registry entry has no `install_cmd` (e.g.
+  jdtls, omnisharp — hand-installed)
+- `failed` — install command exited non-zero; see `message`
+
+`"auto"` and explicit entries mix freely — running
+`extensions: ["auto", "rs"]` installs the auto-detected
+languages plus a guaranteed rust-analyzer install, deduplicated.
 
 ## Global Orientation
 
