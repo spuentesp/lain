@@ -81,6 +81,75 @@ All notable changes to LAIN are documented here. Versions follow
   tunables with `lain doctor --json` as the diagnostic surface.
   `docs/quickstart-tools.md` was updated alongside.
 
+- **Dynamic-dispatch mitigation (three tiers).** Tree-sitter + LSP
+  cannot follow dynamic dispatch (message buses, DI containers,
+  schema-driven routers, reflection). The static graph returned
+  empty `Calls`/`Uses` lists for any caller routed through those
+  patterns, and `get_blast_radius` reported "no dependents found"
+  even when the application depended on the function. Three new
+  layers close the gap:
+
+  - **Tier 1 — protocol composition.** `get_agent_strategy` now
+    teaches the agent to compose `get_blast_radius` with
+    `get_coupling_radar`, `find_anchors`, `trace_dependency`, and
+    `explain_dispatch` rather than trust a single tool. The
+    pre-commit hook (`hooks/claude-code/pre-commit.sh`) now runs
+    `LAIN_SMOKE_CMD` (with `LAIN_SMOKE_TIMEOUT_SECS`) when set,
+    so the smoke gate is the catch-all for changes the static
+    graph cannot reason about. New `docs/dynamic-boundaries.md`
+    template for per-repo registration of message buses, DI
+    containers, and routers.
+
+  - **Tier 2 — heuristic edges.** New `EdgeType` variants
+    `DynamicDispatch`, `BusTopic`, `RouteMatches`. New
+    `EdgeProvenance { Static, Heuristic { detector, confidence },
+    Runtime { trace_id, last_seen_unix } }` carried on every
+    `GraphEdge`. New `dynamic_dispatch_sensor` walks the
+    workspace and emits heuristic edges from matching files to
+    deterministic `Hub:<detector>` synthetic nodes, with per-
+    detector confidence constants (message_bus=0.7,
+    container=0.6, schema_router=0.5, reflection=0.4).
+    `get_blast_radius` gained `include_weak_edges` and honours
+    `LAIN_HEURISTIC_MIN_CONFIDENCE` (default 0.5). Below-threshold
+    edges stay out of the default view.
+
+  - **Tier 3 — runtime synthesis.** New `explain_dispatch` tool
+    (in the curated 15-tool `Semantic` profile) returns
+    `{verdict, static_callers, heuristic_callers, runtime_callers,
+    co_change_partners}` per symbol. The `verdict` field
+    (`static_only`, `heuristic_only`, `runtime_only`,
+    `runtime_confirmed`, `insufficient_evidence`) is the single
+    string an agent should route on. The `runtime_trace`
+    module (`src/server/runtime_trace/`) carries the
+    `RuntimeTraceStore` API surface; the OTLP gRPC adapter
+    itself is deferred to a follow-up PR.
+
+- **Backfill CLI.** `lain hooks backfill-heuristics
+  --workspace <path> [--graph <path>] [--dry-run]` re-runs the
+  heuristic sensor against an existing `.lain/graph.bin` without
+  a full re-index of static edges. Idempotent: deterministic UUID
+  v5 identifiers mean re-runs add zero new edges. Use after
+  upgrading lain that predates Tier 2.
+
+- **Awareness doc coverage.** All twelve agent awareness files
+  under `hooks/` (`claude`, `claude-code`, `cursor`, `codex`,
+  `cline`, `copilot`, `gemini`, `kimi`, `agy`, `windsurf`,
+  `opencode`, plus `kimi/skills/lain/SKILL.md`) gained a
+  "Dynamic Dispatch Caveat" section that links back to
+  `docs/dynamic-dispatch.md` in the lain repo.
+
+- **Umbrella doc.** `docs/dynamic-dispatch.md` describes the
+  three tiers end-to-end, documents the new env vars
+  (`LAIN_HEURISTIC_MIN_CONFIDENCE`, `LAIN_TRACE_TTL_SECS`,
+  `LAIN_TRACE_MAX_EDGES`), and lists what the mitigation does
+  not solve. Linked from `docs/INDEX.md`.
+
+- **Polished.** Removed dead `_force_use` helper from
+  `explain_dispatch`; tightened `NodeType` import scope;
+  `resolve_node` rejects empty handles explicitly so the new
+  empty-name `File` nodes (source of heuristic edges) cannot
+  be silently matched by `find_node_by_name("")`.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
