@@ -184,6 +184,15 @@ fn boot_server(
         .env("XDG_STATE_HOME", state.path())
         .env("XDG_CONFIG_HOME", xdg_config.path())
         .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
+        // Boot in Full profile so the flagship-tool assertions in
+        // `server_starts_when_embedding_model_missing` (which expect
+        // every tool — including ones outside `SEMANTIC_PROFILE` like
+        // `find_anchors` and `query_graph` — to be visible) hold. The
+        // test's intent is to pin the inert-tool filter scope
+        // (only `semantic_search` should be dropped, not the whole
+        // surface); the Semantic profile would also drop the flagship
+        // tools, masking the original intent.
+        .env("LAIN_TOOL_PROFILE", "full")
         .env_remove("LAIN_EMBEDDING_MODEL")
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
