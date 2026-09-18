@@ -35,6 +35,17 @@ const CONFIDENCE_MESSAGE_BUS: f32 = 0.7;
 const CONFIDENCE_CONTAINER_RESOLVE: f32 = 0.6;
 const CONFIDENCE_SCHEMA_ROUTER: f32 = 0.5;
 const CONFIDENCE_REFLECTION: f32 = 0.4;
+/// `Box<dyn Trait>`, `Arc<dyn Trait>`, `Rc<dyn Trait>` — Rust's
+/// canonical dynamic dispatch. Confidence below the message_bus
+/// patterns because the trait object surface is statically known,
+/// only the implementation is runtime-resolved.
+const CONFIDENCE_RUST_TRAIT_OBJECT: f32 = 0.6;
+/// `tokio::spawn(...)` etc. — the closure escapes to a foreign
+/// task, so blast radius from inside the closure is invisible to
+/// the static graph. Lower than trait objects because most
+/// spawns are short-lived fire-and-forget tasks that don't
+/// recursively dispatch back.
+const CONFIDENCE_ASYNC_TASK_SPAWN: f32 = 0.5;
 
 /// Convention patterns per language family. Each entry is `(regex, detector)`;
 /// a file matching the regex in this list emits a heuristic edge tagged
@@ -102,6 +113,29 @@ const RAW_DETECTORS: &[(&str, &str, &str)] = &[
     ),
     (r"\binterface\s*\{\s*\}", "serde_value", "DynamicDispatch"),
     (r"^\s*dynamic\s+\w", "serde_value", "DynamicDispatch"),
+    // Rust trait objects (non-Any). The earlier serde_value pattern
+    // covers `Box<dyn Any>` etc. — this covers the common case where
+    // the dispatch target is a user-defined trait whose set of
+    // implementers is open and not visible to the static graph.
+    // We don't anchor the trait identifier on a word boundary because
+    // `dyn MyTrait` is followed by space-or-angle, not a letter, and
+    // a `\w` would let `dyn MyTraitFoo` match `dyn MyTrait` if a later
+    // pattern ever drifted.
+    (
+        r"(?:Box|Rc|Arc)<dyn\s+[A-Z][A-Za-z0-9_]*",
+        "rust_trait_object",
+        "DynamicDispatch",
+    ),
+    // Async task spawners. The closure handed to `spawn` is opaque to
+    // the static graph: the future may call anything, and the
+    // JoinHandle's caller has no syntactic edge to the work. We
+    // anchor on the runtime namespace so prose like "the spawn
+    // function" doesn't trigger.
+    (
+        r"\b(tokio|async_std|smol|executor|workers)\s*::\s*spawn\s*\(",
+        "async_task_spawn",
+        "DynamicDispatch",
+    ),
 ];
 
 /// One precompiled detector. Building a `regex::Regex` per detector per
@@ -129,6 +163,8 @@ static DETECTORS: Lazy<Vec<CompiledDetector>> = Lazy::new(|| {
         "container_resolve" => CONFIDENCE_CONTAINER_RESOLVE,
         "schema_router" => CONFIDENCE_SCHEMA_ROUTER,
         "serde_value" => CONFIDENCE_REFLECTION,
+        "rust_trait_object" => CONFIDENCE_RUST_TRAIT_OBJECT,
+        "async_task_spawn" => CONFIDENCE_ASYNC_TASK_SPAWN,
         _ => 0.5,
     };
     let edge_type_for = |kind: &str| match kind {
@@ -379,5 +415,130 @@ mod tests {
             _ => unreachable!(),
         };
         assert!((0.0..=1.0).contains(&confidence));
+    }
+
+    /// A Rust trait object (`Box<dyn Trait>`) is the canonical dynamic
+    /// dispatch surface in Rust — the trait object itself is opaque to
+    /// the static graph because every impl block in every crate is a
+    /// potential receiver. The detector emits a `DynamicDispatch`
+    /// edge tagged with `rust_trait_object`.
+    #[test]
+    fn rust_trait_object_creates_dynamic_dispatch_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("dispatcher.rs"),
+            "trait Handler { fn handle(&self, req: Request); }\n\
+             fn run(h: Box<dyn Handler>) { h.handle(req); }\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detectors.contains("rust_trait_object"),
+            "expected rust_trait_object in {:?}",
+            detectors
+        );
+
+        // Confidence is 0.6 — higher than async spawn (0.5) because
+        // trait objects are a more obvious dispatch point.
+        let edge = graph
+            .all_edges()
+            .into_iter()
+            .find(|e| matches!(
+                e.provenance,
+                Some(EdgeProvenance::Heuristic { ref detector, .. }) if detector == "rust_trait_object"
+            ))
+            .expect("rust_trait_object edge should exist");
+        let confidence = match edge.provenance.as_ref().unwrap() {
+            EdgeProvenance::Heuristic { confidence, .. } => *confidence,
+            _ => unreachable!(),
+        };
+        assert!(
+            (confidence - 0.6).abs() < 1e-6,
+            "rust_trait_object confidence must be 0.6, got {confidence}"
+        );
+    }
+
+    /// `tokio::spawn(...)` hands a future off to the runtime; the
+    /// static graph can't see what the future calls. The detector
+    /// emits a `DynamicDispatch` edge tagged with `async_task_spawn`.
+    /// Bare `spawn(` without a namespace prefix is intentionally
+    /// ignored — too noisy in comment prose.
+    #[test]
+    fn async_task_spawn_creates_dynamic_dispatch_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("worker.rs"),
+            "fn dispatch(req: Request) {\n    tokio::spawn(async move { process(req).await });\n}\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detectors.contains("async_task_spawn"),
+            "expected async_task_spawn in {:?}",
+            detectors
+        );
+    }
+
+    /// `spawn(` without a runtime namespace is prose noise, not a
+    /// dispatch surface. The detector must not match it — otherwise
+    /// every doc comment or test name that mentions "spawn" would
+    /// produce a phantom heuristic edge.
+    #[test]
+    fn bare_spawn_without_namespace_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("notes.rs"),
+            "// TODO: spawn a worker thread here\n\
+             fn helper() { spawn(local_fn()); }\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !detectors.contains("async_task_spawn"),
+            "bare `spawn(` must not trigger async_task_spawn: {:?}",
+            detectors
+        );
     }
 }
