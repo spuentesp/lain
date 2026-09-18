@@ -579,7 +579,14 @@ impl LspMultiplexer {
                         reason: format!("ensure_server: {e}"),
                     },
                 );
-                debug!("LSP prewarm: ensure_server failed for {}: {}", binary, e);
+                // warn! (not debug!) so operators running with default
+                // log levels see when prewarm fails — `prewarm_state`
+                // is observable via /health and doctor --json but
+                // log journal is the primary operator surface.
+                warn!(
+                    "LSP prewarm: {} ensure_server failed: {} (path={:?})",
+                    binary, e, path
+                );
                 return;
             }
         };
@@ -593,6 +600,16 @@ impl LspMultiplexer {
                     PrewarmOutcome::Failed {
                         reason: format!("read_to_string: {e}"),
                     },
+                );
+                // Previously silent — every other failure path is
+                // logged at debug! or warn!; this one was missing.
+                // The sentinel file not being readable is a real
+                // configuration problem (operator pointed at the
+                // wrong dir, or perms are off) and the operator
+                // should see it without raising their log level.
+                warn!(
+                    "LSP prewarm: {} read_to_string failed: {} (path={:?})",
+                    binary, e, path
                 );
                 return;
             }
@@ -637,6 +654,15 @@ impl LspMultiplexer {
                     reason: format!("open_document: {e}"),
                 },
             );
+            // Previously silent — the timeout arm above logs at warn!
+            // but the synchronous-error path didn't. Operators who
+            // hit a channel-closed / bridge error during prewarm
+            // would otherwise see no log entry unless they had
+            // tracing at debug!. Bump to warn! to match.
+            warn!(
+                "LSP prewarm: {} open_document failed: {} (uri={})",
+                binary, e, uri
+            );
             return;
         }
 
@@ -671,10 +697,19 @@ impl LspMultiplexer {
                         reason: e.to_string(),
                     },
                 );
-                debug!("LSP prewarm: {} failed: {}", binary, e);
+                // Bumped from debug! to warn! — an LSP round-trip
+                // failure during cold-boot prewarm is operationally
+                // significant (the LSP is reachable enough to answer
+                // but the response is bad), and operators running at
+                // default log levels should see it.
+                warn!(
+                    "LSP prewarm: {} bridge get_document_symbols failed: {} (elapsed={}ms, timeout={:?})",
+                    binary, e, start.elapsed().as_millis(), timeout
+                );
             }
             Err(_) => {
-                debug!("LSP prewarm: {} timed out after {:?}", binary, timeout);
+                // Timeout arm — already logged at warn! above this
+                // match; just record the outcome and bail.
                 self.prewarm_state
                     .insert(binary.clone(), PrewarmOutcome::TimedOut);
             }
