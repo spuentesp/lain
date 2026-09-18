@@ -28,6 +28,7 @@ Instead of treating code as unstructured flat text or relying on fuzzy keyword s
 - **Instant Answers**: Federation overview, repo health, and call graphs answered in milliseconds.
 - **Hot Reload**: Edit `repos.yaml` or `workspaces.yaml`; the server updates live without dropping a single active MCP session.
 - **Interactive Tool Console**: Exercise any MCP tool directly from the web browser; *Copy as cURL* gives agents and operators instant reproducibility.
+- **No Cold-Cache Penalty**: A fresh server warms up every language server (one round-trip per language) before the scan batch runs, so cold-cache `rust-analyzer` / `clangd` don't trip the runtime circuit breaker on the first call.
 
 > [!NOTE]
 > The demo is kept as a single GIF so it plays inline without storing duplicate video encodings in the repository.
@@ -124,6 +125,25 @@ LAIN provides specialized MCP tools categorized by capability:
 - **`get_agent_strategy`** — Retrieves operational guidelines and strategic instructions for agents.
 - **`get_world_state`** — Summarizes active sessions, file claims, and graph freshness in a single compact call.
 
+### 7. Cold-boot LSP prewarm
+- On first start, LAIN warms up every language server your workspace uses
+  (one warm-up `documentSymbol` call against a sentinel file per language)
+  before the scan batch runs. Cold-cache `rust-analyzer` / `clangd`
+  no longer trip the runtime circuit breaker on the first real call.
+  Opt out with `LAIN_LSP_PREWARM=false`. Per-binary warm-up state is
+  visible via `GET /health` and `lain doctor --json`.
+
+### 8. Curated tool surface
+- By default `tools/list` returns the **curated 14-tool semantic
+  surface** — the M5 bootstrap (`understand_repository`), the M6
+  high-level Agent API (`find_symbol`, `get_context`, `find_related`,
+  `assess_change`, `search_code`), readiness + multiplayer essentials.
+  Active profile and per-binary LSP prewarm status surface in
+  `get_capabilities`. Operators who want every low-level tool can opt
+  in with `LAIN_TOOL_PROFILE=full`. The on-disk schema
+  (`docs/tool-schema.json`) is unchanged: schema-drift CI still
+  validates the fully-populated shape.
+
 ---
 
 ## TL;DR — Install in 30 Seconds
@@ -138,6 +158,27 @@ lain --version
 ```
 
 See [QUICKSTART.md](docs/QUICKSTART.md) for Homebrew, manual builds, non-interactive flags, and ONNX model setups.
+
+### Operator knobs
+
+| Env var | Effect |
+|---|---|
+| `LAIN_TOOL_PROFILE=full` | Restore the legacy 79-tool surface (default is the curated 14-tool `semantic`). |
+| `LAIN_LSP_PREWARM=false` | Skip the cold-boot LSP prewarm pass (cold-cache LSPs may then trip the runtime 1 s breaker on first call). |
+
+Tunables (`.lain/tuning.toml`):
+
+```toml
+[ingestion]
+lsp_prewarm_timeout_secs = 30   # per-language prewarm budget; default 30
+lsp_prewarm_max_files     = 50  # sentinel-pick scan ceiling; default 50
+lsp_prewarm_opt_out       = false
+```
+
+`lain doctor --json` reports the active `tool_profile.name` and the
+resolved `lsp_prewarm` knobs at the top level, so an offline
+operator can verify exactly which surface and prewarm config a given
+binary is running with.
 
 ---
 
