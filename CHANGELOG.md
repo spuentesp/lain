@@ -277,6 +277,42 @@ All notable changes to LAIN are documented here. Versions follow
   `0 static + N heuristic` vertex and cannot leak into the
   truly-safe path.
 
+- **Negative-coverage regression tests for detector regexes.**
+  Three tests pin what the heuristic regexes MUST NOT match
+  so a future tightening can't silently start firing on
+  innocent identifiers:
+  - `identifier_prefixes_with_eval_or_exec_do_not_match` —
+    `evaluate_query`, `execution_time`, `exec_summary`,
+    `executable_path` (all common identifier forms that
+    contain the eval/exec substrings) must not fire
+    `dynamic_eval`.
+  - `concrete_generic_types_do_not_match_rust_trait_object`
+    — `Vec<MyStruct>`, `HashMap<String, MyStruct>`,
+    `Box<MyStruct>` (concrete types without `dyn`) must
+    not fire `rust_trait_object`.
+  - `identifier_prefixes_in_dispatch_context_do_not_match` —
+    the dynamic_eval version of test 1, in bus/handler.py
+    shape. The comment-stripping case (commented-out
+    `bus.publish(` still matches today) is intentionally
+    NOT pinned — fixing it requires a tree-sitter pre-pass
+    per file and is documented in the test as a future-PR
+    concern.
+
+- **`type_escape` detector for TypeScript `as any` / `as
+  unknown as any` / `<any>`.** TypeScript's type escape
+  hatches are the most common JS/TS-specific
+  dynamic-dispatch surface we hadn't yet covered. After any
+  of these casts, the value dispatches through the JavaScript
+  prototype chain at runtime — the LSP can't follow, the
+  static type system has been told to look the other way.
+  Pinned at confidence 0.3 (lower than `serde_value`'s 0.4
+  because `as any` is often a temporary workaround rather
+  than an architectural dispatch surface — the user usually
+  intends to remove it eventually). Three regression tests
+  pin the contract: `typescript_as_any_emits_type_escape_edge`,
+  `typescript_as_unknown_as_any_matches`, and the negative
+  coverage `as_something_other_than_any_does_not_match`.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
