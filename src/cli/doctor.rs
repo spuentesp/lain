@@ -44,6 +44,34 @@ pub struct InstallationReport {
     pub hook_script: Option<PathBuf>,
 }
 
+/// Active wire-level tool profile. Surfaced in `doctor --json` so an
+/// operator checking an offline server can see whether `tools/list`
+/// will return the curated 14-tool semantic surface or the full
+/// 79-tool legacy surface. The advertised count is what the next
+/// `tools/list` round-trip will report — lower than the registry
+/// total under `semantic`, equal to the registry total under
+/// `full`.
+#[derive(Debug, Serialize)]
+pub struct ToolProfileReport {
+    pub name: &'static str,
+    pub advertised_count: usize,
+}
+
+/// LSP cold-boot prewarm knobs. Defaulted from
+/// `IngestionConfig::default()`; the operator can override per-server
+/// via `.lain/tuning.toml` (not currently read by `doctor` — the
+/// snapshot stays default-only so a non-workspace `doctor`
+/// invocation is meaningful). The `env_opt_out` line tells the
+/// operator whether `LAIN_LSP_PREWARM=false` has disabled the
+/// prewarm entirely.
+#[derive(Debug, Serialize)]
+pub struct LspPrewarmKnobs {
+    pub timeout_secs: u64,
+    pub max_files: usize,
+    pub opt_out: bool,
+    pub env_opt_out: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
     pub schema_version: u32,
@@ -55,6 +83,8 @@ pub struct DoctorReport {
     pub capabilities: Capabilities,
     pub transport: TransportReport,
     pub installation: InstallationReport,
+    pub tool_profile: ToolProfileReport,
+    pub lsp_prewarm: LspPrewarmKnobs,
     pub problems: Vec<Problem>,
 }
 
@@ -243,6 +273,48 @@ fn observe_semantic(report: &mut DoctorReport) {
 }
 
 pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
+    // Tool-profile report (PR-fix-1): surface the active wire-level
+    // filter so an operator reading doctor.json can tell whether
+    // `tools/list` is the curated 14 or the full 79. Reads `LAIN_TOOL_PROFILE`
+    // via the same env-var resolution the dispatcher uses, so doctor
+    // and the running server agree to the byte.
+    let profile = crate::server::tools::profile::ToolProfile::from_env();
+    // LSP prewarm knobs (PR-fix-1): defaults from `IngestionConfig::default()`.
+    // Doctor doesn't currently read `.lain/tuning.toml` — the snapshot
+    // would diverge from a server that has overrides applied, but
+    // the defaults are stable and useful enough for offline triage.
+    let prewarm_knobs = crate::tuning::IngestionConfig::default();
+    let env_opt_out = matches!(
+        std::env::var("LAIN_LSP_PREWARM").ok().as_deref(),
+        Some("false") | Some("0") | Some("")
+    );
+    // `advertised_count` matches what `tools/list` would return under
+    // this profile, approximated. We don't have a live `LspPool`
+    // here (doctor runs without booting a server), so the count is:
+    //   * Full profile:      registry total
+    //   * Semantic profile:  (inventory tools whose name is in
+    //                         SEMANTIC_PROFILE) + SERVER_STATUS.len()
+    // Both approximations omit workspace-mode tools (those live on
+    // `LainMcpServer`, not on this code path); operators using a
+    // workspace server will see a slightly higher count in the
+    // server's own `get_capabilities.tool_profile.advertised_count`.
+    let registry = crate::tools::registry::ToolRegistry::definitions();
+    let advertised = match profile {
+        crate::server::tools::profile::ToolProfile::Full => registry.len(),
+        crate::server::tools::profile::ToolProfile::Semantic => {
+            let inventory_in_profile = registry
+                .iter()
+                .filter(|d| {
+                    crate::server::tools::profile::SEMANTIC_PROFILE
+                        .iter()
+                        .any(|name| *name == d.name)
+                })
+                .count();
+            inventory_in_profile
+                + crate::server::tools::profile::special_advertised_count(profile, false)
+        }
+    };
+
     let mut report = DoctorReport {
         schema_version: SCHEMA_VERSION,
         server_version: env!("CARGO_PKG_VERSION"),
@@ -262,6 +334,16 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
             tools_count: None,
         },
         installation: installation(),
+        tool_profile: ToolProfileReport {
+            name: profile.as_str(),
+            advertised_count: advertised,
+        },
+        lsp_prewarm: LspPrewarmKnobs {
+            timeout_secs: prewarm_knobs.lsp_prewarm_timeout_secs,
+            max_files: prewarm_knobs.lsp_prewarm_max_files,
+            opt_out: prewarm_knobs.lsp_prewarm_opt_out,
+            env_opt_out,
+        },
         problems: Vec::new(),
     };
     // Interactive CLI diagnosis follows its own cwd, not an agent parent's cwd.
@@ -511,4 +593,105 @@ fn probe_stdio(workspace: &Path) -> Result<usize> {
     };
     session.shutdown();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `build_report` runs without a workspace and without booting a
+    /// real server — it defaults to the workspace tuning defaults,
+    /// the registry's tool count, and a Semantic profile unless the
+    /// test runner happens to have `LAIN_TOOL_PROFILE=full` in its
+    /// env (it doesn't on CI). The tool-profile / prewarm fields
+    /// must reflect those defaults, NOT the registry's full
+    /// surface, so an operator doing `doctor --json` against an
+    /// offline server sees what `tools/list` will produce.
+    ///
+    /// Caveat: a test that mutates `LAIN_TOOL_PROFILE` or
+    /// `LAIN_LSP_PREWARM` would race siblings that read them. We
+    /// don't mutate env in these tests — env-driven paths are
+    /// pinned at the unit-test level (`profile::tests::from_env`)
+    /// rather than here.
+    #[test]
+    fn report_carries_tool_profile_and_prewarm_knobs() {
+        let report = build_report(None).expect("build_report without workspace");
+        assert!(
+            report.tool_profile.name == "semantic" || report.tool_profile.name == "full",
+            "tool_profile.name must be one of the documented values, got {:?}",
+            report.tool_profile.name
+        );
+        // The advertised count under the default Semantic profile
+        // is much smaller than the registry total. We pin a
+        // coarse "less than the registry" check rather than an
+        // exact value — adding a tool to the registry is a normal
+        // event and shouldn't break doctor tests.
+        let registry = crate::tools::registry::ToolRegistry::definitions().len();
+        if report.tool_profile.name == "semantic" {
+            assert!(
+                report.tool_profile.advertised_count < registry,
+                "semantic profile advertised_count ({}) must be < registry len ({})",
+                report.tool_profile.advertised_count,
+                registry
+            );
+        } else {
+            assert_eq!(
+                report.tool_profile.advertised_count, registry,
+                "full profile must equal registry length"
+            );
+        }
+        // The prewarm knobs pin the documented defaults so a future
+        // tuning-config change is caught here before reaching a
+        // release.
+        assert_eq!(report.lsp_prewarm.timeout_secs, 30);
+        assert_eq!(report.lsp_prewarm.max_files, 50);
+        assert!(!report.lsp_prewarm.opt_out);
+    }
+
+    /// `doctor --json` JSON-serialises a complete document
+    /// regardless of whether a workspace was found. Captures the
+    /// wire shape via `serde_json::to_value` so a future field
+    /// rename in either `ToolProfileReport` or `LspPrewarmKnobs`
+    /// surfaces as a CI break.
+    #[test]
+    fn report_shape_round_trips_through_serde() {
+        let report = build_report(None).expect("build_report without workspace");
+        let value = serde_json::to_value(&report).expect("DoctorReport must serialise");
+        let obj = value.as_object().expect("top-level JSON is an object");
+        for required in [
+            "schema_version",
+            "server_version",
+            "build_commit",
+            "assessment",
+            "agent_ready",
+            "repository",
+            "capabilities",
+            "transport",
+            "installation",
+            "tool_profile",
+            "lsp_prewarm",
+            "problems",
+        ] {
+            assert!(
+                obj.contains_key(required),
+                "DoctorReport JSON missing required field {required:?}; full: {value}"
+            );
+        }
+        let profile = obj
+            .get("tool_profile")
+            .and_then(|v| v.as_object())
+            .expect("tool_profile is an object");
+        assert!(profile.contains_key("name"));
+        assert!(profile.contains_key("advertised_count"));
+        let prewarm = obj
+            .get("lsp_prewarm")
+            .and_then(|v| v.as_object())
+            .expect("lsp_prewarm is an object");
+        for k in ["timeout_secs", "max_files", "opt_out", "env_opt_out"] {
+            assert!(
+                prewarm.contains_key(k),
+                "lsp_prewarm JSON missing {k:?}; full: {value}"
+            );
+        }
+    }
 }
