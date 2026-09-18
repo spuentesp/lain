@@ -55,6 +55,17 @@ fn lain_schema_dump_writes_tools_list_shape() {
         );
     }
 
+    // Determinism: running `lain schema dump` twice in a row must
+    // produce byte-identical output. Non-deterministic ordering in
+    // HashMap iteration or inventory::iter would otherwise make
+    // schema regeneration flaky (a developer re-running `make schema`
+    // would see spurious diffs).
+    let raw_2 = std::fs::read_to_string(&out_path).expect("read schema file");
+    assert_eq!(
+        raw, raw_2,
+        "schema dump must be deterministic across consecutive runs"
+    );
+
     // Spot-check: at least one tool from each subset must appear, so a
     // silent omission of one of the five sources shows up here.
     let names: std::collections::HashSet<&str> = tools
@@ -233,6 +244,17 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
         .env("XDG_STATE_HOME", state.path())
         .env("XDG_CONFIG_HOME", xdg_config.path())
         .env("LAIN_JOB_STORE", state.path().join("jobs.json"))
+        // The on-disk schema dump is the *maximum* surface an agent
+        // could see (see `dump_tools_schema`'s doc comment — it does
+        // not apply `ToolProfile` filtering, so it always emits every
+        // tool from the five sources). To match that here, the server
+        // must run in `Full` profile, not the default `Semantic`
+        // (which would filter the live response down to ~28 curated
+        // tools and diverge from the 79-tool on-disk schema).
+        // Without this env var the live side would silently drop
+        // everything not in `SEMANTIC_PROFILE`, breaking the
+        // byte-comparison invariant.
+        .env("LAIN_TOOL_PROFILE", "full")
         // Suppress LAIN_EMBEDDING_MODEL so the server falls back to the
         // relative `models/all-MiniLM-L6-v2.onnx` path, which doesn't
         // exist in the repo root and forces a stub embedder — matching

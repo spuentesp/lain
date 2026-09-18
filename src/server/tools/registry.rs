@@ -414,22 +414,32 @@ impl ToolRegistry {
     }
 
     /// Collect all tool definitions for MCP schema registration.
+    ///
+    /// Sorted alphabetically by tool name so the inventory iteration
+    /// order — which is non-deterministic across linker layouts and
+    /// rebuilds — doesn't leak into the wire surface. The
+    /// `lain schema dump` artifact (docs/tool-schema.json) and the
+    /// live `tools/list` response both flow through this method, so
+    /// sorting here pins both sides to the same byte-order contract
+    /// (`tests/schema_dump_smoke::live_tools_list_byte_matches_on_disk_schema_dump`).
     pub fn definitions() -> Vec<crate::server::tools::definitions::ToolDefinition> {
-        iter::<ToolHandlerEntry>()
-            .map(|entry| {
-                let schema: Value = serde_json::from_str(entry.0.input_schema())
-                    .unwrap_or_else(|_| serde_json::json!({}));
-                crate::server::tools::definitions::ToolDefinition {
-                    name: entry.0.name(),
-                    description: entry.0.description(),
-                    input_schema: schema,
-                    readiness: crate::server::tools::definitions::readiness_requirement(
-                        entry.0.name(),
-                    )
+        let mut defs: Vec<crate::server::tools::definitions::ToolDefinition> = iter::<
+            ToolHandlerEntry,
+        >()
+        .map(|entry| {
+            let schema: Value = serde_json::from_str(entry.0.input_schema())
+                .unwrap_or_else(|_| serde_json::json!({}));
+            crate::server::tools::definitions::ToolDefinition {
+                name: entry.0.name(),
+                description: entry.0.description(),
+                input_schema: schema,
+                readiness: crate::server::tools::definitions::readiness_requirement(entry.0.name())
                     .expect("every registered tool must declare a readiness requirement"),
-                }
-            })
-            .collect()
+            }
+        })
+        .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 }
 
