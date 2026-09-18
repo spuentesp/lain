@@ -1210,6 +1210,37 @@ impl LspMultiplexer {
         }
     }
 }
+
+/// `Drop` for `LspMultiplexer`. Defense in depth on the lsp-bridge's
+/// own `Drop for LspProcess` chain: when this Drop runs, the
+/// `lsp-bridge::bridge::Bridge` field's own Drop iterates every
+/// tracked `LspProcess` and sends SIGKILL via
+/// `LspProcess::kill()` (`futures::executor::block_on`).
+///
+/// Without `shutdown_all` having been called explicitly, that's
+/// the only thing standing between a panic during cold-boot
+/// prewarm and a leaked LSP child process — the kernel only
+/// cleans children up when the *parent* dies, and tests that
+/// fork `LainServer` repeatedly will leak LSP processes until
+/// the test runner itself exits. The Drop on the bridge is what
+/// prevents that leak.
+///
+/// Normal shutdown goes through `LainServer::shutdown` →
+/// `LspPool::shutdown_all` → `LspMultiplexer::shutdown`
+/// synchronously, with a 5 s budget enforced at every layer. The
+/// explicit Drop here is for the panic path; under normal
+/// operation `shutdown` has already completed and the bridge's
+/// internal child table is empty.
+///
+/// Empty body intentionally: the actual cleanup happens inside
+/// `Bridge::drop` → `LspProcess::drop`. This impl exists so the
+/// invariant is visible at the call site and so any future
+/// regression in the bridge's Drop chain is a single-file
+/// compile-time hook (drop in the missing body here) rather
+/// than a process leak.
+impl Drop for LspMultiplexer {
+    fn drop(&mut self) {}
+}
 // `marked_string_to_string` existed only to format hover contents for
 // `get_hover_info`, which was removed as dead.
 
