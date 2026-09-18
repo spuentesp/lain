@@ -20,6 +20,7 @@ single-repository setup, federation, and basic troubleshooting.
 - [Query tutorial](quickstart-query.md): a short introduction to `query_graph`
 - [Query language reference](query-language.md): the full ops-array format
 - [`tool-schema.json`](tool-schema.json): generated wire-format schema
+- [Dynamic dispatch mitigation](dynamic-dispatch.md): the three-tier plan that closes the static-graph blind spot for message buses, DI containers, and schema-driven routers. Includes the `explain_dispatch` tool, the `dynamic-boundaries.md` template, and the backfill CLI.
 
 ## Understand and maintain it
 

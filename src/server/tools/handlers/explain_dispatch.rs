@@ -35,7 +35,7 @@
 use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::schema::{EdgeProvenance, EdgeType, GraphEdge, GraphNode};
 use crate::server::runtime_trace::RuntimeTraceStore;
 use crate::server::tools::utils::resolve_node;
 use serde::Serialize;
@@ -270,11 +270,6 @@ fn classify_static_or_heuristic(
         _ => {}
     }
 }
-
-// Avoid an unused-import warning when the handler is included in a
-// build where `NodeType` isn't otherwise referenced.
-#[allow(dead_code)]
-fn _force_use(_: NodeType) {}
 
 #[cfg(test)]
 mod tests {
