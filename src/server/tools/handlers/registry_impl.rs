@@ -71,6 +71,39 @@ impl ToolHandler for ExploreArchitectureHandler {
         handlers::architecture::explore_architecture(&ctx.graph, &ctx.overlay, max_depth)
     }
 }
+// ─── Explain Dispatch (Tier 3 — dynamic-dispatch mitigation) ──────────────
+
+pub struct ExplainDispatchHandler;
+#[async_trait]
+impl ToolHandler for ExplainDispatchHandler {
+    fn name(&self) -> &'static str {
+        "explain_dispatch"
+    }
+    fn description(&self) -> &'static str {
+        "Synthesises static callers, heuristic edges, runtime edges, and co-change \
+         partners for a symbol and returns a single verdict. Use this instead of \
+         `get_blast_radius` when an empty blast radius might mean 'static graph \
+         cannot see the dispatcher' rather than 'no callers'. The verdict field \
+         is `insufficient_evidence` exactly when every signal is empty — that \
+         is the case Tier 1 teaches agents to refuse to treat as safe."
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}"#
+    }
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
+    async fn call(
+        &self,
+        ctx: &ToolContext,
+        args: &Map<String, Value>,
+    ) -> Result<String, LainError> {
+        let symbol = required_str_arg(args, "symbol")?;
+        handlers::explain_dispatch::explain_dispatch(&ctx.graph, &ctx.overlay, &symbol).await
+    }
+}
+inventory::submit!(ToolHandlerEntry(&ExplainDispatchHandler));
+
 inventory::submit!(ToolHandlerEntry(&ExploreArchitectureHandler));
 
 pub struct ListEntryPointsHandler;
@@ -404,7 +437,7 @@ impl ToolHandler for GetBlastRadiusHandler {
         "Calculates the transitive impact and ripple effect of changing a symbol"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"}},"required":["symbol"]}"#
+        r#"{"type":"object","properties":{"symbol":{"type":"string"},"include_coupling":{"type":"boolean"},"include_weak_edges":{"type":"boolean","description":"Include heuristic callers (dynamic dispatch / bus / router) with confidence >= LAIN_HEURISTIC_MIN_CONFIDENCE. Default false."}},"required":["symbol"]}"#
     }
     fn capability(&self) -> ToolCapability {
         ToolCapability::ReadOnly
@@ -416,11 +449,13 @@ impl ToolHandler for GetBlastRadiusHandler {
     ) -> Result<String, LainError> {
         let symbol = required_str_arg(args, "symbol")?;
         let include_coupling = bool_arg(args, "include_coupling").unwrap_or(false);
+        let include_weak_edges = bool_arg(args, "include_weak_edges").unwrap_or(false);
         let mut out = handlers::impact::get_blast_radius(
             &ctx.graph,
             &ctx.overlay,
             &symbol,
             include_coupling,
+            include_weak_edges,
             ui_link(ctx),
         )
         .await?;

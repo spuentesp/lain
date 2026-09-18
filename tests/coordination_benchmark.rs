@@ -229,6 +229,11 @@ async fn blast_radius_latency_benchmark() {
             &overlay,
             "function_9999",
             false,
+            // Heuristic edges (DynamicDispatch / BusTopic / RouteMatches)
+            // are filtered out — the 10k synthetic chain has no bus /
+            // container / router patterns, so the default off-path is
+            // the steady-state budget we want to measure.
+            false,
             None,
         )
         .await

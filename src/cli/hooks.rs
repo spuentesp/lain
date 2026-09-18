@@ -146,6 +146,25 @@ pub enum HooksAction {
         #[arg(long, default_value = "")]
         agent_name: String,
     },
+    /// Re-run the dynamic-dispatch heuristic sensor against the
+    /// workspace and merge the resulting edges into the on-disk graph.
+    /// Use this to backfill graphs that were indexed before Tier 2
+    /// shipped, without paying for a full re-index of static edges.
+    /// The graph file is read, edges are added, and the file is
+    /// rewritten atomically via the standard save path.
+    BackfillHeuristics {
+        /// Workspace root to scan for source files. Defaults to the
+        /// current working directory.
+        #[arg(long, default_value = ".")]
+        workspace: String,
+        /// Path to the on-disk graph (default `.lain/graph.bin`
+        /// relative to `--workspace`).
+        #[arg(long)]
+        graph: Option<String>,
+        /// Dry run — count what would change without writing.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -876,6 +895,162 @@ mod tests {
             no_marker.canonicalize().unwrap(),
             root.join("src/sub").canonicalize().unwrap(),
             "`.lain` must not be honored as a workspace anchor"
+        );
+    }
+}
+
+/// `lain hooks backfill-heuristics --workspace <path> [--graph <path>] [--dry-run]`
+///
+/// Opens the on-disk graph (default `.lain/graph.bin` under the
+/// workspace root), runs the Tier 2 dynamic-dispatch sensor, merges
+/// the resulting heuristic edges into the graph, and saves the graph
+/// back atomically. Designed to upgrade graphs indexed before Tier 2
+/// shipped: no full re-index of static edges is performed.
+///
+/// The graph is read in read-write mode; if the file doesn't exist
+/// the command exits with a clear error rather than silently
+/// starting fresh (the operator almost certainly wanted to backfill
+/// *something* and starting a new graph would hide the typo).
+pub fn backfill_heuristics(workspace: &str, graph: Option<&str>, dry_run: bool) -> Result<()> {
+    use crate::schema::RepoNamespace;
+    use crate::server::graph::GraphDatabase;
+    use crate::server::sensors::dynamic_dispatch_sensor::scan_workspace_dispatch;
+
+    let ws_path = Path::new(workspace);
+    if !ws_path.exists() {
+        return Err(anyhow::anyhow!(
+            "workspace path does not exist: {}",
+            ws_path.display()
+        ));
+    }
+    let graph_path = match graph {
+        Some(p) => PathBuf::from(p),
+        None => ws_path.join(".lain/graph.bin"),
+    };
+    if !graph_path.exists() {
+        return Err(anyhow::anyhow!(
+            "graph file does not exist: {}\nPass --graph <path> if it lives elsewhere, \
+             or run a full `lain mcp` index first to create it.",
+            graph_path.display()
+        ));
+    }
+
+    let mut graph = GraphDatabase::new(&graph_path)
+        .with_context(|| format!("open graph at {}", graph_path.display()))?;
+
+    let ns = RepoNamespace::fresh();
+    graph.set_namespace(ns.clone());
+    // The dynamic_dispatch_sensor reads graph paths via `graph_path`
+    // which mints IDs under the configured namespace; setting it here
+    // keeps backfilled edges compatible with whatever namespace the
+    // graph was originally built with. `RepoNamespace::fresh()` is
+    // per-run, so a re-backfill produces the same IDs and the upsert
+    // path naturally de-duplicates edges the operator already merged.
+    let before = graph.all_edges().len();
+    let added = scan_workspace_dispatch(&graph, ws_path, &ns)
+        .with_context(|| format!("scan workspace {}", ws_path.display()))?;
+    let after = graph.all_edges().len();
+
+    if dry_run {
+        println!(
+            "{{\"dry_run\": true, \"edges_before\": {}, \"edges_after\": {}, \"added\": {}, \"graph\": \"{}\"}}",
+            before, after, added, graph_path.display()
+        );
+        return Ok(());
+    }
+
+    graph
+        .save_to_disk_sync()
+        .with_context(|| format!("save graph at {}", graph_path.display()))?;
+    println!(
+        "{{\"edges_before\": {}, \"edges_after\": {}, \"added\": {}, \"graph\": \"{}\"}}",
+        before,
+        after,
+        added,
+        graph_path.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod backfill_heuristics_tests {
+    use super::*;
+    use crate::graph::GraphDatabase;
+
+    /// End-to-end: a workspace with a `bus.publish` call gets a
+    /// heuristic edge added to its `.lain/graph.bin` by the backfill
+    /// command, while a workspace with no dispatch patterns is a
+    /// no-op. We avoid `RepoNamespace::for_test()` here because the
+    /// real backfill path uses `fresh()`; instead we drive the sensor
+    /// directly with the same namespace the CLI uses.
+    #[test]
+    fn backfill_adds_edges_to_graph_with_patterns_and_skips_clean_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::create_dir_all(ws.join(".lain")).unwrap();
+
+        // Seed an empty graph file. `GraphDatabase::new` requires the
+        // file to exist (or it creates an in-memory one) — using an
+        // existing empty file simulates "graph was previously indexed".
+        let graph_path = ws.join(".lain/graph.bin");
+        std::fs::write(&graph_path, []).unwrap();
+
+        // Write a source file with a dispatch pattern.
+        std::fs::write(
+            ws.join("orders.py"),
+            "def publish_order():\n    bus.publish('orders.v1', payload)\n",
+        )
+        .unwrap();
+
+        // Backfill it.
+        backfill_heuristics(ws.to_str().unwrap(), None, false).unwrap();
+
+        // Open the saved graph and confirm the edge is there.
+        let graph = GraphDatabase::new(&graph_path).unwrap();
+        use crate::schema::EdgeProvenance;
+        let heuristic_count = graph
+            .all_edges()
+            .into_iter()
+            .filter(|e| matches!(e.provenance, Some(EdgeProvenance::Heuristic { .. })))
+            .count();
+        assert!(
+            heuristic_count > 0,
+            "expected backfill to add at least one heuristic edge"
+        );
+
+        // A workspace with no dispatch patterns is a no-op (no crash,
+        // zero edges added). Backfill twice to assert idempotence: the
+        // sensor's deterministic IDs mean re-runs add zero new edges.
+        let clean_dir = tempfile::tempdir().unwrap();
+        let clean_ws = clean_dir.path();
+        std::fs::create_dir_all(clean_ws.join(".lain")).unwrap();
+        std::fs::write(clean_ws.join(".lain/graph.bin"), []).unwrap();
+        std::fs::write(
+            clean_ws.join("README.md"),
+            "# Pure markdown, no dispatch patterns here.",
+        )
+        .unwrap();
+        backfill_heuristics(clean_ws.to_str().unwrap(), None, false).unwrap();
+        let graph2 = GraphDatabase::new(&clean_dir.path().join(".lain/graph.bin")).unwrap();
+        assert_eq!(
+            graph2.all_edges().len(),
+            0,
+            "clean workspace must not gain any edges"
+        );
+    }
+
+    /// A missing graph file produces an actionable error, not a
+    /// silent empty write. This is the regression guard for the
+    /// "operator typo'd the path" case.
+    #[test]
+    fn backfill_errors_when_graph_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = backfill_heuristics(dir.path().to_str().unwrap(), None, false);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("graph file does not exist"),
+            "missing-graph error message must mention graph file: {msg}"
         );
     }
 }

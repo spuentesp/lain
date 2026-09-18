@@ -68,6 +68,21 @@
     "name": "describe_schema"
   },
   {
+    "description": "Synthesises static callers, heuristic edges, runtime edges, and co-change partners for a symbol and returns a single verdict. Use this instead of `get_blast_radius` when an empty blast radius might mean 'static graph cannot see the dispatcher' rather than 'no callers'. The verdict field is `insufficient_evidence` exactly when every signal is empty — that is the case Tier 1 teaches agents to refuse to treat as safe.",
+    "inputSchema": {
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "name": "explain_dispatch"
+  },
+  {
     "description": "Combines signatures, docstrings, and metrics into a human-readable architectural summary",
     "inputSchema": {
       "properties": {
@@ -197,6 +212,10 @@
     "inputSchema": {
       "properties": {
         "include_coupling": {
+          "type": "boolean"
+        },
+        "include_weak_edges": {
+          "description": "Include heuristic callers (dynamic dispatch / bus / router) with confidence >= LAIN_HEURISTIC_MIN_CONFIDENCE. Default false.",
           "type": "boolean"
         },
         "symbol": {
