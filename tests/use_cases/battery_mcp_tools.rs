@@ -973,7 +973,8 @@ async fn get_capabilities_advertised_count_includes_workspace_when_active() {
 
     // The workspace-active advertised count should equal the
     // baseline plus `SemanticProfileFamlies::WORKSPACE.len() = 4`.
-    let workspace_family_size = lain::server::tools::profile::SemanticProfileFamlies::WORKSPACE.len();
+    let workspace_family_size =
+        lain::server::tools::profile::SemanticProfileFamlies::WORKSPACE.len();
     assert_eq!(
         with_ws_count,
         baseline_count + workspace_family_size,
@@ -1053,9 +1054,7 @@ async fn install_language_servers_auto_resolves_workspace_tracked_languages() {
     // Config-error fallback).
     let mut args = serde_json::Map::new();
     args.insert("extensions".into(), serde_json::json!(["auto"]));
-    let result = executor
-        .call("install_language_server", Some(&args))
-        .await;
+    let result = executor.call("install_language_server", Some(&args)).await;
     let text = match result {
         Ok(t) => t,
         Err(e) => {
