@@ -46,6 +46,11 @@ const CONFIDENCE_RUST_TRAIT_OBJECT: f32 = 0.6;
 /// spawns are short-lived fire-and-forget tasks that don't
 /// recursively dispatch back.
 const CONFIDENCE_ASYNC_TASK_SPAWN: f32 = 0.5;
+/// `eval()`, `exec()`, `pickle.loads()` — direct dynamic code
+/// execution. Any symbol loaded through one of these is invisible
+/// to the static graph; the confidence matches reflection
+/// because the dispatch surface is similarly opaque.
+const CONFIDENCE_DYNAMIC_EVAL: f32 = 0.4;
 
 /// Convention patterns per language family. Each entry is `(regex, detector)`;
 /// a file matching the regex in this list emits a heuristic edge tagged
@@ -136,6 +141,16 @@ const RAW_DETECTORS: &[(&str, &str, &str)] = &[
         "async_task_spawn",
         "DynamicDispatch",
     ),
+    // Direct dynamic code execution: eval / exec / new Function /
+    // pickle.loads. Anchored on the function name + open paren so
+    // prose like "the eval function" doesn't match. We don't restrict
+    // by language because every one of these is in scope for the
+    // static graph's blind spot.
+    (
+        r"\b(eval|exec|pickle\.loads|new\s+Function|Function)\s*\(",
+        "dynamic_eval",
+        "DynamicDispatch",
+    ),
 ];
 
 /// One precompiled detector. Building a `regex::Regex` per detector per
@@ -165,6 +180,7 @@ static DETECTORS: Lazy<Vec<CompiledDetector>> = Lazy::new(|| {
         "serde_value" => CONFIDENCE_REFLECTION,
         "rust_trait_object" => CONFIDENCE_RUST_TRAIT_OBJECT,
         "async_task_spawn" => CONFIDENCE_ASYNC_TASK_SPAWN,
+        "dynamic_eval" => CONFIDENCE_DYNAMIC_EVAL,
         _ => 0.5,
     };
     let edge_type_for = |kind: &str| match kind {
@@ -538,6 +554,77 @@ mod tests {
         assert!(
             !detectors.contains("async_task_spawn"),
             "bare `spawn(` must not trigger async_task_spawn: {:?}",
+            detectors
+        );
+    }
+
+    /// Direct dynamic code execution (`eval`, `exec`, `pickle.loads`,
+    /// `new Function`) is the most extreme form of dynamic dispatch —
+    /// anything reachable from the loaded string is invisible to the
+    /// static graph. Pinned at confidence 0.4 because the pattern is
+    /// unambiguous but the runtime target is unknowable from the
+    /// call site alone.
+    #[test]
+    fn dynamic_eval_emits_dynamic_dispatch_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("load.py"),
+            "import pickle\n\
+             def load_blob(blob):\n    return pickle.loads(blob)\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detectors.contains("dynamic_eval"),
+            "expected dynamic_eval in {:?}",
+            detectors
+        );
+    }
+
+    /// `eval` matches across languages (Python's built-in eval and
+    /// JavaScript's eval are both dispatch surfaces). Pinned by a
+    /// JavaScript fixture so a Python-only tuning doesn't silently
+    /// miss the same risk in a JS codebase.
+    #[test]
+    fn javascript_eval_also_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("runner.js"),
+            "function run(src) { return eval(src); }\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detectors.contains("dynamic_eval"),
+            "JS eval must also trigger dynamic_eval: {:?}",
             detectors
         );
     }
