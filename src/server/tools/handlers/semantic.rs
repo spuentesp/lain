@@ -547,9 +547,17 @@ fn extract_section(body: &str, header_marker: &str) -> String {
 }
 
 fn count_bullets(section: &str) -> usize {
+    // Bullet lines in the assess_change sections are indented with
+    // two spaces (`  - caller.name (...) in path`); the section
+    // header itself starts with a single `- ` (`- Direct dependents
+    // (3):`). Counting lines whose trimmed prefix is `- ` would
+    // over-count: a section with 0 actual callers still has the
+    // `- Direct dependents (0):` header line that the loop counted
+    // as a bullet, falsely pushing the risk verdict up from `low`
+    // to `medium`. Two spaces is the real bullet marker.
     section
         .lines()
-        .filter(|l| l.trim_start().starts_with("- "))
+        .filter(|l| l.starts_with("  - ") || l.starts_with("- - "))
         .count()
 }
 
@@ -935,6 +943,59 @@ mod m6_tests {
         assert!(
             out.contains("heuristic-only") || out.contains("heuristic caller(s) included"),
             "expected explicit heuristic marker in the verdict line, got:\n{out}"
+        );
+    }
+
+    /// Truly-empty blast radius (no static callers AND no heuristic
+    /// callers) reports `risk=low` cleanly — no asterisk, no
+    /// heuristic marker. This is the third vertex of the risk-tier
+    /// contract:
+    ///
+    ///   1. N static callers → risk tier from count (medium / high)
+    ///   2. 0 static + N heuristic → `risk=low* — heuristic-only`
+    ///   3. 0 static + 0 heuristic → bare `risk=low`
+    ///
+    /// Without this third case pinned, the iter-21 `low*` heuristic
+    /// could leak into the truly-safe path and confuse an agent into
+    /// refusing to edit a leaf function.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_truly_empty_blast_radius_says_low() {
+        // Fresh graph with a single Function node and no callers.
+        // The test fixture must be truly caller-free — make_test_graph
+        // wires up a Calls edge, so we build inline.
+        let tmp = std::env::temp_dir().join("test_assess_truly_empty");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let leaf = GraphNode::new(
+            NodeType::Function,
+            "leaf_helper".to_string(),
+            "/src/lib.rs".to_string(),
+        );
+        graph.upsert_node(leaf.clone()).unwrap();
+
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("leaf_helper".to_string()),
+        );
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        // Pin the third vertex of the contract: bare `risk=low`,
+        // no asterisk, no heuristic-only marker.
+        assert!(
+            out.contains("verdict: **low**"),
+            "truly-empty blast radius must say bare risk=low, got:\n{out}"
+        );
+        assert!(
+            !out.contains("heuristic-only"),
+            "truly-empty blast radius must NOT carry the heuristic-only caveat, got:\n{out}"
+        );
+        assert!(
+            !out.contains("heuristic caller(s) included"),
+            "truly-empty blast radius must NOT carry the heuristic marker, got:\n{out}"
         );
     }
 
