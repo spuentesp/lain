@@ -4,6 +4,7 @@
 
 pub mod definitions;
 pub mod handlers;
+pub mod profile;
 #[cfg(test)]
 pub mod proptest_helpers;
 pub mod registry;
@@ -636,11 +637,35 @@ impl ToolExecutor {
         let lifecycle = self.ctx.readiness.snapshot();
         let structural = structural_state(lifecycle.state);
         let capabilities = capabilities_for(structural, lifecycle.retry_after_ms, semantic_stub);
+        // Surface the active tool profile so an agent can self-
+        // discover whether it's running on the curated Semantic
+        // surface or the legacy 79-tool Full surface. An agent that
+        // wants the full list can either set `LAIN_TOOL_PROFILE=full`
+        // on restart, or call `get_agent_strategy` for the full
+        // enumeration (the curated surface includes it as an escape
+        // hatch).
+        let profile = crate::server::tools::profile::ToolProfile::from_env();
+        let advertised = crate::tools::registry::ToolRegistry::definitions()
+            .iter()
+            .filter(|def| {
+                use crate::server::mcp::handler::profile_allows;
+                profile_allows(profile, def.name)
+            })
+            .count()
+            + crate::server::tools::profile::special_advertised_count(
+                profile,
+                self.ctx.federation.is_some(),
+            );
         serde_json::to_string(&serde_json::json!({
             "schema_version": SCHEMA_VERSION,
             "server_version": env!("CARGO_PKG_VERSION"),
             "repository": self.ctx.workspace.file_name().map(|name| name.to_string_lossy()),
             "capabilities": capabilities,
+            // New in PR3 (semantic-default tool profile).
+            "tool_profile": {
+                "name": profile.as_str(),
+                "advertised_count": advertised,
+            },
             "freshness": {
                 "head": lifecycle.target_commit,
                 "indexed_commit": lifecycle.indexed_commit,
