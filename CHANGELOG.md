@@ -5,6 +5,26 @@ All notable changes to LAIN are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added
+
+- **Semantic-default tool profile.** `tools/list` now returns the
+  curated 14-tool semantic surface by default — the M5 bootstrap
+  (`understand_repository`), the M6 high-level Agent API
+  (`find_symbol`, `get_context`, `find_related`, `assess_change`,
+  `search_code`), readiness + self-discovery (`get_health`,
+  `get_capabilities`), and the multiplayer essentials
+  (`register_agent`, `heartbeat`, `claim_files`, `release_files`,
+  `get_world_state`) — with `get_agent_strategy` kept as an
+  on-demand escape hatch to the full list. Federation, workspace,
+  and server-status families are visible when in their respective
+  modes. The legacy 79-tool surface is reachable via
+  `LAIN_TOOL_PROFILE=full`. Active profile is exposed through
+  `get_capabilities.tool_profile` so agents self-discover which
+  filter is in effect at startup. The on-disk
+  `docs/tool-schema.json` is unchanged: schema-drift CI still
+  validates the fully-populated shape, only the runtime wire
+  shrinks.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
