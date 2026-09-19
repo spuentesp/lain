@@ -89,6 +89,51 @@ if (process.platform !== 'win32') {
       assert.throws(() => runtime.verifyBinary(executable, '1.2.3'), /expected/);
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
+
+  test('verified install unpacks sidecar binary if present', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lain-install-sidecar-'));
+    const source = path.join(directory, 'source');
+    const cache = path.join(directory, 'cache');
+    fs.mkdirSync(source);
+    const executable = path.join(source, 'lain');
+    fs.writeFileSync(executable, '#!/bin/sh\nprintf "lain 1.2.3\\n"\n');
+    fs.chmodSync(executable, 0o755);
+    const sidecar = path.join(source, 'lain-git-sidecar');
+    fs.writeFileSync(sidecar, '#!/bin/sh\nprintf "lain-git-sidecar 1.2.3\\n"\n');
+    fs.chmodSync(sidecar, 0o755);
+    const asset = runtime.assetName('1.2.3', 'x86_64-unknown-linux-gnu');
+    const archive = path.join(source, asset);
+    execFileSync('tar', ['czf', archive, '-C', source, 'lain', 'lain-git-sidecar']);
+    const digest = crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
+    fs.writeFileSync(path.join(source, 'SHA256SUMS'), `${digest}  ${asset}\n`);
+    let downloads = 0;
+    const download = async (url, destination) => {
+      downloads += 1;
+      fs.copyFileSync(path.join(source, path.basename(url)), destination);
+    };
+    const options = { version: '1.2.3', platform: 'linux', arch: 'x64', env: { LAIN_CACHE_DIR: cache }, download };
+    try {
+      const installed = await runtime.ensureBinary(options);
+      assert.strictEqual(downloads, 2);
+      assert.strictEqual(fs.statSync(installed).mode & 0o777, 0o755);
+      const installedSidecar = path.join(path.dirname(installed), 'lain-git-sidecar');
+      assert(fs.existsSync(installedSidecar), 'sidecar binary should exist alongside main binary');
+      assert.strictEqual(fs.statSync(installedSidecar).mode & 0o777, 0o755);
+      assert(!fs.readdirSync(path.dirname(installed)).some((name) => name.startsWith('.install-')));
+      await runtime.ensureBinary({ ...options, download: async () => { throw new Error('network used'); } });
+      assert.strictEqual(downloads, 2);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test('downloaded sidecar binary version must match the selected release', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lain-sidecar-version-'));
+    try {
+      const executable = path.join(directory, 'lain-git-sidecar');
+      fs.writeFileSync(executable, '#!/bin/sh\nprintf "lain-git-sidecar 9.9.9\\n"\n');
+      fs.chmodSync(executable, 0o755);
+      assert.throws(() => runtime.verifySidecarBinary(executable, '1.2.3'), /expected/);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
 }
 
 (async () => {

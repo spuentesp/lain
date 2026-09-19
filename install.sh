@@ -366,6 +366,14 @@ install() {
     exit 1
   fi
 
+  if [ -f "${tmpdir}/lain-git-sidecar" ]; then
+    mv "${tmpdir}/lain-git-sidecar" "${INSTALL_DIR}/lain-git-sidecar"
+    chmod +x "${INSTALL_DIR}/lain-git-sidecar"
+  elif [ -f "${tmpdir}/lain-git-sidecar.exe" ]; then
+    mv "${tmpdir}/lain-git-sidecar.exe" "${INSTALL_DIR}/lain-git-sidecar.exe"
+    chmod +x "${INSTALL_DIR}/lain-git-sidecar.exe"
+  fi
+
   chmod +x "${INSTALL_DIR}/${BIN_NAME}" || chmod +x "${INSTALL_DIR}/${BIN_NAME}.exe"
   rm -rf "$tmpdir"
 
