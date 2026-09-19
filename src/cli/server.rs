@@ -203,6 +203,41 @@ pub async fn run_server(
         server.ingest().tool_executor().ctx.clone(),
     );
 
+    // OTLP runtime-trace listener: opt-in via LAIN_TRACE_RUNTIME=true.
+    // Bound to a separate TcpListener so the runtime trace path
+    // doesn't share the MCP bearer-token auth layer — OTLP collectors
+    // don't ship bearer tokens. The port is configurable via
+    // LAIN_TRACE_OTLP_PORT (default 4318, the OTel standard).
+    if std::env::var("LAIN_TRACE_RUNTIME")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        let otlp_port: u16 = std::env::var("LAIN_TRACE_OTLP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4318);
+        let otlp_addr = std::net::SocketAddr::from(([0, 0, 0, 0], otlp_port));
+        match crate::server::runtime_trace::server::try_bind(otlp_addr).await {
+            Ok(listener) => {
+                let store = std::sync::Arc::new(
+                    crate::server::runtime_trace::RuntimeTraceStore::global().clone(),
+                );
+                let handle = crate::server::runtime_trace::server::start(listener, store);
+                tracing::info!(
+                    "OTLP runtime-trace listener bound on {otlp_addr} (POST /v1/traces)"
+                );
+                // Drop the handle to free resources if shutdown aborts
+                // it. The listener runs until the process exits.
+                std::mem::forget(handle);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "could not bind OTLP listener on {otlp_addr}: {e} — runtime tracing disabled"
+                );
+            }
+        }
+    }
+
     info!(
         "lain server: starting on {:?} transport (port {})",
         transport_enum, port
