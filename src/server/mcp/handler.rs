@@ -2801,17 +2801,24 @@ mod tests {
 
     #[test]
     fn health_response_surfaces_git_sensor_telemetry_and_sidecar_degraded_state() {
-        use crate::server::git::AnyGitSensor;
+        use crate::server::git::{AnyGitSensor, GitSensorMode};
 
         let repo_root = std::env::current_dir().unwrap();
-        let in_proc_sensor = AnyGitSensor::from_env(&repo_root).unwrap();
+        let in_proc_sensor = AnyGitSensor::new(&repo_root, GitSensorMode::InProcess).unwrap();
 
         // 1. In-process mode reports ok status and in_process kind.
         let body = build_health_body(0, 0, None, None, Some(&in_proc_sensor));
         assert_eq!(body["status"], "ok");
         assert_eq!(body["git_sensor"]["kind"], "in_process");
 
-        // 2. Dead sidecar reports degraded status and reason.
+        // 2. Default mode (Sidecar) reports ok status and sidecar kind.
+        let sidecar_sensor = AnyGitSensor::from_env(&repo_root).unwrap();
+        assert_eq!(sidecar_sensor.mode(), GitSensorMode::Sidecar);
+        let sidecar_body = build_health_body(0, 0, None, None, Some(&sidecar_sensor));
+        assert_eq!(sidecar_body["status"], "ok");
+        assert_eq!(sidecar_body["git_sensor"]["kind"], "sidecar");
+
+        // 3. Dead sidecar reports degraded status and reason.
         let dead_sidecar_json = serde_json::json!({
             "status": "Degraded",
             "reason": "git sensor sidecar is not alive",

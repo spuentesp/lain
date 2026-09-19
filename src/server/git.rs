@@ -500,9 +500,9 @@ impl GitSensor {
 #[serde(rename_all = "snake_case")]
 pub enum GitSensorMode {
     /// Direct in-process `libgit2` calls wrapped in a mutex.
-    #[default]
     InProcess,
     /// Isolated child daemon process communicating via Unix domain socket IPC.
+    #[default]
     Sidecar,
 }
 
@@ -531,7 +531,7 @@ impl std::fmt::Display for GitSensorMode {
 
 impl GitSensorMode {
     /// Resolve git sensor mode from the `LAIN_GIT_SENSOR` environment variable,
-    /// falling back to the default `InProcess` mode.
+    /// falling back to the default `Sidecar` mode.
     pub fn from_env() -> Self {
         if let Ok(val) = std::env::var("LAIN_GIT_SENSOR") {
             if let Ok(mode) = val.parse() {

@@ -91,7 +91,7 @@ impl FederationConfig {
     /// Return the configured Git sensor mode, taking precedence in order:
     /// 1. `LAIN_GIT_SENSOR` environment variable
     /// 2. `git_sensor` field from config file
-    /// 3. Default `GitSensorMode::InProcess`
+    /// 3. Default `GitSensorMode::Sidecar`
     pub fn git_sensor_mode(&self) -> crate::git::GitSensorMode {
         if let Ok(val) = std::env::var("LAIN_GIT_SENSOR") {
             if let Ok(mode) = val.parse() {
@@ -168,20 +168,42 @@ repos:
         let cfg: FederationConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.repos.len(), 2);
         assert_eq!(cfg.max_concurrent_indexers, 4);
-        assert_eq!(cfg.git_sensor_mode(), crate::git::GitSensorMode::InProcess);
+        assert_eq!(cfg.git_sensor_mode(), crate::git::GitSensorMode::Sidecar);
     }
 
     #[test]
     fn parses_git_sensor_config() {
-        let yaml = r#"
+        let yaml_sidecar = r#"
 git_sensor: sidecar
 repos:
   - id: ws
     source: { type: workspace_dir, path: /srv/ws }
 "#;
-        let cfg: FederationConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.git_sensor, Some(crate::git::GitSensorMode::Sidecar));
-        assert_eq!(cfg.git_sensor_mode(), crate::git::GitSensorMode::Sidecar);
+        let cfg_sidecar: FederationConfig = serde_yaml::from_str(yaml_sidecar).unwrap();
+        assert_eq!(
+            cfg_sidecar.git_sensor,
+            Some(crate::git::GitSensorMode::Sidecar)
+        );
+        assert_eq!(
+            cfg_sidecar.git_sensor_mode(),
+            crate::git::GitSensorMode::Sidecar
+        );
+
+        let yaml_inproc = r#"
+git_sensor: in_process
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let cfg_inproc: FederationConfig = serde_yaml::from_str(yaml_inproc).unwrap();
+        assert_eq!(
+            cfg_inproc.git_sensor,
+            Some(crate::git::GitSensorMode::InProcess)
+        );
+        assert_eq!(
+            cfg_inproc.git_sensor_mode(),
+            crate::git::GitSensorMode::InProcess
+        );
     }
 
     #[test]

@@ -187,9 +187,9 @@ jobs:
       # missing. Building it here (rather than relying on `cargo test`
       # to incidentally produce it) keeps the panic-fallback dead and
       # the Windows matrix cell green.
-      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+      - name: Build binaries (for use_cases/battery_* and sidecar tests that invoke them as subprocesses)
         shell: bash
-        run: cargo build --bin lain
+        run: cargo build --bin lain --bin lain-git-sidecar
 
       - name: Run tests
         shell: bash
@@ -238,9 +238,9 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
-      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+      - name: Build binaries (for use_cases/battery_* and sidecar tests that invoke them as subprocesses)
         shell: bash
-        run: cargo build --bin lain
+        run: cargo build --bin lain --bin lain-git-sidecar
 
       - name: Run tests
         shell: bash
