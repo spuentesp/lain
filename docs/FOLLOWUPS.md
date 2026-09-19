@@ -221,6 +221,24 @@ The only remaining M4 work is the LSP subprocess calls:
   input; the repo lookup can use `code.repo` or the OTLP
   resource's `service.name` attribute if either is present.
 
+## From Bug #2 root-cause investigation (PR #174 follow-up)
+
+### Production sidecar implementation
+- **Source:** PR #174 prototype findings (`docs/notes/2026-09-19-sidecar-prototype-bench.md`,
+  decision: GO) and architecture design (`docs/notes/2026-09-19-sidecar-architecture.md`).
+- **Status:** in flight (Milestone 1 branch `feat/sidecar-proto-handshake`).
+- **What needs to happen:** 8-milestone roadmap:
+  1. Protocol version constant & handshake validation (`sidecar_proto.rs`).
+  2. Child daemon hardening (`PR_SET_PDEATHSIG`, canonical paths, signals).
+  3. Client supervisor (`SidecarGitSensor`, 3-in-30s respawn budget, timeouts).
+  4. Unified `AnyGitSensor` abstraction & config flag.
+  5. Plumb `AnyGitSensor` through `ingestion.rs`, watcher, and federation.
+  6. Federation health reporting (`get_health` reporting `git_sensor.kind`).
+  7. Binary distribution & packaging (release workflow, Homebrew, npm-shim).
+  8. Soak testing & default flip to Sidecar.
+- **Acceptance:** Simulated child hang does not block parent threads; child is auto-killed
+  and respawned; all existing integration tests pass in both modes.
+
 ## Release flow
 
 ### Next release cut (separate scope)
