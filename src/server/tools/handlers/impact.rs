@@ -582,4 +582,35 @@ mod tests {
             "summary line must be absent when no heuristic edges pass"
         );
     }
+
+    /// `get_blast_radius` against a fresh, never-indexed graph must
+    /// return a structured `NotFound` rather than panic on an empty
+    /// BFS queue. The handler walks incoming edges, so a zero-node
+    /// graph would otherwise take the `while let Some(...)` loop's
+    /// early-exit and produce a confident "no callers" answer —
+    /// which is wrong: the symbol is missing, not isolated. The
+    /// `resolve_node` empty-graph branch was added so this case
+    /// surfaces as a NotFound with a `get_health` next step.
+    #[tokio::test]
+    async fn blast_radius_on_empty_graph_returns_not_found() {
+        let (dir, graph) = temp_graph();
+        let _ = dir; // graph dropped at end of test
+        let overlay = VolatileOverlay::new();
+
+        let result = get_blast_radius(&graph, &overlay, "anything", false, false, None).await;
+
+        match result {
+            Err(LainError::NotFound(msg)) => {
+                assert!(
+                    msg.contains("graph being searched is empty")
+                        || msg.contains("graph indexes committed code"),
+                    "NotFound message should describe the empty-graph branch, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected NotFound on an empty graph, got {:?}",
+                other.map(|s| s.chars().take(80).collect::<String>())
+            ),
+        }
+    }
 }
