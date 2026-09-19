@@ -218,6 +218,23 @@ All notable changes to LAIN are documented here. Versions follow
   function so it can be tested with `Mutex<()>` without
   constructing a real `GitSensor` on disk.
 
+- **OpenSSF Scorecard `Signed-Releases` status documented.** The
+  `docs/SCORECARD.md` plan now reflects that `release.yml`
+  already runs `cosign sign-blob --yes --bundle ...` with
+  keyless OIDC on every per-platform build (PR #84) and
+  attaches the bundle to the GitHub Release alongside the SLSA
+  provenance, in-toto attestation, SBOM, and SHA256 side-file.
+  The remaining 2/10 score on `Signed-Releases` is a
+  file-extension mismatch — Scorecard looks for
+  `*.sig`/`*.asc`/`*.pem`/`*.gpg`, but cosign v3 writes
+  `*.cosign.bundle.json`. The signature is real and
+  verifiable; only the filename extension is wrong. Two paths
+  forward are documented (extract the raw signature with
+  `jq -r '.messageSignature.content' | base64 -d > tarball.sig`,
+  or switch to cosign v2 with `--output-signature`); both
+  touch `release.yml` and should land as their own PR with a
+  dry-run review before the next release ships.
+
 ### Fixed
 
 - **Relative `workspace_dir` paths in `repos.yaml` no longer
