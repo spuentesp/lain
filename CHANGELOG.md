@@ -185,6 +185,20 @@ All notable changes to LAIN are documented here. Versions follow
   `tools::handlers::explain_dispatch` pins the up-front-resolve
   contract so that regression fails at `cargo test` time.
 
+- **Federation drain contract pinned.** An edge whose source is
+  in the local index but whose target is missing now reliably
+  ends up in `take_pending_external_edges` instead of being
+  counted as dropped. The companion to
+  `insert_edges_batch_reports_dropped_count_for_orphan_edges`
+  pins the positive arm — the federation's `project_repo`
+  drains that queue after the intra-repo edge pass to emit the
+  edge to the federated backend, so silently dropping it would
+  break cross-repo projection with no operator-visible signal
+  (the dropped counter would not move). Also asserts the queue
+  starts empty (so a leaking earlier test cannot pollute this
+  one) and that `take_pending_external_edges` drains
+  (`take_*`, not `peek_*`) so a second call returns empty.
+
 ### Fixed
 
 - **Relative `workspace_dir` paths in `repos.yaml` no longer
