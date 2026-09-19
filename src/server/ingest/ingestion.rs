@@ -1836,10 +1836,31 @@ mod readiness_progress_tests {
     /// with "build_core_memory must not hang past 5s".
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn build_core_memory_fails_fast_when_git_sensor_mutex_held() {
+    async fn default_mode_is_sidecar() {
+        assert_eq!(
+            crate::git::GitSensorMode::default(),
+            crate::git::GitSensorMode::Sidecar
+        );
         let root = git_fixture_with_one_file();
         let server =
             LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        assert_eq!(
+            server.ingest().git().mode(),
+            crate::git::GitSensorMode::Sidecar
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn build_core_memory_fails_fast_when_git_sensor_mutex_held() {
+        let root = git_fixture_with_one_file();
+        let server = LainServer::with_git_sensor_mode(
+            root.path(),
+            &root.path().join("state/graph.bin"),
+            None,
+            crate::git::GitSensorMode::InProcess,
+        )
+        .unwrap();
         disable_real_lsp(&server, root.path()).await;
 
         // Externally grab the parking_lot `GitSensor` mutex to simulate
@@ -1892,7 +1913,13 @@ mod readiness_progress_tests {
         use std::sync::Arc;
         let root = git_fixture_with_one_file();
         let server = Arc::new(
-            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap(),
+            LainServer::with_git_sensor_mode(
+                root.path(),
+                &root.path().join("state/graph.bin"),
+                None,
+                crate::git::GitSensorMode::InProcess,
+            )
+            .unwrap(),
         );
         disable_real_lsp(&server, root.path()).await;
 

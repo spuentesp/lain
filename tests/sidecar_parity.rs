@@ -97,6 +97,9 @@ fn test_git_sensor_mode_config_and_parsing() {
     assert_eq!(json_sidecar, "\"sidecar\"");
     let decoded_sidecar: GitSensorMode = serde_json::from_str(&json_sidecar).unwrap();
     assert_eq!(decoded_sidecar, GitSensorMode::Sidecar);
+
+    // Default mode is Sidecar
+    assert_eq!(GitSensorMode::default(), GitSensorMode::Sidecar);
 }
 
 #[test]

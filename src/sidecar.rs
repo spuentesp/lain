@@ -516,20 +516,48 @@ fn resolve_sidecar_binary(custom: Option<&Path>) -> Result<PathBuf, LainError> {
         }
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        let sibling = exe.with_file_name("lain-git-sidecar");
-        if sibling.exists() {
-            return Ok(sibling);
+    if let Some(val) = std::env::var_os("CARGO_BIN_EXE_lain-git-sidecar") {
+        let p = PathBuf::from(val);
+        if p.exists() {
+            return Ok(p);
         }
     }
 
-    if let Ok(path) = which::which("lain-git-sidecar") {
+    if let Ok(exe) = std::env::current_exe() {
+        let sidecar_name = if cfg!(windows) {
+            "lain-git-sidecar.exe"
+        } else {
+            "lain-git-sidecar"
+        };
+        let sibling = exe.with_file_name(sidecar_name);
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+        if let Some(parent) = exe.parent() {
+            if parent.file_name().and_then(|f| f.to_str()) == Some("deps") {
+                if let Some(target_dir) = parent.parent() {
+                    let sidecar = target_dir.join(sidecar_name);
+                    if sidecar.exists() {
+                        return Ok(sidecar);
+                    }
+                }
+            }
+        }
+    }
+
+    let sidecar_name = if cfg!(windows) {
+        "lain-git-sidecar.exe"
+    } else {
+        "lain-git-sidecar"
+    };
+
+    if let Ok(path) = which::which(sidecar_name) {
         return Ok(path);
     }
 
     // Check development target directories
     for dir in &["target/debug", "target/release"] {
-        let p = Path::new(dir).join("lain-git-sidecar");
+        let p = Path::new(dir).join(sidecar_name);
         if p.exists() {
             return Ok(dunce::canonicalize(&p).unwrap_or(p));
         }

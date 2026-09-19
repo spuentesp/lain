@@ -558,6 +558,21 @@ impl LainServer {
         memory_path: &Path,
         embedding_model: Option<&Path>,
     ) -> Result<Self, LainError> {
+        Self::with_git_sensor_mode(
+            workspace,
+            memory_path,
+            embedding_model,
+            crate::git::GitSensorMode::from_env(),
+        )
+    }
+
+    /// Construct a `LainServer` with an explicit `GitSensorMode`.
+    pub fn with_git_sensor_mode(
+        workspace: &Path,
+        memory_path: &Path,
+        embedding_model: Option<&Path>,
+        git_mode: crate::git::GitSensorMode,
+    ) -> Result<Self, LainError> {
         let config = LainConfig {
             workspace: workspace.to_path_buf(),
             memory_path: memory_path.to_path_buf(),
@@ -605,7 +620,7 @@ impl LainServer {
             );
         }
 
-        let git = Arc::new(AnyGitSensor::from_env(workspace)?);
+        let git = Arc::new(AnyGitSensor::new(workspace, git_mode)?);
         let lsp_pool = Arc::new(LspPool::new(
             workspace,
             tuning.ingestion.lsp_pool_size,
