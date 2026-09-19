@@ -297,6 +297,10 @@ fn dispatch(req: &Request, sensor: &GitSensor) -> Response {
             ),
             Err(e) => Response::Error(e.to_string()),
         },
+        Request::IsIgnored { path } => match sensor.is_ignored(path) {
+            Ok(ignored) => Response::IsIgnored(ignored),
+            Err(e) => Response::Error(e.to_string()),
+        },
         Request::Shutdown => Response::Ok,
     }
 }

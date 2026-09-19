@@ -48,6 +48,8 @@ pub enum Request {
     },
     /// "List uncommitted changes (staged + unstaged + untracked)."
     GetUncommittedChanges,
+    /// "Is this path ignored by .gitignore rules?"
+    IsIgnored { path: PathBuf },
     /// "Exit cleanly." The child replies with `Response::Ok` and
     /// drops the listening socket.
     Shutdown,
@@ -76,6 +78,7 @@ pub enum Response {
     TrackedFiles(Vec<PathBuf>),
     CoChanges(Vec<CoChangePair>),
     UncommittedChanges(Vec<FileChange>),
+    IsIgnored(bool),
     /// Acknowledges a `Shutdown`. The child exits after writing this.
     Ok,
     /// Method-specific error. The parent treats this as the libgit2
