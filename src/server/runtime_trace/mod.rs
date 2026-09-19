@@ -31,6 +31,7 @@
 //! tool handlers query the store unconditionally.
 
 pub mod otlp;
+pub mod server;
 pub mod spans;
 pub mod store;
 
