@@ -1142,22 +1142,38 @@ impl LainMcpServer {
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
         info!("Starting Lain MCP HTTP server on port {}", port);
 
-        // Same backgrounded re-index as `run_stdio`; see there for the
-        // full rationale. HTTP has no equivalent to stdio's "session
-        // ended" moment (the accept loop below runs until the process is
-        // killed), but unlike the pre-fix code we now retain the
-        // `JoinHandle` in `LifecycleInfo::startup_task` so a future
-        // `LainServer::shutdown` (or `Drop`) can cancel the
-        // server-owned token and bound-await the task. The transport's
-        // own loop keeps running until the runtime tears it down —
-        // the same shutdown story every other HTTP server in the
-        // project's stack uses — but the backgrounded indexer no
-        // longer races a teardown.
+        // Bind the HTTP listener *before* spawning the background
+        // re-index. The original order spawned the startup task first
+        // and only then reached `TcpListener::bind`, which let the
+        // startup task starve the bind on the same runtime when the
+        // startup task itself hung — Bug #2 from the 2026-09-18 Tauri
+        // postmortem: the CLI server hung in `Dl` state, port 9999
+        // never opened, no log lines after the projection log.
+        // Binding first means the listener is up even if the re-index
+        // hangs; clients hitting the port then get the structured
+        // `warming_up` response from `dispatch_tool_call` (see the
+        // comment in `run_stdio`) instead of a connection refused, and
+        // operators can poll `/health` to observe the stuck state.
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+        info!("Lain MCP HTTP server listening on 0.0.0.0:{}", port);
+
+        // Same backgrounded re-index as `run_stdio`; see there for
+        // the full rationale. HTTP has no equivalent to stdio's
+        // "session ended" moment (the accept loop below runs until
+        // the process is killed), but unlike the pre-fix code we now
+        // retain the `JoinHandle` in `LifecycleInfo::startup_task` so
+        // a future `LainServer::shutdown` (or `Drop`) can cancel the
+        // server-owned token and bound-await the task. The
+        // transport's own loop keeps running until the runtime tears
+        // it down — the same shutdown story every other HTTP server
+        // in the project's stack uses — but the backgrounded indexer
+        // no longer races a teardown.
         //
         // No notifier: this transport is a plain request/response
         // JSON-RPC loop with no persistent connection to push an
-        // unsolicited notification through. `get_capabilities` polling
-        // is the only freshness signal HTTP clients get today.
+        // unsolicited notification through. `get_capabilities`
+        // polling is the only freshness signal HTTP clients get
+        // today.
         let cancel = self
             .server
             .as_ref()
@@ -1186,7 +1202,6 @@ impl LainMcpServer {
         let status_last_error = self.status_last_error;
         let reload_bus = self.reload_bus;
         let server = self.server;
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
         loop {
             match listener.accept().await {
