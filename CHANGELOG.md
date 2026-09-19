@@ -265,6 +265,17 @@ All notable changes to LAIN are documented here. Versions follow
   cause of the underlying hang (Bug #2) is still under
   investigation.
 
+### Removed
+
+- **`/tmp/lain-build` cleanup.** Deleted the duplicate trial build
+  artifact (~1.2 GB). The repo at
+  `data/agents/orca/workspaces/lain/detailing` is the canonical
+  lain source; agent hook configs already point at the repo's
+  `hooks/` directory and the repo's hook READMEs include a
+  "Dynamic Dispatch Caveat" section that `/tmp/lain-build`'s
+  copies lacked. Resolves postmortem open question #4 from the
+  2026-09-18 Tauri federation trial.
+
 ### Tier-3 follow-ups
 
 - **`NodeType::Synthetic` for hub nodes.** Hub nodes (`Hub:
