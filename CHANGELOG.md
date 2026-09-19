@@ -150,6 +150,18 @@ All notable changes to LAIN are documented here. Versions follow
   empty-name `File` nodes (source of heuristic edges) cannot
   be silently matched by `find_node_by_name("")`.
 
+- **OTLP listener startup hook.** `cli/server.rs` now binds the
+  runtime-trace OTLP HTTP listener at startup, gated by
+  `LAIN_TRACE_RUNTIME=true` and a configurable
+  `LAIN_TRACE_OTLP_PORT` (default 4318, the OTLP/HTTP convention).
+  The listener runs on its own `TcpListener`, completely separate
+  from the MCP transport, so trace ingestion never shares a port
+  with the agent-facing API and never competes for MCP request
+  budget. Bind failure is downgraded to a startup warning — the
+  server still comes up with tracing disabled rather than failing
+  the boot — so an OTLP port collision on a host running other
+  observability tooling no longer wedges the MCP entry point.
+
 ### Tier-3 follow-ups
 
 - **`NodeType::Synthetic` for hub nodes.** Hub nodes (`Hub:
