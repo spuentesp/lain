@@ -20,12 +20,12 @@
 //! EOF.
 
 use lain::git::{
-    ChangeType as GitChangeType, CoChangePair as GitCoChangePair, FileChange as GitFileChange,
-    GitSensor,
+    ChangeType as GitChangeType, CoChangePair as GitCoChangePair, CommitInfo as GitCommitInfo,
+    FileChange as GitFileChange, GitSensor, RepoIdentity as GitRepoIdentity,
 };
 use lain::sidecar_proto::{
-    read_frame, write_frame, ChangeType, CoChangePair, FileChange, Request, Response,
-    PROTOCOL_VERSION,
+    read_frame, write_frame, ChangeType, CoChangePair, CommitInfo, FileChange, RepoIdentity,
+    Request, Response, PROTOCOL_VERSION,
 };
 
 use std::io::Write;
@@ -301,6 +301,24 @@ fn dispatch(req: &Request, sensor: &GitSensor) -> Response {
             Ok(ignored) => Response::IsIgnored(ignored),
             Err(e) => Response::Error(e.to_string()),
         },
+        Request::GetFileDiff { path } => match sensor.get_file_diff(path) {
+            Ok(diff) => Response::FileDiff(diff),
+            Err(e) => Response::Error(e.to_string()),
+        },
+        Request::GetCurrentBranch => match sensor.get_current_branch() {
+            Ok(branch) => Response::CurrentBranch(branch),
+            Err(e) => Response::Error(e.to_string()),
+        },
+        Request::GetCommitHistory { count } => match sensor.get_commit_history(*count) {
+            Ok(commits) => {
+                Response::CommitHistory(commits.into_iter().map(git_commit_to_proto).collect())
+            }
+            Err(e) => Response::Error(e.to_string()),
+        },
+        Request::GetRepoIdentity => match sensor.get_repo_identity() {
+            Ok(id) => Response::RepoIdentity(id.map(git_identity_to_proto)),
+            Err(e) => Response::Error(e.to_string()),
+        },
         Request::Shutdown => Response::Ok,
     }
 }
@@ -322,5 +340,21 @@ fn git_filechange_to_proto(c: GitFileChange) -> FileChange {
             GitChangeType::Deleted => ChangeType::Deleted,
         },
         staged: c.staged,
+    }
+}
+
+fn git_commit_to_proto(c: GitCommitInfo) -> CommitInfo {
+    CommitInfo {
+        id: c.id,
+        message: c.message,
+        files: c.files,
+        time: c.time,
+    }
+}
+
+fn git_identity_to_proto(id: GitRepoIdentity) -> RepoIdentity {
+    RepoIdentity {
+        owner: id.owner,
+        name: id.name,
     }
 }

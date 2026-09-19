@@ -5,10 +5,11 @@
 //! respawn budgets (max 3 retries in 30 seconds), and automatic transparent recovery.
 
 use crate::error::LainError;
-use crate::git::{ChangeType, CoChangePair, FileChange};
+use crate::git::{ChangeType, CoChangePair, CommitInfo, FileChange, RepoIdentity};
 use crate::sidecar_proto::{
     read_frame, write_frame, ChangeType as ProtoChangeType, CoChangePair as ProtoCoChangePair,
-    FileChange as ProtoFileChange, Request, Response, PROTOCOL_VERSION,
+    CommitInfo as ProtoCommitInfo, FileChange as ProtoFileChange,
+    RepoIdentity as ProtoRepoIdentity, Request, Response, PROTOCOL_VERSION,
 };
 
 use parking_lot::Mutex;
@@ -180,6 +181,60 @@ impl SidecarGitSensor {
                 other => Err(LainError::Git(format!("unexpected response: {:?}", other))),
             },
         )
+    }
+
+    /// "Get the latest commit hash."
+    pub fn get_latest_commit(&self) -> Result<String, LainError> {
+        self.get_latest_commit_info().map(|(c, _)| c)
+    }
+
+    /// "Get diff for a specific file."
+    pub fn get_file_diff(&self, path: &Path) -> Result<String, LainError> {
+        self.inner.lock().call(
+            Request::GetFileDiff {
+                path: path.to_path_buf(),
+            },
+            |resp| match resp {
+                Response::FileDiff(diff) => Ok(diff),
+                Response::Error(msg) => Err(LainError::Git(msg)),
+                other => Err(LainError::Git(format!("unexpected response: {:?}", other))),
+            },
+        )
+    }
+
+    /// "Get the current branch name."
+    pub fn get_current_branch(&self) -> Result<String, LainError> {
+        self.inner
+            .lock()
+            .call(Request::GetCurrentBranch, |resp| match resp {
+                Response::CurrentBranch(branch) => Ok(branch),
+                Response::Error(msg) => Err(LainError::Git(msg)),
+                other => Err(LainError::Git(format!("unexpected response: {:?}", other))),
+            })
+    }
+
+    /// "Get commit history for co-change or timeline analysis."
+    pub fn get_commit_history(&self, count: usize) -> Result<Vec<CommitInfo>, LainError> {
+        self.inner
+            .lock()
+            .call(Request::GetCommitHistory { count }, |resp| match resp {
+                Response::CommitHistory(commits) => {
+                    Ok(commits.into_iter().map(proto_to_commitinfo).collect())
+                }
+                Response::Error(msg) => Err(LainError::Git(msg)),
+                other => Err(LainError::Git(format!("unexpected response: {:?}", other))),
+            })
+    }
+
+    /// "Get repository identity (owner, name) from git remote."
+    pub fn get_repo_identity(&self) -> Result<Option<RepoIdentity>, LainError> {
+        self.inner
+            .lock()
+            .call(Request::GetRepoIdentity, |resp| match resp {
+                Response::RepoIdentity(id) => Ok(id.map(proto_to_repoidentity)),
+                Response::Error(msg) => Err(LainError::Git(msg)),
+                other => Err(LainError::Git(format!("unexpected response: {:?}", other))),
+            })
     }
 }
 
@@ -481,5 +536,21 @@ fn proto_to_filechange(c: ProtoFileChange) -> FileChange {
             ProtoChangeType::Deleted => ChangeType::Deleted,
         },
         staged: c.staged,
+    }
+}
+
+fn proto_to_commitinfo(c: ProtoCommitInfo) -> CommitInfo {
+    CommitInfo {
+        id: c.id,
+        message: c.message,
+        files: c.files,
+        time: c.time,
+    }
+}
+
+fn proto_to_repoidentity(i: ProtoRepoIdentity) -> RepoIdentity {
+    RepoIdentity {
+        owner: i.owner,
+        name: i.name,
     }
 }

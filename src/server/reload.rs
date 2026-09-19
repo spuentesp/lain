@@ -444,6 +444,7 @@ mod tests {
                     data_dir: data_dir.to_path_buf(),
                     max_concurrent_indexers: 1,
                     ready_threshold: 0.8,
+                    git_sensor: None,
                     repos: vec![crate::server::federation::config::RepoConfig {
                         id: (*id).to_string(),
                         source: crate::server::federation::config::SourceConfig::WorkspaceDir {

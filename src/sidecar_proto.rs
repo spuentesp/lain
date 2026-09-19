@@ -50,6 +50,14 @@ pub enum Request {
     GetUncommittedChanges,
     /// "Is this path ignored by .gitignore rules?"
     IsIgnored { path: PathBuf },
+    /// "Get diff for a specific file."
+    GetFileDiff { path: PathBuf },
+    /// "Get the current branch name."
+    GetCurrentBranch,
+    /// "Get commit history for co-change or timeline analysis."
+    GetCommitHistory { count: usize },
+    /// "Get repository identity (owner, name) from git remote."
+    GetRepoIdentity,
     /// "Exit cleanly." The child replies with `Response::Ok` and
     /// drops the listening socket.
     Shutdown,
@@ -79,6 +87,10 @@ pub enum Response {
     CoChanges(Vec<CoChangePair>),
     UncommittedChanges(Vec<FileChange>),
     IsIgnored(bool),
+    FileDiff(String),
+    CurrentBranch(String),
+    CommitHistory(Vec<CommitInfo>),
+    RepoIdentity(Option<RepoIdentity>),
     /// Acknowledges a `Shutdown`. The child exits after writing this.
     Ok,
     /// Method-specific error. The parent treats this as the libgit2
@@ -112,6 +124,22 @@ pub enum ChangeType {
     Added,
     Modified,
     Deleted,
+}
+
+/// Mirrors `crate::git::CommitInfo` for the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub id: String,
+    pub message: String,
+    pub files: Vec<String>,
+    pub time: i64,
+}
+
+/// Mirrors `crate::git::RepoIdentity` for the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepoIdentity {
+    pub owner: String,
+    pub name: String,
 }
 
 /// Length-prefixed frame codec. Writes/reads a 4-byte big-endian
@@ -197,5 +225,22 @@ mod tests {
         write_frame(&mut resp_buf, &resp).unwrap();
         let decoded_resp: Response = read_frame(&mut Cursor::new(resp_buf)).unwrap();
         assert_eq!(resp, decoded_resp);
+
+        let branch_resp = Response::CurrentBranch("main".to_string());
+        let mut branch_buf = Vec::new();
+        write_frame(&mut branch_buf, &branch_resp).unwrap();
+        let decoded_branch: Response = read_frame(&mut Cursor::new(branch_buf)).unwrap();
+        assert_eq!(branch_resp, decoded_branch);
+
+        let commits_resp = Response::CommitHistory(vec![CommitInfo {
+            id: "123".to_string(),
+            message: "msg".to_string(),
+            files: vec!["a.rs".to_string()],
+            time: 123456,
+        }]);
+        let mut commits_buf = Vec::new();
+        write_frame(&mut commits_buf, &commits_resp).unwrap();
+        let decoded_commits: Response = read_frame(&mut Cursor::new(commits_buf)).unwrap();
+        assert_eq!(commits_resp, decoded_commits);
     }
 }
