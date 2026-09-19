@@ -6,6 +6,7 @@ use crate::error::LainError;
 pub use crate::sidecar::{SidecarGitSensor, SidecarHealth};
 use git2::{DiffOptions, Repository, StatusOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{debug, info};
 
 /// Git repository sensor
@@ -491,5 +492,255 @@ impl GitSensor {
             }
         }
         Ok(None)
+    }
+}
+
+/// Execution mode for Git sensor operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GitSensorMode {
+    /// Direct in-process `libgit2` calls wrapped in a mutex.
+    #[default]
+    InProcess,
+    /// Isolated child daemon process communicating via Unix domain socket IPC.
+    Sidecar,
+}
+
+impl std::str::FromStr for GitSensorMode {
+    type Err = LainError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "in_process" | "inprocess" | "in-process" => Ok(Self::InProcess),
+            "sidecar" => Ok(Self::Sidecar),
+            other => Err(LainError::Config(format!(
+                "invalid git sensor mode '{other}': expected 'in_process' or 'sidecar'"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for GitSensorMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InProcess => write!(f, "in_process"),
+            Self::Sidecar => write!(f, "sidecar"),
+        }
+    }
+}
+
+impl GitSensorMode {
+    /// Resolve git sensor mode from the `LAIN_GIT_SENSOR` environment variable,
+    /// falling back to the default `InProcess` mode.
+    pub fn from_env() -> Self {
+        if let Ok(val) = std::env::var("LAIN_GIT_SENSOR") {
+            if let Ok(mode) = val.parse() {
+                return mode;
+            }
+        }
+        Self::default()
+    }
+}
+
+/// Polymorphic abstraction over in-process and out-of-process Git sensors.
+///
+/// Both variants implement the complete set of git queries used throughout
+/// Lain (commit inspection, uncommitted changes, co-change analysis, and gitignore).
+#[derive(Clone)]
+pub enum AnyGitSensor {
+    InProcess(Arc<parking_lot::Mutex<GitSensor>>),
+    Sidecar(Arc<SidecarGitSensor>),
+}
+
+impl std::fmt::Debug for AnyGitSensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InProcess(_) => write!(f, "AnyGitSensor::InProcess(..)"),
+            Self::Sidecar(s) => write!(f, "AnyGitSensor::Sidecar({:?})", s.workspace()),
+        }
+    }
+}
+
+impl AnyGitSensor {
+    /// Open a Git sensor for the given workspace with the requested mode.
+    pub fn new(workspace: &Path, mode: GitSensorMode) -> Result<Self, LainError> {
+        match mode {
+            GitSensorMode::InProcess => {
+                let sensor = GitSensor::new(workspace)?;
+                Ok(Self::InProcess(Arc::new(parking_lot::Mutex::new(sensor))))
+            }
+            GitSensorMode::Sidecar => {
+                let sensor = SidecarGitSensor::new(workspace)?;
+                Ok(Self::Sidecar(Arc::new(sensor)))
+            }
+        }
+    }
+
+    /// Open a Git sensor using `LAIN_GIT_SENSOR` environment variable (defaults to `InProcess`).
+    pub fn from_env(workspace: &Path) -> Result<Self, LainError> {
+        Self::new(workspace, GitSensorMode::from_env())
+    }
+
+    /// Construct an `AnyGitSensor` wrapping an existing in-process `GitSensor`.
+    pub fn in_process(sensor: GitSensor) -> Self {
+        Self::InProcess(Arc::new(parking_lot::Mutex::new(sensor)))
+    }
+
+    /// Construct an `AnyGitSensor` wrapping an existing `Arc<parking_lot::Mutex<GitSensor>>`.
+    pub fn from_in_process_arc(arc: Arc<parking_lot::Mutex<GitSensor>>) -> Self {
+        Self::InProcess(arc)
+    }
+
+    /// Construct an `AnyGitSensor` wrapping a `SidecarGitSensor`.
+    pub fn sidecar(sensor: SidecarGitSensor) -> Self {
+        Self::Sidecar(Arc::new(sensor))
+    }
+
+    /// Construct an `AnyGitSensor` wrapping an existing `Arc<SidecarGitSensor>`.
+    pub fn from_sidecar_arc(arc: Arc<SidecarGitSensor>) -> Self {
+        Self::Sidecar(arc)
+    }
+
+    /// Active operational mode.
+    pub fn mode(&self) -> GitSensorMode {
+        match self {
+            Self::InProcess(_) => GitSensorMode::InProcess,
+            Self::Sidecar(_) => GitSensorMode::Sidecar,
+        }
+    }
+
+    /// Returns `true` if this sensor is running out-of-process via `lain-git-sidecar`.
+    pub fn is_sidecar(&self) -> bool {
+        matches!(self, Self::Sidecar(_))
+    }
+
+    /// Returns `true` if this sensor is running in-process via direct `libgit2`.
+    pub fn is_in_process(&self) -> bool {
+        matches!(self, Self::InProcess(_))
+    }
+
+    /// Health telemetry if backed by a sidecar daemon.
+    pub fn sidecar_health(&self) -> Option<SidecarHealth> {
+        match self {
+            Self::InProcess(_) => None,
+            Self::Sidecar(sensor) => Some(sensor.health()),
+        }
+    }
+
+    /// Borrow the underlying in-process mutex handle if in `InProcess` mode.
+    pub fn as_in_process(&self) -> Option<&Arc<parking_lot::Mutex<GitSensor>>> {
+        match self {
+            Self::InProcess(arc) => Some(arc),
+            Self::Sidecar(_) => None,
+        }
+    }
+
+    /// Borrow the underlying sidecar handle if in `Sidecar` mode.
+    pub fn as_sidecar(&self) -> Option<&Arc<SidecarGitSensor>> {
+        match self {
+            Self::InProcess(_) => None,
+            Self::Sidecar(arc) => Some(arc),
+        }
+    }
+
+    /// Check if this is a valid Git repository with a working HEAD.
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::InProcess(m) => m.lock().is_valid(),
+            Self::Sidecar(s) => s.is_valid(),
+        }
+    }
+
+    /// Get latest commit hash and its timestamp.
+    pub fn get_latest_commit_info(&self) -> Result<(String, i64), LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_latest_commit_info(),
+            Self::Sidecar(s) => s.get_latest_commit_info(),
+        }
+    }
+
+    /// Get the latest commit hash.
+    pub fn get_latest_commit(&self) -> Result<String, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_latest_commit(),
+            Self::Sidecar(s) => s.get_latest_commit(),
+        }
+    }
+
+    /// Get all files that were changed since a specific commit hash.
+    pub fn get_changed_files_since(&self, since_hash: &str) -> Result<Vec<PathBuf>, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_changed_files_since(since_hash),
+            Self::Sidecar(s) => s.get_changed_files_since(since_hash),
+        }
+    }
+
+    /// Get all tracked files in the repository, respecting .gitignore.
+    pub fn get_all_tracked_files(&self) -> Result<Vec<PathBuf>, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_all_tracked_files(),
+            Self::Sidecar(s) => s.get_all_tracked_files(),
+        }
+    }
+
+    /// Analyze co-changes from commit history.
+    pub fn analyze_co_changes(
+        &self,
+        count: usize,
+        threshold: usize,
+        max_files: usize,
+    ) -> Result<Vec<CoChangePair>, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().analyze_co_changes(count, threshold, max_files),
+            Self::Sidecar(s) => s.analyze_co_changes(count, threshold, max_files),
+        }
+    }
+
+    /// Get all uncommitted changes (staged and unstaged).
+    pub fn get_uncommitted_changes(&self) -> Result<Vec<FileChange>, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_uncommitted_changes(),
+            Self::Sidecar(s) => s.get_uncommitted_changes(),
+        }
+    }
+
+    /// Check if a file is ignored by .gitignore.
+    pub fn is_ignored(&self, path: &Path) -> Result<bool, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().is_ignored(path),
+            Self::Sidecar(s) => s.is_ignored(path),
+        }
+    }
+
+    /// Get diff content for a specific file.
+    pub fn get_file_diff(&self, path: &Path) -> Result<String, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_file_diff(path),
+            Self::Sidecar(s) => s.get_file_diff(path),
+        }
+    }
+
+    /// Get the current branch name.
+    pub fn get_current_branch(&self) -> Result<String, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_current_branch(),
+            Self::Sidecar(s) => s.get_current_branch(),
+        }
+    }
+
+    /// Get commit history for co-change or timeline analysis.
+    pub fn get_commit_history(&self, count: usize) -> Result<Vec<CommitInfo>, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_commit_history(count),
+            Self::Sidecar(s) => s.get_commit_history(count),
+        }
+    }
+
+    /// Get the GitHub repository identity from the git remote.
+    pub fn get_repo_identity(&self) -> Result<Option<RepoIdentity>, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_repo_identity(),
+            Self::Sidecar(s) => s.get_repo_identity(),
+        }
     }
 }

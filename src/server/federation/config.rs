@@ -15,6 +15,8 @@ pub struct FederationConfig {
     pub max_concurrent_indexers: usize,
     #[serde(default = "default_ready_threshold")]
     pub ready_threshold: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sensor: Option<crate::git::GitSensorMode>,
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
 }
@@ -25,6 +27,7 @@ impl Default for FederationConfig {
             data_dir: default_data_dir(),
             max_concurrent_indexers: default_max_concurrent_indexers(),
             ready_threshold: default_ready_threshold(),
+            git_sensor: None,
             repos: Vec::new(),
         }
     }
@@ -84,6 +87,18 @@ impl FederationConfig {
     }
     pub fn load_from_str(s: &str) -> Result<Self, LainError> {
         serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))
+    }
+    /// Return the configured Git sensor mode, taking precedence in order:
+    /// 1. `LAIN_GIT_SENSOR` environment variable
+    /// 2. `git_sensor` field from config file
+    /// 3. Default `GitSensorMode::InProcess`
+    pub fn git_sensor_mode(&self) -> crate::git::GitSensorMode {
+        if let Ok(val) = std::env::var("LAIN_GIT_SENSOR") {
+            if let Ok(mode) = val.parse() {
+                return mode;
+            }
+        }
+        self.git_sensor.unwrap_or_default()
     }
     pub fn build_sources(&self) -> Result<Vec<Box<dyn RepoSource>>, LainError> {
         let mut out = Vec::with_capacity(self.repos.len());
@@ -153,6 +168,20 @@ repos:
         let cfg: FederationConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.repos.len(), 2);
         assert_eq!(cfg.max_concurrent_indexers, 4);
+        assert_eq!(cfg.git_sensor_mode(), crate::git::GitSensorMode::InProcess);
+    }
+
+    #[test]
+    fn parses_git_sensor_config() {
+        let yaml = r#"
+git_sensor: sidecar
+repos:
+  - id: ws
+    source: { type: workspace_dir, path: /srv/ws }
+"#;
+        let cfg: FederationConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.git_sensor, Some(crate::git::GitSensorMode::Sidecar));
+        assert_eq!(cfg.git_sensor_mode(), crate::git::GitSensorMode::Sidecar);
     }
 
     #[test]
