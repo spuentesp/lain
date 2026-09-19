@@ -17,7 +17,7 @@ use crate::server::error::LainError;
 use crate::server::events_log::EventsLog;
 use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::workspace::WorkspacesFile;
-use crate::server::git::GitSensor;
+use crate::server::git::AnyGitSensor;
 use crate::server::graph::GraphDatabase;
 use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
@@ -331,7 +331,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // federation mode — holds no code" — while claiming to be the
     // subject repo's history.
     let git_root = single_repo_root(&federation).unwrap_or_else(|| ws.to_path_buf());
-    let git = Arc::new(Mutex::new(GitSensor::new(&git_root)?));
+    let git = Arc::new(AnyGitSensor::from_env(&git_root)?);
     let lsp_pool = Arc::new(LspPool::new(&ws, 1, &tuning.runtime)?);
 
     let tool_executor = ToolExecutor::new(ToolExecutorConfig {
@@ -605,7 +605,7 @@ impl LainServer {
             );
         }
 
-        let git = Arc::new(Mutex::new(GitSensor::new(workspace)?));
+        let git = Arc::new(AnyGitSensor::from_env(workspace)?);
         let lsp_pool = Arc::new(LspPool::new(
             workspace,
             tuning.ingestion.lsp_pool_size,

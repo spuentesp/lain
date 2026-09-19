@@ -319,6 +319,14 @@ fn dispatch(req: &Request, sensor: &GitSensor) -> Response {
             Ok(id) => Response::RepoIdentity(id.map(git_identity_to_proto)),
             Err(e) => Response::Error(e.to_string()),
         },
+        Request::GetNewCommitsSince { since_hash } => {
+            match sensor.get_new_commits_since(since_hash) {
+                Ok(commits) => {
+                    Response::CommitHistory(commits.into_iter().map(git_commit_to_proto).collect())
+                }
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
         Request::Shutdown => Response::Ok,
     }
 }

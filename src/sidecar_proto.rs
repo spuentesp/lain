@@ -58,6 +58,8 @@ pub enum Request {
     GetCommitHistory { count: usize },
     /// "Get repository identity (owner, name) from git remote."
     GetRepoIdentity,
+    /// "Get commits newer than the given commit hash."
+    GetNewCommitsSince { since_hash: String },
     /// "Exit cleanly." The child replies with `Response::Ok` and
     /// drops the listening socket.
     Shutdown,

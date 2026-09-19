@@ -15,7 +15,6 @@ impl LainServer {
             let commit = self
                 .ingest()
                 .git()
-                .lock()
                 .get_latest_commit_info()
                 .map(|(commit, _)| commit)
                 .inspect_err(|e| warn!("Background sync: failed to get commit info: {}", e))
