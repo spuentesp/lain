@@ -1886,6 +1886,7 @@ mod readiness_progress_tests {
     /// would call `git_sensor.lock()` and never return, the outer
     /// `tokio::time::timeout` would fire, and the test would panic
     /// with "build_core_memory must not hang past 5s".
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn build_core_memory_fails_fast_when_git_sensor_mutex_held() {
         let root = git_fixture_with_one_file();
@@ -1932,6 +1933,7 @@ mod readiness_progress_tests {
     /// fail fast with `LainError::Other`. Pre-fix they would have
     /// queued on the parking_lot mutex; post-fix they all return
     /// within a few ms.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn build_core_memory_concurrent_calls_fail_fast_when_mutex_held() {
         use std::sync::Arc;
