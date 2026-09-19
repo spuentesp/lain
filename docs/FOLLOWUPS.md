@@ -5,13 +5,63 @@ was deliberately deferred to keep those PRs small. Each entry
 points at the source PR, the section of the plan it came from,
 and a one-line scope summary.
 
-Last update: 2026-09-16, refreshed against HEAD (past PR #66, #72,
-#74, #75, #77, #88, plus PR A's cancellation work on
-`feat/m4-cancellation-token`, PR B's spawn-blocking work on
-`feat/m4-spawn-blocking`, PR E's tree-sitter+ONNX migration on
-`feat/m4-spawn-blocking-followup`, and the LSP cancel-aware
-work on `feat/m4-lsp-cancel-aware`). Stays on `0.7.4-rc1`;
+Last update: 2026-09-19, refreshed against HEAD past the
+2026-09-19 batch (PR #168 review-fix sweep, PR #169 / #170
+`get_health` Bug #2 banner, PR #171 / #172 OTLP resolver
+wiring). Closes the eight issues from the cross-agent code
+review of PRs #151 / #153 / #154 / #165 — see the "Closed this
+cycle" section below for the list. Stays on `0.7.4-rc1`;
 release cut is separate scope.
+
+Eight items from the 2026-09-19 review cycle were resolved and
+removed from this file. They never landed here as open entries
+because the review surfaced them fresh, but documenting them so
+the next reviewer can see the cycle's full surface:
+
+- **OTLP listener parsed spans but never wrote to the store**
+  (PR #154 `acceptedSpans` lie) — fixed in PR #168: split
+  response into `receivedSpans` / `storedSpans`; end-to-end
+  test now pins both fields instead of just the 200 status.
+- **`git_busy_since_nanos` atomic was dead state** (PR #165
+  initialized to 0, never written) — fixed in PR #168: watchdog
+  publishes a `SystemTime` nanosecond timestamp on free→held
+  via CAS, clears on held→free, clears on exit.
+- **`parse_otlp_json` doc/code mismatch** on span-kind
+  fallback — fixed in PR #168.
+- **`as i64` cast on `end_unix_nanos`** could silently wrap —
+  fixed in PR #168: `u64::parse` + `i64::try_from`, returns
+  `OtlpParseError::EndTime` on overflow.
+- **`hex_len` accepted uppercase hex** — fixed in PR #168:
+  OTLP IDs are lowercase per spec, uppercase is rejected and
+  surfaced as a parse error. New `parse_rejects_uppercase_hex_ids`
+  test pins the contract.
+- **`get_all_tracked_files_works_with_relative_workspace_path`
+  `set_current_dir` race** — fixed in PR #168: process-static
+  `CWD_LOCK: Mutex<()>` serializes the test against any future
+  cwd-manipulating test.
+- **"Git sensor busy" `LainError::Other` string duplicated 4×**
+  — fixed in PR #168: centralised in `git_sensor_busy_error()`
+  helper in `src/server/ingest/ingestion.rs`.
+- **OTLP listener tests used multi-thread tokio runtime**
+  while the Bug #2 watchdog tests used `current_thread` —
+  fixed in PR #168: aligned all three OTLP listener tests to
+  `current_thread`.
+
+Closed this cycle (six items that landed in this batch but
+weren't previously tracked here):
+
+- **Bug #2 hang not visible to MCP clients** — fixed in
+  PR #169 / #170. `ToolContext.git_busy_since_unix_nanos`
+  carries the live atomic; `get_health` emits a
+  `⚠ Bug #2: GitSensor mutex held for {N}s — ...` banner when
+  non-zero. Two regression tests pin both branches.
+- **OTLP listener returned `storedSpans: 0` for every payload**
+  — fixed in PR #171 / #172. New `SpanResolver` type alias
+  + `no_resolver()` helper; `cli::server::run` wires
+  `graph.find_node_by_name(span.name)` for the bound
+  single-repo graph. Federation-aware resolution that walks
+  every registered repo's graph and returns namespaced global
+  ids is the next step — see the new entry below.
 
 Five items originally logged here have been resolved and removed
 from this file:
@@ -137,6 +187,39 @@ The only remaining M4 work is the LSP subprocess calls:
   storage layer); handoff flow exercised through
   register_agent → leave_handoff_note → unregister →
   re-register → get_pending_handoffs.
+
+## From the runtime-trace / OTLP path (PR #171 / #172 deferred)
+
+### Federation-aware OTLP resolver
+- **Source:** PR #171 wired the OTLP listener's resolver to
+  `graph.find_node_by_name(span.name)` against the bound
+  single-repo graph. PR #172's CHANGELOG explicitly defers the
+  federation case as a follow-up.
+- **Status:** pending. Multi-repo federation calls land at the
+  same listener but resolve against the staging placeholder,
+  which is the same answer they got pre-fix — no regression, no
+  improvement either.
+- **What needs to happen:** build a federation-aware resolver
+  closure that, for each span, walks every registered repo's
+  `find_node_by_name`. Returned node_ids must be in **namespaced
+  global form** (`repo_id:Kind:path:name`), not the local form
+  the per-repo `GraphDatabase` uses, so `RuntimeTraceStore::ingest`
+  mints a correctly-namespaced `RuntimeCall` edge. The local →
+  global id mapping is `FederatedIndex::local_to_global` and
+  is already wired; the missing piece is the resolver shape that
+  walks it.
+- **Where to land:** new `runtime_trace::federation_resolver`
+  module that takes `Arc<FederatedIndex>` and returns a
+  `SpanResolver`. `cli::server::run` swaps the
+  single-graph resolver for this one when federation mode is
+  active. StdIO single-repo mode keeps the simpler
+  `find_node_by_name` resolver.
+- **Acceptance:** federation-mode OTLP listener mints
+  cross-repo `RuntimeCall` edges that `explain_dispatch` can
+  surface. Span attribute `code.namespace` + `code.function`
+  (the semconv keys the existing tests use) is the resolver
+  input; the repo lookup can use `code.repo` or the OTLP
+  resource's `service.name` attribute if either is present.
 
 ## Release flow
 
