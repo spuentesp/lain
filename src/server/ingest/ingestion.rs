@@ -53,10 +53,35 @@ impl LainServer {
         // `Arc<Mutex<GitSensor>>` is cloned and the parking_lot lock
         // is acquired *inside* the closure so no guard crosses the
         // await boundary.
+        //
+        // 2026-09-18 Tauri federation postmortem Bug #2 mitigation:
+        // `try_lock` (not `lock`) inside the closure. libgit2 is not
+        // cancellable; if a previous `index()` call wedged in libgit2
+        // (packed-refs read on a huge monorepo, hung filesystem,
+        // etc.), the parking_lot guard stays held by that stuck
+        // `spawn_blocking` thread, and every subsequent watcher-
+        // triggered `index_forced()` would block forever on `lock()`.
+        // `try_lock` fails fast with `WouldBlock`; the closure maps
+        // that to `LainError::Other`, `repo.index()` sees the error
+        // and demotes health to `Degraded`, and the watcher stops
+        // accumulating blocked tasks. The original stuck thread is
+        // not recoverable from Rust (no safe way to kill an OS thread)
+        // — this is a mitigation that surfaces the hang, not a fix
+        // for the underlying libgit2/FS hang.
         let git_sensor = Arc::clone(self.ingest().git());
-        let (latest_commit, latest_time) = offthread(cancel.clone(), move || {
-            git_sensor.lock().get_latest_commit_info()
-        })
+        let (latest_commit, latest_time) = offthread(
+            cancel.clone(),
+            move || -> Result<(String, i64), LainError> {
+                let guard = git_sensor.try_lock().ok_or_else(|| {
+                    LainError::Other(
+                        "GitSensor mutex held by another thread; a prior index() \
+                 call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
+                            .into(),
+                    )
+                })?;
+                guard.get_latest_commit_info()
+            },
+        )
         .await?;
         let last_commit = self.ingest().graph().get_last_commit()?;
         self.readiness().update(|snapshot| {
@@ -88,16 +113,36 @@ impl LainServer {
             info!("Incremental update since {}", last);
             let last = last.clone();
             let git_sensor = Arc::clone(self.ingest().git());
-            offthread(cancel.clone(), move || {
-                git_sensor.lock().get_changed_files_since(&last)
-            })
+            offthread(
+                cancel.clone(),
+                move || -> Result<Vec<std::path::PathBuf>, LainError> {
+                    let guard = git_sensor.try_lock().ok_or_else(|| {
+                        LainError::Other(
+                            "GitSensor mutex held by another thread; a prior index() \
+                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
+                                .into(),
+                        )
+                    })?;
+                    guard.get_changed_files_since(&last)
+                },
+            )
             .await?
         } else {
             info!("Full repository scan");
             let git_sensor = Arc::clone(self.ingest().git());
-            offthread(cancel.clone(), move || {
-                git_sensor.lock().get_all_tracked_files()
-            })
+            offthread(
+                cancel.clone(),
+                move || -> Result<Vec<std::path::PathBuf>, LainError> {
+                    let guard = git_sensor.try_lock().ok_or_else(|| {
+                        LainError::Other(
+                            "GitSensor mutex held by another thread; a prior index() \
+                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
+                                .into(),
+                        )
+                    })?;
+                    guard.get_all_tracked_files()
+                },
+            )
             .await?
         };
 
@@ -595,11 +640,19 @@ impl LainServer {
             let min_pair = self.ingest().tuning().ingestion.cochange_min_pair_count;
             let max_files = self.ingest().tuning().ingestion.cochange_max_commit_files;
             let git_sensor = Arc::clone(self.ingest().git());
-            match offthread(cancel.clone(), move || {
-                git_sensor
-                    .lock()
-                    .analyze_co_changes(window, min_pair, max_files)
-            })
+            match offthread(
+                cancel.clone(),
+                move || -> Result<Vec<crate::git::CoChangePair>, LainError> {
+                    let guard = git_sensor.try_lock().ok_or_else(|| {
+                        LainError::Other(
+                            "GitSensor mutex held by another thread; a prior index() \
+                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
+                                .into(),
+                        )
+                    })?;
+                    guard.analyze_co_changes(window, min_pair, max_files)
+                },
+            )
             .await
             {
                 Ok(v) => v,
@@ -798,9 +851,19 @@ impl LainServer {
                 return Err(LainError::Cancelled);
             }
             let git_sensor = Arc::clone(self.ingest().git());
-            let tracked_paths_result = offthread(cancel.clone(), move || {
-                git_sensor.lock().get_all_tracked_files()
-            })
+            let tracked_paths_result = offthread(
+                cancel.clone(),
+                move || -> Result<Vec<std::path::PathBuf>, LainError> {
+                    let guard = git_sensor.try_lock().ok_or_else(|| {
+                        LainError::Other(
+                            "GitSensor mutex held by another thread; a prior index() \
+                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
+                                .into(),
+                        )
+                    })?;
+                    guard.get_all_tracked_files()
+                },
+            )
             .await;
             match tracked_paths_result {
                 Ok(tracked_paths) => {
@@ -1803,6 +1866,120 @@ mod readiness_progress_tests {
         assert_eq!(
             snapshot.state,
             crate::server::readiness::IndexState::WarmingUp
+        );
+    }
+
+    /// Bug #2 from the 2026-09-18 Tauri postmortem: a libgit2 call that
+    /// wedges (packed-refs read on a huge monorepo, hung filesystem)
+    /// leaves the parking_lot `GitSensor` mutex held by the stuck
+    /// `spawn_blocking` thread. Pre-fix, every subsequent
+    /// `build_core_memory` (and watcher-triggered `index_forced`)
+    /// would block forever on `git_sensor.lock()` waiting for that
+    /// stuck thread. The post-fix `build_core_memory` uses `try_lock`
+    /// inside the offthread closures and fails fast with
+    /// `LainError::Other` if the mutex is held. This test holds the
+    /// mutex externally and confirms `build_core_memory` returns the
+    /// structured error within a few hundred ms instead of hanging
+    /// on the test's outer 5 s budget.
+    ///
+    /// Would hang on pre-fix code: the spawned `offthread` closure
+    /// would call `git_sensor.lock()` and never return, the outer
+    /// `tokio::time::timeout` would fire, and the test would panic
+    /// with "build_core_memory must not hang past 5s".
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn build_core_memory_fails_fast_when_git_sensor_mutex_held() {
+        let root = git_fixture_with_one_file();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+
+        // Externally grab the parking_lot `GitSensor` mutex to simulate
+        // a previous `index()` call's stuck libgit2 thread still
+        // holding it. parking_lot's `lock()` is infallible; the
+        // offthread closure's `try_lock` will see `None`.
+        let _held = server.ingest().git().lock();
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.build_core_memory(),
+        )
+        .await
+        .expect(
+            "build_core_memory must not hang past 5s when the git sensor mutex is held externally",
+        );
+
+        assert!(
+            matches!(result, Err(LainError::Other(_))),
+            "expected LainError::Other from try_lock failure; got {result:?}"
+        );
+        // try_lock is O(1) and the offthread future resolves
+        // immediately on WouldBlock. Generous slack for slow CI.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "build_core_memory took too long to fail-fast: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Companion to `build_core_memory_fails_fast_when_git_sensor_mutex_held`:
+    /// the postmortem's actual user-visible failure was the watcher
+    /// *pile-up* — rust-analyzer fires many diagnostics in quick
+    /// succession after projection, each one triggering
+    /// `index_forced`, and every one blocked forever on the parking_lot
+    /// mutex held by the stuck thread. This test pins the concurrent
+    /// case: N parallel `build_core_memory` calls, all expected to
+    /// fail fast with `LainError::Other`. Pre-fix they would have
+    /// queued on the parking_lot mutex; post-fix they all return
+    /// within a few ms.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn build_core_memory_concurrent_calls_fail_fast_when_mutex_held() {
+        use std::sync::Arc;
+        let root = git_fixture_with_one_file();
+        let server = Arc::new(
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap(),
+        );
+        disable_real_lsp(&server, root.path()).await;
+
+        // Hold the parking_lot mutex externally — simulates a stuck
+        // spawn_blocking thread holding the guard.
+        let _held = server.ingest().git().lock();
+
+        const N: usize = 8;
+        let started = std::time::Instant::now();
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let server = server.clone();
+            handles.push(tokio::spawn(async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    server.build_core_memory(),
+                )
+                .await
+            }));
+        }
+
+        let mut other_count = 0;
+        for h in handles {
+            match h.await.expect("task panicked") {
+                Ok(Err(LainError::Other(_))) => other_count += 1,
+                Ok(Ok(())) => {
+                    panic!("expected LainError::Other from try_lock failure, got Ok")
+                }
+                Ok(Err(e)) => panic!("expected LainError::Other, got {e:?}"),
+                Err(_) => panic!("a concurrent build_core_memory hung past the 5s budget"),
+            }
+        }
+        assert_eq!(other_count, N, "every concurrent call must fail fast");
+
+        // try_lock is O(1) and the offthread futures resolve
+        // immediately on WouldBlock. Generous slack for slow CI.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "concurrent fail-fast took too long: {:?}",
+            started.elapsed()
         );
     }
 

@@ -49,7 +49,7 @@ impl GitSensor {
         for entry in index.iter() {
             if let Ok(path) = std::str::from_utf8(&entry.path) {
                 let full_path = self.workspace.join(path);
-                if full_path.is_file() && !self.repo.is_path_ignored(&full_path)? {
+                if full_path.is_file() && !self.repo.is_path_ignored(Path::new(path))? {
                     files.push(full_path);
                 }
             }
@@ -391,7 +391,7 @@ impl GitSensor {
                 if !full_path.is_file() {
                     continue;
                 }
-                if !self.repo.is_path_ignored(&full_path)? {
+                if !self.repo.is_path_ignored(Path::new(&file))? {
                     files.insert(full_path);
                 }
             }

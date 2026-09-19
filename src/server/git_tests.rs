@@ -303,3 +303,81 @@ fn get_new_commits_since_returns_newer_commits_not_older() {
         since_head.len()
     );
 }
+
+/// `get_all_tracked_files` must return tracked files even when the
+/// sensor is constructed with a *relative* workspace path.
+///
+/// The pre-2026-09-18 implementation joined the workdir-relative
+/// `entry.path` onto `self.workspace`, producing paths like
+/// `./<workspace>/crates/.../lib.rs` whenever `repos.yaml` used a
+/// relative `workspace_dir`. libgit2 could not resolve those under the
+/// workdir and treated every entry as ignored, so the indexer
+/// silently reported 0 tracked files. This regression test pins the
+/// fix: it opens the sensor via a `./`-prefixed relative path (the
+/// shape that triggers the bug) and asserts that tracked,
+/// non-ignored files appear in the result while gitignored files do
+/// not.
+#[test]
+fn get_all_tracked_files_works_with_relative_workspace_path() {
+    use std::fs;
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join("lain_git_test_relative_workspace");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+    };
+    git(&["init"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+
+    fs::write(dir.join("keep.rs"), "fn main() {}").unwrap();
+    fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(dir.join("noise.log"), "ignored").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-m", "init"]);
+
+    // Open with a `./`-prefixed relative path so that
+    // `self.workspace.join(path)` produces paths that start with
+    // `./<workspace>/...`. That is exactly the shape that tripped up
+    // libgit2's `is_path_ignored` resolution pre-fix. `set_current_dir`
+    // is process-wide and races with parallel tests, so save and
+    // restore around the call.
+    let cwd_parent = dir.parent().unwrap();
+    let cwd_basename = dir.file_name().unwrap();
+    let prev_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(cwd_parent).unwrap();
+
+    let cwd_basename_str = cwd_basename.to_string_lossy().into_owned();
+    let workspace_arg = format!("./{cwd_basename_str}");
+    let sensor = GitSensor::new(Path::new(&workspace_arg)).unwrap();
+    let files = sensor.get_all_tracked_files().unwrap();
+
+    std::env::set_current_dir(&prev_cwd).unwrap();
+
+    let names: Vec<String> = files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        names.iter().any(|n| n == "keep.rs"),
+        "keep.rs missing from {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "noise.log"),
+        "noise.log should have been filtered by .gitignore, got {names:?}"
+    );
+    assert!(
+        !names.is_empty(),
+        "pre-fix bug: relative workspace path produced a 0-file index"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

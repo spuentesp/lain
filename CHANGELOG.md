@@ -185,6 +185,36 @@ All notable changes to LAIN are documented here. Versions follow
   `tools::handlers::explain_dispatch` pins the up-front-resolve
   contract so that regression fails at `cargo test` time.
 
+### Fixed
+
+- **Relative `workspace_dir` paths in `repos.yaml` no longer
+  produce a silent 0-file index.** Joining the workdir-relative
+  `entry.path` onto a relative workspace produced paths like
+  `./tauri/crates/tauri/src/lib.rs` that libgit2 could not resolve
+  under the workdir and therefore treated as ignored, so the
+  indexer reported zero tracked files per repo and the federation
+  loaded empty graphs. `GitSensor::get_all_tracked_files` and
+  `GitSensor::get_changed_files_since` now pass the workdir-
+  relative path straight to `is_path_ignored`. Regression test:
+  `get_all_tracked_files_works_with_relative_workspace_path`.
+  Surfaces in the 2026-09-18 Tauri federation trial
+  (`POSTMORTEM.md` Bug #1).
+
+- **HTTP transport listener binds before the startup re-index is
+  spawned.** `LainMcpServer::run_http` previously logged
+  "Starting Lain MCP HTTP server" and then spawned the
+  backgrounded startup re-index task before reaching
+  `TcpListener::bind`. When the re-index hung, port 9999 never
+  opened, no log line followed the "Starting" line, and clients
+  got `connection refused`. The listener is now bound first and a
+  "listening" log line fires immediately after `bind` returns, so
+  a stuck startup task is distinguishable from a stuck bind. If
+  the re-index does hang, the listener stays up and clients get
+  the structured `warming_up` response from `dispatch_tool_call`;
+  operators can poll `/health` to observe the stuck state. Root
+  cause of the underlying hang (Bug #2) is still under
+  investigation.
+
 ### Tier-3 follow-ups
 
 - **`NodeType::Synthetic` for hub nodes.** Hub nodes (`Hub:
