@@ -367,6 +367,16 @@ All notable changes to LAIN are documented here. Versions follow
   a `\b` anchor) without requiring one new test per
   detector.
 
+- **Cross-tool contract pinned: assess_change `low*` implies
+  explain_dispatch sees the heuristic.** When assess_change
+  emits `risk=low* — heuristic-only`, the same symbol fed
+  to explain_dispatch must surface the heuristic caller
+  (verdict `heuristic_only` or `runtime_confirmed`). If the
+  two tools ever decouple, the agent would silently get a
+  `no_callers` verdict on a heuristic-only fixture and ship
+  the regression Tier 3 was built to prevent. Pinned by
+  `assess_change_low_star_implies_explain_dispatch_sees_heuristic`.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
