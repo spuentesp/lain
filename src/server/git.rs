@@ -3,6 +3,7 @@
 //! Handles file walking, change detection, and uncommitted diff tracking.
 
 use crate::error::LainError;
+pub use crate::sidecar::{SidecarGitSensor, SidecarHealth};
 use git2::{DiffOptions, Repository, StatusOptions};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};

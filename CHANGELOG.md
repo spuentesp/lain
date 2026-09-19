@@ -217,6 +217,16 @@ All notable changes to LAIN are documented here. Versions follow
   socket cleanup on `SIGINT` / `SIGTERM`, RAII `SocketCleaner` guard,
   and canonical path resolution via `dunce::canonicalize`.
 
+- **Bug #2 sidecar client supervisor & lifecycle management (Milestone 3).**
+  Added `SidecarGitSensor` and supervisor engine (`src/sidecar.rs`),
+  implementing transparent child process spawning, per-call timeouts
+  (2s), force-kill on hang, automatic crash recovery with a single retry,
+  rolling respawn budget (max 3 retries in 30s) returning `LainError::Unavailable`
+  on exhaustion, and diagnostic `SidecarHealth` reporting. End-to-end lifecycle
+  suite (`tests/sidecar_lifecycle.rs`) validates normal operations, auto-recovery
+  on `kill -9`, and budget exhaustion without server deadlock. Added `Request::IsIgnored`
+  to complete the full 7-method `GitSensor` surface.
+
 - **Federation drain contract pinned.** An edge whose source is
   in the local index but whose target is missing now reliably
   ends up in `take_pending_external_edges` instead of being
