@@ -377,6 +377,22 @@ All notable changes to LAIN are documented here. Versions follow
   the regression Tier 3 was built to prevent. Pinned by
   `assess_change_low_star_implies_explain_dispatch_sees_heuristic`.
 
+- **Minimal OTLP HTTP/JSON ingest adapter for `runtime_trace`.**
+  Closes the deferred Tier-3 OTLP listener work without
+  pulling in `tonic` + `opentelemetry-proto`. Covers the
+  common production path: OTel collector → OTLP HTTP
+  exporter → lain. `parse_otlp_json(payload: &[u8]) ->
+  Vec<SpanRecord>` walks the official OTLP HTTP/JSON shape
+  (`{"resourceSpans": [...]}` → `scopeSpans: [...]` →
+  `spans[]`) and emits one `SpanRecord` per span. Trace/span
+  IDs must be 32/16 hex chars respectively; malformed IDs
+  return `OtlpParseError::{TraceId, SpanId}`. Unknown span
+  kinds fall back to `Internal` rather than dropping the span.
+  What's intentionally NOT included: gRPC adapter (heavy
+  deps) and the HTTP server route (a follow-up can wire
+  `parse_otlp_json` to a hyper handler when
+  `LAIN_TRACE_RUNTIME=true` is set).
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
