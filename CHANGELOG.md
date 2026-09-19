@@ -355,6 +355,18 @@ All notable changes to LAIN are documented here. Versions follow
   Function target asserts `~ 3 heuristic caller(s) included`
   appears verbatim in the output.
 
+- **Combined negative-coverage sweep across all 16 detector
+  patterns.** A single fixture exercises every detector's
+  benign form — `publisher_count`, `dispatch_count`,
+  `container_size`, `Kafka` type usage, `app_size`,
+  `router_count`, bare `spawn`, `evaluation_metric`,
+  user-defined `Anything` trait — and asserts none of them
+  fire. Each detector already has its own positive +
+  negative tests; this combined sweep catches a future
+  regression that widens any single pattern (e.g. removes
+  a `\b` anchor) without requiring one new test per
+  detector.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
