@@ -32,23 +32,128 @@ use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+fn configure_parent_death_signal() {
+    extern "C" {
+        fn prctl(
+            option: std::os::raw::c_int,
+            arg2: std::os::raw::c_ulong,
+            arg3: std::os::raw::c_ulong,
+            arg4: std::os::raw::c_ulong,
+            arg5: std::os::raw::c_ulong,
+        ) -> std::os::raw::c_int;
+    }
+    const PR_SET_PDEATHSIG: std::os::raw::c_int = 1;
+    const SIGTERM: std::os::raw::c_ulong = 15;
+    unsafe {
+        let ret = prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
+        if ret != 0 {
+            eprintln!(
+                "[lain-git-sidecar:{}] warning: failed to set PR_SET_PDEATHSIG (errno: {})",
+                std::process::id(),
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_parent_death_signal() {}
+
+#[cfg(unix)]
+mod signals {
+    use std::ffi::CString;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    static SOCKET_C_STR: AtomicPtr<std::os::raw::c_char> = AtomicPtr::new(std::ptr::null_mut());
+
+    extern "C" {
+        fn signal(sig: std::os::raw::c_int, handler: extern "C" fn(std::os::raw::c_int)) -> usize;
+        fn unlink(pathname: *const std::os::raw::c_char) -> std::os::raw::c_int;
+        fn _exit(status: std::os::raw::c_int) -> !;
+    }
+
+    extern "C" fn handle_signal(sig: std::os::raw::c_int) {
+        let ptr = SOCKET_C_STR.load(Ordering::SeqCst);
+        if !ptr.is_null() {
+            unsafe {
+                unlink(ptr);
+                _exit(128 + sig);
+            }
+        }
+        unsafe {
+            _exit(1);
+        }
+    }
+
+    pub fn register_socket_cleanup(path: &std::path::Path) {
+        if let Ok(c_path) = CString::new(path.as_os_str().as_encoded_bytes()) {
+            let leaked = c_path.into_raw();
+            SOCKET_C_STR.store(leaked, Ordering::SeqCst);
+            const SIGINT: std::os::raw::c_int = 2;
+            const SIGTERM: std::os::raw::c_int = 15;
+            unsafe {
+                signal(SIGINT, handle_signal);
+                signal(SIGTERM, handle_signal);
+            }
+        }
+    }
+
+    pub fn unregister_socket_cleanup() {
+        let ptr = SOCKET_C_STR.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if !ptr.is_null() {
+            unsafe {
+                let _ = CString::from_raw(ptr);
+            }
+        }
+    }
+}
+
+struct SocketCleaner<'a>(&'a Path);
+impl<'a> Drop for SocketCleaner<'a> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+        #[cfg(unix)]
+        signals::unregister_socket_cleanup();
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    configure_parent_death_signal();
+
     let mut args = std::env::args().skip(1);
-    let repo_path = args
+    let repo_path_arg = args
         .next()
         .ok_or("usage: lain-git-sidecar <repo-path> <socket-path>")?;
-    let socket_path = args
+    let socket_path_arg = args
         .next()
         .ok_or("usage: lain-git-sidecar <repo-path> <socket-path>")?;
 
-    let sensor = GitSensor::new(Path::new(&repo_path))?;
+    let repo_path = dunce::canonicalize(&repo_path_arg).map_err(|e| {
+        format!(
+            "[lain-git-sidecar:{}] failed to canonicalize repo path '{}': {e}",
+            std::process::id(),
+            repo_path_arg
+        )
+    })?;
+    let socket_path = Path::new(&socket_path_arg);
+
+    let sensor = GitSensor::new(&repo_path)?;
 
     // Clean up any stale socket file at the path — if the previous
     // child died without unlinking, the bind would fail.
-    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(socket_path);
 
-    let listener = UnixListener::bind(&socket_path)?;
-    eprintln!("lain-git-sidecar: listening on {socket_path}");
+    #[cfg(unix)]
+    signals::register_socket_cleanup(socket_path);
+    let _cleaner = SocketCleaner(socket_path);
+
+    let listener = UnixListener::bind(socket_path)?;
+    eprintln!(
+        "[lain-git-sidecar:{}] listening on {}",
+        std::process::id(),
+        socket_path.display()
+    );
 
     // Single connection at a time for the prototype. Production
     // would want a thread pool + per-connection GitSensor (or a
@@ -59,16 +164,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(e) => {
-                    eprintln!("lain-git-sidecar: connection error: {e}");
+                    eprintln!(
+                        "[lain-git-sidecar:{}] connection error: {e}",
+                        std::process::id()
+                    );
                 }
             },
             Err(e) => {
-                eprintln!("lain-git-sidecar: accept error: {e}");
+                eprintln!(
+                    "[lain-git-sidecar:{}] accept error: {e}",
+                    std::process::id()
+                );
             }
         }
     }
 
-    let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
 

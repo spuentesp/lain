@@ -211,6 +211,12 @@ All notable changes to LAIN are documented here. Versions follow
   requests. Fixed `lain-git-sidecar` listener loop to cleanly exit
   on `Request::Shutdown` so parent process wait completes immediately.
 
+- **Bug #2 sidecar daemon hardening (Milestone 2).**
+  Hardened `lain-git-sidecar` with Linux `PR_SET_PDEATHSIG` (auto-exit
+  on parent termination to prevent zombie child processes), async-signal-safe
+  socket cleanup on `SIGINT` / `SIGTERM`, RAII `SocketCleaner` guard,
+  and canonical path resolution via `dunce::canonicalize`.
+
 - **Federation drain contract pinned.** An edge whose source is
   in the local index but whose target is missing now reliably
   ends up in `take_pending_external_edges` instead of being
