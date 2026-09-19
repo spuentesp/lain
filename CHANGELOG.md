@@ -199,6 +199,25 @@ All notable changes to LAIN are documented here. Versions follow
   one) and that `take_pending_external_edges` drains
   (`take_*`, not `peek_*`) so a second call returns empty.
 
+- **Bug #2 hang watchdog.** `LainServer` now spawns a tokio task
+  that probes the parking_lot `GitSensor` mutex with `try_lock`
+  every 5 s. If the mutex has been continuously held for longer
+  than `LAIN_GIT_SENSOR_BUSY_THRESHOLD_SECS` (default 30 s, well
+  below the 60 s `index_timeout()` budget), the watchdog emits a
+  single `tracing::warn!` per hold with elapsed time and a
+  pointer to `scripts/debug-hung-server.sh`. Companion to the
+  `try_lock` mitigation in `build_core_memory` — the mitigation
+  breaks the cascade; the watchdog surfaces the hang earlier so
+  operators see it at ~30 s instead of waiting the full 5-minute
+  budget. Threshold is env-tunable. The watchdog honors the
+  server-owned cancellation token and clears its shared atomic
+  on exit so a server restart doesn't carry a stale timestamp.
+  Two regression tests pin both branches (`_warns_when_mutex_held_past_threshold`
+  and `_stays_silent_when_threshold_not_crossed`), and the loop
+  is extracted into a generic `run_git_sensor_watchdog` free
+  function so it can be tested with `Mutex<()>` without
+  constructing a real `GitSensor` on disk.
+
 ### Fixed
 
 - **Relative `workspace_dir` paths in `repos.yaml` no longer

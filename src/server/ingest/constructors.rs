@@ -499,6 +499,21 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
 
     let lifecycle_handle = Arc::new(super::handles::LifecycleInfo::new(now));
 
+    // Bug #2 from the 2026-09-18 Tauri postmortem: a libgit2 call wedged
+    // inside a spawn_blocking thread holds the parking_lot
+    // `GitSensor` mutex indefinitely. The mitigation in
+    // `build_core_memory` already fails-fast on `try_lock`, but the
+    // stuck thread keeps running and the federation only transitions
+    // to `Degraded` once the full `index_timeout()` budget exhausts.
+    // This watchdog surfaces the hang earlier, at
+    // `LAIN_GIT_SENSOR_BUSY_THRESHOLD_SECS` (default 30 s).
+    let git_busy_threshold_secs: u64 = std::env::var("LAIN_GIT_SENSOR_BUSY_THRESHOLD_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    let _watchdog = ingest_handle
+        .start_git_sensor_watchdog(lifecycle_handle.cancel_token(), git_busy_threshold_secs);
+
     let annotations = crate::server::annotations::AnnotationRegistry::open_best_effort(
         &crate::config::state_dir(),
     );
