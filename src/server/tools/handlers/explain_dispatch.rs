@@ -283,6 +283,36 @@ mod tests {
         n
     }
 
+    /// `explain_dispatch` resolves the symbol up-front via
+    /// `resolve_node`, so a missing symbol must surface as the same
+    /// `NotFound` an agent would see from any other tool — not a
+    /// `verdict: "insufficient_evidence"` report that lies about
+    /// what is and isn't in the graph. Without this pin, a future
+    /// refactor that replaces the `resolve_node` early-return with
+    /// a fall-through to `build_with_store` would emit a confident
+    /// "no callers" answer for a symbol that doesn't exist at all.
+    #[tokio::test]
+    async fn explain_dispatch_returns_not_found_for_unknown_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+
+        let result = explain_dispatch(&graph, &overlay, "definitely_not_a_real_symbol_xyz").await;
+
+        match result {
+            Err(LainError::NotFound(msg)) => {
+                assert!(
+                    msg.contains("Node not found for handle"),
+                    "expected the standard NotFound from resolve_node, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected NotFound for an unknown symbol, got {:?}",
+                other.map(|s| s.lines().next().unwrap_or("").to_string())
+            ),
+        }
+    }
+
     #[test]
     fn verdict_is_insufficient_evidence_when_no_signals() {
         let dir = tempfile::tempdir().unwrap();
