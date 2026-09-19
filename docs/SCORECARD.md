@@ -2,7 +2,10 @@
 
 Live snapshot fetched from
 `https://api.securityscorecards.dev/projects/github.com/spuentesp/lain`
-on 2026-09-16. **Overall score: 7.9/10** (up from 5.0 on 2026-09-14).
+on 2026-09-19. **Overall score: 7.9/10** (unchanged since 2026-09-16;
+the only movements since the last refresh are documentation and
+test pins; no behavior-changing security work landed in this
+window).
 
 ## Current state (all 18 checks, live 2026-09-16)
 
@@ -53,22 +56,50 @@ at 3: single-maintainer reality, not a bug to "tighten."
 
 ## Recommended next moves, ranked by value ÷ effort
 
-### 1. Signed-Releases (2 → 10) — ~30 min
+### 1. Signed-Releases (2 → 10) — partial in PR #84, follow-up pending
 
-`release.yml` already calls `actions/attest-build-provenance@v2.4.0`
-(confirmed live at lines 156/234/316), which produces a SLSA-style
-provenance attestation signed by GitHub's OIDC token, but Scorecard's
-`Signed-Releases` check specifically wants `.sig`/`.asc`/`.pem`/`.gpg`
-files attached to the release — hence 2/10 instead of 0, but still not
-10.
+`release.yml` now runs `cosign sign-blob --yes --bundle ...` with
+keyless OIDC on every per-platform build job (wired in PR #84,
+live at lines 195–201, 282–288, 378–384). The bundle
+(`.cosign.bundle.json`) is attached to each GitHub release along
+with the SLSA provenance bundle (`.sigstore.json`), the in-toto
+attestation (`.intoto.jsonl`), the per-binary CycloneDX SBOM, and
+the per-binary SHA256 side-file. All three tarball uploads now
+have a fully-fidelity provenance chain verifiable with the
+`cosign verify-blob` CLI alone.
 
-Cheapest path: add `cosign sign-blob` with keyless OIDC after the
-provenance step. Output to `release/lain-${VER}-${TARGET}.tar.gz.sig`
-and add it to the `softprops/action-gh-release` upload list.
+What is still missing for Scorecard's 10/10: Scorecard's
+`Signed-Releases` check looks for files matching `*.sig`,
+`*.asc`, `*.pem`, or `*.gpg` extensions. The cosign v3 bundle
+uses `.cosign.bundle.json`, which Scorecard does not recognise
+as a "signed release artifact" despite the underlying signature
+being valid. Hence the stuck-at-2 score (the `passing` check
+catches that *something* signed exists, not the *extension* of
+that file).
 
-This touches the release pipeline, so it should be its own PR with a
-dry-run review before any new release ships — not bundled into a docs
-pass.
+Two concrete paths forward; both touch the release pipeline and
+should land as their own PR with a dry-run review before the next
+release ships:
+
+a. **Extract the raw signature from the cosign v3 bundle.**
+   After `cosign sign-blob --bundle ...`, run
+   `jq -r '.messageSignature.content' | base64 -d > <tarball>.sig`
+   and add `<tarball>.sig` to the `softprops/action-gh-release`
+   files list. `jq` is already a runner dependency (used in
+   `release.yml` line 72 for the npm retry branch). Cheapest
+   option; keeps the existing keyless flow; touches ~9 lines
+   per platform × 3 platforms = ~30 lines plus the upload list.
+
+b. **Switch to cosign v2 `--output-signature` / `--output-certificate`.**
+   Pin the cosign installer to a v2.x release; the deprecated
+   flags produce a `.sig` file directly. Loses no functionality
+   but locks the workflow to a tool version that's EOL upstream.
+
+Either path unblocks Scorecard's 10/10 on `Signed-Releases`
+(plus the implicit downstream: every other check that references
+"this repo signs releases" goes green). It is not done in this
+iter because modifying `release.yml` deserves a dry-run review
+on the next release tag — out of scope for a docs pass.
 
 ### 2. Branch-Protection / Code-Review — process decision, not a patch
 
