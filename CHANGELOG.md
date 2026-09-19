@@ -393,6 +393,22 @@ All notable changes to LAIN are documented here. Versions follow
   `parse_otlp_json` to a hyper handler when
   `LAIN_TRACE_RUNTIME=true` is set).
 
+- **OTLP HTTP listener at `/v1/traces`.** Wires the
+  `parse_otlp_json` parser into a real `hyper::server::conn::http1`
+  listener that OTLP collectors can POST to. The listener
+  binds its own `TcpListener` (separate from the MCP HTTP
+  transport) so the runtime trace path doesn't share the MCP
+  bearer-token auth layer. POST `/v1/traces` ingests each
+  span into the store; returns 200 with
+  `{"partialSuccess":{"acceptedSpans":N}}` on success, 400
+  on a malformed payload, 404 for any other path/method.
+  Activation is opt-in via `LAIN_TRACE_RUNTIME=true`; the
+  `cli/server.rs` wiring is left as a follow-up so this PR
+  ships the listener + parser contract without changing
+  startup behaviour. Auth on the listener is intentionally
+  absent — OTLP collectors don't ship bearer tokens;
+  operators firewall the port instead.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
