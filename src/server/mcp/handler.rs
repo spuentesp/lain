@@ -1140,7 +1140,7 @@ impl LainMcpServer {
     // pulling `self` across threads (which has non-`Send` fields).
     #[allow(clippy::redundant_locals)]
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
-        info!("Starting Lain MCP HTTP server on port {}", port);
+        info!("Binding Lain MCP HTTP listener on 0.0.0.0:{}", port);
 
         // Bind the HTTP listener *before* spawning the background
         // re-index. The original order spawned the startup task first
