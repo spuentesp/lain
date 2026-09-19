@@ -201,8 +201,15 @@ All notable changes to LAIN are documented here. Versions follow
   implement `SidecarGitSensor` and the `AnyGitSensor` enum as
   drop-in replacements for `Arc<Mutex<GitSensor>>`, default
   mode stays `InProcess` until soak-tested.
-  `tools::handlers::explain_dispatch` pins the up-front-resolve
-  contract so that regression fails at `cargo test` time.
+
+- **Bug #2 sidecar protocol versioning & handshake (Milestone 1).**
+  Added `PROTOCOL_VERSION: u32 = 1` constant and mandatory
+  `Request::Handshake` / `Response::HandshakeAck` / `Response::HandshakeNack`
+  frames to `src/sidecar_proto.rs`. `lain-git-sidecar` now requires
+  the handshake as its initial message on connection and rejects
+  mismatched protocol versions before processing operational git
+  requests. Fixed `lain-git-sidecar` listener loop to cleanly exit
+  on `Request::Shutdown` so parent process wait completes immediately.
 
 - **Federation drain contract pinned.** An edge whose source is
   in the local index but whose target is missing now reliably
