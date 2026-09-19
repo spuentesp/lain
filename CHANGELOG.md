@@ -252,6 +252,25 @@ All notable changes to LAIN are documented here. Versions follow
   elapsed seconds) branches, plus the NTP-step / future-timestamp
   clamp.
 
+- **OTLP listener now mints runtime edges.** `POST /v1/traces`
+  on the runtime-trace listener previously returned
+  `receivedSpans: N, storedSpans: 0` for every payload —
+  parsed, validated, then dropped because the listener had no
+  way to map spans to graph nodes. The new `SpanResolver` type
+  alias and `no_resolver()` helper let callers plug in any
+  span→node_id policy; `cli::server::run` wires
+  `graph.find_node_by_name(span.name)` for the bound single-repo
+  graph. When the listener runs with `no_resolver()` (tests,
+  sidecar executors without a graph) `storedSpans` stays at 0
+  honestly; when the caller supplies a real resolver, parent /
+  child span pairs whose names both resolve mint a
+  `RuntimeCall` edge that `explain_dispatch` then surfaces.
+  Federation-aware resolution that walks every registered
+  repo's graph and returns namespaced global ids is a
+  follow-up — multi-repo federation calls land here today
+  and resolve against the staging placeholder, which is the
+  same answer they got before.
+
 ### Fixed
 
 - **Relative `workspace_dir` paths in `repos.yaml` no longer
