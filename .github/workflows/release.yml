@@ -156,8 +156,9 @@ jobs:
         run: |
           mkdir -p release
           cp target/x86_64-unknown-linux-gnu/release/lain release/lain
-          tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C release lain
-          rm release/lain
+          cp target/x86_64-unknown-linux-gnu/release/lain-git-sidecar release/lain-git-sidecar
+          tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C release lain lain-git-sidecar
+          rm release/lain release/lain-git-sidecar
       - name: Compute per-binary SHA256
         run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
       - name: Generate SBOM (CycloneDX JSON)
@@ -251,8 +252,9 @@ jobs:
         run: |
           mkdir -p release
           cp target/aarch64-apple-darwin/release/lain release/lain
-          tar czf release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz -C release lain
-          rm release/lain
+          cp target/aarch64-apple-darwin/release/lain-git-sidecar release/lain-git-sidecar
+          tar czf release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz -C release lain lain-git-sidecar
+          rm release/lain release/lain-git-sidecar
       - name: Compute per-binary SHA256
         run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-aarch64-apple-darwin.tar.gz
       - name: Generate SBOM (CycloneDX JSON)
@@ -341,8 +343,9 @@ jobs:
         run: |
           mkdir -p release
           cp target/x86_64-pc-windows-msvc/release/lain.exe release/lain.exe
-          tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz -C release lain.exe
-          rm release/lain.exe
+          cp target/x86_64-pc-windows-msvc/release/lain-git-sidecar.exe release/lain-git-sidecar.exe
+          tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz -C release lain.exe lain-git-sidecar.exe
+          rm release/lain.exe release/lain-git-sidecar.exe
       - name: Compute per-binary SHA256
         shell: bash
         run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz

@@ -29,6 +29,7 @@ class Lain < Formula
 
   def install
     bin.install "lain"
+    bin.install "lain-git-sidecar" if File.exist?("lain-git-sidecar")
   end
 
   def caveats

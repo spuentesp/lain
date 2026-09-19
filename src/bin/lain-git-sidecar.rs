@@ -121,7 +121,13 @@ impl<'a> Drop for SocketCleaner<'a> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure_parent_death_signal();
 
-    let mut args = std::env::args().skip(1);
+    let args_vec: Vec<String> = std::env::args().skip(1).collect();
+    if args_vec.iter().any(|a| a == "--version" || a == "-V") {
+        println!("lain-git-sidecar {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    let mut args = args_vec.into_iter();
     let repo_path_arg = args
         .next()
         .ok_or("usage: lain-git-sidecar <repo-path> <socket-path>")?;
