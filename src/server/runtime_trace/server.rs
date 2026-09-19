@@ -29,6 +29,28 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+/// Symbol→node_id resolver for OTLP spans. The caller supplies
+/// this because the resolution policy is mode-dependent: stdio
+/// mode uses a single `GraphDatabase::find_node_by_name` lookup,
+/// federation mode walks every registered repo. We keep
+/// `runtime_trace` agnostic to that policy by accepting a closure
+/// rather than a `GraphDatabase` reference — avoids a
+/// `runtime_trace → graph` dependency and keeps the test surface
+/// small (a closure over a `HashMap` is enough for unit tests).
+///
+/// Returning `None` is the safe default: it tells
+/// [`RuntimeTraceStore::ingest`] to drop that end of the edge
+/// rather than mint a `RuntimeCall` to a non-existent node.
+pub type SpanResolver = Arc<dyn Fn(&SpanRecord) -> Option<String> + Send + Sync>;
+
+/// No-op resolver — accepts every span verbatim with no edge
+/// minted. Useful in tests that don't exercise resolution and
+/// as the explicit fallback when the caller has no graph to
+/// resolve against (today: standalone / sidecar executors).
+pub fn no_resolver() -> SpanResolver {
+    Arc::new(|_| None)
+}
+
 /// One-shot response body. We always emit a single buffered payload;
 /// streaming isn't needed for `/v1/traces`. `UnsyncBoxBody<Full<Bytes>, E>`
 /// is the same shape the MCP handler uses for non-streaming responses.
@@ -45,26 +67,33 @@ pub async fn try_bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
-/// Start the OTLP accept loop on `listener`. Returns a
+/// Start the OTLP accept loop on `listener`. `resolver` maps
+/// each span to a node_id (or `None` to skip edge minting); it
+/// runs once per span per request, so keep it cheap. Returns a
 /// `JoinHandle` for the background task; drop it to stop the
-/// listener. Returns `Ok(None)` when the listener wasn't bound
-/// (caller can ignore and continue).
-pub fn start(listener: TcpListener, store: Arc<RuntimeTraceStore>) -> JoinHandle<()> {
+/// listener.
+pub fn start(
+    listener: TcpListener,
+    store: Arc<RuntimeTraceStore>,
+    resolver: SpanResolver,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        accept_loop(listener, store).await;
+        accept_loop(listener, store, resolver).await;
     })
 }
 
-async fn accept_loop(listener: TcpListener, store: Arc<RuntimeTraceStore>) {
+async fn accept_loop(listener: TcpListener, store: Arc<RuntimeTraceStore>, resolver: SpanResolver) {
     loop {
         match listener.accept().await {
             Ok((stream, _peer)) => {
                 let store = store.clone();
+                let resolver = Arc::clone(&resolver);
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
                     let svc = service_fn(move |req| {
                         let store = store.clone();
-                        async move { handle_request(req, store).await }
+                        let resolver = Arc::clone(&resolver);
+                        async move { handle_request(req, store, resolver).await }
                     });
                     if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
                         tracing::debug!("otlp connection error: {e}");
@@ -81,12 +110,13 @@ async fn accept_loop(listener: TcpListener, store: Arc<RuntimeTraceStore>) {
 async fn handle_request(
     req: Request<Incoming>,
     store: Arc<RuntimeTraceStore>,
+    resolver: SpanResolver,
 ) -> Result<Response<OtlpBody>, hyper::Error> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
     let response = match (method, path.as_str()) {
-        (Method::POST, "/v1/traces") => ingest_traces(req, store).await,
+        (Method::POST, "/v1/traces") => ingest_traces(req, store, resolver).await,
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(bytes_body(Bytes::from_static(b"not found")))
@@ -110,19 +140,23 @@ async fn handle_request(
 /// mints zero edges and the spans are not queryable via
 /// `explain_dispatch` yet. The response field name reflects this:
 /// `receivedSpans` (parsed + validated) is reported even when
-/// `storedSpans` (resolved + minted as edges) is zero.
+/// `storedSpans` (resolved + minted as edges) is zero when the
+/// caller supplied [`no_resolver`] or every span's namespace /
+/// function attributes failed to resolve.
 ///
-/// Wiring up real resolution requires plumbing a
-/// `GraphDatabase` handle into the listener. That's a follow-up
-/// (needs to coexist with the federation mode's
-/// multi-repo-global-id mapping, not just the single-repo
-/// `find_node_by_name`). Until then, this endpoint is a
-/// parse-and-validate shim: it's useful as a collector target
-/// (operators can confirm their OTel collector is configured
-/// correctly) but not as a queryable runtime-trace source.
+/// The caller-provided `resolver` is invoked once per span. A
+/// resolver returning `None` drops that end of the edge rather
+/// than mint a `RuntimeCall` to a non-existent node — keeping
+/// `RuntimeTraceStore::ingest`'s "no fake edges" contract.
+///
+/// Federation mode wires the resolver to walk every registered
+/// repo's `find_node_by_name`; stdio single-repo mode uses one
+/// `find_node_by_name` call against the bound graph. Either way
+/// the listener itself stays graph-agnostic.
 async fn ingest_traces(
     req: Request<Incoming>,
     store: Arc<RuntimeTraceStore>,
+    resolver: SpanResolver,
 ) -> Response<OtlpBody> {
     use http_body_util::BodyExt;
     let Ok(body) = req.collect().await else {
@@ -136,12 +170,11 @@ async fn ingest_traces(
     };
 
     let received = records.len();
-    // Best-effort ingest. With the current no-graph listener the
-    // resolve closure always returns `None`, so this mints zero
-    // edges — but calling `ingest` keeps the wire path the same as
-    // a future fix and surfaces a non-zero `storedSpans` the moment
-    // resolution lands.
-    let stored = store.ingest(&records, |_span| None);
+    // Best-effort ingest. The closure form lets the caller supply
+    // any resolver policy without runtime_trace depending on the
+    // graph crate; the listener itself stays graph-agnostic.
+    let resolver_for_ingest = Arc::clone(&resolver);
+    let stored = store.ingest(&records, move |span| resolver_for_ingest(span));
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
@@ -182,7 +215,7 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let listener = try_bind(addr).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = start(listener, store.clone());
+        let handle = start(listener, store.clone(), no_resolver());
 
         let body = br#"{
             "resourceSpans": [{
@@ -212,15 +245,100 @@ mod tests {
         let body_str = std::str::from_utf8(&body_bytes).expect("utf-8 body");
         // The response must report both fields, and `receivedSpans`
         // must equal the number of spans we sent (1). `storedSpans`
-        // may be 0 today (resolution not wired) but the field must
-        // exist so callers can distinguish parsed from stored.
+        // is 0 here because no_resolver() returns None for every
+        // span — verified by the dedicated resolver_mints_edge
+        // test below.
         assert!(
             body_str.contains("\"receivedSpans\":1"),
             "response must report receivedSpans=1; got: {body_str}"
         );
         assert!(
-            body_str.contains("\"storedSpans\":"),
-            "response must include storedSpans field even when 0; got: {body_str}"
+            body_str.contains("\"storedSpans\":0"),
+            "no_resolver must produce storedSpans=0; got: {body_str}"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    /// Pin the resolver contract end-to-end. Build a small map
+    /// from symbol string → node_id, install it as the listener's
+    /// resolver, send a parent/child pair whose spans both resolve,
+    /// and verify the response reports `storedSpans == 1` (one edge
+    /// minted). Pre-fix code had no resolver at all and silently
+    /// dropped every span; this test pins that the wire path can
+    /// carry resolution once the caller supplies it.
+    ///
+    /// The two spans must resolve to *different* node_ids because
+    /// `RuntimeTraceStore::ingest` skips edges where caller ==
+    /// callee (`if caller_id == *callee_id { continue; }`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolver_mints_edge_for_matching_span() {
+        use std::collections::HashMap;
+        let store = Arc::new(RuntimeTraceStore::new(StoreConfig::default()));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let listener = try_bind(addr).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let symbol_to_id: HashMap<String, String> = [
+            ("orders-handler".to_string(), "node-handler".to_string()),
+            ("validate-order".to_string(), "node-validate".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let map = Arc::new(symbol_to_id);
+        let resolver: SpanResolver =
+            Arc::new(move |span: &SpanRecord| map.get(&span.name).cloned());
+        let handle = start(listener, store.clone(), resolver);
+
+        // Parent → child chain. Both span names resolve to distinct
+        // node_ids so the store's caller == callee filter doesn't drop
+        // the edge.
+        let body = br#"{
+            "resourceSpans": [{
+                "scopeSpans": [{
+                    "spans": [
+                        {
+                            "traceId": "00000000000000000000000000000001",
+                            "spanId": "0000000000000001",
+                            "parentSpanId": "0000000000000002",
+                            "name": "orders-handler",
+                            "kind": 1,
+                            "endTimeUnixNano": "1700000000000000000"
+                        },
+                        {
+                            "traceId": "00000000000000000000000000000001",
+                            "spanId": "0000000000000002",
+                            "name": "validate-order",
+                            "kind": 1,
+                            "endTimeUnixNano": "1700000000000000000"
+                        }
+                    ]
+                }]
+            }]
+        }"#;
+        let url = format!("http://127.0.0.1:{port}/v1/traces");
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body.to_vec())
+            .send()
+            .await
+            .expect("POST should succeed");
+        assert_eq!(resp.status(), 200);
+        let body_bytes = resp.bytes().await.expect("read response body");
+        let body_str = std::str::from_utf8(&body_bytes).expect("utf-8 body");
+        // Two spans received; one edge minted between the distinct
+        // resolved node_ids. `storedSpans` counts edges minted, not
+        // spans stored.
+        assert!(
+            body_str.contains("\"receivedSpans\":2"),
+            "receivedSpans must be 2; got: {body_str}"
+        );
+        assert!(
+            body_str.contains("\"storedSpans\":1"),
+            "matching parent/child pair should mint 1 edge; got: {body_str}"
         );
 
         handle.abort();
@@ -233,7 +351,7 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let listener = try_bind(addr).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = start(listener, store.clone());
+        let handle = start(listener, store.clone(), no_resolver());
 
         let client = reqwest::Client::new();
         let resp = client
@@ -253,7 +371,7 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let listener = try_bind(addr).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = start(listener, store.clone());
+        let handle = start(listener, store.clone(), no_resolver());
 
         let client = reqwest::Client::new();
         let resp = client

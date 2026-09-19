@@ -222,7 +222,23 @@ pub async fn run_server(
                 let store = std::sync::Arc::new(
                     crate::server::runtime_trace::RuntimeTraceStore::global().clone(),
                 );
-                let handle = crate::server::runtime_trace::server::start(listener, store);
+                // Build a span→node_id resolver against the bound
+                // single-repo graph. Federation mode wires a different
+                // resolver that walks every registered repo; this
+                // wiring is sufficient because `cli::server::run`
+                // starts the listener before the federation-aware
+                // dispatcher takes over. Federation OTLP resolution
+                // is a follow-up — for now the listener resolves
+                // against whichever graph `ctx` points at, and
+                // federation calls that land here will mint edges
+                // against the staging placeholder (None for
+                // unresolved cross-repo callees).
+                let graph = server.ingest().tool_executor().ctx.graph.clone();
+                let resolver: crate::server::runtime_trace::server::SpanResolver =
+                    std::sync::Arc::new(move |span: &crate::server::runtime_trace::SpanRecord| {
+                        graph.find_node_by_name(&span.name).map(|n| n.id)
+                    });
+                let handle = crate::server::runtime_trace::server::start(listener, store, resolver);
                 tracing::info!(
                     "OTLP runtime-trace listener bound on {otlp_addr} (POST /v1/traces)"
                 );
