@@ -396,3 +396,64 @@ fn insert_edges_batch_reports_dropped_count_for_orphan_edges() {
         "the valid edge must be persisted; orphans must not steal it"
     );
 }
+
+/// Companion to `insert_edges_batch_reports_dropped_count_for_orphan_edges`.
+/// That test pins the dropped count (and the valid-edge survival);
+/// this one pins the *positive* arm: an edge whose source IS in
+/// the local index but whose target is missing must end up in
+/// `take_pending_external_edges`, not the dropped counter.
+///
+/// The federation's `project_repo` drains that queue after the
+/// intra-repo edge pass to emit the edge to the federated
+/// backend. If `insert_edges_batch` ever silently drops this arm
+/// too, the federation's cross-repo projection breaks because
+/// nothing reaches the backend — and the dropped counter would
+/// not move, so the operator warning stays silent.
+#[test]
+fn insert_edges_batch_holds_missing_target_edge_for_federation_drain() {
+    let graph = make_test_graph();
+
+    // Pick a real source from the fixture and pair it with a
+    // synthetic target that doesn't exist anywhere.
+    let nodes = graph.get_all_nodes();
+    assert!(!nodes.is_empty(), "fixture should have ≥1 node");
+    let src = nodes[0].id.clone();
+    let orphan_tgt = "orphan-tgt-fed-22222222-2222-2222-2222-222222222222".to_string();
+
+    // Queue must be empty before we start; otherwise another
+    // test's drain path leaked across runs.
+    assert!(
+        graph.take_pending_external_edges().is_empty(),
+        "pending_external_edges must start empty for this test"
+    );
+
+    let batch = vec![GraphEdge::new(
+        EdgeType::Calls,
+        src.clone(),
+        orphan_tgt.clone(),
+    )];
+
+    let dropped = graph
+        .insert_edges_batch(&batch)
+        .expect("insert_edges_batch should not error on a missing target");
+    assert_eq!(
+        dropped, 0,
+        "missing-target edges must not be counted as dropped; \
+         they are held for federation drain"
+    );
+
+    let drained = graph.take_pending_external_edges();
+    assert_eq!(
+        drained.len(),
+        1,
+        "exactly the missing-target edge should have been queued for drain"
+    );
+    assert_eq!(drained[0].source_id, src);
+    assert_eq!(drained[0].target_id, orphan_tgt);
+
+    // Second drain returns empty — `take_*` semantics, not peek.
+    assert!(
+        graph.take_pending_external_edges().is_empty(),
+        "draining twice must not return the same edge"
+    );
+}
