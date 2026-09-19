@@ -162,6 +162,18 @@ All notable changes to LAIN are documented here. Versions follow
   the boot — so an OTLP port collision on a host running other
   observability tooling no longer wedges the MCP entry point.
 
+- **`get_blast_radius` empty-graph contract pinned.** A fresh,
+  never-indexed graph now produces a structured `NotFound` from
+  `get_blast_radius` rather than a confident "no callers" report.
+  The handler walks incoming edges, so a zero-node graph would
+  otherwise take the BFS loop's early-exit and report a symbol as
+  "isolated" — wrong, because the symbol is missing, not
+  unconnected. `resolve_node` already detects the empty-graph
+  branch and points the agent at `get_health` and federation
+  fallback; the new test in `tools::handlers::impact` pins that
+  contract so a future refactor that drops the branch fails loud
+  instead of silently regressing.
+
 ### Tier-3 follow-ups
 
 - **`NodeType::Synthetic` for hub nodes.** Hub nodes (`Hub:
