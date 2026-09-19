@@ -343,6 +343,18 @@ All notable changes to LAIN are documented here. Versions follow
   - Source missing, target missing: dropped (orphan).
   - Source present, target present: inserted normally.
 
+- **`assess_change` heuristic-caller count pinned.** The
+  `~ N heuristic caller(s) included` line is the agent's
+  only signal that a static-graph-empty blast radius has
+  more callers than the static graph shows. Agents rely on N
+  to decide whether to follow up with `explain_dispatch`; if
+  N is wrong, the agent under- or over-estimates the blast
+  radius. Pinned by
+  `assess_change_heuristic_caller_count_reflects_graph`:
+  fixture with three distinct File callers on a single
+  Function target asserts `~ 3 heuristic caller(s) included`
+  appears verbatim in the output.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
