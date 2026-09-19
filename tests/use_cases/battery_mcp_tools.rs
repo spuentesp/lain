@@ -772,10 +772,10 @@ fn build_test_executor_with_workspace(
         overlay: lain::overlay::VolatileOverlay::new(),
         embedder: lain::nlp::NlpEmbedder::new_stub(),
         cross_encoder: lain::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
-        git: std::sync::Arc::new(parking_lot::Mutex::new(
-            lain::git::GitSensor::new(&workspace)
+        git: std::sync::Arc::new(
+            lain::git::AnyGitSensor::from_env(&workspace)
                 .expect("git sensor must succeed for the test workspace"),
-        )),
+        ),
         lsp_pool: std::sync::Arc::new(
             lain::lsp::LspPool::new(
                 &workspace,

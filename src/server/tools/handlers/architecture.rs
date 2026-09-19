@@ -1,13 +1,12 @@
 //! Architecture domain handlers
 
 use crate::error::LainError;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
 use crate::schema::NodeType;
 use crate::server::tools::utils::format_duration;
 use crate::server::tools::utils::resolve_node;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -492,7 +491,7 @@ pub fn understand_repository(
     workspace: &PathBuf,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     readiness: &crate::server::readiness::ReadinessHandle,
     budget_tokens: Option<usize>,
 ) -> Result<String, LainError> {
@@ -529,12 +528,11 @@ pub fn understand_repository(
 
     // 2. Git state — HEAD commit (short hash) + dirty flag.
     let (head, dirty) = {
-        let g = git.lock();
-        let head = g
+        let head = git
             .get_latest_commit_info()
             .ok()
             .map(|(h, _)| h.chars().take(7).collect::<String>());
-        let dirty = g
+        let dirty = git
             .get_uncommitted_changes()
             .ok()
             .map(|c| !c.is_empty())

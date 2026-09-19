@@ -8,7 +8,7 @@
 //! No central edit required.
 
 use crate::error::LainError;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
@@ -32,7 +32,7 @@ pub struct ToolContextDeps {
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
     pub cross_encoder: crate::nlp::CrossEncoder,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
     pub embedding_cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
@@ -48,7 +48,7 @@ pub struct ToolContext {
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
     pub cross_encoder: crate::nlp::CrossEncoder,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
     pub embedding_cache: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
@@ -288,13 +288,9 @@ impl ToolContext {
         bound.indexed_signal = Some(repo.indexed_signal());
         let root = repo.source().local_path().to_path_buf();
         // Git-backed tools (history, diff, branch status) read through
-        // `git`, so it has to follow the repo too — otherwise they keep
-        // answering from whichever checkout the server was built
-        // against. A repo whose checkout is not a git work tree keeps
-        // the existing sensor rather than failing the call.
-        if let Ok(sensor) = GitSensor::new(&root) {
-            bound.git = Arc::new(Mutex::new(sensor));
-        }
+        // `git`, so it has to follow the repo too. Rebind to the repo's
+        // own AnyGitSensor.
+        bound.git = Arc::clone(repo.git());
         bound.workspace = root;
         Some(bound)
     }
@@ -520,7 +516,7 @@ mod federation_binding_tests {
             overlay: crate::overlay::VolatileOverlay::new(),
             embedder: crate::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
             cross_encoder: crate::nlp::CrossEncoder::from_dir(std::path::Path::new("/nonexistent")),
-            git: Arc::new(Mutex::new(GitSensor::new(&roots[0].1).expect("git sensor"))),
+            git: Arc::new(AnyGitSensor::from_env(&roots[0].1).expect("git sensor")),
             lsp_pool: Arc::new(
                 LspPool::new(&roots[0].1, 1, &crate::tuning::RuntimeConfig::default()).unwrap(),
             ),

@@ -1,16 +1,14 @@
 //! GitOps domain handlers - git operations for agent workflow
 
 use crate::error::LainError;
-use crate::git::{ChangeType, GitSensor};
-use parking_lot::Mutex;
+use crate::git::{AnyGitSensor, ChangeType};
 use std::sync::Arc;
 
 pub fn get_file_diff(
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     path_filter: Option<&str>,
 ) -> Result<String, LainError> {
-    let git_guard = git.lock();
-    let changes = git_guard.get_uncommitted_changes()?;
+    let changes = git.get_uncommitted_changes()?;
 
     if changes.is_empty() {
         return Ok("No uncommitted changes.".to_string());
@@ -41,11 +39,10 @@ pub fn get_file_diff(
 }
 
 pub fn get_commit_history(
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
     limit: Option<usize>,
 ) -> Result<String, LainError> {
-    let git_guard = git.lock();
-    let commits = git_guard.get_commit_history(limit.unwrap_or(20))?;
+    let commits = git.get_commit_history(limit.unwrap_or(20))?;
 
     if commits.is_empty() {
         return Ok("No commit history found.".to_string());
@@ -73,10 +70,9 @@ pub fn get_commit_history(
     Ok(result)
 }
 
-pub fn get_branch_status(git: &Arc<Mutex<GitSensor>>) -> Result<String, LainError> {
-    let git_guard = git.lock();
-    let branch = git_guard.get_current_branch()?;
-    let is_valid = git_guard.is_valid();
+pub fn get_branch_status(git: &Arc<AnyGitSensor>) -> Result<String, LainError> {
+    let branch = git.get_current_branch()?;
+    let is_valid = git.is_valid();
 
     let mut status = String::from("## Git Branch Status\n\n");
     status.push_str(&format!("**Branch:** `{}`\n", branch));

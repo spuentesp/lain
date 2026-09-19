@@ -721,7 +721,7 @@ fn tools_count(value: &Value) -> Result<usize> {
 /// Internal probe endpoint: no indexing, watchers, model loading, or tool calls.
 pub async fn run_probe(workspace: &Path) -> Result<()> {
     // Validate before the sidecar constructor, preventing its fallback stub repo.
-    crate::server::git::GitSensor::new(workspace)?;
+    crate::server::git::AnyGitSensor::from_env(workspace)?;
     let graph = crate::server::graph::GraphDatabase::empty_read_only();
     let executor = crate::server::tools::ToolExecutor::new_read_only(
         graph,

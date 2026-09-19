@@ -1,7 +1,7 @@
 use crate::error::LainError;
 use crate::federation::health::RepoHealth;
 use crate::federation::repo_source::RepoSource;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::{HierarchicalSymbol, LspPool};
 use crate::schema::{GraphEdge, GraphNode};
@@ -87,30 +87,8 @@ pub struct RepoIndex {
     source: Box<dyn RepoSource>,
     db: GraphDatabase,
     lsp: LspPool,
-    // `GitSensor` wraps a `git2::Repository`, which is `Send` but `!Sync`
-    // (git2 provides `unsafe impl Send for Repository` but no `Sync` impl).
-    // We wrap the sensor in `Arc<Mutex<...>>` for two reasons:
-    //
-    // 1. **Runtime serialization:** `RepoIndex::index` and `start_watcher`
-    //    both touch `git` from worker threads (the sink is on the tokio
-    //    runtime; the watcher callback may fire on a notify thread). The
-    //    Mutex serializes git2 calls so we never have two threads in
-    //    libgit2 at once on the same handle.
-    // 2. **Sharing into closures:** `start_watcher` clones the `Arc` into a
-    //    `Fn` closure handed to `notify::RecommendedWatcher`. Without
-    //    `Arc` we couldn't move `git` into the closure without taking
-    //    `&mut self` (we want `&self.index` etc. to remain callable).
-    //
-    // We use `tokio::sync::Mutex` (not `parking_lot::Mutex`) because we
-    // need to hold the lock across `.await` points inside `index_one_repo`.
-    // `tokio::sync::MutexGuard<T>` is `Send` when `T: Send`, and
-    // `GitSensor: Send` (via `git2::Repository`'s `unsafe impl Send`).
-    // `parking_lot::MutexGuard` is `!Send` by default — its `send_guard`
-    // feature is not enabled, so we'd have to either add a Cargo.toml
-    // feature flip or restructure the pipeline to use `spawn_blocking` for
-    // the entire ingestion. `tokio::sync::Mutex` is the small
-    // dependency-free fix and matches the existing `LspPool` pattern.
-    git: Arc<AsyncMutex<GitSensor>>,
+    git: Arc<AnyGitSensor>,
+    index_lock: AsyncMutex<()>,
     health: Arc<RwLock<RepoHealth>>,
     last_indexed: Arc<RwLock<SystemTime>>,
     /// The error text from the most recent failed `index()`/`index_forced()`
@@ -296,7 +274,7 @@ impl RepoIndex {
         // settings in particular were documented knobs that nothing read.
         let runtime = crate::tuning::load_tuning_config(&local_path).runtime;
         let lsp = LspPool::new(&local_path, 4, &runtime)?;
-        let git = Arc::new(AsyncMutex::new(GitSensor::new(&local_path)?));
+        let git = Arc::new(AnyGitSensor::from_env(&local_path)?);
         // Read the namespace *before* moving `source` into the struct —
         // we need the source's id, and `Box<dyn RepoSource>` isn't
         // `Copy`. URGENT FIXES #2: every `GraphNode` this repo produces
@@ -319,6 +297,7 @@ impl RepoIndex {
             db,
             lsp,
             git,
+            index_lock: AsyncMutex::new(()),
             health: Arc::new(RwLock::new(RepoHealth::Indexing)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             last_index_error: Arc::new(RwLock::new(None)),
@@ -395,6 +374,11 @@ impl RepoIndex {
     /// PATH); production code does not need it.
     pub fn lsp(&self) -> &LspPool {
         &self.lsp
+    }
+
+    /// Borrow the Git sensor for this repository.
+    pub fn git(&self) -> &Arc<AnyGitSensor> {
+        &self.git
     }
 
     /// Whether `index()` or `index_forced()` has succeeded at least
@@ -522,11 +506,10 @@ impl RepoIndex {
         // shared `&self.db` borrow across the pipeline is safe.
         let db = &self.db;
         let lsp = self.lsp.clone();
-        let git = Arc::clone(&self.git);
 
         // Acquire the lock before running the pipeline so we serialize
         // against any concurrent `index()` call (e.g. from the watcher).
-        let git_guard = git.lock().await;
+        let _index_guard = self.index_lock.lock().await;
 
         let pipeline = async {
             let overlay = self.server_overlay.lock().clone();
@@ -538,7 +521,7 @@ impl RepoIndex {
                 path: &path,
                 graph: db,
                 lsp_pool: &lsp,
-                git: &git_guard,
+                git: &self.git,
                 overlay: &overlay,
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
@@ -557,17 +540,12 @@ impl RepoIndex {
                     budget,
                     self.source.local_path()
                 );
-                drop(git_guard);
                 let message = format!("RepoIndex::index exceeded {:?} budget", budget);
                 *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(message));
             }
         };
-
-        // Drop the guard explicitly before updating shared state so the
-        // watcher can re-enter the lock promptly.
-        drop(git_guard);
 
         if let Err(e) = &result {
             tracing::warn!(
@@ -615,9 +593,8 @@ impl RepoIndex {
         let path = self.source.local_path().to_path_buf();
         let db = &self.db;
         let lsp = self.lsp.clone();
-        let git = Arc::clone(&self.git);
 
-        let git_guard = git.lock().await;
+        let _index_guard = self.index_lock.lock().await;
 
         let pipeline = async {
             let overlay = self.server_overlay.lock().clone();
@@ -629,7 +606,7 @@ impl RepoIndex {
                 path: &path,
                 graph: db,
                 lsp_pool: &lsp,
-                git: &git_guard,
+                git: &self.git,
                 overlay: &overlay,
                 resolver: resolver_ref,
                 source_repo: Some(source_repo),
@@ -648,15 +625,12 @@ impl RepoIndex {
                     budget,
                     self.source.local_path()
                 );
-                drop(git_guard);
                 let message = format!("RepoIndex::index_forced exceeded {:?} budget", budget);
                 *self.last_index_error.write() = Some(message.clone());
                 self.set_health(RepoHealth::Degraded);
                 return Err(LainError::Other(message));
             }
         };
-
-        drop(git_guard);
 
         if let Err(e) = &result {
             tracing::warn!(
@@ -890,8 +864,7 @@ impl RepoIndex {
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let (changes, indexed_current_commit) = {
-            let git = self.git.lock().await;
-            let changes = git.get_uncommitted_changes()?;
+            let changes = self.git.get_uncommitted_changes()?;
             // The canonical signal that an indexer pass has caught up
             // with HEAD is `db.last_commit == git HEAD`. Comparing the
             // two is O(1) per cycle and independent of which paths
@@ -908,7 +881,7 @@ impl RepoIndex {
             // (the older pre-commit node satisfied `has_node_at_path`)
             // while the static graph never got a chance to add the
             // new symbol — both layers silently lost the function.
-            let indexed_current_commit = match git.get_latest_commit_info() {
+            let indexed_current_commit = match self.git.get_latest_commit_info() {
                 Ok((head, _)) => self.db.get_last_commit()?.as_deref() == Some(head.as_str()),
                 Err(_) => false,
             };

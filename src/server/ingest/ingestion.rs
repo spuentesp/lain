@@ -2,7 +2,7 @@ use super::blocking::offthread;
 use super::scan::{scan_file_batch, PatternRef, StaticFileRef};
 use super::LainServer;
 use crate::error::LainError;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::{graph_path, GraphDatabase};
 use crate::lsp::LspPool;
 use crate::schema::{GraphEdge, GraphNode};
@@ -12,20 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-
-/// Bug #2 (2026-09-18 Tauri postmortem): every `offthread`
-/// closure that needs the parking_lot `GitSensor` mutex must
-/// build the same "mutex held by another thread" error. Centralise
-/// the message so the postmortem reference and the exact phrasing
-/// live in one place — when the root-cause fix lands, the message
-/// only changes here.
-fn git_sensor_busy_error() -> LainError {
-    LainError::Other(
-        "GitSensor mutex held by another thread; a prior index() \
-         call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
-            .into(),
-    )
-}
 
 impl LainServer {
     /// The "Sane" Ingestion Pipeline: Map -> Reduce -> Resolve -> Enrich.
@@ -64,31 +50,14 @@ impl LainServer {
         // worker; a slow git operation (e.g. a packed-refs refresh
         // on a huge monorepo) would block the worker holding the
         // `AsyncMutex<GitSensor>` for as long as it took. The
-        // `Arc<Mutex<GitSensor>>` is cloned and the parking_lot lock
-        // is acquired *inside* the closure so no guard crosses the
-        // await boundary.
-        //
-        // 2026-09-18 Tauri federation postmortem Bug #2 mitigation:
-        // `try_lock` (not `lock`) inside the closure. libgit2 is not
-        // cancellable; if a previous `index()` call wedged in libgit2
-        // (packed-refs read on a huge monorepo, hung filesystem,
-        // etc.), the parking_lot guard stays held by that stuck
-        // `spawn_blocking` thread, and every subsequent watcher-
-        // triggered `index_forced()` would block forever on `lock()`.
-        // `try_lock` fails fast with `WouldBlock`; the closure maps
-        // that to `LainError::Other`, `repo.index()` sees the error
-        // and demotes health to `Degraded`, and the watcher stops
-        // accumulating blocked tasks. The original stuck thread is
-        // not recoverable from Rust (no safe way to kill an OS thread)
-        // — this is a mitigation that surfaces the hang, not a fix
-        // for the underlying libgit2/FS hang.
+        // `Arc<AnyGitSensor>` is cloned and the call is dispatched
+        // *inside* the closure so no lock or IPC crosses the await boundary.
+        // In InProcess mode, try_lock fails fast if another thread is holding
+        // the lock (Bug #2 mitigation). In Sidecar mode, IPC dispatches directly.
         let git_sensor = Arc::clone(self.ingest().git());
         let (latest_commit, latest_time) = offthread(
             cancel.clone(),
-            move || -> Result<(String, i64), LainError> {
-                let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
-                guard.get_latest_commit_info()
-            },
+            move || -> Result<(String, i64), LainError> { git_sensor.try_get_latest_commit_info() },
         )
         .await?;
         let last_commit = self.ingest().graph().get_last_commit()?;
@@ -124,8 +93,7 @@ impl LainServer {
             offthread(
                 cancel.clone(),
                 move || -> Result<Vec<std::path::PathBuf>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
-                    guard.get_changed_files_since(&last)
+                    git_sensor.try_get_changed_files_since(&last)
                 },
             )
             .await?
@@ -135,8 +103,7 @@ impl LainServer {
             offthread(
                 cancel.clone(),
                 move || -> Result<Vec<std::path::PathBuf>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
-                    guard.get_all_tracked_files()
+                    git_sensor.try_get_all_tracked_files()
                 },
             )
             .await?
@@ -151,7 +118,7 @@ impl LainServer {
             sweep_orphans(
                 &self.ingest().config().workspace,
                 self.ingest().graph(),
-                &self.ingest().git().lock(),
+                self.ingest().git(),
             );
             if cancel.is_cancelled() {
                 info!("build_core_memory: cancelled after orphan sweep");
@@ -639,8 +606,7 @@ impl LainServer {
             match offthread(
                 cancel.clone(),
                 move || -> Result<Vec<crate::git::CoChangePair>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
-                    guard.analyze_co_changes(window, min_pair, max_files)
+                    git_sensor.try_analyze_co_changes(window, min_pair, max_files)
                 },
             )
             .await
@@ -844,8 +810,7 @@ impl LainServer {
             let tracked_paths_result = offthread(
                 cancel.clone(),
                 move || -> Result<Vec<std::path::PathBuf>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
-                    guard.get_all_tracked_files()
+                    git_sensor.try_get_all_tracked_files()
                 },
             )
             .await;
@@ -943,7 +908,7 @@ impl LainServer {
         // The snapshot, removals, and replacements form one reconciliation.
         // Direct process_change calls use the same lock.
         let _guard = self.ingest().process_change_lock().lock().await;
-        let changes = self.ingest().git().lock().get_uncommitted_changes()?;
+        let changes = self.ingest().git().get_uncommitted_changes()?;
         let root = &self.ingest().config().workspace;
         let current_paths: HashSet<String> = changes
             .iter()
@@ -952,7 +917,6 @@ impl LainServer {
         let head = self
             .ingest()
             .git()
-            .lock()
             .get_latest_commit_info()
             .ok()
             .map(|(h, _)| h);
@@ -1173,7 +1137,7 @@ fn insert_edges_best_effort(db: &GraphDatabase, edges: &[GraphEdge], label: &str
     }
 }
 
-fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &GitSensor) {
+fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &AnyGitSensor) {
     match git.get_all_tracked_files() {
         Ok(tracked_paths) => {
             // Reduced with the same helper the scanner mints node paths with:
@@ -1204,7 +1168,7 @@ pub struct IndexRequest<'a> {
     pub path: &'a Path,
     pub graph: &'a GraphDatabase,
     pub lsp_pool: &'a LspPool,
-    pub git: &'a GitSensor,
+    pub git: &'a AnyGitSensor,
     pub overlay: &'a VolatileOverlay,
     pub resolver: Option<&'a dyn crate::federation::cross_repo::CrossRepoResolver>,
     pub source_repo: Option<&'a crate::federation::repo_id::RepoId>,
@@ -1882,7 +1846,12 @@ mod readiness_progress_tests {
         // a previous `index()` call's stuck libgit2 thread still
         // holding it. parking_lot's `lock()` is infallible; the
         // offthread closure's `try_lock` will see `None`.
-        let _held = server.ingest().git().lock();
+        let _held = server
+            .ingest()
+            .git()
+            .as_in_process()
+            .expect("test runs in InProcess mode")
+            .lock();
 
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
@@ -1929,7 +1898,12 @@ mod readiness_progress_tests {
 
         // Hold the parking_lot mutex externally — simulates a stuck
         // spawn_blocking thread holding the guard.
-        let _held = server.ingest().git().lock();
+        let _held = server
+            .ingest()
+            .git()
+            .as_in_process()
+            .expect("test runs in InProcess mode")
+            .lock();
 
         const N: usize = 8;
         let started = std::time::Instant::now();

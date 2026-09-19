@@ -2,12 +2,11 @@
 //!
 //! Watches for file changes and updates the volatile overlay via LSP symbol extraction.
 
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::LainServer;
 use notify::{
     event::CreateKind, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -415,7 +414,7 @@ pub(crate) struct WatcherTestHooks {
 pub(crate) struct WatcherThreadArgs {
     pub workspace: PathBuf,
     pub file_sender: mpsc::Sender<PathBuf>,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub command_pair: (
         std::sync::mpsc::Sender<WatchCommand>,
         std::sync::mpsc::Receiver<WatchCommand>,
@@ -429,7 +428,7 @@ impl WatcherThreadArgs {
     pub fn production(
         workspace: PathBuf,
         file_sender: mpsc::Sender<PathBuf>,
-        git: Arc<Mutex<GitSensor>>,
+        git: Arc<AnyGitSensor>,
         command_pair: (
             std::sync::mpsc::Sender<WatchCommand>,
             std::sync::mpsc::Receiver<WatchCommand>,
@@ -449,7 +448,7 @@ impl WatcherThreadArgs {
     pub fn for_test(
         workspace: PathBuf,
         file_sender: mpsc::Sender<PathBuf>,
-        git: Arc<Mutex<GitSensor>>,
+        git: Arc<AnyGitSensor>,
         command_pair: (
             std::sync::mpsc::Sender<WatchCommand>,
             std::sync::mpsc::Receiver<WatchCommand>,
@@ -600,7 +599,7 @@ fn handle_watch_command(
     path: PathBuf,
     watcher: &mut RecommendedWatcher,
     watched: &mut HashSet<PathBuf>,
-    git: &Arc<Mutex<GitSensor>>,
+    git: &Arc<AnyGitSensor>,
 ) {
     if !path.is_dir() {
         debug!("FileWatcher: ignoring non-directory command {:?}", path);
@@ -621,7 +620,7 @@ fn handle_watch_command(
 }
 
 /// Filter notify events to only relevant file changes
-fn filter_event(event: &Event, git: &Arc<Mutex<GitSensor>>) -> Option<PathBuf> {
+fn filter_event(event: &Event, git: &Arc<AnyGitSensor>) -> Option<PathBuf> {
     match event.kind {
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
             // Get the first path from the event
@@ -642,8 +641,8 @@ fn filter_event(event: &Event, git: &Arc<Mutex<GitSensor>>) -> Option<PathBuf> {
 /// A failed ignore check is treated as *not* ignored: a transient Git
 /// metadata problem should degrade into extra work, never into silently
 /// dropped live updates.
-fn is_git_ignored(path: &Path, git: &Arc<Mutex<GitSensor>>) -> bool {
-    match git.lock().is_ignored(path) {
+fn is_git_ignored(path: &Path, git: &Arc<AnyGitSensor>) -> bool {
+    match git.is_ignored(path) {
         Ok(ignored) => ignored,
         Err(error) => {
             debug!(
@@ -693,8 +692,7 @@ mod tests {
     //! registration and command-channel behavior added in task 3.
 
     use super::*;
-    use crate::git::GitSensor;
-    use parking_lot::Mutex;
+    use crate::git::AnyGitSensor;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -950,13 +948,9 @@ mod tests {
         };
 
         // Git-aware signature:
-        //   filter_event(&Event, &Arc<parking_lot::Mutex<GitSensor>>)
+        //   filter_event(&Event, &Arc<AnyGitSensor>)
         //       -> Option<PathBuf>
-        // GitSensor is the production sensor type — we wrap it in the
-        // Arc<Mutex<_>> handle production code already uses elsewhere.
-        let sensor = Arc::new(Mutex::new(
-            GitSensor::new(&repo_path).expect("GitSensor::new"),
-        ));
+        let sensor = Arc::new(AnyGitSensor::from_env(&repo_path).expect("AnyGitSensor::from_env"));
 
         let kept = filter_event(&visible_event, &sensor);
         let dropped = filter_event(&ignored_event, &sensor);
@@ -1008,7 +1002,7 @@ mod tests {
             return;
         }
 
-        let git = Arc::new(Mutex::new(GitSensor::new(&repo).expect("GitSensor::new")));
+        let git = Arc::new(AnyGitSensor::from_env(&repo).expect("AnyGitSensor::from_env"));
 
         // Production-shape channels:
         // - file events flow through a Tokio mpsc (same type as the
@@ -1208,7 +1202,7 @@ mod tests {
     async fn newly_created_directory_is_registered() {
         let (_tmp, repo) = build_repo_layout();
 
-        let git = Arc::new(Mutex::new(GitSensor::new(&repo).expect("GitSensor::new")));
+        let git = Arc::new(AnyGitSensor::from_env(&repo).expect("AnyGitSensor::from_env"));
 
         let (file_tx, mut file_rx) = tokio::sync::mpsc::channel::<PathBuf>(16);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();

@@ -743,4 +743,76 @@ impl AnyGitSensor {
             Self::Sidecar(s) => s.get_repo_identity(),
         }
     }
+
+    /// Get commits newer than the given commit hash.
+    pub fn get_new_commits_since(&self, since_hash: &str) -> Result<Vec<CommitInfo>, LainError> {
+        match self {
+            Self::InProcess(m) => m.lock().get_new_commits_since(since_hash),
+            Self::Sidecar(s) => s.get_new_commits_since(since_hash),
+        }
+    }
+
+    /// Try to get latest commit info, failing fast if in `InProcess` mode and the mutex is locked.
+    /// In `Sidecar` mode, dispatches directly without acquiring any in-process lock.
+    pub fn try_get_latest_commit_info(&self) -> Result<(String, i64), LainError> {
+        match self {
+            Self::InProcess(m) => {
+                let guard = m.try_lock().ok_or_else(git_sensor_busy_error)?;
+                guard.get_latest_commit_info()
+            }
+            Self::Sidecar(s) => s.get_latest_commit_info(),
+        }
+    }
+
+    /// Try to get changed files since commit, failing fast if in `InProcess` mode and the mutex is locked.
+    /// In `Sidecar` mode, dispatches directly without acquiring any in-process lock.
+    pub fn try_get_changed_files_since(&self, since_hash: &str) -> Result<Vec<PathBuf>, LainError> {
+        match self {
+            Self::InProcess(m) => {
+                let guard = m.try_lock().ok_or_else(git_sensor_busy_error)?;
+                guard.get_changed_files_since(since_hash)
+            }
+            Self::Sidecar(s) => s.get_changed_files_since(since_hash),
+        }
+    }
+
+    /// Try to get all tracked files, failing fast if in `InProcess` mode and the mutex is locked.
+    /// In `Sidecar` mode, dispatches directly without acquiring any in-process lock.
+    pub fn try_get_all_tracked_files(&self) -> Result<Vec<PathBuf>, LainError> {
+        match self {
+            Self::InProcess(m) => {
+                let guard = m.try_lock().ok_or_else(git_sensor_busy_error)?;
+                guard.get_all_tracked_files()
+            }
+            Self::Sidecar(s) => s.get_all_tracked_files(),
+        }
+    }
+
+    /// Try to analyze co-changes, failing fast if in `InProcess` mode and the mutex is locked.
+    /// In `Sidecar` mode, dispatches directly without acquiring any in-process lock.
+    pub fn try_analyze_co_changes(
+        &self,
+        count: usize,
+        threshold: usize,
+        max_files: usize,
+    ) -> Result<Vec<CoChangePair>, LainError> {
+        match self {
+            Self::InProcess(m) => {
+                let guard = m.try_lock().ok_or_else(git_sensor_busy_error)?;
+                guard.analyze_co_changes(count, threshold, max_files)
+            }
+            Self::Sidecar(s) => s.analyze_co_changes(count, threshold, max_files),
+        }
+    }
+}
+
+/// Bug #2 (2026-09-18 Tauri postmortem): every operation that
+/// requires the parking_lot `GitSensor` mutex in fail-fast mode
+/// builds the same "mutex held by another thread" error.
+pub fn git_sensor_busy_error() -> LainError {
+    LainError::Other(
+        "GitSensor mutex held by another thread; a prior index() \
+         call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
+            .into(),
+    )
 }

@@ -14,7 +14,7 @@ pub mod utils_tests;
 
 use crate::error::LainError;
 use crate::federation::repo_id::RepoId;
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::NlpEmbedder;
@@ -116,7 +116,7 @@ pub struct ToolExecutorConfig {
     pub overlay: VolatileOverlay,
     pub embedder: NlpEmbedder,
     pub cross_encoder: crate::nlp::CrossEncoder,
-    pub git: Arc<Mutex<GitSensor>>,
+    pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
     pub workspace: std::path::PathBuf,
@@ -249,10 +249,10 @@ impl ToolExecutor {
                 ),
             },
         };
-        let git = Arc::new(Mutex::new(
-            crate::git::GitSensor::new(&git_root)
+        let git = Arc::new(
+            crate::git::AnyGitSensor::from_env(&git_root)
                 .expect("sidecar git sensor must succeed after stub init"),
-        ));
+        );
         let runtime = crate::tuning::load_tuning_config(&workspace).runtime;
         let lsp_root = match crate::lsp::LspPool::new(&workspace, 1, &runtime) {
             Ok(pool) => pool,
@@ -1209,11 +1209,11 @@ pub fn create_test_executor_with_graph(graph: crate::graph::GraphDatabase) -> To
     use std::path::{Path, PathBuf};
     let overlay = crate::overlay::VolatileOverlay::new();
     let embedder = crate::nlp::NlpEmbedder::new_stub();
-    let git = Arc::new(parking_lot::Mutex::new(
-        crate::git::GitSensor::new(Path::new(".")).unwrap_or_else(|_| {
-            crate::git::GitSensor::new(Path::new("/tmp")).expect("fallback git sensor")
+    let git = Arc::new(
+        crate::git::AnyGitSensor::from_env(Path::new(".")).unwrap_or_else(|_| {
+            crate::git::AnyGitSensor::from_env(Path::new("/tmp")).expect("fallback git sensor")
         }),
-    ));
+    );
     let lsp_pool = Arc::new(
         crate::lsp::LspPool::new(Path::new("."), 2, &crate::tuning::RuntimeConfig::default())
             .expect("lsp pool"),

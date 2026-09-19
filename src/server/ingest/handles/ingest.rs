@@ -5,7 +5,7 @@
 //! `next_revision`, `broadcast_overlay_insert`, the four
 //! `overlay_paths_*` helpers, and `shutdown` through.
 
-use crate::git::GitSensor;
+use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
 use crate::nlp::{CrossEncoder, NlpEmbedder};
@@ -30,7 +30,7 @@ pub struct IngestHandle {
     pub(crate) overlay: VolatileOverlay,
     pub(crate) embedder: NlpEmbedder,
     pub(crate) cross_encoder: CrossEncoder,
-    pub(crate) git: Arc<Mutex<GitSensor>>,
+    pub(crate) git: Arc<AnyGitSensor>,
     pub(crate) lsp_pool: Arc<LspPool>,
     pub(crate) tool_executor: ToolExecutor,
     pub(crate) tuning: Arc<TuningConfig>,
@@ -71,7 +71,7 @@ impl IngestHandle {
         overlay: VolatileOverlay,
         embedder: NlpEmbedder,
         cross_encoder: CrossEncoder,
-        git: Arc<Mutex<GitSensor>>,
+        git: Arc<AnyGitSensor>,
         lsp_pool: Arc<LspPool>,
         tool_executor: ToolExecutor,
         tuning: Arc<TuningConfig>,
@@ -122,6 +122,9 @@ impl IngestHandle {
     /// the hang earlier, with a clear message and a pointer to
     /// `scripts/debug-hung-server.sh`.
     ///
+    /// When the git sensor runs in `Sidecar` mode, there is no in-process
+    /// mutex that could wedge; this spawns an idle task waiting for cancellation.
+    ///
     /// Polls every 5 s; warns once per continuous hold past the
     /// threshold (clears `warned` when the mutex is observed free).
     /// Honors `cancel` for clean shutdown.
@@ -132,13 +135,20 @@ impl IngestHandle {
     ) -> tokio::task::JoinHandle<()> {
         let git = Arc::clone(&self.git);
         let busy_since = Arc::clone(&self.git_busy_since_nanos);
-        tokio::spawn(run_git_sensor_watchdog(
-            git,
-            busy_since,
-            std::time::Duration::from_secs(threshold_secs),
-            std::time::Duration::from_secs(5),
-            cancel,
-        ))
+        if let Some(in_proc_mutex) = git.as_in_process() {
+            let in_proc_mutex = Arc::clone(in_proc_mutex);
+            tokio::spawn(run_git_sensor_watchdog(
+                in_proc_mutex,
+                busy_since,
+                std::time::Duration::from_secs(threshold_secs),
+                std::time::Duration::from_secs(5),
+                cancel,
+            ))
+        } else {
+            tokio::spawn(async move {
+                cancel.cancelled().await;
+            })
+        }
     }
 
     /// Shared index lifecycle handle. `build_core_memory` reports phase
@@ -233,7 +243,7 @@ impl IngestHandle {
         &self.cross_encoder
     }
 
-    pub fn git(&self) -> &Arc<Mutex<GitSensor>> {
+    pub fn git(&self) -> &Arc<AnyGitSensor> {
         &self.git
     }
 

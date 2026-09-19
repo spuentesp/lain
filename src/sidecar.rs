@@ -236,6 +236,22 @@ impl SidecarGitSensor {
                 other => Err(LainError::Git(format!("unexpected response: {:?}", other))),
             })
     }
+
+    /// "Get commits newer than the given commit hash."
+    pub fn get_new_commits_since(&self, since_hash: &str) -> Result<Vec<CommitInfo>, LainError> {
+        self.inner.lock().call(
+            Request::GetNewCommitsSince {
+                since_hash: since_hash.to_string(),
+            },
+            |resp| match resp {
+                Response::CommitHistory(commits) => {
+                    Ok(commits.into_iter().map(proto_to_commitinfo).collect())
+                }
+                Response::Error(msg) => Err(LainError::Git(msg)),
+                other => Err(LainError::Git(format!("unexpected response: {:?}", other))),
+            },
+        )
+    }
 }
 
 struct SidecarInner {
