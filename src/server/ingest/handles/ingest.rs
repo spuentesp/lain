@@ -50,11 +50,16 @@ pub struct IngestHandle {
     /// `try_lock`; when it's been continuously held for longer than
     /// the configured threshold, the watchdog emits a `tracing::warn!`
     /// with elapsed time and a `scripts/debug-hung-server.sh` pointer.
-    /// `0` means "not currently held"; any other value is the
-    /// monotonic nanosecond timestamp at which the current hold began.
-    /// The watchdog itself sets and clears this — closures don't touch
-    /// it — so existing offthread closures stay lock-free on the
-    /// fast path.
+    ///
+    /// `0` means "not currently held". Any other value is the
+    /// wall-clock nanosecond timestamp at which the current hold
+    /// began (the watchdog publishes it on the free→held transition
+    /// via CAS so only the first observer wins, and clears it on the
+    /// held→free transition). The offthread closures never touch
+    /// it, so the fast path stays lock-free. Surfacing this through
+    /// `get_health` / `get_capabilities` is a follow-up — for now
+    /// the watchdog's own `tracing::warn!` is the operator-visible
+    /// signal.
     pub(crate) git_busy_since_nanos: Arc<AtomicU64>,
 }
 
@@ -264,6 +269,17 @@ impl IngestHandle {
 /// shared `busy_since` atomic on exit so a server restart doesn't
 /// carry a stale timestamp.
 ///
+/// The shared `busy_since` atomic is the *observable* signal —
+/// callers reading `IngestHandle::git_busy_since_nanos` get the
+/// wall-clock nanosecond timestamp at which the current hold began,
+/// or `0` if the mutex is free. `get_health` surfaces this so the
+/// watchdog's signal is visible to operator tooling (alertmanager,
+/// dashboards) without needing to grep logs. We use `SystemTime`
+/// rather than `Instant` so the value is comparable to the host's
+/// wall clock — Instant has no global epoch, which would make
+/// "how long has this been held?" unanswerable from outside this
+/// loop.
+///
 /// Generic over `T` so tests can exercise the loop with a
 /// `Mutex<()>` instead of constructing a real `GitSensor` (which
 /// requires an on-disk repo).
@@ -274,7 +290,6 @@ async fn run_git_sensor_watchdog<T>(
     poll_interval: std::time::Duration,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    let mut held_since: Option<std::time::Instant> = None;
     let mut warned = false;
     loop {
         // Use `try_lock` to probe — parking_lot's API is infallible,
@@ -282,27 +297,46 @@ async fn run_git_sensor_watchdog<T>(
         // (i.e. a libgit2 call in flight). We don't care who, just that
         // the hold duration exceeds the threshold.
         if git.try_lock().is_none() {
-            let now = std::time::Instant::now();
-            let since = held_since.get_or_insert(now);
-            if !warned && now.duration_since(*since) >= threshold {
-                tracing::warn!(
-                    threshold_secs = threshold.as_secs(),
-                    elapsed_secs = now.duration_since(*since).as_secs(),
-                    "GitSensor parking_lot mutex has been continuously held for \
-                     >{}s. A prior call is likely wedged in libgit2 \
-                     (Bug #2, 2026-09-18 postmortem). The offthread closures \
-                     already fail-fast on try_lock, so subsequent \
-                     build_core_memory calls return LainError::Other, but \
-                     the stuck spawn_blocking thread keeps running. \
-                     Inspect /proc/<pid>/wchan or run \
-                     scripts/debug-hung-server.sh for the user's postmortem \
-                     recipe.",
-                    threshold.as_secs()
-                );
-                warned = true;
+            // CAS-loop: only the first observer of the held
+            // transition writes the timestamp. Any later observer
+            // sees the existing value and leaves it.
+            let now_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let observed_start_nanos = match busy_since.compare_exchange(
+                0,
+                now_nanos,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => now_nanos,
+                Err(existing) => existing,
+            };
+            if !warned && observed_start_nanos > 0 {
+                let elapsed_nanos = now_nanos.saturating_sub(observed_start_nanos);
+                if std::time::Duration::from_nanos(elapsed_nanos) >= threshold {
+                    tracing::warn!(
+                        threshold_secs = threshold.as_secs(),
+                        elapsed_secs = std::time::Duration::from_nanos(elapsed_nanos).as_secs(),
+                        "GitSensor parking_lot mutex has been continuously held for \
+                         >{}s. A prior call is likely wedged in libgit2 \
+                         (Bug #2, 2026-09-18 postmortem). The offthread closures \
+                         already fail-fast on try_lock, so subsequent \
+                         build_core_memory calls return LainError::Other, but \
+                         the stuck spawn_blocking thread keeps running. \
+                         Inspect /proc/<pid>/wchan or run \
+                         scripts/debug-hung-server.sh for the user's postmortem \
+                         recipe.",
+                        threshold.as_secs()
+                    );
+                    warned = true;
+                }
             }
         } else {
-            held_since = None;
+            // Mutex is free. Clear both the local warn latch and the
+            // shared timestamp so the next hold starts fresh.
+            busy_since.store(0, std::sync::atomic::Ordering::Relaxed);
             warned = false;
         }
         tokio::select! {
@@ -390,11 +424,31 @@ mod tests {
         // Hold the mutex for > threshold + a few poll intervals.
         let _held = git.lock();
         tokio::time::sleep(threshold * 4).await;
+
+        // While the mutex is held past the threshold, the watchdog
+        // must publish a non-zero `busy_since` so `get_health` can
+        // surface the hang to operator tooling (alertmanager,
+        // dashboards) without needing to grep logs.
+        assert!(
+            busy_since.load(Ordering::Relaxed) > 0,
+            "watchdog must publish busy_since while mutex is held past threshold; \
+             got {}",
+            busy_since.load(Ordering::Relaxed)
+        );
+
         drop(_held);
 
         // Give the watchdog one more cycle to observe the free mutex
         // and clear `held_since`/`warned` (covers the cleanup branch).
         tokio::time::sleep(poll_interval * 2).await;
+
+        // Once the mutex is free, the watchdog must clear
+        // `busy_since` so a subsequent hold starts fresh.
+        assert_eq!(
+            busy_since.load(Ordering::Relaxed),
+            0,
+            "watchdog must clear busy_since once the mutex is free"
+        );
 
         cancel.cancel();
         handle.await.expect("watchdog task panicked");
