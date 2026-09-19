@@ -902,4 +902,61 @@ mod tests {
             detectors
         );
     }
+
+    /// Combined negative-coverage sweep across all 16 detector
+    /// patterns. A single fixture containing every benign
+    /// identifier form a real codebase might use MUST NOT fire
+    /// any detector. Pin the full surface in one test so a
+    /// future regression that widens any single pattern fails
+    /// fast and visibly, instead of needing one new test per
+    /// detector.
+    ///
+    /// Each line is intentionally a *plausible-looking* dispatch
+    /// shape that a careless regex would fire on. The test
+    /// asserts none of them are heuristic edges.
+    #[test]
+    fn combined_negative_coverage_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("benign.rs"),
+            // bus.publish-family identifiers — \b boundary handles these
+            "fn publisher_count() -> usize { 0 }\n\
+             fn dispatch_count() -> usize { 0 }\n\
+             // container-resolve identifiers — word-boundary handles these
+             fn container_size() -> usize { 0 }\n\
+             // message-bus namespaces that are NOT actually publishing
+             // (kafka is, but as a type name, not a method call)
+             let _: Kafka = Kafka::new();\n\
+             // router-family identifiers — word-boundary handles these
+             fn app_size() -> usize { 0 }\n\
+             fn router_count() -> usize { 0 }\n\
+             // bare spawn( without runtime namespace — bare() handles this
+             fn spawn(worker: fn()) { worker(); }\n\
+             // serde_value patterns as IDENTIFIERS (not types)
+             fn evaluation_metric() -> f32 { 0.0 }\n\
+             // type_escape with a user-defined Anything (capitalised)
+             trait Anything { fn value(&self) -> String; }\n\
+             fn cast_anything(x: Anything) -> impl Anything { x }\n",
+        )
+        .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&db_dir.path().join("graph.bin")).unwrap();
+        let ns = RepoNamespace::for_test();
+
+        scan_workspace_dispatch(&graph, dir.path(), &ns).unwrap();
+
+        let detectors: HashSet<String> = graph
+            .all_edges()
+            .into_iter()
+            .filter_map(|e| match e.provenance {
+                Some(EdgeProvenance::Heuristic { detector, .. }) => Some(detector),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detectors.is_empty(),
+            "no detector should fire on benign identifier forms; fired: {detectors:?}"
+        );
+    }
 }
