@@ -1110,6 +1110,71 @@ mod m6_tests {
         );
     }
 
+    /// The `~ N heuristic caller(s) included` count in
+    /// `assess_change`'s body must reflect the actual number of
+    /// heuristic edges in the graph — agents rely on that count
+    /// to decide whether to follow up with `explain_dispatch`.
+    /// Fixture with three BusTopic heuristic edges pointing at
+    /// the same target pins `~ 3 heuristic caller(s) included`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_heuristic_caller_count_reflects_graph() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        let tmp = std::env::temp_dir().join("test_assess_heuristic_count");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let target = GraphNode::new(
+            NodeType::Function,
+            "process".to_string(),
+            "/src/processor.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        // Three distinct files publish to the same message bus,
+        // each landing on `process`.
+        for path in [
+            "/src/orders.py",
+            "/src/payments.py",
+            "/src/notifications.py",
+        ] {
+            let caller_id = GraphNode::generate_id(&NodeType::File, path, "", None, &ns);
+            graph
+                .upsert_node({
+                    let mut n = GraphNode::new(NodeType::File, String::new(), path.to_string());
+                    n.id = caller_id.clone();
+                    n
+                })
+                .unwrap();
+            graph
+                .insert_edges_batch(&[GraphEdge {
+                    edge_type: EdgeType::BusTopic,
+                    source_id: caller_id,
+                    target_id: target.id.clone(),
+                    weight: Some(0.7),
+                    cross_repo: false,
+                    provenance: Some(EdgeProvenance::Heuristic {
+                        detector: "message_bus_publisher".to_string(),
+                        confidence: 0.7,
+                    }),
+                }])
+                .unwrap();
+        }
+
+        let mut a = Map::new();
+        a.insert("symbol".to_string(), Value::String("process".to_string()));
+        let out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+
+        assert!(
+            out.contains("~ 3 heuristic caller(s) included"),
+            "the heuristic count must reflect the graph (3 edges), got:\n{out}"
+        );
+    }
+
     /// Helper that wraps `search_code` with `cross_encoder` and
     /// `embedding_cache` defaulted to empty (so the lexical path
     /// is the only one exercised — that's what these unit tests
