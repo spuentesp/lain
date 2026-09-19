@@ -25,6 +25,7 @@ use lain::git::{
 };
 use lain::sidecar_proto::{
     read_frame, write_frame, ChangeType, CoChangePair, FileChange, Request, Response,
+    PROTOCOL_VERSION,
 };
 
 use std::io::Write;
@@ -54,11 +55,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // thread-safe Arc<Mutex<GitSensor>> shared across connections).
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
-                if let Err(e) = handle_connection(stream, &sensor) {
+            Ok(stream) => match handle_connection(stream, &sensor) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(e) => {
                     eprintln!("lain-git-sidecar: connection error: {e}");
                 }
-            }
+            },
             Err(e) => {
                 eprintln!("lain-git-sidecar: accept error: {e}");
             }
@@ -72,13 +75,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn handle_connection(
     mut stream: UnixStream,
     sensor: &GitSensor,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
+    // Handshake check: first frame must be Request::Handshake matching PROTOCOL_VERSION.
+    let first_req: Request = match read_frame(&mut stream) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+        Err(e) => return Err(Box::new(e)),
+    };
+
+    match first_req {
+        Request::Handshake { version } if version == PROTOCOL_VERSION => {
+            write_frame(
+                &mut stream,
+                &Response::HandshakeAck {
+                    version: PROTOCOL_VERSION,
+                },
+            )?;
+            stream.flush()?;
+        }
+        Request::Handshake { version } => {
+            let nack = Response::HandshakeNack {
+                expected: PROTOCOL_VERSION,
+                received: version,
+                reason: format!(
+                    "protocol version mismatch: expected {}, got {}",
+                    PROTOCOL_VERSION, version
+                ),
+            };
+            let _ = write_frame(&mut stream, &nack);
+            let _ = stream.flush();
+            return Err(format!(
+                "handshake version mismatch: expected {}, got {}",
+                PROTOCOL_VERSION, version
+            )
+            .into());
+        }
+        other => {
+            let nack = Response::HandshakeNack {
+                expected: PROTOCOL_VERSION,
+                received: 0,
+                reason: "initial message must be Request::Handshake".to_string(),
+            };
+            let _ = write_frame(&mut stream, &nack);
+            let _ = stream.flush();
+            return Err(format!("expected handshake as first frame, got: {:?}", other).into());
+        }
+    }
+
     loop {
         let req: Request = match read_frame(&mut stream) {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // Parent closed the connection. Clean shutdown.
-                return Ok(());
+                return Ok(false);
             }
             Err(e) => return Err(Box::new(e)),
         };
@@ -86,7 +135,7 @@ fn handle_connection(
         if matches!(req, Request::Shutdown) {
             write_frame(&mut stream, &resp)?;
             stream.flush()?;
-            return Ok(());
+            return Ok(true);
         }
         write_frame(&mut stream, &resp)?;
         stream.flush()?;
@@ -95,6 +144,19 @@ fn handle_connection(
 
 fn dispatch(req: &Request, sensor: &GitSensor) -> Response {
     match req {
+        Request::Handshake { version } => {
+            if *version == PROTOCOL_VERSION {
+                Response::HandshakeAck {
+                    version: PROTOCOL_VERSION,
+                }
+            } else {
+                Response::HandshakeNack {
+                    expected: PROTOCOL_VERSION,
+                    received: *version,
+                    reason: "protocol version mismatch".to_string(),
+                }
+            }
+        }
         Request::GetLatestCommitInfo => match sensor.get_latest_commit_info() {
             Ok((commit, timestamp)) => Response::LatestCommitInfo { commit, timestamp },
             Err(e) => Response::Error(e.to_string()),

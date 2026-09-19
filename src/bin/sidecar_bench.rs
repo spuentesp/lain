@@ -16,7 +16,7 @@
 //! child at a temp path and tears it down on exit.
 
 use lain::git::GitSensor;
-use lain::sidecar_proto::{read_frame, write_frame, Request, Response};
+use lain::sidecar_proto::{read_frame, write_frame, Request, Response, PROTOCOL_VERSION};
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut session = Session::new(stream);
+    session.handshake()?;
 
     // Run baseline first (in-process, no IPC) so the comparison
     // table is in-process-vs-IPC, not the other way around.
@@ -213,6 +214,36 @@ struct Session {
 impl Session {
     fn new(stream: UnixStream) -> Self {
         Self { stream }
+    }
+
+    fn handshake(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let req = Request::Handshake {
+            version: PROTOCOL_VERSION,
+        };
+        write_frame(&mut self.stream, &req)?;
+        self.stream.flush()?;
+        match read_frame(&mut self.stream)? {
+            Response::HandshakeAck { version } => {
+                if version != PROTOCOL_VERSION {
+                    return Err(format!(
+                        "handshake ack version mismatch: expected {}, got {}",
+                        PROTOCOL_VERSION, version
+                    )
+                    .into());
+                }
+                Ok(())
+            }
+            Response::HandshakeNack {
+                expected,
+                received,
+                reason,
+            } => Err(format!(
+                "handshake nack: expected {}, received {}, reason: {}",
+                expected, received, reason
+            )
+            .into()),
+            other => Err(format!("expected handshake response, got: {:?}", other).into()),
+        }
     }
 }
 

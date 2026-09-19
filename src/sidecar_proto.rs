@@ -18,13 +18,18 @@
 //! `use crate::sidecar_proto::*;`. If the prototype decides no-go, rip
 //! out the bin entries in Cargo.toml and delete this module.
 
+pub const PROTOCOL_VERSION: u32 = 1;
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Request from parent to child. Tagged enum so the dispatcher can
 /// route by variant without an explicit method id.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Request {
+    /// Initial handshake to verify protocol compatibility. Must be sent
+    /// immediately upon connection before any operational requests.
+    Handshake { version: u32 },
     /// "What's HEAD right now?" Returns the commit hash and the
     /// commit-time epoch seconds.
     GetLatestCommitInfo,
@@ -51,8 +56,18 @@ pub enum Request {
 /// Response from child to parent. Successful variant carries the
 /// method-specific payload; `Error` carries a human-readable string
 /// (libgit2 error message, panic message, etc.).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Response {
+    /// Acknowledges a successful handshake with the matching protocol version.
+    HandshakeAck {
+        version: u32,
+    },
+    /// Rejection of a handshake due to version mismatch or negotiation failure.
+    HandshakeNack {
+        expected: u32,
+        received: u32,
+        reason: String,
+    },
     LatestCommitInfo {
         commit: String,
         timestamp: i64,
@@ -73,7 +88,7 @@ pub enum Response {
 /// Mirrors `crate::git::CoChangePair` for the wire. Duplicated to keep
 /// this module dependency-free of the main crate's git module (the
 /// child doesn't need anything else).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoChangePair {
     pub file1: String,
     pub file2: String,
@@ -82,14 +97,14 @@ pub struct CoChangePair {
 
 /// Mirrors `crate::git::FileChange` for the wire. Same rationale as
 /// `CoChangePair`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileChange {
     pub path: PathBuf,
     pub change_type: ChangeType,
     pub staged: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChangeType {
     Added,
     Modified,
@@ -120,4 +135,64 @@ pub fn read_frame<R: std::io::Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> 
     let (msg, _) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_handshake_roundtrip() {
+        let req = Request::Handshake {
+            version: PROTOCOL_VERSION,
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &req).expect("write_frame failed");
+
+        let mut cursor = Cursor::new(buf);
+        let decoded: Request = read_frame(&mut cursor).expect("read_frame failed");
+        assert_eq!(req, decoded);
+
+        let ack = Response::HandshakeAck {
+            version: PROTOCOL_VERSION,
+        };
+        let mut ack_buf = Vec::new();
+        write_frame(&mut ack_buf, &ack).expect("write ack failed");
+        let mut ack_cursor = Cursor::new(ack_buf);
+        let decoded_ack: Response = read_frame(&mut ack_cursor).expect("read ack failed");
+        assert_eq!(ack, decoded_ack);
+    }
+
+    #[test]
+    fn test_handshake_nack_roundtrip() {
+        let nack = Response::HandshakeNack {
+            expected: PROTOCOL_VERSION,
+            received: 999,
+            reason: "unsupported protocol version 999".to_string(),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &nack).expect("write nack failed");
+
+        let mut cursor = Cursor::new(buf);
+        let decoded: Response = read_frame(&mut cursor).expect("read nack failed");
+        assert_eq!(nack, decoded);
+    }
+
+    #[test]
+    fn test_frames_roundtrip() {
+        let req = Request::GetChangedFilesSince {
+            since_hash: "abc1234".to_string(),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &req).unwrap();
+        let decoded: Request = read_frame(&mut Cursor::new(buf)).unwrap();
+        assert_eq!(req, decoded);
+
+        let resp = Response::ChangedFiles(vec![PathBuf::from("foo/bar.rs")]);
+        let mut resp_buf = Vec::new();
+        write_frame(&mut resp_buf, &resp).unwrap();
+        let decoded_resp: Response = read_frame(&mut Cursor::new(resp_buf)).unwrap();
+        assert_eq!(resp, decoded_resp);
+    }
 }
