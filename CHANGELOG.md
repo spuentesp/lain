@@ -327,6 +327,22 @@ All notable changes to LAIN are documented here. Versions follow
   agent knows the runtime target has more callers than the
   static graph shows.
 
+- **`insert_edges_batch` dropped-edge count contract pinned.**
+  The function silently drops edges whose endpoints are both
+  missing (or whose source is missing), and the production
+  caller `insert_edges_reporting` emits a `warn!` carrying the
+  count. The function returns the count but no test was
+  pinning that contract — iter 17 found the silent-drop
+  behaviour the hard way when an `assess_change` fixture
+  forgot to upsert one endpoint. Pinned by
+  `insert_edges_batch_reports_dropped_count_for_orphan_edges`:
+  - Source present, target missing: NOT dropped; held for
+    the federation's `project_repo` drain.
+  - Source missing, target present: dropped (orphan — we
+    can't project a source we don't have).
+  - Source missing, target missing: dropped (orphan).
+  - Source present, target present: inserted normally.
+
 ## [0.7.4] — 2026-09-16
 
 ### Added
