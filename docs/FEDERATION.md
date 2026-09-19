@@ -628,12 +628,25 @@ the process. The original stuck `spawn_blocking` thread is left to
 finish when libgit2 returns; this is a mitigation, not a root-cause
 fix (libgit2 is fundamentally non-cancellable from Rust).
 
+**Watchdog (added shortly after the mitigation):** `LainServer`
+also spawns a watchdog task that probes the parking_lot `GitSensor`
+mutex with `try_lock` every 5 s. If the mutex has been continuously
+held for longer than `LAIN_GIT_SENSOR_BUSY_THRESHOLD_SECS`
+(default 30 s, well below the 60 s `index_timeout()` budget), the
+watchdog emits a single `tracing::warn!` per hold with the elapsed
+time and a pointer to `scripts/debug-hung-server.sh`. Operators see
+the hang at ~30 s instead of waiting the full 5-minute budget. The
+warning is `warned`-once: cleared when the mutex is observed free, so
+a single transient hold doesn't spam the log.
+
 **Action:**
 
 - Confirm the version is **0.7.5 or later** — the mitigation landed
   there. Older versions silently pile up blocked tasks on every
   rust-analyzer diagnostic notification and present as the original
-  "process in `Dl` state, port never opens" symptom.
+  "process in `Dl` state, port never opens" symptom. The watchdog
+  landed one release after the mitigation; check `git log
+  --grep='watchdog'` if you need the exact version.
 - For diagnosis, run `scripts/debug-hung-server.sh <repos.yaml>`.
   The script launches `lain server` with `--log-level debug
   --reindex-timeout 0`, captures the log, polls for the
