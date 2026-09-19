@@ -919,6 +919,18 @@ impl LainMcpServer {
         let occupancy = Arc::clone(server.occupancy());
         let last_outcome = Arc::clone(server.refresh_handle().last_outcome());
         let annotations = Arc::clone(server.annotations());
+        // The watchdog spawned by `IngestHandle::start_git_sensor_watchdog`
+        // publishes a wall-clock timestamp on the free→held transition
+        // (Bug #2 from the 2026-09-18 postmortem). `get_health` reads
+        // this so the hang is visible to operator tooling without log
+        // scraping. Single-repo binding gets the live atomic; multi-repo
+        // (`for_repo`) callers keep this binding's atomic because the
+        // mutex in question is the orchestrator's, not per-repo.
+        //
+        // The atomic lives behind an Arc inside the IngestHandle, so a
+        // direct clone is enough — the watchdog writes to the same
+        // allocation this handle observes.
+        let git_busy_since_unix_nanos = Arc::clone(&server.ingest().git_busy_since_nanos);
         // `executor.ctx` is `pub`; mutate it in place so handlers reading
         // through `&ctx.presence` / `&ctx.occupancy` observe the live
         // registries.
@@ -926,6 +938,7 @@ impl LainMcpServer {
         self.executor.ctx.occupancy = occupancy;
         self.executor.ctx.last_outcome = last_outcome;
         self.executor.ctx.annotations = annotations;
+        self.executor.ctx.git_busy_since_unix_nanos = git_busy_since_unix_nanos;
         self.server = Some(server);
         self
     }

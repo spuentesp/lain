@@ -682,6 +682,29 @@ impl ToolExecutor {
         .map_err(Into::into)
     }
 
+    /// Format the Bug #2 hang banner for `get_health`. Returns
+    /// `None` when the parking_lot `GitSensor` mutex is free (atomic
+    /// is `0`); returns the banner text with the elapsed hold time
+    /// when it's non-zero. Computed live from the bound atomic so
+    /// the output reflects whatever the watchdog last published
+    /// (CAS on free→held, clear on held→free, clear on exit).
+    fn git_busy_since_banner(busy_since_unix_nanos: u64) -> Option<String> {
+        if busy_since_unix_nanos == 0 {
+            return None;
+        }
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let elapsed_nanos = now_nanos.saturating_sub(busy_since_unix_nanos);
+        let elapsed_secs = elapsed_nanos / 1_000_000_000;
+        Some(format!(
+            "⚠ Bug #2: GitSensor mutex held for {elapsed_secs}s — a prior index() \
+             call may be wedged in libgit2. Inspect /proc/<pid>/wchan or run \
+             scripts/debug-hung-server.sh."
+        ))
+    }
+
     pub async fn get_health(&self) -> Result<String, LainError> {
         let (nodes, edges) = self.ctx.graph.get_stats();
         let last_commit = self
@@ -770,6 +793,23 @@ impl ToolExecutor {
         // neither of which a stdio MCP client surfaces to the model.
         // This is the in-tool-output visibility path.
         if let Some(line) = self.ctx.last_outcome.lock().banner_line() {
+            output.push_str(&format!("- **{line}**\n"));
+        }
+
+        // Bug #2 hang banner (2026-09-18 postmortem): the
+        // `IngestHandle` watchdog publishes a wall-clock nanosecond
+        // timestamp when the parking_lot `GitSensor` mutex becomes
+        // continuously held and clears it on the held→free transition.
+        // Until now this was only visible in `tracing::warn!` output,
+        // which a stdio MCP client can't surface. Compute the elapsed
+        // hold from the bound atomic and emit a banner when it's
+        // non-zero — alertmanager / dashboards can grep this from
+        // `get_health` output without log scraping.
+        if let Some(line) = Self::git_busy_since_banner(
+            self.ctx
+                .git_busy_since_unix_nanos
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ) {
             output.push_str(&format!("- **{line}**\n"));
         }
 
@@ -1344,5 +1384,57 @@ mod tests {
         assert_eq!(repos[1]["capabilities"]["symbols"]["state"], "warming_up");
 
         drop(src_dirs);
+    }
+
+    /// Pin the Bug #2 banner contract: when the parking_lot
+    /// `GitSensor` mutex is free (`busy_since == 0`), the banner
+    /// helper returns `None` so `get_health` doesn't emit a false
+    /// alarm. The pre-fix review noted that the watchdog's
+    /// `git_busy_since_nanos` was a dead atomic; surfacing it via
+    /// `get_health` is now the operator-visible signal. This test
+    /// pins both halves of the contract.
+    #[test]
+    fn git_busy_since_banner_returns_none_when_mutex_free() {
+        assert!(
+            ToolExecutor::git_busy_since_banner(0).is_none(),
+            "atomic=0 must produce no banner; otherwise every idle \
+             server would report a phantom hang"
+        );
+    }
+
+    #[test]
+    fn git_busy_since_banner_formats_elapsed_seconds_when_held() {
+        // Pick a wall-clock timestamp 17 seconds in the past so the
+        // elapsed computation is deterministic regardless of test
+        // machine clock drift. The helper compares against
+        // `SystemTime::now()`, so the test's stability hinges on the
+        // math being `saturating_sub`, not a fixed literal.
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let busy_17s_ago = now_nanos.saturating_sub(17 * 1_000_000_000);
+        let banner = ToolExecutor::git_busy_since_banner(busy_17s_ago)
+            .expect("non-zero busy_since must produce a banner");
+        // The banner must reference Bug #2 so alertmanager can match
+        // it without parsing prose, and must include the elapsed
+        // time in seconds so dashboards can graph it.
+        assert!(
+            banner.contains("Bug #2"),
+            "banner must name Bug #2: {banner}"
+        );
+        assert!(
+            banner.contains("17s"),
+            "banner must include the 17s elapsed hold: {banner}"
+        );
+        // A future timestamp (clock skew, NTP step) must not panic or
+        // produce a negative elapsed — `saturating_sub` clamps at 0.
+        let future = now_nanos + 60 * 1_000_000_000;
+        let banner = ToolExecutor::git_busy_since_banner(future)
+            .expect("non-zero busy_since must produce a banner");
+        assert!(
+            banner.contains("0s"),
+            "future timestamp must clamp to 0s, not panic: {banner}"
+        );
     }
 }

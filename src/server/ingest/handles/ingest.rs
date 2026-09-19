@@ -100,6 +100,17 @@ impl IngestHandle {
         }
     }
 
+    /// Wall-clock nanosecond timestamp at which the parking_lot
+    /// `GitSensor` mutex became continuously held, or `0` if it's
+    /// free. See [`Self::start_git_sensor_watchdog`] for the writer.
+    /// Exposed so `get_health` can surface the hang to operator
+    /// tooling (alertmanager, dashboards) without requiring log
+    /// scraping.
+    pub fn git_busy_since_unix_nanos(&self) -> u64 {
+        self.git_busy_since_nanos
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Spawn a watchdog task that polls the parking_lot `GitSensor`
     /// mutex with `try_lock` and emits `tracing::warn!` when the
     /// mutex has been continuously held for longer than
