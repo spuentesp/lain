@@ -135,6 +135,9 @@ impl ToolExecutor {
     pub fn ui_sessions(&self) -> &AsyncMutex<HashMap<String, UiSession>> {
         &self.ctx.ui_sessions
     }
+    pub fn git(&self) -> &Arc<crate::server::git::AnyGitSensor> {
+        &self.ctx.git
+    }
     /// Record the port the HTTP transport is actually listening on, so
     /// tool output can link to `/ui/...` sessions. 0 (the default) means
     /// "no UI server" (stdio mode) — handlers then skip the link instead
@@ -699,8 +702,8 @@ impl ToolExecutor {
         let elapsed_nanos = now_nanos.saturating_sub(busy_since_unix_nanos);
         let elapsed_secs = elapsed_nanos / 1_000_000_000;
         Some(format!(
-            "⚠ Bug #2: GitSensor mutex held for {elapsed_secs}s — a prior index() \
-             call may be wedged in libgit2. Inspect /proc/<pid>/wchan or run \
+            "⚠ Bug #2: GitSensor held/unreachable for {elapsed_secs}s — a prior index() \
+             call may be wedged in libgit2 or sidecar process down. Inspect /proc/<pid>/wchan or run \
              scripts/debug-hung-server.sh."
         ))
     }
@@ -766,26 +769,51 @@ impl ToolExecutor {
             _ => last_commit.clone(),
         };
 
-        // Status reflects the last refresh outcome. Printing
-        // `Operational ✅` beside a re-index failure in the same
-        // payload is how a two-day-old graph went unnoticed.
+        // Status reflects the last refresh outcome and git sensor responsiveness.
+        let git_healthy = self.ctx.git.is_alive();
         let degraded = self.ctx.last_outcome.lock().is_degraded();
-        let status = if degraded {
-            "Degraded ⚠ (serving a stale graph — see the warning below)"
+        let status = if degraded || !git_healthy {
+            if !git_healthy {
+                "Degraded ⚠ (git sensor sidecar is down — see the warning below)"
+            } else {
+                "Degraded ⚠ (serving a stale graph — see the warning below)"
+            }
         } else {
             "Operational ✅"
         };
+        let git_sensor_display = match self.ctx.git.as_ref() {
+            crate::server::git::AnyGitSensor::InProcess(_) => "In-process (libgit2)".to_string(),
+            crate::server::git::AnyGitSensor::Sidecar(sidecar) => {
+                let sh = sidecar.health();
+                if sh.alive {
+                    format!(
+                        "Sidecar (PID {:?}, alive, respawns: {}, latency: {}µs)",
+                        sh.child_pid, sh.respawns_in_window, sh.last_call_duration_us
+                    )
+                } else {
+                    format!(
+                        "Sidecar (DEAD, consecutive failures: {}, respawns: {})",
+                        sh.consecutive_failures, sh.respawns_in_window
+                    )
+                }
+            }
+        };
         let mut output = format!(
-            "## Lain Server Health\n\n- **Workspace:** {}\n- **Build:** {}\n- **Status:** {}\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
+            "## Lain Server Health\n\n- **Workspace:** {}\n- **Build:** {}\n- **Status:** {}\n- **Git Sensor:** {}\n- **Static Nodes:** {}\n- **Static Edges:** {}\n- **Volatile Nodes (Overlay):** {}\n- **Last Enriched Commit:** {}\n- **NLP Model:** {}\n",
             workspace_display,
             crate::server::build_info::summary(),
             status,
+            git_sensor_display,
             nodes,
             edges,
             overlay_stats.node_count,
             commit_status,
             embedder_status
         );
+
+        if !git_healthy {
+            output.push_str("- **⚠ GitSensor sidecar daemon is DOWN (unreachable)**\n");
+        }
 
         // Last refresh outcome (from the spawn in run_stdio / run_http).
         // Step 1 of the staleness fix: the re-index failure was previously

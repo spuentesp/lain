@@ -145,9 +145,12 @@ impl IngestHandle {
                 cancel,
             ))
         } else {
-            tokio::spawn(async move {
-                cancel.cancelled().await;
-            })
+            tokio::spawn(run_sidecar_watchdog(
+                git,
+                busy_since,
+                std::time::Duration::from_secs(5),
+                cancel,
+            ))
         }
     }
 
@@ -369,6 +372,55 @@ async fn run_git_sensor_watchdog<T>(
     busy_since.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Bug #2 sidecar watchdog loop. Extracted so behavior can be unit-tested.
+/// When running in `Sidecar` mode, there is no parent in-process mutex to wedge.
+/// Instead, this loop periodically polls `git.sidecar_health()`:
+/// - If `alive` is false, it writes the timestamp to `busy_since` (just like the
+///   mutex watchdog) and logs a warning.
+/// - When `alive` recovers to true, it clears `busy_since`.
+/// Honors `cancel` and clears `busy_since` on exit.
+async fn run_sidecar_watchdog(
+    git: Arc<AnyGitSensor>,
+    busy_since: Arc<AtomicU64>,
+    poll_interval: std::time::Duration,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let mut warned = false;
+    loop {
+        if let Some(health) = git.sidecar_health() {
+            if !health.alive {
+                let now_nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let _ = busy_since.compare_exchange(
+                    0,
+                    now_nanos,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if !warned {
+                    tracing::warn!(
+                        child_pid = ?health.child_pid,
+                        failures = health.consecutive_failures,
+                        respawns = health.respawns_in_window,
+                        "GitSensor sidecar process is not alive. Calls will attempt auto-recovery or fail-fast."
+                    );
+                    warned = true;
+                }
+            } else {
+                busy_since.store(0, std::sync::atomic::Ordering::Relaxed);
+                warned = false;
+            }
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+    busy_since.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +609,23 @@ mod tests {
             !captured.contains("GitSensor parking_lot mutex has been continuously held"),
             "watchdog must NOT warn for a brief hold, got:\n{captured}"
         );
+    }
+
+    #[tokio::test]
+    async fn sidecar_watchdog_clears_on_cancel() {
+        let repo_root = std::env::current_dir().unwrap();
+        let git = Arc::new(AnyGitSensor::from_env(&repo_root).unwrap());
+        let busy_since = Arc::new(AtomicU64::new(0));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(run_sidecar_watchdog(
+            git,
+            Arc::clone(&busy_since),
+            std::time::Duration::from_millis(20),
+            cancel.clone(),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel.cancel();
+        handle.await.expect("watchdog task panicked");
+        assert_eq!(busy_since.load(Ordering::Relaxed), 0);
     }
 }

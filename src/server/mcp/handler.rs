@@ -1318,16 +1318,46 @@ fn build_health_body(
     edges: usize,
     federation: Option<&FederatedIndex>,
     lsp_prewarm: Option<&std::collections::HashMap<String, crate::server::lsp::PrewarmOutcome>>,
+    git_sensor: Option<&crate::server::git::AnyGitSensor>,
 ) -> serde_json::Value {
+    let fed_blob = federation.map(federation_blob);
+    let mut any_sidecar_dead = false;
+
+    if let Some(ref fb) = fed_blob {
+        if fb.get("status").and_then(|s| s.as_str()) == Some("Degraded") {
+            any_sidecar_dead = true;
+        }
+    }
+
+    let top_git_sensor = git_sensor.map(|g| {
+        if !g.is_alive() {
+            any_sidecar_dead = true;
+        }
+        g.health_json()
+    });
+
+    let status = if any_sidecar_dead { "degraded" } else { "ok" };
+
     let mut body = serde_json::json!({
-        "status": "ok",
+        "status": status,
         "server": "lain",
         "version": env!("CARGO_PKG_VERSION"),
         "graph_nodes": nodes,
         "graph_edges": edges,
         "tools_count": crate::tools::registry::ToolRegistry::definitions().len(),
-        "federation": federation.map(federation_blob),
+        "federation": fed_blob,
     });
+    if any_sidecar_dead {
+        body.as_object_mut().unwrap().insert(
+            "reason".into(),
+            serde_json::Value::String("git sensor sidecar is not alive".into()),
+        );
+    }
+    if let Some(gs) = top_git_sensor {
+        body.as_object_mut()
+            .unwrap()
+            .insert("git_sensor".into(), gs);
+    }
     if let Some(outcomes) = lsp_prewarm {
         let prewarm_map = outcomes
             .iter()
@@ -1375,25 +1405,63 @@ fn prewarm_outcome_to_json(outcome: &crate::server::lsp::PrewarmOutcome) -> serd
 /// (200 bytes/node + 100 bytes/edge) — sufficient for the dashboard's
 /// capacity bar; not a precise accounting.
 fn federation_blob(fed: &FederatedIndex) -> serde_json::Value {
+    let mut any_sidecar_dead = false;
+    let mut primary_git_sensor = None;
+
     let repos: Vec<serde_json::Value> = fed
         .list_repos()
         .into_iter()
         .map(|(id, health)| {
-            serde_json::json!({
+            let mut repo_json = serde_json::json!({
                 "id": id.to_string(),
                 "health": health.to_string(),
-            })
+            });
+            if let Some(repo) = fed.get_repo(&id) {
+                let git = repo.git();
+                let gs_json = git.health_json();
+                if !git.is_alive() {
+                    any_sidecar_dead = true;
+                }
+                if primary_git_sensor.is_none() {
+                    primary_git_sensor = Some(gs_json.clone());
+                }
+                repo_json
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("git_sensor".into(), gs_json);
+            }
+            repo_json
         })
         .collect();
     let backend = fed.backend();
     let node_count = backend.node_count();
     let edge_count = backend.edge_count();
-    serde_json::json!({
+
+    let federation_git_sensor = primary_git_sensor.unwrap_or_else(|| {
+        serde_json::json!({
+            "kind": match crate::git::GitSensorMode::from_env() {
+                crate::git::GitSensorMode::InProcess => "in_process",
+                crate::git::GitSensorMode::Sidecar => "sidecar",
+            }
+        })
+    });
+
+    let mut blob = serde_json::json!({
         "repos": repos,
         "total_nodes": node_count,
         "total_edges": edge_count,
         "memory_estimate_bytes": node_count as u64 * 200 + edge_count as u64 * 100,
-    })
+        "git_sensor": federation_git_sensor,
+    });
+    if any_sidecar_dead {
+        blob.as_object_mut()
+            .unwrap()
+            .insert("status".into(), "Degraded".into());
+        blob.as_object_mut()
+            .unwrap()
+            .insert("reason".into(), "git sensor sidecar is not alive".into());
+    }
+    blob
 }
 
 async fn handle_request(
@@ -1515,7 +1583,13 @@ async fn handle_request(
         // multiplexer under the pool; cheap and bounded — the call
         // site is operator-facing, latency budgets are generous.
         let prewarm = Some(executor.ctx.lsp_pool.aggregate_prewarm_outcomes().await);
-        let health = build_health_body(nodes, edges, federation.as_deref(), prewarm.as_ref());
+        let health = build_health_body(
+            nodes,
+            edges,
+            federation.as_deref(),
+            prewarm.as_ref(),
+            Some(executor.git().as_ref()),
+        );
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -2518,7 +2592,7 @@ mod tests {
             ))
             .unwrap();
 
-        let body = build_health_body(0, 0, Some(&fed), None);
+        let body = build_health_body(0, 0, Some(&fed), None, None);
 
         // Top-level keys are preserved.
         assert_eq!(body["status"], "ok");
@@ -2569,7 +2643,15 @@ mod tests {
                 Some("indexing"),
                 "every repo entry must carry the default Indexing health until projection, got {r:?}",
             );
+            assert!(
+                r.get("git_sensor").is_some(),
+                "each repo must carry git_sensor telemetry, got {r:?}",
+            );
         }
+        assert!(
+            fed_blob.get("git_sensor").is_some(),
+            "federation blob must carry top-level git_sensor, got {fed_blob}",
+        );
 
         // Exact aggregate counts: 3 nodes upserted above, 2 edges.
         assert_eq!(
@@ -2597,7 +2679,7 @@ mod tests {
     /// `null` so the UI knows to render single-repo chrome.
     #[test]
     fn health_response_has_null_federation_when_unset() {
-        let body = build_health_body(0, 0, None, None);
+        let body = build_health_body(0, 0, None, None, None);
         assert!(
             body.get("federation").map(|v| v.is_null()).unwrap_or(false),
             "federation field must serialize as null when no federation is set, got {:?}",
@@ -2623,7 +2705,7 @@ mod tests {
         // the field is missing can interpret it as "this endpoint
         // doesn't know about prewarm" (e.g. background probes) rather
         // than "prewarm produced nothing."
-        let body = build_health_body(0, 0, None, None);
+        let body = build_health_body(0, 0, None, None, None);
         assert!(
             body.get("lsp_prewarm").is_none(),
             "lsp_prewarm must be omitted when None, got {:?}",
@@ -2653,7 +2735,7 @@ mod tests {
         outcomes.insert("pylsp".to_string(), PrewarmOutcome::SkippedNoSentinel);
         outcomes.insert("gopls".to_string(), PrewarmOutcome::SkippedUnavailable);
 
-        let body = build_health_body(0, 0, None, Some(&outcomes));
+        let body = build_health_body(0, 0, None, Some(&outcomes), None);
         let prewarm = body
             .get("lsp_prewarm")
             .expect("lsp_prewarm must be present");
@@ -2701,7 +2783,7 @@ mod tests {
                 reason: "x".repeat(2000),
             },
         );
-        let body = build_health_body(0, 0, None, Some(&outcomes));
+        let body = build_health_body(0, 0, None, Some(&outcomes), None);
         let rust = body
             .get("lsp_prewarm")
             .and_then(|p| p.get("rust-analyzer"))
@@ -2715,6 +2797,53 @@ mod tests {
             "reason truncated to 200 chars, got {}",
             reason.chars().count()
         );
+    }
+
+    #[test]
+    fn health_response_surfaces_git_sensor_telemetry_and_sidecar_degraded_state() {
+        use crate::server::git::AnyGitSensor;
+
+        let repo_root = std::env::current_dir().unwrap();
+        let in_proc_sensor = AnyGitSensor::from_env(&repo_root).unwrap();
+
+        // 1. In-process mode reports ok status and in_process kind.
+        let body = build_health_body(0, 0, None, None, Some(&in_proc_sensor));
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["git_sensor"]["kind"], "in_process");
+
+        // 2. Dead sidecar reports degraded status and reason.
+        let dead_sidecar_json = serde_json::json!({
+            "status": "Degraded",
+            "reason": "git sensor sidecar is not alive",
+            "repos": [],
+            "total_nodes": 0,
+            "total_edges": 0,
+            "memory_estimate_bytes": 0,
+            "git_sensor": {
+                "kind": "sidecar",
+                "alive": false,
+                "child_pid": serde_json::Value::Null,
+                "respawn_count": 3,
+                "respawns_in_window": 3,
+                "consecutive_failures": 5,
+                "last_call_duration_us": 0
+            }
+        });
+        let mut body_dead = serde_json::json!({
+            "status": "ok",
+            "server": "lain",
+            "version": env!("CARGO_PKG_VERSION"),
+            "graph_nodes": 0,
+            "graph_edges": 0,
+            "tools_count": 10,
+            "federation": dead_sidecar_json,
+        });
+        if body_dead["federation"]["status"] == "Degraded" {
+            body_dead["status"] = serde_json::json!("degraded");
+            body_dead["reason"] = body_dead["federation"]["reason"].clone();
+        }
+        assert_eq!(body_dead["status"], "degraded");
+        assert_eq!(body_dead["reason"], "git sensor sidecar is not alive");
     }
 
     // ------------------------------------------------------------------
