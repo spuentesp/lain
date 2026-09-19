@@ -124,6 +124,22 @@ inventory = "0.2"
 name = "lain"
 path = "src/lib.rs"
 
+[[bin]]
+name = "lain"
+path = "src/main.rs"
+
+# Bug #2 sidecar prototype. See plan
+# `moon-knight-lightray-ghost-rider.md` for design. These are throwaway
+# binaries that may be ripped out after the prototype decides go/no-go
+# on the full sidecar implementation.
+[[bin]]
+name = "lain-git-sidecar"
+path = "src/bin/lain-git-sidecar.rs"
+
+[[bin]]
+name = "sidecar_bench"
+path = "src/bin/sidecar_bench.rs"
+
 [features]
 # No features defined yet. (The `test-utils` feature was removed in
 # the docs/dead-code sweep — the only thing it gated was a

@@ -185,6 +185,25 @@ All notable changes to LAIN are documented here. Versions follow
   `tools::handlers::explain_dispatch` pins the up-front-resolve
   contract so that regression fails at `cargo test` time.
 
+- **Bug #2 sidecar prototype (decision: GO).** Throwaway
+  prototype that hosts `git2::Repository` in a child process
+  and answers libgit2 calls over a Unix domain socket
+  (`src/bin/lain-git-sidecar.rs` + `src/bin/sidecar_bench.rs`).
+  Wire protocol in `src/sidecar_proto.rs`. Benchmark at
+  1000 iters on the lain repo itself: **average p95 IPC
+  overhead = 10.3 µs** across the 5 `GitSensor` methods called
+  from `build_core_memory`'s offthread closures. Verdict from the
+  plan's decision tree: **GO** (< 500 µs avg p95). Findings
+  write-up at `docs/notes/2026-09-19-sidecar-prototype-bench.md`.
+  Full architecture design (the production shape, schema
+  versioning, child lifecycle, federation health surface) at
+  `docs/notes/2026-09-19-sidecar-architecture.md`. Next cycle:
+  implement `SidecarGitSensor` and the `AnyGitSensor` enum as
+  drop-in replacements for `Arc<Mutex<GitSensor>>`, default
+  mode stays `InProcess` until soak-tested.
+  `tools::handlers::explain_dispatch` pins the up-front-resolve
+  contract so that regression fails at `cargo test` time.
+
 - **Federation drain contract pinned.** An edge whose source is
   in the local index but whose target is missing now reliably
   ends up in `take_pending_external_edges` instead of being
