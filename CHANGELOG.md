@@ -235,6 +235,23 @@ All notable changes to LAIN are documented here. Versions follow
   touch `release.yml` and should land as their own PR with a
   dry-run review before the next release ships.
 
+- **Bug #2 hang now visible in `get_health`.** The parking_lot
+  `GitSensor` watchdog spawned by `IngestHandle::start_git_sensor_watchdog`
+  publishes a wall-clock nanosecond timestamp on the free→held
+  transition (CAS, so only the first observer wins) and clears
+  it on the held→free transition. Until now that atomic was
+  observable only via `tracing::warn!`, which a stdio MCP client
+  can't surface. `ToolContext` now carries the live atomic
+  (cloned via `LainMcpServer::with_server`), and `get_health`
+  appends a `⚠ Bug #2: GitSensor mutex held for {N}s — ...`
+  banner whenever it's non-zero. Alertmanager can match the
+  literal `Bug #2` without parsing prose; dashboards can
+  graph the elapsed-seconds field via a regex. New helper
+  `ToolExecutor::git_busy_since_banner` is unit-tested for
+  both the free-mutex (`None`) and held-mutex (banner with
+  elapsed seconds) branches, plus the NTP-step / future-timestamp
+  clamp.
+
 ### Fixed
 
 - **Relative `workspace_dir` paths in `repos.yaml` no longer
