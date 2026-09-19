@@ -86,6 +86,20 @@ pub struct ToolContext {
     /// swaps in the live `Arc<Mutex<RefreshOutcome>>` from the
     /// constructed `LainServer`.
     pub last_outcome: Arc<parking_lot::Mutex<crate::server::refresh::RefreshOutcome>>,
+    /// Wall-clock nanosecond timestamp at which the parking_lot
+    /// `GitSensor` mutex became continuously held (Bug #2 from the
+    /// 2026-09-18 postmortem), or `0` if the mutex is free. The
+    /// watchdog spawned by [`crate::server::ingest::handles::IngestHandle::start_git_sensor_watchdog`]
+    /// publishes this on the free→held transition (CAS, so only the
+    /// first observer wins) and clears it on the held→free
+    /// transition. `get_health` reads it to surface the hang to
+    /// operator tooling (alertmanager, dashboards) without requiring
+    /// log scraping. Initialized to a fresh zero atomic so standalone
+    /// / sidecar executors that never wire a `LainServer` keep
+    /// constructing successfully; `LainMcpServer::with_server`
+    /// replaces this with the live atomic from the constructed
+    /// `LainServer`'s `IngestHandle`.
+    pub git_busy_since_unix_nanos: Arc<std::sync::atomic::AtomicU64>,
     /// Single owner for startup indexing state. Health, discovery, and the
     /// readiness gate read snapshots from this handle.
     pub readiness: crate::server::readiness::ReadinessHandle,
@@ -180,6 +194,11 @@ impl ToolContext {
             last_outcome: Arc::new(parking_lot::Mutex::new(
                 crate::server::refresh::RefreshOutcome::skipped(),
             )),
+            // Default to a fresh zero atomic. `LainMcpServer::with_server`
+            // swaps in the live atomic from the constructed
+            // `LainServer`'s `IngestHandle` once the orchestrator is
+            // built; until then `get_health` reads 0 ("mutex free").
+            git_busy_since_unix_nanos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             readiness: crate::server::readiness::ReadinessHandle::default(),
             // Set by `with_federation` when the server runs in
             // federation mode; single-workspace executors leave it None
