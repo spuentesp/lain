@@ -627,6 +627,35 @@ impl AnyGitSensor {
         }
     }
 
+    /// Returns `true` if this sensor is operational and responsive.
+    pub fn is_alive(&self) -> bool {
+        match self {
+            Self::InProcess(_) => true,
+            Self::Sidecar(sensor) => sensor.health().alive,
+        }
+    }
+
+    /// Format structured health and telemetry for this sensor.
+    pub fn health_json(&self) -> serde_json::Value {
+        match self {
+            Self::InProcess(_) => serde_json::json!({
+                "kind": "in_process",
+            }),
+            Self::Sidecar(sensor) => {
+                let sh = sensor.health();
+                serde_json::json!({
+                    "kind": "sidecar",
+                    "alive": sh.alive,
+                    "child_pid": sh.child_pid,
+                    "respawn_count": sh.respawns_in_window,
+                    "respawns_in_window": sh.respawns_in_window,
+                    "consecutive_failures": sh.consecutive_failures,
+                    "last_call_duration_us": sh.last_call_duration_us,
+                })
+            }
+        }
+    }
+
     /// Borrow the underlying in-process mutex handle if in `InProcess` mode.
     pub fn as_in_process(&self) -> Option<&Arc<parking_lot::Mutex<GitSensor>>> {
         match self {

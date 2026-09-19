@@ -267,13 +267,19 @@ struct SidecarInner {
 }
 
 impl SidecarInner {
-    fn health(&self) -> SidecarHealth {
+    fn health(&mut self) -> SidecarHealth {
         let now = Instant::now();
         let respawns = self
             .respawn_history
             .iter()
             .filter(|t| now.duration_since(**t) <= RESPAWN_WINDOW)
             .count();
+
+        if let Some(child) = self.child.as_mut() {
+            if let Ok(Some(_)) = child.try_wait() {
+                self.stream = None;
+            }
+        }
 
         SidecarHealth {
             alive: self.stream.is_some() && self.consecutive_failures == 0,
