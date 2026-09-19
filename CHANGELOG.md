@@ -290,6 +290,23 @@ All notable changes to LAIN are documented here. Versions follow
   and resolve against the staging placeholder, which is the
   same answer they got before.
 
+- **`explain_symbol` / `get_blast_radius` append `### Open
+  annotations`.** The PR #66 carry-over from `FOLLOWUPS.md`
+  is now end-to-end pinned. Both tools look up open annotations
+  targeting the resolved symbol via
+  `open_annotations_for_symbol` (federation-mode only, by
+  design — the dedicated `add_annotation` / `list_annotations`
+  MCP tools already route by repo). When at least one open
+  annotation matches, the markdown body grows a
+  `### Open annotations` section listing each entry's
+  `[@author, date, kind=…] body_excerpt`. When none match, the
+  section is omitted entirely (`format_open_annotations_section`
+  returns an empty string for `&[]`). The end-to-end test in
+  `tests/annotations_e2e.rs` walks the JSON-RPC dispatcher
+  through all three branches (no-annotation / open-annotation /
+  resolved-annotation) so the contract can't regress
+  silently.
+
 ### Fixed
 
 - **Relative `workspace_dir` paths in `repos.yaml` no longer
