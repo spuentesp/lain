@@ -174,6 +174,17 @@ All notable changes to LAIN are documented here. Versions follow
   contract so a future refactor that drops the branch fails loud
   instead of silently regressing.
 
+- **`explain_dispatch` NotFound contract pinned.** A missing
+  symbol now surfaces as `NotFound` from `explain_dispatch`
+  rather than a confident `verdict: "insufficient_evidence"`
+  report. `explain_dispatch` resolves the symbol up-front via
+  `resolve_node`, so a future refactor that replaces the
+  early-return with a fall-through to `build_with_store` would
+  emit a confident "no callers" answer for a symbol that doesn't
+  exist at all. The new test in
+  `tools::handlers::explain_dispatch` pins the up-front-resolve
+  contract so that regression fails at `cargo test` time.
+
 ### Tier-3 follow-ups
 
 - **`NodeType::Synthetic` for hub nodes.** Hub nodes (`Hub:
