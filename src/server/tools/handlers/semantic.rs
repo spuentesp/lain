@@ -1175,6 +1175,106 @@ mod m6_tests {
         );
     }
 
+    /// Cross-tool contract: when `assess_change` reports
+    /// `risk=low*` (heuristic-only), the same symbol fed to
+    /// `explain_dispatch` must return one of the heuristic
+    /// verdicts — `heuristic_only` or `runtime_confirmed` (if a
+    /// matching runtime span exists). The static-only verdicts
+    /// (`static_only`, `mixed`) and `no_callers` / `insufficient_evidence`
+    /// are wrong — assess_change said `low*` precisely because the
+    /// static graph is empty but the heuristic sensor saw
+    /// something. Pinned here so a future refactor that decouples
+    /// the two paths (e.g. one stops calling the other) is caught
+    /// by CI.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_low_star_implies_explain_dispatch_sees_heuristic() {
+        use crate::schema::{EdgeProvenance, NodeType, RepoNamespace};
+
+        // Re-use the heuristic-only fixture from iter 21.
+        let tmp = std::env::temp_dir().join("test_assess_low_star_to_explain");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = RepoNamespace::for_test();
+
+        let target = GraphNode::new(
+            NodeType::Function,
+            "fire_handler".to_string(),
+            "/src/handler.py".to_string(),
+        );
+        graph.upsert_node(target.clone()).unwrap();
+
+        let hub_name = "Hub:message_bus_publisher";
+        let hub_id = GraphNode::generate_id(&NodeType::Synthetic, "__hub__", hub_name, None, &ns);
+        let caller_id = GraphNode::generate_id(&NodeType::File, "/src/caller.py", "", None, &ns);
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::File, String::new(), "/src/caller.py".to_string());
+                n.id = caller_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .upsert_node({
+                let mut n =
+                    GraphNode::new(NodeType::Synthetic, hub_name.to_string(), String::new());
+                n.id = hub_id.clone();
+                n
+            })
+            .unwrap();
+        graph
+            .insert_edges_batch(&[GraphEdge {
+                edge_type: EdgeType::BusTopic,
+                source_id: caller_id,
+                target_id: target.id.clone(),
+                weight: Some(0.7),
+                cross_repo: false,
+                provenance: Some(EdgeProvenance::Heuristic {
+                    detector: "message_bus_publisher".to_string(),
+                    confidence: 0.7,
+                }),
+            }])
+            .unwrap();
+
+        // 1) assess_change must report risk=low* — heuristic-only.
+        let mut a = Map::new();
+        a.insert(
+            "symbol".to_string(),
+            Value::String("fire_handler".to_string()),
+        );
+        let assess_out = assess_change(&graph, &overlay, std::path::Path::new("/"), &a, None)
+            .await
+            .expect("assess_change on a known symbol must succeed");
+        assert!(
+            assess_out.contains("heuristic-only") || assess_out.contains("verdict: **low*"),
+            "expected risk=low* — heuristic-only; got:\n{assess_out}"
+        );
+
+        // 2) explain_dispatch on the same symbol must surface
+        // the heuristic caller (heuristic_only or
+        // runtime_confirmed — there are no runtime spans in this
+        // fixture so heuristic_only is the right answer).
+        let explain_out = crate::server::tools::handlers::explain_dispatch::explain_dispatch(
+            &graph,
+            &overlay,
+            "fire_handler",
+        )
+        .await
+        .expect("explain_dispatch on a known symbol must succeed");
+
+        assert!(
+            explain_out.contains("heuristic_only") || explain_out.contains("runtime_confirmed"),
+            "explain_dispatch must surface the heuristic caller \
+             (verdict heuristic_only or runtime_confirmed); got:\n{explain_out}"
+        );
+        assert!(
+            !explain_out.contains("verdict: no_callers"),
+            "explain_dispatch must NOT report no_callers when \
+             assess_change reported risk=low*; got:\n{explain_out}"
+        );
+    }
+
     /// Helper that wraps `search_code` with `cross_encoder` and
     /// `embedding_cache` defaulted to empty (so the lexical path
     /// is the only one exercised — that's what these unit tests
