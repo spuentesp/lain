@@ -391,3 +391,139 @@ fn multi_repo_target_without_repo_id_surfaces_config_error() {
 
     drop(guard);
 }
+
+/// Pin the contract that `explain_symbol` / `get_blast_radius`
+/// markdown bodies grow a `### Open annotations` section when an
+/// open annotation targets the resolved symbol. The wiring lives
+/// at `src/server/tools/handlers/registry_impl.rs:1439`
+/// (`open_annotations_for_symbol`) and the section is rendered by
+/// `annotation_tools::format_open_annotations_section` (capped at 8
+/// summaries per target). The section is omitted entirely when no
+/// open annotation matches — `format_open_annotations_section`
+/// returns an empty string for `&[]`.
+///
+/// Three branches:
+/// 1. With an open annotation targeting `ann_target`, both
+///    `explain_symbol` and `get_blast_radius` output include
+///    `### Open annotations` followed by the body excerpt.
+/// 2. After `resolve_annotation`, the section is gone — the
+///    open-list filter excludes it.
+/// 3. For a symbol with no annotations (`not_a_real_symbol`),
+///    neither output includes the section header at all.
+///
+/// This is the test the FOLLOWUPS.md "Auto-include in
+/// `explain_symbol` / `get_blast_radius` markdown" entry's
+/// acceptance criterion called for. Pre-fix code returned no
+/// section at all (the helper existed but no test pinned the
+/// end-to-end contract); post-fix the section appears in both
+/// tools' bodies when there's at least one matching open
+/// annotation.
+#[test]
+fn open_annotations_section_appears_in_explain_and_blast_radius() {
+    let fixture = AnnotationFixture::build();
+    let (host, guard) = boot_and_wait(&fixture);
+    let session = register_session(&host, "annotations-markdown");
+
+    // ── Negative path: no annotations yet ───────────────────────────
+    let explain_empty = tools_call_text(
+        &host,
+        "explain_symbol",
+        serde_json::json!({"symbol": "ann_target"}),
+    );
+    assert!(
+        !explain_empty.contains("### Open annotations"),
+        "explain_symbol must NOT include the section when no open \
+         annotations target the symbol; got:\n{explain_empty}"
+    );
+    let blast_empty = tools_call_text(
+        &host,
+        "get_blast_radius",
+        serde_json::json!({"symbol": "ann_target"}),
+    );
+    assert!(
+        !blast_empty.contains("### Open annotations"),
+        "get_blast_radius must NOT include the section when no \
+         open annotations target the symbol; got:\n{blast_empty}"
+    );
+
+    // ── Add an open annotation targeting the symbol ─────────────────
+    let body = "symbol-level note: 'ann_target' is the test fixture's marker";
+    let target = serde_json::json!({
+        "kind": "symbol",
+        "symbol": "ann_target",
+    });
+    let added = add_annotation_response(&host, &session, body, target);
+    let id = added
+        .pointer("/id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("missing id: {added}"))
+        .to_string();
+
+    // ── Positive path: both tools must include the section ─────────
+    let explain_full = tools_call_text(
+        &host,
+        "explain_symbol",
+        serde_json::json!({"symbol": "ann_target"}),
+    );
+    assert!(
+        explain_full.contains("### Open annotations"),
+        "explain_symbol must include the section header when an \
+         open annotation targets the symbol; got:\n{explain_full}"
+    );
+    assert!(
+        explain_full.contains(body),
+        "explain_symbol section must include the annotation body; \
+         got:\n{explain_full}"
+    );
+
+    let blast_full = tools_call_text(
+        &host,
+        "get_blast_radius",
+        serde_json::json!({"symbol": "ann_target"}),
+    );
+    assert!(
+        blast_full.contains("### Open annotations"),
+        "get_blast_radius must include the section header when an \
+         open annotation targets the symbol; got:\n{blast_full}"
+    );
+    assert!(
+        blast_full.contains(body),
+        "get_blast_radius section must include the annotation body; \
+         got:\n{blast_full}"
+    );
+
+    // ── Resolve and re-query: section must disappear ───────────────
+    let resolved = tools_call_text(
+        &host,
+        "resolve_annotation",
+        serde_json::json!({
+            "session_token": session,
+            "id": id,
+        }),
+    );
+    let _resolved_v: serde_json::Value = serde_json::from_str(&resolved)
+        .unwrap_or_else(|e| panic!("resolve_annotation not JSON: {e}\n{resolved}"));
+
+    let explain_after = tools_call_text(
+        &host,
+        "explain_symbol",
+        serde_json::json!({"symbol": "ann_target"}),
+    );
+    assert!(
+        !explain_after.contains("### Open annotations"),
+        "explain_symbol must drop the section after the only open \
+         annotation is resolved; got:\n{explain_after}"
+    );
+    let blast_after = tools_call_text(
+        &host,
+        "get_blast_radius",
+        serde_json::json!({"symbol": "ann_target"}),
+    );
+    assert!(
+        !blast_after.contains("### Open annotations"),
+        "get_blast_radius must drop the section after the only \
+         open annotation is resolved; got:\n{blast_after}"
+    );
+
+    drop(guard);
+}
