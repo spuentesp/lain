@@ -61,6 +61,9 @@ impl SidecarGitSensor {
             ))
         })?;
 
+        // Fast pre-flight check: workspace must be a valid git repository before spawning
+        git2::Repository::open(&workspace_canon)?;
+
         let mut inner = SidecarInner {
             workspace: workspace_canon.clone(),
             child: None,
@@ -412,6 +415,14 @@ impl SidecarInner {
         let connect_timeout = Duration::from_secs(2);
         let start = Instant::now();
         let stream = loop {
+            if let Some(child) = self.child.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    self.force_teardown();
+                    return Err(LainError::Unavailable(format!(
+                        "git sidecar child exited prematurely with status {status}"
+                    )));
+                }
+            }
             match UnixStream::connect(&self.socket_path) {
                 Ok(s) => break s,
                 Err(e) if start.elapsed() < connect_timeout => {
