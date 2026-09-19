@@ -20,7 +20,14 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for e in entries.flatten() {
         let p = e.path();
+        // `src/bin/*.rs` are binary entry points declared in `Cargo.toml`
+        // via `[[bin]] path = ...`. They are crate roots for their own
+        // binaries, not modules of the lib, so they don't need a
+        // `mod` declaration. Skip the whole `src/bin/` subtree.
         if p.is_dir() {
+            if p.file_name().and_then(|n| n.to_str()) == Some("bin") {
+                continue;
+            }
             rust_files(&p, out);
         } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
             // `lib.rs` and `main.rs` are crate roots and `mod.rs` declares
