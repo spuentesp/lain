@@ -609,6 +609,66 @@ The traversal hit the 1000-node cap. Re-call with a smaller `depth`,
 a different seed, or use `search_org` first to confirm the symbol
 exists in exactly one repo and isn't a high-fanout hub.
 
+### Repo `degraded` with `Other: GitSensor mutex held by another thread; a prior index() call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)`
+
+A libgit2 call (`repo.head()`, packed-refs read, etc.) inside a
+prior `RepoIndex::index()` wedged — typically because the underlying
+filesystem was slow or the working tree is on a path libgit2 can't
+handle cleanly (large monorepo, NFS, virtualized FS). The
+parking_lot `GitSensor` mutex stays held by the stuck
+`spawn_blocking` thread. Every subsequent watcher-triggered
+`index_forced()` call would block forever on `lock()` (pre-fix
+Bug #2 from the 2026-09-18 Tauri federation trial).
+
+**Mitigation (already shipped):** `build_core_memory` uses
+`try_lock` in its offthread closures, so the new call fails fast
+with this exact error string, `repo.index()` returns the error, and
+the federation demotes the repo to `degraded` instead of hanging
+the process. The original stuck `spawn_blocking` thread is left to
+finish when libgit2 returns; this is a mitigation, not a root-cause
+fix (libgit2 is fundamentally non-cancellable from Rust).
+
+**Action:**
+
+- Confirm the version is **0.7.5 or later** — the mitigation landed
+  there. Older versions silently pile up blocked tasks on every
+  rust-analyzer diagnostic notification and present as the original
+  "process in `Dl` state, port never opens" symptom.
+- For diagnosis, run `scripts/debug-hung-server.sh <repos.yaml>`.
+  The script launches `lain server` with `--log-level debug
+  --reindex-timeout 0`, captures the log, polls for the
+  tell-tale milestone signatures, and dumps `/proc/<pid>/{wchan,
+  status,stack}` if the process appears wedged so you can see which
+  syscall each thread is stuck on.
+- The repo's `last_index_error` (visible via `get_repo_info`)
+  carries the same error string; this is the persistent record of
+  what libgit2 was doing when it wedged. Pair it with
+  `/proc/<pid>/wchan` from a stuck run to file a useful upstream
+  issue if the hang reproduces on a non-Tauri repo.
+
+**Future root-cause options (not implemented in the 0.7.5
+mitigation; this is a roadmap for the next round of investigation):**
+
+- **Sidecar process for libgit2.** Run `git2::Repository` in a
+  separate child process, talk to it over a length-prefixed IPC
+  channel. When the child hangs, the parent can `SIGKILL` it
+  without poisoning its own threads; the parking_lot guard lives
+  in the child's address space and dies with it. The parent can
+  respawn the child transparently. This is the only surveyed
+  option that genuinely breaks the cascade rather than mitigating
+  the user-visible symptoms, at the cost of moving libgit2's
+  blocking API out of process.
+- **Drop the parking_lot mutex around `GitSensor`.** `git2::Repository`
+  declares `unsafe impl Sync` (see `src/server/git.rs:17-26`),
+  but libgit2's per-handle state is not safe under concurrent
+  calls; dropping the mutex means callers must serialize themselves.
+  Not viable without a wider audit of every call site.
+- **Per-call timeout inside the closure.** Wrap each libgit2 call
+  in a wall-clock timer; if it exceeds a budget, return a
+  synthetic error and mark the sensor "stuck" until a future
+  call succeeds. Equivalent in effect to the current `try_lock`
+  mitigation, framed as "poisoned state" rather than "mutex held".
+
 ---
 
 ## Workspaces
