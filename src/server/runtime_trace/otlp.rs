@@ -70,9 +70,11 @@ pub struct Span {
     #[serde(default, rename = "parentSpanId")]
     pub parent_span_id: Option<String>,
     pub name: String,
-    /// OTLP span-kind integer. We only keep the variants that map
-    /// to graph edges (`Internal`, the RPC-style kinds). The
-    /// `Unspecified` variant and any future additions are dropped.
+    /// OTLP span-kind integer. Mapped to a [`SpanKind`] via
+    /// [`SpanKind::from_otlp`]; unknown or future kinds fall back to
+    /// `Internal` rather than being dropped, because the OTLP spec
+    /// explicitly allows forward-compatible unknown enum values and
+    /// dropping the span would lose the trace.
     #[serde(default)]
     pub kind: i32,
     /// End time as nanoseconds. Stored as `String` in the wire
@@ -118,7 +120,16 @@ pub enum OtlpParseError {
 }
 
 fn hex_len(s: &str) -> Option<usize> {
-    if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+    // OTLP IDs are lowercase base16 per the spec. Accepting upper
+    // case here would mask producer bugs (or non-conformant
+    // collectors) — a `0A1B...` ID should surface as a parse
+    // error rather than silently being treated as a valid
+    // lowercase ID that happens to alias the same byte sequence.
+    if !s.len().is_multiple_of(2)
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return None;
     }
     Some(s.len())
@@ -153,11 +164,18 @@ fn translate_span(span: &Span) -> Result<SpanRecord, OtlpParseError> {
     if hex_len(&span.span_id) != Some(16) {
         return Err(OtlpParseError::SpanId(span.span_id.clone()));
     }
-    let end_unix_nanos: u128 = span
+    // `u64` is sufficient for any realistic Unix-nanosecond timestamp
+    // (~584 years from epoch). `try_from` the seconds result so a
+    // malformed payload that somehow encodes a far-future or
+    // negative timestamp returns `OtlpParseError::EndTime` rather
+    // than silently wrapping via `as i64`.
+    let end_unix_nanos: u64 = span
         .end_time_unix_nano
         .parse()
         .map_err(|_| OtlpParseError::EndTime(span.end_time_unix_nano.clone()))?;
-    let end_unix = (end_unix_nanos / 1_000_000_000) as i64;
+    let end_unix_secs = end_unix_nanos / 1_000_000_000;
+    let end_unix = i64::try_from(end_unix_secs)
+        .map_err(|_| OtlpParseError::EndTime(span.end_time_unix_nano.clone()))?;
 
     let kind = SpanKind::from_otlp(span.kind).unwrap_or(SpanKind::Internal);
 
@@ -330,6 +348,28 @@ mod tests {
         }"#;
         let err = parse_otlp_json(payload.as_bytes()).expect_err("must reject");
         assert!(matches!(err, OtlpParseError::SpanId(_)));
+    }
+
+    /// OTLP IDs are lowercase base16 per the spec. A producer
+    /// emitting uppercase is non-conformant and the bug should
+    /// surface as a parse error rather than silently being
+    /// accepted.
+    #[test]
+    fn parse_rejects_uppercase_hex_ids() {
+        let payload = r#"{
+            "resourceSpans": [{
+                "scopeSpans": [{
+                    "spans": [{
+                        "traceId": "0A1B2C3D4E5F60718293A4B5C6D7E8F90",
+                        "spanId": "0000000000000001",
+                        "name": "x",
+                        "endTimeUnixNano": "1700000000000000000"
+                    }]
+                }]
+            }]
+        }"#;
+        let err = parse_otlp_json(payload.as_bytes()).expect_err("must reject");
+        assert!(matches!(err, OtlpParseError::TraceId(_)));
     }
 
     #[test]

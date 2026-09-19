@@ -322,6 +322,17 @@ fn get_all_tracked_files_works_with_relative_workspace_path() {
     use std::fs;
     use std::process::Command;
 
+    // `set_current_dir` is process-wide. Any other test that runs
+    // in parallel against the same binary and uses relative paths
+    // or `std::env::current_dir()` would race against our cwd
+    // change. The simplest defence without pulling in a `serial`
+    // harness is a process-static mutex: this test is the only
+    // caller today, but the guard makes the constraint explicit so
+    // a future test that needs cwd control can opt into the same
+    // serialization by acquiring the same mutex.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = std::env::temp_dir().join("lain_git_test_relative_workspace");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -346,9 +357,7 @@ fn get_all_tracked_files_works_with_relative_workspace_path() {
     // Open with a `./`-prefixed relative path so that
     // `self.workspace.join(path)` produces paths that start with
     // `./<workspace>/...`. That is exactly the shape that tripped up
-    // libgit2's `is_path_ignored` resolution pre-fix. `set_current_dir`
-    // is process-wide and races with parallel tests, so save and
-    // restore around the call.
+    // libgit2's `is_path_ignored` resolution pre-fix.
     let cwd_parent = dir.parent().unwrap();
     let cwd_basename = dir.file_name().unwrap();
     let prev_cwd = std::env::current_dir().unwrap();

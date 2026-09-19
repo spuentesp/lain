@@ -13,6 +13,20 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+/// Bug #2 (2026-09-18 Tauri postmortem): every `offthread`
+/// closure that needs the parking_lot `GitSensor` mutex must
+/// build the same "mutex held by another thread" error. Centralise
+/// the message so the postmortem reference and the exact phrasing
+/// live in one place — when the root-cause fix lands, the message
+/// only changes here.
+fn git_sensor_busy_error() -> LainError {
+    LainError::Other(
+        "GitSensor mutex held by another thread; a prior index() \
+         call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
+            .into(),
+    )
+}
+
 impl LainServer {
     /// The "Sane" Ingestion Pipeline: Map -> Reduce -> Resolve -> Enrich.
     /// `&self` (not `&mut self`) because every field this method writes
@@ -72,13 +86,7 @@ impl LainServer {
         let (latest_commit, latest_time) = offthread(
             cancel.clone(),
             move || -> Result<(String, i64), LainError> {
-                let guard = git_sensor.try_lock().ok_or_else(|| {
-                    LainError::Other(
-                        "GitSensor mutex held by another thread; a prior index() \
-                 call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
-                            .into(),
-                    )
-                })?;
+                let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
                 guard.get_latest_commit_info()
             },
         )
@@ -116,13 +124,7 @@ impl LainServer {
             offthread(
                 cancel.clone(),
                 move || -> Result<Vec<std::path::PathBuf>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(|| {
-                        LainError::Other(
-                            "GitSensor mutex held by another thread; a prior index() \
-                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
-                                .into(),
-                        )
-                    })?;
+                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
                     guard.get_changed_files_since(&last)
                 },
             )
@@ -133,13 +135,7 @@ impl LainServer {
             offthread(
                 cancel.clone(),
                 move || -> Result<Vec<std::path::PathBuf>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(|| {
-                        LainError::Other(
-                            "GitSensor mutex held by another thread; a prior index() \
-                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
-                                .into(),
-                        )
-                    })?;
+                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
                     guard.get_all_tracked_files()
                 },
             )
@@ -643,13 +639,7 @@ impl LainServer {
             match offthread(
                 cancel.clone(),
                 move || -> Result<Vec<crate::git::CoChangePair>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(|| {
-                        LainError::Other(
-                            "GitSensor mutex held by another thread; a prior index() \
-                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
-                                .into(),
-                        )
-                    })?;
+                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
                     guard.analyze_co_changes(window, min_pair, max_files)
                 },
             )
@@ -854,13 +844,7 @@ impl LainServer {
             let tracked_paths_result = offthread(
                 cancel.clone(),
                 move || -> Result<Vec<std::path::PathBuf>, LainError> {
-                    let guard = git_sensor.try_lock().ok_or_else(|| {
-                        LainError::Other(
-                            "GitSensor mutex held by another thread; a prior index() \
-                     call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
-                                .into(),
-                        )
-                    })?;
+                    let guard = git_sensor.try_lock().ok_or_else(git_sensor_busy_error)?;
                     guard.get_all_tracked_files()
                 },
             )

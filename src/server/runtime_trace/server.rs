@@ -101,15 +101,28 @@ async fn handle_request(
 /// require a content-type header, but it usually sends
 /// `application/json`; we accept any content type.
 ///
-/// Resolution: the OTLP spec allows spans to carry
-/// `code.namespace` + `code.function` semconv attributes that
-/// resolve to a node_id. We delegate that resolution to the
-/// caller via a no-resolve ingest — the runtime_trace store
-/// stores spans verbatim and `explain_dispatch` will resolve
-/// them at query time.
+/// Storage status (deliberately honest): the listener parses
+/// spans and runs [`RuntimeTraceStore::ingest`] with a best-effort
+/// resolver. The resolver today returns `None` for every span
+/// because this transport has no graph reference — the OTLP
+/// listener is wired before the federation/stdio paths and lives
+/// independently of `LainServer`. Without a node_id, `ingest`
+/// mints zero edges and the spans are not queryable via
+/// `explain_dispatch` yet. The response field name reflects this:
+/// `receivedSpans` (parsed + validated) is reported even when
+/// `storedSpans` (resolved + minted as edges) is zero.
+///
+/// Wiring up real resolution requires plumbing a
+/// `GraphDatabase` handle into the listener. That's a follow-up
+/// (needs to coexist with the federation mode's
+/// multi-repo-global-id mapping, not just the single-repo
+/// `find_node_by_name`). Until then, this endpoint is a
+/// parse-and-validate shim: it's useful as a collector target
+/// (operators can confirm their OTel collector is configured
+/// correctly) but not as a queryable runtime-trace source.
 async fn ingest_traces(
     req: Request<Incoming>,
-    _store: Arc<RuntimeTraceStore>,
+    store: Arc<RuntimeTraceStore>,
 ) -> Response<OtlpBody> {
     use http_body_util::BodyExt;
     let Ok(body) = req.collect().await else {
@@ -121,12 +134,19 @@ async fn ingest_traces(
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("{e}")),
     };
-    let n = records.len();
+
+    let received = records.len();
+    // Best-effort ingest. With the current no-graph listener the
+    // resolve closure always returns `None`, so this mints zero
+    // edges — but calling `ingest` keeps the wire path the same as
+    // a future fix and surfaces a non-zero `storedSpans` the moment
+    // resolution lands.
+    let stored = store.ingest(&records, |_span| None);
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .body(bytes_body(Bytes::from(format!(
-            "{{\"partialSuccess\":{{\"acceptedSpans\":{n}}}}}"
+            "{{\"partialSuccess\":{{\"receivedSpans\":{received},\"storedSpans\":{stored}}}}}"
         ))))
         .unwrap()
 }
@@ -148,9 +168,15 @@ mod tests {
     use crate::server::runtime_trace::StoreConfig;
     use std::net::{IpAddr, Ipv4Addr};
 
-    /// Bind to an ephemeral port, fire one POST against it,
-    /// verify the OTLP payload was accepted.
-    #[tokio::test]
+    /// Bind to an ephemeral port, fire one POST against it, verify
+    /// the OTLP payload was accepted AND the response carries both
+    /// `receivedSpans` and `storedSpans`. The pre-fix code returned
+    /// 200 with `acceptedSpans: N` but never wrote to the store, so
+    /// the count was a lie. The post-fix test pins both halves of
+    /// the response: parsed-but-not-yet-stored is a known
+    /// intermediate state (until graph resolution lands) and the
+    /// response must distinguish it from "actually in the store".
+    #[tokio::test(flavor = "current_thread")]
     async fn end_to_end_post_ingests_payload() {
         let store = Arc::new(RuntimeTraceStore::new(StoreConfig::default()));
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -182,12 +208,26 @@ mod tests {
             .expect("POST should succeed");
 
         assert_eq!(resp.status(), 200, "OTLP endpoint should accept the span");
+        let body_bytes = resp.bytes().await.expect("read response body");
+        let body_str = std::str::from_utf8(&body_bytes).expect("utf-8 body");
+        // The response must report both fields, and `receivedSpans`
+        // must equal the number of spans we sent (1). `storedSpans`
+        // may be 0 today (resolution not wired) but the field must
+        // exist so callers can distinguish parsed from stored.
+        assert!(
+            body_str.contains("\"receivedSpans\":1"),
+            "response must report receivedSpans=1; got: {body_str}"
+        );
+        assert!(
+            body_str.contains("\"storedSpans\":"),
+            "response must include storedSpans field even when 0; got: {body_str}"
+        );
 
         handle.abort();
         let _ = handle.await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn unknown_path_returns_404() {
         let store = Arc::new(RuntimeTraceStore::new(StoreConfig::default()));
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
@@ -207,7 +247,7 @@ mod tests {
         let _ = handle.await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn malformed_json_returns_400() {
         let store = Arc::new(RuntimeTraceStore::new(StoreConfig::default()));
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
