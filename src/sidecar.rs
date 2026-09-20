@@ -90,6 +90,11 @@ impl SidecarGitSensor {
         &self.workspace
     }
 
+    /// Path to the Unix domain socket currently used for IPC.
+    pub fn socket_path(&self) -> PathBuf {
+        self.inner.lock().socket_path.clone()
+    }
+
     /// Health inspection snapshot.
     pub fn health(&self) -> SidecarHealth {
         self.inner.lock().health()
@@ -257,6 +262,14 @@ impl SidecarGitSensor {
     }
 }
 
+impl std::fmt::Debug for SidecarGitSensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SidecarGitSensor")
+            .field("workspace", &self.workspace)
+            .finish()
+    }
+}
+
 struct SidecarInner {
     workspace: PathBuf,
     child: Option<Child>,
@@ -322,11 +335,23 @@ impl SidecarInner {
                 // Attempt single retry after respawn
                 self.ensure_connected()?;
                 let retry_started = Instant::now();
-                self.write_request(&req)?;
-                let resp = self.read_response()?;
-                self.last_call_duration = retry_started.elapsed();
-                self.consecutive_failures = 0;
-                parse(resp)
+                let retry_res = (|| -> Result<Response, LainError> {
+                    self.write_request(&req)?;
+                    self.read_response()
+                })();
+
+                match retry_res {
+                    Ok(resp) => {
+                        self.last_call_duration = retry_started.elapsed();
+                        self.consecutive_failures = 0;
+                        parse(resp)
+                    }
+                    Err(retry_err) => {
+                        self.force_teardown();
+                        self.consecutive_failures += 1;
+                        Err(retry_err)
+                    }
+                }
             }
         }
     }
@@ -442,7 +467,10 @@ impl SidecarInner {
         self.stream = Some(stream);
 
         // Execute protocol handshake immediately
-        self.perform_handshake()?;
+        if let Err(e) = self.perform_handshake() {
+            self.force_teardown();
+            return Err(e);
+        }
 
         info!(
             "[lain-git-sidecar] connected to child daemon at {:?}",
@@ -482,6 +510,7 @@ impl SidecarInner {
 
     fn force_teardown(&mut self) {
         if let Some(mut stream) = self.stream.take() {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(50)));
             let _ = write_frame(&mut stream, &Request::Shutdown);
             let _ = stream.flush();
         }
