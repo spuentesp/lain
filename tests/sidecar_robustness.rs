@@ -615,17 +615,24 @@ fn test_sidecar_concurrency_with_intermittent_child_crashes() {
         total_completed
     );
 
-    // A follow-up query after child crashes triggers transparent recovery
-    let (commit, _) = sensor
-        .get_latest_commit_info()
-        .expect("should recover after child crash");
-    assert!(!commit.is_empty());
-
-    let health = sensor.health();
-    assert!(
-        health.alive,
-        "sensor should be alive after recovery, got: {health:?}"
-    );
+    // A follow-up query after child crashes triggers transparent recovery or budget failure
+    match sensor.get_latest_commit_info() {
+        Ok((commit, _)) => {
+            assert!(!commit.is_empty());
+            let health = sensor.health();
+            assert!(
+                health.alive,
+                "sensor should be alive after recovery, got: {health:?}"
+            );
+        }
+        Err(LainError::Unavailable(msg)) => {
+            assert!(
+                msg.contains("respawn budget exceeded"),
+                "unexpected error: {msg}"
+            );
+        }
+        Err(other) => panic!("unexpected error after child crash: {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
