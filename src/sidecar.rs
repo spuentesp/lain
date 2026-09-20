@@ -74,6 +74,7 @@ impl SidecarGitSensor {
             last_call_duration: Duration::ZERO,
             call_timeout,
             custom_bin_path: bin_path,
+            is_initial_boot: true,
         };
 
         // Initial spawn and connection check
@@ -280,6 +281,7 @@ struct SidecarInner {
     last_call_duration: Duration,
     call_timeout: Duration,
     custom_bin_path: Option<PathBuf>,
+    is_initial_boot: bool,
 }
 
 impl SidecarInner {
@@ -387,6 +389,11 @@ impl SidecarInner {
     fn ensure_connected(&mut self) -> Result<(), LainError> {
         if self.stream.is_some() {
             return Ok(());
+        }
+
+        if self.is_initial_boot {
+            self.is_initial_boot = false;
+            return self.spawn_child_and_connect();
         }
 
         // Enforce respawn budget
