@@ -403,7 +403,7 @@ impl LainServer {
         self.presence.load_state()
     }
 
-    pub fn with_shared_presence<T>(&self, f: impl FnOnce() -> T) -> T {
+    pub fn with_shared_presence<T>(&self, f: impl Fn() -> T) -> T {
         self.presence.with_shared_presence(f)
     }
 

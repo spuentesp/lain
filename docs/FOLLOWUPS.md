@@ -46,6 +46,50 @@ Last verified against `dev` on 2026-09-21.
 - **Acceptance:** hot LSP calls run outside Tokio worker threads while retaining
   cancellation and timeout behavior.
 
+## Coordination: stdio lock fail-open concurrent-write race
+
+- **Status:** partial fix landed (commit `d1e1727` on dev); reproducer still
+  sees multiple grants per scope under adversarial lock contention.
+- **Background:** `harness/reproduce-stdio-lock-fail-open.py` forces the
+  state-file lock sentinel and runs N agents through the lock acquisition's
+  2-second timeout. All N agents then proceed unlocked (`with_shared_presence`'s
+  fail-open path), each reads the same pre-claim snapshot, each runs
+  `claim_files`, and each fires its persist callback. Last writer wins on
+  disk; every agent returns "granted" to the caller even though the
+  linearizability invariant from
+  `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` says at most one live
+  exclusive lease per scope.
+- **Partial fix in `src/server/ingest/handles/presence.rs::with_shared_presence`:**
+  hash the state file before `f()` and again after; if the hash changed,
+  another process wrote during our critical section, so re-run `f()` on the
+  refreshed state. This catches the simplest case where the file changed
+  during our critical section. The four presence-tool closures were
+  converted from `FnOnce` to `Fn` (the four args structs grew `Clone`
+  derives) so the retry loop can call them more than once.
+- **Why it doesn't fully close the gap:** the hash-based retry sees the
+  LAST writer's state, which contains only that writer's claim. Re-running
+  `f()` on that state has the agent's own id filtered out by
+  `OccupancyMap::claim_in_memory`'s conflict check, so the retry still
+  reports "granted". To make the losers report "conflict", the retry would
+  need to know whether the LAST writer is someone other than the current
+  agent — that requires either compare-and-swap on the persist callback
+  (so only one writer actually commits) or serialization through the
+  state-file lock (the reproducer's fresh sentinel defeats that path).
+- **Work:** explore a compare-and-swap on the persist callback: read the
+  file hash, write only if the hash matches the in-memory view's expected
+  hash, and on mismatch refresh the in-memory state and surface a
+  `ClaimRevoked { reason: "concurrent_writer" }` event. Alternatively,
+  refuse to proceed unlocked and return a `coordination_unavailable`
+  error so the agent can retry; this changes the existing
+  `with_shared_presence` contract (`T` → `Result<T, String>`) and the
+  reproducer's lock-sentinel design must be revisited.
+- **Evidence:** `reproduce-stdio-lock-fail-open.py` reproducer under
+  `harness/` in the anemone test ground; `variant_N.json` artefacts
+  under each `runs/repro-*` directory.
+- **Acceptance:** the reproducer reports `issue not observed` (i.e., exactly
+  one of N concurrent claims gets `granted` and the rest get `conflict`).
+  The current partial fix reports `ISSUE REPRODUCED` in most iterations.
+
 ## Planned capability expansions
 
 These are scoped plans, not partially implemented promises:
