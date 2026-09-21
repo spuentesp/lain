@@ -100,7 +100,10 @@ Last verified against `dev` on 2026-09-21.
   - `scripts/agy_chaos.sh` variant 1: bob_granted_post_restart = 1.
 - **Acceptance:** reproducer reports `issue not observed` under
   forced-timeout; natural contention reports exactly 1 grant + (N − 1)
-  conflicts per iteration.
+  conflicts per iteration; `with_shared_presence` returns
+  `Err(RefreshFailed | PersistFailed)` when the state file can't be
+  read or written (e.g. the path was replaced by a directory between
+  two agents registering).
 
 ## Planned capability expansions
 

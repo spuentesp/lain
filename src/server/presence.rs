@@ -430,6 +430,60 @@ impl PresenceRegistry {
         *slot = Some(std::sync::Arc::new(cb));
     }
 
+    /// Atomically replace the current persist callback with one that
+    /// records its `Result<(), String>` into the supplied cell, and
+    /// return the previous callback (if any) so the caller can
+    /// restore it after the critical section. `PresenceLayer::with_shared_presence`
+    /// uses this to surface persist failures without permanently
+    /// changing the long-lived callback that the LainServer wired
+    /// up at construction.
+    ///
+    /// `path` is the state-file path to write; it's passed in by the
+    /// caller because `PresenceRegistry` doesn't carry the path
+    /// itself — the long-lived callback captured the path when the
+    /// LainServer was constructed, and we want this swap to write
+    /// the same file.
+    pub fn swap_persist_capture(
+        &self,
+        cell: std::sync::Arc<parking_lot::Mutex<Option<Result<(), String>>>>,
+        path: std::path::PathBuf,
+        presence: std::sync::Arc<PresenceRegistry>,
+        occupancy: std::sync::Arc<OccupancyMap>,
+        intent: std::sync::Arc<crate::server::intent::IntentRegistry>,
+        activity: std::sync::Arc<crate::server::activity::ActivityTracker>,
+    ) -> Option<PersistFn> {
+        let cell_for_cb = std::sync::Arc::clone(&cell);
+        let path_for_cb = path.clone();
+        let presence_for_cb = std::sync::Arc::clone(&presence);
+        let occupancy_for_cb = std::sync::Arc::clone(&occupancy);
+        let intent_for_cb = std::sync::Arc::clone(&intent);
+        let activity_for_cb = std::sync::Arc::clone(&activity);
+        let new_cb: PersistFn = std::sync::Arc::new(move || {
+            let result = crate::server::presence::save_pair(
+                &path_for_cb,
+                &presence_for_cb,
+                &occupancy_for_cb,
+                &intent_for_cb,
+                &activity_for_cb,
+            );
+            let mut slot = cell_for_cb.lock();
+            *slot = Some(result.map_err(|e| e));
+        });
+        let mut slot = self.persist_cb.lock();
+        let prev = slot.take();
+        *slot = Some(new_cb);
+        prev
+    }
+
+    /// Restore a callback previously captured by
+    /// [`Self::swap_persist_capture`]. `with_shared_presence`
+    /// calls this after the closure runs to put the long-lived
+    /// callback back in place.
+    pub fn restore_persist_callback(&self, cb: PersistFn) {
+        let mut slot = self.persist_cb.lock();
+        *slot = Some(cb);
+    }
+
     /// Clone the (optional) persist callback out of the slot. Returns
     /// `None` when no callback has been installed; callers always
     /// no-op in that case.
@@ -885,6 +939,49 @@ impl OccupancyMap {
     {
         let mut slot = self.persist_cb.lock();
         *slot = Some(std::sync::Arc::new(cb));
+    }
+
+    /// Atomically replace the current persist callback with one that
+    /// records its `Result<(), String>` into the supplied cell, and
+    /// return the previous callback. See
+    /// [`PresenceRegistry::swap_persist_capture`] for the rationale.
+    pub fn swap_persist_capture(
+        &self,
+        cell: std::sync::Arc<parking_lot::Mutex<Option<Result<(), String>>>>,
+        path: std::path::PathBuf,
+        presence: std::sync::Arc<PresenceRegistry>,
+        occupancy: std::sync::Arc<OccupancyMap>,
+        intent: std::sync::Arc<crate::server::intent::IntentRegistry>,
+        activity: std::sync::Arc<crate::server::activity::ActivityTracker>,
+    ) -> Option<crate::server::presence::PersistFn> {
+        let cell_for_cb = std::sync::Arc::clone(&cell);
+        let path_for_cb = path.clone();
+        let presence_for_cb = std::sync::Arc::clone(&presence);
+        let occupancy_for_cb = std::sync::Arc::clone(&occupancy);
+        let intent_for_cb = std::sync::Arc::clone(&intent);
+        let activity_for_cb = std::sync::Arc::clone(&activity);
+        let new_cb: crate::server::presence::PersistFn = std::sync::Arc::new(move || {
+            let result = crate::server::presence::save_pair(
+                &path_for_cb,
+                &presence_for_cb,
+                &occupancy_for_cb,
+                &intent_for_cb,
+                &activity_for_cb,
+            );
+            let mut slot = cell_for_cb.lock();
+            *slot = Some(result.map_err(|e| e));
+        });
+        let mut slot = self.persist_cb.lock();
+        let prev = slot.take();
+        *slot = Some(new_cb);
+        prev
+    }
+
+    /// Restore a callback previously captured by
+    /// [`Self::swap_persist_capture`].
+    pub fn restore_persist_callback(&self, cb: crate::server::presence::PersistFn) {
+        let mut slot = self.persist_cb.lock();
+        *slot = Some(cb);
     }
 
     /// Set the workspace root so `claim` can write the
