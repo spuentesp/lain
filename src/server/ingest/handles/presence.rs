@@ -286,6 +286,18 @@ impl PresenceLayer {
     /// applies only to exclusive leases; a duplicate session under
     /// the rare race where two agents register at the same instant
     /// is benign and the duplicate expires on its TTL.
+    ///
+    /// Refresh / persist failures: if `refresh_shared_presence`
+    /// can't read the on-disk state (e.g. the state path was
+    /// replaced by a directory, or the file's permissions revoke
+    /// read access mid-run), or the persist callback can't write
+    /// the on-disk state after `f` returns, this function surfaces
+    /// the error as `Err(CoordinationError::RefreshFailed)` or
+    /// `Err(CoordinationError::PersistFailed)`. Without this
+    /// propagation both processes see stale in-memory decisions and
+    /// return `granted` based on no peer state — the
+    /// `runs/20260921-pr199-persist-failure/` artefact under
+    /// `anemone/runs/` reproduces that exact scenario.
     /// Run `f` inside the cross-process presence critical section.
     ///
     /// The state-file lock is acquired with the loaded tuning
@@ -325,13 +337,49 @@ impl PresenceLayer {
             );
             return Err(CoordinationError::Unavailable);
         }
-        // Lock held: refresh, run the closure (which mutates
-        // in-memory and fires the persist callback), and let the
-        // guard's Drop release the sentinel when this scope exits.
-        // The closure runs under the lock so no peer can interleave
-        // a read-modify-write cycle that overwrites our state.
-        self.refresh_shared_presence();
-        Ok(f())
+        // Refresh: must succeed before we mutate. A failed read
+        // would leave the agent's decision based on a stale view
+        // that no longer reflects peer activity on disk; surfacing
+        // the error is the only way to enforce the linearizability
+        // invariant in that case.
+        if let Err(e) = self.refresh_shared_presence() {
+            return Err(CoordinationError::RefreshFailed(e));
+        }
+        // Capture the persist callback's result so we can surface
+        // it after `f` returns. The callback signature is `Fn()`
+        // (installed once at LainServer construction), so we wrap
+        // it for the duration of this critical section by stashing
+        // the previous callback and installing a fresh one that
+        // records its result in the cell.
+        let persist_result =
+            std::sync::Arc::new(parking_lot::Mutex::new(None::<Result<(), String>>));
+        let prev_presence_cb = self.presence.swap_persist_capture(
+            std::sync::Arc::clone(&persist_result),
+            path.clone(),
+            self.presence.clone(),
+            self.occupancy.clone(),
+            self.intent.clone(),
+            self.activity.clone(),
+        );
+        let prev_occupancy_cb = self.occupancy.swap_persist_capture(
+            std::sync::Arc::clone(&persist_result),
+            path.clone(),
+            self.presence.clone(),
+            self.occupancy.clone(),
+            self.intent.clone(),
+            self.activity.clone(),
+        );
+        let result = f();
+        if let Some(prev) = prev_presence_cb {
+            self.presence.restore_persist_callback(prev);
+        }
+        if let Some(prev) = prev_occupancy_cb {
+            self.occupancy.restore_persist_callback(prev);
+        }
+        if let Some(Err(e)) = persist_result.lock().clone() {
+            return Err(CoordinationError::PersistFailed(e));
+        }
+        Ok(result)
     }
 
     /// Read-only half of [`Self::with_shared_presence`]: refresh from
@@ -339,7 +387,7 @@ impl PresenceLayer {
     /// or saving. Used by `list_active_agents`, `list_occupancy` and
     /// friends, where a stale read is the whole bug and a write would
     /// be pure contention.
-    pub fn refresh_shared_presence(&self) {
+    pub fn refresh_shared_presence(&self) -> Result<(), String> {
         let path = self.state_path();
         // The reload exists to observe *other processes'* writes. If the
         // file has not changed since we last read it, there is nothing
@@ -351,14 +399,12 @@ impl PresenceLayer {
         {
             let seen = self.presence_state_seen.lock();
             if current.is_some() && *seen == current {
-                return;
+                return Ok(());
             }
         }
-        if let Err(e) = self.load_state() {
-            tracing::debug!("presence refresh skipped: {e}");
-            return;
-        }
+        self.load_state().map_err(|e| e.to_string())?;
         *self.presence_state_seen.lock() = current;
+        Ok(())
     }
 
     // `install_persist_callback` stays on LainServer in PR 3.7b — it
@@ -372,19 +418,33 @@ impl PresenceLayer {
     fn _graph_db_marker(_g: &GraphDatabase) {}
 }
 
-/// Coordination failure surfaced by `PresenceLayer::with_shared_presence`
-/// when the state-file lock cannot be acquired within the configured
-/// deadline. Exclusive mutations (claim, release, register, heartbeat,
-/// intent declare/update, hook observation) refuse to proceed without
-/// the lock so the linearizability invariant from
-/// `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` ("at most one live
-/// exclusive lease per scope") holds under contention. The agent
-/// surfaces this to its caller and retries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Coordination failure surfaced by `PresenceLayer::with_shared_presence`.
+/// Every variant indicates that the call did NOT complete its
+/// in-memory mutation safely: the agent sees the error and retries,
+/// rather than silently operating on stale state. The
+/// `Unavailable` variant covers lock-acquisition timeout;
+/// `RefreshFailed` covers the case where the on-disk state file
+/// can't be read after the lock is held (e.g. the path was
+/// replaced by a directory between lock acquisition and read);
+/// `PersistFailed` covers the case where the in-memory mutation
+/// ran but the on-disk write failed. All three together enforce
+/// the linearizability invariant from
+/// `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` ("at most one
+/// live exclusive lease per scope").
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinationError {
     /// State-file lock acquisition timed out. A peer process is
     /// holding the critical section; retry after a brief delay.
     Unavailable,
+    /// `refresh_shared_presence` couldn't read the on-disk state.
+    /// The in-memory state is now stale; the agent must retry so
+    /// the next call sees fresh peer state.
+    RefreshFailed(String),
+    /// The persist callback failed to write the on-disk state
+    /// after the closure ran. The in-memory mutation succeeded but
+    /// peers won't see it; the agent must retry so the lock is
+    /// re-acquired and the write is re-attempted.
+    PersistFailed(String),
 }
 
 impl std::fmt::Display for CoordinationError {
@@ -392,6 +452,14 @@ impl std::fmt::Display for CoordinationError {
         match self {
             CoordinationError::Unavailable => f.write_str(
                 "presence coordination unavailable: state-file lock not acquired within the configured deadline",
+            ),
+            CoordinationError::RefreshFailed(e) => write!(
+                f,
+                "presence coordination failed: state-file refresh failed ({e})"
+            ),
+            CoordinationError::PersistFailed(e) => write!(
+                f,
+                "presence coordination failed: persist callback failed ({e})"
             ),
         }
     }
@@ -528,5 +596,80 @@ mod tests {
         // Cleanup: remove the sentinel so other tests don't trip
         // over it.
         let _ = std::fs::remove_file(&sentinel);
+    }
+
+    /// Unit test for the I/O-failure path the user identified: the
+    /// state-file lock acquisition succeeds (sibling lock path is
+    /// writable), but the state-file *content* path is unwritable
+    /// (replaced by a directory between two agents registering).
+    /// Both `refresh_shared_presence` (which tries to read the
+    /// file) and the persist callback (which tries to write it)
+    /// would silently fail under the historical advisory design;
+    /// both agents would then return "granted" based on a stale
+    /// in-memory view that never observed peer activity. After the
+    /// PR #199 fix that surfaces those failures, both calls must
+    /// return `Err(CoordinationError::RefreshFailed | PersistFailed)`.
+    #[test]
+    fn with_shared_presence_fails_closed_when_state_path_is_a_directory() {
+        let tmp = tempdir();
+        let ws = tmp.path().to_path_buf();
+        let repos = ws.join("repos.yaml");
+        std::fs::write(&repos, "").unwrap();
+
+        // Build a `PresenceLayer` with the production defaults —
+        // the lock acquisition is fast so the test runs without
+        // sitting on a 2-second timeout.
+        let cfg = crate::server::tuning::PresenceConfig::default();
+        let presence_state_seen = Arc::new(Mutex::new(None));
+        let presence = Arc::new(crate::server::presence::PresenceRegistry::new());
+        let occupancy = Arc::new(crate::server::presence::OccupancyMap::new());
+        let intent = Arc::new(crate::server::intent::IntentRegistry::new());
+        let activity = Arc::new(crate::server::activity::ActivityTracker::new());
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let state_path = crate::config::state_path_for_workspace(&repos);
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let l = PresenceLayer {
+            presence_state_seen,
+            presence,
+            occupancy,
+            intent,
+            activity,
+            presence_event_tx: tx,
+            state_path: state_path.clone(),
+            lock_timeouts: LockTimeouts {
+                acquire_timeout_ms: cfg.state_lock_acquire_timeout_ms,
+                retry_interval_ms: cfg.state_lock_retry_interval_ms,
+                stale_after_secs: cfg.state_lock_stale_after_secs,
+            },
+        };
+
+        // Replace the state-file *content* path with a directory.
+        // The sibling lock path (`<path>.json.lock`) stays a regular
+        // file (or doesn't exist yet), so lock acquisition still
+        // succeeds. The state-file read in `refresh_shared_presence`
+        // and the state-file write in the persist callback both
+        // fail.
+        if state_path.exists() {
+            std::fs::remove_file(&state_path).unwrap();
+        }
+        std::fs::create_dir(&state_path).unwrap();
+
+        let result: Result<(), CoordinationError> = l.with_shared_presence(|| ());
+        let err_msg = match result {
+            Ok(()) => panic!(
+                "with_shared_presence must fail closed when the state path \
+                 is a directory; got Ok(())"
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err_msg.contains("refresh failed") || err_msg.contains("persist failed"),
+            "expected RefreshFailed or PersistFailed; got {err_msg:?}"
+        );
+
+        // Cleanup: remove the directory we created.
+        let _ = std::fs::remove_dir(&state_path);
     }
 }
