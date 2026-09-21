@@ -399,33 +399,6 @@ async fn dispatch_tool_call(
         Some(&args_map)
     };
 
-    // Direct dispatch for the intent-layer tools. The
-    // `declare_presence_tool!` macros register them via
-    // `inventory::submit!`, but the inventory section doesn't reach
-    // the production binary in this build mode, so the inventory
-    // iteration above returns None for these names and they would
-    // otherwise fall through to `executor.call` (which doesn't
-    // know them) and surface as "Unknown tool". Dispatching
-    // directly here mirrors how the federation + workspace tools
-    // are wired, and keeps the multiplayer surface callable
-    // regardless of inventory collection.
-    let intent_args = Value::Object(args_map.clone());
-    let intent_layer_result: Option<Result<Value, String>> = match name {
-        "lain_intent" => server
-            .as_deref()
-            .map(|s| crate::server::mcp::intent_tools::run_lain_intent(s, intent_args.clone())),
-        "list_active_intents" => server.as_deref().map(|s| {
-            crate::server::mcp::intent_tools::run_list_active_intents(s, intent_args.clone())
-        }),
-        "unregister_agent" => server.as_deref().map(|s| {
-            crate::server::mcp::presence_tools::run_unregister_agent(s, intent_args.clone())
-        }),
-        _ => None,
-    };
-    if let Some(result) = intent_layer_result {
-        return tool_result(name, result);
-    }
-
     match executor.call(name, args).await {
         Ok(text) => (text, false),
         Err(e) => (format!("Error: {e}"), true),
@@ -3720,6 +3693,36 @@ declare_presence_tool!(
     get_pending_handoffs_handler,
     "get_pending_handoffs",
     crate::server::mcp::annotation_tools::run_get_pending_handoffs
+);
+
+// Intent-layer tools. Same shape as the presence tools — the
+// runner signature is `fn(&LainServer, Value) -> Result<Value,
+// String>` — so they register through `declare_presence_tool!`
+// and reach `tools/call` via the inventory iteration in
+// `dispatch_tool_call`. Before this commit the three tools
+// `lain_intent`, `list_active_intents`, and `unregister_agent`
+// were matched in a direct-dispatch arm because the inventory
+// section reportedly didn't reach the production binary. That
+// turned the dispatcher back into a stringly-typed match ladder
+// and tripped `scripts/check-mcp-dispatch-shape.py`, which is
+// the load-bearing guardrail from
+// `docs/CONTRIBUTING_AGENTS.md#inventory-pattern`. Routing them
+// through the same macro as the other presence tools removes
+// the match arms and the guardrail violation in one move.
+declare_presence_tool!(
+    lain_intent_handler,
+    "lain_intent",
+    crate::server::mcp::intent_tools::run_lain_intent
+);
+declare_presence_tool!(
+    list_active_intents_handler,
+    "list_active_intents",
+    crate::server::mcp::intent_tools::run_list_active_intents
+);
+declare_presence_tool!(
+    unregister_agent_handler,
+    "unregister_agent",
+    crate::server::mcp::presence_tools::run_unregister_agent
 );
 
 /// Same shape for the audit tools; the runner signature differs only
