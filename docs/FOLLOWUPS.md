@@ -48,47 +48,59 @@ Last verified against `dev` on 2026-09-21.
 
 ## Coordination: stdio lock fail-open concurrent-write race
 
-- **Status:** partial fix landed (commit `d1e1727` on dev); reproducer still
-  sees multiple grants per scope under adversarial lock contention.
+- **Status:** fixed.
 - **Background:** `harness/reproduce-stdio-lock-fail-open.py` forces the
   state-file lock sentinel and runs N agents through the lock acquisition's
-  2-second timeout. All N agents then proceed unlocked (`with_shared_presence`'s
-  fail-open path), each reads the same pre-claim snapshot, each runs
-  `claim_files`, and each fires its persist callback. Last writer wins on
-  disk; every agent returns "granted" to the caller even though the
-  linearizability invariant from
+  2-second timeout. All N agents then proceeded unlocked
+  (`with_shared_presence`'s historical fail-open path), each read the
+  same pre-claim snapshot, each ran `claim_files`, and each fired its
+  persist callback. Last writer wins on disk; every agent returned
+  "granted" to the caller even though the linearizability invariant from
   `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` says at most one live
-  exclusive lease per scope.
-- **Partial fix in `src/server/ingest/handles/presence.rs::with_shared_presence`:**
-  hash the state file before `f()` and again after; if the hash changed,
-  another process wrote during our critical section, so re-run `f()` on the
-  refreshed state. This catches the simplest case where the file changed
-  during our critical section. The four presence-tool closures were
-  converted from `FnOnce` to `Fn` (the four args structs grew `Clone`
-  derives) so the retry loop can call them more than once.
-- **Why it doesn't fully close the gap:** the hash-based retry sees the
-  LAST writer's state, which contains only that writer's claim. Re-running
-  `f()` on that state has the agent's own id filtered out by
-  `OccupancyMap::claim_in_memory`'s conflict check, so the retry still
-  reports "granted". To make the losers report "conflict", the retry would
-  need to know whether the LAST writer is someone other than the current
-  agent — that requires either compare-and-swap on the persist callback
-  (so only one writer actually commits) or serialization through the
-  state-file lock (the reproducer's fresh sentinel defeats that path).
-- **Work:** explore a compare-and-swap on the persist callback: read the
-  file hash, write only if the hash matches the in-memory view's expected
-  hash, and on mismatch refresh the in-memory state and surface a
-  `ClaimRevoked { reason: "concurrent_writer" }` event. Alternatively,
-  refuse to proceed unlocked and return a `coordination_unavailable`
-  error so the agent can retry; this changes the existing
-  `with_shared_presence` contract (`T` → `Result<T, String>`) and the
-  reproducer's lock-sentinel design must be revisited.
-- **Evidence:** `reproduce-stdio-lock-fail-open.py` reproducer under
-  `harness/` in the anemone test ground; `variant_N.json` artefacts
-  under each `runs/repro-*` directory.
-- **Acceptance:** the reproducer reports `issue not observed` (i.e., exactly
-  one of N concurrent claims gets `granted` and the rest get `conflict`).
-  The current partial fix reports `ISSUE REPRODUCED` in most iterations.
+  exclusive lease per scope. The user's report also identified that
+  `state_lock::acquire` used `PresenceConfig::default()` instead of the
+  loaded `tuning.toml`, and that `run_lain_intent` and `handle_hook`
+  wrote to the same state file *outside* `with_shared_presence` so their
+  persist callbacks raced with claim writes under natural contention.
+- **Fix:**
+  - `state_lock::acquire_with` takes operator-supplied timeouts; the
+    old `acquire` is preserved as the default-timeouts wrapper for
+    back-compat.
+  - `PresenceLayer` now carries a `lock_timeouts: LockTimeouts` snapshot
+    of `PresenceConfig` taken at construction; `with_shared_presence`
+    threads those into `acquire_with` so `.lain/tuning.toml`'s
+    `state_lock_*` keys actually take effect.
+  - `with_shared_presence` returns
+    `Result<T, CoordinationError>`; on timeout it returns
+    `Err(CoordinationError::Unavailable)` instead of proceeding
+    unlocked. Exclusive mutations (`run_register_agent`,
+    `run_heartbeat`, `run_claim_files`, `run_release_files`,
+    `run_lain_intent`, `handle_hook`) propagate the error to the
+    agent so it can retry; the agent contract surfaces
+    "coordination_unavailable" as a tool error.
+  - `run_lain_intent` and `handle_hook` now wrap their mutations in
+    `with_shared_presence` so the intent-declare and
+    activity-record persist callbacks fire under the same lock as
+    claim writes.
+  - `HookEvent`, `LainIntentArgs`, and the four presence-tool args
+    structs gained `Clone` derives so the closures can be `FnOnce`.
+- **Reproducer results:**
+  - `harness/reproduce-stdio-lock-fail-open.py --natural
+    --agents 6 --iterations 3`: every iteration reports 1 grant + 5
+    conflicts, exactly the linearizability invariant.
+  - `--natural --agents 2 --iterations 5`: every iteration reports
+    1 grant + 1 conflict.
+  - Forced-lock-timeout: every iteration reports 0 grants + 6 errors
+    (all agents fail-closed).
+- **Test counts:**
+  - `cargo test --lib`: 1089 passed (1 new: `with_shared_presence_fails_closed_when_lock_unavailable`).
+  - `tests/coordination_linearizability::linearizability_holds_across_n_agents_and_n_iterations`:
+    400 races, 0 invariant violations.
+  - `scripts/e2e_full.sh`: 46 / 46.
+  - `scripts/agy_chaos.sh` variant 1: bob_granted_post_restart = 1.
+- **Acceptance:** reproducer reports `issue not observed` under
+  forced-timeout; natural contention reports exactly 1 grant + (N − 1)
+  conflicts per iteration.
 
 ## Planned capability expansions
 

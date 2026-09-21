@@ -33,6 +33,21 @@ pub struct PresenceLayer {
     pub(crate) activity: Arc<ActivityTracker>,
     pub(crate) presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
     pub(crate) state_path: PathBuf,
+    /// Loaded tuning for the state-file lock. Snapshot at construction
+    /// so a tuning.toml reload doesn't change mid-flight behaviour.
+    lock_timeouts: LockTimeouts,
+}
+
+/// State-file lock timeouts. Snapshotted from `PresenceConfig` at
+/// `PresenceLayer` construction; `with_shared_presence` passes these
+/// to `state_lock::acquire_with` so the lock honours operator
+/// overrides from `.lain/tuning.toml` instead of falling back to the
+/// hard-coded defaults.
+#[derive(Clone, Copy)]
+struct LockTimeouts {
+    acquire_timeout_ms: u64,
+    retry_interval_ms: u64,
+    stale_after_secs: u64,
 }
 
 impl PresenceLayer {
@@ -52,6 +67,7 @@ impl PresenceLayer {
         presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         repos_yaml: Option<&std::path::Path>,
         workspace: &std::path::Path,
+        presence_config: &crate::server::tuning::PresenceConfig,
     ) -> Self {
         let state_path = match repos_yaml {
             Some(repos) => state_path_for_workspace(repos),
@@ -65,6 +81,11 @@ impl PresenceLayer {
             activity,
             presence_event_tx,
             state_path,
+            lock_timeouts: LockTimeouts {
+                acquire_timeout_ms: presence_config.state_lock_acquire_timeout_ms,
+                retry_interval_ms: presence_config.state_lock_retry_interval_ms,
+                stale_after_secs: presence_config.state_lock_stale_after_secs,
+            },
         }
     }
 
@@ -165,6 +186,7 @@ impl PresenceLayer {
             self.presence.remove(agent_id);
             released
         })
+        .unwrap_or_default()
     }
 
     /// Alias for [`Self::unregister_agent`].
@@ -264,47 +286,52 @@ impl PresenceLayer {
     /// applies only to exclusive leases; a duplicate session under
     /// the rare race where two agents register at the same instant
     /// is benign and the duplicate expires on its TTL.
-    pub fn with_shared_presence<T>(&self, f: impl Fn() -> T) -> T {
-        const MAX_RACE_RETRIES: usize = 4;
+    /// Run `f` inside the cross-process presence critical section.
+    ///
+    /// The state-file lock is acquired with the loaded tuning
+    /// (`tuning.toml`'s `state_lock_*` keys) and held through
+    /// `refresh_shared_presence` + `f` + the persist callback. If
+    /// the lock cannot be acquired within the configured deadline,
+    /// this returns `Err(CoordinationError::Unavailable)` — the
+    /// caller surfaces the failure to the agent so it can retry
+    /// instead of silently writing a stale view.
+    ///
+    /// Why fail closed (instead of the historical "proceed unlocked"
+    /// advisory): the linearizability invariant from
+    /// `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` says at most
+    /// one live exclusive lease per scope. Holding the lock through
+    /// persist is the only way to enforce that invariant under
+    /// contention. Proceeding unlocked is the failure mode that
+    /// the reproducer in `harness/reproduce-stdio-lock-fail-open.py`
+    /// surfaces — six agents reading the same pre-claim snapshot,
+    /// each firing its persist callback, and the last writer's
+    /// state being the only one peers ever observe. Returning
+    /// `Unavailable` puts the retry decision on the agent, which
+    /// can do exponential backoff, surface the error to its user,
+    /// or escalate to a hard failure.
+    pub fn with_shared_presence<T>(&self, f: impl FnOnce() -> T) -> Result<T, CoordinationError> {
         let path = self.state_path();
-        let lock = lain_state_lock::acquire(&path);
-        if lock.is_held() {
-            // Lock held: no concurrent writers possible. Run the
-            // closure under the lock so the in-memory refresh, the
-            // mutation, and the persist callback all happen
-            // serialized against peers. The lock guard's Drop
-            // releases the sentinel when this scope exits.
-            self.refresh_shared_presence();
-            return f();
-        }
-        // Unlocked fallback. Capture the pre-f state hash so we can
-        // tell, after f() returns, whether anyone else wrote to the
-        // file during our critical section.
-        //
-        // On race detection we re-run `f` on the refreshed state so
-        // the agent's own conflict filter sees the other writer's
-        // claim. `f` must be re-callable (a `Fn`, not a `FnOnce`) so
-        // every call site captures its arguments by clone or borrow;
-        // the four presence-tools closures were updated accordingly.
-        for attempt in 0..MAX_RACE_RETRIES {
-            self.refresh_shared_presence();
-            let pre_hash = state_file_hash(&path);
-            let result = f();
-            let post_hash = state_file_hash(&path);
-            if pre_hash == post_hash {
-                return result;
-            }
+        let lock = lain_state_lock::acquire_with(
+            &path,
+            self.lock_timeouts.acquire_timeout_ms,
+            self.lock_timeouts.retry_interval_ms,
+            self.lock_timeouts.stale_after_secs,
+        );
+        if !lock.is_held() {
             tracing::warn!(
-                "with_shared_presence: concurrent unlocked write detected \
-                 on attempt {}; re-running on refreshed state",
-                attempt + 1
+                "with_shared_presence: state-file lock not acquired within \
+                 {}ms; refusing to proceed unlocked",
+                self.lock_timeouts.acquire_timeout_ms
             );
+            return Err(CoordinationError::Unavailable);
         }
-        // Exhausted retries. Run one last time and return whatever
-        // f says. Under pathological contention the worst case is
-        // the original last-writer-wins behavior.
+        // Lock held: refresh, run the closure (which mutates
+        // in-memory and fires the persist callback), and let the
+        // guard's Drop release the sentinel when this scope exits.
+        // The closure runs under the lock so no peer can interleave
+        // a read-modify-write cycle that overwrites our state.
         self.refresh_shared_presence();
-        f()
+        Ok(f())
     }
 
     /// Read-only half of [`Self::with_shared_presence`]: refresh from
@@ -345,20 +372,36 @@ impl PresenceLayer {
     fn _graph_db_marker(_g: &GraphDatabase) {}
 }
 
-/// BLAKE3 hash of the state file at `path`. Returns the all-zero
-/// hash when the file is missing or unreadable; callers compare
-/// against the previous hash to detect "the file changed between
-/// my reads" and trigger a retry of the in-flight operation.
-///
-/// Used by `PresenceLayer::with_shared_presence`'s concurrent-
-/// unlocked-write fallback. The hash is intentionally content-
-/// based rather than mtime-based because mtime resolution is
-/// filesystem-dependent and the reproducer's adversarial padding
-/// keeps the file from getting a meaningful mtime bump.
-fn state_file_hash(path: &std::path::Path) -> blake3::Hash {
-    match std::fs::read(path) {
-        Ok(bytes) => blake3::hash(&bytes),
-        Err(_) => blake3::hash(b""),
+/// Coordination failure surfaced by `PresenceLayer::with_shared_presence`
+/// when the state-file lock cannot be acquired within the configured
+/// deadline. Exclusive mutations (claim, release, register, heartbeat,
+/// intent declare/update, hook observation) refuse to proceed without
+/// the lock so the linearizability invariant from
+/// `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` ("at most one live
+/// exclusive lease per scope") holds under contention. The agent
+/// surfaces this to its caller and retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinationError {
+    /// State-file lock acquisition timed out. A peer process is
+    /// holding the critical section; retry after a brief delay.
+    Unavailable,
+}
+
+impl std::fmt::Display for CoordinationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CoordinationError::Unavailable => f.write_str(
+                "presence coordination unavailable: state-file lock not acquired within the configured deadline",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CoordinationError {}
+
+impl From<CoordinationError> for String {
+    fn from(e: CoordinationError) -> String {
+        e.to_string()
     }
 }
 
@@ -392,6 +435,7 @@ mod tests {
             presence_tx,
             repos_yaml,
             workspace,
+            &crate::server::tuning::PresenceConfig::default(),
         )
     }
 
@@ -420,125 +464,69 @@ mod tests {
         assert_eq!(l.presence_event_tx().receiver_count(), 0);
     }
 
-    /// Unit test for the hash-based concurrent-unlocked-write
-    /// detection. Two processes each take a separate `PresenceLayer`
-    /// pointed at the same state file; the first writes through its
-    /// layer, then the second writes through its layer. The second's
-    /// `with_shared_presence` should detect that the file changed
-    /// during its critical section and re-run the closure on the
-    /// refreshed state. We assert that the re-run fires by counting
-    /// closure invocations and confirming the second layer observed
-    /// the first layer's write via the in-memory state.
+    /// Unit test for fail-closed: `with_shared_presence` must
+    /// return `Err(CoordinationError::Unavailable)` when the
+    /// state-file lock can't be acquired, so the agent sees a
+    /// coordination failure instead of silently writing a stale
+    /// view. We plant a fresh sentinel that the acquisition will
+    /// treat as held for the full timeout.
     ///
-    /// This test deliberately bypasses the file-lock by planting a
-    /// fresh sentinel that the acquisition will treat as held, so
-    /// the unlocked-fallback path is exercised. The reproducer in
-    /// `tests/.../reproduce-stdio-lock-fail-open.py` is the
-    /// cross-process version of this scenario.
+    /// Cross-process version of this scenario is the reproducer in
+    /// `harness/reproduce-stdio-lock-fail-open.py`.
     #[test]
-    fn with_shared_presence_retries_when_unlocked_write_detected() {
-        use crate::server::activity::ActivityTracker;
-        use crate::server::intent::IntentRegistry;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
+    fn with_shared_presence_fails_closed_when_lock_unavailable() {
         let tmp = tempdir();
         let ws = tmp.path().to_path_buf();
         let repos = ws.join("repos.yaml");
         std::fs::write(&repos, "").unwrap();
 
-        // Two layers, both pointed at the same state file. Each
-        // will go through the unlocked fallback because we plant a
-        // sentinel below.
-        let l1 = layer(Some(&repos), &ws);
-        let l2 = layer(Some(&repos), &ws);
-        let reg1 = Arc::clone(l1.presence());
-        let reg2 = Arc::clone(l2.presence());
-        let occ1 = Arc::clone(l1.occupancy());
-        let occ2 = Arc::clone(l2.occupancy());
-        let intent = Arc::new(IntentRegistry::new());
-        let activity = Arc::new(ActivityTracker::new());
-
-        // Seed a session so each layer's register path succeeds.
-        let _ = reg1.register(
-            "agent-1".into(),
-            crate::server::presence::AgentKind::Other("test".into()),
-            crate::server::presence::AgentMode::Interactive,
-            None,
-            None,
-        );
-        let _ = reg2.register(
-            "agent-2".into(),
-            crate::server::presence::AgentKind::Other("test".into()),
-            crate::server::presence::AgentMode::Interactive,
-            None,
-            None,
-        );
-        // Install persist callbacks so each mutation hits disk.
-        let path1 = l1.state_path();
-        let path2 = l2.state_path();
-        let cb1 = {
-            let r = Arc::clone(&reg1);
-            let o = Arc::clone(&occ1);
-            let i = Arc::clone(&intent);
-            let a = Arc::clone(&activity);
-            let p = path1.clone();
-            move || {
-                let _ = crate::server::presence::save_pair(&p, &r, &o, &i, &a);
-            }
+        // Build a `PresenceLayer` with a tiny acquire timeout so the
+        // test doesn't spend the production default 2000 ms waiting.
+        let short_timeouts = crate::server::tuning::PresenceConfig {
+            state_lock_acquire_timeout_ms: 50,
+            state_lock_retry_interval_ms: 5,
+            state_lock_stale_after_secs: 60,
+            ..crate::server::tuning::PresenceConfig::default()
         };
-        let cb2 = {
-            let r = Arc::clone(&reg2);
-            let o = Arc::clone(&occ2);
-            let i = Arc::clone(&intent);
-            let a = Arc::clone(&activity);
-            let p = path2.clone();
-            move || {
-                let _ = crate::server::presence::save_pair(&p, &r, &o, &i, &a);
-            }
+        let presence_state_seen = Arc::new(Mutex::new(None));
+        let presence = Arc::new(crate::server::presence::PresenceRegistry::new());
+        let occupancy = Arc::new(crate::server::presence::OccupancyMap::new());
+        let intent = Arc::new(crate::server::intent::IntentRegistry::new());
+        let activity = Arc::new(crate::server::activity::ActivityTracker::new());
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let state_path = crate::config::state_path_for_workspace(&repos);
+        let l = PresenceLayer {
+            presence_state_seen,
+            presence,
+            occupancy,
+            intent,
+            activity,
+            presence_event_tx: tx,
+            state_path,
+            lock_timeouts: LockTimeouts {
+                acquire_timeout_ms: short_timeouts.state_lock_acquire_timeout_ms,
+                retry_interval_ms: short_timeouts.state_lock_retry_interval_ms,
+                stale_after_secs: short_timeouts.state_lock_stale_after_secs,
+            },
         };
-        reg1.set_persist_callback(cb1.clone());
-        occ1.set_persist_callback(cb1);
-        reg2.set_persist_callback(cb2.clone());
-        occ2.set_persist_callback(cb2);
 
-        // Plant a fresh sentinel so lock acquisition times out and
-        // both layers proceed through the unlocked fallback. The
-        // path the sentinel lives at is the state-file lock sentinel
-        // path; the file-lock module reads it on every acquire.
-        // Make sure the parent directory exists — in CI the
-        // `$XDG_STATE_HOME` may point at a path the test runner
-        // hasn't materialised yet.
-        if let Some(parent) = path1.parent() {
+        // Plant a fresh sentinel so the next `state_lock::acquire`
+        // call hits the timeout path. `with_shared_presence` must
+        // observe `!lock.is_held()` and surface `Unavailable`.
+        if let Some(parent) = l.state_path().parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let sentinel = path1.with_extension("json.lock");
+        let sentinel = l.state_path().with_extension("json.lock");
         std::fs::write(&sentinel, "forced-by-test\n").unwrap();
 
-        // Each layer tries to claim a distinct path so the
-        // post-refresh re-run has a chance to see the other layer's
-        // mutation. Layer 1 writes first (manually), then layer 2
-        // runs `with_shared_presence` which should detect the
-        // concurrent write via the post_hash check.
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let result = l2.with_shared_presence(|| {
-            call_count.fetch_add(1, Ordering::SeqCst);
-            // On the first call, layer 1's write hasn't hit disk
-            // yet; we simulate it by writing here so the
-            // post-f hash differs from pre-f.
-            let _ = crate::server::presence::save_pair(&path1, &reg1, &occ1, &intent, &activity);
-            42
-        });
+        let result: Result<(), CoordinationError> = l.with_shared_presence(|| ());
+        assert!(
+            matches!(result, Err(CoordinationError::Unavailable)),
+            "expected CoordinationError::Unavailable when lock is held; got {result:?}"
+        );
 
-        // The closure was invoked at least once. With the CAS retry
-        // it may be invoked more than once if the post-f hash
-        // differs. We don't assert a specific count — the
-        // reproducers in `harness/reproduce-stdio-lock-fail-open.py`
-        // and the cross-process tests cover the end-to-end count.
-        assert!(call_count.load(Ordering::SeqCst) >= 1);
-        assert_eq!(result, 42);
-
-        // Tidy up the sentinel so other tests don't trip over it.
+        // Cleanup: remove the sentinel so other tests don't trip
+        // over it.
         let _ = std::fs::remove_file(&sentinel);
     }
 }

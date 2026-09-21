@@ -72,17 +72,42 @@ impl Drop for StateLock {
     }
 }
 
-/// Acquire the lock for `state_path`, retrying until [`ACQUIRE_TIMEOUT`].
+/// Acquire the lock for `state_path` with the loaded timing tunables.
 /// Always returns a `StateLock` — on timeout it returns one with
 /// `held == false` so the caller proceeds unlocked rather than failing.
+///
+/// Callers that need to fail closed when coordination is impossible
+/// should check `StateLock::is_held()` and surface an error to the
+/// caller; this entry point keeps the historical "advisory lock
+/// that degrades gracefully" semantics for back-compat. New code
+/// should prefer [`acquire_with`], which is the same primitive
+/// driven by caller-supplied timeouts.
 pub fn acquire(state_path: &Path) -> StateLock {
-    // Read from `PresenceConfig` rather than local constants, so every
-    // presence-related timing is declared in one place with the rest of
-    // lain's tunables.
     let cfg = crate::server::tuning::PresenceConfig::default();
-    let acquire_timeout = Duration::from_millis(cfg.state_lock_acquire_timeout_ms);
-    let retry_interval = Duration::from_millis(cfg.state_lock_retry_interval_ms);
-    let stale_after = Duration::from_secs(cfg.state_lock_stale_after_secs);
+    acquire_with(
+        state_path,
+        cfg.state_lock_acquire_timeout_ms,
+        cfg.state_lock_retry_interval_ms,
+        cfg.state_lock_stale_after_secs,
+    )
+}
+
+/// Acquire the lock for `state_path` using the supplied timeouts. Use
+/// this when the caller has loaded `tuning.toml` and wants the lock
+/// to honour operator overrides — `acquire` always uses
+/// `PresenceConfig::default()`, which silently ignores the tuning
+/// file. The same advisory semantics apply: on timeout the returned
+/// `StateLock` has `held == false` so the caller can branch on
+/// `is_held()` and decide whether to fail closed or proceed.
+pub fn acquire_with(
+    state_path: &Path,
+    acquire_timeout_ms: u64,
+    retry_interval_ms: u64,
+    stale_after_secs: u64,
+) -> StateLock {
+    let acquire_timeout = Duration::from_millis(acquire_timeout_ms);
+    let retry_interval = Duration::from_millis(retry_interval_ms);
+    let stale_after = Duration::from_secs(stale_after_secs);
     let path = lock_path_for(state_path);
     let deadline = SystemTime::now() + acquire_timeout;
     loop {

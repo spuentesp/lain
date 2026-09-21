@@ -32,7 +32,7 @@ use serde_json::Value;
 /// Wire shape for one `/hook` POST. Every field except `at` is
 /// required; serde rejects the request as `malformed_hook_event` if
 /// `session_token` / `agent_id` / `event` / `tool` are missing.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct HookEvent {
     pub session_token: String,
     pub agent_id: String,
@@ -62,6 +62,20 @@ pub struct HookEvent {
 /// the hook sees; failures return `Err(String)` so the HTTP layer
 /// can produce a 400 response with a stable error code.
 pub fn handle_hook(server: &LainServer, event: HookEvent) -> Result<Value, String> {
+    // Wrap the activity mutation in `with_shared_presence` so the
+    // observation write to the state file happens under the lock.
+    // Without this wrapper the activity tracker's persist callback
+    // fires outside the lock and races against `claim_files`
+    // writes on the same state file — the natural-contention race
+    // the user's report identified. The HookEvent is Clone so the
+    // closure can be FnOnce.
+    server
+        .with_shared_presence(|| handle_hook_inner(server, event.clone()))
+        .map_err(|e| e.to_string())
+        .and_then(|inner| inner)
+}
+
+fn handle_hook_inner(server: &LainServer, event: HookEvent) -> Result<Value, String> {
     // Auth is the standard session-token check. The agent_id must
     // match the resolved session — same contract every other
     // multiplayer tool enforces — so a hook forger can't record

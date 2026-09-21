@@ -262,15 +262,26 @@ async fn multi_file_grant_emits_one_audit_line_per_path() {
 /// by pointing `XDG_STATE_HOME` at a path whose `lain/` child cannot
 /// be created (a regular file in the way). The handler still returns
 /// `granted: [...]` so the agent's edit proceeds; the audit module
-/// logs the failure and the dispatcher's `WARN` is acceptable. This
-/// pins the "audit never blocks an edit" invariant from the spec.
+/// Coordination fails closed when the state directory is unwritable.
+/// The lock sentinel lives next to the state file under
+/// `state_dir/`, so an unwritable parent breaks both the audit
+/// append path and the lock acquisition. Under fail-closed
+/// coordination, this is fatal: an exclusive mutation cannot
+/// proceed without the lock, and the agent sees
+/// `CoordinationError::Unavailable`.
+///
+/// This supersedes the older "audit failure doesn't block claim"
+/// contract: the audit path is still non-blocking on its own
+/// (`append_edit_event` failures are logged warnings, not errors)
+/// but the parent directory is shared with the lock sentinel, so
+/// breaking one breaks the other. The linearizability invariant
+/// from `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` says at
+/// most one live exclusive lease per scope, and that invariant
+/// requires a writable lock directory.
 #[tokio::test]
-async fn audit_append_failure_does_not_block_claim() {
+async fn coordination_fails_closed_when_state_dir_is_unwritable() {
     let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let blocker = tempfile::tempdir().unwrap();
-    // Place a regular file where `state_dir()` expects `lain/` to be
-    // a directory — `append_edit_event`'s `OpenOptions::create(true)`
-    // will then fail with `NotADirectory`.
     let blocker_file = blocker.path().join("lain");
     std::fs::write(&blocker_file, b"not a directory").unwrap();
     std::env::set_var(
@@ -289,18 +300,10 @@ async fn audit_append_failure_does_not_block_claim() {
         &server,
         serde_json::json!({"name": "alice"}),
     )
-    .unwrap();
-    let agent_id = reg["agent_id"].as_str().unwrap().to_string();
-    let token = reg["session_token"].as_str().unwrap().to_string();
-
-    let resp = lain::server::mcp::presence_tools::run_claim_files(
-        &server,
-        serde_json::json!({
-            "agent_id": agent_id,
-            "session_token": token,
-            "files": [{"path": "auth.rs", "symbols": ["login"], "intent": "edit"}],
-        }),
-    )
-    .expect("claim_files must succeed even when audit append fails");
-    assert_eq!(resp["granted"].as_array().unwrap().len(), 1);
+    .expect_err("register_agent must fail closed when the state dir is unwritable");
+    let msg = reg.to_string();
+    assert!(
+        msg.contains("coordination unavailable"),
+        "expected coordination_unavailable error; got {msg:?}"
+    );
 }

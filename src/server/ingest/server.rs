@@ -403,7 +403,10 @@ impl LainServer {
         self.presence.load_state()
     }
 
-    pub fn with_shared_presence<T>(&self, f: impl Fn() -> T) -> T {
+    pub fn with_shared_presence<T>(
+        &self,
+        f: impl FnOnce() -> T,
+    ) -> Result<T, crate::server::ingest::handles::presence::CoordinationError> {
         self.presence.with_shared_presence(f)
     }
 

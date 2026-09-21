@@ -457,6 +457,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         presence_event_tx.clone(),
         repos_yaml.as_deref(),
         ws.as_path(),
+        &tuning.presence,
     ));
 
     let ingest_handle = Arc::new(super::handles::IngestHandle::new(
@@ -685,6 +686,7 @@ impl LainServer {
             presence_event_tx.clone(),
             None,
             workspace,
+            &tuning.presence,
         ));
 
         let ingest_handle = Arc::new(super::handles::IngestHandle::new(
