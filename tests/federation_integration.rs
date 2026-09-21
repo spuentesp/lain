@@ -1046,11 +1046,11 @@ async fn detect_overlap_two_shared_functions_is_high() {
 // federation-level tools (`list_repos`, `search_org`) reported a
 // fully-populated graph. Confident false negatives.
 //
-// The fix: when the federation has exactly one repo, the executor's
-// graph is that repo's indexed `GraphDatabase`. Multi-repo
-// federations still bind to the placeholder and need the round-2
-// federation-aware handler refactor; this test pins the single-repo
-// case so the regression can't reappear silently.
+// The fix initially bound a single-repo federation directly to that
+// repo's indexed `GraphDatabase`. Multi-repo executors retain the
+// placeholder as their default, but normal MCP dispatch now injects a
+// resolved `repo_id` and the tool registry rebinds per call. This test
+// pins the direct single-repo binding so that fast path cannot regress.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1163,10 +1163,10 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
 #[tokio::test]
 async fn multi_repo_federation_falls_back_to_placeholder() {
     // Two repos → multi-repo federation → the placeholder graph
-    // still binds the executor. Per-repo tools still won't work,
-    // but the executor must construct cleanly and the placeholder
-    // must be the SAME empty DB regardless of repo count. This
-    // pins the "only the single-repo path got the fix" contract.
+    // remains the executor's default. MCP tool calls do work because
+    // dispatch resolves a repo and `ToolRegistry::dispatch` rebinds the
+    // context; this lower-level constructor test only pins the neutral
+    // default used before a request has selected a repo.
     let ws_a = tempfile::tempdir().unwrap();
     let ws_b = tempfile::tempdir().unwrap();
     init_bare_git_repo(ws_a.path());
@@ -1189,11 +1189,11 @@ async fn multi_repo_federation_falls_back_to_placeholder() {
 
     // The placeholder path: the executor's graph is fresh and
     // empty (0 nodes), not bound to either repo. This is the
-    // known limitation the next round-2 refactor will address.
+    // intentional neutral default; request dispatch must rebind it.
     assert_eq!(
         server.ingest().graph().node_count(),
         0,
-        "multi-repo federation still binds the placeholder; round-2 will fix this"
+        "multi-repo federation should keep a neutral placeholder default"
     );
 }
 

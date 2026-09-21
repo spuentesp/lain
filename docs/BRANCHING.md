@@ -16,10 +16,9 @@ hotfix/x ─────┘
 - **Feature branches** (`feature/<name>`, `fix/<name>`, `chore/<name>`)
   branch off `dev` and target `dev` when opened as PRs.
 - **`dev`** is the always-green integration branch. It receives all
-  feature work; PRs to `dev` only need CI to pass.
+  feature work; PRs to `dev` require one approval and the fast CI lane.
 - **`main`** is the protected release line. PRs from `dev` → `main`
-  require one approving review and a green `lain/agent-contract`
-  status.
+  require one approving review and the full cross-platform CI lane.
 
 ## Why this shape
 
@@ -29,8 +28,10 @@ added the OpenSSF Scorecard badge: Scorecard's `Code-Review` and
 `Branch-Protection` checks were both at 0, and the badge reflected
 that. We turned on:
 
-- `main` requires 1 approval + green `lain/agent-contract`.
-- `dev` requires green `lain/agent-contract`.
+- `main` requires one approval, `lain/agent-contract`, lint, and the
+  Ubuntu/macOS/Windows Cargo tests.
+- `dev` requires one approval, `lain/agent-contract`, lint, and the Ubuntu
+  Cargo test.
 - Force pushes and direct deletion are blocked on both.
 
 **These settings alone did not move the score to 10.** Confirmed
@@ -45,7 +46,7 @@ limit, not a misconfiguration to patch quietly.
 
 ## Branch protection rules
 
-Configured 2026-09-14 via the GitHub API.
+Last verified through the GitHub API on 2026-09-20.
 
 ### `main`
 
@@ -53,7 +54,7 @@ Configured 2026-09-14 via the GitHub API.
 |---|---|
 | Required approving reviews | 1 |
 | Dismiss stale reviews on push | yes |
-| Require status checks | `lain/agent-contract` |
+| Require status checks | `lain/agent-contract`, lint, Ubuntu/macOS/Windows Cargo tests |
 | Require branches up to date before merge | yes |
 | Require conversation resolution | no |
 | Require signed commits | no |
@@ -66,20 +67,20 @@ Configured 2026-09-14 via the GitHub API.
 
 | Setting | Value |
 |---|---|
-| Required approving reviews | 0 (integration branch) |
-| Require status checks | `lain/agent-contract` |
+| Required approving reviews | 1 |
+| Require status checks | `lain/agent-contract`, lint, Ubuntu Cargo tests |
 | Require branches up to date before merge | yes |
 | Allow force pushes | no |
 | Allow deletions | no |
 
-`dev` deliberately has no review requirement — that's `main`'s gate.
-A broken PR will be caught by the agent-contract rollup before it can
-merge.
+`dev` is still the faster integration lane, but branch protection now requires
+one approval as well as the fast-lane checks. `main` adds the cross-platform
+test contexts and is reserved for release PRs.
 
 ## What counts as "agent contract"
 
 The `lain/agent-contract` status is published by the `agent-contract`
-job inside [`.github/workflows/ci.yml`](.github/workflows/ci.yml), not
+job inside [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), not
 by a separate workflow. It runs as part of every CI invocation and
 aggregates three sibling CI jobs:
 
@@ -102,26 +103,23 @@ git switch -c feature/some-name
 
 # ... work, commit ...
 
-# Open a PR targeting dev. Once CI is green and the rollup posts
-# "Passing", merge.
+# Open a PR targeting dev. Once approval, CI, and the rollup are green,
+# merge.
 gh pr create --base dev --head feature/some-name
 
-# Periodically: cut a release from dev into main.
+# To release: branch from dev, update every release-metadata file, and
+# open the release PR against main.
 git switch dev
 git pull --ff-only
 git switch -c release/v0.x.y
+python3 scripts/check-release-version.py --tag v0.x.y
 gh pr create --base main --head release/v0.x.y \
   --title 'release: v0.x.y' --body '...' --label release
 ```
 
-## Hotfix path
-
-For an urgent fix that can't wait for `dev` to settle:
-
-1. Branch off `main`: `git switch main && git switch -c hotfix/thing`.
-2. Open a PR to `main`. It still needs 1 review + agent-contract.
-3. After merging to `main`, cherry-pick or fast-forward `dev` to
-   catch up: `git switch dev && git merge --ff-only main`.
+After the release PR merges, push the version tag so `release.yml` publishes
+the artifacts, then fast-forward `dev` to `main`. Urgent fixes still land on
+`dev` first; `main` receives changes only through a release PR.
 
 ## What this policy is *not*
 

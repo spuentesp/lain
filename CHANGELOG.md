@@ -7,6 +7,32 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **Intent & observability layer** (PRs 1–6 of
+  `docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md`). Two new MCP tools:
+  `lain_intent` (declare / update per-agent goal + scopes) and
+  `list_active_intents` (per-agent activity feed). New
+  `POST /hook` endpoint that ingests tool-call observations from
+  the agent's host-specific hook layer (Claude Code PostToolUse,
+  AGY pre-edit, etc.). Three-level coordination engine that
+  surfaces GREEN / YELLOW / RED with structured reasons and related
+  activity. The `lain setup --agent claude` command now writes a
+  three-sentence system prompt to `.lain/PROMPT.md` that the
+  operator copies into their agent's startup-context file. New
+  `scripts/e2e_full.sh` drives a real `lain server` through 46
+  scenarios across intent lifecycle, activity observation,
+  evaluation, persistence, cross-agent, error paths, and doc
+  accuracy. Linearizability stress test
+  (`tests/coordination_linearizability.rs`): 100 iterations × 4
+  racers + N=10 + release/reclaim cycle, plus the AGY
+  end-to-end harness (`scripts/agy_e2e.sh` → `verdict.json`).
+  `unregister_agent` MCP tool added; releases every claim and
+  drops the agent's intent + activity entries. Existing
+  presence + occupancy snapshot file extended with
+  `intents` / `activities` arrays (`#[serde(default)]` for
+  backward-compat). Linearizability invariant preserved: RED
+  always wins over YELLOW peer-reading, file-lock fail-closed
+  continues to be the source of truth for exclusive ownership.
+
 - **LSP cold-boot prewarm.** On every server start, each language
   server the workspace actually uses gets one warm-up
   `documentSymbol` call against a sentinel file (largest by
@@ -194,10 +220,11 @@ All notable changes to LAIN are documented here. Versions follow
   overhead = 10.3 µs** across the 5 `GitSensor` methods called
   from `build_core_memory`'s offthread closures. Verdict from the
   plan's decision tree: **GO** (< 500 µs avg p95). Findings
-  write-up at `docs/notes/2026-09-19-sidecar-prototype-bench.md`.
+  benchmark write-up (retired from the current docs; preserved in Git history).
   Full architecture design (the production shape, schema
   versioning, child lifecycle, federation health surface) at
-  `docs/notes/2026-09-19-sidecar-architecture.md`. Next cycle:
+  the sidecar architecture record (retired from the current docs; preserved in
+  Git history). Next cycle:
   implement `SidecarGitSensor` and the `AnyGitSensor` enum as
   drop-in replacements for `Arc<Mutex<GitSensor>>`, default
   mode stays `InProcess` until soak-tested.

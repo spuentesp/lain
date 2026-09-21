@@ -57,19 +57,10 @@ def main() -> int:
         handler_path = os.path.join(raw, HANDLER_REL)
         with open(handler_path, encoding="utf-8") as f:
             text = f.read()
-        new_arm = '\n            "totally_new_tool" => Ok("noop".to_string()),\n'
-        idx = text.find("match name")
-        if idx == -1:
-            # Phase 3.2 (full) removed the federation/workspace match
-            # arm from dispatch_tool_call. When the only match arm is
-            # gone, the patch-based tests don't apply — the script
-            # itself catches new arms via the inventory iter. Skip the
-            # patch tests rather than failing.
-            print("dispatch is fully inventory-based; skipping patch tests")
-            print("all tests passed")
-            return 0
-        brace = text.find("{", idx)
-        patched = text[: brace + 1] + new_arm + text[brace + 1 :]
+        needle = "    let ctx = McpContext {"
+        injection = '    match name { "totally_new_tool" => (), _ => () };\n'
+        assert needle in text
+        patched = text.replace(needle, injection + needle, 1)
         with open(handler_path, "w", encoding="utf-8") as f:
             f.write(patched)
         assert_eq("new arm added", run(raw), 1)
@@ -77,10 +68,8 @@ def main() -> int:
             f.write(text)
         with open(handler_path, encoding="utf-8") as f:
             t2 = f.read()
-        collide = '\n            "explore_architecture" => Ok("noop".to_string()),\n'
-        idx = t2.find("match name")
-        brace = t2.find("{", idx)
-        patched = t2[: brace + 1] + collide + t2[brace + 1 :]
+        collision = '    match name { "explore_architecture" => (), _ => () };\n'
+        patched = t2.replace(needle, collision + needle, 1)
         with open(handler_path, "w", encoding="utf-8") as f:
             f.write(patched)
         assert_eq("collision with inventory name", run(raw), 1)

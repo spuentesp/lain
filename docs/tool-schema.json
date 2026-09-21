@@ -1393,5 +1393,89 @@
       "type": "object"
     },
     "name": "get_pending_handoffs"
+  },
+  {
+    "description": "Tear down an agent session: releases every claim, drops intent + activity entries, removes the presence session.",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "description": "agent_id",
+          "type": "string"
+        },
+        "session_token": {
+          "description": "session_token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "session_token"
+      ],
+      "type": "object"
+    },
+    "name": "unregister_agent"
+  },
+  {
+    "description": "Declare or update an intent (goal + scopes + status). The response carries the live coordination level (GREEN / YELLOW / RED) and a `coordination` block with related activity. Returns {intent_id, revision, coordination, intent}.",
+    "inputSchema": {
+      "properties": {
+        "add_scopes": {
+          "description": "add_scopes",
+          "type": "string"
+        },
+        "agent_id": {
+          "description": "agent_id",
+          "type": "string"
+        },
+        "goal": {
+          "description": "goal",
+          "type": "string"
+        },
+        "intent_id": {
+          "description": "intent_id",
+          "type": "string"
+        },
+        "remove_scopes": {
+          "description": "remove_scopes",
+          "type": "string"
+        },
+        "scopes": {
+          "description": "scopes",
+          "type": "string"
+        },
+        "session_token": {
+          "description": "session_token",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved",
+            "stale"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "session_token"
+      ],
+      "type": "object"
+    },
+    "name": "lain_intent"
+  },
+  {
+    "description": "Per-agent activity feed: for each connected agent, returns intent {goal, scopes, status}, focus (most-recent observation target), observed_reads (deduped), and last_tool {tool, target, at_unix}. Optional `agent_id` filters to one agent.",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "description": "agent_id",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_active_intents"
   }
 ]

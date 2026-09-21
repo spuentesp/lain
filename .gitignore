@@ -39,6 +39,10 @@ memory.json
 .lain/
 mcp-publisher
 
+# Sibling git checkout accidentally created during local testing;
+# not part of this repo.
+lain/
+
 # Node test deps (installed via `npm install --prefix tests/js`)
 tests/js/node_modules/
 

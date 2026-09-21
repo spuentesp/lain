@@ -227,16 +227,38 @@ pub async fn run_server(
                 // resolver that walks every registered repo; this
                 // wiring is sufficient because `cli::server::run`
                 // starts the listener before the federation-aware
-                // dispatcher takes over. Federation OTLP resolution
-                // is a follow-up — for now the listener resolves
-                // against whichever graph `ctx` points at, and
-                // federation calls that land here will mint edges
-                // against the staging placeholder (None for
-                // unresolved cross-repo callees).
-                let graph = server.ingest().tool_executor().ctx.graph.clone();
-                let resolver: crate::server::runtime_trace::server::SpanResolver =
-                    std::sync::Arc::new(move |span: &crate::server::runtime_trace::SpanRecord| {
-                        graph.find_node_by_name(&span.name).map(|n| n.id)
+                // dispatcher takes over. Federation mode uses the
+                // dedicated federation resolver which walks every
+                // registered repo and honors OTLP semconv hints
+                // (`code.repo`, `service.name`) so cross-repo spans
+                // mint correctly namespaced `RuntimeCall` edges
+                // instead of leaking edges between repos.
+                let resolver = server
+                    .ingest()
+                    .tool_executor()
+                    .ctx
+                    .federation
+                    .clone()
+                    .map(|fed| crate::server::runtime_trace::server::federation_resolver(fed))
+                    .unwrap_or_else(|| {
+                        // Single-workspace mode: the executor's graph
+                        // is the only authoritative source.
+                        let graph = server.ingest().tool_executor().ctx.graph.clone();
+                        crate::server::runtime_trace::server::SpanResolver::from(
+                            std::sync::Arc::new(
+                                move |span: &crate::server::runtime_trace::SpanRecord| {
+                                    graph.find_node_by_name(&span.name).map(|n| n.id)
+                                },
+                            )
+                                as std::sync::Arc<
+                                    dyn Fn(
+                                            &crate::server::runtime_trace::SpanRecord,
+                                        )
+                                            -> Option<String>
+                                        + Send
+                                        + Sync,
+                                >,
+                        )
                     });
                 let handle = crate::server::runtime_trace::server::start(listener, store, resolver);
                 tracing::info!(

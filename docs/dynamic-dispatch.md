@@ -90,15 +90,31 @@ the default view clean.
 **The honest answer when static + heuristic still say "I don't know".**
 
 The `runtime_trace` module holds a process-global
-`RuntimeTraceStore`. Future OTLP adapters (or test fixtures) feed
-`SpanRecord`s into it; each parent→child span pair with both
+`RuntimeTraceStore`. The shipped OTLP HTTP/JSON listener (or test fixtures)
+feeds `SpanRecord`s into it; each parent→child span pair with both
 endpoints resolvable in the static graph becomes a `RuntimeCall`
 edge with `provenance = Runtime { trace_id, last_seen_unix }` and a
 TTL configured by `LAIN_TRACE_TTL_SECS` (default 3600).
 
-The OTLP gRPC listener itself is not shipped in this milestone —
+The OTLP gRPC listener is not shipped —
 the heavy `tonic` + `opentelemetry-*` deps are deferred to a
-follow-up PR. The store API is the contract adapters must fulfil.
+separate capability plan. The store API is the contract adapters must fulfil.
+
+### Federation-aware OTLP resolver
+
+In federation mode the OTLP resolver walks every registered
+repo's graph looking for the span name and returns the global
+node id when exactly one repo owns the symbol. It honors OTLP
+semconv hints (`code.repo` for repo-narrowed resolution;
+`service.name` as a secondary lookup key) before falling back
+to the global index.
+
+It returns `None` when no repo owns the symbol or when the
+symbol-name lookup is ambiguous across repos — in both cases
+the edge is dropped rather than minted against the staging
+placeholder. See
+`runtime_trace::server::federation_resolver` and the
+`federation_resolver_narrows_via_code_repo_attribute` test.
 
 ## The `explain_dispatch` tool
 

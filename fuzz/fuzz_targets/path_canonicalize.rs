@@ -33,8 +33,7 @@ use lain::server::path_util::{canonical_form, lexical_normalize, posix_string};
 use lain::server::presence::canonical_claim_path;
 use std::path::{Path, PathBuf};
 
-#[libfuzzer_sys::fuzz_target]
-fn fuzz_path_canonicalize(data: &[u8]) {
+libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Same lossy conversion the production code uses — invalid
     // UTF-8 must not panic the fuzzer itself.
     let input = String::from_utf8_lossy(data);
@@ -54,4 +53,4 @@ fn fuzz_path_canonicalize(data: &[u8]) {
     let _ = lexical_normalize(&path);
     let _ = canonical_form(&path);
     let _ = canonical_claim_path(&roots, &path);
-}
+});

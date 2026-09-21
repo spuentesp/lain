@@ -182,16 +182,6 @@ pub struct RepoIndex {
     /// catches `indexed_signal = true` for the wire payload the
     /// `Notify`'s one-shot semantics would otherwise miss.
     indexed_at_least_once: std::sync::atomic::AtomicBool,
-    /// Current depth of the watcher's bounded event channel.
-    /// Incremented by the receiver loop on receive, decremented on
-    /// process. Exposed as the `outstanding_files` field on
-    /// `PerRepoReadiness` so `get_capabilities` can show back-pressure
-    /// without scraping the receiver task's internals. Currently
-    /// stays at 0 — the receiver loop's incr/decr is wired but the
-    /// channel capacity (1024) rarely fills in practice; the
-    /// spawn_blocking follow-up PR will fill it in for hot-loop
-    /// observability. Defined now to keep the wire shape stable
-    /// across that work.
     /// Depth of the watcher's bounded event channel at snapshot
     /// time. `Arc`-wrapped so the inotify callback (increment
     /// side) and the Tokio receiver loop (decrement side) share

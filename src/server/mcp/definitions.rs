@@ -282,6 +282,29 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
         required_args: &[],
         optional_args: &["scope", "since_unix_ms"],
     },
+    // Intent layer (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    // Listed here (in addition to the inventory-registered entries
+    // in `handler.rs`) so the multiplayer tools are advertised in
+    // `tools/list` regardless of whether the inventory crate
+    // collected the static-linker section in a given build.
+    ToolDef {
+        name: "unregister_agent",
+        description: "Tear down an agent session: releases every claim, drops intent + activity entries, removes the presence session.",
+        required_args: &["agent_id", "session_token"],
+        optional_args: &[],
+    },
+    ToolDef {
+        name: "lain_intent",
+        description: "Declare or update an intent (goal + scopes + status). The response carries the live coordination level (GREEN / YELLOW / RED) and a `coordination` block with related activity. Returns {intent_id, revision, coordination, intent}.",
+        required_args: &["agent_id", "session_token"],
+        optional_args: &["goal", "scopes", "status", "add_scopes", "remove_scopes", "intent_id"],
+    },
+    ToolDef {
+        name: "list_active_intents",
+        description: "Per-agent activity feed: for each connected agent, returns intent {goal, scopes, status}, focus (most-recent observation target), observed_reads (deduped), and last_tool {tool, target, at_unix}. Optional `agent_id` filters to one agent.",
+        required_args: &[],
+        optional_args: &["agent_id"],
+    },
 ];
 
 /// Map a `&[ToolDef]` to the Vec<Tool> shape the MCP `tools/list`

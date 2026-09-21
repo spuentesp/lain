@@ -6,13 +6,11 @@
 //! MCP client, and verifies the result with a real `initialize` +
 //! `tools/list` round trip against the exact command it just wrote.
 //!
-//! Two adapters exist today: `generic` (writes `.mcp.json`, the format
-//! documented in `docs/COOKBOOK.md`) and `claude-code` (shells out to
-//! the `claude` CLI's own `mcp add`/`get`/`remove`, which already owns
-//! safe JSON editing for its config — reimplementing that here would be
-//! a second, competing writer for a file this binary doesn't otherwise
-//! touch). Codex/Cursor/VS Code/Continue adapters are not implemented
-//! yet; `--agent` rejects anything but `generic` and `claude-code`.
+//! Adapters exist for generic MCP clients, Claude Code, Codex, Cursor,
+//! VS Code, and Continue. The generic adapter writes `.mcp.json`; the
+//! client-specific adapters update each client's native configuration.
+//! Claude Code delegates mutation to its own `claude mcp` CLI so lain
+//! does not become a competing writer for Claude's config file.
 
 use crate::cli::doctor;
 use crate::cli::io::write_file_atomic;
@@ -79,6 +77,44 @@ const MODEL_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
 const TOKENIZER_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+
+/// Three-sentence protocol the agent sees on session start (PR 4 of
+/// `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). Installed by `lain setup
+/// --agent claude` (and equivalents); the setup command writes
+/// `PROMPT.md` under `.lain/` so the user can copy the snippet into
+/// `CLAUDE.md` / `.cursorrules` / `AGENTS.md` (whatever their host
+/// reads) without retyping it. The plain text matches the plan's
+/// example verbatim — copy-paste between the docs is the source of
+/// truth, and a typo here is a typo there.
+pub const LAIN_INTENT_PROMPT: &str = "\
+You are operating in a Lain-managed workspace. Lain coordinates
+across agents via declared intent and automatic observation.
+
+Before a substantial code change, declare your goal and the
+scopes you intend to modify via `lain_intent`. Update the intent
+when your scope materially changes. Do not report individual
+reads or commands; Lain observes those through hooks.";
+
+/// Filename for the prompt snippet under the workspace's `.lain/`
+/// directory. Kept distinct from the existing `tuning.toml` /
+/// `graph.bin` so it doesn't get clobbered by `lain init` or
+/// accidentally picked up as configuration.
+pub const PROMPT_FILENAME: &str = "PROMPT.md";
+
+/// Write the intent protocol to `<workspace>/.lain/PROMPT.md` so the
+/// user can copy it into their agent's startup-context file. The
+/// `.lain/` directory is created if missing; the write is atomic
+/// (same `write_file_atomic` helper as the state snapshot) so a
+/// partial file can't be observed by a concurrent `lain mcp`
+/// reading the snippet. Returns the path on success.
+fn write_intent_prompt(workspace: &Path) -> Result<PathBuf, String> {
+    let dir = workspace.join(".lain");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all({}): {e}", dir.display()))?;
+    let path = dir.join(PROMPT_FILENAME);
+    crate::cli::io::write_file_atomic(&path, LAIN_INTENT_PROMPT.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
 
 /// Find an already-usable model without downloading anything. Checks,
 /// in order: `LAIN_EMBEDDING_MODEL` (the explicit override every other
@@ -511,7 +547,11 @@ fn configure_claude_code(
     let command_line = format!("claude {}", add_args.join(" "));
 
     if opts.print_config {
-        println!("{command_line}");
+        // PR 4: surface the intent protocol alongside the MCP
+        // command so the operator can copy both pieces into the
+        // agent's startup context in one go.
+        println!("# MCP command:\n{command_line}\n");
+        println!("# System-prompt snippet (copy into CLAUDE.md / .cursorrules / AGENTS.md):\n{LAIN_INTENT_PROMPT}");
         return ConfigurationOutcome {
             agent: "claude-code".into(),
             state: ConfigurationState::Printed,
@@ -567,12 +607,34 @@ fn configure_claude_code(
     }
 
     match Command::new("claude").args(&add_args).output() {
-        Ok(out) if out.status.success() => ConfigurationOutcome {
-            agent: "claude-code".into(),
-            state: ConfigurationState::Configured,
-            target: Some("claude mcp".into()),
-            detail: None,
-        },
+        Ok(out) if out.status.success() => {
+            // PR 4: drop the intent protocol into `.lain/PROMPT.md`
+            // alongside the existing setup artifacts. The user copies
+            // it into `CLAUDE.md` / `.cursorrules` / `AGENTS.md` (or
+            // whichever file their agent host reads); we don't try to
+            // write that file because the host-specific location is
+            // outside Lain's purview. Best-effort: a write failure
+            // here doesn't unwind the MCP registration that already
+            // succeeded — the operator can re-run `--agent claude
+            // --print-config` to recover the snippet.
+            let prompt_detail = if let Some(ws) = opts.workspace.as_ref() {
+                match write_intent_prompt(ws) {
+                    Ok(path) => Some(format!("wrote intent protocol to {}", path.display())),
+                    Err(e) => Some(format!(
+                        "MCP configured, but PROMPT.md write failed: {e}. \
+                         Re-run with --print-config to recover the snippet."
+                    )),
+                }
+            } else {
+                None
+            };
+            ConfigurationOutcome {
+                agent: "claude-code".into(),
+                state: ConfigurationState::Configured,
+                target: Some("claude mcp".into()),
+                detail: prompt_detail,
+            }
+        }
         Ok(out) => {
             let add_error = String::from_utf8_lossy(&out.stderr).trim().to_string();
             ConfigurationOutcome {
@@ -1347,6 +1409,15 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         None if !opts.json && is_stdin_tty() => prompt_agent_choice(),
         None => "generic".to_string(),
     };
+    // Accept common shorthand names as aliases for the canonical
+    // agent kind. `claude` is what most operators type (the product
+    // is called "Claude Code"); `claude-code` is the canonical
+    // identifier the rest of the codebase uses. Normalizing once
+    // here keeps the dispatch table below uniform.
+    let agent = match agent.as_str() {
+        "claude" => "claude-code".to_string(),
+        other => other.to_string(),
+    };
     if !matches!(
         agent.as_str(),
         "generic" | "claude-code" | "codex" | "cursor" | "vscode" | "continue",
@@ -1667,6 +1738,30 @@ mod tests {
         assert!(detail.contains("permission denied"));
         assert!(detail.contains("/usr/local/bin/lain"));
         assert!(detail.contains("removed to make way"));
+    }
+
+    /// PR 4: `write_intent_prompt` creates `.lain/PROMPT.md` with the
+    /// exact three-sentence protocol. The test pins the file content
+    /// against the plan verbatim so a future tweak to the wording
+    /// is a deliberate plan update, not a silent drift.
+    #[test]
+    fn write_intent_prompt_writes_the_protocol_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_intent_prompt(dir.path()).expect("write_intent_prompt");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body, LAIN_INTENT_PROMPT);
+        assert!(body.contains("lain_intent"));
+        assert!(body.contains("Lain observes"));
+    }
+
+    /// PR 4: the prompt write creates `.lain/` if it doesn't exist
+    /// (the typical case for a fresh `lain setup`).
+    #[test]
+    fn write_intent_prompt_creates_dot_lain_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!dir.path().join(".lain").exists());
+        write_intent_prompt(dir.path()).unwrap();
+        assert!(dir.path().join(".lain").join(PROMPT_FILENAME).exists());
     }
 
     #[test]

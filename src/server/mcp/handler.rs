@@ -25,7 +25,7 @@ use rust_mcp_sdk::{
     },
     McpServer, StdioTransport, TransportOptions,
 };
-use serde_json::Map;
+use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -399,10 +399,45 @@ async fn dispatch_tool_call(
         Some(&args_map)
     };
 
+    // Direct dispatch for the intent-layer tools. The
+    // `declare_presence_tool!` macros register them via
+    // `inventory::submit!`, but the inventory section doesn't reach
+    // the production binary in this build mode, so the inventory
+    // iteration above returns None for these names and they would
+    // otherwise fall through to `executor.call` (which doesn't
+    // know them) and surface as "Unknown tool". Dispatching
+    // directly here mirrors how the federation + workspace tools
+    // are wired, and keeps the multiplayer surface callable
+    // regardless of inventory collection.
+    let intent_args = Value::Object(args_map.clone());
+    let intent_layer_result: Option<Result<Value, String>> = match name {
+        "lain_intent" => server
+            .as_deref()
+            .map(|s| crate::server::mcp::intent_tools::run_lain_intent(s, intent_args.clone())),
+        "list_active_intents" => server.as_deref().map(|s| {
+            crate::server::mcp::intent_tools::run_list_active_intents(s, intent_args.clone())
+        }),
+        "unregister_agent" => server.as_deref().map(|s| {
+            crate::server::mcp::presence_tools::run_unregister_agent(s, intent_args.clone())
+        }),
+        _ => None,
+    };
+    if let Some(result) = intent_layer_result {
+        return tool_result(name, result);
+    }
+
     match executor.call(name, args).await {
         Ok(text) => (text, false),
         Err(e) => (format!("Error: {e}"), true),
     }
+}
+
+/// Wrap an args `Map<String, Value>` as a single `Value::Object` so
+/// the runner functions' `Value` parameter type matches. The runner
+/// functions re-deserialize through their own `serde_json::from_value`
+/// calls, so the wrapping is just shape preservation.
+fn args_map_to_value(map: serde_json::Map<String, Value>) -> Value {
+    Value::Object(map)
 }
 
 struct LainHandler {
@@ -1877,6 +1912,156 @@ async fn handle_request(
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
             .body(full_body(Bytes::from(response_str)))
+            .unwrap());
+    }
+
+    // POST /hook -> ingest a tool-call observation from an agent's
+    // hook layer (PR 2 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    //
+    // Wire shape:
+    // ```json
+    // {
+    //   "session_token": "...",
+    //   "agent_id": "...",
+    //   "event": "tool_start" | ...,
+    //   "tool": "Read" | ...,
+    //   "target": "src/auth.rs"
+    // }
+    // ```
+    if method == Method::POST && path == "/hook" {
+        const MAX_HOOK_BODY_BYTES: u64 = 64 * 1024;
+        let body_bytes = match Limited::new(req.into_body(), MAX_HOOK_BODY_BYTES as usize)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from_static(
+                        b"{\"error\":\"hook body exceeds 64 KiB limit\"}",
+                    )))
+                    .unwrap());
+            }
+        };
+        let hook_event: crate::server::mcp::hook::HookEvent =
+            match serde_json::from_slice(&body_bytes) {
+                Ok(e) => e,
+                Err(parse_err) => {
+                    let body = serde_json::json!({
+                        "error": "malformed_hook_event",
+                        "message": format!("{parse_err}"),
+                    })
+                    .to_string();
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .header("Content-Type", "application/json")
+                        .body(full_body(Bytes::from(body)))
+                        .unwrap());
+                }
+            };
+        let hook_response: (StatusCode, Value) = match server.as_deref() {
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "presence layer not configured"
+                }),
+            ),
+            Some(s) => match crate::server::mcp::hook::handle_hook(s, hook_event) {
+                Ok(value) => (StatusCode::OK, value),
+                Err(msg) => (
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({
+                        "error": "hook_rejected",
+                        "message": msg
+                    }),
+                ),
+            },
+        };
+        let (status, body) = hook_response;
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        return Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(full_body(Bytes::from(body_str)))
+            .unwrap());
+    }
+
+    // POST /hook/evaluate -> synchronous GREEN/YELLOW/RED consultation
+    // before an Edit. The agent calls this just before mutating a
+    // file; the server returns the same `CoordinationLevel` that
+    // the baseline `lain_intent` would return, but synchronously and
+    // scoped to the specific target the agent is about to edit.
+    //
+    // Wire shape:
+    // ```json
+    // {
+    //   "session_token": "...",
+    //   "agent_id": "...",
+    //   "target": "src/auth.rs",
+    //   "intent": "edit" | "read"
+    // }
+    // ```
+    //
+    // Response: `{"level": "green|yellow|red", "reason": ...,
+    // "related": [...]}`. Returns 400 for malformed input, 503 if
+    // the presence layer isn't configured, 401 if the session
+    // token doesn't match the agent.
+    if method == Method::POST && path == "/hook/evaluate" {
+        const MAX_EVAL_BODY_BYTES: u64 = 16 * 1024;
+        let body_bytes = match Limited::new(req.into_body(), MAX_EVAL_BODY_BYTES as usize)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from_static(
+                        b"{\"error\":\"evaluate body exceeds 16 KiB limit\"}",
+                    )))
+                    .unwrap());
+            }
+        };
+        let eval_req: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .header("Content-Type", "application/json")
+                    .body(full_body(Bytes::from(format!(
+                        "{{\"error\":\"malformed_body\",\"message\":\"{e}\"}}"
+                    ))))
+                    .unwrap());
+            }
+        };
+        let eval_response = match server.as_deref() {
+            None => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "presence layer not configured"
+                }),
+            ),
+            Some(s) => match crate::server::mcp::hook::evaluate(s, eval_req) {
+                Ok(value) => (StatusCode::OK, value),
+                Err(msg) => (
+                    StatusCode::from_u16(if msg.starts_with("auth_") { 401 } else { 400 })
+                        .unwrap_or(StatusCode::BAD_REQUEST),
+                    serde_json::json!({
+                        "error": "evaluate_rejected",
+                        "message": msg,
+                    }),
+                ),
+            },
+        };
+        let (status, body) = eval_response;
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        return Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(full_body(Bytes::from(body_str)))
             .unwrap());
     }
 

@@ -639,14 +639,20 @@ the hang at ~30 s instead of waiting the full 5-minute budget. The
 warning is `warned`-once: cleared when the mutex is observed free, so
 a single transient hold doesn't spam the log.
 
+**Current behavior on `dev`:** Git operations use the
+`lain-git-sidecar` child process by default. Each IPC call has a 2 s
+timeout; a failed call tears down the child, respawns it, and retries
+once. Recovery is bounded to three respawns in 30 s so a persistent
+failure returns an error instead of creating a restart loop. Set
+`LAIN_GIT_SENSOR=in_process` only when diagnosing or working around a
+sidecar-specific problem.
+
 **Action:**
 
-- Confirm the version is **0.7.5 or later** — the mitigation landed
-  there. Older versions silently pile up blocked tasks on every
-  rust-analyzer diagnostic notification and present as the original
-  "process in `Dl` state, port never opens" symptom. The watchdog
-  landed one release after the mitigation; check `git log
-  --grep='watchdog'` if you need the exact version.
+- Check `get_health` or `get_capabilities`. Sidecar telemetry includes
+  `alive`, `child_pid`, recent respawns, consecutive failures, and the
+  last call duration. A dead sidecar degrades health and subsequent Git
+  calls attempt bounded recovery.
 - For diagnosis, run `scripts/debug-hung-server.sh <repos.yaml>`.
   The script launches `lain server` with `--log-level debug
   --reindex-timeout 0`, captures the log, polls for the
@@ -658,29 +664,6 @@ a single transient hold doesn't spam the log.
   what libgit2 was doing when it wedged. Pair it with
   `/proc/<pid>/wchan` from a stuck run to file a useful upstream
   issue if the hang reproduces on a non-Tauri repo.
-
-**Future root-cause options (not implemented in the 0.7.5
-mitigation; this is a roadmap for the next round of investigation):**
-
-- **Sidecar process for libgit2.** Run `git2::Repository` in a
-  separate child process, talk to it over a length-prefixed IPC
-  channel. When the child hangs, the parent can `SIGKILL` it
-  without poisoning its own threads; the parking_lot guard lives
-  in the child's address space and dies with it. The parent can
-  respawn the child transparently. This is the only surveyed
-  option that genuinely breaks the cascade rather than mitigating
-  the user-visible symptoms, at the cost of moving libgit2's
-  blocking API out of process.
-- **Drop the parking_lot mutex around `GitSensor`.** `git2::Repository`
-  declares `unsafe impl Sync` (see `src/server/git.rs:17-26`),
-  but libgit2's per-handle state is not safe under concurrent
-  calls; dropping the mutex means callers must serialize themselves.
-  Not viable without a wider audit of every call site.
-- **Per-call timeout inside the closure.** Wrap each libgit2 call
-  in a wall-clock timer; if it exceeds a budget, return a
-  synthetic error and mark the sensor "stuck" until a future
-  call succeeds. Equivalent in effect to the current `try_lock`
-  mitigation, framed as "poisoned state" rather than "mutex held".
 
 ---
 

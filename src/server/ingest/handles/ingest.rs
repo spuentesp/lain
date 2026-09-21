@@ -56,10 +56,9 @@ pub struct IngestHandle {
     /// began (the watchdog publishes it on the free→held transition
     /// via CAS so only the first observer wins, and clears it on the
     /// held→free transition). The offthread closures never touch
-    /// it, so the fast path stays lock-free. Surfacing this through
-    /// `get_health` / `get_capabilities` is a follow-up — for now
-    /// the watchdog's own `tracing::warn!` is the operator-visible
-    /// signal.
+    /// it, so the fast path stays lock-free. `get_health` and
+    /// `get_capabilities` surface the live timestamp in addition to
+    /// the watchdog's `tracing::warn!` signal.
     pub(crate) git_busy_since_nanos: Arc<AtomicU64>,
 }
 

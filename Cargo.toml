@@ -12,7 +12,7 @@ license = "MIT"
 [dependencies]
 # Core async runtime
 tokio = { version = "1.35", features = ["full"] }
-# CancellationToken (M4 close-out — AGENT_UX_ROADMAP.md, FOLLOWUPS.md).
+# CancellationToken for cooperative indexing and shutdown.
 # The `rt` feature is what exports `tokio_util::sync::CancellationToken`.
 tokio-util = { version = "0.7", features = ["rt"] }
 
@@ -128,10 +128,8 @@ path = "src/lib.rs"
 name = "lain"
 path = "src/main.rs"
 
-# Bug #2 sidecar prototype. See plan
-# `moon-knight-lightray-ghost-rider.md` for design. These are throwaway
-# binaries that may be ripped out after the prototype decides go/no-go
-# on the full sidecar implementation.
+# Git isolation sidecar shipped alongside the main binary. Keeping the daemon
+# in the same package pins its protocol and release version to `lain`.
 [[bin]]
 name = "lain-git-sidecar"
 path = "src/bin/lain-git-sidecar.rs"

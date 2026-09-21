@@ -1,110 +1,87 @@
 # Vulnerabilities — triage and remediation log
 
-This document is the rolling inventory of OSV advisories against
-`lain`'s dependency graph and what we're doing about each one. The
-OpenSSF Scorecard `Vulnerabilities` check reads from this same
-source (OSV.dev) so improvements here move the score.
+Rolling inventory of OSV advisories against the dependency graph in
+`Cargo.lock`.
 
-**Snapshot date:** 2026-09-15
-**Scorecard snapshot:** 6.8/10 (post-PR #49; `Vulnerabilities` 0 → ~5 expected after this PR lands)
-**Source:** live query of `https://api.osv.dev/v1/querybatch` against `Cargo.lock` (25 unique advisory IDs across 11 crates)
+**Snapshot date:** 2026-09-20
 
-## Bucket A — drop-in bump (cleared in this PR)
+**Source:** `https://api.osv.dev/v1/querybatch` queried for every crates.io
+package in `Cargo.lock`
 
-| Advisory | Crate | From → To | Fix |
-|---|---|---|---|
-| `RUSTSEC-2026-0190` | anyhow | 1.0.102 → 1.0.104 | Unsoundness in `Error::downcast_mut()` |
-| `GHSA-phqj-4mhp-q6mq` | openssl | 0.10.78 → 0.10.81 | Out-of-bounds write in `CipherCtxRef::cipher_update_inplace` |
-| `GHSA-xp3w-r5p5-63rr` | openssl | (same bump) | UB in `X509Ref::ocsp_responders` for non-UTF-8 URLs |
-| `GHSA-xv59-967r-8726` | openssl | (same bump) | Heap buffer overflow in AES-KW-PAD |
-| `RUSTSEC-2026-0204` | crossbeam-epoch | 0.9.18 → 0.9.21 | Invalid pointer dereference in `fmt::Pointer` impl |
+**Current result:** three advisory ids across three crates
 
-`cargo update -p anyhow -p openssl -p crossbeam-epoch` bumps the
-lockfile. No Cargo.toml changes needed; `anyhow = "1.0"` in the
-manifest is a semver-major wildcard that accepts 1.0.104.
+## Active advisories
 
-## Bucket B — requires rustls upgrade (separate PR)
+### `ring 0.17.9`
 
-| Advisory | Crate | Fix | Blocker |
-|---|---|---|---|
-| `GHSA-4p46-pwfr-66x6` / `RUSTSEC-2025-0009` | ring@0.17.9 | 0.17.12+ | rustls@0.21.12 pins ring to 0.17.x without accepting newer minor versions. rustls 0.22+ / 0.23+ lifts the cap. |
-| `GHSA-82j2-j2ch-gfr8` / `RUSTSEC-2026-0104` | rustls-webpki@0.101.7 | 0.103.13+ | Same rustls constraint chain. |
+- `RUSTSEC-2025-0009` / `GHSA-4p46-pwfr-66x6`
+- Fixed in `ring 0.17.12` or newer.
+- A direct lockfile update is currently blocked: newer `ring` requires
+  `cc >=1.2.8`, while `tree-sitter-javascript 0.21.4` constrains `cc` to
+  `~1.0.90`.
+- **Action:** update the JavaScript tree-sitter dependency far enough to remove
+  the old `cc` constraint, then update `ring` and run the full parser, TLS, and
+  cross-platform test matrix. Alternatively, evaluate a rustls provider setup
+  that does not pull `ring`.
 
-**Action:** follow-up PR bumps `rustls` to 0.23+ (uses
-`aws-lc-rs` instead of `ring` for the default crypto provider).
-Will close all six rustls-webpki + ring advisories at once.
+### `paste 1.0.15`
 
-## Bucket C — accepts a major bump (separate PR per crate)
+- `RUSTSEC-2024-0436`: crate is unmaintained.
+- It is transitive through `tokenizers 0.21.4`; Lain does not call it directly.
+- **Action:** track a `tokenizers` release that removes `paste`, or patch the
+  dependency to a maintained compatible implementation after verifying the
+  tokenizer and ONNX paths on every supported platform.
 
-| Advisory | Crate | Migration path |
-|---|---|---|
-| `GHSA-36xm-35qq-795w` / `RUSTSEC-2023-0058` | inventory@0.1.11 → 0.2.0 | Breaking — `collect!` macro signature changed. Used by `tree-sitter` and `wasmtime`. Will require downstream adapter work. |
-| `GHSA-ghc8-5cgm-5rpf` / `RUSTSEC-2023-0057` | (same) | Same |
+### `bincode 2.0.1`
 
-The two inventory advisories are *fixed in 0.2.0*. Bumping is a
-major version that breaks `tree-sitter` and `wasmtime`. Hold this
-until a `cargo update -p tree-sitter` lands that pulls a compatible
-inventory.
+- `RUSTSEC-2025-0141`: crate is unmaintained. This is a maintenance advisory,
+  not a reported memory-safety vulnerability.
+- Lain uses the 2.x serde compatibility API with legacy encoding for persisted
+  graph compatibility.
+- **Action:** evaluate a maintained serialization format and write an explicit
+  on-disk migration plan before replacing it. Until then, retain compatibility
+  tests and treat persisted graph files as local, untrusted input.
 
-## Bucket D — unmaintained, no upstream fix
+## Recently cleared dependency work
 
-| Advisory | Crate | Status |
-|---|---|---|
-| `RUSTSEC-2024-0436` | paste@1.0.15 | paste is unmaintained. Switch to `pastey` (drop-in API). The rustls 0.23+ upgrade (Bucket B) did *not* drop paste as predicted — it's still in the lockfile and needs its own PR. |
+- `git2` is now `0.21.0`; the previously tracked 0.19/0.20 advisories no
+  longer appear in the OSV result.
+- `inventory` is now `0.2.3`; the old 0.1 advisories are gone.
+- `rustls-webpki` is now `0.103.15`; its previously tracked advisory is gone.
+- `h2` is no longer present in the current dependency tree.
+- `rustls` is now `0.23.45`; the remaining TLS advisory is the independently
+  pinned `ring` version described above.
 
-rustls-pemfile was cleared by the rustls 0.23+ upgrade. bincode
-was migrated to 2.0.x in PR #57 and is no longer in this bucket
-(see the resolved list below).
+## Refresh procedure
 
-## Resolved (kept here so the audit trail survives)
-
-| Advisory | Crate | Resolved by |
-|---|---|---|
-| `RUSTSEC-2025-0141` | bincode@1.3.3 → 2.0.1 | PR #57 (closes 1 OSV vuln). `bincode::serde::*` calls in `src/server/graph.rs` and `src/server/federation/manifest.rs` use `bincode::config::legacy()` so the migration is backwards-compatible with pre-existing on-disk state. |
-| `RUSTSEC-2025-0134` | rustls-pemfile@1.0.4 | rustls 0.21→0.23 bump in PR #53 (the lockfile no longer pulls rustls-pemfile; rustls 0.23 uses its 2.x branch internally). |
-
-## Bucket E — git2 (separate PR)
-
-| Advisory | Fix |
-|---|---|
-| `GHSA-j39j-6gw9-jw6h` / `RUSTSEC-2026-0008` | git2 0.20.4 |
-| `RUSTSEC-2026-0183` | git2 0.21.0 |
-| `RUSTSEC-2026-0184` | git2 0.21.0 |
-
-All three are UB-class bugs. Fixed in 0.20.4 / 0.21.0. The Cargo.toml
-pin is `git2 = "0.19"`. Bumping is a minor version — API may shift
-slightly in `Repository::list` and `BlameHunk::signature` paths.
-Plan a focused PR with a smoke-test against the federation fixture.
-
-## Bucket F — h2 (separate PR)
-
-| Advisory | Fix |
-|---|---|
-| `RUSTSEC-2026-0258` | h2 0.4.16 |
-
-Minor version bump. Transitive through hyper → reqwest. API stable
-for our usage; should be a clean lockfile bump.
-
----
-
-## How to refresh this doc
-
-When bumping deps, re-query OSV and update this file:
+Run this from the repository root and replace the snapshot above with the
+result:
 
 ```bash
 python3 <<'PY'
-import json, urllib.request, pathlib, tomllib
-parsed = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
-pkgs = [{'name': p['name'], 'version': p['version']} for p in parsed['package']]
-body = json.dumps({'queries': [
-    {'package': {'name': p['name'], 'ecosystem': 'crates.io'}, 'version': p['version']}
-    for p in pkgs]}).encode()
-req = urllib.request.Request('https://api.osv.dev/v1/querybatch', data=body,
-    headers={'Content-Type': 'application/json'})
-with urllib.request.urlopen(req, timeout=60) as r:
-    resp = json.loads(r.read())
-for q, res in zip(pkgs, resp['results']):
-    if res.get('vulns'):
-        print(f"{q['name']}@{q['version']}: {[v['id'] for v in res['vulns']]}")
+import json, pathlib, tomllib, urllib.request
+
+lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text())
+packages = [{"name": p["name"], "version": p["version"]}
+            for p in lock["package"]]
+body = json.dumps({"queries": [
+    {"package": {"name": p["name"], "ecosystem": "crates.io"},
+     "version": p["version"]}
+    for p in packages
+]}).encode()
+request = urllib.request.Request(
+    "https://api.osv.dev/v1/querybatch",
+    data=body,
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(request, timeout=60) as response:
+    results = json.loads(response.read())["results"]
+for package, result in zip(packages, results):
+    ids = [vulnerability["id"] for vulnerability in result.get("vulns", [])]
+    if ids:
+        print(f'{package["name"]}@{package["version"]}: {", ".join(ids)}')
 PY
 ```
+
+Also run `cargo tree -i <crate>` for every result before proposing a fix; OSV
+identifies the affected package, not the dependency path or upgrade blocker.

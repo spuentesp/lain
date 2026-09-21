@@ -125,9 +125,13 @@ Four-call dance per agent (sequence diagram in [multiplayer.md](multiplayer.md#a
 
 ```
 1. register_agent(name, kind)        → {agent_id, session_token, expires_at_unix}
-2. claim_files(path, symbols?, intent?)  → {granted, conflicts, advisories}
-3. edit
-4. release_files(path)
+2. (optional) lain_intent(goal, scopes, status) → {intent_id, coordination: {level, reason, related[]}}
+3. claim_files(path, symbols?, intent?) → {granted, conflicts, advisories}
+4. edit
+5. release_files(path)
+6. (optional) unregister_agent() — releases every claim, drops the
+   intent and activity entries. The expiry loop handles the
+   "agent crashed" case; use this when the agent knows it's done.
 ```
 
 Any authenticated call refreshes the session — no heartbeat loop
@@ -202,3 +206,56 @@ Exit 0 clean, 1 on hard failure.
 | All MCP tools | [quickstart-tools.md](quickstart-tools.md) |
 | `repos.yaml` schema | [REPOS_YAML.md](REPOS_YAML.md) |
 | Command Center | [command-center.md](command-center.md) |
+
+## Intent + activity feed
+
+The intent layer is the second-tier surface above `claim_files`.
+Agents declare goals and scopes once; hooks auto-record tool
+calls; the evaluator returns GREEN / YELLOW / RED before edits.
+
+### Quick start
+
+```bash
+# 1. Install the agent's MCP config + system-prompt snippet.
+#    Writes .lain/PROMPT.md with the three-sentence protocol;
+#    copy it into your agent's startup-context file (CLAUDE.md,
+#    .cursorrules, AGENTS.md, …).
+lain setup --agent claude
+
+# 2. (Optional) Preview the install without changing anything.
+lain setup --agent claude --print-config
+
+# 3. In the agent's session, declare an intent once:
+#    > "Before I edit, run `lain_intent` with goal='...', scopes=[...]"
+#    The hook layer does the rest automatically.
+
+# 4. The agent's per-agent activity feed is observable to peers:
+curl -X POST http://localhost:9999/mcp \
+    -H 'Content-Type: application/json' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+             "params":{"name":"list_active_intents","arguments":{}}}'
+```
+
+### The three-sentence protocol
+
+The setup command writes this to `.lain/PROMPT.md`:
+
+> You are operating in a Lain-managed workspace. Lain coordinates
+> across agents via declared intent and automatic observation.
+>
+> Before a substantial code change, declare your goal and the
+> scopes you intend to modify via `lain_intent`. Update the intent
+> when your scope materially changes. Do not report individual
+> reads or commands; Lain observes those through hooks.
+
+### Hooks
+
+The hook layer (Claude Code PreToolUse, AGY pre-tool, Kimi pre-tool,
+Codex pre-tool, Cursor / Continue equivalents) POSTs observations to
+`/hook`. The wire shape and per-agent-kind mapping are documented in
+`docs/hooks.md`.
+
+For a synchronous answer before Edit fires (a YES/NO/YELLOW call),
+agents POST to `/hook/evaluate` with the target path or symbol; the
+server returns the GREEN / YELLOW / RED level + reason + related
+peer activity.

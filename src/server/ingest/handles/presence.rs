@@ -9,6 +9,8 @@
 
 use crate::config::state_path_for_workspace;
 use crate::graph::GraphDatabase;
+use crate::server::activity::ActivityTracker;
+use crate::server::intent::IntentRegistry;
 use crate::server::presence::{
     load_pair as load_presence_pair, save_pair as save_presence_pair, AgentId, OccupancyMap,
     PresenceEvent, PresenceRegistry,
@@ -27,6 +29,8 @@ pub struct PresenceLayer {
     pub(crate) presence_state_seen: Arc<Mutex<Option<std::time::SystemTime>>>,
     pub(crate) presence: Arc<PresenceRegistry>,
     pub(crate) occupancy: Arc<OccupancyMap>,
+    pub(crate) intent: Arc<IntentRegistry>,
+    pub(crate) activity: Arc<ActivityTracker>,
     pub(crate) presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
     pub(crate) state_path: PathBuf,
 }
@@ -43,6 +47,8 @@ impl PresenceLayer {
         presence_state_seen: Arc<Mutex<Option<std::time::SystemTime>>>,
         presence: Arc<PresenceRegistry>,
         occupancy: Arc<OccupancyMap>,
+        intent: Arc<IntentRegistry>,
+        activity: Arc<ActivityTracker>,
         presence_event_tx: broadcast::Sender<(u64, PresenceEvent)>,
         repos_yaml: Option<&std::path::Path>,
         workspace: &std::path::Path,
@@ -55,6 +61,8 @@ impl PresenceLayer {
             presence_state_seen,
             presence,
             occupancy,
+            intent,
+            activity,
             presence_event_tx,
             state_path,
         }
@@ -78,6 +86,19 @@ impl PresenceLayer {
     /// `presence()`.
     pub fn occupancy(&self) -> &Arc<OccupancyMap> {
         &self.occupancy
+    }
+
+    /// Borrowed handle to the intent registry (PR 1 of
+    /// `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). Same rationale as
+    /// `presence()`.
+    pub fn intent(&self) -> &Arc<crate::server::intent::IntentRegistry> {
+        &self.intent
+    }
+
+    /// Borrowed handle to the activity tracker (PR 1). Same
+    /// rationale as `presence()`.
+    pub fn activity(&self) -> &Arc<crate::server::activity::ActivityTracker> {
+        &self.activity
     }
 
     /// Borrowed handle to the `PresenceEvent` broadcast sender.
@@ -133,6 +154,14 @@ impl PresenceLayer {
                     },
                 );
             }
+            // Drop the agent's intent and activity too so the
+            // activity feed doesn't show a ghost entry after the
+            // session ends. `presence.remove` triggers the
+            // `on_remove_callback` (which only releases
+            // occupancy); intent + activity are independent and
+            // need explicit cleanup here.
+            self.intent.retire(agent_id);
+            self.activity.drop_agent(agent_id);
             self.presence.remove(agent_id);
             released
         })
@@ -147,23 +176,59 @@ impl PresenceLayer {
         self.unregister_agent(events_log, agent_id)
     }
 
-    /// Persist the live `PresenceRegistry` + `OccupancyMap` to the
-    /// server's state file.
+    /// Persist the live `PresenceRegistry` + `OccupancyMap` +
+    /// `IntentRegistry` + `ActivityTracker` to the server's state
+    /// file. The intent and activity registries are additive
+    /// (`#[serde(default)]` on the JSON shape), so older state files
+    /// hydrate cleanly with empty registries.
     pub fn save_state(&self) -> Result<(), crate::server::error::LainError> {
         let path = self.state_path();
-        save_presence_pair(&path, &self.presence, &self.occupancy).map_err(|e| {
+        save_presence_pair(
+            &path,
+            &self.presence,
+            &self.occupancy,
+            &self.intent,
+            &self.activity,
+        )
+        .map_err(|e| {
             crate::server::error::LainError::Other(format!("save_state({}): {e}", path.display()))
         })
     }
 
-    /// Hydrate the live `PresenceRegistry` + `OccupancyMap` from the
-    /// server's state file, if any. Idempotent: missing file is a
-    /// no-op.
+    /// Hydrate the live `PresenceRegistry` + `OccupancyMap` +
+    /// `IntentRegistry` + `ActivityTracker` from the server's state
+    /// file, if any. Idempotent: missing file is a no-op.
+    ///
+    /// Side effect: `load_presence_pair` returns the list of
+    /// `ClaimRevoked { reason: "stale_owner" }` events the load
+    /// itself produced (a fresh server reclaiming claims whose
+    /// owner is no longer in `PresenceRegistry::sessions`). Those
+    /// events are forwarded to the SSE broadcast channel here so
+    /// peers learn the linearizability gap has been closed.
+    /// `events_log::append` is intentionally skipped — the audit
+    /// log is append-only across the *current* process's lifetime
+    /// and a load happens before any agent is registered, so the
+    /// reclamation never needs an audit trail.
     pub fn load_state(&self) -> Result<(), crate::server::error::LainError> {
         let path = self.state_path();
-        load_presence_pair(&path, &self.presence, &self.occupancy).map_err(|e| {
+        let revoked = load_presence_pair(
+            &path,
+            &self.presence,
+            &self.occupancy,
+            &self.intent,
+            &self.activity,
+        )
+        .map_err(|e| {
             crate::server::error::LainError::Other(format!("load_state({}): {e}", path.display()))
-        })
+        })?;
+        // Use a monotonic counter so each load-time event gets a
+        // unique SSE id even though we skipped the audit log.
+        let mut counter: u64 = 0;
+        for event in revoked {
+            counter = counter.saturating_add(1);
+            let _ = self.presence_event_tx.send((counter, event));
+        }
+        Ok(())
     }
 
     /// Run `f` inside the cross-process presence critical section:
@@ -242,10 +307,16 @@ mod tests {
             workspace
         };
         let (presence_tx, _rx) = broadcast::channel(8);
+        // Intent + activity trackers ride alongside presence /
+        // occupancy (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+        // These tests only assert on presence state paths, so empty
+        // trackers are correct.
         PresenceLayer::new(
             Arc::new(Mutex::new(None)),
             Arc::new(PresenceRegistry::new()),
             Arc::new(OccupancyMap::default()),
+            Arc::new(crate::server::intent::IntentRegistry::new()),
+            Arc::new(crate::server::activity::ActivityTracker::new()),
             presence_tx,
             repos_yaml,
             workspace,

@@ -148,7 +148,7 @@ impl<'de> serde::Deserialize<'de> for SymbolHash {
 /// reported `claimed_at: 0` on every claim they held, and a conflict's
 /// `last_seen_unix` froze — leaving no way to tell a fresh claim from a
 /// stale one, which is exactly what those fields are for.
-mod unix_secs {
+pub(crate) mod unix_secs {
     use super::SystemTime;
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -1788,6 +1788,22 @@ struct PersistedState {
     /// Task 2.6 wires up the loader's reset detection.
     #[serde(default)]
     audit_reset_at_unix: Option<f64>,
+    /// Per-agent intent declarations. `(agent_id, intent)`. The
+    /// registry invariant is "one intent per agent", but the on-disk
+    /// shape is a flat list so a stale state file with a duplicate
+    /// entry does not crash the loader — the loader picks the most
+    /// recent entry per agent and drops the rest. `#[serde(default)]`
+    /// keeps backward-compat with state files written before the
+    /// intent layer landed (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    #[serde(default)]
+    intents: Vec<(String, crate::server::intent::Intent)>,
+    /// Per-agent observed tool-call activity. `(agent_id, activity)`.
+    /// The `Activity::recent_tools` ring buffer is FIFO-capped at
+    /// 100 entries, so a stale entry's payload stays bounded even
+    /// after a long-running session. `#[serde(default)]` for the
+    /// same backward-compat reason as `intents`.
+    #[serde(default)]
+    activities: Vec<(String, crate::server::activity::Activity)>,
 }
 
 /// Serialize the in-memory presence registry + occupancy map to a JSON
@@ -1804,7 +1820,13 @@ struct PersistedState {
 /// filename with no parent (which `LainServer::state_path` never
 /// produces, but tests might) falls back to the current dir, which
 /// at worst yields a `0` offset for a missing audit log.
-pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Result<(), String> {
+pub fn save_pair(
+    path: &Path,
+    reg: &PresenceRegistry,
+    occ: &OccupancyMap,
+    intent: &crate::server::intent::IntentRegistry,
+    activity: &crate::server::activity::ActivityTracker,
+) -> Result<(), String> {
     // Task 2.6 — read the live audit log size now so the value
     // persisted on this save reflects "how much audit data was on
     // disk at the moment of this write," not a placeholder. The
@@ -1820,6 +1842,8 @@ pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
     let state = {
         let s = reg.inner.lock();
         let o = occ.inner.lock();
+        let intents_snapshot = intent.snapshot();
+        let activities_snapshot = activity.snapshot();
         PersistedState {
             sessions: s
                 .sessions
@@ -1881,6 +1905,22 @@ pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
             // `#[serde(default)]`).
             audit_offset_bytes,
             audit_reset_at_unix: None,
+            // Intent layer (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`):
+            // a flat `(agent_id, intent)` list. Each agent has at
+            // most one intent in memory; if a stale state file
+            // somehow has duplicates, the loader picks the most
+            // recent per agent.
+            intents: intents_snapshot
+                .into_iter()
+                .map(|(id, i)| (id.0, i))
+                .collect(),
+            // Activity layer: per-agent observed tool calls. The
+            // ring buffer on `Activity` is bounded to ~100 entries
+            // so a single agent's payload stays small.
+            activities: activities_snapshot
+                .into_iter()
+                .map(|(id, a)| (id.0, a))
+                .collect(),
         }
     };
     let json = serde_json::to_string_pretty(&state)
@@ -1907,9 +1947,25 @@ pub fn save_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
 /// in the server log. The next `save_pair` then persists the reset
 /// timestamp out to the world; subsequent restarts see the marker
 /// and don't re-warn.
-pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Result<(), String> {
+///
+/// Returns the list of `PresenceEvent::ClaimRevoked { reason:
+/// "stale_owner" }` events the caller must publish on the
+/// presence broadcast channel. These are claims whose owner is no
+/// longer in `PresenceRegistry::sessions` after a fresh load — i.e.
+/// the agent's process is gone but its claims were never released.
+/// Without this cross-check the new server would refuse every
+/// competing claim on those scopes (linearizability violation across
+/// server crashes), so the load itself reclaims them and tells the
+/// world via SSE.
+pub fn load_pair(
+    path: &Path,
+    reg: &PresenceRegistry,
+    occ: &OccupancyMap,
+    intent: &crate::server::intent::IntentRegistry,
+    activity: &crate::server::activity::ActivityTracker,
+) -> Result<Vec<PresenceEvent>, String> {
     if !path.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let json =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -2034,8 +2090,118 @@ pub fn load_pair(path: &Path, reg: &PresenceRegistry, occ: &OccupancyMap) -> Res
             .map(|cs| cs.iter().any(|c| &c.path == path))
             .unwrap_or(false)
     });
+    drop(s);
+    drop(o);
 
-    Ok(())
+    // Intent layer (PR 1 of
+    // `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). The on-disk shape is
+    // `(agent_id, Intent)`. The registry's `replace_all` handles
+    // deduplication per agent (most-recent `updated_at` wins) so a
+    // stale state file with duplicates is reconciled.
+    let intents: Vec<crate::server::intent::Intent> = state
+        .intents
+        .into_iter()
+        .map(|(id_str, i)| {
+            let mut i = i;
+            // Defensive: state-file entries carry `agent_id` inside
+            // the Intent; use the on-disk agent_id (the tuple key)
+            // to overwrite any drift in the inner field.
+            i.agent_id = AgentId(id_str);
+            i
+        })
+        .collect();
+    intent.replace_all(intents);
+
+    // Activity layer: each `(agent_id, Activity)` pair is restored
+    // verbatim. The `replace_all` helper overwrites the entry's
+    // agent_id with the map key so the two stay in sync.
+    let activities: Vec<(AgentId, crate::server::activity::Activity)> = state
+        .activities
+        .into_iter()
+        .map(|(id_str, a)| (AgentId(id_str), a))
+        .collect();
+    activity.replace_all(activities);
+
+    // Linearizability across server crashes (variant 1 of
+    // `scripts/agy_chaos.sh`): every claim whose `agent_id` is not
+    // in `s.sessions` is an orphan — its owner is gone but the claim
+    // survived the persistence round-trip. The lock layer's
+    // stale-after-takeover window would eventually let a competing
+    // agent in via the filesystem sentinel, but the in-memory
+    // `OccupancyMap` is checked first and the orphan claim would
+    // block the competing agent indefinitely. So drop the orphans
+    // here and emit one `ClaimRevoked` per reclaimed path so SSE
+    // subscribers see the same view the new server has.
+    //
+    // The cross-check happens after both `o.by_file` and `o.by_agent`
+    // are populated so we can prune consistently. The `lock_leases`
+    // retain above already drops filesystem lock entries that no
+    // longer match a live `o.by_agent` claim, so it falls into line.
+    let stale_events: Vec<PresenceEvent> = {
+        let s_guard = reg.inner.lock();
+        let mut o_guard = occ.inner.lock();
+        let mut revoked: Vec<PresenceEvent> = Vec::new();
+        let orphan_agents: Vec<AgentId> = o_guard
+            .by_agent
+            .keys()
+            .filter(|agent_id| !s_guard.sessions.contains_key(agent_id))
+            .cloned()
+            .collect();
+        for agent_id in orphan_agents {
+            // Take the orphan's claims out of `by_agent` first; the
+            // claim list is what we iterate to clean up `by_file`.
+            if let Some(claims) = o_guard.by_agent.remove(&agent_id) {
+                for claim in &claims {
+                    if let Some(entry) = o_guard.by_file.get_mut(&claim.path) {
+                        entry.agents.remove(&agent_id);
+                        // Drop every symbol-level entry the agent
+                        // touched. Empty file-level agents means
+                        // `__file_level__` stays around only if
+                        // another agent still holds the file.
+                        for sym in claim
+                            .symbols
+                            .iter()
+                            .chain(std::iter::once(&"__file_level__".to_string()))
+                        {
+                            if let Some(set) = entry.symbols.get_mut(sym) {
+                                set.remove(&agent_id);
+                                if set.is_empty() {
+                                    entry.symbols.remove(sym);
+                                }
+                            }
+                            if let Some(intents) = entry.intents.get_mut(sym) {
+                                intents.remove(&agent_id);
+                                if intents.is_empty() {
+                                    entry.intents.remove(sym);
+                                }
+                            }
+                            if let Some(touched) = entry.last_touched.get_mut(sym) {
+                                touched.remove(&agent_id);
+                                if touched.is_empty() {
+                                    entry.last_touched.remove(sym);
+                                }
+                            }
+                        }
+                        if entry.agents.is_empty()
+                            && entry.symbols.is_empty()
+                            && entry.intents.is_empty()
+                            && entry.last_touched.is_empty()
+                        {
+                            o_guard.by_file.remove(&claim.path);
+                        }
+                    }
+                    revoked.push(PresenceEvent::ClaimRevoked {
+                        agent_id: agent_id.clone(),
+                        path: claim.path.clone(),
+                        reason: "stale_owner".to_string(),
+                    });
+                }
+            }
+        }
+        revoked
+    };
+
+    Ok(stale_events)
 }
 
 /// Compute the BLAKE3-256 `SymbolHash` of the body bytes for `symbol`
@@ -2229,6 +2395,41 @@ mod audit_persistence_tests {
     //! than via the `tests/` integration tree — that way we can assert
     //! on the field values directly.
     use super::*;
+
+    /// Thin test wrappers around `save_pair` / `load_pair` so the
+    /// existing audit tests don't have to thread empty intent /
+    /// activity registries through every call site. PR 1 of
+    /// `docs/INTENT_AND_OBSERVABILITY_PLAN.md` extended the saver
+    /// and loader signatures to take the two new registries; the
+    /// intent and activity payload is irrelevant for these tests
+    /// because they assert on presence + occupancy fields only.
+    fn save_pair_legacy(
+        path: &Path,
+        reg: &PresenceRegistry,
+        occ: &OccupancyMap,
+    ) -> Result<(), String> {
+        save_pair(
+            path,
+            reg,
+            occ,
+            &crate::server::intent::IntentRegistry::new(),
+            &crate::server::activity::ActivityTracker::new(),
+        )
+    }
+
+    fn load_pair_legacy(
+        path: &Path,
+        reg: &PresenceRegistry,
+        occ: &OccupancyMap,
+    ) -> Result<Vec<crate::server::presence::PresenceEvent>, String> {
+        load_pair(
+            path,
+            reg,
+            occ,
+            &crate::server::intent::IntentRegistry::new(),
+            &crate::server::activity::ActivityTracker::new(),
+        )
+    }
     use std::fs;
 
     #[test]
@@ -2278,7 +2479,7 @@ mod audit_persistence_tests {
         let path = dir.path().join("state.json");
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        save_pair(&path, &reg, &occ).expect("save_pair");
+        save_pair_legacy(&path, &reg, &occ).expect("save_pair");
         let written = fs::read_to_string(&path).unwrap();
         assert!(
             written.contains("\"audit_offset_bytes\""),
@@ -2291,7 +2492,7 @@ mod audit_persistence_tests {
 
         // Round-trip back through `load_pair` -> PersistedState with no
         // parse error, then double-check we read what we wrote.
-        load_pair(&path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&path, &reg, &occ).expect("load_pair");
         let parsed: PersistedState = serde_json::from_str(&written).unwrap();
         assert_eq!(parsed.audit_offset_bytes, 0);
         assert_eq!(parsed.audit_reset_at_unix, None);
@@ -2316,7 +2517,7 @@ mod audit_persistence_tests {
 
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        save_pair(&state_path, &reg, &occ).expect("save_pair");
+        save_pair_legacy(&state_path, &reg, &occ).expect("save_pair");
 
         let written = fs::read_to_string(&state_path).unwrap();
         let parsed: PersistedState =
@@ -2361,7 +2562,7 @@ mod audit_persistence_tests {
 
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        load_pair(&state_path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&state_path, &reg, &occ).expect("load_pair");
 
         // The state file on disk must now have `audit_reset_at_unix`
         // set to a recent timestamp (not null). The loader rewrites
@@ -2408,7 +2609,7 @@ mod audit_persistence_tests {
 
         let reg = PresenceRegistry::new();
         let occ = OccupancyMap::new();
-        load_pair(&state_path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&state_path, &reg, &occ).expect("load_pair");
 
         let after = fs::read_to_string(&state_path).unwrap();
         let parsed: PersistedState = serde_json::from_str(&after).unwrap();
@@ -2481,10 +2682,10 @@ mod audit_persistence_tests {
                 plan_revision: None,
             }],
         );
-        save_pair(&state_path, &disk_reg, &disk_occ).expect("save_pair");
+        save_pair_legacy(&state_path, &disk_reg, &disk_occ).expect("save_pair");
 
         // 3. Load snapshot into live reg & occ
-        load_pair(&state_path, &reg, &occ).expect("load_pair");
+        load_pair_legacy(&state_path, &reg, &occ).expect("load_pair");
 
         // Stale session and claim for alice must be GONE (restored snapshot, not additive merge)
         assert!(
@@ -2531,7 +2732,7 @@ mod audit_persistence_tests {
             }],
         );
 
-        let res = load_pair(&state_path, &reg, &occ);
+        let res = load_pair_legacy(&state_path, &reg, &occ);
         assert!(res.is_err(), "load_pair must error on invalid json");
 
         // Live state must be completely untouched
@@ -2565,7 +2766,7 @@ mod audit_persistence_tests {
             }],
         );
 
-        let res = load_pair(&missing_path, &reg, &occ);
+        let res = load_pair_legacy(&missing_path, &reg, &occ);
         assert!(
             res.is_ok(),
             "load_pair on missing file must be a no-op Ok(())"
@@ -2607,20 +2808,20 @@ mod audit_persistence_tests {
                 plan_revision: None,
             }],
         );
-        save_pair(&state_path, &reg1, &occ1).unwrap();
+        save_pair_legacy(&state_path, &reg1, &occ1).unwrap();
 
         // Process 2 reloads and sees Process 1's work
-        load_pair(&state_path, &reg2, &occ2).unwrap();
+        load_pair_legacy(&state_path, &reg2, &occ2).unwrap();
         assert!(reg2.get(&sess1.id).is_some());
         assert!(occ2.list_for_path(Path::new("job.rs")).is_some());
 
         // Process 1 finishes work: releases claim and session, then persists
         occ1.release(&sess1.id, &[PathBuf::from("job.rs")]);
         reg1.remove(&sess1.id);
-        save_pair(&state_path, &reg1, &occ1).unwrap();
+        save_pair_legacy(&state_path, &reg1, &occ1).unwrap();
 
         // Process 2 refreshes from disk: ghost session and ghost claim must be gone
-        load_pair(&state_path, &reg2, &occ2).unwrap();
+        load_pair_legacy(&state_path, &reg2, &occ2).unwrap();
         assert!(
             reg2.get(&sess1.id).is_none(),
             "ghost session should not survive cross-process refresh"

@@ -1,3 +1,5 @@
+use lain::server::activity::ActivityTracker;
+use lain::server::intent::IntentRegistry;
 use lain::server::presence::*;
 use std::time::SystemTime;
 
@@ -724,15 +726,182 @@ fn persistence_round_trip() {
             plan_revision: None,
         }],
     );
-    save_pair(&path, &reg1, &occ1).unwrap();
+    save_pair(
+        &path,
+        &reg1,
+        &occ1,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
 
     // Round 2: load into a fresh registry.
     let reg2 = PresenceRegistry::new();
     let occ2 = OccupancyMap::new();
-    load_pair(&path, &reg2, &occ2).unwrap();
+    load_pair(
+        &path,
+        &reg2,
+        &occ2,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
 
     assert_eq!(reg2.list_active(true).len(), 1);
     assert_eq!(occ2.list_for_agent(&agent.id).len(), 1);
+}
+
+/// Variant 1 of `scripts/agy_chaos.sh`: alice claims a path, the
+/// server holding her session is SIGKILLed, a fresh server boots.
+/// The state file carries alice's session *and* her claim. Without
+/// the cross-check in `load_pair`, the fresh server would refuse
+/// every competing claim on that path (a linearizability violation
+/// across server crashes — alice's lease isn't live but the in-memory
+/// `OccupancyMap` still owns it).
+///
+/// The fix: `load_pair` walks `by_agent` after hydration and drops
+/// every claim whose `agent_id` is no longer in `sessions`. The
+/// reclaimed paths are returned as `ClaimRevoked { reason:
+/// "stale_owner" }` events so SSE subscribers see the same view
+/// the new server has.
+#[test]
+fn load_pair_reclaims_orphaned_claims_on_fresh_server() {
+    use lain::server::presence::PresenceEvent;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let stem = "test-orphan";
+    let path = tmp.path().join(format!("{stem}.json"));
+
+    // Round 1: alice registers + claims + releases her session
+    // entry but her claim survives on disk (simulating a SIGKILL
+    // mid-cycle — the agent's heartbeat thread didn't get to
+    // release_files before the OS tore it down).
+    let reg1 = PresenceRegistry::new();
+    let occ1 = OccupancyMap::new();
+    let alice = reg1.register(
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    occ1.claim(
+        &alice.id,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("foo.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    // Simulate the SIGKILL: drop alice from sessions but leave
+    // her claim on disk. `PresenceRegistry::remove` only purges the
+    // session entry — it doesn't touch the occupancy map — so
+    // save_pair persists a state file with `sessions=[]` but
+    // `occupancy_by_agent=[alice.id -> [foo.rs]]`.
+    let removed = reg1.remove(&alice.id);
+    assert!(removed.is_some(), "sanity: alice's session was live");
+    save_pair(
+        &path,
+        &reg1,
+        &occ1,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
+
+    // Round 2: a fresh server loads the state file. `reg2` is
+    // empty, so every claim alice left behind is an orphan.
+    let reg2 = PresenceRegistry::new();
+    let occ2 = OccupancyMap::new();
+    let events = load_pair(
+        &path,
+        &reg2,
+        &occ2,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .expect("load_pair");
+
+    // No live session means the fresh server saw no agents.
+    assert_eq!(reg2.list_active(true).len(), 0);
+    // No live claim means the fresh server's occupancy is empty
+    // (alice's orphan claim was reclaimed during the load).
+    assert_eq!(occ2.list_all().len(), 0);
+    // The load reported the reclamation so SSE subscribers learn
+    // about it.
+    assert_eq!(events.len(), 1, "exactly one ClaimRevoked event");
+    match &events[0] {
+        PresenceEvent::ClaimRevoked {
+            agent_id,
+            path,
+            reason,
+        } => {
+            assert_eq!(agent_id, &alice.id);
+            assert_eq!(path, &std::path::PathBuf::from("foo.rs"));
+            assert_eq!(reason, "stale_owner");
+        }
+        other => panic!("expected ClaimRevoked, got {other:?}"),
+    }
+}
+
+/// Counterpart to `load_pair_reclaims_orphaned_claims_on_fresh_server`:
+/// when alice's session survives the load (e.g. a clean restart where
+/// she re-registers before the load), her claim must NOT be reclaimed.
+/// Regression for "the cross-check is too aggressive and silently
+/// drops claims for live agents".
+#[test]
+fn load_pair_keeps_claims_for_live_agents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stem = "test-live";
+    let path = tmp.path().join(format!("{stem}.json"));
+
+    let reg1 = PresenceRegistry::new();
+    let occ1 = OccupancyMap::new();
+    let alice = reg1.register(
+        "alice".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    occ1.claim(
+        &alice.id,
+        vec![ClaimRequest {
+            path: std::path::PathBuf::from("bar.rs"),
+            symbols: vec![],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        }],
+    );
+    save_pair(
+        &path,
+        &reg1,
+        &occ1,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .unwrap();
+
+    let reg2 = PresenceRegistry::new();
+    let occ2 = OccupancyMap::new();
+    let events = load_pair(
+        &path,
+        &reg2,
+        &occ2,
+        &IntentRegistry::new(),
+        &ActivityTracker::new(),
+    )
+    .expect("load_pair");
+
+    assert_eq!(reg2.list_active(true).len(), 1);
+    assert_eq!(occ2.list_for_agent(&alice.id).len(), 1);
+    assert!(
+        events.is_empty(),
+        "live-agent claims must NOT emit ClaimRevoked; got {events:?}"
+    );
 }
 
 // --- Task 3 brief: explicit claim TTL via ttl_seconds + expires_at ---
@@ -2078,9 +2247,13 @@ fn read_over_another_read_carries_no_advisory() {
     assert!(result.advisories.is_empty(), "two readers are not a hazard");
 }
 
-/// The holder's name is resolved live, so a departed holder reports
-/// `null` rather than the fabricated "unknown" that got the field
-/// removed in the first place.
+/// The holder's name is resolved live, so a departed holder is
+/// reclaimed by the next `load_pair` (see
+/// `load_pair_reclaims_orphaned_claims_on_fresh_server` for the
+/// linearizability fix this depends on). Before that fix landed
+/// the field reported `null` because the conflict path couldn't
+/// resolve a name; the fix moves the reclaim to `load_pair` itself
+/// so the orphan claim never makes it to the conflict reporter.
 #[tokio::test]
 async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
     use lain::server::mcp::presence_tools::run_claim_files;
@@ -2094,7 +2267,13 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
 
     let bob = run_register_agent_for_test(&server, "bob");
 
-    // An unresolvable holder has a claim in occupancy without a live session in presence
+    // Insert a phantom holder directly: a claim in `OccupancyMap`
+    // for an agent that was never registered in `PresenceRegistry`.
+    // This used to test that the conflict path resolved names to
+    // `null` rather than fabricating one. After the linearizability
+    // fix, the next `load_pair` (triggered by `with_shared_presence`
+    // inside `claim_files`) reclaims the phantom claim so bob's
+    // claim succeeds without conflict.
     let departed = AgentId("departed-uuid".into());
     server.occupancy().claim(
         &departed,
@@ -2115,10 +2294,16 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
         }),
     )
     .unwrap();
-    let c = &v["conflicts"].as_array().unwrap()[0];
+    let granted = v["granted"].as_array().unwrap();
+    let conflicts = v["conflicts"].as_array().unwrap();
+    assert_eq!(
+        granted.len(),
+        1,
+        "departed holder must be reclaimed so bob wins; got {v}"
+    );
     assert!(
-        c["name"].is_null(),
-        "an unresolvable holder must be null, not a fabricated name: {c}"
+        conflicts.is_empty(),
+        "no conflict should be reported against a reclaimed holder; got {conflicts:?}"
     );
 }
 

@@ -87,6 +87,26 @@ pub fn run(action: HooksAction) -> anyhow::Result<()> {
             dry_run,
         } => crate::cli::hooks::backfill_heuristics(&workspace, graph.as_deref(), dry_run)
             .map_err(|e| anyhow::anyhow!("{e}")),
+        HooksAction::Observe {
+            url,
+            agent_name,
+            agent_kind,
+            session_token,
+            event,
+            tool,
+            target,
+            at,
+        } => crate::cli::hooks::observe(
+            &url,
+            &agent_name,
+            &agent_kind,
+            &session_token,
+            &event,
+            &tool,
+            &target,
+            &at,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}")),
     }
 }
 
