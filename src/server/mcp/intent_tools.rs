@@ -41,7 +41,7 @@ use serde_json::{json, Value};
 /// - `status` (declare / update): one of `investigating`, `planning`,
 ///   `editing`, `reviewing`, `done`. Defaults to `planning` on declare
 ///   when absent.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct LainIntentArgs {
     pub agent_id: String,
     pub session_token: String,
@@ -74,6 +74,20 @@ pub struct LainIntentArgs {
 /// overlay), and a placeholder `coordination` block. PR 3 wires the
 /// actual GREEN/YELLOW/RED evaluation here.
 pub fn run_lain_intent(server: &LainServer, args: Value) -> Result<Value, String> {
+    // Wrap the entire declare/update + coordination evaluation in
+    // `with_shared_presence` so the intent mutation and its persist
+    // happen under the state-file lock. Without this wrapper,
+    // `intent_registry.declare()` / `update()` fire the persist
+    // callback *outside* the lock and race against `claim_files`
+    // writes on the same state file. That's the natural-contention
+    // race the user's report identified.
+    server
+        .with_shared_presence(|| run_lain_intent_inner(server, args.clone()))
+        .map_err(|e| e.to_string())
+        .and_then(|inner| inner)
+}
+
+fn run_lain_intent_inner(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: LainIntentArgs =
         serde_json::from_value(args).map_err(|e| format!("lain_intent: {e}"))?;
     let session = authenticate(server, &a.session_token)?;
