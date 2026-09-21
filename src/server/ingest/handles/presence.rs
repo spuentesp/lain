@@ -506,6 +506,12 @@ mod tests {
         // both layers proceed through the unlocked fallback. The
         // path the sentinel lives at is the state-file lock sentinel
         // path; the file-lock module reads it on every acquire.
+        // Make sure the parent directory exists — in CI the
+        // `$XDG_STATE_HOME` may point at a path the test runner
+        // hasn't materialised yet.
+        if let Some(parent) = path1.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let sentinel = path1.with_extension("json.lock");
         std::fs::write(&sentinel, "forced-by-test\n").unwrap();
 
