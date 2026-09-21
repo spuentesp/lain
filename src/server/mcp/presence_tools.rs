@@ -54,7 +54,7 @@ pub(crate) fn authenticate(server: &LainServer, token: &str) -> Result<AgentSess
     Ok(session)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RegisterAgentArgs {
     pub name: String,
     pub kind: Option<String>,
@@ -65,7 +65,7 @@ pub struct RegisterAgentArgs {
 
 pub fn run_register_agent(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: RegisterAgentArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    server.with_shared_presence(|| run_register_agent_inner(server, a))
+    server.with_shared_presence(|| run_register_agent_inner(server, a.clone()))
 }
 
 fn run_register_agent_inner(server: &LainServer, a: RegisterAgentArgs) -> Result<Value, String> {
@@ -97,7 +97,7 @@ fn run_register_agent_inner(server: &LainServer, a: RegisterAgentArgs) -> Result
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct HeartbeatArgs {
     pub agent_id: String,
     pub session_token: String,
@@ -105,7 +105,7 @@ pub struct HeartbeatArgs {
 
 pub fn run_heartbeat(server: &LainServer, args: Value) -> Result<Value, String> {
     let a: HeartbeatArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    server.with_shared_presence(|| run_heartbeat_inner(server, a))
+    server.with_shared_presence(|| run_heartbeat_inner(server, a.clone()))
 }
 
 fn run_heartbeat_inner(server: &LainServer, a: HeartbeatArgs) -> Result<Value, String> {
@@ -303,14 +303,14 @@ pub fn run_list_subagents(server: &LainServer, args: Value) -> Result<Value, Str
     Ok(json!({ "parent": parent_id.as_str(), "subagents": children }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ClaimFilesArgs {
     pub agent_id: String,
     pub session_token: String,
     pub files: Vec<ClaimFilesEntry>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ClaimFilesEntry {
     pub path: String,
     pub symbols: Option<Vec<String>>,
@@ -428,7 +428,7 @@ pub fn run_claim_files(server: &LainServer, args: Value) -> Result<Value, String
     // only see peers if the registry is refreshed from the shared state
     // file first — and only stay correct if the grant is written back
     // under the same lock.
-    server.with_shared_presence(|| run_claim_files_inner(server, a))
+    server.with_shared_presence(|| run_claim_files_inner(server, a.clone()))
 }
 
 fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value, String> {
@@ -778,14 +778,14 @@ fn symbol_exists_in_static_graph(server: &LainServer, sym: &str) -> bool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ReleaseFilesArgs {
     pub agent_id: String,
     pub session_token: String,
     pub files: Vec<ReleaseFilesEntry>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReleaseFilesEntry {
     pub path: String,
     pub symbols: Option<Vec<String>>,
@@ -838,7 +838,7 @@ pub fn run_release_files(server: &LainServer, args: Value) -> Result<Value, Stri
              `agent_id` and `session_token`."
         )
     })?;
-    server.with_shared_presence(|| run_release_files_inner(server, a))
+    server.with_shared_presence(|| run_release_files_inner(server, a.clone()))
 }
 
 fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<Value, String> {
