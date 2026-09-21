@@ -163,7 +163,7 @@ impl PresenceLayer {
         events_log: &crate::server::events_log::EventsLog,
         agent_id: &AgentId,
     ) -> Vec<PathBuf> {
-        match self.with_shared_presence(|| {
+        self.with_shared_presence(|| {
             let released = self.occupancy.release_all_for(agent_id);
             for path in &released {
                 self.emit_presence_event(
@@ -185,10 +185,8 @@ impl PresenceLayer {
             self.activity.drop_agent(agent_id);
             self.presence.remove(agent_id);
             released
-        }) {
-            Ok(released) => released,
-            Err(_) => Vec::new(),
-        }
+        })
+        .unwrap_or_default()
     }
 
     /// Alias for [`Self::unregister_agent`].
