@@ -72,6 +72,9 @@ pub fn readiness_requirement(name: &str) -> Option<ReadinessRequirement> {
             | "resolve_annotation"
             | "leave_handoff_note"
             | "get_pending_handoffs"
+            | "unregister_agent"
+            | "lain_intent"
+            | "list_active_intents"
     ) {
         return Some(GraphIndependent);
     }

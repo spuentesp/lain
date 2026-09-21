@@ -576,7 +576,7 @@ impl AnyGitSensor {
         }
     }
 
-    /// Open a Git sensor using `LAIN_GIT_SENSOR` environment variable (defaults to `InProcess`).
+    /// Open a Git sensor using `LAIN_GIT_SENSOR` (defaults to `Sidecar`).
     pub fn from_env(workspace: &Path) -> Result<Self, LainError> {
         Self::new(workspace, GitSensorMode::from_env())
     }

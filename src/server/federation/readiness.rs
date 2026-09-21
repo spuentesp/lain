@@ -43,10 +43,9 @@ pub struct PerRepoReadiness {
     /// lain's commit-hash wire shape.
     pub last_indexed_commit: Option<String>,
     pub last_indexed_at_unix_ms: Option<u64>,
-    /// Depth of the watcher's event channel at snapshot time. Currently
-    /// always 0 — the AtomicUsize counter is wired up so the spawn_blocking
-    /// follow-up PR can fill it in without changing this DTO. Pinning the
-    /// field now keeps the wire shape stable across that work.
+    /// Depth of the watcher's bounded event channel at snapshot time.
+    /// The callback increments the shared counter before enqueueing and
+    /// the receiver decrements it after processing.
     pub outstanding_files: u64,
     /// Re-uses `CapabilityState` so `get_capabilities` does not need a
     /// parallel staleness vocabulary. Mapping:

@@ -143,6 +143,18 @@ pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value,
         .into_iter()
         .map(|s| {
             let claims = server.occupancy().list_for_agent(&s.id);
+            // Intent + activity feed (PR 1 of
+            // `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). Surfaced here
+            // so `list_active_agents` becomes the cross-agent
+            // awareness surface — a peer agent reads this to learn
+            // what every connected agent is doing, not just who is
+            // connected.
+            let intent = server.intent().get(&s.id).map(|i| intent_to_json(&i));
+            let activity = server.activity().get(&s.id);
+            let (focus, observed_reads, last_tool) = match activity {
+                Some(a) => (a.focus(), a.observed_reads(), a.last_tool().cloned()),
+                None => (Vec::new(), Vec::new(), None),
+            };
             json!({
                 "agent_id": s.id.as_str(),
                 "name": s.name,
@@ -151,6 +163,14 @@ pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value,
                 "started_at": crate::server::time::unix_secs_u64(s.started_at),
                 "last_heartbeat": crate::server::time::unix_secs_u64(s.last_heartbeat),
                 "claims_count": claims.len(),
+                "intent": intent,
+                "focus": focus,
+                "observed_reads": observed_reads,
+                "last_tool": last_tool.map(|t| json!({
+                    "tool": t.tool,
+                    "target": t.target,
+                    "at_unix": crate::server::time::unix_secs_u64(t.at),
+                })),
             })
         })
         .collect();
@@ -162,6 +182,33 @@ pub struct WhoAmIArgs {
     pub session_token: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UnregisterAgentArgs {
+    pub agent_id: String,
+    pub session_token: String,
+}
+
+/// Unregister the calling agent. Releases every occupancy claim the
+/// agent held, removes the agent's presence session, and (per PR 5
+/// of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`) drops the agent's
+/// declared intent and observed activity so the activity feed
+/// doesn't show a ghost entry after the session ends. Auth is the
+/// same as every other multiplayer tool: `agent_id` must match the
+/// session token. Returns the list of paths whose claims were
+/// released as part of the unregister.
+pub fn run_unregister_agent(server: &LainServer, args: Value) -> Result<Value, String> {
+    let a: UnregisterAgentArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
+    let session = authenticate(server, &a.session_token)?;
+    if session.id.as_str() != a.agent_id {
+        return Err("agent_id does not match session token".into());
+    }
+    let released = server.unregister_agent(&session.id);
+    Ok(json!({
+        "released": released.iter().map(|p| posix_string(p)).collect::<Vec<_>>(),
+        "removed": true,
+    }))
+}
+
 pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
     server.refresh_shared_presence();
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -171,6 +218,15 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
         .parent_session_id
         .as_ref()
         .map(|p| p.as_str().to_string());
+    // Intent + activity for the calling agent. Same per-agent view
+    // shape as `list_active_agents` and `list_active_intents` so
+    // downstream renderers can share a single parser.
+    let intent = server.intent().get(&session.id).map(|i| intent_to_json(&i));
+    let activity = server.activity().get(&session.id);
+    let (focus, observed_reads, last_tool) = match activity {
+        Some(a) => (a.focus(), a.observed_reads(), a.last_tool().cloned()),
+        None => (Vec::new(), Vec::new(), None),
+    };
     Ok(json!({
         "agent_id": session.id.as_str(),
         "name": session.name,
@@ -184,7 +240,33 @@ pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
         "inferred": c.inferred,
             "claimed_at": crate::server::time::unix_secs_u64(c.claimed_at),
         })).collect::<Vec<_>>(),
+        "intent": intent,
+        "focus": focus,
+        "observed_reads": observed_reads,
+        "last_tool": last_tool.map(|t| json!({
+            "tool": t.tool,
+            "target": t.target,
+            "at_unix": crate::server::time::unix_secs_u64(t.at),
+        })),
     }))
+}
+
+/// Project an `Intent` into the wire JSON shape shared by every
+/// per-agent surface (`list_active_agents`, `who_am_i`,
+/// `list_active_intents`). Extracted so the three call sites can't
+/// drift — adding a field here updates the whole API at once. Takes
+/// `&Intent` so call sites can pass either an owned `Intent` from
+/// `Option::map(intent, ...)` or a `&Intent` from a borrow; both
+/// work because the function only reads through the reference.
+fn intent_to_json(i: &crate::server::intent::Intent) -> Value {
+    json!({
+        "agent_id": i.agent_id.as_str(),
+        "goal": i.goal,
+        "scopes": i.scopes,
+        "status": i.status.as_str(),
+        "created_at_unix": crate::server::time::unix_secs_u64(i.created_at),
+        "updated_at_unix": crate::server::time::unix_secs_u64(i.updated_at),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +315,22 @@ pub struct ClaimFilesEntry {
     pub path: String,
     pub symbols: Option<Vec<String>>,
     pub intent: Option<String>,
+    /// Optional per-claim TTL in seconds. When set, the resulting
+    /// `Claim` carries `expires_at = claimed_at + ttl_seconds` and the
+    /// expiry loop releases the claim once `expires_at` passes —
+    /// independent of the holding agent's heartbeat. Bounds are
+    /// `[1, 86_400]` (24 h). Validation happens in
+    /// `run_claim_files_inner`; serde accepts any `u64` and the
+    /// caller gets a clear `claim_files: ttl_seconds must be >= 1`
+    /// (or `<= 86400`) error if the bounds are violated.
+    ///
+    /// Previously this field was silently dropped on the wire:
+    /// `serde` ignored the unknown key, so an agent that sent
+    /// `ttl_seconds: 120` got the same behavior as one that sent
+    /// nothing — claims without an expiry. The harness in
+    /// `hooks/agy/` relied on the field and would have shipped the
+    /// silently-broken contract.
+    pub ttl_seconds: Option<u64>,
     /// Last plan revision the calling agent saw (Task 1.4, PR 1).
     /// `None` preserves the prior behavior for callers that don't
     /// track revisions yet.
@@ -242,12 +340,12 @@ pub struct ClaimFilesEntry {
 /// Accept both `"src/a.rs"` and `{"path": "src/a.rs"}`.
 ///
 /// Mirrors `ReleaseFilesEntry` (above). A claim entry carries
-/// `intent` and `ttl_seconds`; the string form has nothing to set on
-/// those, so the bare path is the obvious spelling and an agent
-/// writes it without thinking. It used to be rejected with `invalid
-/// type: string "src/a.rs", expected struct ClaimFilesEntry` — a
-/// Rust type name the caller cannot act on, for input that was never
-/// ambiguous.
+/// `intent`, `ttl_seconds`, and `plan_revision`; the string form has
+/// nothing to set on those, so the bare path is the obvious spelling
+/// and an agent writes it without thinking. It used to be rejected
+/// with `invalid type: string "src/a.rs", expected struct
+/// ClaimFilesEntry` — a Rust type name the caller cannot act on, for
+/// input that was never ambiguous.
 impl<'de> serde::Deserialize<'de> for ClaimFilesEntry {
     fn deserialize<D>(d: D) -> Result<Self, D::Error>
     where
@@ -258,6 +356,8 @@ impl<'de> serde::Deserialize<'de> for ClaimFilesEntry {
             path: String,
             symbols: Option<Vec<String>>,
             intent: Option<String>,
+            #[serde(default)]
+            ttl_seconds: Option<u64>,
             #[serde(default)]
             plan_revision: Option<crate::server::revision_log::RevisionId>,
         }
@@ -272,12 +372,14 @@ impl<'de> serde::Deserialize<'de> for ClaimFilesEntry {
                 path,
                 symbols: None,
                 intent: None,
+                ttl_seconds: None,
                 plan_revision: None,
             },
             Either::Object(o) => ClaimFilesEntry {
                 path: o.path,
                 symbols: o.symbols,
                 intent: o.intent,
+                ttl_seconds: o.ttl_seconds,
                 plan_revision: o.plan_revision,
             },
         })
@@ -350,24 +452,50 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     let requests: Vec<ClaimRequest> = a
         .files
         .into_iter()
-        .map(|f| ClaimRequest {
-            path: std::path::PathBuf::from(f.path),
-            symbols: f.symbols.unwrap_or_default(),
-            intent: f
-                .intent
-                .as_deref()
-                .map(|s| {
-                    if s == "read" {
-                        ClaimIntent::Read
-                    } else {
-                        ClaimIntent::Edit
-                    }
-                })
-                .unwrap_or(ClaimIntent::Edit),
-            ttl_seconds: None,
-            plan_revision: f.plan_revision,
+        .map(|f| {
+            // Validate TTL bounds before the request reaches the
+            // occupancy map. The bounds are `[1, 86_400]` (24 h):
+            // - `0` is rejected because it would expire immediately
+            //   and the claim would be useless.
+            // - `> 86_400` is rejected to bound the on-disk state size
+            //   and stop a misconfigured agent from holding a file
+            //   for weeks. Operators who need longer expirations
+            //   should release and re-claim.
+            //
+            // The check lives in the inner function (not in serde) so
+            // the error message names `claim_files` and matches the
+            // existing convention of using the public tool name in
+            // user-facing errors. Returning `Err` here aborts the
+            // whole batch — partial validation across `files` would
+            // let an agent silently get no claims when at least one
+            // entry is malformed.
+            if let Some(ttl) = f.ttl_seconds {
+                if ttl == 0 {
+                    return Err("claim_files: ttl_seconds must be >= 1".into());
+                }
+                if ttl > 86_400 {
+                    return Err("claim_files: ttl_seconds must be <= 86400".into());
+                }
+            }
+            Ok(ClaimRequest {
+                path: std::path::PathBuf::from(f.path),
+                symbols: f.symbols.unwrap_or_default(),
+                intent: f
+                    .intent
+                    .as_deref()
+                    .map(|s| {
+                        if s == "read" {
+                            ClaimIntent::Read
+                        } else {
+                            ClaimIntent::Edit
+                        }
+                    })
+                    .unwrap_or(ClaimIntent::Edit),
+                ttl_seconds: f.ttl_seconds,
+                plan_revision: f.plan_revision,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     // Snapshot the agent's held symbols *before* the claim lands.
     // Retract detection asks "was this symbol here when you last
     // looked?", and after the claim is applied every symbol in the
@@ -1181,5 +1309,51 @@ mod tests {
         let rendered = posix_string(&path);
         assert_eq!(rendered, "src/a.rs");
         assert!(!rendered.contains('\\'));
+    }
+
+    /// `ClaimFilesEntry` accepts the bare-string form (`"src/a.rs"`)
+    /// with all optional fields defaulted to `None`. This is the
+    /// path agents write without thinking — a string is the obvious
+    /// spelling for "I want this file".
+    #[test]
+    fn claim_files_entry_string_form_parses_with_defaults() {
+        let entry: ClaimFilesEntry = serde_json::from_value(serde_json::json!("src/a.rs"))
+            .expect("bare-string form must parse");
+        assert_eq!(entry.path, "src/a.rs");
+        assert!(entry.symbols.is_none());
+        assert!(entry.intent.is_none());
+        assert!(entry.ttl_seconds.is_none());
+        assert!(entry.plan_revision.is_none());
+    }
+
+    /// The object form must accept `ttl_seconds` and forward it
+    /// through. This is the regression guard for the "harness sent
+    /// `ttl_seconds: 120`, serde ignored it" defect that motivated
+    /// this work — without an explicit `#[serde(default)]` the field
+    /// silently defaults and the agent sees the same behavior as one
+    /// that sent nothing.
+    #[test]
+    fn claim_files_entry_object_form_parses_ttl_seconds() {
+        let entry: ClaimFilesEntry = serde_json::from_value(serde_json::json!({
+            "path": "src/a.rs",
+            "intent": "edit",
+            "ttl_seconds": 120,
+        }))
+        .expect("object form with ttl_seconds must parse");
+        assert_eq!(entry.path, "src/a.rs");
+        assert_eq!(entry.intent.as_deref(), Some("edit"));
+        assert_eq!(entry.ttl_seconds, Some(120));
+    }
+
+    /// When the object omits `ttl_seconds`, the field defaults to
+    /// `None` rather than erroring. Backward-compat: agents that
+    /// don't track TTL keep working unchanged.
+    #[test]
+    fn claim_files_entry_object_form_without_ttl_seconds_defaults_to_none() {
+        let entry: ClaimFilesEntry = serde_json::from_value(serde_json::json!({
+            "path": "src/a.rs",
+        }))
+        .expect("object form without ttl_seconds must parse");
+        assert!(entry.ttl_seconds.is_none());
     }
 }

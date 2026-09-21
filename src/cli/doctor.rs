@@ -46,8 +46,8 @@ pub struct InstallationReport {
 
 /// Active wire-level tool profile. Surfaced in `doctor --json` so an
 /// operator checking an offline server can see whether `tools/list`
-/// will return the curated 14-tool semantic surface or the full
-/// 79-tool legacy surface. The advertised count is what the next
+/// will return the curated 15-tool semantic surface or the full
+/// 80-tool surface. The advertised count is what the next
 /// `tools/list` round-trip will report — lower than the registry
 /// total under `semantic`, equal to the registry total under
 /// `full`.
@@ -429,7 +429,7 @@ fn observe_semantic(report: &mut DoctorReport) {
 pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     // Tool-profile report (PR-fix-1): surface the active wire-level
     // filter so an operator reading doctor.json can tell whether
-    // `tools/list` is the curated 14 or the full 79. Reads `LAIN_TOOL_PROFILE`
+    // `tools/list` is the curated 15 or the full 80. Reads `LAIN_TOOL_PROFILE`
     // via the same env-var resolution the dispatcher uses, so doctor
     // and the running server agree to the byte.
     let profile = crate::server::tools::profile::ToolProfile::from_env();

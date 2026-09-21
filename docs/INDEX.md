@@ -27,14 +27,34 @@ single-repository setup, federation, and basic troubleshooting.
 - [Architecture](ARCHITECTURE.md): system boundaries and design choices
 - [Technical reference](TECHNICAL.md): modules, data structures, and internals
 - [CI](CI.md): checks run in continuous integration
+- [Branching](BRANCHING.md): integration, release, and protection policy
+- [Distribution](DISTRIBUTION.md): pre-release and published-package checks
 - [Release verification](VERIFICATION.md): how to verify a release artifact
 - [Supply-chain security](SUPPLY_CHAIN.md): release and dependency controls
 - [SafeSkill scoring](SAFESKILL.md): scope and interpretation of the score
-- [Agent UX roadmap](AGENT_UX_ROADMAP.md): active install and onboarding work
+- [Contributing as an agent](CONTRIBUTING_AGENTS.md): code-structure rules and
+  automated guardrails
+- [Agent UX design record](AGENT_UX_ROADMAP.md): stable milestone vocabulary
+  referenced by code and tool descriptions
+- [Current follow-ups](FOLLOWUPS.md): unfinished work deferred from merged PRs
+- [Vulnerability triage](VULNS.md): current OSV findings and remediation
+- [OpenSSF Scorecard](SCORECARD.md): current external score and process gaps
 - [Graph data-source decision](opinions/graph-tab-data-source.md): why the
   Command Center graph uses `get_workspace_graph`
 
+Active, scoped capability plans:
+
+- [Hybrid LSP expansion](hybrid-lsp-expansion.md)
+- [OTLP gRPC ingest](otlp-grpc-ingest.md)
+- [Upstream `lsp-bridge` request](UPSTREAM_LSP_BRIDGE_ISSUE.md)
+
 `METADATA.toml` belongs to the release workflow rather than the reading path.
+
+Completed design plans (work landed; kept for historical record):
+- [`docs/archive/COORDINATION_CONSISTENCY_PLAN.md`](archive/COORDINATION_CONSISTENCY_PLAN.md)
+- [`docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md`](archive/INTENT_AND_OBSERVABILITY_PLAN.md)
+
+Each archive entry has a status line in [`docs/archive/README.md`](archive/README.md).
 
 Completed plans, audits, review notes, and the academic SRS package live in Git
 history. Keeping them out of the current tree prevents old implementation notes

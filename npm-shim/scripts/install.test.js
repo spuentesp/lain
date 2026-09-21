@@ -50,6 +50,41 @@ test('checksum mismatch fails closed', () => {
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('Windows runtime DLLs are installed beside the executable', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lain-windows-dlls-'));
+  const source = path.join(directory, 'source');
+  const destination = path.join(directory, 'cache');
+  fs.mkdirSync(source);
+  fs.mkdirSync(destination);
+  fs.writeFileSync(path.join(source, 'DirectML.dll'), 'authenticated archive bytes');
+  fs.writeFileSync(path.join(source, 'not-a-runtime.txt'), 'leave me behind');
+  try {
+    const installed = runtime.installWindowsRuntimeDlls(source, destination, 'win32');
+    assert.deepStrictEqual(installed, ['DirectML.dll']);
+    assert(fs.existsSync(path.join(destination, 'DirectML.dll')));
+    assert(fs.existsSync(path.join(source, 'not-a-runtime.txt')));
+    runtime.verifyWindowsRuntimeDlls(destination, 'win32');
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Windows install fails clearly when DirectML.dll is absent', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lain-windows-dlls-missing-'));
+  const source = path.join(directory, 'source');
+  const destination = path.join(directory, 'cache');
+  fs.mkdirSync(source);
+  fs.mkdirSync(destination);
+  try {
+    assert.throws(
+      () => runtime.installWindowsRuntimeDlls(source, destination, 'win32'),
+      /missing DirectML\.dll/
+    );
+    assert.throws(
+      () => runtime.verifyWindowsRuntimeDlls(destination, 'win32'),
+      /missing DirectML\.dll/
+    );
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 if (process.platform !== 'win32') {
   test('verified install is atomic and a second invocation is offline', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lain-install-'));

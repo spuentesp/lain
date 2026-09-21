@@ -87,6 +87,48 @@ pub enum HooksAction {
     /// Detect symbol-level overlap between two git refs in a federation
     /// workspace. Used by the pre-commit hook to refuse a commit that
     /// would touch symbols also touched by `--base`.
+    /// Record a tool-call observation (`tool_start`, `tool_end`,
+    /// `session_start`, ...) for the activity feed. Per-tool-call
+    /// observation is what surfaces Read / Grep / Bash in
+    /// `list_active_intents`; `claim_files` only fires on Edit,
+    /// so without this command the activity feed is sparse.
+    Observe {
+        /// Lain server URL (bare, e.g. `http://localhost:9999`). The MCP
+        /// `/mcp` path is appended automatically; a value that already
+        /// ends in `/mcp` is accepted unchanged for backwards
+        /// compatibility with older hook scripts.
+        /// Falls back to `$LAIN_URL`.
+        #[arg(long, default_value = "")]
+        url: String,
+        /// Stable agent name (must match the one used at claim).
+        #[arg(long, default_value = "lain-cli")]
+        agent_name: String,
+        /// Agent kind (`"agy"`, `"codex"`, `"kimi"`, `"claude"`, ...).
+        #[arg(long, default_value = "other")]
+        agent_kind: String,
+        /// Session token issued by `register_agent` (returned in the
+        /// `session_token` field). Required so the observation is
+        /// attributed to the right agent.
+        #[arg(long, default_value = "")]
+        session_token: String,
+        /// Event kind — `"tool_start"`, `"tool_end"`, `"session_start"`,
+        /// `"session_end"`. Other values are accepted verbatim so future
+        /// agent kinds can extend without a CLI change.
+        #[arg(long, default_value = "tool_start")]
+        event: String,
+        /// Tool name as reported by the agent host (e.g. `"Read"`,
+        /// `"Grep"`, `"Edit"`).
+        #[arg(long, required = true)]
+        tool: String,
+        /// Best-effort target extracted by the hook (file path,
+        /// pattern, command line). Empty string is acceptable.
+        #[arg(long, default_value = "")]
+        target: String,
+        /// Optional ISO-8601 timestamp the agent recorded. Empty
+        /// string falls back to server `now()`.
+        #[arg(long, default_value = "")]
+        at: String,
+    },
     OverlapCheck {
         /// Lain server URL (bare, e.g. `http://localhost:9999`). The MCP
         /// `/mcp` path is appended automatically; a value that already
@@ -260,11 +302,8 @@ fn register_if_needed(
         // agent_id that claim/release will fail against.
         let stale = match post_tool_call(
             url,
-            "tools/call",
-            serde_json::json!({
-                "name": "heartbeat",
-                "arguments": { "agent_id": s.agent_id, "session_token": s.session_token }
-            }),
+            "heartbeat",
+            serde_json::json!({ "agent_id": s.agent_id, "session_token": s.session_token }),
         ) {
             Ok(r) => r.get("isError").and_then(|v| v.as_bool()).unwrap_or(false),
             Err(_) => true,
@@ -284,14 +323,7 @@ fn register_if_needed(
     if let Some(parent) = parent_session_id {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_tool_call(
-        url,
-        "tools/call",
-        serde_json::json!({
-            "name": "register_agent",
-            "arguments": args
-        }),
-    )?;
+    let result = post_tool_call(url, "register_agent", args)?;
     let text = result["content"][0]["text"].as_str().unwrap_or("");
     let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let sess = HookSession {
@@ -376,14 +408,7 @@ pub fn claim(
     if let Some(parent) = parent {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_tool_call(
-        url,
-        "tools/call",
-        serde_json::json!({
-            "name": "claim_files",
-            "arguments": args
-        }),
-    )?;
+    let result = post_tool_call(url, "claim_files", args)?;
     let text = result["content"][0]["text"].as_str().unwrap_or("");
     let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let granted = parsed["granted"].as_array().map(|a| a.len()).unwrap_or(0);
@@ -425,14 +450,7 @@ pub fn release(
     if let Some(parent) = parent {
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
-    let result = post_tool_call(
-        url,
-        "tools/call",
-        serde_json::json!({
-            "name": "release_files",
-            "arguments": args
-        }),
-    )?;
+    let result = post_tool_call(url, "release_files", args)?;
     let text = result["content"][0]["text"].as_str().unwrap_or("");
     let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
     let released = parsed["released"].as_array().map(|a| a.len()).unwrap_or(0);
@@ -591,6 +609,83 @@ fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Record a tool-call observation by POSTing to `/hook`. Used by
+/// the AGY / Codex / Kimi hooks to surface every tool call (not
+/// just Edit) in the activity feed. The `claim_files` MCP tool
+/// only fires on Edit, so without this command the activity feed
+/// stays sparse — the plan's acceptance criterion says the feed
+/// should show what the agent was actually doing, including Read /
+/// Grep / Bash.
+/// Always exits 0 on network failure so a transient server outage
+/// can't block the agent — same fail-open contract as `claim` and
+/// `release`.
+pub fn observe(
+    url: &str,
+    agent_name: &str,
+    _agent_kind: &str,
+    session_token: &str,
+    event: &str,
+    tool: &str,
+    target: &str,
+    at: &str,
+) -> Result<()> {
+    // Resolve the session token through the same session-file cache
+    // that `claim` uses. The hook script can either pass the token
+    // directly (preferred — no FS round-trip) or leave it empty and
+    // let us look it up by `agent_name`.
+    let token = if !session_token.is_empty() {
+        session_token.to_string()
+    } else {
+        match read_session(agent_name) {
+            Some(s) => s.session_token,
+            None => {
+                eprintln!("observe: no session for agent={agent_name}; skipping");
+                return Ok(());
+            }
+        }
+    };
+    let agent_id = match read_session(agent_name) {
+        Some(s) => s.agent_id,
+        None => {
+            // No prior session. The hook can't get an id without
+            // registering first. Skip silently.
+            eprintln!("observe: no prior session for agent={agent_name}; skipping");
+            return Ok(());
+        }
+    };
+    let endpoint = mcp_endpoint(&resolve_url(url)?);
+    let body = serde_json::json!({
+        "session_token": token,
+        "agent_id": agent_id,
+        "event": event,
+        "tool": tool,
+        "target": target,
+        // Server stamps `at` from `now()` when this is empty /
+        // absent, so the hook can omit it entirely.
+    });
+    if !at.is_empty() {
+        // Replace the body with a copy that carries `at` too.
+        let mut body = body;
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("at".into(), serde_json::Value::String(at.into()));
+        }
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .post(&endpoint.replace("/mcp", "/hook"))
+            .json(&body)
+            .send();
+        let _ = resp; // fail-open
+    } else {
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .post(&endpoint.replace("/mcp", "/hook"))
+            .json(&body)
+            .send();
+        let _ = resp;
+    }
+    Ok(())
+}
+
 /// Resolve a git ref to its full SHA via `git rev-parse`. The MCP
 /// `detect_overlap` tool accepts refs as-is, but resolving here gives
 /// the user a clearer error message when the ref is bad *before*
@@ -627,14 +722,11 @@ pub fn overlap_check(url: &str, base: &str, head: Option<&str>, workspace: &str)
         .with_context(|| format!("resolving head ref {head_input:?}"))?;
     let result = post_tool_call(
         url,
-        "tools/call",
+        "detect_overlap",
         serde_json::json!({
-            "name": "detect_overlap",
-            "arguments": {
-                "base": base_sha,
-                "head": head_sha,
-                "workspace": workspace,
-            }
+            "base": base_sha,
+            "head": head_sha,
+            "workspace": workspace,
         }),
     )?;
     let text = result["content"][0]["text"].as_str().unwrap_or("");

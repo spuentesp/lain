@@ -7,10 +7,10 @@ Quick reference for LAIN MCP tools.
 > `lain server --config ./repos.yaml`.
 
 > **Tool profile.** By default, `tools/list` returns the curated
-> 14-tool semantic surface (the M5 bootstrap + the M6 high-level
+> 15-tool semantic surface (the M5 bootstrap + the M6 high-level
 > Agent API + readiness + multiplayer essentials), with a few
 > contextual additions depending on the server's mode
-> (federation / workspace / server-status). The legacy 79-tool
+> (federation / workspace / server-status). The full 80-tool
 > surface is reachable via `LAIN_TOOL_PROFILE=full`. The active
 > profile is reported through `get_capabilities.tool_profile` so
 > agents self-discover the filter on first connect. See
@@ -405,8 +405,16 @@ they are central to the workflow they belong to:
 - **Workspaces** ([`FEDERATION.md`](FEDERATION.md) §Workspaces):
   `list_workspaces`, `get_active_workspace`, `get_workspace`.
 - **Presence** ([`multiplayer.md`](multiplayer.md)): `register_agent`,
-  `heartbeat`, `list_active_agents`, `who_am_i`, `list_subagents`,
-  `my_claims`.
+  `heartbeat`, `unregister_agent`, `list_active_agents`, `who_am_i`,
+  `list_subagents`, `my_claims`.
+- **Intent layer** ([`multiplayer.md`](multiplayer.md#intent-layer),
+  [`archive/INTENT_AND_OBSERVABILITY_PLAN.md`](archive/INTENT_AND_OBSERVABILITY_PLAN.md)):
+  `lain_intent` (declare goal + scopes, get coordination level),
+  `list_active_intents` (per-agent activity feed), and the
+  synchronous `POST /hook/evaluate` endpoint that wraps the
+  GREEN / YELLOW / RED evaluator for pre-Edit consults. Hooks
+  auto-populate the feed via `POST /hook` and `lain hooks
+  observe` ([`hooks.md`](hooks.md)).
 - **Reload** ([`hot-reload.md`](hot-reload.md)): `request_reload`,
   `get_reload_status`.
 - **Command Center** ([`command-center.md`](command-center.md)):

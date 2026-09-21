@@ -1,12 +1,21 @@
 # Distribution checklist
 
 Pre-release checklist for the npm-published `@spuentesp/lain-mcp`
-package. Run this in order at the moment you cut a release tag;
-each step is a thing that has gone wrong on the live `latest`
-dist-tag at some point (see `docs/AGENT_UX_ROADMAP.md` for the
-2026-09-16 "Regressed in production" finding — the package on npm
-that day was the pre-`609f8db` launcher, and there was no
-`SHA256SUMS` asset on the corresponding GitHub release).
+package. Run this in order when cutting a release tag. The checks preserve
+lessons from the 2026-09-16 incident, when npm `latest` contained the old
+launcher and the matching GitHub release had no `SHA256SUMS` asset.
+
+## Current known issue
+
+As of 2026-09-21, the Windows clean-room install repair is in
+tree but not yet released. `release.yml::build-windows` packages
+every `*.dll` from `target/x86_64-pc-windows-msvc/release/`
+alongside `lain.exe`, and the build fails loudly if `DirectML.dll`
+is missing. `npm-shim/scripts/install.test.js` regresses the
+absent-DLL failure path. The actual release that carries the
+fix is the next release PR — until the next tag, the published
+artifact still ships `lain.exe` alone. See
+[`FOLLOWUPS.md`](FOLLOWUPS.md).
 
 ## What the runtime needs
 
@@ -29,8 +38,8 @@ triggers `release.yml`.
       (`v0.x.y-rcN`) route `npm publish` to `--tag next`, which
       leaves `latest` pinned at the previous stable. A user who
       runs `npm install @spuentesp/lain-mcp` without specifying a
-      tag never sees an rc. `release.yml` lines 538-541 detect the
-      suffix and route accordingly; verify by reading the diff in
+      tag never sees an rc. `release.yml` detects the suffix and routes
+      accordingly; verify by reading the diff in
       `npm-shim/package.json` after `sync-server-json` runs.
 - [ ] **Versions are aligned.** Every release-metadata file lists
       the same `v0.x.y`: `Cargo.toml`, `Cargo.lock`, `server.json`,
@@ -77,7 +86,7 @@ should verify each completed step before announcing the release.
       exercised against the freshly-published artifact returns
       "Operational" for `initialize` + `tools/list` +
       `get_capabilities`. This is the canary for the live
-      "Regressed in production" finding.
+      published-package contract.
 
 ## After the release lands
 
@@ -86,12 +95,9 @@ should verify each completed step before announcing the release.
       `runtime.js::verifyBinary` already does; the smoke is a
       human-facing sanity check that the published launcher actually
       ran end to end (download → extract → chmod → exec).
-- [ ] **Mark the live finding resolved in
-      `docs/AGENT_UX_ROADMAP.md`.** Move the M1 row from "🔴
-      Regressed in production" to "✅ Done" with the new tag in
-      the evidence column, and delete the callout block below the
-      table. Until then, the table reflects the published state,
-      not the in-tree code.
+- [ ] **Update current status.** Refresh `docs/FOLLOWUPS.md` and the milestone
+      summary in `docs/AGENT_UX_ROADMAP.md` if the release changes published
+      behavior or resolves a distribution defect.
 
 ## When things go wrong
 
@@ -100,6 +106,6 @@ for an npm publish that fails after the binaries are already on
 GitHub Releases. Trigger it via
 `gh workflow run release.yml -f tag=v0.x.y`; it re-runs only the
 npm publish job, leaving the build artifacts untouched. The
-escape hatch exists because `@spuentesp/lain-mcp` has been stuck
-at 0.6.1 on the public registry since v0.6.2 — exactly the
-incident this checklist is designed to prevent recurring.
+escape hatch exists because an earlier release published GitHub assets but
+left npm `latest` behind. It repairs npm publication without rebuilding or
+replacing already-published binaries.

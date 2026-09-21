@@ -20,11 +20,13 @@ use super::handles::{
     LifecycleInfo, PresenceLayer, RefreshState,
 };
 use crate::config::state_path_for_workspace;
+use crate::server::activity::ActivityTracker;
 use crate::server::annotations::AnnotationRegistry;
 use crate::server::federation::config::RepoConfig;
 use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::repo_id::RepoId;
 use crate::server::federation::workspace::WorkspacesFile;
+use crate::server::intent::IntentRegistry;
 use crate::server::overlay::{broadcast_overlay_diff, OverlayDiff, RevisionId};
 use crate::server::presence::{
     save_pair as save_presence_pair, AgentId, OccupancyMap, PresenceEvent, PresenceRegistry,
@@ -159,6 +161,24 @@ impl LainServer {
 
     pub fn occupancy(&self) -> &Arc<OccupancyMap> {
         self.presence.occupancy()
+    }
+
+    /// Intent registry (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
+    /// Forwards to the underlying `PresenceLayer`'s intent handle.
+    /// The MCP `lain_intent` and `list_active_intents` tools consult
+    /// this; the per-agent activity feed in `who_am_i` /
+    /// `list_active_agents` reads it.
+    pub fn intent(&self) -> &Arc<IntentRegistry> {
+        self.presence.intent()
+    }
+
+    /// Activity tracker (PR 1). Forwards to the underlying
+    /// `PresenceLayer`'s activity handle. The hook ingestion
+    /// endpoint (PR 2) will record observations here; the per-agent
+    /// activity feed surfaces `recent_tools`, `focus`, and
+    /// `observed_reads` from this registry.
+    pub fn activity(&self) -> &Arc<ActivityTracker> {
+        self.presence.activity()
     }
 
     pub fn presence_event_tx(&self) -> &broadcast::Sender<(u64, PresenceEvent)> {
@@ -391,29 +411,50 @@ impl LainServer {
         self.presence.refresh_shared_presence();
     }
 
-    /// Install a persist callback on `presence` and `occupancy` that
-    /// drives `save_state` on every mutation. Called once from each
-    /// constructor, immediately after the registries are built and
-    /// after `load_state` has hydrated them.
+    /// Install a persist callback on `presence`, `occupancy`,
+    /// `intent`, and `activity` that drives `save_state` on every
+    /// mutation. Called once from each constructor, immediately
+    /// after the registries are built and after `load_state` has
+    /// hydrated them. PR 1 of
+    /// `docs/INTENT_AND_OBSERVABILITY_PLAN.md` extends the persist
+    /// surface to the intent and activity registries — every
+    /// mutation (declare intent, update intent, record tool
+    /// observation) flows through the same `save_presence_pair`
+    /// saver that presence and occupancy already use.
     pub(crate) fn install_persist_callback(&self) {
         let path = self.presence.state_path();
         let presence = Arc::clone(self.presence.presence());
         let occupancy = Arc::clone(self.presence.occupancy());
+        let intent = Arc::clone(self.presence.intent());
+        let activity = Arc::clone(self.presence.activity());
         let cb = move || {
-            if let Err(e) = save_presence_pair(&path, &presence, &occupancy) {
+            if let Err(e) = save_presence_pair(&path, &presence, &occupancy, &intent, &activity) {
                 tracing::warn!("persist failed: {e}");
             }
         };
         self.presence.presence().set_persist_callback(cb.clone());
         let presence2 = Arc::clone(self.presence.presence());
         let occupancy2 = Arc::clone(self.presence.occupancy());
+        let intent2 = Arc::clone(self.presence.intent());
+        let activity2 = Arc::clone(self.presence.activity());
         let path2 = self.presence.state_path();
         let cb2 = move || {
-            if let Err(e) = save_presence_pair(&path2, &presence2, &occupancy2) {
+            if let Err(e) =
+                save_presence_pair(&path2, &presence2, &occupancy2, &intent2, &activity2)
+            {
                 tracing::warn!("persist failed: {e}");
             }
         };
         self.presence.occupancy().set_persist_callback(cb2);
+        // Intent + activity get their own callbacks so a mutation in
+        // either triggers the same saver. The callbacks capture
+        // identical state by `Arc::clone`, so a single persist fires
+        // for every mutation regardless of which registry originated
+        // it.
+        let cb3 = cb.clone();
+        self.presence.intent().set_persist_callback(cb3);
+        let cb4 = cb.clone();
+        self.presence.activity().set_persist_callback(cb4);
         let occupancy_for_remove = Arc::clone(self.presence.occupancy());
         self.presence.presence().set_on_remove_callback(move |id| {
             occupancy_for_remove.release_all_for(id);

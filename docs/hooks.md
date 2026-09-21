@@ -44,3 +44,45 @@ All sessions of one agent kind share the same `~/.config/lain/hooks/<kind>.sessi
 `tests/e2e/multiplayer-hooks.sh` exercises the full hook flow against a real
 `lain server`. See [the harness README](../tests/e2e/README.md), or run
 `tests/e2e/multiplayer-hooks.sh --help`.
+
+## Activity observation
+
+The pre-edit hook above only fires on Edit / Write / MultiEdit. The
+intent layer also wants to know what the agent was *reading* so
+the activity feed (`focus`, `observed_reads`, `last_tool`) reflects
+the agent's investigation, not just its edits.
+
+For each agent kind, add a wrapper that POSTs every tool-call
+observation to `/hook`:
+
+```bash
+# Inside the agent's per-tool wrapper
+curl -sf -X POST "$LAIN_URL/hook" \
+    -H 'Content-Type: application/json' \
+    --data "$(printf '{"session_token":"%s","agent_id":"%s","event":"%s","tool":"%s","target":"%s"}' \
+        "$LAIN_SESSION_TOKEN" "$LAIN_AGENT_ID" \
+        "tool_start" "$TOOL" "$TARGET")"
+```
+
+The wire shape, validation, and auth contract are documented in
+`src/server/mcp/hook.rs`; the regression fixture is
+`tests/hook_ingest.rs`.
+
+### Per-agent-kind wrappers
+
+| Agent | Wrapper location | Hook events fired |
+|---|---|---|
+| Claude Code | `hooks/claude-code/post-tool.sh` | Read, Edit, Grep, Bash |
+| Kimi | `hooks/kimi/pre-tool.sh` | Read, Edit, Grep, Bash |
+| AGY | `hooks/agy/pre-tool.sh` | Read, Edit, Grep, Bash |
+| Codex | `hooks/codex/pre-tool.sh` | Read, Edit, Grep, Bash |
+
+All four wrappers are bash, fail-open (always exit 0), parse the
+agent's stdin JSON envelope, extract `tool_name` and
+`tool_input.{file_path,command,pattern}`, and forward to `lain
+hooks observe` which POSTs `/hook`. The CLI subcommand and
+wrappers are the agent-agnostic replacement for hand-rolled curl
+in the per-agent wrapper. The synchronous pre-edit endpoint is
+`POST /hook/evaluate` (used by agents that want a YES/NO answer
+before Edit fires); the wrapper script above is for the
+observation stream.

@@ -11,6 +11,7 @@ use super::background::{
 };
 use super::config::{LainConfig, Transport, PRESENCE_EVENT_CHANNEL_CAPACITY};
 use super::server::LainServer;
+use crate::server::activity::ActivityTracker;
 use crate::server::attribution::AttributionBackend;
 use crate::server::auth::AuthState;
 use crate::server::error::LainError;
@@ -19,6 +20,7 @@ use crate::server::federation::federated_index::FederatedIndex;
 use crate::server::federation::workspace::WorkspacesFile;
 use crate::server::git::AnyGitSensor;
 use crate::server::graph::GraphDatabase;
+use crate::server::intent::IntentRegistry;
 use crate::server::lsp::LspPool;
 use crate::server::nlp::{CrossEncoder, NlpEmbedder};
 use crate::server::overlay::VolatileOverlay;
@@ -201,8 +203,9 @@ fn init_workspace_state(ws: &Path) -> Result<PathBuf, LainError> {
 /// Otherwise return the placeholder. The single-repo path
 /// unblocks `find_anchors` / `explain_symbol` / `get_blast_radius`
 /// / `query_graph` / `get_function_callers` / `get_function_callees`
-/// without waiting for the round-2 federation-aware handler refactor
-/// (which is the open follow-up for multi-repo).
+/// at the executor root. In multi-repo mode the executor keeps the
+/// placeholder as its default, while MCP dispatch injects `repo_id` and
+/// `ToolRegistry::dispatch` rebinds the context to that repo's graph.
 /// The single registered repo's checkout, when there is exactly one.
 ///
 /// `config.workspace` is a staging placeholder in federation mode, so
@@ -405,6 +408,12 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // broadcasts `PresenceEvent` notifications.
     let presence = Arc::new(PresenceRegistry::new());
     let occupancy = Arc::new(OccupancyMap::new());
+    // Intent + activity trackers ride alongside presence/occupancy
+    // (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). They share
+    // the same persistence path and the same install_persist_callback
+    // wiring; the data they carry is additive on the JSON snapshot.
+    let intent_registry = Arc::new(IntentRegistry::new());
+    let activity_tracker = Arc::new(ActivityTracker::new());
     let (presence_event_tx, _) = broadcast::channel(PRESENCE_EVENT_CHANNEL_CAPACITY);
     // P1 #2: open the events log before `mem_path` is moved into the
     // LainServer struct — the expiry loop and attribution watcher tag
@@ -443,6 +452,8 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         Arc::clone(&presence_state_seen),
         presence,
         occupancy,
+        intent_registry,
+        activity_tracker,
         presence_event_tx.clone(),
         repos_yaml.as_deref(),
         ws.as_path(),
@@ -659,10 +670,18 @@ impl LainServer {
         let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
         let overlay_updated = Arc::new(Notify::new());
 
+        // Intent + activity trackers ride alongside presence/occupancy
+        // (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`); same
+        // persistence story as the federation-mode constructor.
+        let intent_registry = Arc::new(IntentRegistry::new());
+        let activity_tracker = Arc::new(ActivityTracker::new());
+
         let presence_handle = Arc::new(super::handles::PresenceLayer::new(
             Arc::clone(&presence_state_seen),
             Arc::new(PresenceRegistry::new()),
             Arc::new(OccupancyMap::new()),
+            intent_registry,
+            activity_tracker,
             presence_event_tx.clone(),
             None,
             workspace,

@@ -103,9 +103,11 @@ LAIN provides specialized MCP tools categorized by capability:
 
 ### 3. Multi-Agent Coordination ("Multiplayer Mode")
 - **`register_agent` / `heartbeat`** — Registers an agent session and keeps advisory leases fresh.
+- **`unregister_agent`** — Explicit teardown: releases every claim and drops the intent + activity entries.
 - **`claim_files` / `release_files`** — Claims or releases files and symbol ranges before editing.
+- **`lain_intent` / `list_active_intents`** — The intent layer: declare a goal + scopes, get a coordination level (GREEN / YELLOW / RED), see the per-agent activity feed (`focus`, `observed_reads`, `last_tool`). Hooks auto-populate the feed via `POST /hook`; see [docs/multiplayer.md](docs/multiplayer.md#intent-layer) and [docs/hooks.md](docs/hooks.md#activity-observation).
 - **`detect_overlap`** — Analyzes overlapping symbol changes between git branches or concurrent sessions.
-- **`list_active_agents` / `who_am_i`** — Discovers other active agents and reports session identity.
+- **`list_active_agents` / `who_am_i`** — Discovers other active agents and reports session identity (extended to include intent + activity feed entries).
 
 ### 4. Search & Deep Graph Queries
 - **`semantic_search`** *(requires ONNX model — see [Setting Up Semantic Search](#setting-up-semantic-search-optional))* — Concept-based code search using local ONNX embeddings with hybrid BM25/stemmed ranking.
@@ -142,13 +144,12 @@ those patterns, even when the application depends on the symbol.
 
 Behind the scenes: Tier 2 emits `BusTopic` / `DynamicDispatch` /
 `RouteMatches` edges from convention-pattern matches (message
-buses, DI containers, FastAPI decorators); Tier 3's
-`RuntimeTraceStore` will eventually absorb OpenTelemetry spans
-as `RuntimeCall` edges. Full reference: [docs/dynamic-dispatch.md](docs/dynamic-dispatch.md).
+buses, DI containers, FastAPI decorators); Tier 3's HTTP/JSON OTLP
+listener feeds OpenTelemetry spans into `RuntimeTraceStore` as
+`RuntimeCall` edges. Full reference: [docs/dynamic-dispatch.md](docs/dynamic-dispatch.md).
 
 ### 8. Cold-boot LSP prewarm
 
-### 7. Cold-boot LSP prewarm
 - On first start, LAIN warms up every language server your workspace uses
   (one warm-up `documentSymbol` call against a sentinel file per language)
   before the scan batch runs. Cold-cache `rust-analyzer` / `clangd`
@@ -157,7 +158,7 @@ as `RuntimeCall` edges. Full reference: [docs/dynamic-dispatch.md](docs/dynamic-
   visible via `GET /health` and `lain doctor --json`.
 
 ### 9. Curated tool surface
-- By default `tools/list` returns the **curated 14-tool semantic
+- By default `tools/list` returns the **curated 15-tool semantic
   surface** — the M5 bootstrap (`understand_repository`), the M6
   high-level Agent API (`find_symbol`, `get_context`, `find_related`,
   `assess_change`, `search_code`), readiness + multiplayer essentials.
@@ -182,11 +183,19 @@ lain --version
 
 See [QUICKSTART.md](docs/QUICKSTART.md) for Homebrew, manual builds, non-interactive flags, and ONNX model setups.
 
+## Project reports
+
+- [REPORT.md](REPORT.md) — review of the intent + observability layer
+  against real-agent scenarios; documents the seven broken promises
+  the "test all lain promises" pass surfaced and fixed.
+- [docs/archive/](docs/archive/) — completed design plans (intent +
+  observability, file-lock primitive); kept for historical context.
+
 ### Operator knobs
 
 | Env var | Effect |
 |---|---|
-| `LAIN_TOOL_PROFILE=full` | Restore the legacy 79-tool surface (default is the curated 15-tool `semantic`). |
+| `LAIN_TOOL_PROFILE=full` | Restore the full 80-tool surface (default is the curated 15-tool `semantic`, plus contextual server/workspace/federation tools). |
 | `LAIN_LSP_PREWARM=false` | Skip the cold-boot LSP prewarm pass (cold-cache LSPs may then trip the runtime 1 s breaker on first call). |
 | `LAIN_HEURISTIC_MIN_CONFIDENCE=0.5` | Minimum confidence a heuristic edge needs to appear in `get_blast_radius` without `include_weak_edges=true`. Lower = more permissive. |
 | `LAIN_TRACE_TTL_SECS=3600` | TTL for runtime edges in `RuntimeTraceStore`. Expired edges are purged on the next sweep. |

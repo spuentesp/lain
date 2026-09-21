@@ -51,6 +51,77 @@ pub fn no_resolver() -> SpanResolver {
     Arc::new(|_| None)
 }
 
+/// Federation-aware resolver. Walks every registered repo's graph
+/// looking for the span name and returns the global node id when
+/// exactly one repo owns the symbol. Honors OTLP semconv hints
+/// (`code.repo` for repo-narrowed resolution; `service.name` as a
+/// secondary lookup key) before falling back to the global index.
+///
+/// Returns `None` when no repo owns the symbol or when the
+/// span-name lookup is ambiguous across repos — in both cases
+/// the caller drops the edge rather than minting a stale
+/// `RuntimeCall` against the staging placeholder.
+///
+/// Federation mode (`Arc<FederatedIndex>`) is the only mode
+/// `FederatedIndex` carries; for single-workspace mode the
+/// caller wraps this in a single-graph closure (see
+/// `cli/server.rs`).
+pub fn federation_resolver(
+    fed: Arc<crate::server::federation::federated_index::FederatedIndex>,
+) -> SpanResolver {
+    Arc::new(
+        move |span: &crate::server::runtime_trace::spans::SpanRecord| {
+            use crate::server::runtime_trace::spans::AttributeValue;
+            // Honor `code.repo` (OTLP semconv) when present so the
+            // resolver doesn't waste work scanning every repo.
+            let code_repo = span.attributes.get("code.repo").and_then(|v| v.as_str());
+            let service_name = span.attributes.get("service.name").and_then(|v| v.as_str());
+
+            if let Some(repo_id) = code_repo {
+                if let Ok(repo_id) = crate::server::federation::repo_id::RepoId::new(repo_id) {
+                    if let Some(repo) = fed.get_repo(&repo_id) {
+                        if let Some(node) = repo.db().find_node_by_name(&span.name) {
+                            return Some(node.id);
+                        }
+                    }
+                }
+            }
+            // Fallback: walk every repo, pick the unambiguous match.
+            let mut hits = Vec::new();
+            for (repo_id, _) in fed.list_repos() {
+                if let Some(repo) = fed.get_repo(&repo_id) {
+                    if let Some(node) = repo.db().find_node_by_name(&span.name) {
+                        hits.push(node.id);
+                    }
+                }
+            }
+            // `service.name` (OTLP semconv) is a secondary lookup
+            // key — if the symbol-name lookup is empty, try the
+            // service name so cross-runtime callers (HTTP routes,
+            // gRPC handlers) still mint edges.
+            if hits.is_empty() {
+                if let Some(svc) = service_name {
+                    for (repo_id, _) in fed.list_repos() {
+                        if let Some(repo) = fed.get_repo(&repo_id) {
+                            if let Some(node) = repo.db().find_node_by_name(svc) {
+                                hits.push(node.id);
+                            }
+                        }
+                    }
+                }
+            }
+            if hits.len() == 1 {
+                hits.into_iter().next()
+            } else {
+                // 0 hits or ambiguous → drop the edge. Better to be
+                // silent than to mint a `RuntimeCall` against the
+                // wrong repo (which is exactly what the prior code did).
+                None
+            }
+        },
+    )
+}
+
 /// One-shot response body. We always emit a single buffered payload;
 /// streaming isn't needed for `/v1/traces`. `UnsyncBoxBody<Full<Bytes>, E>`
 /// is the same shape the MCP handler uses for non-streaming responses.
@@ -257,6 +328,13 @@ mod tests {
             "no_resolver must produce storedSpans=0; got: {body_str}"
         );
 
+        // The post-test cleanup: stop the background OTLP listener
+        // before the runtime trace store is dropped. Aborting the
+        // task without abort_handle leaves the accept loop running
+        // and the next test that binds the same port fails with
+        // EADDRINUSE.
+        handle.abort();
+
         handle.abort();
         let _ = handle.await;
     }
@@ -385,5 +463,177 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    /// Federation resolver: when the federation owns two repos and
+    /// the span's `code.repo` attribute narrows the lookup, the
+    /// resolver must mint an edge against the matching repo's graph
+    /// and ignore the other. Without that narrowing, the pre-fix
+    /// code resolved against the staging graph and leaked edges
+    /// between repos.
+    #[tokio::test(flavor = "current_thread")]
+    async fn federation_resolver_narrows_via_code_repo_attribute() {
+        use crate::graph::GraphDatabase;
+        use crate::schema::{GraphNode, NodeType};
+        use crate::server::federation::federated_index::FederatedIndex;
+        use crate::server::federation::graph_backend::PetgraphBackend;
+        use crate::server::federation::repo_id::RepoId;
+        use crate::server::federation::repo_source::WorkspaceDirSource;
+
+        fn new_git_repo() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            dir
+        }
+
+        // Two-repo federation: `auth` owns `validate_token`,
+        // `orders` owns `place_order`.
+        let fed_dir = tempfile::tempdir().unwrap();
+        let fed = Arc::new(FederatedIndex::new(Arc::new(
+            PetgraphBackend::new(fed_dir.path()).unwrap(),
+        )));
+        let auth_src = new_git_repo();
+        let orders_src = new_git_repo();
+        fed.add_repo(
+            Box::new(
+                WorkspaceDirSource::new(
+                    RepoId::new("auth").unwrap(),
+                    auth_src.path().to_path_buf(),
+                )
+                .unwrap(),
+            ),
+            fed_dir.path(),
+        )
+        .await
+        .unwrap();
+        fed.add_repo(
+            Box::new(
+                WorkspaceDirSource::new(
+                    RepoId::new("orders").unwrap(),
+                    orders_src.path().to_path_buf(),
+                )
+                .unwrap(),
+            ),
+            fed_dir.path(),
+        )
+        .await
+        .unwrap();
+        // Inject the per-repo nodes via the per-repo db (which
+        // lives on the federation side after add_repo).
+        let auth_db = fed
+            .get_repo(&RepoId::new("auth").unwrap())
+            .unwrap()
+            .db()
+            .clone();
+        let orders_db = fed
+            .get_repo(&RepoId::new("orders").unwrap())
+            .unwrap()
+            .db()
+            .clone();
+        let mut auth_node = GraphNode::new(
+            NodeType::Function,
+            "validate_token".into(),
+            "src/auth.rs".into(),
+        );
+        auth_node.id = "auth::validate_token".into();
+        auth_db.upsert_node(auth_node).unwrap();
+        let mut orders_node = GraphNode::new(
+            NodeType::Function,
+            "place_order".into(),
+            "src/orders.rs".into(),
+        );
+        orders_node.id = "orders::place_order".into();
+        orders_db.upsert_node(orders_node).unwrap();
+
+        let resolver = federation_resolver(fed.clone());
+
+        // Span in the auth repo: must resolve to auth::validate_token.
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert(
+            "code.repo".into(),
+            crate::server::runtime_trace::spans::AttributeValue::Str("auth".into()),
+        );
+        let span = SpanRecord {
+            trace_id: "00000000000000000000000000000001".into(),
+            span_id: "0000000000000001".into(),
+            parent_span_id: None,
+            name: "validate_token".into(),
+            kind: crate::server::runtime_trace::spans::SpanKind::Server,
+            attributes: attrs,
+            end_unix: 1,
+        };
+        assert_eq!(
+            resolver(&span),
+            Some("auth::validate_token".to_string()),
+            "code.repo must narrow to the auth repo"
+        );
+
+        // Span in the orders repo: must resolve to orders::place_order.
+        let mut attrs2 = std::collections::HashMap::new();
+        attrs2.insert(
+            "code.repo".into(),
+            crate::server::runtime_trace::spans::AttributeValue::Str("orders".into()),
+        );
+        let span2 = SpanRecord {
+            trace_id: "00000000000000000000000000000002".into(),
+            span_id: "0000000000000003".into(),
+            parent_span_id: None,
+            name: "place_order".into(),
+            kind: crate::server::runtime_trace::spans::SpanKind::Server,
+            attributes: attrs2,
+            end_unix: 1,
+        };
+        assert_eq!(
+            resolver(&span2),
+            Some("orders::place_order".to_string()),
+            "code.repo must narrow to the orders repo"
+        );
+
+        // Span name that exists in BOTH repos: must return None
+        // rather than picking one — ambiguity is fatal for the
+        // federation's correctness contract.
+        let mut shared =
+            GraphNode::new(NodeType::Function, "shared".into(), "src/shared.rs".into());
+        shared.id = "auth::shared".into();
+        auth_db.upsert_node(shared.clone()).unwrap();
+        shared.id = "orders::shared".into();
+        orders_db.upsert_node(shared).unwrap();
+        let mut attrs3 = std::collections::HashMap::new();
+        attrs3.insert(
+            "code.repo".into(),
+            crate::server::runtime_trace::spans::AttributeValue::Str("auth".into()),
+        );
+        let span3 = SpanRecord {
+            trace_id: "00000000000000000000000000000003".into(),
+            span_id: "0000000000000004".into(),
+            parent_span_id: None,
+            name: "shared".into(),
+            kind: crate::server::runtime_trace::spans::SpanKind::Server,
+            attributes: attrs3,
+            end_unix: 1,
+        };
+        // Narrowed to auth — picks the auth::shared node.
+        assert_eq!(resolver(&span3), Some("auth::shared".to_string()));
+        // Without code.repo: ambiguous (both repos own "shared"),
+        // so the resolver returns None to drop the edge rather than
+        // mint it against the wrong repo.
+        let span4 = SpanRecord {
+            trace_id: "00000000000000000000000000000004".into(),
+            span_id: "0000000000000005".into(),
+            parent_span_id: None,
+            name: "shared".into(),
+            kind: crate::server::runtime_trace::spans::SpanKind::Server,
+            attributes: std::collections::HashMap::new(),
+            end_unix: 1,
+        };
+        assert_eq!(
+            resolver(&span4),
+            None,
+            "ambiguous name across repos must return None"
+        );
     }
 }

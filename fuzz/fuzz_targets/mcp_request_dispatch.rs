@@ -23,8 +23,7 @@
 
 #![no_main]
 
-#[libfuzzer_sys::fuzz_target]
-fn fuzz_mcp_request_dispatch(data: &[u8]) {
+libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Same lossy round-trip the handler does on HTTP body bytes.
     let value: serde_json::Value = match serde_json::from_slice(data) {
         Ok(v) => v,
@@ -66,4 +65,4 @@ fn fuzz_mcp_request_dispatch(data: &[u8]) {
     let _ = value.pointer("/params/arguments/module_path");
     let _ = value.pointer("/params/arguments/symbol");
     let _ = value.pointer("/params/arguments/limit");
-}
+});

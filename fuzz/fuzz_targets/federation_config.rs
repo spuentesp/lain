@@ -12,12 +12,11 @@
 
 use lain::server::federation::config::FederationConfig;
 
-#[libfuzzer_sys::fuzz_target]
-fn fuzz_federation_config(data: &[u8]) {
+libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // The parser takes `&str`; lossy conversion here lets us
     // exercise non-UTF-8 input without panicking on the conversion.
     let input = String::from_utf8_lossy(data);
     // We don't care whether parse succeeds or fails — only that it
     // doesn't panic, hang, or allocate gigabytes.
     let _ = FederationConfig::load_from_str(&input);
-}
+});

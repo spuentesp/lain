@@ -7,7 +7,7 @@
 //! while `Full` advertises every registered tool.
 //!
 //! The default is `Semantic` because the project has consistently
-//! measured that raw 79-tool schemas encourage smaller models to
+//! measured that raw 80-tool schemas encourage smaller models to
 //! pattern-match across all descriptions and flounder. The
 //! `LAIN_TOOL_PROFILE=full` opt-out is documented in
 //! `docs/quickstart-tools.md` and surfaced through `get_capabilities`
@@ -91,11 +91,11 @@ impl SemanticProfileFamlies {
 /// can decide whether to opt out of the curated default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolProfile {
-    /// Default. ~14 tools (the M5/M6 high-level layer + multiplayer
+    /// Default. 15 tools (the M5/M6 high-level layer + multiplayer
     /// essentials + escape hatch). Recommended for smaller models
     /// and any cold-startup that doesn't need every low-level tool.
     Semantic,
-    /// Legacy 79-tool surface. Same schema as `tools/list` returned
+    /// Full 80-tool surface. Same schema as the generated on-disk snapshot.
     /// before PR3. Opt-in via `LAIN_TOOL_PROFILE=full`.
     Full,
 }
