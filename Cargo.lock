@@ -1255,7 +1255,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
- "rust-mcp-schema",
+ "rust-mcp-schema 2.0.0",
  "rust-mcp-sdk",
  "serde",
  "serde_json",
@@ -2183,6 +2183,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-mcp-schema"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a66664d256795cdd61b7d4d6516d8afe041c947bedd1d10aff9e41e15771b43"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rust-mcp-sdk"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2193,7 +2203,7 @@ dependencies = [
  "bytes",
  "futures",
  "rust-mcp-macros",
- "rust-mcp-schema",
+ "rust-mcp-schema 1.0.0",
  "rust-mcp-transport",
  "serde",
  "serde_json",
@@ -2213,7 +2223,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "rust-mcp-schema",
+ "rust-mcp-schema 1.0.0",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
