@@ -48,7 +48,7 @@ ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
 # at link time on Windows with `ort-sys`'s prebuilt `/MD` C++ runtime
 # (fatal LNK1169 / LNK2038 mismatch on `RuntimeLibrary`). The pure-Rust
 # suffix-array fallback that ships in the same crate is used instead.
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 # LSP bridge for multi-language support
 lsp-bridge = "0.2"
