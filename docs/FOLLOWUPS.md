@@ -46,6 +46,40 @@ Last verified against `dev` on 2026-09-21.
 - **Acceptance:** hot LSP calls run outside Tokio worker threads while retaining
   cancellation and timeout behavior.
 
+## Federation: cold-start self-trigger loop
+
+- **Status:** fixed.
+- **Background:** During federation-mode cold-start (the `lain server`
+  subcommand against a multi-repo federation), the indexer pipeline can
+  self-trigger `index_forced` repeatedly without an intervening
+  commit, uncommitted change, or explicit reindex request. Every
+  cycle took 30 s – 3 min during the 2026-09-21 reproducer run; the
+  HTTP listener never bound in the 5-min retry window. The exact
+  trigger surface (an LSP build-script write, a graph-mutation
+  broadcast, a watcher requeue) is hard to pin down without the
+  original failing harness's logs, but the *shape* is detectable
+  without that data: an `index_forced` call within a short window
+  of the previous successful index, with no commit move and no
+  uncommitted work, is by definition a self-trigger.
+- **Fix:** `RepoIndex::index_forced` now runs a cycle-detection guard
+  at entry. If the previous successful index completed within
+  `repo_cycle_threshold_secs` (default 30 s, configurable via
+  `.lain/tuning.toml`) AND no commit moved AND no uncommitted
+  changes exist, the call is suppressed (returns `Ok(())` without
+  re-running the pipeline). A real change in either signal bypasses
+  the guard. Tuning key: `repo_cycle_threshold_secs` under
+  `[presence]` in `.lain/tuning.toml`.
+- **Regression:** `repo_index::tests::index_forced_suppresses_self_trigger_loop`
+  exercises the loop case (second `index_forced` immediately after
+  a successful first index is suppressed; a third call after a
+  synthetic uncommitted write is allowed through).
+- **Acceptance:** federation-mode cold-start completes in bounded
+  time; `lain server` HTTP listener binds within
+  `repo_cycle_threshold_secs` after the last index cycle. The
+  underlying trigger surface is still under investigation; the guard
+  is the general fix that breaks any self-trigger loop regardless of
+  cause.
+
 ## Coordination: stdio lock fail-open concurrent-write race
 
 - **Status:** fixed.

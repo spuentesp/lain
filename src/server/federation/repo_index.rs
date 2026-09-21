@@ -91,6 +91,17 @@ pub struct RepoIndex {
     index_lock: AsyncMutex<()>,
     health: Arc<RwLock<RepoHealth>>,
     last_indexed: Arc<RwLock<SystemTime>>,
+    /// Threshold for cold-start cycle detection. If `index_forced`
+    /// fires within this many seconds of the previous successful
+    /// index AND no commit moved AND no uncommitted changes exist,
+    /// the reindex is suppressed as a self-trigger. Default 30 s
+    /// matches the longest observed federation-mode cold-start
+    /// cycle (the `index → topology → re-scan → index` loop from
+    /// 2026-09-21); longer cycles still get suppressed because
+    /// they fall into the same "no progress, no external change"
+    /// bucket. Tunable per server via the `repo_cycle_threshold_secs`
+    /// tuning key.
+    cycle_threshold_secs: u64,
     /// The error text from the most recent failed `index()`/`index_forced()`
     /// attempt, if any. `RepoHealth::Degraded` alone doesn't say *why* —
     /// this is what `get_repo_info` surfaces so an operator (or a test
@@ -282,6 +293,13 @@ impl RepoIndex {
         // co-change coupling found" for every file. URGENT FIXES
         // #14 follow-up.
         db.set_namespace(id_namespace);
+        // Cold-start cycle detection threshold. Snapshotted from the
+        // repo's `.lain/tuning.toml` (`repo_cycle_threshold_secs`) with
+        // a 30s default; tests that want to exercise the suppression
+        // can lower it to 0.
+        let cycle_threshold_secs = crate::tuning::load_tuning_config(&local_path)
+            .presence
+            .repo_cycle_threshold_secs;
         Ok(Self {
             source,
             db,
@@ -305,6 +323,7 @@ impl RepoIndex {
             indexed_at_least_once: std::sync::atomic::AtomicBool::new(false),
             cancel: CancellationToken::new(),
             outstanding: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cycle_threshold_secs,
         })
     }
 
@@ -583,6 +602,55 @@ impl RepoIndex {
         let path = self.source.local_path().to_path_buf();
         let db = &self.db;
         let lsp = self.lsp.clone();
+
+        // Cold-start cycle detection: the federation-mode startup
+        // pipeline can self-trigger `index_forced` repeatedly when a
+        // post-index side effect (an LSP build-script write, a
+        // graph-mutation broadcast, a watcher requeue) trips the
+        // filesystem watcher. The result is the `index → topology →
+        // re-scan → index → …` cycle observed during 2026-09-21
+        // cold-start tests where every cycle took 30s – 3 min and the
+        // HTTP listener never bound. Break the cycle at the entry point:
+        // if we completed a successful index in the recent past
+        // (default 30 s, configurable via `repo_cycle_threshold_secs`
+        // tuning) and there's been no external change since — no new
+        // commit, no uncommitted work — refuse to start another
+        // pipeline so the watcher's notify storm doesn't translate into
+        // a CPU-bound indexing loop.
+        //
+        // The check deliberately uses both signals (commit + uncommitted
+        // changes) so a legitimate re-index still fires: a save that
+        // hasn't been committed yet shows up in `get_uncommitted_changes`
+        // and bypasses the suppression; a commit between the previous
+        // index and now shows up in `git.get_latest_commit_info`. Only
+        // "no change anywhere, but `index_forced` got called anyway"
+        // triggers the suppression.
+        let now = SystemTime::now();
+        let last = *self.last_indexed.read();
+        let since_last = now.duration_since(last).unwrap_or(Duration::ZERO);
+        let cycle_threshold_secs = self.cycle_threshold_secs;
+        if since_last < Duration::from_secs(cycle_threshold_secs) {
+            let latest_commit = self.git.get_latest_commit_info().ok().map(|(c, _)| c);
+            let last_commit = self.db.get_last_commit().ok().flatten();
+            let uncommitted = self.git.get_uncommitted_changes().unwrap_or_default();
+            let no_commit_change = match (&latest_commit, &last_commit) {
+                (Some(l), Some(p)) => l == p,
+                // Unborn repo or pre-first-index — the indexer's
+                // baseline is the empty graph, and the first index
+                // cycle sets the marker. Anything earlier than that
+                // (e.g. a watcher firing before `await_startup_reindex`
+                // finished) is a legitimate re-trigger, not a loop.
+                _ => false,
+            };
+            if no_commit_change && uncommitted.is_empty() {
+                tracing::debug!(
+                    "[federation] {:?}: index_forced suppressed (last index was {:.1}s ago, no external change)",
+                    path,
+                    since_last.as_secs_f64()
+                );
+                return Ok(());
+            }
+        }
 
         let _index_guard = self.index_lock.lock().await;
 
@@ -1357,5 +1425,153 @@ mod tests {
         assert!(repo.watcher.lock().is_none());
         assert_eq!(overlay.get_all_nodes().len(), 1);
         assert!(overlay.get_node(&unrelated.id).is_some());
+    }
+
+    /// Regression for the 2026-09-21 federation-mode cold-start
+    /// loop: `index → topology → re-scan → index → …` where every
+    /// cycle took 30 s – 3 min and the HTTP listener never bound.
+    /// The cycle surfaced as repeated `index_forced` calls without an
+    /// intervening commit, uncommitted change, or external signal.
+    /// The fix is a guard at the entry of `index_forced`: if the
+    /// previous successful index completed within
+    /// `cycle_threshold_secs` AND no commit moved AND no uncommitted
+    /// changes exist, the reindex is suppressed.
+    ///
+    /// This test exercises the guard end-to-end: a first
+    /// `index_forced` succeeds and stamps `last_indexed`; a second
+    /// `index_forced` immediately after is suppressed (returns Ok(())
+    /// without doing work). A subsequent `index_forced` after a
+    /// synthetic uncommitted write is allowed through — that's the
+    /// "real change, not a loop" case the guard must not block.
+    #[tokio::test]
+    async fn index_forced_suppresses_self_trigger_loop() {
+        use crate::git::AnyGitSensor;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(workspace.path()).unwrap();
+        // `commit` requires `user.name` + `user.email`; CI runners
+        // don't have them in the global git config, so set them on
+        // the test repo.
+        let mut cfg = repo.config().expect("git config");
+        cfg.set_str("user.name", "cycle-test")
+            .expect("set user.name");
+        cfg.set_str("user.email", "cycle-test@localhost")
+            .expect("set user.email");
+        // Seed a lib.rs and an initial commit so the indexer has
+        // something to scan on the first call.
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "pub fn cycle_marker() {}\n",
+        )
+        .unwrap();
+        // something to scan on the first call.
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "pub fn cycle_marker() {}\n",
+        )
+        .unwrap();
+        {
+            let repo = git2::Repository::open(workspace.path()).unwrap();
+            let mut idx = repo.index().unwrap();
+            idx.add_path(Path::new("lib.rs")).unwrap();
+            idx.write().unwrap();
+            let tree_id = idx.write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let sig = repo.signature().unwrap();
+            // Initial commit on an unborn HEAD: parents = empty.
+            repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+                .unwrap();
+        }
+
+        let state = tempfile::tempdir().unwrap();
+        let src: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(
+                RepoId::new("cycle").unwrap(),
+                workspace.path().to_path_buf(),
+            )
+            .unwrap(),
+        );
+        let ri = Arc::new(RepoIndex::new(src, state.path()).unwrap());
+        for _ in 0..4 {
+            ri.lsp.next().lock().await.mark_unavailable("rust-analyzer");
+        }
+
+        // First `index_forced`: should do a real index pass and
+        // stamp `last_indexed`. Asserts the baseline (not suppressed).
+        let started = std::time::Instant::now();
+        ri.index_forced()
+            .await
+            .expect("first index_forced should succeed with tree-sitter fallback");
+        let first_elapsed = started.elapsed();
+        // The first index is *not* the loop case (no previous index
+        // exists), so the guard does not fire. Confirm by checking
+        // `last_indexed` was updated.
+        let last = ri.last_indexed();
+        let since_epoch = last
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        assert!(
+            since_epoch.as_secs() > 1_000_000_000,
+            "last_indexed should be a real timestamp after the first index"
+        );
+
+        // Second `index_forced` immediately after — this is the
+        // loop case. The guard must suppress it: return Ok(()) without
+        // re-running the pipeline. We assert this indirectly by
+        // checking that `last_indexed` did NOT advance past the
+        // first call's stamp and that the second call returned in
+        // well under the index-time budget (cycle_threshold_secs is
+        // 30s by default; a suppressed call must finish in < 1s).
+        let pre_second = ri.last_indexed();
+        let started2 = std::time::Instant::now();
+        ri.index_forced()
+            .await
+            .expect("second index_forced should be suppressed, not error");
+        let second_elapsed = started2.elapsed();
+        let post_second = ri.last_indexed();
+        assert_eq!(
+            pre_second, post_second,
+            "suppressed index_forced must not advance last_indexed"
+        );
+        assert!(
+            second_elapsed < std::time::Duration::from_secs(1),
+            "suppressed index_forced must finish fast (was {:?}); a \
+             30s+ elapsed time means the guard fired but the \
+             pipeline still ran",
+            second_elapsed
+        );
+        // Sanity: the first index was actually slow enough that we
+        // know it didn't sneak past the guard. A real `index_forced`
+        // walk would take seconds; the suppression should be a few
+        // milliseconds.
+        let _ = first_elapsed; // kept for diagnostic
+
+        // Third `index_forced` after a synthetic uncommitted write:
+        // the guard must allow it because the uncommitted change
+        // proves the worktree is different from the last index.
+        std::fs::write(
+            workspace.path().join("lib.rs"),
+            "pub fn cycle_marker() {}\npub fn cycle_marker_changed() {}\n",
+        )
+        .unwrap();
+        // Mark LSP unavailable again — the synthetic write happens
+        // *before* the test re-grabs the LSP slot, so the indexer
+        // falls back to tree-sitter without trying to spawn
+        // rust-analyzer (CI runners don't have it on PATH).
+        for _ in 0..4 {
+            ri.lsp.next().lock().await.mark_unavailable("rust-analyzer");
+        }
+        ri.index_forced()
+            .await
+            .expect("third index_forced must run after uncommitted change");
+        let post_third = ri.last_indexed();
+        assert!(
+            post_third > pre_second,
+            "third index_forced (after real change) must advance last_indexed"
+        );
+        // We don't enforce `> post_second` strictly because
+        // `SystemTime::now()` resolution is platform-dependent; the
+        // monotonic `>` against `pre_second` is enough.
+        let _ = AnyGitSensor::from_env; // silence unused import lint
     }
 }

@@ -208,6 +208,17 @@ pub struct PresenceConfig {
     /// A state lock older than this is presumed abandoned by a dead
     /// holder and may be taken over.
     pub state_lock_stale_after_secs: u64,
+    /// Threshold for the federation-mode cold-start cycle detection:
+    /// `RepoIndex::index_forced` is suppressed when the previous
+    /// successful index completed within this many seconds AND no
+    /// commit moved AND no uncommitted changes exist. The check breaks
+    /// the `index → topology → re-scan → index → …` loop observed
+    /// during 2026-09-21 cold-start runs (every cycle was 30 s – 3
+    /// min, never converged). Default 30 s matches the longest
+    /// observed cycle; lower it for faster break-out in CI, raise it
+    /// for larger monorepos where legitimate reindexes routinely
+    /// happen within the window.
+    pub repo_cycle_threshold_secs: u64,
 }
 
 impl Default for PresenceConfig {
@@ -219,6 +230,7 @@ impl Default for PresenceConfig {
             state_lock_acquire_timeout_ms: 2000,
             state_lock_retry_interval_ms: 20,
             state_lock_stale_after_secs: 10,
+            repo_cycle_threshold_secs: 30,
         }
     }
 }
