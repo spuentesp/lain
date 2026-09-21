@@ -105,7 +105,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Tree-sitter static analysis
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
-tree-sitter-python = "0.21"
+tree-sitter-python = "0.23"
 tree-sitter-javascript = "0.21"
 
 # Per-repo annotation storage (M4 plan §4.2: per-repo sqlite table
