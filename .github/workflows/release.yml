@@ -136,7 +136,7 @@ jobs:
           EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-gnu
@@ -236,7 +236,7 @@ jobs:
           EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           targets: aarch64-apple-darwin
@@ -325,7 +325,7 @@ jobs:
           EPOCH=$(python3 -c "from datetime import datetime; import os; print(int(datetime.fromisoformat(os.environ['UPDATED_AT'].replace('Z','+00:00')).timestamp()))")
           echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
           echo "epoch-debug=$EPOCH"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
