@@ -7,15 +7,19 @@ launcher and the matching GitHub release had no `SHA256SUMS` asset.
 
 ## Current known issue
 
-As of 2026-09-21, the Windows clean-room install repair is in
+As of 2026-09-22, the Windows clean-room install repair is in
 tree but not yet released. `release.yml::build-windows` packages
 every `*.dll` from `target/x86_64-pc-windows-msvc/release/`
 alongside `lain.exe`, and the build fails loudly if `DirectML.dll`
-is missing. `npm-shim/scripts/install.test.js` regresses the
-absent-DLL failure path. The actual release that carries the
-fix is the next release PR — until the next tag, the published
-artifact still ships `lain.exe` alone. See
-[`FOLLOWUPS.md`](FOLLOWUPS.md).
+is missing. Release packaging and CI both call
+`scripts/package-windows-release.sh`, so the release PR's Windows
+job checks the archive contract against a real Cargo build before
+the tag exists. `scripts/test_package_windows_release.py` covers
+missing-DLL and missing-sidecar failures, while
+`npm-shim/scripts/install.test.js` covers the install side. The
+actual release that carries the fix is the next release PR — until
+the next tag, the published artifact still ships `lain.exe` alone.
+See [`FOLLOWUPS.md`](FOLLOWUPS.md).
 
 ## What the runtime needs
 
@@ -34,6 +38,11 @@ triggers `release.yml`.
 - [ ] **Code state.** `main` HEAD contains the rewritten launcher
       (`grep ensureBinary npm-shim/bin/lain.js`) and the SHA256SUMS
       aggregator (`.github/workflows/release.yml::sha256sums`).
+- [ ] **Windows archive contract.** Run
+      `python3 scripts/test_package_windows_release.py`. On the release
+      PR, the Windows `test-cross` job must also package the binaries from
+      `target/debug` and confirm that `DirectML.dll` is present. The tagged
+      build uses the same packaging script against `target/.../release`.
 - [ ] **Tag is stable, not pre-release.** Pre-release tags
       (`v0.x.y-rcN`) route `npm publish` to `--tag next`, which
       leaves `latest` pinned at the previous stable. A user who

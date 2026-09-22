@@ -242,6 +242,15 @@ jobs:
         shell: bash
         run: cargo build --bin lain --bin lain-git-sidecar
 
+      - name: Check Windows release archive contents
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          bash scripts/package-windows-release.sh \
+            target/debug \
+            "$RUNNER_TEMP/lain-windows-ci.tar.gz"
+          tar tzf "$RUNNER_TEMP/lain-windows-ci.tar.gz"
+
       - name: Run tests
         shell: bash
         run: cargo test --workspace
@@ -471,6 +480,9 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      - name: Windows archive contract tests
+        working-directory: .
+        run: python3 scripts/test_package_windows_release.py
 
   arch-guardrails:
     name: Architecture guardrails (no redundant code)
