@@ -573,7 +573,12 @@ async fn spawn_hot_reload(config_path: &Path, server: &LainServer) {
     let bus = server.reload_bus();
 
     // File watcher — fires `request_reload` on hand-edits.
-    let _watcher_join = crate::server::watcher::spawn_config_watcher(config_path, Arc::clone(&bus));
+    // The handle pair (`_watcher_join` + `_watcher_handle`) is held
+    // for the lifetime of the hot-reload task; dropping the handle
+    // signals the watcher thread to exit and releases the OS watch
+    // handles.
+    let (_watcher_join, _watcher_handle) =
+        crate::server::watcher::spawn_config_watcher(config_path, Arc::clone(&bus));
 
     // Unix socket — CLI signals. Unix only; on Windows the file watcher
     // is still the reload path (CLI-prompted reloads via the

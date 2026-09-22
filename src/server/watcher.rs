@@ -39,8 +39,10 @@ pub fn watch_paths_for_config(repos_yaml: &Path) -> Vec<PathBuf> {
 /// (`repos.yaml` + `workspaces.yaml`). On any Modify/Create/Remove
 /// event against those exact paths, calls `bus.request_reload()`.
 ///
-/// Returns a `JoinHandle` for the watcher thread. Tests can drop it
-/// to terminate; production drops it at server shutdown.
+/// Returns `(join, handle)` where `join` is the spawned thread's
+/// `JoinHandle` and `handle` is a `ConfigWatcherHandle`. Dropping
+/// `handle` sends a shutdown signal and the thread exits promptly,
+/// releasing the OS watch handles.
 ///
 /// Implementation note: this is a separate watcher from
 /// `FileWatcher::start` (which watches source files for the volatile
@@ -49,12 +51,13 @@ pub fn watch_paths_for_config(repos_yaml: &Path) -> Vec<PathBuf> {
 pub fn spawn_config_watcher(
     repos_yaml: &Path,
     bus: Arc<crate::server::reload::ReloadBus>,
-) -> std::thread::JoinHandle<()> {
+) -> (std::thread::JoinHandle<()>, ConfigWatcherHandle) {
     use crate::server::reload::ReloadBus;
 
     let targets: HashSet<PathBuf> = watch_paths_for_config(repos_yaml).into_iter().collect();
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
-    std::thread::spawn(move || {
+    let join = std::thread::spawn(move || {
         let bus_clone: Arc<ReloadBus> = Arc::clone(&bus);
         let targets_clone = targets.clone();
 
@@ -110,13 +113,56 @@ pub fn spawn_config_watcher(
             );
         }
 
-        // Block forever; the watcher is dropped when this thread exits
-        // (i.e. when the JoinHandle is dropped by the server shutdown
-        // path).
+        // Block on either the shutdown signal or the next 1-hour
+        // heartbeat. Pre-fix this was an unbounded `sleep(3600s)`
+        // loop with no shutdown path; dropping the JoinHandle left
+        // the thread and its OS watch handles alive for the rest of
+        // the process lifetime. The shutdown channel makes a clean
+        // exit reachable from any caller.
         loop {
-            std::thread::sleep(Duration::from_secs(3600));
+            match shutdown_rx.recv_timeout(Duration::from_secs(3600)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            }
         }
-    })
+        // `watcher` (the `RecommendedWatcher`) drops here, which
+        // signals its inner notify thread to exit and releases the
+        // OS watch handles.
+    });
+
+    (join, ConfigWatcherHandle { tx: shutdown_tx })
+}
+
+/// Shutdown signal for `spawn_config_watcher`. Dropping the handle
+/// signals the watcher thread to exit; the caller can also call
+/// `stop()` for an explicit shutdown point. The watcher thread's
+/// `RecommendedWatcher` drops when the thread exits, releasing the
+/// OS watch handles.
+pub struct ConfigWatcherHandle {
+    tx: std::sync::mpsc::Sender<()>,
+}
+
+impl ConfigWatcherHandle {
+    /// Signal the watcher thread to exit and join it. `Drop` calls
+    /// this, so manual invocation is only needed when the caller
+    /// wants a deterministic shutdown point.
+    pub fn stop(self, join: std::thread::JoinHandle<()>) {
+        let _ = self.tx.send(());
+        let _ = join.join();
+    }
+}
+
+impl Drop for ConfigWatcherHandle {
+    fn drop(&mut self) {
+        // Send is infallible; the only way it fails is if the
+        // receiver has already been dropped, which means the thread
+        // is gone — in that case the next `join` (if the JoinHandle
+        // outlives us) will observe `Err(JoinError)`. We can't
+        // access the JoinHandle from `Drop` because the caller owns
+        // it; the caller is responsible for either holding both
+        // alive together or joining explicitly.
+        let _ = self.tx.send(());
+    }
 }
 
 /// Debounce window for rapid file changes
@@ -153,31 +199,42 @@ impl FileWatcher {
         Self { sender, receiver }
     }
 
-    /// Start watching the workspace directory. Returns a one-shot
-    /// receiver that fires once the initial `notify` registration
-    /// completes (the same barrier tests already used internally via
-    /// `WatcherTestHooks::ready_signal`, now also wired for production
-    /// callers that need to sequence startup against it — see
-    /// `start_source_watcher`).
+    /// Start watching the workspace directory.
+    ///
+    /// Returns a `(ready, handle)` pair:
+    ///
+    /// - `ready: oneshot::Receiver<usize>` fires once the initial
+    ///   `notify` registration completes.
+    /// - `handle: WatcherHandle` owns the watcher's `JoinHandle` and
+    ///   the shutdown channel. Dropping the handle sends
+    ///   `WatchCommand::Shutdown` and joins the thread (with a short
+    ///   deadline) so the OS watch handles are released promptly.
     pub fn start(
         self,
         workspace: PathBuf,
         server: LainServer,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> oneshot::Receiver<usize> {
+    ) -> (oneshot::Receiver<usize>, WatcherHandle) {
         let file_sender = self.sender.clone();
         let receiver = self.receiver;
         let git = Arc::clone(server.ingest().git());
 
-        // The watcher thread body lives in `run_watcher_thread` so
-        // production *and* tests share one closure and one command
-        // dispatch path. `command_done` has no production use, so only
-        // `ready_signal` is wired here.
-        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
+        // `cmd_tx` is wrapped in `Arc` so the notify closure (which
+        // captures it for `WatchCommand::AddDirectory`) and the
+        // returned `WatcherHandle` (which sends `Shutdown`) can both
+        // hold a clone. The thread keeps its end via `cmd_rx`.
+        let (cmd_tx_inner, cmd_rx) = std::sync::mpsc::channel::<WatchCommand>();
+        let cmd_tx = Arc::new(cmd_tx_inner);
+        let cmd_tx_for_thread = Arc::clone(&cmd_tx);
         let (ready_tx, ready_rx) = oneshot::channel::<usize>();
-        let mut args = WatcherThreadArgs::production(workspace, file_sender, git, (cmd_tx, cmd_rx));
+        let mut args = WatcherThreadArgs::production(
+            workspace,
+            file_sender,
+            git,
+            (cmd_tx_for_thread.as_ref().clone(), cmd_rx),
+        );
         args.test_hooks.ready_signal = Some(ready_tx);
-        let _join = run_watcher_thread(args);
+        let join = run_watcher_thread(args);
 
         // Spawn the event processor task
         tokio::spawn(async move {
@@ -264,7 +321,11 @@ impl FileWatcher {
             }
         });
 
-        ready_rx
+        let handle = WatcherHandle {
+            join: Some(join),
+            cmd_tx: Arc::clone(&cmd_tx),
+        };
+        (ready_rx, handle)
     }
 }
 
@@ -282,6 +343,63 @@ fn take_batch(pending: &mut HashSet<PathBuf>, limit: usize) -> Vec<PathBuf> {
         pending.remove(p);
     }
     batch
+}
+
+/// Owns the watcher's `JoinHandle` and shutdown channel. Dropping the
+/// handle sends `WatchCommand::Shutdown` to the watcher thread and
+/// joins it (with a short deadline) so the OS watch handles are
+/// released promptly. The pre-fix code discarded the `JoinHandle`
+/// and moved the only `cmd_tx` into the notify closure, leaving the
+/// thread permanently detached — keep this handle alive for the
+/// lifetime of the watcher to avoid that leak.
+pub struct WatcherHandle {
+    join: Option<std::thread::JoinHandle<()>>,
+    cmd_tx: Arc<std::sync::mpsc::Sender<WatchCommand>>,
+}
+
+impl WatcherHandle {
+    /// Explicitly send `WatchCommand::Shutdown` and join the thread.
+    /// `Drop` calls this, so manual invocation is only needed when
+    /// the caller wants a deterministic shutdown point.
+    pub fn stop(mut self) {
+        self.shutdown_and_join();
+    }
+
+    fn shutdown_and_join(&mut self) {
+        // `send` is infallible on the producer side; the only way it
+        // can fail is if the receiver has already been dropped, which
+        // means the thread is gone — in that case the join returns
+        // immediately. Either path is fine.
+        let _ = self.cmd_tx.send(WatchCommand::Shutdown);
+        if let Some(join) = self.join.take() {
+            // Bound the join so a stuck thread doesn't deadlock the
+            // drop path. The thread breaks out of its command loop
+            // on `Shutdown` and the watcher `Drop` releases the OS
+            // handles; a hung thread is a real bug but should not
+            // stall the test or server teardown.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if join.is_finished() {
+                    let _ = join.join();
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "FileWatcher: thread did not exit within 5s of Stop; \
+                         abandoning it (OS watch handles may leak until process exit)"
+                    );
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+impl Drop for WatcherHandle {
+    fn drop(&mut self) {
+        self.shutdown_and_join();
+    }
 }
 
 impl Default for FileWatcher {
@@ -1389,5 +1507,133 @@ mod hidden_path_tests {
         assert!(!hidden_below(ws, &ws.join("src/lib.rs")));
         assert!(hidden_below(ws, &ws.join(".git/index")));
         assert!(hidden_below(ws, &ws.join("pkg/.venv/x.py")));
+    }
+}
+#[allow(unused_imports)]
+mod handle_lifecycle_tests {
+    //! PR-1 regression tests for `WatcherHandle`.
+
+    use super::{WatcherHandle, WatcherThreadArgs};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// `WatcherHandle::stop` must send `WatchCommand::Shutdown` and
+    /// join the watcher thread. Pre-fix the only `cmd_tx` was moved
+    /// into the notify closure so no caller could ever signal
+    /// shutdown — this test pins that the handle actually does.
+    #[tokio::test]
+    async fn handle_stop_signals_shutdown_and_joins() {
+        let dir = tempfile::Builder::new()
+            .prefix("lain-watcher-handle-stop-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let (tx, _rx) = mpsc::channel::<PathBuf>(16);
+        let git = Arc::new(crate::git::AnyGitSensor::from_env(dir.path()).unwrap());
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<super::WatchCommand>();
+        let mut args = WatcherThreadArgs::production(
+            dir.path().to_path_buf(),
+            tx,
+            git,
+            (cmd_tx.clone(), cmd_rx),
+        );
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<usize>();
+        args.test_hooks.ready_signal = Some(ready_tx);
+        let join = super::run_watcher_thread(args);
+
+        ready_rx.await.expect("watcher ready signal");
+
+        let handle = WatcherHandle {
+            join: Some(join),
+            cmd_tx: Arc::new(cmd_tx),
+        };
+
+        // Stop must complete within a generous deadline; a stuck
+        // thread would deadlock Drop (and `stop`) without the poll
+        // loop in `shutdown_and_join`.
+        tokio::task::spawn_blocking(move || {
+            handle.stop();
+        })
+        .await
+        .expect("stop task panicked");
+    }
+
+    /// `WatcherHandle`'s `Drop` must also send `Shutdown` and join —
+    /// the default shutdown path when a caller drops the handle
+    /// without an explicit `stop`.
+    #[tokio::test]
+    async fn handle_drop_signals_shutdown_and_joins() {
+        let dir = tempfile::Builder::new()
+            .prefix("lain-watcher-handle-drop-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let (tx, _rx) = mpsc::channel::<PathBuf>(16);
+        let git = Arc::new(crate::git::AnyGitSensor::from_env(dir.path()).unwrap());
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<super::WatchCommand>();
+        let mut args = WatcherThreadArgs::production(
+            dir.path().to_path_buf(),
+            tx,
+            git,
+            (cmd_tx.clone(), cmd_rx),
+        );
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<usize>();
+        args.test_hooks.ready_signal = Some(ready_tx);
+        let join = super::run_watcher_thread(args);
+
+        ready_rx.await.expect("watcher ready signal");
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let dropped_clone = dropped.clone();
+        let handle = WatcherHandle {
+            join: Some(join),
+            cmd_tx: Arc::new(cmd_tx),
+        };
+
+        tokio::task::spawn_blocking(move || {
+            drop(handle);
+            // The Drop must have completed (and the thread joined) by
+            // the time control returns here.
+            dropped_clone.store(1, Ordering::SeqCst);
+        })
+        .await
+        .expect("drop task panicked");
+
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "drop task did not record completion"
+        );
+    }
+
+    /// Config-watcher shutdown: dropping the `ConfigWatcherHandle`
+    /// must cause the thread to exit (the thread was an unbounded
+    /// `sleep(3600s)` loop pre-fix). PR-1 regression test.
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_watcher_thread_exits_when_handle_drops() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repos = tmp.path().join("repos.yaml");
+        std::fs::write(&repos, "repos: []\n").expect("write fixture");
+        let bus = Arc::new(crate::server::reload::ReloadBus::new());
+        let (join, handle) = super::spawn_config_watcher(&repos, bus);
+
+        // Give the thread a moment to register watches.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Drop the handle; the thread must see the shutdown signal
+        // and exit. Bounded wait so a regression fails loudly
+        // instead of hanging the test.
+        drop(handle);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if join.is_finished() {
+                join.join().expect("config watcher thread panicked");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("config watcher thread did not exit within 2s of handle drop");
     }
 }
