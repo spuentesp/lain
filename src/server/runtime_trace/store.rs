@@ -122,39 +122,40 @@ impl RuntimeTraceStore {
         let now = now_unix();
         let mut added = 0usize;
 
-        // First pass: resolve each span to a node id, remembering
-        // parent->child linkages.
+        // First pass: index spans by id and resolve every span to its
+        // node id, AND resolve every span's parent to its node id. The
+        // user-supplied resolver may walk the federation (look up nodes
+        // across repos) — running it under `self.inner.lock()`
+        // serialises every snapshot/edges_from/edges_to/purge_expired
+        // call behind a potentially slow resolver. Pre-fix the
+        // second pass called `resolve(parent)` under the lock;
+        // F3 fixes that by pre-computing the (caller, callee)
+        // pairs before acquiring the guard.
         let mut span_ids: HashMap<&str, &SpanRecord> = HashMap::with_capacity(spans.len());
         for s in spans {
             span_ids.insert(s.span_id.as_str(), s);
         }
-        let resolved: Vec<(Option<String>, &SpanRecord)> =
-            spans.iter().map(|s| (resolve(s), s)).collect();
+        let edges_to_mint: Vec<(String, String, &SpanRecord)> = spans
+            .iter()
+            .filter_map(|s| {
+                let callee_id = resolve(s)?;
+                let parent_id = s.parent_span_id.as_ref()?;
+                let parent = span_ids.get(parent_id.as_str())?;
+                let caller_id = resolve(parent)?;
+                if caller_id == callee_id {
+                    return None;
+                }
+                Some((caller_id, callee_id, s))
+            })
+            .collect();
 
-        // Second pass: for each span with a parent, attempt to mint
-        // a (caller, callee) edge.
+        // Second pass: under the lock, only the cheap mutations.
         let mut guard = self.inner.lock();
-        for (callee_id_opt, span) in &resolved {
-            let Some(callee_id) = callee_id_opt.as_ref() else {
-                continue;
-            };
-            let Some(parent_id) = span.parent_span_id.as_ref() else {
-                continue;
-            };
-            let Some(parent) = span_ids.get(parent_id.as_str()) else {
-                continue;
-            };
-            let Some(caller_id) = resolve(parent) else {
-                continue;
-            };
-            if caller_id == *callee_id {
-                continue;
-            }
-
+        for (caller_id, callee_id, span) in &edges_to_mint {
             let key = (span.trace_id.clone(), caller_id.clone(), callee_id.clone());
             let edge = GraphEdge {
                 edge_type: EdgeType::RuntimeCall,
-                source_id: caller_id,
+                source_id: caller_id.clone(),
                 target_id: callee_id.clone(),
                 weight: None,
                 cross_repo: false,
