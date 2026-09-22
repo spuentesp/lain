@@ -1,6 +1,7 @@
 # User Manual
 
-What's not in the README. Install + quickstart + commands live there.
+The README covers installation and a first query. This manual holds the CLI
+reference, tuning options, and day-to-day operating notes.
 
 ## Concepts
 
@@ -11,6 +12,29 @@ What's not in the README. Install + quickstart + commands live there.
 | **Federation** | `lain server`'s view of N repos. Not a separate mode |
 | **Single-repo** | `lain mcp` — walks up for `.git`, no `repos.yaml` needed |
 | **Graph** | petgraph at `.lain/graph.bin`. UUID v5 ids so they round-trip across tools |
+
+## CLI reference
+
+| Command | Purpose |
+|---|---|
+| `lain mcp` | Start a single-repository MCP server on stdio. It walks up from the current directory to find `.git`; no `repos.yaml` is required. |
+| `lain setup` | Configure an MCP client and verify the connection. `--dry-run` and `--print-config` don't write files. |
+| `lain oneshot` | Start a temporary MCP server, call one tool, print the answer, and exit. Example: `lain oneshot get_blast_radius validate_token`. |
+| `lain server` | Start the federation server and, with HTTP transport, the Command Center. |
+| `lain repos` | Add, list, or remove entries in `repos.yaml`. |
+| `lain workspaces` | Create and switch named groups of repositories. |
+| `lain query` | Run a `query_graph` operation array against a saved graph. |
+| `lain init` | Create a minimal `repos.yaml` for the current Git repository. |
+| `lain ask` | Ask one question using semantic search when an embedding model is configured, with a structural fallback when it isn't. |
+| `lain hooks` | Claim or release files and check branch overlap from agent hooks. |
+| `lain doctor` | Check the binary, graph freshness, install paths, and MCP connection. Exit codes are 0 ready, 1 degraded, and 2 unusable. |
+| `lain capabilities` | Print structural, semantic, runtime, and coordination readiness. Add `--json` for scripts. |
+| `lain status` | Print repository, index, and MCP readiness. Add `--json` for scripts. |
+| `lain schema` | Write the MCP tool schema used by schema-drift CI. |
+
+Run `lain <command> --help` for flags. The generated MCP tool schema lives at
+[`tool-schema.json`](tool-schema.json); the human-readable tool guide is
+[`quickstart-tools.md`](quickstart-tools.md).
 
 ## Server lifecycle
 
@@ -70,15 +94,16 @@ server. `get_reload_status` reports the state (`idle` /
 `.lain/tuning.toml`. Defaults shown; only set the keys you need.
 
 ```toml
-[ingest]
-max_concurrent_indexers = 8
-ready_threshold = 0.8
-
-[nlp]
+semantic_similarity_threshold = 0.3
 query_prefix = ""                       # BGE: "Represent this sentence for searching relevant passages: "
-lex_weight = 0.3                        # hybrid score weight on stemmed token recall
-anchor_weight = 0.05                    # hybrid score weight on anchor score
-cross_encoder_top_k = 0                 # 0 = off; set to 20 to enable rerank
+lexical_weight = 0.0
+anchor_weight = 0.3
+cross_encoder_top_k = 20
+
+[ingestion]
+lsp_pool_size = 4
+files_per_batch = 50
+max_files_per_scan = 5000
 
 [presence]
 interactive_session_ttl_secs = 600      # agent doing ordinary work
@@ -87,6 +112,21 @@ inferred_claim_ttl_secs      = 120      # how long a *guessed* claim lives
 state_lock_acquire_timeout_ms = 2000    # then proceed without lock
 state_lock_retry_interval_ms  = 20      # tail latency under contention
 ```
+
+Cold language servers get one `documentSymbol` request before the main scan.
+These settings control that warm-up:
+
+```toml
+[ingestion]
+lsp_prewarm_timeout_secs = 30
+lsp_prewarm_max_files = 50
+lsp_prewarm_opt_out = false
+lsp_prewarm_skip_extensions = ["js", "css"]
+```
+
+Set `LAIN_LSP_PREWARM=false` to skip the warm-up without editing the file.
+`lain doctor --json` prints the resolved settings and the result for each
+language server.
 
 `state_lock_retry_interval_ms` sets the contention tail latency:
 with eight agents on one file, p99 on `claim_files` is roughly ten

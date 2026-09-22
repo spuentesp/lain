@@ -341,25 +341,9 @@ jobs:
       - name: Package tarball
         shell: bash
         run: |
-          mkdir -p release
-          cp target/x86_64-pc-windows-msvc/release/lain.exe release/lain.exe
-          cp target/x86_64-pc-windows-msvc/release/lain-git-sidecar.exe release/lain-git-sidecar.exe
-          DLLS=(target/x86_64-pc-windows-msvc/release/*.dll)
-          if [ ! -e "${DLLS[0]}" ]; then
-            echo "::error::Windows build produced no runtime DLLs; DirectML.dll is required by lain.exe"
-            exit 1
-          fi
-          cp "${DLLS[@]}" release/
-          if [ ! -f release/DirectML.dll ]; then
-            echo "::error::DirectML.dll is missing from the Windows build output"
-            exit 1
-          fi
-          DLL_NAMES=()
-          for dll in "${DLLS[@]}"; do
-            DLL_NAMES+=("$(basename "$dll")")
-          done
-          tar czf release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz -C release lain.exe lain-git-sidecar.exe "${DLL_NAMES[@]}"
-          rm release/lain.exe release/lain-git-sidecar.exe release/*.dll
+          bash scripts/package-windows-release.sh \
+            target/x86_64-pc-windows-msvc/release \
+            release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
       - name: Compute per-binary SHA256
         shell: bash
         run: python scripts/compute-sha256.py release/lain-${{ steps.version.outputs.VERSION }}-x86_64-pc-windows-msvc.tar.gz
