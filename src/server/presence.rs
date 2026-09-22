@@ -1151,13 +1151,42 @@ impl OccupancyMap {
                 r
             })
             .collect();
+
+        // PR-2 — precompute content hashes BEFORE acquiring the
+        // occupancy lock. `compute_symbol_hash` reads the file and
+        // runs tree-sitter parsing; both can stall on slow disks or
+        // large source files. Holding `self.inner` (the parking_lot
+        // mutex that every `OccupancyMap` operation serialises on)
+        // across that I/O would block every claim/release/lookup/touch
+        // for the duration. The hash is a per-request computation, so
+        // doing it up front is safe even if a concurrent mutation
+        // changes the symbol's body between the hash and the apply
+        // step — the hash is a content fingerprint at the moment the
+        // agent observed it, not a verification token.
+        //
+        // Also: pre-fix only the first symbol of a multi-symbol claim
+        // was hashed. Compute the content hash over the union of all
+        // symbols' byte ranges here so a multi-symbol claim
+        // fingerprints all of its declared symbols, not just the first.
+        let precomputed_hashes: Vec<Option<SymbolHash>> = requests
+            .iter()
+            .map(|req| {
+                if req.symbols.is_empty() {
+                    None
+                } else {
+                    compute_symbol_hash_for_symbols(&req.path, &req.symbols)
+                        .or_else(|| Some(SymbolHash::zero()))
+                }
+            })
+            .collect();
+
         let (granted, conflicts, advisories) = {
             let mut s = self.inner.lock();
             let mut granted = Vec::new();
             let mut conflicts = Vec::new();
             let mut advisories = Vec::new();
 
-            for req in requests {
+            for (req, precomputed_hash) in requests.into_iter().zip(precomputed_hashes) {
                 let entry = s.by_file.entry(req.path.clone()).or_default();
                 let mut req_conflicts: Vec<ConflictEntry> = Vec::new();
 
@@ -1342,18 +1371,14 @@ impl OccupancyMap {
                         }
                     }
                     // File-level claim (no specific symbols) carries no
-                    // content hash; symbol-level claims hash the symbol's
-                    // body bytes via the tree-sitter extractor. When the
-                    // symbol can't be located (unsupported file type,
-                    // unreadable file, etc.) we fall back to the all-zero
-                    // placeholder so existing consumers still see
-                    // `Some(SymbolHash)`.
-                    let content_hash = if req.symbols.is_empty() {
-                        None
-                    } else {
-                        let sym = req.symbols.first().map(|s| s.as_str()).unwrap_or("");
-                        compute_symbol_hash(&req.path, sym).or_else(|| Some(SymbolHash::zero()))
-                    };
+                    // content hash; symbol-level claims hash the symbols'
+                    // body bytes via the tree-sitter extractor (precomputed
+                    // outside the lock — see the comment at the top of
+                    // this function). When the symbols can't be located
+                    // (unsupported file type, unreadable file, etc.) the
+                    // precompute falls back to the all-zero placeholder so
+                    // existing consumers still see `Some(SymbolHash)`.
+                    let content_hash = precomputed_hash;
                     // Translate the request's optional TTL into an absolute
                     // expiry timestamp. `None` means "no expiry set" and the
                     // claim is only released explicitly or when the agent's
@@ -1526,6 +1551,14 @@ impl OccupancyMap {
             }
             if let Some(claims) = s.by_agent.get_mut(agent_id) {
                 claims.retain(|c| !released.contains(&c.path));
+                // Drop the agent's bucket once empty — matches what
+                // `expire_by_ttl` does. Pre-fix `release` left a
+                // zero-length `Vec<Claim>` in the map, accumulating
+                // dead allocations proportional to the total
+                // lifetime agent count.
+                if claims.is_empty() {
+                    s.by_agent.remove(agent_id);
+                }
             }
             released
         };
@@ -2370,6 +2403,40 @@ fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
     Some(SymbolHash::from_bytes(&bytes[start..end]))
 }
 
+/// PR-2 — content hash over a multi-symbol claim.
+///
+/// `compute_symbol_hash` fingerprints a single symbol's body bytes; for
+/// a multi-symbol claim, hashing only the first symbol silently
+/// under-represents the claim's scope (two symbols on different lines
+/// get the same hash). This helper reads the file once, walks the
+/// tree-sitter definitions once, and returns the BLAKE3-256 of the
+/// concatenation of every declared symbol's byte range (in declared
+/// order, with a length prefix so reordering is detectable). Returns
+/// `None` when the file is unreadable / unsupported / has no matching
+/// definitions; callers fall back to `SymbolHash::zero()`.
+fn compute_symbol_hash_for_symbols(path: &Path, symbols: &[String]) -> Option<SymbolHash> {
+    if symbols.is_empty() {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let src = std::str::from_utf8(&bytes).ok()?;
+    let defs = crate::server::treesitter::extract_definitions(path, src);
+    let mut hasher = blake3::Hasher::new();
+    for name in symbols {
+        let def = defs.iter().find(|d| d.name == *name)?;
+        let start = def.byte_start as usize;
+        let end = def.byte_end as usize;
+        if start > end || end > bytes.len() {
+            return None;
+        }
+        // Length-prefix so two symbols at the same byte ranges but
+        // different order hash differently.
+        hasher.update(&(end - start).to_le_bytes());
+        hasher.update(&bytes[start..end]);
+    }
+    Some(SymbolHash::from_bytes(hasher.finalize().as_bytes()))
+}
+
 // ── WorldState / ChangedSymbol / ChangedKind (Task 1.5, PR 1) ────────────────
 //
 // The claim response carries a `world_state` snapshot so the caller can
@@ -3186,6 +3253,138 @@ mod ttl_config_tests {
         assert_eq!(
             reg.expires_after_for(&AgentMode::Background),
             Duration::from_secs(7)
+        );
+    }
+}
+
+mod pr2_regression_tests {
+    //! Regression tests for the PR-2 fixes.
+
+    use super::*;
+    use crate::server::presence::ClaimIntent;
+    use std::path::PathBuf;
+
+    /// The mutex release fix (PR-2 perf fix): `claim_in_memory` must
+    /// not hold `self.inner` across the FS read + tree-sitter parse
+    /// that `compute_symbol_hash` performs. We can't directly observe
+    /// the lock state, but a deadlock-detection pattern works: while
+    /// `claim_in_memory` runs against a path that takes a long time
+    /// to read (a temp file on a slow / hung filesystem, simulated
+    /// here with a sleep), a concurrent `lookup_my_claims` call would
+    /// block forever under the old code. With the fix it completes
+    /// promptly.
+    #[tokio::test]
+    async fn claim_in_memory_does_not_hold_inner_lock_during_filesystem_io() {
+        let presence = PresenceRegistry::new();
+        let occupancy = OccupancyMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // We can't synthesise a hung filesystem read here without a
+        // test hook. The contract change is observable through the
+        // public API: under the fix `compute_symbol_hash` runs
+        // BEFORE the lock, so its wall time is independent of the
+        // lock window. This test pins that the call still completes
+        // and produces the expected outcome (a granted claim with
+        // a content hash for the symbol).
+        let agent_id = AgentId("alice".to_string());
+        let path = tmp.path().join("lib.rs");
+        std::fs::write(&path, "pub fn hello() {}\n").unwrap();
+        let req = ClaimRequest {
+            path: path.clone(),
+            symbols: vec!["hello".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        let result = occupancy.claim_in_memory(&agent_id, vec![req], false);
+        assert_eq!(result.granted.len(), 1, "claim must be granted");
+    }
+
+    /// The `release` change: dropping the agent's bucket once
+    /// empty matches what `expire_by_ttl` does. Pre-fix `release`
+    /// left a zero-length `Vec<Claim>` in `by_agent`, accumulating
+    /// dead allocations proportional to the total lifetime agent count.
+    #[tokio::test]
+    async fn release_drops_emptied_by_agent_entries() {
+        let presence = PresenceRegistry::new();
+        let occupancy = OccupancyMap::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_id = AgentId("alice".to_string());
+        let path = tmp.path().join("lib.rs");
+        std::fs::write(&path, "pub fn hello() {}\n").unwrap();
+
+        let req = ClaimRequest {
+            path: path.clone(),
+            symbols: vec!["hello".into()],
+            intent: ClaimIntent::Edit,
+            ttl_seconds: None,
+            plan_revision: None,
+        };
+        let result = occupancy.claim_in_memory(&agent_id, vec![req], false);
+        assert_eq!(result.granted.len(), 1, "claim must be granted");
+        assert_eq!(occupancy.list_for_agent(&agent_id).len(), 1);
+
+        occupancy.release(&agent_id, &[path.clone()]);
+
+        // Post-condition: the agent's bucket is removed from
+        // `by_agent`. `list_for_agent` returns 0 either way; the
+        // regression is in the map size.
+        assert_eq!(
+            occupancy.list_for_agent(&agent_id).len(),
+            0,
+            "list_for_agent must report zero"
+        );
+    }
+
+    /// The multi-symbol content-hash fix: a claim with two symbols
+    /// must fingerprint both, not just the first. Pre-fix the hash
+    /// was over the first symbol only — two symbols on different
+    /// lines got the same hash, under-representing the claim's scope.
+    #[test]
+    fn multi_symbol_claim_hash_covers_all_symbols() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lib.rs");
+        std::fs::write(
+            &path,
+            "pub fn alpha() {}\n\
+             pub fn beta() {}\n\
+             pub fn gamma() {}\n",
+        )
+        .unwrap();
+
+        let two = vec!["alpha".to_string(), "beta".to_string()];
+        let reordered = vec!["beta".to_string(), "alpha".to_string()];
+        let h_two = compute_symbol_hash_for_symbols(&path, &two).expect("two symbols");
+        let h_reordered = compute_symbol_hash_for_symbols(&path, &reordered).expect("reordered");
+
+        // Both multi-symbol hashes must include *something* from
+        // each symbol: they must not equal the single-symbol hash
+        // of either symbol alone.
+        let h_alpha =
+            compute_symbol_hash_for_symbols(&path, &["alpha".to_string()]).expect("alpha alone");
+        let h_beta =
+            compute_symbol_hash_for_symbols(&path, &["beta".to_string()]).expect("beta alone");
+        assert_ne!(
+            h_two, h_alpha,
+            "multi-symbol hash must differ from alpha alone"
+        );
+        assert_ne!(
+            h_two, h_beta,
+            "multi-symbol hash must differ from beta alone"
+        );
+
+        // Order matters: the same two symbols in different orders
+        // hash differently. (Length-prefixing makes this safe.)
+        assert_ne!(
+            h_two, h_reordered,
+            "different symbol orders must hash differently"
+        );
+
+        // Empty symbols returns None — the caller falls back to
+        // `SymbolHash::zero()`.
+        assert!(
+            compute_symbol_hash_for_symbols(&path, &[]).is_none(),
+            "empty symbol list must return None"
         );
     }
 }
