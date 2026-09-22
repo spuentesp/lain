@@ -525,17 +525,45 @@ fn trim_for_section(body: &str, max_lines: usize) -> String {
 }
 
 fn extract_section(body: &str, header_marker: &str) -> String {
+    // F5 — the body produced by `get_call_sites` and `get_blast_radius`
+    // is NOT structured with `## ` H2 headings. `get_call_sites`
+    // outputs single-dash bullets (`- **caller** (...) calls it at
+    // line N`); `get_blast_radius` outputs `\n- Direct dependents
+    // (N):` and `\n  - depth N: count` lines. Pre-fix this function
+    // scanned for `## `, never matched, and always fell through to
+    // the fallback "first 20 non-empty lines" — which is then fed to
+    // `count_bullets` and produces 0 every time. Result: `direct_count`
+    // was always zero, and `transitive_count` was the only non-zero
+    // count (the fallback body never contained bullets either, so
+    // transitive was zero too).
+    //
+    // Fix: keep the public API but make the function actually find
+    // the bullet section. Match lines that contain the header marker
+    // (case-insensitive) at any indentation (we've seen `- `, `## `,
+    // and `  - ` styles). Once the header is found, take the body up
+    // until the next blank line OR a different heading — the body
+    // forms of these calls don't actually use a closing marker, so
+    // we fall through at EOF.
     let mut in_section = false;
     let mut buf: Vec<&str> = Vec::new();
+    let header_lower = header_marker.to_lowercase();
     for line in body.lines() {
-        if line.starts_with("## ") {
-            if in_section {
-                break;
+        let trimmed = line.trim_start();
+        let trimmed_lower = trimmed.to_lowercase();
+        if !in_section {
+            if trimmed_lower.starts_with("- ") || trimmed_lower.starts_with("## ") {
+                if trimmed_lower.contains(&header_lower) {
+                    in_section = true;
+                }
             }
-            if line.to_lowercase().contains(&header_marker.to_lowercase()) {
-                in_section = true;
-            }
-        } else if in_section {
+        } else if trimmed.is_empty() {
+            // Blank line ends the section (body sections are
+            // consistently followed by a blank or next heading).
+            break;
+        } else if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
+            // Hit the next heading without seeing the marker again.
+            break;
+        } else {
             buf.push(line);
         }
     }
@@ -551,17 +579,28 @@ fn extract_section(body: &str, header_marker: &str) -> String {
 }
 
 fn count_bullets(section: &str) -> usize {
-    // Bullet lines in the assess_change sections are indented with
-    // two spaces (`  - caller.name (...) in path`); the section
-    // header itself starts with a single `- ` (`- Direct dependents
-    // (3):`). Counting lines whose trimmed prefix is `- ` would
-    // over-count: a section with 0 actual callers still has the
-    // `- Direct dependents (0):` header line that the loop counted
-    // as a bullet, falsely pushing the risk verdict up from `low`
-    // to `medium`. Two spaces is the real bullet marker.
+    // F5 — the actual caller-bullet format from `get_call_sites` is
+    // `- **caller_name** (...) calls it at line N`; the blast-radius
+    // body uses `  - depth N: count` for indented bullets. Both start
+    // with `- **` (the caller bullet) or `  - ` (the depth line).
+    // Pre-fix `count_bullets` checked only `  - ` and `- - `, neither
+    // of which matched the real caller output, so the count was
+    // always zero and the risk verdict degenerated to `low` even
+    // when callers existed. Match `- **` (the caller marker) AND
+    // `  - ` (the indented depth marker); exclude header lines like
+    // `- leaf_helper (Function)` and `- Overlay freshness: live`
+    // that aren't caller bullets.
     section
         .lines()
-        .filter(|l| l.starts_with("  - ") || l.starts_with("- - "))
+        .filter(|l| {
+            let t = l.trim_start();
+            if t == "-" || t == "--" || t.starts_with("---") {
+                return false;
+            }
+            // Caller bullets: `- **name**` (get_call_sites) or
+            // `  - depth N: count` (get_blast_radius indented).
+            t.starts_with("- **") || t.starts_with("  - ")
+        })
         .count()
 }
 
