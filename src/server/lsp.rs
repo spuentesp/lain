@@ -37,10 +37,11 @@ const LSP_OPEN_DOC_TIMEOUT: Duration = Duration::from_secs(5);
 /// `LspMultiplexer` `AsyncMutex`, blocking every other file currently
 /// being scanned. 1s bounds the worst-case hold per call. The
 /// per-binary circuit breaker (see [`record_lsp_failure`]) handles
-/// the case where the LSP child is consistently slow — after 3
-/// failures the binary is marked `unavailable` and the indexer
-/// falls back to tree-sitter for the rest of the process lifetime.
-/// ProcessExited failures route to the restart budget instead.
+/// the case where the LSP child is consistently slow — once
+/// `MAX_CONSECUTIVE_LSP_FAILURES` failures stack up the binary is
+/// marked `unavailable` and the indexer falls back to tree-sitter
+/// for the rest of the process lifetime. ProcessExited failures
+/// route to the restart budget instead.
 const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 /// Maximum time to wait for the LSP install subprocess (`pip install
 /// python-lsp-server`, `npm install -g typescript-language-server`,
@@ -832,7 +833,26 @@ impl LspMultiplexer {
         let server_id = self.ensure_server(path).await?;
         let uri = format!("file://{}", path.display());
 
-        let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+        let content = match tokio::fs::read_to_string(path).await {
+            Ok(c) => c,
+            Err(e) => {
+                // PR-3 — file read failure is a meaningful diagnostic
+                // (file vanished, permission denied, binary file). Pre-fix
+                // `unwrap_or_default()` silently turned the failure into
+                // an empty content string and let the LSP layer return
+                // `Ok(Vec::new())` indistinguishable from a clean
+                // empty file. Log the read error so operators can see
+                // what happened; the caller already falls back to
+                // tree-sitter on empty.
+                tracing::warn!(
+                    "LSP layer could not read {} for open_document: {e}; \
+                     the file may have vanished or become unreadable; \
+                     the scan will fall back to tree-sitter",
+                    path.display()
+                );
+                String::new()
+            }
+        };
         if let Err(e) = self.bridge.open_document(&server_id, &uri, &content).await {
             // open_document failure usually means the channel is
             // closed — i.e. the child died. Classify via the bridge
@@ -886,7 +906,23 @@ impl LspMultiplexer {
         }
 
         match failure_kind {
-            Some(kind) => self.record_lsp_failure(&server_id, kind),
+            Some(kind) => {
+                // PR-3 — bridge errors and timeouts used to silently
+                // turn into `Ok(Vec::new())` (indistinguishable from a
+                // genuinely empty file). The caller (the scan path)
+                // does fall back to tree-sitter on empty, but the
+                // operator had no visibility into why LSP failed.
+                // Surface the failure as a warning so the LSP layer's
+                // outages show up in logs; the circuit-breaker book-
+                // keeping still runs.
+                tracing::warn!(
+                    "LSP get_document_symbols({}) failed: {:?}; \
+                     scan will fall back to tree-sitter",
+                    path.display(),
+                    kind
+                );
+                self.record_lsp_failure(&server_id, kind);
+            }
             None => self.record_success(&server_id),
         }
 
@@ -1214,10 +1250,17 @@ impl LspMultiplexer {
         *entry = (new_count, new_window_start);
 
         if new_count > LSP_RESTART_BUDGET && !self.unavailable.contains(binary) {
+            // PR-3 — docstring at line 40 says "after 3" but the
+            // check fires at 4 because the constant is the trip
+            // threshold, not the inclusive count. Operators reading
+            // the docstring would misread the threshold; the WARN log
+            // itself now states the actual trip value (`new_count`)
+            // so the message matches the code path.
             warn!(
-                "LSP '{}' has restarted {} times within {:?}; \
-                 marking unavailable. The child is likely crash-looping.",
-                binary, new_count, LSP_RESTART_WINDOW
+                "LSP '{}' has restarted {} times within {:?} \
+                 (threshold {}); marking unavailable. \
+                 The child is likely crash-looping.",
+                binary, new_count, LSP_RESTART_WINDOW, LSP_RESTART_BUDGET
             );
             self.unavailable.insert(binary.to_string());
             self.consecutive_failures.remove(binary);
