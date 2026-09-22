@@ -321,6 +321,26 @@ impl PresenceLayer {
     /// `Unavailable` puts the retry decision on the agent, which
     /// can do exponential backoff, surface the error to its user,
     /// or escalate to a hard failure.
+    ///
+    /// Lock-order invariant — read before reordering.
+    ///
+    /// `with_shared_presence` acquires **five distinct locks** in a
+    /// fixed order:
+    ///   1. state-file lock (`lain_state_lock::acquire_with`, blocking,
+    ///      cross-process)
+    ///   2. presence refresh (`refresh_shared_presence`, re-reads
+    ///      on-disk state)
+    ///   3. `persist_result` mutex (captures the persist-callback's
+    ///      outcome)
+    ///   4. `presence.persist_cb` swap
+    ///   5. `occupancy.persist_cb` swap
+    ///
+    /// All five are acquired sequentially (no nesting) and released
+    /// in reverse. Any future refactor that acquires any of these
+    /// in a different order — or that nests one inside another —
+    /// will deadlock with itself under contention. The order is
+    /// not enforced by `cargo clippy`; when you edit this function,
+    /// leave the order alone.
     pub fn with_shared_presence<T>(&self, f: impl FnOnce() -> T) -> Result<T, CoordinationError> {
         let path = self.state_path();
         let lock = lain_state_lock::acquire_with(
