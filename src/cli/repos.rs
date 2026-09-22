@@ -37,7 +37,15 @@ pub fn run(action: ReposAction, config_path: &Path) -> Result<()> {
 
 /// `lain repos add <name> <url> [--ref <branch>]`
 fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
-    let mut file = FederationConfig::load(config_path).unwrap_or_default();
+    // F4 — if the file exists, propagate the load error; only fall
+    // back to the default for the genuinely-missing case. Pre-fix,
+    // `unwrap_or_default()` silently turned unreadable / invalid YAML
+    // into an empty config and then the `add` path wrote a
+    // brand-new file over the corrupt one — destroying the
+    // operator's existing configuration with no error message. The
+    // sibling `remove` already does this right (uses `?` via
+    // `with_context`).
+    let mut file = load_or_default(config_path)?;
     if file.repos.iter().any(|r| r.id == name) {
         anyhow::bail!("repo '{name}' already exists in {}", config_path.display());
     }
@@ -58,7 +66,10 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
 
 /// `lain repos list`
 fn list(config_path: &Path) -> Result<()> {
-    let file = FederationConfig::load(config_path).unwrap_or_default();
+    // F4 — propagate load errors instead of swallowing them. An
+    // empty config is reported as "no repos"; a corrupt config is
+    // an error the operator can act on.
+    let file = load_or_default(config_path)?;
     if file.repos.is_empty() {
         println!("(no repos registered in {})", config_path.display());
         return Ok(());
@@ -67,6 +78,20 @@ fn list(config_path: &Path) -> Result<()> {
         println!("{}\t{:?}", r.id, r.source);
     }
     Ok(())
+}
+
+/// F4 — load the federation config, propagating errors. If the file
+/// doesn't exist, return the default (legitimate "no repos yet"
+/// case). If the file exists but is unreadable / invalid YAML,
+/// propagate the error so the caller surfaces it.
+fn load_or_default(
+    config_path: &Path,
+) -> Result<crate::federation::config::FederationConfig> {
+    if !config_path.exists() {
+        return Ok(crate::federation::config::FederationConfig::default());
+    }
+    crate::federation::config::FederationConfig::load(config_path)
+        .with_context(|| format!("load {}", config_path.display()))
 }
 
 /// `lain repos remove <name>`
