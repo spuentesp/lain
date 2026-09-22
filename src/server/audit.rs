@@ -141,12 +141,23 @@ pub fn append_edit_event(state_dir: &Path, event: &AuditEvent) -> std::io::Resul
     // destination on some filesystems) — the `let _ =` swallows
     // the not-found error which is the common case on first
     // rotation.
-    if path.exists() {
-        let size = std::fs::metadata(&path)?.len();
-        if size >= AUDIT_LOG_MAX_BYTES {
+    //
+    // Single `metadata` call instead of `exists() + metadata()`: the
+    // two-call version has a TOCTOU race where a concurrent writer
+    // can rotate the file between the two stat()s and observe a
+    // stale size.
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.len() >= AUDIT_LOG_MAX_BYTES => {
             let rotated = state_dir.join(AUDIT_LOG_ROTATED);
             let _ = std::fs::remove_file(&rotated);
             std::fs::rename(&path, &rotated)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // file doesn't exist yet; fall through to the open-create
+        }
+        Err(e) => return Err(e),
+        Ok(_) => {
+            // exists but below cap; fall through to the open-append
         }
     }
 
