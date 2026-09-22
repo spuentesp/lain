@@ -8,7 +8,6 @@ use crate::query::spec::{
 };
 use anyhow::Result;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Result<()> {
@@ -39,7 +38,12 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
     };
 
     let embedder = NlpEmbedder::new()?;
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(
+            crate::server::tuning::TuningConfig::default().embedding_cache_capacity,
+        )
+        .expect("default capacity > 0"),
+    )));
     let mut executor = Executor::new(&graph, &embedder, &cache, &root);
     let spec = parse_query_string(expression);
 

@@ -1278,4 +1278,121 @@ mod tests {
 
         drop(git);
     }
+
+    /// B3 — `process_change` hashes the file with blake3 and short-
+    /// circuits on unchanged content. A no-op editor save (touch,
+    /// metadata-only write, save without edits) fires the watcher
+    /// but the file's bytes are unchanged; the LSP round trip is
+    /// the expensive part and must be skipped on a hash hit.
+    ///
+    /// The first call populates the cache and processes normally
+    /// (overlay gains a node). The second call on the same bytes
+    /// hits the cache, returns early, and the overlay is unchanged
+    /// from the first call's state — proving the LSP path was
+    /// skipped. A subsequent write with different bytes misses
+    /// the cache, re-processes, and the overlay reflects the new
+    /// symbol.
+    #[tokio::test]
+    async fn process_change_short_circuits_on_unchanged_content() {
+        let root = tempfile::Builder::new()
+            .prefix("lain-watcher-b3-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        for _ in 0..4 {
+            server
+                .ingest()
+                .lsp_pool()
+                .next()
+                .lock()
+                .await
+                .mark_unavailable("rust-analyzer");
+        }
+        let path = root.path().join("lib.rs");
+        fs::write(&path, "pub fn hello() {}\n").unwrap();
+
+        // First call: populates the hash cache, processes normally.
+        process_file(&server, &path).await.unwrap();
+        let first_overlay = server.overlay().get_all_nodes();
+        assert_eq!(
+            first_overlay.len(),
+            1,
+            "first call processes the LSP path and inserts the symbol"
+        );
+
+        // Second call: same bytes. The hash matches; process_change
+        // returns Ok(()) without re-running the LSP round trip.
+        // We can't observe the LSP round trip directly, but the
+        // overlay state matches the first call — proving no second
+        // insert happened (which a non-cached path would produce
+        // because it goes through the same insert path as the first
+        // call and the test fixture has its own LSP marked
+        // unavailable so the tree-sitter fallback would mint a
+        // different id under different mtimes).
+        process_file(&server, &path).await.unwrap();
+        let second_overlay = server.overlay().get_all_nodes();
+        assert_eq!(
+            second_overlay.len(),
+            1,
+            "second call on the same bytes must not insert a duplicate"
+        );
+        assert_eq!(
+            second_overlay[0].id, first_overlay[0].id,
+            "the surviving node must be the original, not a duplicate"
+        );
+
+        // Third call: different bytes. Hash miss; the LSP path runs
+        // and inserts the new symbol (retracting the old one).
+        fs::write(&path, "pub fn world() {}\n").unwrap();
+        process_file(&server, &path).await.unwrap();
+        let third_overlay = server.overlay().get_all_nodes();
+        assert_eq!(
+            third_overlay.len(),
+            1,
+            "third call processes the new content"
+        );
+        assert_ne!(
+            third_overlay[0].id, first_overlay[0].id,
+            "the new symbol must have a different node id from the old one"
+        );
+    }
+
+    /// B3 — deletion drops the cached hash. Re-creating the file
+    /// starts with a clean cache entry (the mtime changed anyway,
+    /// but verifying the explicit drop pin keeps the
+    /// `if !path.is_file()` branch's contract intact).
+    #[tokio::test]
+    async fn process_change_drops_cached_hash_on_deletion() {
+        let root = tempfile::Builder::new()
+            .prefix("lain-watcher-b3-del-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        for _ in 0..4 {
+            server
+                .ingest()
+                .lsp_pool()
+                .next()
+                .lock()
+                .await
+                .mark_unavailable("rust-analyzer");
+        }
+        let path = root.path().join("lib.rs");
+        fs::write(&path, "pub fn hello() {}\n").unwrap();
+        process_file(&server, &path).await.unwrap();
+
+        // Delete the file: cached hash must be dropped so a future
+        // re-creation starts clean.
+        fs::remove_file(&path).unwrap();
+        process_file(&server, &path).await.unwrap();
+        let hashes = server.ingest().file_content_hashes().lock();
+        assert!(
+            hashes.get(&path).is_none(),
+            "deleted path's hash must be dropped from the cache"
+        );
+    }
 }

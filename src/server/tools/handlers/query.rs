@@ -9,7 +9,6 @@ use crate::query::{Executor, QuerySpec};
 use crate::server::presence::{OccupancyMap, PresenceRegistry};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Build the `occupancy` JSON summary attached to `query_graph` and
@@ -54,7 +53,7 @@ pub fn query_graph(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
     embedder: &NlpEmbedder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     presence: &PresenceRegistry,
     occupancy: &OccupancyMap,
     arguments: Option<&Map<String, Value>>,

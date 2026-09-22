@@ -35,7 +35,7 @@ pub struct ToolContextDeps {
     pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
-    pub embedding_cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    pub embedding_cache: Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     pub ui_sessions: crate::server::tools::UiSessionStore,
     pub jobs: Arc<Mutex<HashMap<String, crate::server::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
@@ -51,7 +51,7 @@ pub struct ToolContext {
     pub git: Arc<AnyGitSensor>,
     pub lsp_pool: Arc<LspPool>,
     pub tuning: Arc<TuningConfig>,
-    pub embedding_cache: Arc<Mutex<std::collections::HashMap<String, Vec<f32>>>>,
+    pub embedding_cache: Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     pub ui_sessions: Arc<AsyncMutex<std::collections::HashMap<String, UiSession>>>,
     pub jobs: Arc<Mutex<std::collections::HashMap<String, crate::server::tools::JobInfo>>>,
     pub job_webhooks: Arc<AsyncMutex<Vec<String>>>,
@@ -521,7 +521,12 @@ mod federation_binding_tests {
                 LspPool::new(&roots[0].1, 1, &crate::tuning::RuntimeConfig::default()).unwrap(),
             ),
             tuning: Arc::new(TuningConfig::default()),
-            embedding_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            embedding_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(
+                    crate::server::tuning::TuningConfig::default().embedding_cache_capacity,
+                )
+                .expect("default capacity > 0"),
+            ))),
             ui_sessions: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
             jobs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             job_webhooks: Arc::new(AsyncMutex::new(Vec::new())),
@@ -561,5 +566,35 @@ mod federation_binding_tests {
             ctx.for_repo("no-such-repo").is_none(),
             "an unknown repo leaves the caller's context alone"
         );
+    }
+
+    /// B1 — the bounded embedding cache evicts the oldest entry once
+    /// capacity is exceeded. A long-running server with many distinct
+    /// queries must not grow the cache without limit; with a small
+    /// capacity the LRU policy keeps the working set bounded and a
+    /// known-old entry is dropped before a known-new one is added.
+    #[test]
+    fn embedding_cache_evicts_oldest_when_full() {
+        use lru::LruCache;
+        use std::num::NonZeroUsize;
+
+        let cache: parking_lot::Mutex<LruCache<String, Vec<f32>>> =
+            parking_lot::Mutex::new(LruCache::new(NonZeroUsize::new(2).unwrap()));
+
+        // Fill to capacity.
+        cache.lock().put("a".into(), vec![1.0]);
+        cache.lock().put("b".into(), vec![2.0]);
+        assert_eq!(cache.lock().len(), 2);
+
+        // A third put evicts the least-recently-used entry (`a`).
+        cache.lock().put("c".into(), vec![3.0]);
+        assert_eq!(cache.lock().len(), 2);
+        assert!(
+            cache.lock().get("a").is_none(),
+            "the oldest entry must be evicted; got {:?}",
+            cache.lock().get("a")
+        );
+        assert!(cache.lock().get("b").is_some(), "b survives");
+        assert!(cache.lock().get("c").is_some(), "c survives");
     }
 }

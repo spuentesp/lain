@@ -19,7 +19,7 @@ use std::time::Instant;
 /// The three collections produced by a graph traversal. A named result keeps
 /// traversal APIs readable and gives callers one stable shape to extend.
 pub type TraversalResult = (Vec<GraphNodeRef>, Vec<GraphEdgeRef>, Vec<GraphPath>);
-pub type EmbeddingCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+pub type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
 type TraversalQueueItem = (String, Vec<String>, Vec<(String, String)>);
 
 /// Executor for running queries against the graph
@@ -436,7 +436,7 @@ impl<'a> Executor<'a> {
             if let Ok(emb) = serde_json::from_str::<Vec<f32>>(e_json) {
                 self.embedding_cache
                     .lock()
-                    .insert(node.id.clone(), emb.clone());
+                    .put(node.id.clone(), emb.clone());
                 return Some(emb);
             }
         }
@@ -446,7 +446,7 @@ impl<'a> Executor<'a> {
         self.embedder.embed(&text).ok().inspect(|emb| {
             self.embedding_cache
                 .lock()
-                .insert(node.id.clone(), emb.clone());
+                .put(node.id.clone(), emb.clone());
         })
     }
 

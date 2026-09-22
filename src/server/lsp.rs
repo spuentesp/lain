@@ -267,6 +267,7 @@ const LANGUAGE_MAP: &[(&str, LspConfig)] = &[
 ];
 
 /// A symbol with its children for recursive processing
+#[derive(Clone)]
 pub struct HierarchicalSymbol {
     pub node: GraphNode,
     pub children: Vec<HierarchicalSymbol>,

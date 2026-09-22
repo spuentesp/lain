@@ -34,7 +34,6 @@ use crate::server::tools::utils::{required_str_arg, resolve_node_ambiguous, str_
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -197,7 +196,7 @@ pub async fn find_related(
     workspace: &std::path::Path,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     args: &Map<String, Value>,
     ui_link: crate::server::tools::UiLink<'_>,
@@ -362,7 +361,7 @@ pub fn search_code(
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     args: &Map<String, Value>,
 ) -> Result<String, LainError> {
@@ -567,7 +566,7 @@ fn semantic_call(
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     query: &str,
     limit: usize,
@@ -1292,7 +1291,11 @@ mod m6_tests {
         use std::sync::Arc;
         let embedder = NlpEmbedder::new_stub();
         let cross = CrossEncoder::from_dir(std::path::Path::new("/nonexistent"));
-        let cache = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+        let tuning = TuningConfig::default();
+        let cache = Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(tuning.embedding_cache_capacity)
+                .expect("default capacity > 0"),
+        )));
         let tuning = TuningConfig::default();
         search_code(
             std::path::Path::new("/"),

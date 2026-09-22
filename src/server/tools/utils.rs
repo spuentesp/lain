@@ -9,6 +9,63 @@ use crate::schema::GraphNode;
 use crate::server::federation::federated_index::FederatedIndex;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::SystemTime;
+
+/// B2 — process-wide LRU cache of file contents, keyed on the
+/// resolved (workspace-relative or absolute) path and valued on
+/// `(mtime, lines)`. The cache is read-through: a hit with a
+/// matching mtime serves the cached lines without touching disk; a
+/// miss or mtime mismatch re-reads and repopulates. Bounded so a
+/// server watching many files doesn't grow the cache without limit.
+///
+/// Process-wide rather than per-executor because the cache value is
+/// only ever the file's lines (small, shared across queries) and
+/// duplicating one per executor would defeat the point. The
+/// federation runs in one process; the sidecar shares this cache
+/// with the owner at the OS page-cache level only — it has its own
+/// file-content cache.
+static FILE_CONTENT_CACHE: OnceLock<
+    parking_lot::Mutex<lru::LruCache<PathBuf, (SystemTime, Vec<String>)>>,
+> = OnceLock::new();
+
+pub(crate) fn file_content_cache(
+) -> &'static parking_lot::Mutex<lru::LruCache<PathBuf, (SystemTime, Vec<String>)>> {
+    FILE_CONTENT_CACHE.get_or_init(|| {
+        parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(
+                crate::server::tuning::TuningConfig::default().file_content_cache_capacity,
+            )
+            .expect("default file_content_cache_capacity > 0"),
+        ))
+    })
+}
+
+/// Read the full file content as a `Vec<String>` (one entry per line).
+///
+/// Reads through `FILE_CONTENT_CACHE`: a hit with matching mtime
+/// returns the cached lines; a miss or stale entry re-reads and
+/// repopulates. `None` on I/O error — the caller falls back to the
+/// non-cached path (a `read_lines`-style read) in `read_body_excerpt`.
+pub(crate) fn read_lines_cached(resolved: &Path) -> Option<Vec<String>> {
+    let mtime = std::fs::metadata(resolved)
+        .and_then(|m| m.modified())
+        .ok()?;
+    let cache = file_content_cache();
+    {
+        let mut guard = cache.lock();
+        if let Some((cached_mtime, cached_lines)) = guard.get(resolved) {
+            if *cached_mtime == mtime {
+                return Some(cached_lines.clone());
+            }
+        }
+    }
+    let content = std::fs::read_to_string(resolved).ok()?;
+    let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let mut guard = cache.lock();
+    guard.put(resolved.to_path_buf(), (mtime, lines.clone()));
+    Some(lines)
+}
 
 /// Helper to resolve a handle (name, path, or ID) to a node
 pub fn resolve_node(
@@ -389,6 +446,39 @@ fn read_body_excerpt(
         workspace.join(path)
     };
     let path = resolved.as_path();
+    // B2 — try the file-content cache first. The cache hit serves
+    // the lines without an `open()` + `read_line()` loop on every
+    // call, which is the common case once a corpus has been read
+    // once. A miss or I/O error falls through to the original
+    // line-by-line read so the function's contract is preserved.
+    if let Some(lines) = read_lines_cached(path) {
+        let mut buf = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            // `lines` is 0-indexed by construction; `start` is 1-indexed.
+            let lineno = (i as u32) + 1;
+            if lineno < start {
+                continue;
+            }
+            if lineno >= end {
+                break;
+            }
+            if !buf.is_empty() {
+                buf.push(' ');
+            }
+            buf.push_str(line);
+            // Stop early if we've already collected enough tokens
+            if buf.split_whitespace().count() >= max_tokens {
+                break;
+            }
+        }
+        let trimmed: String = buf
+            .split_whitespace()
+            .take(max_tokens)
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Ok(trimmed);
+    }
+
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     let f = File::open(path)?;

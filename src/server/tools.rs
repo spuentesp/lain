@@ -172,7 +172,10 @@ impl ToolExecutor {
             git,
             lsp_pool,
             tuning: Arc::clone(&tuning),
-            embedding_cache: Arc::new(Mutex::new(HashMap::new())),
+            embedding_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(tuning.embedding_cache_capacity.max(1))
+                    .expect("embedding_cache_capacity must be > 0"),
+            ))),
             ui_sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             jobs: Arc::clone(&jobs_registry),
             job_webhooks: Arc::clone(&webhooks),
@@ -279,7 +282,10 @@ impl ToolExecutor {
             git,
             lsp_pool,
             tuning: Arc::clone(&tuning),
-            embedding_cache: Arc::new(Mutex::new(HashMap::new())),
+            embedding_cache: Arc::new(Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(tuning.embedding_cache_capacity.max(1))
+                    .expect("embedding_cache_capacity must be > 0"),
+            ))),
             ui_sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             jobs: Arc::clone(&jobs_registry),
             job_webhooks: Arc::clone(&webhooks),
