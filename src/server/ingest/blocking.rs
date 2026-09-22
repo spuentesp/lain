@@ -37,9 +37,20 @@ use crate::error::LainError;
 /// before `f` completes, the spawned task is aborted and the future
 /// resolves to `Err(LainError::Cancelled)`.
 ///
-/// The closure runs to completion or is aborted; it cannot return a
-/// partial value. A caller that needs partial progress must check
-/// the token inside the closure and return early.
+/// **Cancellation is cooperative — the sync work keeps running on the
+/// blocking pool until it returns naturally.** `JoinHandle::abort()` on
+/// a `spawn_blocking` task signals cancellation to the future's
+/// `poll`, but the underlying blocking thread (libgit2 revwalk, ONNX
+/// forward pass, file reads, etc.) is not interrupted and continues
+/// executing until the closure returns. The caller MUST observe
+/// the token inside the closure for cooperative cancellation to
+/// short-circuit the work; otherwise, repeated cancellations during
+/// shutdown can leave work running on the blocking pool beyond the
+/// future's drop.
+///
+/// The closure cannot return a partial value. A caller that needs
+/// partial progress must check the token inside the closure and
+/// return early.
 pub(crate) fn offthread<F, R>(cancel: CancellationToken, f: F) -> Offthread<R>
 where
     F: FnOnce() -> Result<R, LainError> + Send + 'static,
