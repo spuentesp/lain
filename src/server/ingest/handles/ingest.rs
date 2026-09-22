@@ -181,43 +181,6 @@ impl IngestHandle {
         });
     }
 
-    /// Test-only helper: insert `node` into the overlay and record
-    /// `node.id` under the workspace-relative `key` in `overlay_paths`
-    /// — the same bookkeeping `process_change` does when LSP
-    /// produces real symbols.
-    pub fn overlay_paths_test_insert(&self, key: String, node: GraphNode) {
-        self.overlay_paths
-            .lock()
-            .entry(key)
-            .or_default()
-            .push(node.id.clone());
-        self.overlay.insert_node(node);
-    }
-
-    /// Test-only helper: read the current `overlay_paths` snapshot.
-    pub fn overlay_paths_test_keys(&self) -> Vec<String> {
-        self.overlay_paths.lock().keys().cloned().collect()
-    }
-
-    /// Record that this server's watcher (or any other overlay writer
-    /// outside `process_change`) inserted a node at workspace-relative
-    /// `key` with the given `node_id`.
-    pub fn overlay_paths_record_insert(&self, key: String, node_id: String) {
-        self.overlay_paths
-            .lock()
-            .entry(key)
-            .or_default()
-            .push(node_id);
-    }
-
-    /// Replace the bookkeeping entry for `key` with a fresh list of
-    /// `node_ids`. Used when a re-saved file should drop the previous
-    /// version's overlay entries from the same path before inserting
-    /// the new ones.
-    pub fn overlay_paths_replace(&self, key: String, node_ids: Vec<String>) {
-        self.overlay_paths.lock().insert(key, node_ids);
-    }
-
     pub async fn shutdown(&self) {
         tracing::info!("Shutting down Lain server...");
         self.lsp_pool.shutdown_all().await;

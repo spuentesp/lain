@@ -320,10 +320,6 @@ impl LainServer {
         });
     }
 
-    pub fn overlay_paths_test_insert(&self, key: String, node: crate::server::schema::GraphNode) {
-        self.ingest.overlay_paths_test_insert(key, node);
-    }
-
     pub async fn add_repo(
         &self,
         repo: &RepoConfig,
