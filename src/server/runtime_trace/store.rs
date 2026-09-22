@@ -179,15 +179,32 @@ impl RuntimeTraceStore {
 
         // Capacity guard: if we exceeded max_edges after the insert,
         // drop the oldest entries by `last_seen_unix`.
+        //
+        // Implementation: a min-heap of size `overflow` keeps the
+        // `overflow` oldest keys seen so far. Push every (key,
+        // last_seen_unix) and pop the heap back down to `overflow`
+        // each time it grows past the limit — once we've scanned
+        // the whole map, the heap holds exactly the `overflow`
+        // oldest keys. Cost: O(N log overflow) instead of the
+        // previous O(N log N) full sort, and we clone only the
+        // `overflow` oldest keys rather than every key.
+        //
+        // The review also suggested a secondary `BTreeMap<i64,
+        // Vec<key>>` ordered by timestamp; that's the right long-
+        // term fix but requires keeping both indices in lock-step.
+        // The heap approach is a smaller, surgical improvement.
         if guard.edges.len() > self.config.max_edges {
+            use std::cmp::Reverse;
             let overflow = guard.edges.len() - self.config.max_edges;
-            let mut by_age: Vec<_> = guard
-                .edges
-                .iter()
-                .map(|(k, v)| (k.clone(), v.last_seen_unix))
-                .collect();
-            by_age.sort_by_key(|(_, t)| *t);
-            for (k, _) in by_age.into_iter().take(overflow) {
+            let mut oldest: std::collections::BinaryHeap<(Reverse<i64>, (String, String, String))> =
+                std::collections::BinaryHeap::with_capacity(overflow + 1);
+            for (k, v) in guard.edges.iter() {
+                oldest.push((Reverse(v.last_seen_unix), k.clone()));
+                if oldest.len() > overflow {
+                    oldest.pop();
+                }
+            }
+            for (_, k) in oldest {
                 guard.edges.remove(&k);
             }
         }
