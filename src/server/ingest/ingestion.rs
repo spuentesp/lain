@@ -398,6 +398,10 @@ impl LainServer {
             snapshot.files_failed = 0;
         });
 
+        // B4 — one fresh LSP response cache per indexing pass.
+        // Shared (Arc-cloned) by every chunk in this batch; drops
+        // at the end of the `scan_file_batch` JoinSet drain below.
+        let lsp_cache = std::sync::Arc::new(crate::server::ingest::scan::LspScanCache::default());
         let mut set = tokio::task::JoinSet::new();
         for chunk in file_chunks {
             // AGENT_UX_ROADMAP.md M4 follow-up: cancel between batches.
@@ -417,6 +421,9 @@ impl LainServer {
             // `self`'s lifetime.
             let namespace = *self.ingest().id_namespace();
             let cancel_for_spawn = cancel.clone();
+            // B4 — Arc-clone the per-scan LSP cache into the task so
+            // every chunk shares the same cache instance.
+            let lsp_cache_for_task = std::sync::Arc::clone(&lsp_cache);
 
             set.spawn(async move {
                 scan_file_batch(
@@ -428,6 +435,7 @@ impl LainServer {
                     commit_hash,
                     &namespace,
                     cancel_for_spawn,
+                    Some(&*lsp_cache_for_task),
                 )
                 .await
             });
@@ -1146,7 +1154,26 @@ impl LainServer {
         let key = graph_path(&self.ingest().config().workspace, path);
         if !path.is_file() {
             self.remove_owned_overlay_path(&key);
+            // The file is gone; drop its hash entry so a future
+            // re-creation starts with a clean cache.
+            self.ingest().file_content_hashes().lock().remove(path);
             return Ok(());
+        }
+        // B3 — short-circuit no-op editor saves. The watcher fires on
+        // every modify event (including metadata-only writes and
+        // editor "save" that doesn't change bytes); the LSP round
+        // trip below is the expensive part. blake3 is already a
+        // project dependency. A hit on the cache means the file's
+        // bytes are unchanged and there's nothing to re-index.
+        if let Ok(bytes) = std::fs::read(path) {
+            let hash = blake3::hash(&bytes);
+            let mut hashes = self.ingest().file_content_hashes().lock();
+            if hashes.get(path) == Some(hash.as_bytes()) {
+                // Hash unchanged — drop the read lock and skip.
+                drop(hashes);
+                return Ok(());
+            }
+            hashes.insert(path.to_path_buf(), *hash.as_bytes());
         }
         // Try the LSP path first. With rust-analyzer unavailable (CI's
         // default for this test env), the LSP request errors out —
@@ -1549,6 +1576,12 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
                 commit_hash,
                 &namespace,
                 cancel_for_spawn,
+                // Federation path: cache is `None`. The federation
+                // re-indexes one repo at a time, and its scan
+                // batch sizes are smaller; the dedup win is the
+                // single-workspace batch. Wiring the cache here is
+                // a future-PR concern.
+                None,
             )
             .await
         });

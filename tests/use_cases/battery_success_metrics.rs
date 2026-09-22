@@ -293,7 +293,12 @@ fn find_dead_code_actually_lists_dead_symbols() {
         &overlay,
         None,
         &lain::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
-        &std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),
+        &std::sync::Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(
+                lain::server::tuning::TuningConfig::default().embedding_cache_capacity,
+            )
+            .expect("default capacity > 0"),
+        ))),
     );
     let text = result.expect("find_dead_code must succeed on a known fixture");
     // Success metric: response names the truly dead symbols.

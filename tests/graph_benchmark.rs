@@ -12,16 +12,19 @@ use lain::nlp::NlpEmbedder;
 use lain::query::executor::Executor;
 use lain::query::spec::*;
 use lain::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
+use lain::server::tuning::TuningConfig;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-type EmbeddingCache = Arc<Mutex<HashMap<String, Vec<f32>>>>;
+type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
 
 fn make_test_executor_params() -> (NlpEmbedder, EmbeddingCache) {
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
     (embedder, cache)
 }
 

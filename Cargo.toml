@@ -102,6 +102,10 @@ dashmap = "6.0"
 rayon = "1.10"
 async-recursion = "1.1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# Bounded LRU cache for the embedding hot path (B1). Pure data-structure
+# crate, no I/O or network transitive deps — same shape as `dashmap`
+# above, which is already vendored-class common in this repo.
+lru = "0.12"
 
 # Tree-sitter static analysis
 tree-sitter = "0.25"

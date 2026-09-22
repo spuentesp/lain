@@ -10,7 +10,7 @@ use crate::server::tools::utils::{
 };
 use crate::tuning::TuningConfig;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
@@ -20,7 +20,7 @@ pub fn semantic_search(
     overlay: &VolatileOverlay,
     embedder: &NlpEmbedder,
     cross_encoder: &CrossEncoder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     tuning: &TuningConfig,
     query: &str,
     limit: usize,
@@ -114,8 +114,8 @@ pub fn semantic_search(
             // queries can reuse it. Before this fix, only persisted
             // embeddings were cached, and every cold query paid the
             // full embed cost (~22s for 500 nodes on this corpus).
-            if !cache.contains_key(&node.id) {
-                cache.insert(node.id.clone(), emb.clone());
+            if !cache.contains(&node.id) {
+                cache.put(node.id.clone(), emb.clone());
             }
             // Persist volatile embeddings back to graph.bin so the next
             // process start doesn't have to re-embed the same nodes.
