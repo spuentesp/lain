@@ -299,7 +299,7 @@ impl LainServer {
             let max_per_mux = if pool_size == 0 {
                 0
             } else {
-                (n_exts + pool_size - 1) / pool_size
+                n_exts.div_ceil(pool_size)
             };
             if max_per_mux > 1 {
                 info!(
