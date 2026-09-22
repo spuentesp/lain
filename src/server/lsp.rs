@@ -963,6 +963,13 @@ impl LspMultiplexer {
         if parts.len() > 1 {
             cmd.args(&parts[1..]);
         }
+        // `kill_on_drop(true)` ensures that when `tokio::time::timeout`
+        // drops the inner future on expiry (line 974), the spawned
+        // child is actually signalled to terminate — without this,
+        // an interactive install command blocked on stdin would
+        // outlive the timeout and the server's wait, leaking the
+        // process for the rest of the session lifetime.
+        cmd.kill_on_drop(true);
 
         // Bound the install subprocess with LSP_INSTALL_TIMEOUT.
         // Without this, an interactive prompt or a slow-network hang
@@ -1424,21 +1431,20 @@ use tokio::sync::Mutex as AsyncMutex;
 /// Pool of LspMultiplexer instances for parallel LSP communication
 pub struct LspPool {
     multiplexers: Vec<Arc<AsyncMutex<LspMultiplexer>>>,
-    next: AtomicUsize,
+    /// Round-robin counter. Wrapped in `Arc` so every `Clone` of the
+    /// pool shares the same counter — a freshly-zeroed per-clone counter
+    /// would split the multiplexer pool across clones and starve some
+    /// multiplexers. The pool is intended to be cloned for read-only
+    /// sharing, so sharing the counter is correct: it's a stateless
+    /// index, not per-clone state.
+    next: Arc<AtomicUsize>,
 }
 
 impl Clone for LspPool {
     fn clone(&self) -> Self {
-        // `AtomicUsize` isn't `Clone` so we can't `#[derive(Clone)]`, but
-        // every clone should share the round-robin counter (a freshly
-        // zeroed counter would split the multiplexer pool across clones
-        // and starve some multiplexers). The pool is intended to be cloned
-        // for read-only sharing, so pointing at the original counter is
-        // correct: it's a stateless index, not a per-clone state.
-        let next = AtomicUsize::new(self.next.load(Ordering::Relaxed));
         LspPool {
             multiplexers: self.multiplexers.clone(),
-            next,
+            next: Arc::clone(&self.next),
         }
     }
 }
@@ -1457,7 +1463,7 @@ impl LspPool {
         }
         Ok(Self {
             multiplexers,
-            next: AtomicUsize::new(0),
+            next: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -1509,6 +1515,103 @@ impl LspPool {
         for m in &self.multiplexers {
             m.lock().await.shutdown().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_clone_tests {
+    //! `LspPool::Clone` must share the round-robin counter across clones.
+    //!
+    //! Pre-fix, the `Clone` impl called
+    //! `AtomicUsize::new(self.next.load(Ordering::Relaxed))`, which
+    //! created a brand-new atomic with the current value. Two clones of
+    //! the same pool rotated independently — calls to `next()` on each
+    //! clone handed back the same multiplexer index, starving the other
+    //! half of the pool when the clones ran concurrently.
+    //!
+    //! Post-fix, the counter is wrapped in `Arc<AtomicUsize>` so every
+    //! clone shares the same counter. This test pins that contract.
+
+    use super::LspPool;
+    use std::sync::Arc;
+
+    /// Two clones of a pool with two multiplexers must distribute
+    /// four `next()` calls across both multiplexers (not hand back
+    /// the same multiplexer twice on the same clone).
+    #[test]
+    fn clones_share_the_round_robin_counter() {
+        let make_mux = || {
+            Arc::new(tokio::sync::Mutex::new(
+                crate::server::lsp::LspMultiplexer::new(
+                    std::path::Path::new("."),
+                    &crate::server::tuning::RuntimeConfig::default(),
+                )
+                .unwrap(),
+            ))
+        };
+        let pool = LspPool {
+            multiplexers: vec![make_mux(), make_mux()],
+            next: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+
+        let clone_a = pool.clone();
+        let clone_b = pool.clone();
+
+        // Four interleaved calls across two clones must visit at
+        // least two distinct multiplexer instances. Pre-fix this
+        // test would see only one pointer (whichever the clone's
+        // local counter happened to land on); post-fix the shared
+        // counter ensures both are visited.
+        let a1 = clone_a.next();
+        let b1 = clone_b.next();
+        let a2 = clone_a.next();
+        let b2 = clone_b.next();
+        let mut ids = std::collections::HashSet::new();
+        for arc in [&a1, &b1, &a2, &b2] {
+            ids.insert(Arc::as_ptr(arc) as usize);
+        }
+        assert!(
+            ids.len() >= 2,
+            "two clones of a 2-multiplexer pool must visit at least 2 distinct multiplexers; got {}",
+            ids.len()
+        );
+    }
+
+    /// Three clones of a 3-multiplexer pool must each visit all three
+    /// multiplexers over 9 calls (3 calls × 3 clones) — the shared
+    /// counter cycles through every multiplexer before any clone sees
+    /// a repeat. Pre-fix each clone had its own counter, so each
+    /// clone visited the same multiplexer three times in a row.
+    #[test]
+    fn three_clones_share_a_single_round_robin() {
+        let make_mux = || {
+            Arc::new(tokio::sync::Mutex::new(
+                crate::server::lsp::LspMultiplexer::new(
+                    std::path::Path::new("."),
+                    &crate::server::tuning::RuntimeConfig::default(),
+                )
+                .unwrap(),
+            ))
+        };
+        let pool = LspPool {
+            multiplexers: vec![make_mux(), make_mux(), make_mux()],
+            next: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let clones: Vec<_> = (0..3).map(|_| pool.clone()).collect();
+        let mut hits: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for _ in 0..9 {
+            let clone = &clones[0];
+            hits.insert(Arc::as_ptr(&clone.next()) as usize);
+        }
+        // The shared counter visits 3 multiplexers in 9 calls; the
+        // 4th-9th calls cycle back to the same three. We expect 3
+        // distinct pointers.
+        assert_eq!(
+            hits.len(),
+            3,
+            "shared counter over 3 multiplexers × 9 calls must visit 3 distinct multiplexers; got {}",
+            hits.len()
+        );
     }
 }
 

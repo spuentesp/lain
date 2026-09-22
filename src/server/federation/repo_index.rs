@@ -243,9 +243,6 @@ impl RepoIndex {
         if let Some(task) = self.watcher_task.lock().take() {
             task.abort();
         }
-        if let Some(task) = self.watcher_task.lock().take() {
-            task.abort();
-        }
         let overlay = self.server_overlay.lock().clone();
         let ids: Vec<_> = self
             .overlay_paths
