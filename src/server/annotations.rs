@@ -952,6 +952,44 @@ mod tests {
     }
 
     #[test]
+    fn add_rejects_oversized_refs_array() {
+        // Without `MAX_REFS`, a peer could ship an annotation with
+        // millions of `AnnotationTarget` entries; the whole array is
+        // serialized into the SQLite row's `refs_json` column and
+        // re-listed on every `list_annotations` call.
+        let (_tmp, store) = open_store();
+
+        // MAX_REFS + 1 entries — over the cap.
+        let too_many: Vec<AnnotationTarget> = (0..=MAX_REFS)
+            .map(|i| AnnotationTarget::Symbol { symbol: format!("s{i}") })
+            .collect();
+        let over = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol { symbol: "fn a".into() },
+            kind: AnnotationKind::Note,
+            body: "ok".into(),
+            author: AgentId("alice".into()),
+            refs: too_many,
+        }
+        .into_annotation();
+        let err = store.add(&over).unwrap_err();
+        assert!(format!("{err}").contains("refs"), "error names the field");
+
+        // The boundary itself is allowed.
+        let exactly_max: Vec<AnnotationTarget> = (0..MAX_REFS)
+            .map(|i| AnnotationTarget::Symbol { symbol: format!("s{i}") })
+            .collect();
+        let at = AddAnnotationInputs {
+            target: AnnotationTarget::Symbol { symbol: "fn a".into() },
+            kind: AnnotationKind::Note,
+            body: "ok".into(),
+            author: AgentId("alice".into()),
+            refs: exactly_max,
+        }
+        .into_annotation();
+        store.add(&at).unwrap();
+    }
+
+    #[test]
     fn staleness_marks_targets_that_no_longer_exist() {
         let (_tmp, store) = open_store();
         let a = AddAnnotationInputs {
