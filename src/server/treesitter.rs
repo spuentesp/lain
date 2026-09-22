@@ -5,12 +5,62 @@
 
 use crate::schema::{EdgeType, NodeType};
 use parking_lot::Mutex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
 thread_local! {
     static PARSER: Mutex<Parser> = Mutex::new(Parser::new());
+}
+
+/// Process-wide cache of compiled tree-sitter queries.
+///
+/// `tree_sitter::Query::new` is non-trivial — it walks the AST pattern and
+/// allocates per-pattern state. With 9 call sites × N files per indexing pass,
+/// that was 5 000-25 000 query compilations per language. Compiled `Query`
+/// values are `Send + Sync` after construction (`QueryCursor` is the
+/// per-thread cursor), so a single shared instance is safe to share across
+/// threads. Keyed by `(language_name, pattern)`; both are `&'static str`
+/// literals that already exist as module-level `const`s.
+///
+/// A miss compiles the query and stores the `Arc`; a hit returns a clone.
+/// The first caller pays the compile cost; every subsequent caller gets the
+/// shared query. The cache is read-only after warmup, so the
+/// `parking_lot::Mutex` is uncontended.
+type CompiledQueryMap = HashMap<(&'static str, &'static str), Arc<Query>>;
+
+static COMPILED_QUERIES: OnceLock<Mutex<CompiledQueryMap>> = OnceLock::new();
+
+/// Compile (or fetch from cache) a tree-sitter query for `language` /
+/// `pattern`. Returns `None` on the same compilation failures the
+/// pre-cache `if let Ok(query) = Query::new(...)` arms fell through on.
+fn compiled_query(language: &'static str, pattern: &'static str) -> Option<Arc<Query>> {
+    let cache = COMPILED_QUERIES.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let guard = cache.lock();
+        if let Some(q) = guard.get(&(language, pattern)) {
+            return Some(Arc::clone(q));
+        }
+    }
+    let lang = match language {
+        "rust" => tree_sitter_rust::language(),
+        "python" => tree_sitter_python::language(),
+        "javascript" => tree_sitter_javascript::language(),
+        _ => return None,
+    };
+    let Ok(q) = Query::new(&lang, pattern) else {
+        return None;
+    };
+    let arc = Arc::new(q);
+    let mut guard = cache.lock();
+    // Re-check under the write lock in case another thread raced ahead
+    // and inserted the same key — keep the first compile, share the Arc.
+    if let Some(existing) = guard.get(&(language, pattern)) {
+        return Some(Arc::clone(existing));
+    }
+    guard.insert((language, pattern), Arc::clone(&arc));
+    Some(arc)
 }
 
 /// A raw reference found in source code, not yet resolved to graph node IDs.
@@ -204,6 +254,7 @@ pub fn extract_refs_with_locals(
         "rs" => extract(
             source,
             tree_sitter_rust::language(),
+            "rust",
             &[RUST_CALLS_1, RUST_CALLS_2, RUST_CALLS_3],
             &[RUST_TYPES],
             local_definitions,
@@ -211,6 +262,7 @@ pub fn extract_refs_with_locals(
         "py" => extract(
             source,
             tree_sitter_python::language(),
+            "python",
             &[PY_CALLS_1, PY_CALLS_2],
             &[PY_TYPES],
             local_definitions,
@@ -218,6 +270,7 @@ pub fn extract_refs_with_locals(
         "js" | "jsx" | "ts" | "tsx" => extract(
             source,
             tree_sitter_javascript::language(),
+            "javascript",
             &[JS_CALLS_1, JS_CALLS_2, JS_NEW],
             &[JS_TYPES],
             local_definitions,
@@ -254,8 +307,9 @@ const JS_TYPES: &str = "(identifier) @name";
 fn extract(
     source: &str,
     language: Language,
-    call_patterns: &[&str],
-    type_patterns: &[&str],
+    language_name: &'static str,
+    call_patterns: &[&'static str],
+    type_patterns: &[&'static str],
     local_definitions: &HashSet<String>,
 ) -> Vec<StaticRef> {
     PARSER.with(|parser| {
@@ -272,7 +326,7 @@ fn extract(
 
         // Calls
         for pattern in call_patterns {
-            if let Ok(query) = Query::new(&language, pattern) {
+            if let Some(query) = compiled_query(language_name, pattern) {
                 let mut cursor = QueryCursor::new();
                 for m in cursor.matches(&query, tree.root_node(), src_bytes) {
                     for cap in m.captures {
@@ -292,7 +346,7 @@ fn extract(
 
         // Type usages
         for pattern in type_patterns {
-            if let Ok(query) = Query::new(&language, pattern) {
+            if let Some(query) = compiled_query(language_name, pattern) {
                 let mut cursor = QueryCursor::new();
                 for m in cursor.matches(&query, tree.root_node(), src_bytes) {
                     for cap in m.captures {
@@ -362,10 +416,10 @@ pub struct StringLiteral {
 pub fn extract_strings(path: &Path, source: &str) -> Vec<StringLiteral> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
-        "rs" => extract_string_literals(source, tree_sitter_rust::language()),
-        "py" => extract_string_literals(source, tree_sitter_python::language()),
+        "rs" => extract_string_literals(source, tree_sitter_rust::language(), "rust"),
+        "py" => extract_string_literals(source, tree_sitter_python::language(), "python"),
         "js" | "jsx" | "ts" | "tsx" => {
-            extract_string_literals(source, tree_sitter_javascript::language())
+            extract_string_literals(source, tree_sitter_javascript::language(), "javascript")
         }
         _ => vec![],
     }
@@ -429,7 +483,7 @@ fn extract_definitions_rust(source: &str) -> Vec<SymbolDef> {
         // Run queries that match definitions at any depth (impl methods included).
         // The matched node's start/end rows give the line range; the `name`
         // field gives the identifier child.
-        let patterns: &[(&str, NodeType)] = &[
+        let patterns: &[(&'static str, NodeType)] = &[
             ("(function_item) @d", NodeType::Function),
             ("(struct_item) @d", NodeType::Struct),
             ("(trait_item) @d", NodeType::Trait),
@@ -437,7 +491,7 @@ fn extract_definitions_rust(source: &str) -> Vec<SymbolDef> {
         ];
 
         for (pattern, kind) in patterns {
-            let Ok(query) = Query::new(&tree_sitter_rust::language(), pattern) else {
+            let Some(query) = compiled_query("rust", pattern) else {
                 continue;
             };
             let mut cursor = QueryCursor::new();
@@ -708,7 +762,11 @@ fn js_class_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
 }
 
 /// Core string literal extractor using tree-sitter
-fn extract_string_literals(source: &str, language: Language) -> Vec<StringLiteral> {
+fn extract_string_literals(
+    source: &str,
+    language: Language,
+    language_name: &'static str,
+) -> Vec<StringLiteral> {
     PARSER.with(|parser| {
         let mut parser = parser.lock();
         if parser.set_language(&language).is_err() {
@@ -723,7 +781,7 @@ fn extract_string_literals(source: &str, language: Language) -> Vec<StringLitera
 
         // Query for string literals
         // Note: string syntax varies by language, but "(string)" covers most cases
-        if let Ok(query) = Query::new(&language, "(string) @str") {
+        if let Some(query) = compiled_query(language_name, "(string) @str") {
             let mut cursor = QueryCursor::new();
             for m in cursor.matches(&query, tree.root_node(), src_bytes) {
                 for cap in m.captures {
@@ -962,6 +1020,59 @@ fn main() {
         assert!(
             calls.contains(&"process"),
             "should find process even if in locals"
+        );
+    }
+
+    /// A2 — compiled tree-sitter queries must be cached and shared across
+    /// callers. Two `compiled_query` calls for the same (language, pattern)
+    /// pair must return `Arc`s pointing at the same allocation. Without
+    /// the cache, every per-file call would compile the query fresh.
+    #[test]
+    fn compiled_query_returns_the_same_arc_across_calls() {
+        let first = compiled_query("rust", RUST_CALLS_1).expect("first call compiles");
+        let second = compiled_query("rust", RUST_CALLS_1).expect("second call hits cache");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second call must return the same Arc as the first"
+        );
+
+        // A different pattern is a different cache entry.
+        let different = compiled_query("rust", RUST_TYPES).expect("types compiles");
+        assert!(
+            !Arc::ptr_eq(&first, &different),
+            "different pattern must not collide on the same Arc"
+        );
+
+        // A different language is a different cache entry.
+        let py = compiled_query("python", PY_CALLS_1).expect("python compiles");
+        assert!(
+            !Arc::ptr_eq(&first, &py),
+            "different language must not collide on the same Arc"
+        );
+
+        // The cache holds onto the queries for the lifetime of the process
+        // (it's a `OnceLock<Mutex<HashMap<…>>>`), so a third call still
+        // returns the original Arc.
+        let third = compiled_query("rust", RUST_CALLS_1).expect("third call hits cache");
+        assert!(
+            Arc::ptr_eq(&first, &third),
+            "third call must still hit the cache"
+        );
+    }
+
+    /// A2 — invalid patterns fall through to `None` rather than poisoning
+    /// the cache, so a subsequent well-formed query still succeeds.
+    #[test]
+    fn compiled_query_returns_none_for_invalid_pattern() {
+        // An unbalanced parenthesis is not a valid tree-sitter pattern.
+        assert!(
+            compiled_query("rust", "(unbalanced").is_none(),
+            "invalid pattern must return None, not panic"
+        );
+        // The cache must still serve a well-formed query afterwards.
+        assert!(
+            compiled_query("rust", RUST_CALLS_1).is_some(),
+            "cache must still serve a well-formed pattern after a failed one"
         );
     }
 }

@@ -101,6 +101,15 @@ pub struct IngestionConfig {
     pub nlp_batch_size: usize,
     /// NLP background: max nodes embedded per interval pass (backpressure).
     pub nlp_budget_per_pass: usize,
+    /// NLP: size of each ONNX forward pass. `embed_batch` amortises the
+    /// per-call matmul/attention overhead across N inputs; the
+    /// documented sweet spot in `nlp.rs:259` is 16 (the same shape
+    /// that took a 5 s sequential embed of 200 nodes down to ~700 ms
+    /// with batching). Independent of `nlp_batch_size` (which is the
+    /// queue chunk size, not the model batch): a chunk of 50 nodes
+    /// with batch=16 is split into one 16-batch + one 16-batch + one
+    /// 16-batch + one 2-batch forward pass.
+    pub nlp_embed_batch_size: usize,
     /// NLP: cap on intra-op threads per embedding call. 0 = auto-detect
     /// (uses min(system cores, 4) — 4 is enough for bge-small/bge-base
     /// inference; more threads doesn't help and burns CPU).
@@ -162,6 +171,7 @@ impl Default for IngestionConfig {
             nlp_prewarm_count: 20,
             nlp_batch_size: 50,
             nlp_budget_per_pass: 20,
+            nlp_embed_batch_size: 16,
             nlp_max_threads: 0, // 0 = auto-detect (min(cores, 4))
             lsp_prewarm_timeout_secs: 30,
             lsp_prewarm_max_files: 50,
@@ -430,6 +440,7 @@ mod knob_reachability_tests {
             ("lsp_symbol_poll_interval_ms", "tuning.rs"),
             ("lsp_pool_size", "tuning.rs"),
             ("nlp_max_threads", "tuning.rs"),
+            ("nlp_embed_batch_size", "tuning.rs"),
             ("cochange_commit_window", "tuning.rs"),
             ("cochange_min_pair_count", "tuning.rs"),
             ("cochange_max_commit_files", "tuning.rs"),

@@ -80,33 +80,36 @@ pub fn resolve_call_edges(
     resolver: Option<&dyn CrossRepoResolver>,
     source_repo: Option<&RepoId>,
 ) -> Vec<GraphEdge> {
-    let mut edges = Vec::with_capacity(refs.len());
-    for (source_id, ref_loc) in refs {
-        let path_str = graph_path(workspace, &ref_loc.path);
-        let mut resolved_target: Option<String> = None;
-        if let Some(target) = db.get_node_at_location(&path_str, ref_loc.line) {
-            if target.id != *source_id {
-                resolved_target = Some(target.id);
-            }
-        } else if let (Some(resolver), Some(src)) = (resolver, source_repo) {
-            if let Some(gid) =
-                resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line))
-            {
-                let gid_str = gid.as_str().to_string();
-                if gid_str != *source_id {
-                    resolved_target = Some(gid_str);
+    use rayon::prelude::*;
+
+    // A5 — each ref is independent: it does a `get_node_at_location`
+    // (short `path_index` lookup) and possibly a cross-repo resolver
+    // call. Parallelise across refs; the graph read lock is held only
+    // for the brief per-ref lookup.
+    refs.par_iter()
+        .filter_map(|(source_id, ref_loc)| {
+            let path_str = graph_path(workspace, &ref_loc.path);
+            if let Some(target) = db.get_node_at_location(&path_str, ref_loc.line) {
+                if target.id != *source_id {
+                    return Some(GraphEdge::new(
+                        EdgeType::Calls,
+                        source_id.clone(),
+                        target.id,
+                    ));
+                }
+            } else if let (Some(resolver), Some(src)) = (resolver, source_repo) {
+                if let Some(gid) =
+                    resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line))
+                {
+                    let gid_str = gid.as_str().to_string();
+                    if gid_str != *source_id {
+                        return Some(GraphEdge::new(EdgeType::Calls, source_id.clone(), gid_str));
+                    }
                 }
             }
-        }
-        if let Some(target_id) = resolved_target {
-            edges.push(GraphEdge::new(
-                EdgeType::Calls,
-                source_id.clone(),
-                target_id,
-            ));
-        }
-    }
-    edges
+            None
+        })
+        .collect()
 }
 
 /// The language family a source path belongs to, for the purpose of
@@ -161,7 +164,7 @@ fn may_link_across(from: &str, to: &str) -> bool {
 /// nodes by name. Self-edges are dropped; `Uses` edges are only kept
 /// when the target is a type-level declaration
 /// (see [`is_type_level_target`]). Each (source, target) pair is
-/// emitted at most once via the local `seen` set.
+/// emitted at most once via a final dedup pass.
 ///
 /// `refs` already carries the source file path + line for each entry;
 /// no workspace path is needed here.
@@ -171,34 +174,37 @@ pub fn resolve_static_edges(
     resolver: Option<&dyn CrossRepoResolver>,
     source_repo: Option<&RepoId>,
 ) -> Vec<GraphEdge> {
-    // (id, type, path). The path is what lets an ambiguous name be
-    // resolved to the definition in the calling file.
-    let mut name_index: HashMap<String, Vec<(String, crate::schema::NodeType, String)>> =
-        HashMap::new();
-    for node in db.get_all_nodes() {
-        name_index.entry(node.name.clone()).or_default().push((
-            node.id.clone(),
-            node.node_type.clone(),
-            node.path.clone(),
-        ));
-    }
+    use rayon::prelude::*;
 
-    let mut edges: Vec<GraphEdge> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    for sr in refs {
-        let Some(source_node) = db.get_node_at_location(&sr.file_path, sr.source_line) else {
-            continue;
-        };
-        let Some(candidates) = name_index.get(sr.target_name.as_str()) else {
-            if let (Some(resolver), Some(src)) = (resolver, source_repo) {
-                if let Some(gid) =
-                    resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None)
-                {
-                    let gid_str = gid.as_str().to_string();
-                    if gid_str != source_node.id {
-                        let key = (source_node.id.clone(), gid_str.clone());
-                        if seen.insert(key) {
-                            edges.push(GraphEdge::new(
+    // A5 + A3 — the old implementation cloned every node in the graph
+    // into a `HashMap<name, Vec<(id, type, path)>>` here, on every
+    // indexing pass. `db.find_indices_by_name(name)` now does the
+    // same lookup in O(matches) via the secondary `name_index`, and
+    // the per-ref work below resolves the candidate `NodeIndex`s into
+    // `(id, type, path)` triples lazily, only for the names that
+    // actually appear in the refs.
+    //
+    // The outer ref loop is independent per iteration (each ref looks
+    // up its own source node and its own target candidates), so it
+    // parallelises cleanly across refs. The graph read lock is held
+    // only for the brief `get_node_at_location` / per-candidate
+    // `node_weight` clone — bounded O(µs) per ref.
+    let raw: Vec<GraphEdge> = refs
+        .par_iter()
+        .filter_map(|sr| {
+            let Some(source_node) = db.get_node_at_location(&sr.file_path, sr.source_line) else {
+                return None;
+            };
+            let indices = db.find_indices_by_name(&sr.target_name);
+            if indices.is_empty() {
+                // No local candidate; try the cross-repo resolver.
+                if let (Some(resolver), Some(src)) = (resolver, source_repo) {
+                    if let Some(gid) =
+                        resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None)
+                    {
+                        let gid_str = gid.as_str().to_string();
+                        if gid_str != source_node.id {
+                            return Some(GraphEdge::new(
                                 sr.edge_type.clone(),
                                 source_node.id.clone(),
                                 gid_str,
@@ -206,52 +212,75 @@ pub fn resolve_static_edges(
                         }
                     }
                 }
+                return None;
             }
-            continue;
-        };
-        // A name that several definitions share cannot be resolved by
-        // name alone. Emitting an edge to *every* candidate — which is
-        // what this did — manufactures callers wholesale: with eleven
-        // `fn parse` definitions, `Args::parse()` in main.rs (clap's
-        // derive) and `n.parse()` on a `&str` (stdlib) each produced
-        // eleven edges, and `get_call_sites parse` answered with 61
-        // callers, the same list for every one of the eleven nodes.
-        //
-        // Prefer a definition in the calling file, which is the case
-        // that is actually decidable. Otherwise emit nothing: a missing
-        // edge is a gap, N wrong edges are a lie, and the lie also
-        // inflates `find_anchors` and `get_blast_radius`.
-        // Drop candidates written in another language before counting.
-        // A cross-language hit is never a real call here: these refs come
-        // from a single-language tree-sitter parse of one file.
-        let candidates: Vec<&(String, crate::schema::NodeType, String)> = candidates
-            .iter()
-            .filter(|(_, _, path)| may_link_across(&sr.file_path, path))
-            .collect();
-
-        let resolved: Vec<&(String, crate::schema::NodeType, String)> = if candidates.len() == 1 {
-            candidates
-        } else {
-            candidates
+            // A name that several definitions share cannot be resolved
+            // by name alone. Emitting an edge to *every* candidate —
+            // which is what the old code did — manufactures callers
+            // wholesale: with eleven `fn parse` definitions,
+            // `Args::parse()` in main.rs (clap's derive) and
+            // `n.parse()` on a `&str` (stdlib) each produced eleven
+            // edges, and `get_call_sites parse` answered with 61
+            // callers, the same list for every one of the eleven nodes.
+            //
+            // Prefer a definition in the calling file, which is the case
+            // that is actually decidable. Otherwise emit nothing: a
+            // missing edge is a gap, N wrong edges are a lie, and the
+            // lie also inflates `find_anchors` and `get_blast_radius`.
+            //
+            // Drop candidates written in another language before
+            // counting. A cross-language hit is never a real call here:
+            // these refs come from a single-language tree-sitter parse
+            // of one file.
+            let graph = db.graph_ref_for_read();
+            let candidates: Vec<(String, crate::schema::NodeType, String)> = indices
                 .into_iter()
-                .filter(|(_, _, path)| path == &sr.file_path)
-                .collect()
-        };
-        for (target_id, target_type, _) in resolved {
-            if *target_id == source_node.id {
-                continue;
-            }
-            if sr.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
-                continue;
-            }
-            let key = (source_node.id.clone(), (*target_id).to_string());
-            if seen.insert(key) {
-                edges.push(GraphEdge::new(
-                    sr.edge_type.clone(),
-                    source_node.id.clone(),
-                    (*target_id).to_string(),
-                ));
-            }
+                .filter_map(|idx| graph.node_weight(idx).cloned())
+                .filter(|n| may_link_across(&sr.file_path, &n.path))
+                .map(|n| (n.id, n.node_type, n.path))
+                .collect();
+
+            let resolved: Vec<(String, crate::schema::NodeType, String)> = if candidates.len() == 1
+            {
+                candidates
+            } else {
+                candidates
+                    .into_iter()
+                    .filter(|(_, _, path)| path == &sr.file_path)
+                    .collect()
+            };
+
+            resolved
+                .into_iter()
+                .find_map(|(target_id, target_type, _)| {
+                    if target_id == source_node.id {
+                        return None;
+                    }
+                    if sr.edge_type == EdgeType::Uses && !is_type_level_target(&target_type) {
+                        return None;
+                    }
+                    Some(GraphEdge::new(
+                        sr.edge_type.clone(),
+                        source_node.id.clone(),
+                        target_id,
+                    ))
+                })
+        })
+        .collect();
+
+    // Dedup by (source_id, target_id). The old serial code did this
+    // inline via a `seen` HashSet; with par_iter the natural shape is
+    // collect-then-dedup. Two refs can legitimately produce the same
+    // (source, target) pair when the same call site is matched by more
+    // than one tree-sitter pattern (e.g. a scoped identifier that also
+    // matches a call_expression's function field), and the resolve
+    // phase used to coalesce those into a single edge.
+    let mut seen: HashSet<(String, String)> = HashSet::with_capacity(raw.len());
+    let mut edges: Vec<GraphEdge> = Vec::with_capacity(raw.len());
+    for e in raw {
+        let key = (e.source_id.clone(), e.target_id.clone());
+        if seen.insert(key) {
+            edges.push(e);
         }
     }
     edges
@@ -267,6 +296,8 @@ pub fn resolve_pattern_edges(
     refs: &[PatternRef],
     limits: PatternLimits,
 ) -> Vec<GraphEdge> {
+    use rayon::prelude::*;
+
     if refs.is_empty() {
         return Vec::new();
     }
@@ -279,13 +310,30 @@ pub fn resolve_pattern_edges(
     let file_nodes: HashMap<&str, &crate::schema::GraphNode> =
         nodes.iter().map(|n| (n.path.as_str(), n)).collect();
 
-    let mut value_to_files: HashMap<String, Vec<String>> = HashMap::new();
-    for pr in refs {
-        let entry = value_to_files.entry(pr.value.clone()).or_default();
-        if !entry.contains(&pr.file_path) {
-            entry.push(pr.file_path.clone());
-        }
-    }
+    // A5 — the value-clustering pass builds a `HashMap<value, Vec<path>>`
+    // across the full ref set. The merge is associative and commutative,
+    // so it parallelises cleanly: each worker thread builds a
+    // per-chunk map, then we reduce into a single map.
+    let value_to_files: HashMap<String, Vec<String>> = refs
+        .par_iter()
+        .fold(HashMap::<String, Vec<String>>::new, |mut acc, pr| {
+            let entry = acc.entry(pr.value.clone()).or_default();
+            if !entry.contains(&pr.file_path) {
+                entry.push(pr.file_path.clone());
+            }
+            acc
+        })
+        .reduce(HashMap::<String, Vec<String>>::new, |mut a, b| {
+            for (k, v) in b {
+                let entry = a.entry(k).or_default();
+                for path in v {
+                    if !entry.contains(&path) {
+                        entry.push(path);
+                    }
+                }
+            }
+            a
+        });
 
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
     for (value, files) in value_to_files {

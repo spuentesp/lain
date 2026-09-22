@@ -644,6 +644,7 @@ impl LainServer {
         let nlp_prewarm_count = self.ingest().tuning().ingestion.nlp_prewarm_count;
         let nlp_batch_size = self.ingest().tuning().ingestion.nlp_batch_size;
         let nlp_budget_per_pass = self.ingest().tuning().ingestion.nlp_budget_per_pass;
+        let nlp_embed_batch_size = self.ingest().tuning().ingestion.nlp_embed_batch_size;
         // The NLP pass runs detached, so it needs its own copy of the
         // workspace root to resolve workspace-relative node paths.
         let ws_for_nlp = self.ingest().config().workspace.clone();
@@ -671,68 +672,30 @@ impl LainServer {
             let rest: Vec<_> = rest_nodes.iter().map(|(_, n)| n.clone()).collect();
 
             info!("NLP pre-warming {} anchor nodes...", prewarm.len());
-            let mut count = 0;
-            for node in &prewarm {
-                if nlp_cancel.is_cancelled() {
-                    return;
-                }
-                if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
-                    if gn.embedding.is_none() {
-                        let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
-                        // AGENT_UX_ROADMAP.md M4 follow-up: ONNX
-                        // inference is sync CPU work — route it
-                        // through `offthread` so a slow forward
-                        // pass doesn't pin a Tokio worker. The
-                        // per-call cancel boundary also lets a
-                        // shutdown abort an in-flight embed.
-                        let embedder_for_call = embedder_clone.clone();
-                        let text_for_call = text.clone();
-                        let emb_result = offthread(nlp_cancel.clone(), move || {
-                            embedder_for_call.embed(&text_for_call)
-                        })
-                        .await;
-                        let emb = match emb_result {
-                            Ok(e) => e,
-                            Err(LainError::Cancelled) => return,
-                            Err(e) => {
-                                warn!(
-                                    "embedding inference failed for {}: {e}; leaving it \
-                                     unembedded so a later pass retries",
-                                    gn.name
-                                );
-                                continue;
-                            }
-                        };
-                        // Never store a default on serialize failure.
-                        // `unwrap_or_default()` wrote `Some("")`, which
-                        // marks the node as embedded — `is_none()` is
-                        // false, so it is never retried — while
-                        // `executor.rs` fails to parse the empty string
-                        // and skips it. The symbol disappears from
-                        // `semantic_search` permanently and silently.
-                        match serde_json::to_string(&emb) {
-                            Ok(json) => {
-                                gn.embedding = Some(json);
-                                if graph_clone.insert_node(&gn).is_ok() {
-                                    count += 1;
-                                }
-                            }
-                            Err(e) => warn!(
-                                "embedding not serialised for {}: {e}; leaving it \
-                                 unembedded so a later pass retries",
-                                gn.name
-                            ),
-                        }
-                    }
-                }
-            }
+            // A1 — amortise the per-call ONNX overhead across chunks
+            // of `nlp_embed_batch_size` nodes. The previous loop did
+            // one forward pass per node (via `embed` → `embed_batch(&[text])`)
+            // for the full prewarm set; with batching, a 200-node
+            // prewarm is 13 forward passes instead of 200.
+            let count = embed_nodes_batched(
+                &graph_clone,
+                &embedder_clone,
+                &prewarm,
+                nlp_embed_batch_size,
+                &ws_for_nlp,
+                &nlp_cancel,
+            )
+            .await;
             info!(
                 "NLP pre-warm complete ({} embedded). Queuing {} remaining nodes.",
                 count,
                 rest.len()
             );
 
-            // Background lazy enrichment with backpressure
+            // Background lazy enrichment with backpressure. The outer
+            // chunking by `nlp_batch_size` keeps the per-pass node
+            // count bounded; the inner batching by
+            // `nlp_embed_batch_size` keeps ONNX efficient.
             let mut budget = nlp_budget_per_pass;
             for chunk in rest.chunks(nlp_batch_size) {
                 if nlp_cancel.is_cancelled() {
@@ -743,54 +706,15 @@ impl LainServer {
                 }
                 let to_embed: Vec<_> = chunk.iter().take(budget).cloned().collect();
                 let batch_len = to_embed.len();
-                for node in &to_embed {
-                    if nlp_cancel.is_cancelled() {
-                        return;
-                    }
-                    if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
-                        if gn.embedding.is_none() {
-                            let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
-                            // Same offthread routing as the prewarm pass:
-                            // keep ONNX off the async runtime.
-                            let embedder_for_call = embedder_clone.clone();
-                            let text_for_call = text.clone();
-                            let emb_result = offthread(nlp_cancel.clone(), move || {
-                                embedder_for_call.embed(&text_for_call)
-                            })
-                            .await;
-                            let emb = match emb_result {
-                                Ok(e) => e,
-                                Err(LainError::Cancelled) => return,
-                                Err(e) => {
-                                    warn!(
-                                        "embedding inference failed for {}: {e}; \
-                                         leaving it unembedded so a later pass retries",
-                                        gn.name
-                                    );
-                                    continue;
-                                }
-                            };
-                            // Same reasoning as the prewarm pass above:
-                            // a default here poisons the node with an
-                            // unparseable embedding it will never retry.
-                            match serde_json::to_string(&emb) {
-                                Ok(json) => {
-                                    gn.embedding = Some(json);
-                                    // A dropped insert silently costs the
-                                    // node its embedding, which surfaces
-                                    // later as `semantic_search` missing
-                                    // code that is plainly there.
-                                    if let Err(e) = graph_clone.insert_node(&gn) {
-                                        warn!("embedding not stored for {}: {e}", gn.name);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("embedding not serialised for {}: {e}", gn.name)
-                                }
-                            }
-                        }
-                    }
-                }
+                embed_nodes_batched(
+                    &graph_clone,
+                    &embedder_clone,
+                    &to_embed,
+                    nlp_embed_batch_size,
+                    &ws_for_nlp,
+                    &nlp_cancel,
+                )
+                .await;
                 budget = budget.saturating_sub(batch_len);
             }
             info!("NLP lazy enrichment pass complete.");
@@ -1135,6 +1059,130 @@ fn insert_edges_best_effort(db: &GraphDatabase, edges: &[GraphEdge], label: &str
     if let Err(e) = insert_edges_reporting(db, edges, label) {
         warn!("{label} edge write error: {e}");
     }
+}
+
+/// A1 — embed a batch of nodes in chunks of `batch_size`.
+///
+/// The pre-fix loop called `embedder.embed(text)` per node; that
+/// helper internally invokes `embed_batch(&[text])` — one ONNX forward
+/// pass for one input — so a 200-node prewarm was 200 forward passes.
+/// `embed_batch` amortises the matmul/attention overhead across N
+/// inputs; the documented sweet spot in `nlp.rs:259` is N=16 (a 6-8x
+/// speedup on the same workload). This helper routes each chunk
+/// through one `offthread(embed_batch(...))` call.
+///
+/// Per-chunk semantics:
+///
+/// - Nodes already carrying an embedding (`gn.embedding.is_some()`) are
+///   skipped — the resolve-from-disk check at the top of each batch
+///   guarantees we never overwrite a live embedding with a fresh one.
+/// - Per-node failures (serialisation, ONNX error) are logged and
+///   left as unembedded so a later pass can retry — the same
+///   "never store a default" guard the pre-fix loop carried.
+/// - `nlp_cancel` is observed once per chunk; an in-flight chunk
+///   completes (or aborts via the `offthread` cancel path) before
+///   the next check.
+///
+/// Returns the number of nodes that received a fresh embedding —
+/// matches the pre-fix `count` accumulator on the prewarm pass.
+async fn embed_nodes_batched(
+    db: &GraphDatabase,
+    embedder: &crate::server::nlp::NlpEmbedder,
+    nodes: &[crate::schema::GraphNode],
+    batch_size: usize,
+    workspace: &Path,
+    cancel: &CancellationToken,
+) -> usize {
+    use crate::schema::GraphNode;
+    let mut count = 0usize;
+    // A batch size of 0 would loop forever; clamp to 1 to keep the
+    // helper total. The tuning default is 16; the only way to land on
+    // 0 is a hand-edited tuning.toml with `nlp_embed_batch_size = 0`.
+    let batch_size = batch_size.max(1);
+
+    for chunk in nodes.chunks(batch_size) {
+        if cancel.is_cancelled() {
+            return count;
+        }
+
+        // Resolve the current node weights (a node may have been
+        // touched since this background task captured its id list)
+        // and collect enriched texts for the unembedded subset. A
+        // node that already has an embedding is skipped without
+        // re-running the embedder — the resolve-from-graph step is
+        // cheap (a path-index lookup).
+        let mut to_embed: Vec<(GraphNode, String)> = Vec::with_capacity(chunk.len());
+        for node in chunk {
+            let Ok(Some(gn)) = db.get_node(&node.id) else {
+                continue;
+            };
+            if gn.embedding.is_some() {
+                continue;
+            }
+            let text = crate::tools::utils::build_enriched_text(&gn, workspace);
+            to_embed.push((gn, text));
+        }
+        if to_embed.is_empty() {
+            continue;
+        }
+
+        // Build an owned `Vec<String>` so the closure can hold
+        // `'static` references into it. The embed_batch call itself
+        // wants `&[&str]`; build that inside the closure where the
+        // owned strings are at rest.
+        let texts: Vec<String> = to_embed.iter().map(|(_, t)| t.clone()).collect();
+        let embedder_clone = embedder.clone();
+        let emb_result = offthread(cancel.clone(), move || {
+            let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+            embedder_clone.embed_batch(&refs)
+        })
+        .await;
+        let embeddings = match emb_result {
+            Ok(v) => v,
+            Err(LainError::Cancelled) => return count,
+            Err(e) => {
+                warn!(
+                    "embedding inference failed for a chunk of {} node(s): {e}; \
+                     leaving them unembedded so a later pass retries",
+                    to_embed.len()
+                );
+                continue;
+            }
+        };
+        // `embed_batch` returns one embedding per input, in the same
+        // order. A length mismatch would indicate a model bug; treat
+        // it as a chunk-level failure and leave the chunk unembedded.
+        if embeddings.len() != to_embed.len() {
+            warn!(
+                "embed_batch returned {} embeddings for {} inputs; skipping chunk",
+                embeddings.len(),
+                to_embed.len()
+            );
+            continue;
+        }
+
+        for ((mut gn, _text), emb) in to_embed.into_iter().zip(embeddings) {
+            // Never store a default on serialize failure —
+            // `unwrap_or_default()` wrote `Some("")`, which marks the
+            // node as embedded while `executor.rs` fails to parse the
+            // empty string and skips it. The symbol would disappear
+            // from `semantic_search` permanently and silently.
+            match serde_json::to_string(&emb) {
+                Ok(json) => {
+                    gn.embedding = Some(json);
+                    if db.insert_node(&gn).is_ok() {
+                        count += 1;
+                    }
+                }
+                Err(e) => warn!(
+                    "embedding not serialised for {}: {e}; leaving it \
+                     unembedded so a later pass retries",
+                    gn.name
+                ),
+            }
+        }
+    }
+    count
 }
 
 fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &AnyGitSensor) {
