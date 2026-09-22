@@ -43,6 +43,38 @@ fn is_safe_workspace_path(p: &str) -> bool {
         && !p.contains("..")
 }
 
+/// Returns `Ok(())` when `git_ref` is safe to interpolate into a
+/// `git <cmd> <git_ref>...` argv vector, otherwise an error suitable
+/// for an MCP tool's user-facing response.
+///
+/// The risk: `git diff --name-only <base> <head>` and
+/// `git show <git_ref>:<path>` both pass the ref as a positional
+/// argument. A leading `-` makes git parse the value as an option
+/// (e.g. `--output=/tmp/evil` for `git diff`, `--upload-pack=…` for
+/// `git fetch`); a `..` segment lets `git show <ref>:../etc/passwd`
+/// escape the repo. Both are rejected here at the MCP boundary.
+fn validate_git_ref(git_ref: &str) -> Result<(), String> {
+    if git_ref.is_empty() {
+        return Err("git ref must not be empty".into());
+    }
+    if git_ref.starts_with('-') {
+        return Err(format!(
+            "git ref {git_ref:?} must not start with '-' (would be parsed as a git option)"
+        ));
+    }
+    if git_ref.contains("..") {
+        return Err(format!(
+            "git ref {git_ref:?} must not contain '..' (path traversal in ':<path>' form)"
+        ));
+    }
+    if git_ref.contains(':') {
+        return Err(format!(
+            "git ref {git_ref:?} must not contain ':' (ambiguous <rev>:<path> form)"
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve a session token to its session, refreshing the heartbeat as
 /// a side effect.
 ///
@@ -1238,6 +1270,8 @@ fn overlap_severity(overlap: &[(String, NodeType)]) -> &'static str {
 /// per line. The two-argument form (rather than `<base>..<head>`) is used
 /// so a ref containing `..` cannot be misparsed as a range.
 fn git_diff_names(root: &std::path::Path, base: &str, head: &str) -> Result<Vec<String>, String> {
+    validate_git_ref(base)?;
+    validate_git_ref(head)?;
     let out = std::process::Command::new("git")
         .current_dir(root)
         .args(["diff", "--name-only", base, head])
@@ -1263,6 +1297,13 @@ fn git_diff_names(root: &std::path::Path, base: &str, head: &str) -> Result<Vec<
 /// definitions sharing a name in one file (a `struct Foo` plus its `impl`-block
 /// helpers, say) collapse to the first kind seen after the sort.
 fn symbols_at_ref(root: &std::path::Path, git_ref: &str, path: &str) -> Vec<(String, NodeType)> {
+    // `path` is workspace-relative (validated at the MCP boundary for
+    // callers that go through `claim_files` / `release_files`); for
+    // defensive depth we still ask the same questions git would refuse
+    // to ask: no leading `-`, no `..`, no embedded `:`.
+    if validate_git_ref(git_ref).is_err() || is_safe_workspace_path(path) == false {
+        return vec![];
+    }
     let Ok(out) = std::process::Command::new("git")
         .current_dir(root)
         .args(["show", &format!("{git_ref}:{path}")])

