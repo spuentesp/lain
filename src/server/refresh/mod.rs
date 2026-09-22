@@ -186,6 +186,11 @@ impl Default for RefreshOutcome {
     }
 }
 
+/// Default `LAIN_REINDEX_TIMEOUT` in seconds. Placeholder per the
+/// comment on `parse_reindex_timeout` — operators should measure
+/// their own p95 and set the env var explicitly.
+const DEFAULT_REINDEX_TIMEOUT_SECS: u64 = 300;
+
 /// Parse the `LAIN_REINDEX_TIMEOUT` env var into a `Duration`.
 /// Falls back to the placeholder default of 300s (5min). The user
 /// is expected to measure a real full index and set this to the
@@ -196,11 +201,14 @@ pub fn parse_reindex_timeout() -> Duration {
         Ok(s) => match s.parse::<u64>() {
             Ok(secs) => Duration::from_secs(secs),
             Err(_) => {
-                eprintln!("LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; using default 300s");
-                Duration::from_secs(300)
+                eprintln!(
+                    "LAIN_REINDEX_TIMEOUT={s:?} is not a valid integer; \
+                     using default {DEFAULT_REINDEX_TIMEOUT_SECS}s"
+                );
+                Duration::from_secs(DEFAULT_REINDEX_TIMEOUT_SECS)
             }
         },
-        Err(_) => Duration::from_secs(300),
+        Err(_) => Duration::from_secs(DEFAULT_REINDEX_TIMEOUT_SECS),
     }
 }
 

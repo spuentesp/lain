@@ -25,6 +25,12 @@ use tracing::{debug, info, warn};
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPAWN_WINDOW: Duration = Duration::from_secs(30);
 const MAX_RESPAWNS_PER_WINDOW: usize = 3;
+/// Time budget for the connect-retry loop in `ensure_connected`. The
+/// loop backs off by `CONNECT_POLL_INTERVAL` until this elapses.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connect-retry poll interval. 25 ms keeps the retry responsive on a
+/// fresh child while staying under a single syscall tick.
+const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Health and diagnostic snapshot of the sidecar daemon.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -443,8 +449,10 @@ impl SidecarInner {
 
         self.child = Some(child);
 
-        // Connect with retry timeout up to 2 seconds
-        let connect_timeout = Duration::from_secs(2);
+        // Connect with retry timeout up to `CONNECT_TIMEOUT`. Poll
+        // every `CONNECT_POLL_INTERVAL` so a fresh child becomes
+        // reachable in a few iterations without burning CPU.
+        let connect_timeout = CONNECT_TIMEOUT;
         let start = Instant::now();
         let stream = loop {
             if let Some(child) = self.child.as_mut() {
@@ -458,7 +466,7 @@ impl SidecarInner {
             match UnixStream::connect(&self.socket_path) {
                 Ok(s) => break s,
                 Err(e) if start.elapsed() < connect_timeout => {
-                    std::thread::sleep(Duration::from_millis(25));
+                    std::thread::sleep(CONNECT_POLL_INTERVAL);
                     let _ = e;
                 }
                 Err(e) => {

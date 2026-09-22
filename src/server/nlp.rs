@@ -233,7 +233,13 @@ impl NlpEmbedder {
             .map_err(|e| LainError::Nlp(e.to_string()))?;
 
         let shape = last_hidden_state.0;
-        Ok(shape.get(2).copied().unwrap_or(384) as usize)
+        // Fall back to the canonical MiniLM-L6-v2 hidden size if the
+        // shape probe fails. The dummy forward pass below always
+        // produces a 3-token sequence, so this only fires when the
+        // model's output tensor genuinely lacks a hidden dim — which
+        // means the model isn't a sentence-transformer at all.
+        const MINILM_L6_V2_HIDDEN_DIM: i64 = 384;
+        Ok(shape.get(2).copied().unwrap_or(MINILM_L6_V2_HIDDEN_DIM) as usize)
     }
 
     #[doc(hidden)]
