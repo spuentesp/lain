@@ -1426,7 +1426,16 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         return Err(LainError::Cancelled);
     }
     let scan_start = std::time::Instant::now();
-    let (latest_commit, latest_time) = git.get_latest_commit_info()?;
+    // F2 — use the `try_*` variants so a wedged spawn_blocking thread
+    // holding the parking_lot `GitSensor` mutex fails fast (the single-
+    // workspace `build_core_memory` already does this — see lines 609
+    // et al.). Pre-fix the federation path called the blocking
+    // helpers; the outer `index_timeout()` budget was the only
+    // escape, and a wedged mutex can hold indefinitely. The same
+    // `try_lock` plumbing the watchdog comment describes at
+    // `IngestHandle::start_git_sensor_watchdog` (handles/ingest.rs:48-52)
+    // is now reachable from this path too.
+    let (latest_commit, latest_time) = git.try_get_latest_commit_info()?;
     let last_commit = graph.get_last_commit()?;
 
     // The commit-hash short-circuit exists to skip an expensive full
@@ -1463,16 +1472,16 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     // truth.
     let files = if force {
         info!("[federation] Forced full re-scan of worktree {:?}", path);
-        git.get_all_tracked_files()?
+        git.try_get_all_tracked_files()?
     } else if let Some(ref last) = last_commit {
         info!(
             "[federation] Incremental update since {} for {:?}",
             last, path
         );
-        git.get_changed_files_since(last)?
+        git.try_get_changed_files_since(last)?
     } else {
         info!("[federation] Full repository scan for {:?}", path);
-        git.get_all_tracked_files()?
+        git.try_get_all_tracked_files()?
     };
 
     if files.is_empty() {
@@ -1696,9 +1705,12 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         );
     }
 
-    // Co-change analysis
+    // Co-change analysis — F2: use the `try_*` variant (same rationale
+    // as the rest of this federation path: a wedged spawn_blocking
+    // thread holding the GitSensor mutex would block forever
+    // otherwise).
     let co_change_pairs = git
-        .analyze_co_changes(
+        .try_analyze_co_changes(
             COCHANGE_COMMIT_WINDOW,
             COCHANGE_MIN_PAIR_COUNT,
             COCHANGE_MAX_COMMIT_FILES,
