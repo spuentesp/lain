@@ -47,6 +47,22 @@ pub struct TuningConfig {
     /// Ingestion: ceiling on cross-boundary coupling edges.
     /// Set to 0 to disable pattern edges.
     pub max_pattern_edges: usize,
+    /// B1 — capacity of the per-tool-executor embedding cache
+    /// (`Arc<Mutex<LruCache<…>>>` in `tools/registry.rs`). Bounded so a
+    /// long-running server with many distinct queries doesn't grow the
+    /// cache without limit. At 384 dims × 4 bytes per `f32`, the default
+    /// 10 000 entries is ~15 MB worst case per executor; a corpus of
+    /// 10 k nodes fills it exactly once, and any query hitting a node
+    /// outside the working set still pays the read-through cost (a
+    /// single ONNX forward pass) before the cache repopulates.
+    pub embedding_cache_capacity: usize,
+    /// B2 — capacity of the process-wide file-content cache
+    /// (`FILE_CONTENT_CACHE` in `tools/utils.rs`). Bounded so a
+    /// long-running server with many watched files doesn't grow the
+    /// cache without limit. 1 000 files × ~50 KB average is ~50 MB
+    /// worst case; mtime invalidation means a stale entry never
+    /// survives a write to its file.
+    pub file_content_cache_capacity: usize,
     /// Ingestion: controls parallel scanning and memory usage.
     pub ingestion: IngestionConfig,
     /// Execution: timeouts for command/tool execution.
@@ -65,6 +81,8 @@ impl Default for TuningConfig {
             query_prefix: String::new(),
             cross_encoder_top_k: 20,
             max_pattern_edges: 200,
+            embedding_cache_capacity: 10_000,
+            file_content_cache_capacity: 1_000,
             ingestion: IngestionConfig::default(),
             runtime: RuntimeConfig::default(),
             presence: PresenceConfig::default(),
@@ -434,6 +452,8 @@ mod knob_reachability_tests {
             ("lsp_symbol_poll_interval_ms", "tuning.rs"),
             ("lsp_pool_size", "tuning.rs"),
             ("nlp_max_threads", "tuning.rs"),
+            ("embedding_cache_capacity", "tuning.rs"),
+            ("file_content_cache_capacity", "tuning.rs"),
             ("cochange_commit_window", "tuning.rs"),
             ("cochange_min_pair_count", "tuning.rs"),
             ("cochange_max_commit_files", "tuning.rs"),

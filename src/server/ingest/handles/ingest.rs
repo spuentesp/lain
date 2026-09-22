@@ -36,6 +36,15 @@ pub struct IngestHandle {
     pub(crate) tuning: Arc<TuningConfig>,
     pub(crate) id_namespace: RepoNamespace,
     pub(crate) overlay_paths: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// B3 — per-path blake3 content hash cache for `process_change`.
+    /// A no-op editor save (touch, metadata-only write) fires the
+    /// watcher but the file's bytes are unchanged; comparing the
+    /// new hash against the cached one short-circuits the LSP round
+    /// trip without re-indexing. `parking_lot::Mutex` because every
+    /// watcher event acquires it briefly; contention is bounded by
+    /// the same lock the watcher itself takes (`process_change_lock`),
+    /// so a separate coarse lock is fine.
+    pub(crate) file_content_hashes: Arc<Mutex<HashMap<std::path::PathBuf, [u8; 32]>>>,
     pub(crate) process_change_lock: Arc<AsyncMutex<()>>,
     pub(crate) overlay_updated: Arc<Notify>,
     pub(crate) overlay_revision: Arc<AtomicU64>,
@@ -96,6 +105,7 @@ impl IngestHandle {
             overlay_updated,
             overlay_revision,
             git_busy_since_nanos: Arc::new(AtomicU64::new(0)),
+            file_content_hashes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -271,6 +281,13 @@ impl IngestHandle {
 
     pub fn process_change_lock(&self) -> &Arc<AsyncMutex<()>> {
         &self.process_change_lock
+    }
+
+    /// B3 — read+write access to the per-path blake3 hash cache.
+    /// Exposed so `process_change` can compare the live file hash
+    /// against the cached one and short-circuit on a no-op write.
+    pub(crate) fn file_content_hashes(&self) -> &Arc<Mutex<HashMap<std::path::PathBuf, [u8; 32]>>> {
+        &self.file_content_hashes
     }
 
     pub fn overlay_updated(&self) -> &Arc<Notify> {

@@ -128,7 +128,12 @@ fn chain_dead_to_call_sites_to_explain() {
         &overlay,
         None,
         &lain::nlp::NlpEmbedder::new_with_threads(0).unwrap(),
-        &std::sync::Arc::new(parking_lot::Mutex::new(Default::default())),
+        &std::sync::Arc::new(parking_lot::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(
+                lain::server::tuning::TuningConfig::default().embedding_cache_capacity,
+            )
+            .expect("default capacity > 0"),
+        ))),
     )
     .expect("find_dead_code");
     assert!(

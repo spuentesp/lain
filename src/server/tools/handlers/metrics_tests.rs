@@ -9,8 +9,8 @@ use crate::server::tools::handlers::metrics::{
     explain_symbol, find_anchors, find_dead_code, get_anchor_score, get_context_depth,
     suggest_refactor_targets,
 };
+use crate::server::tuning::TuningConfig;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 fn make_test_graph_with_nodes() -> (GraphDatabase, VolatileOverlay) {
@@ -119,7 +119,10 @@ fn test_get_context_depth_not_found() {
 fn test_find_dead_code() {
     let (graph, overlay) = make_test_graph_with_nodes();
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
 
     let result = find_dead_code(
         std::path::Path::new(""),
@@ -281,7 +284,10 @@ fn graph_with_an_unindexed_file() -> (GraphDatabase, VolatileOverlay) {
 fn unindexed_files_are_excluded_and_reported_not_called_dead() {
     let (graph, overlay) = graph_with_an_unindexed_file();
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
 
     let text = find_dead_code(
         std::path::Path::new(""),
@@ -330,7 +336,10 @@ fn like_filter_errors_instead_of_silently_ignoring_the_query() {
     // every `like` query returned an identical result set.
     let (graph, overlay) = graph_with_an_unindexed_file();
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
 
     let result = find_dead_code(
         std::path::Path::new(""),
@@ -493,7 +502,10 @@ fn test_symbols_are_excluded_from_dead_code() {
     graph.upsert_node(helper).unwrap();
 
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
     let text = find_dead_code(
         std::path::Path::new(""),
         &graph,
@@ -645,7 +657,10 @@ fn a_dead_function_is_found_even_though_its_file_contains_it() {
         .unwrap();
 
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
     let text = find_dead_code(
         std::path::Path::new(""),
         &graph,
@@ -773,7 +788,10 @@ fn find_dead_code_does_not_report_a_symbol_called_from_another_file() {
 
     let overlay = VolatileOverlay::new();
     let embedder = NlpEmbedder::new_with_threads(0).unwrap();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
     let report = find_dead_code(&ws, &graph, &overlay, None, &embedder, &cache).unwrap();
 
     assert!(
@@ -1041,7 +1059,10 @@ fn find_dead_code_applies_the_name_and_trait_filters_together() {
     );
 
     let embedder = NlpEmbedder::new_stub();
-    let cache = Arc::new(Mutex::new(HashMap::new()));
+    let cache = Arc::new(Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(TuningConfig::default().embedding_cache_capacity)
+            .expect("default capacity > 0"),
+    )));
     let text = find_dead_code(
         std::path::Path::new(""),
         &graph,

@@ -528,7 +528,7 @@ pub fn find_dead_code(
     _overlay: &VolatileOverlay,
     like: Option<&str>,
     embedder: &NlpEmbedder,
-    embedding_cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    embedding_cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
 ) -> Result<String, LainError> {
     // `like` used to degrade to a silent no-op: with a stub embedder
     // nothing cleared the similarity threshold, the filtered set came
@@ -574,7 +574,7 @@ pub fn find_dead_code(
 fn get_embedding(
     node: &crate::schema::GraphNode,
     embedder: &NlpEmbedder,
-    cache: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
+    cache: &Arc<Mutex<lru::LruCache<String, Vec<f32>>>>,
     workspace: &std::path::Path,
 ) -> Option<Vec<f32>> {
     // Check cache
@@ -584,7 +584,7 @@ fn get_embedding(
     // Check stored embedding
     if let Some(ref e_json) = node.embedding {
         if let Ok(emb) = serde_json::from_str::<Vec<f32>>(e_json) {
-            cache.lock().insert(node.id.clone(), emb.clone());
+            cache.lock().put(node.id.clone(), emb.clone());
             return Some(emb);
         }
     }
