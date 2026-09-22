@@ -17,10 +17,51 @@ enum EmbedInner {
         session: Arc<Mutex<Session>>,
         tokenizer: Arc<Tokenizer>,
         embedding_dim: usize,
+        /// Per-model sequence-length cap. Read from the tokenizer's own
+        /// `truncation.max_length` when available (BGE = 512,
+        /// all-MiniLM-L6-v2 = 256); falls back to a safe default if the
+        /// tokenizer doesn't publish one. Used to right-truncate inputs
+        /// before tokenization so the model never sees more tokens than
+        /// it was trained on — passing longer sequences is silently
+        /// truncated by the runtime, which can corrupt the position-id
+        /// embeddings and degrade the output.
+        max_seq_len: usize,
     },
     Stub {
         embedding_dim: usize,
     },
+}
+
+/// Default sequence-length cap when the tokenizer doesn't publish one.
+/// 512 covers BGE-large and any model trained for `max_position_embeddings
+/// >= 512`. MiniLM-L6-v2's published cap is 256; the model itself
+/// silently clamps, so this only matters for the quality of the
+/// truncation we apply before sending.
+const DEFAULT_MAX_SEQ_LEN: usize = 512;
+
+/// Probe the tokenizer's `truncation.max_length` (the field the
+/// `tokenizers` crate populates when the model was exported with a
+/// `--max_length` flag). Returns `DEFAULT_MAX_SEQ_LEN` when the value
+/// is missing, zero, or unparseable.
+///
+/// The previous implementation hardcoded `512` for every model — which
+/// silently truncated MiniLM inputs past 256 tokens, exactly the
+/// comment's promise. Reading from the tokenizer restores the
+/// per-model cap.
+fn detect_max_seq_len(tokenizer: &Tokenizer) -> usize {
+    let Ok(value) = serde_json::to_value(tokenizer) else {
+        return DEFAULT_MAX_SEQ_LEN;
+    };
+    let len = value
+        .get("truncation")
+        .and_then(|t| t.get("max_length"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if len > 0 {
+        len as usize
+    } else {
+        DEFAULT_MAX_SEQ_LEN
+    }
 }
 
 /// Compose the text actually embedded for a query.
@@ -148,6 +189,11 @@ impl NlpEmbedder {
             .with_intra_threads(threads)?
             .commit_from_file(model_path)?;
         let embedding_dim = Self::detect_embedding_dim(&mut session)?;
+        let max_seq_len = detect_max_seq_len(&tokenizer);
+        tracing::info!(
+            "NLP embedder: truncating inputs to {} tokens (from tokenizer config)",
+            max_seq_len
+        );
 
         Ok(Self {
             query_prefix: String::new(),
@@ -155,6 +201,7 @@ impl NlpEmbedder {
                 session: Arc::new(Mutex::new(session)),
                 tokenizer: Arc::new(tokenizer),
                 embedding_dim,
+                max_seq_len,
             },
         })
     }
@@ -261,7 +308,7 @@ impl NlpEmbedder {
         if n == 0 {
             return Ok(Vec::new());
         }
-        let (session, tokenizer, embedding_dim) = match &self.inner {
+        let (session, tokenizer, embedding_dim, max_len) = match &self.inner {
             EmbedInner::Stub { embedding_dim } => {
                 return Ok((0..n).map(|_| vec![0.0f32; *embedding_dim]).collect());
             }
@@ -269,10 +316,9 @@ impl NlpEmbedder {
                 session,
                 tokenizer,
                 embedding_dim,
-            } => (session, tokenizer, *embedding_dim),
+                max_seq_len,
+            } => (session, tokenizer, *embedding_dim, *max_seq_len),
         };
-
-        let max_len: usize = 512;
         let pad_id: i64 = tokenizer
             .token_to_id("[PAD]")
             .map(|v| v as i64)
