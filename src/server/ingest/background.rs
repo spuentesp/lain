@@ -12,6 +12,7 @@ use crate::server::presence::{OccupancyMap, PresenceEvent, PresenceRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// Pick the platform-appropriate default [`AttributionBackend`] for
 /// constructors that don't take an explicit backend (i.e. the
@@ -32,13 +33,18 @@ pub fn default_attribution_backend() -> Arc<dyn AttributionBackend> {
 /// Spawn the background task that prunes expired sessions + claim
 /// TTLs every 5 seconds and broadcasts `PresenceEvent` notifications.
 /// The `JoinHandle` is intentionally dropped — the task lives for
-/// the lifetime of the process. (For graceful shutdown we'd store
-/// the handle and abort it; not needed for MVP.)
+/// the lifetime of the process.
+///
+/// Cooperative shutdown: the loop observes `cancel` via
+/// `tokio::select!` on every tick, so `LainServer::shutdown` (which
+/// calls `LifecycleInfo::cancel_token().cancel()`) breaks the loop
+/// within one interval rather than waiting for process exit.
 pub fn spawn_presence_expiry_loop(
     presence: Arc<PresenceRegistry>,
     occupancy: Arc<OccupancyMap>,
     tx: broadcast::Sender<(u64, PresenceEvent)>,
     events_log: Arc<EventsLog>,
+    cancel: CancellationToken,
 ) {
     let p = presence.clone();
     let o = occupancy.clone();
@@ -46,7 +52,10 @@ pub fn spawn_presence_expiry_loop(
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tick.tick() => {}
+            }
             expiry_tick(&p, &o, &t, &events_log);
         }
     });
@@ -128,10 +137,20 @@ const UI_SESSION_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// nothing ever did. Every `/ui/blast-radius/...` session created by the
 /// HTTP transport stayed in the map for the life of the process, past its
 /// own `expires_at`, and a long-running server grew without bound.
-pub fn spawn_ui_session_reaper(ctx: crate::server::tools::registry::ToolContext) {
+///
+/// Cooperative shutdown: the loop observes `cancel` so
+/// `LainServer::shutdown` can break it instead of waiting for the next
+/// 5-minute tick to land naturally.
+pub fn spawn_ui_session_reaper(
+    ctx: crate::server::tools::registry::ToolContext,
+    cancel: CancellationToken,
+) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(UI_SESSION_REAP_INTERVAL).await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(UI_SESSION_REAP_INTERVAL) => {}
+            }
             ctx.cleanup_expired_sessions().await;
         }
     });

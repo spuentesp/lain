@@ -422,11 +422,17 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // Arc into the struct below.
     let events_log_path = LainServer::events_log_path_from_config(&mem_path);
     let events_log = Arc::new(EventsLog::open(&events_log_path).expect("open events.jsonl"));
+    // Lifecycle handle exists earlier than the rest of the partition
+    // handles (which are built below) because the background loops want
+    // its cancel token. Construction is cheap — just a SystemTime now +
+    // a CancellationToken — so duplicating the line here is harmless.
+    let lifecycle_handle = Arc::new(super::handles::LifecycleInfo::new(SystemTime::now()));
     spawn_presence_expiry_loop(
         presence.clone(),
         occupancy.clone(),
         presence_event_tx.clone(),
         events_log.clone(),
+        lifecycle_handle.cancel_token(),
     );
     start_attribution_watcher(
         attribution,
@@ -509,7 +515,13 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         default_attribution_backend(),
     ));
 
-    let lifecycle_handle = Arc::new(super::handles::LifecycleInfo::new(now));
+    // `lifecycle_handle` was constructed earlier (above the
+    // `spawn_presence_expiry_loop` call site) so the cancel token
+    // the loop observes is the same one this partition handle holds
+    // — `LainServer::shutdown` cancels once and every consumer exits.
+    // The `now` parameter passed to `LifecycleInfo::new` is only used
+    // to populate the static startup banner; reusing the earlier
+    // handle keeps the timestamps consistent.
 
     // Bug #2 from the 2026-09-18 Tauri postmortem: a libgit2 call wedged
     // inside a spawn_blocking thread holds the parking_lot

@@ -218,6 +218,7 @@ pub async fn run_mcp(
         .await;
     crate::server::ingest::background::spawn_ui_session_reaper(
         server.ingest().tool_executor().ctx.clone(),
+        server.lifecycle_handle().cancel_token(),
     );
 
     // Re-index when the checkout moves to a new commit. Without this the

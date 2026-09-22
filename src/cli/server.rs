@@ -201,6 +201,7 @@ pub async fn run_server(
     // interactive blast-radius link and nothing ever removed them.
     crate::server::ingest::background::spawn_ui_session_reaper(
         server.ingest().tool_executor().ctx.clone(),
+        server.lifecycle_handle().cancel_token(),
     );
 
     // OTLP runtime-trace listener: opt-in via LAIN_TRACE_RUNTIME=true.
