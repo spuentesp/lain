@@ -39,8 +39,6 @@ pub type UiSessionStore = Arc<AsyncMutex<HashMap<String, UiSession>>>;
 pub type UiLink<'a> = Option<(&'a UiSessionStore, u16, std::time::Duration)>;
 
 pub use definitions::ToolDefinition;
-// `use utils::*;` was only needed by `augment_knowledge`'s
-// `resolve_node_at_location` call, which was removed with it.
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum JobState {

@@ -10,13 +10,10 @@ pub mod metrics;
 pub mod navigation;
 pub mod search;
 pub mod semantic;
-// `filesystem` (read_file / list_directory / find_files) was removed:
-// 112 lines of handler and 151 lines of tests for three functions that
-// were never registered as MCP tools, so no agent could reach them. The
-// capability is covered — `get_code_snippet` reads source through the
-// graph, and every MCP client already ships native file tools. Keeping an
-// unreachable surface alive is what turned `FileWatcher`, the protocol
-// sensors and `run_background_sync` into silent no-ops.
+// `filesystem` was removed: handlers + tests for three functions that
+// were never registered as MCP tools, so no agent could reach them.
+// File reads are served via `get_code_snippet` and the clients' native
+// tools.
 pub mod context;
 pub mod cross_runtime;
 pub mod gitops;
