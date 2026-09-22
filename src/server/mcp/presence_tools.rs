@@ -1453,4 +1453,48 @@ mod tests {
         .expect("object form without ttl_seconds must parse");
         assert!(entry.ttl_seconds.is_none());
     }
+
+    #[test]
+    fn validate_git_ref_rejects_dangerous_inputs() {
+        // Happy path: normal refs and tags.
+        assert!(validate_git_ref("HEAD").is_ok());
+        assert!(validate_git_ref("main").is_ok());
+        assert!(validate_git_ref("v0.7.4").is_ok());
+        assert!(validate_git_ref("feature/foo").is_ok());
+        assert!(validate_git_ref("abc123").is_ok());
+
+        // Empty is rejected.
+        assert!(validate_git_ref("").is_err());
+
+        // Leading '-' would be parsed as a git option (e.g.
+        // '--output=/tmp/evil' for `git diff`, '--upload-pack=...' for
+        // `git fetch`). Must be rejected.
+        assert!(validate_git_ref("--output=/tmp/evil").is_err());
+        assert!(validate_git_ref("--upload-pack=foo").is_err());
+        assert!(validate_git_ref("-x").is_err());
+
+        // '..' lets `git show <ref>:../etc/passwd` escape the repo.
+        assert!(validate_git_ref("HEAD..HEAD").is_err());
+        assert!(validate_git_ref("a..b").is_err());
+
+        // Embedded ':' makes the `<rev>:<path>` form ambiguous; reject.
+        assert!(validate_git_ref("HEAD:src/x.rs").is_err());
+        assert!(validate_git_ref("a:b").is_err());
+    }
+
+    #[test]
+    fn is_safe_workspace_path_rejects_escape_attempts() {
+        assert!(is_safe_workspace_path("src/lib.rs"));
+        assert!(is_safe_workspace_path("src/sub/mod.rs"));
+        assert!(is_safe_workspace_path("a"));
+        assert!(!is_safe_workspace_path(""));
+        // Absolute paths.
+        assert!(!is_safe_workspace_path("/etc/passwd"));
+        assert!(!is_safe_workspace_path("\\server\\share"));
+        assert!(!is_safe_workspace_path("C:/Windows"));
+        // Traversal.
+        assert!(!is_safe_workspace_path("../../etc/passwd"));
+        assert!(!is_safe_workspace_path("src/../lib.rs"));
+        assert!(!is_safe_workspace_path("src/.."));
+    }
 }
