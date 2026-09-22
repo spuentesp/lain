@@ -1637,10 +1637,26 @@ impl OccupancyMap {
             let mut to_drop: Vec<(AgentId, PathBuf, Vec<String>)> = Vec::new();
             for (agent_id, claims) in s.by_agent.iter() {
                 for c in claims.iter() {
-                    if let Some(exp) = c.expires_at {
-                        if exp <= now {
-                            to_drop.push((agent_id.clone(), c.path.clone(), c.symbols.clone()));
-                        }
+                    let Some(exp) = c.expires_at else { continue };
+                    // Wall-clock skew guard: `expires_at` is a
+                    // `SystemTime`, which is non-monotonic — an NTP
+                    // correction or container suspend can jump it
+                    // backwards. The normal expiry check is `exp <=
+                    // now`; the additional `now < claimed_at` arm
+                    // fails-secure when the wall clock has jumped
+                    // backwards past this claim's creation time
+                    // (otherwise the claim would live forever until
+                    // the clock catches up).
+                    //
+                    // The right long-term fix is to migrate
+                    // `Claim::expires_at` to `Option<Instant>` (mono-
+                    // tonic) and store `expires_at_unix` separately
+                    // for serialization. That's a structural change
+                    // touching every Claim constructor; the guard
+                    // below is the surgical mitigation.
+                    let expired = exp <= now || now < c.claimed_at;
+                    if expired {
+                        to_drop.push((agent_id.clone(), c.path.clone(), c.symbols.clone()));
                     }
                 }
             }
