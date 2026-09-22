@@ -335,17 +335,10 @@ fn register_if_needed(
             .as_str()
             .context("no session_token")?
             .to_string(),
-        registered_at_unix: chrono_now_unix(),
+        registered_at_unix: crate::server::time::unix_secs_u64(std::time::SystemTime::now()),
     };
     write_session(name, &sess)?;
     Ok(sess)
-}
-
-fn chrono_now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// `lain hooks claim --url … --path … [--symbol …] [--intent …] [--parent-session-id …]`

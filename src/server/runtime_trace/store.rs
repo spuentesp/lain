@@ -14,9 +14,9 @@
 
 use super::spans::SpanRecord;
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge};
+use crate::server::time::now_unix;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for the store. Constructed from environment vars
 /// when the server boots; tests build one directly.
@@ -255,13 +255,6 @@ impl RuntimeTraceStore {
     pub fn trace_ids(&self) -> HashSet<String> {
         self.snapshot().into_iter().map(|e| e.trace_id).collect()
     }
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

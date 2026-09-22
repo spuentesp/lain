@@ -18,6 +18,7 @@ pub enum LainError {
     Lsp(String),
 
     #[error("NLP error: {0}")]
+    #[cfg_attr(not(feature = "nlp"), allow(dead_code))]
     Nlp(String),
 
     #[error("MCP error: {0}")]
@@ -86,6 +87,7 @@ impl From<std::io::Error> for LainError {
     }
 }
 
+#[cfg(feature = "nlp")]
 impl<T> From<ort::Error<T>> for LainError {
     fn from(err: ort::Error<T>) -> Self {
         LainError::Nlp(err.to_string())

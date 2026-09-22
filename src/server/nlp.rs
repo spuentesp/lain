@@ -2,15 +2,89 @@
 //!
 //! Supports any ONNX model that produces fixed-dimension sentence embeddings.
 //! Tested with sentence-transformers (all-MiniLM-L6-v2, paraphrase-multilingual, etc.)
+//!
+//! When the `nlp` Cargo feature is enabled (default), this module
+//! provides real ONNX-backed `NlpEmbedder` and `CrossEncoder`
+//! implementations. When the feature is off (`--no-default-features`),
+//! the `ort` and `tokenizers` deps are skipped and zero-cost stub
+//! types are exported under the same names. Stubs satisfy the
+//! compile-time API; methods that would otherwise hit ONNX return
+//! `LainError::Unavailable("ML inference not compiled in this build")`
+//! at runtime. Compile-time callers are gated at their use-sites so
+//! this is unreachable in production.
 
+#[cfg(not(feature = "nlp"))]
+mod stub_types {
+    use std::path::{Path, PathBuf};
+    use crate::error::LainError;
+
+    #[derive(Clone, Default)]
+    pub struct NlpEmbedder;
+
+    impl NlpEmbedder {
+        pub fn new_stub() -> Self { NlpEmbedder }
+        pub fn new_with_threads(_max_threads: usize) -> Result<Self, LainError> {
+            Ok(NlpEmbedder)
+        }
+        pub fn new() -> Result<Self, LainError> {
+            Err(LainError::Unavailable("ML inference not compiled in this build".into()))
+        }
+        pub fn with_max_threads(_model: &Path, _tokenizer: &Path, _max_threads: usize)
+            -> Result<Self, LainError>
+        {
+            Err(LainError::Unavailable("ML inference not compiled in this build".into()))
+        }
+        pub fn resolve_model_paths(_p: &Path) -> (PathBuf, PathBuf) {
+            (PathBuf::new(), PathBuf::new())
+        }
+        pub fn is_stub(&self) -> bool { true }
+        pub fn embedding_dim(&self) -> usize { 0 }
+        pub fn embed(&self, _text: &str) -> Result<Vec<f32>, LainError> {
+            // Stubs return an all-zero vector matching `embedding_dim()`,
+            // matching the real impl's stub-mode contract (so test
+            // fixtures like `offthread_embed_returns_stub_value_when_not_cancelled`
+            // keep working when nlp is off).
+            Ok(vec![0.0; self.embedding_dim()])
+        }
+        pub fn embed_query(&self, _query: &str) -> Result<Vec<f32>, LainError> {
+            Ok(vec![0.0; self.embedding_dim()])
+        }
+        pub fn set_query_prefix(&mut self, _prefix: impl Into<String>) {}
+        pub fn query_prefix(&self) -> &str { "" }
+    }
+
+    #[derive(Clone, Default)]
+    pub struct CrossEncoder;
+
+    impl CrossEncoder {
+        pub fn from_dir(_dir: &Path) -> Self { CrossEncoder }
+        pub fn from_dir_with_threads(_dir: &Path, _max_threads: usize) -> Self { CrossEncoder }
+        pub fn is_active(&self) -> bool { false }
+        pub fn score(&self, _query: &str, _document: &str) -> Result<f32, LainError> {
+            Err(LainError::Unavailable("ML inference not compiled in this build".into()))
+        }
+    }
+}
+
+#[cfg(not(feature = "nlp"))]
+pub use stub_types::{CrossEncoder, NlpEmbedder};
+
+#[cfg(feature = "nlp")]
 use crate::error::LainError;
+#[cfg(feature = "nlp")]
 use ort::session::Session;
+#[cfg(feature = "nlp")]
 use ort::value::Tensor;
+#[cfg(feature = "nlp")]
 use parking_lot::Mutex;
+#[cfg(feature = "nlp")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "nlp")]
 use std::sync::Arc;
+#[cfg(feature = "nlp")]
 use tokenizers::{Encoding, Tokenizer};
 
+#[cfg(feature = "nlp")]
 #[derive(Clone)]
 enum EmbedInner {
     Onnx {
@@ -37,6 +111,7 @@ enum EmbedInner {
 /// >= 512`. MiniLM-L6-v2's published cap is 256; the model itself
 /// > silently clamps, so this only matters for the quality of the
 /// > truncation we apply before sending.
+#[cfg(feature = "nlp")]
 const DEFAULT_MAX_SEQ_LEN: usize = 512;
 
 /// Probe the tokenizer's `truncation.max_length` (the field the
@@ -48,6 +123,7 @@ const DEFAULT_MAX_SEQ_LEN: usize = 512;
 /// silently truncated MiniLM inputs past 256 tokens, exactly the
 /// comment's promise. Reading from the tokenizer restores the
 /// per-model cap.
+#[cfg(feature = "nlp")]
 fn detect_max_seq_len(tokenizer: &Tokenizer) -> usize {
     let Ok(value) = serde_json::to_value(tokenizer) else {
         return DEFAULT_MAX_SEQ_LEN;
@@ -74,6 +150,7 @@ fn detect_max_seq_len(tokenizer: &Tokenizer) -> usize {
 /// Concatenation is deliberate and exact — no separator is inserted.
 /// BGE's documented instruction already ends in `": "`, and adding a
 /// space would change the tokenization the model was trained on.
+#[cfg(feature = "nlp")]
 fn prefixed_query(prefix: &str, query: &str) -> String {
     if prefix.is_empty() {
         return query.to_string();
@@ -81,6 +158,7 @@ fn prefixed_query(prefix: &str, query: &str) -> String {
     format!("{prefix}{query}")
 }
 
+#[cfg(feature = "nlp")]
 #[derive(Clone)]
 pub struct NlpEmbedder {
     inner: EmbedInner,
@@ -96,6 +174,7 @@ pub struct NlpEmbedder {
     query_prefix: String,
 }
 
+#[cfg(feature = "nlp")]
 impl NlpEmbedder {
     /// Resolve a user-supplied `--embedding-model` / `LAIN_EMBEDDING_MODEL`
     /// path to `(model.onnx, tokenizer.json)`. Accepts either a directory
@@ -455,17 +534,20 @@ impl NlpEmbedder {
 // the top-K candidates from the bi-encoder — typically K=20, so the
 // per-query cost stays around ~50ms.
 
+#[cfg(feature = "nlp")]
 #[derive(Clone)]
 pub struct CrossEncoder {
     inner: Option<CrossInner>,
 }
 
+#[cfg(feature = "nlp")]
 #[derive(Clone)]
 struct CrossInner {
     session: Arc<Mutex<Session>>,
     tokenizer: Arc<Tokenizer>,
 }
 
+#[cfg(feature = "nlp")]
 impl CrossEncoder {
     /// Load from model.onnx + tokenizer.json in `dir` with auto-detected
     /// thread count. Use from_dir_with_threads to override.
@@ -600,6 +682,7 @@ impl CrossEncoder {
 ///
 /// Non-zero `max_threads` is honored as-is (subject to system
 /// availability), letting ops cap usage when sharing the box.
+#[cfg(feature = "nlp")]
 pub fn resolve_intra_threads(max_threads: usize) -> usize {
     if max_threads == 0 {
         let cores = std::thread::available_parallelism()
@@ -611,7 +694,7 @@ pub fn resolve_intra_threads(max_threads: usize) -> usize {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "nlp"))]
 mod tests {
     /// `resolve_model_paths` accepts the documented directory form
     /// (joins `model.onnx` + `tokenizer.json`) and the legacy file
@@ -635,7 +718,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "nlp"))]
 mod query_prefix_tests {
     //! The query/document asymmetry is the whole point of `query_prefix`,
     //! and it was previously a convention that two of the three query
