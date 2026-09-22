@@ -135,7 +135,7 @@ fn user_facing_strings_never_name_a_command_that_does_not_exist() {
     );
 }
 
-/// The README's command table must match the binary, both directions.
+/// The documented command table must match the binary, both directions.
 ///
 /// It said "After install, `lain` exposes exactly five subcommands" above
 /// a table listing nine, while `lain --help` printed ten — and the
@@ -144,14 +144,15 @@ fn user_facing_strings_never_name_a_command_that_does_not_exist() {
 /// reading the README to learn the tool got a count, a table, and a
 /// binary that disagreed with each other three ways.
 #[test]
-fn the_readme_command_table_matches_the_binary() {
-    let readme =
-        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
-            .expect("read README.md");
+fn the_documented_command_table_matches_the_binary() {
+    let manual = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/USER_MANUAL.md"),
+    )
+    .expect("read docs/USER_MANUAL.md");
 
     // Rows look like: | `lain server` | Start the MCP server ... |
     let mut documented = HashSet::new();
-    for line in readme.lines() {
+    for line in manual.lines() {
         let t = line.trim();
         if !t.starts_with("| `lain ") {
             continue;
@@ -167,7 +168,7 @@ fn the_readme_command_table_matches_the_binary() {
     }
     assert!(
         !documented.is_empty(),
-        "found no `| \\`lain <cmd>\\` |` rows in the README command table"
+        "found no `| \\`lain <cmd>\\` |` rows in the user manual's command table"
     );
 
     let actual = subcommands();
@@ -175,7 +176,7 @@ fn the_readme_command_table_matches_the_binary() {
     let phantom: Vec<_> = documented.difference(&actual).cloned().collect();
     assert!(
         phantom.is_empty(),
-        "README documents commands the binary does not have: {phantom:?}"
+        "the user manual documents commands the binary does not have: {phantom:?}"
     );
 
     // `help` is clap's own and is not worth a table row.
@@ -187,7 +188,7 @@ fn the_readme_command_table_matches_the_binary() {
     missing.sort();
     assert!(
         missing.is_empty(),
-        "the binary has commands the README never mentions: {missing:?}"
+        "the binary has commands the user manual never mentions: {missing:?}"
     );
 }
 
@@ -195,26 +196,27 @@ fn the_readme_command_table_matches_the_binary() {
 /// claimed a subcommand count that matched neither the table nor the
 /// binary.
 #[test]
-fn the_readme_does_not_claim_a_stale_subcommand_count() {
-    let readme =
-        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
-            .expect("read README.md");
-
-    for spelled in [
-        "three subcommands",
-        "four subcommands",
-        "five subcommands",
-        "six subcommands",
-        "seven subcommands",
-        "eight subcommands",
-        "nine subcommands",
-        "ten subcommands",
-    ] {
-        assert!(
-            !readme.contains(spelled),
-            "README hard-codes a subcommand count (\"{spelled}\") that will \
-             go stale the next time a command is added or removed; describe \
-             the table instead of counting it"
-        );
+fn command_docs_do_not_claim_a_stale_subcommand_count() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in ["README.md", "docs/USER_MANUAL.md"] {
+        let text = std::fs::read_to_string(root.join(relative))
+            .unwrap_or_else(|error| panic!("read {relative}: {error}"));
+        for spelled in [
+            "three subcommands",
+            "four subcommands",
+            "five subcommands",
+            "six subcommands",
+            "seven subcommands",
+            "eight subcommands",
+            "nine subcommands",
+            "ten subcommands",
+        ] {
+            assert!(
+                !text.contains(spelled),
+                "{relative} hard-codes a subcommand count (\"{spelled}\") that will \
+                 go stale the next time a command is added or removed; describe \
+                 the table instead of counting it"
+            );
+        }
     }
 }
