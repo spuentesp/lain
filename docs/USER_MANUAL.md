@@ -25,6 +25,7 @@ reference, tuning options, and day-to-day operating notes.
 | `lain workspaces` | Create and switch named groups of repositories. |
 | `lain query` | Run a `query_graph` operation array against a saved graph. |
 | `lain init` | Create a minimal `repos.yaml` for the current Git repository. |
+| `lain ask` | Ask one question using semantic search when an embedding model is configured, with a structural fallback when it isn't. |
 | `lain hooks` | Claim or release files and check branch overlap from agent hooks. |
 | `lain doctor` | Check the binary, graph freshness, install paths, and MCP connection. Exit codes are 0 ready, 1 degraded, and 2 unusable. |
 | `lain capabilities` | Print structural, semantic, runtime, and coordination readiness. Add `--json` for scripts. |
