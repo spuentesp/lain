@@ -19,6 +19,30 @@ use crate::server::schema::NodeType;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// Returns `true` when `p` is a relative, in-workspace path.
+///
+/// Matches the rules in `annotations::canonical_file`: no leading `/,
+///,
+/// no leading `\\`, no Windows drive letter, and no `..` segment.
+/// Anything else is rejected at the MCP boundary so an agent cannot
+/// land `/etc/passwd` or `../../somewhere` in the occupancy map or
+/// the audit log.
+///
+/// The check operates on the raw string the agent submitted; the
+/// downstream `canonical_claim_path` still applies its own lexical
+/// normalization, which is fine because by this point we know the path
+/// is already workspace-relative.
+fn is_safe_workspace_path(p: &str) -> bool {
+    let bytes = p.as_bytes();
+    let is_drive_absolute = bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(1) == Some(&b':');
+    !p.is_empty()
+        && !p.starts_with('/')
+        && !p.starts_with('\\')
+        && !is_drive_absolute
+        && !p.contains("..")
+}
+
 /// Resolve a session token to its session, refreshing the heartbeat as
 /// a side effect.
 ///
@@ -478,6 +502,20 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             // whole batch — partial validation across `files` would
             // let an agent silently get no claims when at least one
             // entry is malformed.
+            //
+            // Path validation matches `annotations::canonical_file`:
+            // reject absolute paths and any `..` segment so an agent
+            // cannot claim `/etc/passwd` or `../../somewhere` outside
+            // the workspace. Without this, `canonical_claim_path`
+            // lexically normalizes the path and the audit log records
+            // the literal string verbatim, leaking it as durable state.
+            if !is_safe_workspace_path(&f.path) {
+                return Err(format!(
+                    "claim_files: path {:?} is not a relative workspace path \
+                     (must not start with '/' or '\\\\', must not contain '..')",
+                    f.path
+                ));
+            }
             if let Some(ttl) = f.ttl_seconds {
                 if ttl == 0 {
                     return Err("claim_files: ttl_seconds must be >= 1".into());
@@ -858,11 +896,17 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
-    let paths: Vec<std::path::PathBuf> = a
-        .files
-        .into_iter()
-        .map(|f| std::path::PathBuf::from(f.path))
-        .collect();
+    let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(a.files.len());
+    for f in a.files {
+        if !is_safe_workspace_path(&f.path) {
+            return Err(format!(
+                "release_files: path {:?} is not a relative workspace path \
+                 (must not start with '/' or '\\\\', must not contain '..')",
+                f.path
+            ));
+        }
+        paths.push(std::path::PathBuf::from(f.path));
+    }
     let released = server.occupancy().release(&session.id, &paths);
     for path in &released {
         server.emit_presence_event(PresenceEvent::ClaimReleased {

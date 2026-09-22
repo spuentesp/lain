@@ -69,13 +69,24 @@ use crate::server::mcp::definitions::{
 use crate::server::mcp::envelope::{gated_tool_result, tool_text_result};
 use crate::server::mcp::overlay_sse::OverlaySubscribeBody;
 
-/// Parse a `Range<u32>` from a string like `"1..3"`. Returns a descriptive
-/// error on malformed input. Used by both stdio and HTTP dispatch arms for
-/// `get_cross_repo_blast_radius*`.
+/// Parse a half-open `Range<u32>` from a string like `"1..3"`.
+///
+/// `start..end` is **half-open**: depths `start, start+1, …, end-1` are
+/// included. Both endpoints must parse as `u32`, the range must be
+/// non-empty (`start < end`), and the full string must match the
+/// `start..end` shape (no stray delimiters).
+///
+/// Returns a descriptive error on malformed input. Used by both stdio
+/// and HTTP dispatch arms for `get_cross_repo_blast_radius*`.
 fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
     let (start_s, end_s) = s
         .split_once("..")
         .ok_or_else(|| format!("Invalid depth: expected \"<start>..<end>\", got {s:?}"))?;
+    if end_s.contains("..") {
+        return Err(format!(
+            "Invalid depth: expected exactly one '..', got {s:?}"
+        ));
+    }
     let start: u32 = start_s
         .trim()
         .parse()
@@ -84,6 +95,11 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
         .trim()
         .parse()
         .map_err(|e| format!("Invalid depth end: {e}"))?;
+    if start >= end {
+        return Err(format!(
+            "Invalid depth: start must be < end, got {start}..{end}"
+        ));
+    }
     Ok(start..end)
 }
 
@@ -335,15 +351,22 @@ pub struct McpToolEntry {
 inventory::collect!(McpToolEntry);
 
 /// Wrap a handler result into the `(text, is_error)` shape every
-/// `dispatch_tool_call` arm returns. Centralizes the `unwrap_or_else`
-/// serialization fallback so the per-tool wrapper functions stay short.
+/// `dispatch_tool_call` arm returns. Centralizes the serialization
+/// fallback so the per-tool wrapper functions stay short.
+///
+/// `is_error` is `true` whenever the result text could not be derived
+/// from the handler's intent — including a `serde_json` serialization
+/// failure of an otherwise-`Ok` payload. A tool that returned
+/// `Ok(value)` but failed to serialize that value still hasn't produced
+/// its result, and an agent that ignores `is_error` and reads the
+/// text would otherwise see a misleading "serialization error" string
+/// presented as if it were a successful payload.
 fn tool_result(name: &str, result: Result<serde_json::Value, String>) -> (String, bool) {
     match result {
-        Ok(v) => (
-            serde_json::to_string(&v)
-                .unwrap_or_else(|e| format!("{name}: serialization error: {e}")),
-            false,
-        ),
+        Ok(v) => match serde_json::to_string(&v) {
+            Ok(s) => (s, false),
+            Err(e) => (format!("{name}: serialization error: {e}"), true),
+        },
         Err(e) => (format!("{name}: {e}"), true),
     }
 }
@@ -409,9 +432,6 @@ async fn dispatch_tool_call(
 /// the runner functions' `Value` parameter type matches. The runner
 /// functions re-deserialize through their own `serde_json::from_value`
 /// calls, so the wrapping is just shape preservation.
-fn args_map_to_value(map: serde_json::Map<String, Value>) -> Value {
-    Value::Object(map)
-}
 
 struct LainHandler {
     executor: Arc<ToolExecutor>,

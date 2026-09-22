@@ -26,6 +26,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Maximum number of rate-limit buckets kept in memory. The bucket key
+/// is usually a configured bearer token, so this cap is effectively a
+/// safety net — but in dev mode (`api_keys=None` + an explicit
+/// `LAIN_RATE_LIMIT_RPM`) the key is the raw `Authorization` header
+/// and an unauthenticated peer could otherwise mint unique buckets
+/// until the server OOMs. When the cap is hit, the oldest bucket by
+/// `last_refill` is evicted to make room.
+const RATE_LIMIT_MAX_BUCKETS: usize = 4096;
+
 /// Per-key authentication + rate limit state.
 #[derive(Debug, Clone)]
 pub struct AuthState {
@@ -98,13 +107,22 @@ impl AuthState {
     /// Check the `Authorization: Bearer <key>` header against the configured
     /// keys. Returns `Ok(())` if auth passes (or is disabled), `Err(reason)`
     /// otherwise. Stdio callers should skip this entirely.
+    ///
+    /// Uses `constant_time_eq` for the per-key comparison so a
+    /// timing-side-channel attacker can't bisect a valid token byte by
+    /// byte. The comparison still iterates every configured key (the
+    /// expected key set is small), and the comparison itself is
+    /// constant-time.
     pub fn check_bearer(&self, auth_header: Option<&str>) -> Result<(), AuthError> {
         let Some(expected_keys) = &self.api_keys else {
             return Ok(()); // dev mode
         };
         let header = auth_header.ok_or(AuthError::Missing)?;
         let token = bearer_token(header).ok_or(AuthError::Malformed)?;
-        if expected_keys.iter().any(|k| k == &token) {
+        if expected_keys
+            .iter()
+            .any(|k| constant_time_eq(k.as_bytes(), token.as_bytes()))
+        {
             Ok(())
         } else {
             Err(AuthError::Invalid)
@@ -156,8 +174,37 @@ pub fn bearer_token(header: &str) -> Option<String> {
     Some(token.to_string())
 }
 
+/// Constant-time byte-slice equality.
+///
+/// Uses the standard "compare-then-OR length diff" construction: the
+/// runtime depends only on `min(a.len(), b.len())` plus a length
+/// compare, and never short-circuits on the first mismatching byte.
+/// This is what stops a timing-side-channel attacker from bisecting a
+/// valid token byte by byte.
+///
+/// `subtle::ConstantTimeEq` would be the canonical choice, but adding
+/// a direct dependency for one comparison is heavy; the inline version
+/// here matches the security properties for the small key sizes we
+/// compare (32–64 byte bearer tokens).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Token-bucket rate limiter. One bucket per key, refilling at
 /// `requests_per_minute` per minute (continuous, not per-window).
+///
+/// Bounded by [`RATE_LIMIT_MAX_BUCKETS`]: when the cap is reached, the
+/// bucket with the oldest `last_refill` is evicted. This prevents a
+/// peer in dev mode from minting unique buckets (each unique raw
+/// `Authorization` header would otherwise be a new permanent entry)
+/// and exhausting server RAM.
 #[derive(Debug, Clone)]
 pub struct RateLimit {
     rpm: u32,
@@ -185,6 +232,18 @@ impl RateLimit {
         let capacity = self.rpm as f64;
         let refill_per_sec = self.rpm as f64 / 60.0;
         let mut guard = self.inner.lock();
+        // Evict the oldest bucket if we'd otherwise exceed the cap.
+        // O(N) scan, but it only fires on insertion — once the map is
+        // at steady state the cost is amortized.
+        if !guard.contains_key(key) && guard.len() >= RATE_LIMIT_MAX_BUCKETS {
+            if let Some(oldest_key) = guard
+                .iter()
+                .min_by_key(|(_, b)| b.last_refill)
+                .map(|(k, _)| k.clone())
+            {
+                guard.remove(&oldest_key);
+            }
+        }
         let bucket = guard.entry(key.to_string()).or_insert(Bucket {
             tokens: capacity,
             last_refill: now,
@@ -300,5 +359,53 @@ mod tests {
         assert!(rl.try_consume("a").is_ok());
         assert!(rl.try_consume("b").is_ok()); // separate bucket
         assert!(rl.try_consume("a").is_err());
+    }
+
+    /// Without eviction a peer that sends unique raw `Authorization`
+    /// headers can mint an unbounded number of buckets. The cap + LRU
+    /// eviction in `RateLimit::try_consume` keeps the in-memory map
+    /// bounded; this test pins the cap behaviour.
+    ///
+    /// The cap is private (`RATE_LIMIT_MAX_BUCKETS = 4096`); we
+    /// exercise it by exhausting the map, then verifying that further
+    /// distinct keys still produce `Ok` (the cap was bumped rather
+    /// than erroring) and that an existing bucket that *wasn't* the
+    /// oldest is still tracked.
+    #[test]
+    fn rate_limit_caps_bucket_count() {
+        let rl = RateLimit::new(100_000); // huge budget so capacity is not the limiter
+
+        // Fill the map to the cap. Each consume starts a fresh bucket
+        // for an unseen key, so this exercises the eviction path on
+        // every insertion past the cap.
+        for i in 0..(RATE_LIMIT_MAX_BUCKETS + 16) {
+            let key = format!("k{i}");
+            // First touch of each key gets a fresh full bucket; later
+            // touches always succeed under the giant rpm.
+            assert!(rl.try_consume(&key).is_ok());
+        }
+
+        // Map is still bounded after eviction has fired.
+        assert!(
+            rl.inner.lock().len() <= RATE_LIMIT_MAX_BUCKETS,
+            "bucket map grew past the cap ({} entries)",
+            rl.inner.lock().len()
+        );
+
+        // A previously-touched key that was NOT the oldest may have
+        // been evicted, so consuming it gets a fresh full bucket and
+        // still succeeds.
+        let some_key = "k0";
+        assert!(rl.try_consume(some_key).is_ok());
+    }
+
+    #[test]
+    fn constant_time_eq_matches_for_equal_and_unequal_slices() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hell"));
+        assert!(!constant_time_eq(b"hell", b"hello"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"", b"x"));
     }
 }

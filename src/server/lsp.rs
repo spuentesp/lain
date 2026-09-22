@@ -400,16 +400,23 @@ pub struct InstallResult {
     pub message: String,
 }
 
-/// Unix-epoch milliseconds for the restart-budget window. Wrapped so
-/// tests can override the clock if we ever add time-based assertions;
-/// today only `Instant::now` is used, which is monotonic and
-/// unaffected by system clock changes — sufficient for the
-/// "elapsed since last restart" comparison.
+/// Monotonic milliseconds since process start, for the restart-budget window.
+///
+/// The previous implementation used `SystemTime` (wall clock) — that was
+/// wrong: a clock jump backwards (NTP correction, container suspend) would
+/// reset the budget and let a crash-looping LSP reconnect forever.
+/// `Instant` is monotonic and unaffected by wall-clock changes, which is
+/// what the sliding-window comparison actually needs.
+///
+/// Returns `u64::MAX` if the elapsed time would overflow (effectively
+/// unreachable in practice: an `Instant` saturating past 584 million years).
 fn unix_millis_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    let elapsed = start.elapsed();
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// `Work` returned by `prewarm_phase1` when the prewarm path
@@ -1148,8 +1155,20 @@ impl LspMultiplexer {
     /// `LSP_RESTART_WINDOW`, mark the binary unavailable. Otherwise
     /// the count is informational (logged at DEBUG for operator
     /// tracing).
+    ///
+    /// `now_ms` defaults to the monotonic clock via `unix_millis_now`;
+    /// the explicit parameter exists so tests can pin time without
+    /// racing the wall clock or relying on `Instant::now()` happening to
+    /// be far enough into the process for `saturating_sub` arithmetic
+    /// to make sense.
     fn record_restart(&mut self, binary: &str) {
         let now_ms = unix_millis_now();
+        self.record_restart_at(binary, now_ms);
+    }
+
+    /// Same as [`Self::record_restart`] but with the window reference
+    /// time pinned explicitly. Visible for tests.
+    fn record_restart_at(&mut self, binary: &str, now_ms: u64) {
         let window_ms = LSP_RESTART_WINDOW.as_millis() as u64;
         let entry = self
             .restart_budget
@@ -1790,15 +1809,17 @@ mod circuit_breaker_tests {
         let mut m = make();
         let binary = "rust-analyzer";
 
-        // Simulate three restarts that happened an hour ago.
-        let long_ago_ms =
-            unix_millis_now().saturating_sub(LSP_RESTART_WINDOW.as_millis() as u64 * 2);
+        // Use the injectable time so the simulation doesn't depend on
+        // how far into the process lifetime the test happens to run.
+        let window_ms = LSP_RESTART_WINDOW.as_millis() as u64;
+        let window_start = window_ms * 10; // safely older than one window
+        let now_ms = window_start + window_ms + 1; // one window + 1 ms later
         m.restart_budget
-            .insert(binary.to_string(), (LSP_RESTART_BUDGET, long_ago_ms));
+            .insert(binary.to_string(), (LSP_RESTART_BUDGET, window_start));
 
-        // One fresh restart now. The previous window has expired,
-        // so the budget resets and this single restart is fine.
-        m.record_lsp_failure(binary, FailureKind::ProcessExited);
+        // One fresh restart at `now_ms`. The previous window has
+        // expired, so the budget resets and this single restart is fine.
+        m.record_restart_at(binary, now_ms);
         let (count, _) = m.restart_budget[binary];
         assert_eq!(
             count, 1,
