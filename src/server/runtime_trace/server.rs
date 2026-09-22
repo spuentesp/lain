@@ -154,12 +154,24 @@ pub fn start(
 }
 
 async fn accept_loop(listener: TcpListener, store: Arc<RuntimeTraceStore>, resolver: SpanResolver) {
+    // Bound the number of in-flight OTLP connections. Without a cap
+    // a peer can open thousands of slowloris-style connections and
+    // each `tokio::spawn` here adds memory + scheduler pressure until
+    // the process OOMs. The semaphore is `tokio::sync::Semaphore` so
+    // a flood of `accept()`s just stalls at the `.acquire().await`
+    // line rather than spawning unbounded tasks.
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_OTLP_CONCURRENT));
     loop {
+        let permit = match permits.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break, // semaphore closed
+        };
         match listener.accept().await {
             Ok((stream, _peer)) => {
                 let store = store.clone();
                 let resolver = Arc::clone(&resolver);
                 tokio::spawn(async move {
+                    let _permit = permit; // released when the task ends
                     let io = TokioIo::new(stream);
                     let svc = service_fn(move |req| {
                         let store = store.clone();
@@ -173,6 +185,7 @@ async fn accept_loop(listener: TcpListener, store: Arc<RuntimeTraceStore>, resol
             }
             Err(e) => {
                 tracing::error!("otlp accept error: {e}");
+                drop(permit); // release the unused permit
             }
         }
     }
@@ -196,6 +209,21 @@ async fn handle_request(
 
     Ok(response)
 }
+
+/// Maximum OTLP ingest body size, in bytes. A peer that can reach the
+/// listener can otherwise send a multi-GB POST body; `req.collect().await`
+/// would happily buffer it. The cap is enforced by `Limited::new` on the
+/// incoming body before any allocation past the limit. 16 MiB is well
+/// above any reasonable single-batch OTLP payload.
+pub const MAX_OTLP_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum number of concurrent OTLP connections. Each accepted
+/// connection spawns a Tokio task that holds the connection until the
+/// client closes or the read times out. The cap is enforced through a
+/// `tokio::sync::Semaphore` so a peer that opens thousands of slowloris
+/// connections stalls at the `accept()` line rather than spawning
+/// unbounded work.
+pub const MAX_OTLP_CONCURRENT: usize = 64;
 
 /// Read the full request body, parse the OTLP JSON, and ingest
 /// each span into the store. The OTLP HTTP exporter doesn't
@@ -229,8 +257,13 @@ async fn ingest_traces(
     store: Arc<RuntimeTraceStore>,
     resolver: SpanResolver,
 ) -> Response<OtlpBody> {
-    use http_body_util::BodyExt;
-    let Ok(body) = req.collect().await else {
+    use http_body_util::{BodyExt, Limited};
+    // Cap the body size before allocating it. Without this, a peer
+    // can send a multi-GB POST and we buffer it all before noticing.
+    let Ok(body) = Limited::new(req.into_body(), MAX_OTLP_BODY_BYTES)
+        .collect()
+        .await
+    else {
         return json_error(StatusCode::BAD_REQUEST, "could not read body");
     };
     let bytes = body.to_bytes();

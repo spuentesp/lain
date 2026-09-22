@@ -366,6 +366,13 @@ impl LainServer {
 
     pub async fn shutdown(&self) {
         info!("Shutting down Lain server...");
+        // Cancel in-flight work so an HTTP client mid-request sees a
+        // graceful close rather than a dropped connection. The LSP pool
+        // and the background loops observe this token via
+        // `LifecycleInfo::cancel_token`; cancelling here also drops the
+        // `Drop` impl's prior `await` semantics so a future caller can
+        // rely on shutdown returning promptly.
+        self.lifecycle.cancel_token().cancel();
         self.ingest.shutdown().await;
     }
 
