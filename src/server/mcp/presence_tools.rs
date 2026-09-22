@@ -580,6 +580,20 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             // whole batch — partial validation across `files` would
             // let an agent silently get no claims when at least one
             // entry is malformed.
+            //
+            // Path validation matches `annotations::canonical_file`:
+            // reject absolute paths and any `..` segment so an agent
+            // cannot claim `/etc/passwd` or `../../somewhere` outside
+            // the workspace. Without this, `canonical_claim_path`
+            // lexically normalizes the path and the audit log records
+            // the literal string verbatim, leaking it as durable state.
+            if !is_safe_workspace_path(&f.path) {
+                return Err(format!(
+                    "claim_files: path {:?} is not a relative workspace path \
+                     (must not start with '/' or '\\\\', must not contain '..')",
+                    f.path
+                ));
+            }
             if let Some(ttl) = f.ttl_seconds {
                 if ttl == 0 {
                     return Err("claim_files: ttl_seconds must be >= 1".into());
@@ -962,11 +976,17 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
     if session.id.as_str() != a.agent_id {
         return Err("agent_id does not match session token".into());
     }
-    let paths: Vec<std::path::PathBuf> = a
-        .files
-        .into_iter()
-        .map(|f| std::path::PathBuf::from(f.path))
-        .collect();
+    let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(a.files.len());
+    for f in a.files {
+        if !is_safe_workspace_path(&f.path) {
+            return Err(format!(
+                "release_files: path {:?} is not a relative workspace path \
+                 (must not start with '/' or '\\\\', must not contain '..')",
+                f.path
+            ));
+        }
+        paths.push(std::path::PathBuf::from(f.path));
+    }
     let released = server.occupancy().release(&session.id, &paths);
     for path in &released {
         server.emit_presence_event(PresenceEvent::ClaimReleased {
