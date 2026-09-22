@@ -11,6 +11,7 @@ pub mod hook;
 pub mod intent_tools;
 pub mod overlay_sse;
 pub mod presence_tools;
+pub mod tools_registry;
 
 #[cfg(test)]
 mod command_center_assets_tests;
