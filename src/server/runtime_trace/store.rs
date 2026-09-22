@@ -233,27 +233,12 @@ impl RuntimeTraceStore {
         v
     }
 
-    /// Edges that start at `source_id`. Used by `explain_dispatch` and
-    /// `get_blast_radius` (with `include_runtime=true`).
-    pub fn edges_from(&self, source_id: &str) -> Vec<RuntimeEdge> {
-        self.snapshot()
-            .into_iter()
-            .filter(|e| e.edge.source_id == source_id)
-            .collect()
-    }
-
     /// Edges that end at `target_id`. Symmetric helper.
     pub fn edges_to(&self, target_id: &str) -> Vec<RuntimeEdge> {
         self.snapshot()
             .into_iter()
             .filter(|e| e.edge.target_id == target_id)
             .collect()
-    }
-
-    /// Distinct trace ids currently in the store. Useful for
-    /// diagnostics and for tests asserting ingest worked.
-    pub fn trace_ids(&self) -> HashSet<String> {
-        self.snapshot().into_iter().map(|e| e.trace_id).collect()
     }
 }
 
