@@ -74,7 +74,6 @@ anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 
 # Path handling
-walkdir = "2.4"
 glob = "0.3"
 dunce = "1.0"
 
@@ -98,7 +97,6 @@ which = "8.0.2"
 
 # Concurrency primitives
 dashmap = "6.0"
-rayon = "1.10"
 async-recursion = "1.1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
@@ -118,7 +116,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 [dev-dependencies]
 tempfile = "3.8"
 proptest = { version = "1.5", features = ["std"] }
-inventory = "0.2"
 
 [lib]
 name = "lain"

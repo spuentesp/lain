@@ -1251,7 +1251,6 @@ dependencies = [
  "parking_lot",
  "petgraph",
  "proptest",
- "rayon",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1273,7 +1272,6 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "uuid",
- "walkdir",
  "which",
 ]
 
