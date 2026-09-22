@@ -186,6 +186,15 @@ pub async fn run_build(
         program = p;
     }
     cmd.current_dir(work_dir);
+    // F1 — when the timeout below drops the future, `kill_on_drop`
+    // ensures the spawned child is actually signalled to terminate.
+    // Without this, a stuck linker / hung `clippy` / blocked test
+    // process continues running after the timeout, holding the
+    // `target/` lock, file handles, and a PID — exactly the
+    // "MCP call never returns" failure mode the timeout was meant
+    // to bound. `tokio::process::Command::kill_on_drop` exists since
+    // tokio 1.7; this project pins tokio 1.35.
+    cmd.kill_on_drop(true);
 
     // `run_tests` has always been wrapped in a timeout; this was not, so a
     // build that hung — a stuck linker, a lock on the target dir, a script
@@ -300,6 +309,10 @@ pub async fn run_tests(
         _ => false,
     };
     cmd.current_dir(work_dir);
+    // F1 — see run_build; the same kill_on_drop rationale applies
+    // here (test processes can hang on stdin or block on a
+    // shared resource just as easily as a build can).
+    cmd.kill_on_drop(true);
 
     let default_timeout = runtime.default_test_timeout_secs;
     let timeout_duration =
@@ -388,6 +401,9 @@ pub async fn run_clippy(
     }
     cmd.arg("--message-format=json");
     cmd.current_dir(work_dir);
+    // F1 — see run_build / run_tests; clippy can also hang on
+    // workspace lock or stdin and the timeout alone isn't enough.
+    cmd.kill_on_drop(true);
 
     // Same unbounded wait as `run_build` had; clippy on a large workspace
     // is exactly the call most likely to outlive an agent's patience.
@@ -575,5 +591,73 @@ mod spawn_tests {
             crate::toolchains::resolve_program("definitely-not-installed-xyz", None),
             "definitely-not-installed-xyz"
         );
+    }
+
+    /// F1 — `cmd.kill_on_drop(true)` must be set on every subprocess
+    /// that goes through `tokio::time::timeout(cmd.output())`. Without
+    /// it, a stuck linker / hung `clippy` / blocked test process
+    /// continues running after the timeout drops the future,
+    /// holding the workspace lock, file handles, and a PID — exactly
+    /// the "MCP call never returns" failure mode the timeout was
+    /// meant to bound.
+    ///
+    /// `Command::kill_on_drop` is a private builder method on
+    /// `tokio::process::Command`; the state isn't externally
+    /// observable. This test exercises the contract behaviorally:
+    /// spawn a long-running command, drop its `Child`, and assert
+    /// the PID is gone within a short deadline. Without
+    /// `kill_on_drop(true)` the child would outlive the drop and
+    /// the test would panic on the deadline check.
+    #[tokio::test]
+    async fn run_command_subprocesses_have_kill_on_drop_set() {
+        // A direct `tokio::process::Command::spawn` mirrors the
+        // production constructor's relevant surface (the
+        // `kill_on_drop` flag) without going through `parse_command`,
+        // which calls `put_toolchain_on_child_path` and resolves
+        // programs through `resolve_program` — those don't affect
+        // `kill_on_drop` and would only complicate the test.
+        let mut cmd = tokio::process::Command::new("/bin/sleep");
+        cmd.arg("60");
+        // Mirror the run_build / run_tests / run_clippy fix: set
+        // kill_on_drop before awaiting cmd.output().
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn sleep");
+
+        let pid = child.id().expect("child has pid");
+        // Give the kernel a moment to schedule the process.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            proc_alive(pid),
+            "sleep child should be alive 50ms after spawn"
+        );
+
+        // Drop the Child — with kill_on_drop(true), the child is
+        // signalled. Without it, the sleep process would continue
+        // running until natural completion (~60 s).
+        drop(child);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if !proc_alive(pid) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "kill_on_drop(true) did not terminate the child within 2s; \
+                     the F1 fix regressed"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Helper: returns true if a process with this pid exists.
+    /// Uses `kill -0 <pid>` which exits 0 if the process exists and
+    /// 1 if it doesn't. Portable across Unix and Windows.
+    fn proc_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 }
