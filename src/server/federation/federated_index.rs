@@ -230,7 +230,30 @@ impl FederatedIndex {
         // across repos and broke any workspace switch to a new repo_id).
         let per_repo_dir = data_dir.join("repos").join(id.as_str());
         std::fs::create_dir_all(&per_repo_dir).map_err(|e| LainError::Io(e.to_string()))?;
-        let index = Arc::new(RepoIndex::new(source, &per_repo_dir)?);
+        // PR-4 — guard against partial failure. Pre-fix, a failed
+        // `RepoIndex::new` (e.g., LSP pool construction failure)
+        // left the empty `data_dir/repos/<id>/` directory on disk
+        // because there was no rollback. `remove_repo` only cleans up
+        // dirs it inserted itself, so the orphan persisted across
+        // process restarts and accumulated over time. We can't roll
+        // back the `create_dir_all` *before* `RepoIndex::new` because
+        // the latter may also create files under that dir; the safe
+        // pattern is to roll back AFTER `RepoIndex::new` fails, when
+        // we know no partial state was committed.
+        let index = match RepoIndex::new(source, &per_repo_dir) {
+            Ok(idx) => Arc::new(idx),
+            Err(e) => {
+                // Best-effort cleanup. A failure here logs but
+                // doesn't override the original error.
+                if let Err(rm_err) = std::fs::remove_dir_all(&per_repo_dir) {
+                    tracing::warn!(
+                        "failed to clean up orphan per-repo dir {} after RepoIndex::new failure: {rm_err}",
+                        per_repo_dir.display()
+                    );
+                }
+                return Err(e);
+            }
+        };
         // If the federation already has an overlay wired in (the
         // production constructor installs it before the first `add_repo`),
         // share the same Arc so a successful index() updates the
@@ -240,10 +263,30 @@ impl FederatedIndex {
         }
         {
             let _guard = self.projection_lock.lock();
+            // Clone `id` before the insert moves it, so the
+            // post-lock overlay re-check below can use it.
+            let id_for_recheck = id.clone();
             if let Some(previous) = self.repos.write().insert(id, index) {
                 previous.deactivate();
             }
             self.rebuild_symbol_index();
+            // PR-4 — re-check `federation_overlay` under the
+            // `projection_lock` and re-apply it. The pre-fix code
+            // read the overlay BEFORE acquiring the projection
+            // lock, so a concurrent `install_overlay` could land
+            // between the read and the insert and leave the
+            // freshly-added repo with no overlay wired in (the
+            // documented contract is "every repo shares the
+            // federation's overlay"; the bug silently broke it for
+            // any add_repo that interleaved with install_overlay).
+            // Re-checking under the lock guarantees that any
+            // overlay set before this lock is also applied to this
+            // repo.
+            if let Some(overlay) = self.federation_overlay.read().clone() {
+                if let Some(repo) = self.repos.read().get(&id_for_recheck) {
+                    repo.set_overlay(overlay);
+                }
+            }
         }
         // Refresh the on-disk manifest so a runtime add survives a
         // restart. Best-effort; a save failure doesn't fail the add.
