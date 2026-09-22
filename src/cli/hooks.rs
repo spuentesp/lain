@@ -671,14 +671,14 @@ pub fn observe(
         }
         let client = reqwest::blocking::Client::new();
         let resp = client
-            .post(&endpoint.replace("/mcp", "/hook"))
+            .post(endpoint.replace("/mcp", "/hook"))
             .json(&body)
             .send();
         let _ = resp; // fail-open
     } else {
         let client = reqwest::blocking::Client::new();
         let resp = client
-            .post(&endpoint.replace("/mcp", "/hook"))
+            .post(endpoint.replace("/mcp", "/hook"))
             .json(&body)
             .send();
         let _ = resp;
@@ -1031,7 +1031,7 @@ pub fn backfill_heuristics(workspace: &str, graph: Option<&str>, dry_run: bool) 
         .with_context(|| format!("open graph at {}", graph_path.display()))?;
 
     let ns = RepoNamespace::fresh();
-    graph.set_namespace(ns.clone());
+    graph.set_namespace(ns);
     // The dynamic_dispatch_sensor reads graph paths via `graph_path`
     // which mints IDs under the configured namespace; setting it here
     // keeps backfilled edges compatible with whatever namespace the

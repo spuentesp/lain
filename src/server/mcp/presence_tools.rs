@@ -1301,7 +1301,7 @@ fn symbols_at_ref(root: &std::path::Path, git_ref: &str, path: &str) -> Vec<(Str
     // callers that go through `claim_files` / `release_files`); for
     // defensive depth we still ask the same questions git would refuse
     // to ask: no leading `-`, no `..`, no embedded `:`.
-    if validate_git_ref(git_ref).is_err() || is_safe_workspace_path(path) == false {
+    if validate_git_ref(git_ref).is_err() || !is_safe_workspace_path(path) {
         return vec![];
     }
     let Ok(out) = std::process::Command::new("git")

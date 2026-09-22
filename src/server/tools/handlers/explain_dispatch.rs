@@ -82,7 +82,7 @@ pub async fn explain_dispatch(
     symbol: &str,
 ) -> Result<String, LainError> {
     let node = resolve_node(graph, overlay, symbol)?;
-    let report = build_with_store(graph, overlay, &node, &RuntimeTraceStore::global());
+    let report = build_with_store(graph, overlay, &node, RuntimeTraceStore::global());
 
     // Human-readable summary at the top, JSON-ish body at the bottom
     // so existing tools that expect prose still get it.
@@ -130,7 +130,7 @@ pub fn build(
     overlay: &VolatileOverlay,
     target: &GraphNode,
 ) -> ExplainDispatch {
-    build_with_store(graph, overlay, target, &RuntimeTraceStore::global())
+    build_with_store(graph, overlay, target, RuntimeTraceStore::global())
 }
 
 /// Same as `build` but with an injected store. Lets tests pin a
@@ -170,8 +170,8 @@ pub fn build_with_store(
                     });
                 }
             }
-            EdgeType::DynamicDispatch | EdgeType::BusTopic | EdgeType::RouteMatches => {
-                if seen_heuristic.insert(caller.id.clone()) {
+            EdgeType::DynamicDispatch | EdgeType::BusTopic | EdgeType::RouteMatches
+                if seen_heuristic.insert(caller.id.clone()) => {
                     // Overlay edges don't carry provenance yet; tag with
                     // a synthetic detector so the consumer knows the
                     // path. Confidence 0.5 = threshold default.
@@ -181,7 +181,6 @@ pub fn build_with_store(
                         confidence: 0.5,
                     });
                 }
-            }
             _ => {}
         }
     }

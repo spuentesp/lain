@@ -465,9 +465,7 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     let inventory_in_profile = registry
         .iter()
         .filter(|d| {
-            crate::server::tools::profile::SEMANTIC_PROFILE
-                .iter()
-                .any(|name| *name == d.name)
+            crate::server::tools::profile::SEMANTIC_PROFILE.contains(&d.name)
         })
         .count();
     let initial_advertised = match profile {

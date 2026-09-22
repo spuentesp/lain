@@ -35,8 +35,8 @@ enum EmbedInner {
 /// Default sequence-length cap when the tokenizer doesn't publish one.
 /// 512 covers BGE-large and any model trained for `max_position_embeddings
 /// >= 512`. MiniLM-L6-v2's published cap is 256; the model itself
-/// silently clamps, so this only matters for the quality of the
-/// truncation we apply before sending.
+/// > silently clamps, so this only matters for the quality of the
+/// > truncation we apply before sending.
 const DEFAULT_MAX_SEQ_LEN: usize = 512;
 
 /// Probe the tokenizer's `truncation.max_length` (the field the
