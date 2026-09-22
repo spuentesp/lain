@@ -1363,14 +1363,6 @@ fn symbol_kind_to_node_type(kind: SymbolKind) -> NodeType {
     }
 }
 
-/// Location of a definition
-#[derive(Debug, Clone)]
-pub struct DefinitionLocation {
-    pub path: PathBuf,
-    pub line: u32,
-    pub col: u32,
-}
-
 /// Location of a reference
 #[derive(Debug, Clone)]
 pub struct ReferenceLocation {

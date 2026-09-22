@@ -324,18 +324,6 @@ impl LainServer {
         self.ingest.overlay_paths_test_insert(key, node);
     }
 
-    pub fn overlay_paths_test_keys(&self) -> Vec<String> {
-        self.ingest.overlay_paths_test_keys()
-    }
-
-    pub fn overlay_paths_record_insert(&self, key: String, node_id: String) {
-        self.ingest.overlay_paths_record_insert(key, node_id);
-    }
-
-    pub fn overlay_paths_replace(&self, key: String, node_ids: Vec<String>) {
-        self.ingest.overlay_paths_replace(key, node_ids);
-    }
-
     pub async fn add_repo(
         &self,
         repo: &RepoConfig,
