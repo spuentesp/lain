@@ -71,7 +71,6 @@ pub fn federation_resolver(
 ) -> SpanResolver {
     Arc::new(
         move |span: &crate::server::runtime_trace::spans::SpanRecord| {
-            use crate::server::runtime_trace::spans::AttributeValue;
             // Honor `code.repo` (OTLP semconv) when present so the
             // resolver doesn't waste work scanning every repo.
             let code_repo = span.attributes.get("code.repo").and_then(|v| v.as_str());
@@ -506,7 +505,6 @@ mod tests {
     /// between repos.
     #[tokio::test(flavor = "current_thread")]
     async fn federation_resolver_narrows_via_code_repo_attribute() {
-        use crate::graph::GraphDatabase;
         use crate::schema::{GraphNode, NodeType};
         use crate::server::federation::federated_index::FederatedIndex;
         use crate::server::federation::graph_backend::PetgraphBackend;

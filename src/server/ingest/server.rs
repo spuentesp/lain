@@ -417,8 +417,8 @@ impl LainServer {
         self.presence.with_shared_presence(f)
     }
 
-    pub fn refresh_shared_presence(&self) {
-        self.presence.refresh_shared_presence();
+    pub fn refresh_shared_presence(&self) -> Result<(), String> {
+        self.presence.refresh_shared_presence()
     }
 
     /// Install a persist callback on `presence`, `occupancy`,

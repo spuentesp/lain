@@ -194,7 +194,7 @@ pub struct ListActiveAgentsArgs {
 pub fn run_list_active_agents(server: &LainServer, args: Value) -> Result<Value, String> {
     // A listing that only sees this process's own memory is the
     // symptom that made the split invisible.
-    server.refresh_shared_presence();
+    let _ = server.refresh_shared_presence();
     let a: ListActiveAgentsArgs = serde_json::from_value(args).unwrap_or(ListActiveAgentsArgs {
         include_background: None,
     });
@@ -272,7 +272,7 @@ pub fn run_unregister_agent(server: &LainServer, args: Value) -> Result<Value, S
 }
 
 pub fn run_who_am_i(server: &LainServer, args: Value) -> Result<Value, String> {
-    server.refresh_shared_presence();
+    let _ = server.refresh_shared_presence();
     let a: WhoAmIArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
     let claims = server.occupancy().list_for_agent(&session.id);
@@ -345,7 +345,7 @@ pub struct ListSubagentsArgs {
 /// subagent sees on its own `who_am_i` minus `claims`, making it usable
 /// as a lightweight rendering input from the parent's side.
 pub fn run_list_subagents(server: &LainServer, args: Value) -> Result<Value, String> {
-    server.refresh_shared_presence();
+    let _ = server.refresh_shared_presence();
     let a: ListSubagentsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
     let parent_id = session.id.clone();
@@ -955,7 +955,7 @@ pub struct ListOccupancyArgs {
 }
 
 pub fn run_list_occupancy(server: &LainServer, args: Value) -> Result<Value, String> {
-    server.refresh_shared_presence();
+    let _ = server.refresh_shared_presence();
     let a: ListOccupancyArgs =
         serde_json::from_value(args).unwrap_or(ListOccupancyArgs { path: None });
     let entries: Vec<OccupancyEntry> = if let Some(p) = a.path.as_deref() {
@@ -1007,7 +1007,7 @@ pub struct MyClaimsArgs {
 }
 
 pub fn run_my_claims(server: &LainServer, args: Value) -> Result<Value, String> {
-    server.refresh_shared_presence();
+    let _ = server.refresh_shared_presence();
     let a: MyClaimsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
     if session.id.as_str() != a.agent_id {
