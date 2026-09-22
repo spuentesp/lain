@@ -1635,9 +1635,22 @@ impl GraphDatabase {
         }
 
         let mut path_index = HashMap::new();
+        let mut name_index = HashMap::new();
         for (idx, node) in state.graph.node_references() {
             path_index
                 .entry(node.path.clone())
+                .or_insert_with(Vec::new)
+                .push(idx);
+            // A3 — rebuild `name_index` in the same pass over the
+            // loaded petgraph nodes so `find_indices_by_name` /
+            // `find_all_nodes_by_name` work immediately after a cold
+            // load, not just after the next indexing pass.
+            // `load_from_disk` previously went through
+            // `graph.node_weights()` for name lookups; post-fix the
+            // secondary index is authoritative. The on-disk format
+            // is unchanged — `name_index` is purely derived state.
+            name_index
+                .entry(node.name.clone())
                 .or_insert_with(Vec::new)
                 .push(idx);
         }
@@ -1650,6 +1663,10 @@ impl GraphDatabase {
         self.path_index.clear();
         for (k, v) in path_index {
             self.path_index.insert(k, v);
+        }
+        self.name_index.clear();
+        for (k, v) in name_index {
+            self.name_index.insert(k, v);
         }
         *self.last_commit.write() = state.last_commit;
         Ok(())
@@ -2393,6 +2410,71 @@ mod name_index_tests {
             1,
             "a clone must see the upsert; got {} entries",
             via_handle.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod load_from_disk_name_index_tests {
+    //! A3 — `load_from_disk` must rebuild `name_index` from the loaded
+    //! petgraph nodes. Without this, `find_indices_by_name` and
+    //! `find_all_nodes_by_name` return empty until the next indexing
+    //! pass repopulates them. The pre-fix code went through
+    //! `graph.node_weights()` for name lookups and didn't depend on
+    //! the secondary index, so the rebuild was implicit. Post-fix the
+    //! secondary index is authoritative; the rebuild must be explicit.
+
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+
+    /// Persist a small graph, load it fresh, and assert that
+    /// `find_node_by_name` works on the loaded instance without any
+    /// indexing pass. Pre-fix this test was a no-op (the lookup
+    /// used `node_weights()`); post-fix it's the contract that pins
+    /// the rebuild in `load_from_disk`.
+    #[test]
+    fn name_index_is_rebuilt_on_load_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let writer = GraphDatabase::new(&path).expect("db");
+        let alpha = GraphNode::new(NodeType::Function, "alpha".into(), "src/a.rs".into());
+        let beta = GraphNode::new(NodeType::Function, "beta".into(), "src/b.rs".into());
+        writer
+            .insert_nodes_batch(&[alpha.clone(), beta.clone()])
+            .expect("insert");
+        writer
+            .save_to_disk_sync()
+            .expect("save");
+
+        // Fresh load from the same path. The new instance shares
+        // no `name_index` with the writer.
+        drop(writer);
+        let reader = GraphDatabase::new(&path).expect("reload");
+        assert_eq!(reader.node_count(), 2, "two nodes survive the round trip");
+
+        // `find_node_by_name` must work immediately. Pre-fix this
+        // test was a no-op (the lookup went through petgraph);
+        // post-fix it's the regression test for the rebuild.
+        let alpha_hits = reader.find_all_nodes_by_name("alpha");
+        assert_eq!(
+            alpha_hits.len(),
+            1,
+            "name_index must be rebuilt on load — got {} hits",
+            alpha_hits.len()
+        );
+        assert_eq!(alpha_hits[0].id, alpha.id);
+
+        let beta_hits = reader.find_all_nodes_by_name("beta");
+        assert_eq!(beta_hits.len(), 1);
+        assert_eq!(beta_hits[0].id, beta.id);
+
+        // `find_indices_by_name` is the lower-level lookup the
+        // resolve phase uses; it must work too.
+        assert_eq!(reader.find_indices_by_name("alpha").len(), 1);
+        assert_eq!(reader.find_indices_by_name("beta").len(), 1);
+        assert!(
+            reader.find_node_by_name("missing").is_none(),
+            "unknown names still return None"
         );
     }
 }
