@@ -32,11 +32,16 @@ static FILE_CONTENT_CACHE: OnceLock<
 pub(crate) fn file_content_cache(
 ) -> &'static parking_lot::Mutex<lru::LruCache<PathBuf, (SystemTime, Vec<String>)>> {
     FILE_CONTENT_CACHE.get_or_init(|| {
+        // `.max(1)` is a defensive clamp for a hand-edited tuning.toml
+        // setting the capacity to 0; `LruCache::new` panics on a
+        // `NonZeroUsize(0)`. The default (1 000) is well above 1.
         parking_lot::Mutex::new(lru::LruCache::new(
             std::num::NonZeroUsize::new(
-                crate::server::tuning::TuningConfig::default().file_content_cache_capacity,
+                crate::server::tuning::TuningConfig::default()
+                    .file_content_cache_capacity
+                    .max(1),
             )
-            .expect("default file_content_cache_capacity > 0"),
+            .expect("file_content_cache_capacity > 0 after clamp"),
         ))
     })
 }
