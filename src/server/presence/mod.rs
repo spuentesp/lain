@@ -19,13 +19,16 @@ use crate::server::revision_log::RevisionId;
 
 mod agent;
 mod claim;
+mod persistence;
 mod registry;
 pub use agent::{new_agent_id, new_session_token, AgentId, AgentKind, AgentMode};
 pub use claim::{
     unix_secs, Claim, ClaimIntent, ConflictEntry, Holder, OccupancyEntry, SymbolHash,
     SymbolOccupancy,
 };
+pub use persistence::{load_pair, save_pair};
 pub use registry::{HeartbeatError, PersistFn, PresenceRegistry};
+pub(crate) use persistence::compute_symbol_hash;
 pub(crate) use registry::AgentSession;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -75,12 +78,12 @@ pub struct ClaimResult {
 }
 
 #[derive(Debug, Default)]
-struct FileOccupancy {
-    agents: HashSet<AgentId>,
+pub(crate) struct FileOccupancy {
+    pub(crate) agents: HashSet<AgentId>,
     /// Per-symbol agent set. An entry exists only if any agent has claimed
     /// that specific symbol. If no agent has claimed a symbol, the entry is
     /// absent — not present with an empty set.
-    symbols: HashMap<String, HashSet<AgentId>>,
+    pub(crate) symbols: HashMap<String, HashSet<AgentId>>,
     /// Per-symbol intent tracking. Outer key is the symbol name (or
     /// the `__file_level__` sentinel for file-level claims); inner
     /// map records the `ClaimIntent` each agent recorded when they
@@ -88,16 +91,16 @@ struct FileOccupancy {
     /// a Read claim is non-conflicting against any existing intent;
     /// only Edit-vs-Edit (or Edit vs file-level Edit) yields a
     /// conflict.
-    intents: HashMap<String, HashMap<AgentId, ClaimIntent>>,
+    pub(crate) intents: HashMap<String, HashMap<AgentId, ClaimIntent>>,
     /// Per-symbol last-touched timestamp, in the same shape as
     /// `intents`. Used to populate the `last_seen_unix` field on
     /// `ConflictEntry` so callers can tell when the conflicting
     /// claim was first (or most recently) recorded.
-    last_touched: HashMap<String, HashMap<AgentId, SystemTime>>,
+    pub(crate) last_touched: HashMap<String, HashMap<AgentId, SystemTime>>,
     /// Agents whose presence on this file was inferred from filesystem
     /// activity rather than declared. Mirrored onto `ConflictEntry` so
     /// a conflicting agent can tell a guess from a declaration.
-    inferred: HashSet<AgentId>,
+    pub(crate) inferred: HashSet<AgentId>,
 }
 
 impl FileOccupancy {
@@ -167,9 +170,9 @@ impl FileOccupancy {
 }
 
 #[derive(Debug, Default)]
-struct OccupancyState {
-    by_file: HashMap<PathBuf, FileOccupancy>,
-    by_agent: HashMap<AgentId, Vec<Claim>>,
+pub(crate) struct OccupancyState {
+    pub(crate) by_file: HashMap<PathBuf, FileOccupancy>,
+    pub(crate) by_agent: HashMap<AgentId, Vec<Claim>>,
 }
 
 /// Canonical key for a claim path.
@@ -248,7 +251,7 @@ pub fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
 
 #[derive(Clone)]
 pub struct OccupancyMap {
-    inner: std::sync::Arc<Mutex<OccupancyState>>,
+    pub(crate) inner: std::sync::Arc<Mutex<OccupancyState>>,
     /// Optional persist callback. Same shape as the registry's
     /// `persist_cb`; fires on `claim`, `release`, and `release_all_for`
     /// when the call actually mutates state (calls that grant no claims
@@ -268,7 +271,7 @@ pub struct OccupancyMap {
     /// roots. Read by `canonical_claim_path`.
     claim_roots: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
     /// Active advisory filesystem lock leases: (AgentId, CanonicalClaimPath) -> LockFilePath.
-    lock_leases: std::sync::Arc<parking_lot::Mutex<HashMap<(AgentId, PathBuf), PathBuf>>>,
+    pub(crate) lock_leases: std::sync::Arc<parking_lot::Mutex<HashMap<(AgentId, PathBuf), PathBuf>>>,
 }
 
 impl std::fmt::Debug for OccupancyMap {
@@ -1214,512 +1217,6 @@ pub enum PresenceEvent {
     EditLanded {
         event: crate::server::audit::AuditEvent,
     },
-}
-
-// ---------------------------------------------------------------------------
-// Persistence: PresenceRegistry + OccupancyMap <-> JSON
-// ---------------------------------------------------------------------------
-//
-// Why free functions (not methods):
-// - Both `PresenceRegistry` and `OccupancyMap` are `Arc<Mutex<...>>` wrappers.
-//   Adding a method that takes a path clutters the type's contract with a
-//   filesystem concern; the persistence layer is genuinely orthogonal to the
-//   in-memory data structure.
-// - `LainServer` is the natural owner of the state path (it knows the
-//   workspace) and the natural caller; it can either drive the helpers
-//   explicitly via `save_state`/`load_state` or hand a closure that captures
-//   the path to the registries' `set_persist_callback` setters.
-//
-// Why the persist hooks don't capture `LainServer`:
-// - The hook closures need to be `'static + Send + Sync`. Capturing an
-//   `Arc<LainServer>` works in principle but creates a ref cycle (server ->
-//   registry -> closure -> server). Holding just the `Path` + clones of the
-//   `Arc<PresenceRegistry>` / `Arc<OccupancyMap>` keeps the lifecycle
-//   straighforward: as long as the registries live, the closure is valid.
-
-/// On-disk schema for `PresenceRegistry` + `OccupancyMap`. Fields are
-/// `Vec<(K, V)>` rather than maps because serde-json's `HashMap`
-/// representation is non-deterministic across runs; with tuples the
-/// emitted file is stable to hand-inspection.
-type OccupancySnapshot = Vec<(PathBuf, Vec<String>, Vec<(String, Vec<String>)>)>;
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PersistedState {
-    /// `(agent_id_string, session)`.
-    sessions: Vec<(String, AgentSession)>,
-    /// `(path, file_level_agents, [(symbol, agents)])`. The
-    /// `__file_level__` sentinel that lives in the in-memory symbol
-    /// map is filtered out before serialization; the file-level agents
-    /// list is derived directly from `FileOccupancy::agents`.
-    occupancy_by_file: OccupancySnapshot,
-    /// `(path, [(agent_id, intent)])`. File-level `ClaimIntent`
-    /// records — the only intents that survive a save/load round-trip.
-    /// Symbol-level intents (`claims` whose `symbols` field names a
-    /// specific definition) are not persisted because the
-    /// `(sym, agents)` shape in `occupancy_by_file` already records
-    /// which agent touched which symbol; the file-level intent is the
-    /// only one the cross-process presence layer can't reconstruct
-    /// from `agents` alone. Without this, an edit claim loaded from
-    /// disk looks intentless to a peer's read claim, and the
-    /// advisory branch of `OccupancyMap::claim_in_memory` skips
-    /// the warning (P1 bug surfaced by `tests/multi_agent_concurrency`).
-    #[serde(default)]
-    occupancy_file_intents: Vec<(PathBuf, Vec<(String, ClaimIntent)>)>,
-    /// `(agent_id_string, [claim])`. Mirrored into `by_file` on load.
-    occupancy_by_agent: Vec<(String, Vec<Claim>)>,
-    /// Offset (in bytes) into `audit.jsonl` at which the next audit
-    /// append should start on the next restart. Task 2.6 reads this
-    /// out of the audit module on save and writes it back on load so
-    /// crash-safe append continuation crosses process boundaries.
-    #[serde(default)]
-    audit_offset_bytes: u64,
-    /// Unix-epoch seconds at which `audit.jsonl` was last reset
-    /// because it was missing or corrupt on load. `None` until
-    /// Task 2.6 wires up the loader's reset detection.
-    #[serde(default)]
-    audit_reset_at_unix: Option<f64>,
-    /// Per-agent intent declarations. `(agent_id, intent)`. The
-    /// registry invariant is "one intent per agent", but the on-disk
-    /// shape is a flat list so a stale state file with a duplicate
-    /// entry does not crash the loader — the loader picks the most
-    /// recent entry per agent and drops the rest. `#[serde(default)]`
-    /// keeps backward-compat with state files written before the
-    /// intent layer landed (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`).
-    #[serde(default)]
-    intents: Vec<(String, crate::server::intent::Intent)>,
-    /// Per-agent observed tool-call activity. `(agent_id, activity)`.
-    /// The `Activity::recent_tools` ring buffer is FIFO-capped at
-    /// 100 entries, so a stale entry's payload stays bounded even
-    /// after a long-running session. `#[serde(default)]` for the
-    /// same backward-compat reason as `intents`.
-    #[serde(default)]
-    activities: Vec<(String, crate::server::activity::Activity)>,
-}
-
-/// Serialize the in-memory presence registry + occupancy map to a JSON
-/// file at `path`. The write is atomic: serialise to `path.tmp` first,
-/// then `rename` over `path`. Returns a string error on any IO / JSON
-/// failure; callers wrap as needed.
-///
-/// The `audit_offset_bytes` field is populated from the live
-/// `audit.jsonl` file (sibling of `path` under the same state
-/// directory) at save time — Task 2.6 wiring. The state file is
-/// always co-located with the audit log on disk (see
-/// `LainServer::state_dir_for_audit`), so `path.parent()` is the
-/// correct audit directory in every production code path. A bare
-/// filename with no parent (which `LainServer::state_path` never
-/// produces, but tests might) falls back to the current dir, which
-/// at worst yields a `0` offset for a missing audit log.
-pub fn save_pair(
-    path: &Path,
-    reg: &PresenceRegistry,
-    occ: &OccupancyMap,
-    intent: &crate::server::intent::IntentRegistry,
-    activity: &crate::server::activity::ActivityTracker,
-) -> Result<(), String> {
-    // Task 2.6 — read the live audit log size now so the value
-    // persisted on this save reflects "how much audit data was on
-    // disk at the moment of this write," not a placeholder. The
-    // sibling relationship between the state file and the audit log
-    // holds in production; the parent-unwrap_or("") fallback keeps
-    // this safe even for synthetic test paths with no parent.
-    let audit_dir: PathBuf = path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(""));
-    let audit_offset_bytes = crate::server::audit::current_offset_bytes(&audit_dir);
-
-    let state = {
-        let s = reg.inner.lock();
-        let o = occ.inner.lock();
-        let intents_snapshot = intent.snapshot();
-        let activities_snapshot = activity.snapshot();
-        PersistedState {
-            sessions: s
-                .sessions
-                .iter()
-                .map(|(k, v)| (k.0.clone(), v.clone()))
-                .collect(),
-            occupancy_by_file: o
-                .by_file
-                .iter()
-                .map(|(p, fo)| {
-                    let agents: Vec<String> = fo.agents.iter().map(|a| a.0.clone()).collect();
-                    let symbols: Vec<(String, Vec<String>)> = fo
-                        .symbols
-                        .iter()
-                        .filter(|(sym, _)| sym.as_str() != "__file_level__")
-                        .map(|(sym, agents)| {
-                            (sym.clone(), agents.iter().map(|a| a.0.clone()).collect())
-                        })
-                        .collect();
-                    (p.clone(), agents, symbols)
-                })
-                .collect(),
-            // Save file-level intents. `__file_level__` is the only
-            // sentinel key on `intents`; symbol-level entries are
-            // reconstructed on demand from the `(sym, agents)`
-            // entries above and the agents' recorded `claim_set`
-            // (see `load_pair`). Mirrors the comment on
-            // `PersistedState::occupancy_file_intents`.
-            occupancy_file_intents: o
-                .by_file
-                .iter()
-                .map(|(p, fo)| {
-                    let entries: Vec<(String, ClaimIntent)> = fo
-                        .intents
-                        .get("__file_level__")
-                        .map(|per_agent| {
-                            per_agent
-                                .iter()
-                                .map(|(a, i)| (a.0.clone(), i.clone()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    (p.clone(), entries)
-                })
-                .filter(|(_, entries)| !entries.is_empty())
-                .collect(),
-            occupancy_by_agent: o
-                .by_agent
-                .iter()
-                .map(|(k, v)| (k.0.clone(), v.clone()))
-                .collect(),
-            // Task 2.6 — these fields are now driven by the audit
-            // module instead of placeholders. `audit_offset_bytes`
-            // is the live size of `audit.jsonl`; `audit_reset_at_unix`
-            // is set by `load_pair` when it detects a missing or
-            // unreadable audit log on the way in, and simply
-            // round-trips here on the way out. Additive-compat
-            // (state files from before Task 2.2 still load via
-            // `#[serde(default)]`).
-            audit_offset_bytes,
-            audit_reset_at_unix: None,
-            // Intent layer (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`):
-            // a flat `(agent_id, intent)` list. Each agent has at
-            // most one intent in memory; if a stale state file
-            // somehow has duplicates, the loader picks the most
-            // recent per agent.
-            intents: intents_snapshot
-                .into_iter()
-                .map(|(id, i)| (id.0, i))
-                .collect(),
-            // Activity layer: per-agent observed tool calls. The
-            // ring buffer on `Activity` is bounded to ~100 entries
-            // so a single agent's payload stays small.
-            activities: activities_snapshot
-                .into_iter()
-                .map(|(id, a)| (id.0, a))
-                .collect(),
-        }
-    };
-    let json = serde_json::to_string_pretty(&state)
-        .map_err(|e| format!("serialize PersistedState: {e}"))?;
-    crate::cli::io::write_file_atomic(path, json.as_bytes())
-        .map_err(|e| format!("write {}: {e}", path.display()))?;
-    Ok(())
-}
-
-/// Hydrate `reg` and `occ` from a JSON file previously written by
-/// `save_pair`. When `path` does not exist this is a no-op (the
-/// registries stay untouched).
-///
-/// On a successful read, prior contents of `reg` / `occ` are replaced
-/// with the persisted snapshot, ensuring ghost sessions and stale
-/// claims do not survive across reloads. If reading or parsing fails,
-/// live state remains untouched.
-///
-/// Task 2.6: after a successful parse, if the live `audit.jsonl` is
-/// missing or unreadable in the state directory (`path.parent()`),
-/// the loader rewrites the state file with `audit_offset_bytes = 0`
-/// and `audit_reset_at_unix = Some(now)`. The spec calls for a WARN
-/// here; we surface it through `tracing::warn!` so operators see it
-/// in the server log. The next `save_pair` then persists the reset
-/// timestamp out to the world; subsequent restarts see the marker
-/// and don't re-warn.
-///
-/// Returns the list of `PresenceEvent::ClaimRevoked { reason:
-/// "stale_owner" }` events the caller must publish on the
-/// presence broadcast channel. These are claims whose owner is no
-/// longer in `PresenceRegistry::sessions` after a fresh load — i.e.
-/// the agent's process is gone but its claims were never released.
-/// Without this cross-check the new server would refuse every
-/// competing claim on those scopes (linearizability violation across
-/// server crashes), so the load itself reclaims them and tells the
-/// world via SSE.
-pub fn load_pair(
-    path: &Path,
-    reg: &PresenceRegistry,
-    occ: &OccupancyMap,
-    intent: &crate::server::intent::IntentRegistry,
-    activity: &crate::server::activity::ActivityTracker,
-) -> Result<Vec<PresenceEvent>, String> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let json =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut state: PersistedState =
-        serde_json::from_str(&json).map_err(|e| format!("parse {}: {e}", path.display()))?;
-
-    // Task 2.6 — audit log present-or-not check + reset rewrite,
-    // before we start consuming `state`'s `Vec` fields below. The
-    // same `path.parent()` rule from `save_pair` applies: the state
-    // file and audit log are siblings under the state directory,
-    // and a bare path with no parent falls back to the current dir
-    // for the check (which yields a fresh "missing" verdict,
-    // triggering the reset — correct, since no audit log is
-    // colocated there). Doing the rewrite here keeps `state` fully
-    // owned so we can `&state` for the on-disk rewrite; the on-disk
-    // marker is independent of the in-memory hydration that follows
-    // so the order doesn't matter for the data flow.
-    let audit_dir: PathBuf = path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(""));
-    if !crate::server::audit::audit_log_present_and_readable(&audit_dir) {
-        tracing::warn!(
-            "audit log missing or unreadable at {}; resetting audit_offset_bytes and stamping audit_reset_at_unix",
-            audit_dir.join(crate::server::audit::AUDIT_LOG_FILENAME).display(),
-        );
-        state.audit_offset_bytes = 0;
-        state.audit_reset_at_unix = Some(crate::server::time::now_unix_f64());
-        // Persist the reset marker immediately so a crash between
-        // load and the first save doesn't lose it. The write goes
-        // through the same atomic-rename path as `save_pair` so a
-        // half-written state file can't be observed by a concurrent
-        // reader. A concurrent mutator racing the rewrite would
-        // still write its own (possibly newer) state on top of ours
-        // — that's the same race the regular save path already
-        // accepts, so it doesn't widen the surface here.
-        let json = serde_json::to_string_pretty(&state)
-            .map_err(|e| format!("serialize PersistedState (reset): {e}"))?;
-        crate::cli::io::write_file_atomic(path, json.as_bytes())
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
-    }
-
-    // Stage parsed snapshot into temporary collections before locking
-    // or mutating live state. If parsing or validation fails, live state
-    // remains untouched.
-    let mut new_sessions = HashMap::new();
-    let mut new_by_token = HashMap::new();
-    for (k, sess) in state.sessions {
-        new_sessions.insert(AgentId(k.clone()), sess.clone());
-        new_by_token.insert(sess.session_token, AgentId(k));
-    }
-    let mut new_by_file: HashMap<PathBuf, FileOccupancy> = HashMap::new();
-    for (path_str, agents, symbols) in state.occupancy_by_file {
-        let pb = path_str;
-        let entry = new_by_file.entry(pb).or_default();
-        for a in agents {
-            entry.agents.insert(AgentId(a));
-        }
-        for (sym, agent_ids) in symbols {
-            let set = entry.symbols.entry(sym).or_default();
-            for a in agent_ids {
-                set.insert(AgentId(a));
-            }
-        }
-    }
-    // Restore file-level intents so a peer's edit claim is visible
-    // as Edit (not as "no intent recorded") after a load.
-    for (path_str, intents) in state.occupancy_file_intents {
-        let pb = path_str;
-        let entry = new_by_file.entry(pb).or_default();
-        let per_agent = entry
-            .intents
-            .entry("__file_level__".to_string())
-            .or_default();
-        for (agent_id, intent) in intents {
-            per_agent.insert(AgentId(agent_id), intent);
-        }
-    }
-    let mut new_by_agent = HashMap::new();
-    for (k, claims) in state.occupancy_by_agent {
-        let agent_id = AgentId(k.clone());
-        for claim in &claims {
-            let entry = new_by_file.entry(claim.path.clone()).or_default();
-            if claim.symbols.is_empty() {
-                entry
-                    .intents
-                    .entry("__file_level__".to_string())
-                    .or_default()
-                    .insert(agent_id.clone(), claim.intent.clone());
-                entry
-                    .last_touched
-                    .entry("__file_level__".to_string())
-                    .or_default()
-                    .insert(agent_id.clone(), claim.last_touched_unix);
-            } else {
-                for sym in &claim.symbols {
-                    entry
-                        .intents
-                        .entry(sym.clone())
-                        .or_default()
-                        .insert(agent_id.clone(), claim.intent.clone());
-                    entry
-                        .last_touched
-                        .entry(sym.clone())
-                        .or_default()
-                        .insert(agent_id.clone(), claim.last_touched_unix);
-                }
-            }
-        }
-        new_by_agent.insert(agent_id, claims);
-    }
-
-    let mut s = reg.inner.lock();
-    let mut o = occ.inner.lock();
-    s.sessions = new_sessions;
-    s.by_token = new_by_token;
-    o.by_file = new_by_file;
-    o.by_agent = new_by_agent;
-    occ.lock_leases.lock().retain(|(agent, path), _| {
-        o.by_agent
-            .get(agent)
-            .map(|cs| cs.iter().any(|c| &c.path == path))
-            .unwrap_or(false)
-    });
-    drop(s);
-    drop(o);
-
-    // Intent layer (PR 1 of
-    // `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). The on-disk shape is
-    // `(agent_id, Intent)`. The registry's `replace_all` handles
-    // deduplication per agent (most-recent `updated_at` wins) so a
-    // stale state file with duplicates is reconciled.
-    let intents: Vec<crate::server::intent::Intent> = state
-        .intents
-        .into_iter()
-        .map(|(id_str, i)| {
-            let mut i = i;
-            // Defensive: state-file entries carry `agent_id` inside
-            // the Intent; use the on-disk agent_id (the tuple key)
-            // to overwrite any drift in the inner field.
-            i.agent_id = AgentId(id_str);
-            i
-        })
-        .collect();
-    intent.replace_all(intents);
-
-    // Activity layer: each `(agent_id, Activity)` pair is restored
-    // verbatim. The `replace_all` helper overwrites the entry's
-    // agent_id with the map key so the two stay in sync.
-    let activities: Vec<(AgentId, crate::server::activity::Activity)> = state
-        .activities
-        .into_iter()
-        .map(|(id_str, a)| (AgentId(id_str), a))
-        .collect();
-    activity.replace_all(activities);
-
-    // Linearizability across server crashes (variant 1 of
-    // `scripts/agy_chaos.sh`): every claim whose `agent_id` is not
-    // in `s.sessions` is an orphan — its owner is gone but the claim
-    // survived the persistence round-trip. The lock layer's
-    // stale-after-takeover window would eventually let a competing
-    // agent in via the filesystem sentinel, but the in-memory
-    // `OccupancyMap` is checked first and the orphan claim would
-    // block the competing agent indefinitely. So drop the orphans
-    // here and emit one `ClaimRevoked` per reclaimed path so SSE
-    // subscribers see the same view the new server has.
-    //
-    // The cross-check happens after both `o.by_file` and `o.by_agent`
-    // are populated so we can prune consistently. The `lock_leases`
-    // retain above already drops filesystem lock entries that no
-    // longer match a live `o.by_agent` claim, so it falls into line.
-    let stale_events: Vec<PresenceEvent> = {
-        let s_guard = reg.inner.lock();
-        let mut o_guard = occ.inner.lock();
-        let mut revoked: Vec<PresenceEvent> = Vec::new();
-        let orphan_agents: Vec<AgentId> = o_guard
-            .by_agent
-            .keys()
-            .filter(|agent_id| !s_guard.sessions.contains_key(agent_id))
-            .cloned()
-            .collect();
-        for agent_id in orphan_agents {
-            // Take the orphan's claims out of `by_agent` first; the
-            // claim list is what we iterate to clean up `by_file`.
-            if let Some(claims) = o_guard.by_agent.remove(&agent_id) {
-                for claim in &claims {
-                    if let Some(entry) = o_guard.by_file.get_mut(&claim.path) {
-                        entry.agents.remove(&agent_id);
-                        // Drop every symbol-level entry the agent
-                        // touched. Empty file-level agents means
-                        // `__file_level__` stays around only if
-                        // another agent still holds the file.
-                        for sym in claim
-                            .symbols
-                            .iter()
-                            .chain(std::iter::once(&"__file_level__".to_string()))
-                        {
-                            if let Some(set) = entry.symbols.get_mut(sym) {
-                                set.remove(&agent_id);
-                                if set.is_empty() {
-                                    entry.symbols.remove(sym);
-                                }
-                            }
-                            if let Some(intents) = entry.intents.get_mut(sym) {
-                                intents.remove(&agent_id);
-                                if intents.is_empty() {
-                                    entry.intents.remove(sym);
-                                }
-                            }
-                            if let Some(touched) = entry.last_touched.get_mut(sym) {
-                                touched.remove(&agent_id);
-                                if touched.is_empty() {
-                                    entry.last_touched.remove(sym);
-                                }
-                            }
-                        }
-                        if entry.agents.is_empty()
-                            && entry.symbols.is_empty()
-                            && entry.intents.is_empty()
-                            && entry.last_touched.is_empty()
-                        {
-                            o_guard.by_file.remove(&claim.path);
-                        }
-                    }
-                    revoked.push(PresenceEvent::ClaimRevoked {
-                        agent_id: agent_id.clone(),
-                        path: claim.path.clone(),
-                        reason: "stale_owner".to_string(),
-                    });
-                }
-            }
-        }
-        revoked
-    };
-
-    Ok(stale_events)
-}
-
-/// Compute the BLAKE3-256 `SymbolHash` of the body bytes for `symbol`
-/// in `path`. The body is the exact byte range of the symbol's
-/// tree-sitter definition (`byte_start..byte_end`), sliced directly
-/// from the file's raw bytes — no line splitting, no CRLF normalization,
-/// no `String` round-trip. This way two symbols on one line get
-/// distinct hashes, and editing one symbol doesn't shift another
-/// symbol's hash.
-///
-/// Returns `None` when the file is unreadable, not valid UTF-8, the
-/// language isn't supported by the tree-sitter extractor, the symbol
-/// isn't defined in the file, or the recorded byte range falls
-/// outside the file (which shouldn't happen for a freshly parsed
-/// file but is defended against anyway). Callers fall back to
-/// `Some(SymbolHash::zero())` when they need a non-None hash for
-/// `Claim.content_hash`.
-fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
-    let bytes = std::fs::read(path).ok()?;
-    let src = std::str::from_utf8(&bytes).ok()?;
-    let defs = crate::server::treesitter::extract_definitions(path, src);
-    let def = defs.into_iter().find(|d| d.name == symbol)?;
-    let start = def.byte_start as usize;
-    let end = def.byte_end as usize;
-    if start > end || end > bytes.len() {
-        return None;
-    }
-    Some(SymbolHash::from_bytes(&bytes[start..end]))
 }
 
 // ── WorldState / ChangedSymbol / ChangedKind (Task 1.5, PR 1) ────────────────
