@@ -497,7 +497,7 @@ async function main() {
   // next to the recorder's own output.
   const browserConsole = (msg) => {
     const text = msg.text();
-    if (/SPA-FOCAL|SPA-RGT|console\.error|node not found/.test(text)) {
+    if (/SPA-FOCAL|SPA-RGT|SPA-WGC|SPA-INPUT-EVENT|console\.error|node not found/.test(text)) {
       process.stderr.write(`  [browser ${msg.type()}] ${text}\n`);
     }
   };

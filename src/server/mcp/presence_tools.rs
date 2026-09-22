@@ -348,7 +348,7 @@ pub fn run_list_subagents(server: &LainServer, args: Value) -> Result<Value, Str
     let _ = server.refresh_shared_presence();
     let a: ListSubagentsArgs = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let session = authenticate(server, &a.session_token)?;
-    let parent_id = session.id.clone();
+    let parent_id = session.id;
     let mut children: Vec<Value> = Vec::new();
     for child in server.presence().list_active(true) {
         if child.parent_session_id.as_ref() == Some(&parent_id) {
@@ -671,7 +671,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     if !result.conflicts.is_empty() {
         let severity = runtime_conflict_severity(server, &result.conflicts);
         server.emit_presence_event(PresenceEvent::ConflictDetected {
-            agent_id: session.id.clone(),
+            agent_id: session.id,
             conflicts: result.conflicts.clone(),
             severity: severity.to_string(),
         });

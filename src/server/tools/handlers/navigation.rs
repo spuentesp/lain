@@ -324,7 +324,7 @@ pub fn get_layered_map(
         }
         "file" => {
             output.push_str("### Files involved in this layer:\n");
-            let files: HashSet<_> = filtered.into_iter().map(|n| n.path.clone()).collect();
+            let files: HashSet<_> = filtered.into_iter().map(|n| n.path).collect();
             for f in files {
                 output.push_str(&format!("- {}\n", f));
             }

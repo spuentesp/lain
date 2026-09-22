@@ -1580,6 +1580,9 @@ const graphState = {
   lastGoodFocal: null,     // last successful {nodes, edges, truncated}; error UX
                            // preserves this on transient failures (V2 polish #2)
 };
+// DIAG: expose graphState on window so the recorder can verify what
+// the search handler actually wrote. Remove once focal-mode is fixed.
+window.__diag__graphState = graphState;
 
 // Toggle the focal-mode row of the filter bar. When in 'focal' mode we
 // surface the depth slider + back button; in 'anchor' mode we hide the
@@ -1728,9 +1731,11 @@ function renderFocalPreservedWithBanner(banner) {
 // branch.
 function wireGraphControls(state, onChange) {
   const search = document.querySelector('[data-graph-search]');
+  console.log('[SPA-WGC] search=' + (search ? 'present' : 'absent') + ' wg.nodes=' + ((state.workspaceGraph && state.workspaceGraph.nodes) ? state.workspaceGraph.nodes.length : 'null') + ' anchors=' + ((state.fileAnchors) ? state.fileAnchors.length : 'null'));
   if (search) {
     let debounce = null;
     search.addEventListener('input', () => {
+      console.log('[SPA-INPUT-EVENT] fired');
       clearTimeout(debounce);
       debounce = setTimeout(() => {
         const q = (search.value || '').trim();

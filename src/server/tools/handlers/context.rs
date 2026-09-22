@@ -223,7 +223,7 @@ pub fn get_call_sites(
         });
     }
 
-    let mut result = amb.clone();
+    let mut result = amb;
     if let Some(note) = freshness.note(&node.path) {
         result.push_str(&note);
         result.push('\n');

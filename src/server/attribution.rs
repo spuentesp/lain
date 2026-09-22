@@ -489,7 +489,7 @@ fn attribute_edit(
         );
         if !result.granted.is_empty() {
             let ev = PresenceEvent::ClaimGranted {
-                agent_id: agent_id.clone(),
+                agent_id: agent_id,
                 path: path.to_path_buf(),
             };
             let eid = events_log.append(&ev);

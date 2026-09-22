@@ -437,7 +437,7 @@ fn get_cross_repo_blast_radius_handler(
     let depth_str =
         crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
     let depth =
-        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e)?;
     let result = cross_repo_blast_radius_common(fed, map, depth)?;
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
@@ -455,7 +455,7 @@ fn get_cross_repo_blast_radius_for_repo_handler(
     let depth_str =
         crate::server::tools::utils::required_str_arg(map, "depth").map_err(|e| e.to_string())?;
     let depth =
-        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e.to_string())?;
+        crate::server::mcp::handler::parse_depth_range(&depth_str).map_err(|e| e)?;
     let symbol =
         crate::server::tools::utils::required_str_arg(map, "symbol").map_err(|e| e.to_string())?;
     let repo_id_str = map

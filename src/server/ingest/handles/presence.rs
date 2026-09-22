@@ -383,7 +383,7 @@ impl PresenceLayer {
         );
         let prev_occupancy_cb = self.occupancy.swap_persist_capture(
             std::sync::Arc::clone(&persist_result),
-            path.clone(),
+            path,
             self.presence.clone(),
             self.occupancy.clone(),
             self.intent.clone(),

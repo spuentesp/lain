@@ -460,7 +460,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         occupancy,
         intent_registry,
         activity_tracker,
-        presence_event_tx.clone(),
+        presence_event_tx,
         repos_yaml.as_deref(),
         ws.as_path(),
         &tuning.presence,
@@ -468,8 +468,8 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
 
     let ingest_handle = Arc::new(super::handles::IngestHandle::new(
         LainConfig {
-            workspace: ws.clone(),
-            memory_path: mem_path.clone(),
+            workspace: ws,
+            memory_path: mem_path,
         },
         graph,
         overlay,
@@ -501,7 +501,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
         repos_yaml,
     ));
 
-    let audit_handle = Arc::new(super::handles::AuditState::new(events_log.clone()));
+    let audit_handle = Arc::new(super::handles::AuditState::new(events_log));
 
     let hot_reload_handle = Arc::new(super::handles::HotReloadBus::new(
         Arc::new(ReloadBus::new()),
@@ -695,7 +695,7 @@ impl LainServer {
             Arc::new(OccupancyMap::new()),
             intent_registry,
             activity_tracker,
-            presence_event_tx.clone(),
+            presence_event_tx,
             None,
             workspace,
             &tuning.presence,
@@ -729,7 +729,7 @@ impl LainServer {
             None, None, None, None, None,
         ));
 
-        let audit_handle = Arc::new(super::handles::AuditState::new(events_log.clone()));
+        let audit_handle = Arc::new(super::handles::AuditState::new(events_log));
 
         let hot_reload_handle = Arc::new(super::handles::HotReloadBus::new(Arc::new(
             ReloadBus::new(),

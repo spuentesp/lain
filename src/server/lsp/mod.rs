@@ -11,7 +11,6 @@ use lsp_bridge::{LspBridge, LspServerConfig};
 use lsp_types::{DocumentSymbol, Position, SymbolKind, SymbolTag};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 

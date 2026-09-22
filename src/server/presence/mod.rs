@@ -335,7 +335,7 @@ impl OccupancyMap {
         activity: std::sync::Arc<crate::server::activity::ActivityTracker>,
     ) -> Option<crate::server::presence::PersistFn> {
         let cell_for_cb = std::sync::Arc::clone(&cell);
-        let path_for_cb = path.clone();
+        let path_for_cb = path;
         let presence_for_cb = std::sync::Arc::clone(&presence);
         let occupancy_for_cb = std::sync::Arc::clone(&occupancy);
         let intent_for_cb = std::sync::Arc::clone(&intent);

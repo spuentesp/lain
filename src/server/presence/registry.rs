@@ -10,7 +10,6 @@
 //! `AgentMode` from `agent`; `ClaimIntent`, `Holder`, `OccupancyEntry`
 //! from `claim` (the registry's `expire_stale` cross-cuts occupancy).
 
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use parking_lot::Mutex;
@@ -191,7 +190,7 @@ impl PresenceRegistry {
         activity: std::sync::Arc<crate::server::activity::ActivityTracker>,
     ) -> Option<PersistFn> {
         let cell_for_cb = std::sync::Arc::clone(&cell);
-        let path_for_cb = path.clone();
+        let path_for_cb = path;
         let presence_for_cb = std::sync::Arc::clone(&presence);
         let occupancy_for_cb = std::sync::Arc::clone(&occupancy);
         let intent_for_cb = std::sync::Arc::clone(&intent);
@@ -260,7 +259,7 @@ impl PresenceRegistry {
         parent_session_id: Option<AgentId>,
     ) -> AgentSession {
         let id = new_agent_id();
-        let session = AgentSession::new(id.clone(), name, kind, mode, pid, parent_session_id);
+        let session = AgentSession::new(id, name, kind, mode, pid, parent_session_id);
         {
             let mut s = self.inner.lock();
             s.by_token

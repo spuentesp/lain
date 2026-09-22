@@ -463,7 +463,7 @@ impl LainServer {
         // it.
         let cb3 = cb.clone();
         self.presence.intent().set_persist_callback(cb3);
-        let cb4 = cb.clone();
+        let cb4 = cb;
         self.presence.activity().set_persist_callback(cb4);
         let occupancy_for_remove = Arc::clone(self.presence.occupancy());
         self.presence.presence().set_on_remove_callback(move |id| {

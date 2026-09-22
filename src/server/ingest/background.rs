@@ -46,9 +46,9 @@ pub fn spawn_presence_expiry_loop(
     events_log: Arc<EventsLog>,
     cancel: CancellationToken,
 ) {
-    let p = presence.clone();
-    let o = occupancy.clone();
-    let t = tx.clone();
+    let p = presence;
+    let o = occupancy;
+    let t = tx;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {

@@ -707,7 +707,7 @@ pub fn explain_symbol(
                         .get_node(&e.target_id)
                         .ok()
                         .flatten()
-                        .map(|n| n.name.clone())
+                        .map(|n| n.name)
                         .unwrap_or_else(|| e.target_id.clone())
                 })
                 .collect();
@@ -726,7 +726,7 @@ pub fn explain_symbol(
                         .get_node(&e.source_id)
                         .ok()
                         .flatten()
-                        .map(|n| n.name.clone())
+                        .map(|n| n.name)
                         .unwrap_or_else(|| e.source_id.clone())
                 })
                 .collect();

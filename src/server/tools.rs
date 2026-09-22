@@ -184,7 +184,7 @@ impl ToolExecutor {
             std::env::var("LAIN_JOB_STORE").unwrap_or_else(|_| ".lain/jobs.json".into());
         if let Ok(contents) = std::fs::read_to_string(&jobs_path) {
             let jobs_registry = Arc::clone(&jobs_registry);
-            let jobs_path_for_log = jobs_path.clone();
+            let jobs_path_for_log = jobs_path;
             task::spawn(async move {
                 match serde_json::from_str::<Vec<JobInfo>>(&contents) {
                     Ok(vec) => {
@@ -387,7 +387,7 @@ impl ToolExecutor {
 
                     {
                         let mut guard = self.jobs.lock();
-                        guard.insert(job_id.clone(), job.clone());
+                        guard.insert(job_id.clone(), job);
                     }
 
                     let jobs_registry = Arc::clone(&self.jobs);

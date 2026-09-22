@@ -122,7 +122,7 @@ fn run_lain_intent_inner(server: &LainServer, args: Value) -> Result<Value, Stri
             let add_scopes = a.add_scopes.unwrap_or_default();
             let remove_scopes = a.remove_scopes.unwrap_or_default();
             intent_registry.update(
-                session.id.clone(),
+                session.id,
                 intent_id,
                 add_scopes,
                 remove_scopes,

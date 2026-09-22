@@ -850,7 +850,7 @@ impl RepoIndex {
         //     `debug!` so the drop is observable but not noisy.
         //   - `Closed`: receiver task has exited (RepoIndex is being
         //     dropped). Silently drop — there's no one to wake up.
-        let tx_for_closure = tx.clone();
+        let tx_for_closure = tx;
         let outstanding_for_closure = outstanding;
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
