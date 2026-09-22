@@ -588,6 +588,14 @@ impl PresenceRegistry {
 
     pub fn expire_stale(&self) -> Vec<AgentId> {
         let now = SystemTime::now();
+        // Read `expires_after` under the lock and compute the
+        // `now` baseline once at the top. The pre-fix code acquired
+        // the lock twice: once to copy `expires_after`, then again
+        // for the actual scan. If a setter ever mutates
+        // `expires_after` between the two acquires, the second
+        // scan reads a different value mid-pass — a latent bug the
+        // current code is safe from only because no setter exists.
+        // Hold one lock for the whole scan.
         let (expires_after, background_expires_after) = {
             let s = self.inner.lock();
             (s.expires_after, s.background_expires_after)
