@@ -20,8 +20,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{FileOccupancy, OccupancyMap};
-use super::claim::{Claim, ClaimIntent, SymbolHash};
+use super::OccupancyMap;
+use super::claim::{Claim, ClaimIntent};
+use super::occupancy::FileOccupancy;
 use super::registry::{AgentSession, PresenceRegistry};
 
 /// On-disk schema for `PresenceRegistry` + `OccupancyMap`. Fields are
@@ -479,34 +480,6 @@ pub fn load_pair(
     };
 
     Ok(stale_events)
-}
-
-/// Compute the BLAKE3-256 `SymbolHash` of the body bytes for `symbol`
-/// in `path`. The body is the exact byte range of the symbol's
-/// tree-sitter definition (`byte_start..byte_end`), sliced directly
-/// from the file's raw bytes — no line splitting, no CRLF normalization,
-/// no `String` round-trip. This way two symbols on one line get
-/// distinct hashes, and editing one symbol doesn't shift another
-/// symbol's hash.
-///
-/// Returns `None` when the file is unreadable, not valid UTF-8, the
-/// language isn't supported by the tree-sitter extractor, the symbol
-/// isn't defined in the file, or the recorded byte range falls
-/// outside the file (which shouldn't happen for a freshly parsed
-/// file but is defended against anyway). Callers fall back to
-/// `Some(SymbolHash::zero())` when they need a non-None hash for
-/// `Claim.content_hash`.
-pub(crate) fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
-    let bytes = std::fs::read(path).ok()?;
-    let src = std::str::from_utf8(&bytes).ok()?;
-    let defs = crate::server::treesitter::extract_definitions(path, src);
-    let def = defs.into_iter().find(|d| d.name == symbol)?;
-    let start = def.byte_start as usize;
-    let end = def.byte_end as usize;
-    if start > end || end > bytes.len() {
-        return None;
-    }
-    Some(SymbolHash::from_bytes(&bytes[start..end]))
 }
 
 #[cfg(test)]
