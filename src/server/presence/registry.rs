@@ -13,7 +13,6 @@
 use std::time::SystemTime;
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::agent::{new_agent_id, new_session_token, AgentId, AgentKind, AgentMode};
 use super::OccupancyMap;

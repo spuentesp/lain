@@ -8,14 +8,9 @@
 //! can clone them into the MCP dispatcher, the attribution watcher, and
 //! the SSE endpoint without juggling lifetimes.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::path::PathBuf;
 
-use parking_lot::Mutex;
 
-pub(crate) use crate::server::path_util::{canonical_form, lexical_normalize, posix_string};
-use crate::server::revision_log::RevisionId;
 
 mod agent;
 mod claim;

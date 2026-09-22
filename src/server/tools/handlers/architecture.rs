@@ -9,7 +9,7 @@ use crate::server::tools::utils::format_duration;
 use crate::server::tools::utils::resolve_node;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 pub fn explore_architecture(
@@ -488,7 +488,7 @@ pub fn architectural_observations(
 /// the payload is well under 1 KB, leaving plenty of room in a
 /// agent's context for the actual question that follows.
 pub fn understand_repository(
-    workspace: &PathBuf,
+    workspace: &Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     git: &Arc<AnyGitSensor>,

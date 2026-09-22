@@ -41,14 +41,18 @@ petgraph = { version = "0.6", features = ["serde-1"] }
 # Persistence
 bincode = { version = "2", features = ["serde"] }
 
-# NLP & Machine Learning
-ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
+# NLP & Machine Learning. Both pulled in by the `nlp` feature; the
+# default build includes them. Drop with `--no-default-features` for
+# a slim build that omits ort_sys (~107MB native) + tokenizers
+# (~62MB); `lain setup` / `lain query` / `semantic_search` then print
+# "ML inference not compiled in this build".
+ort = { version = "2.0.0-rc.13", features = ["ndarray"], optional = true }
 # Disable tokenizers' default `esaxx_fast` feature, which pulls in
 # `esaxx-rs`'s `cc`-built C++ as a static `/MT` archive. That collides
 # at link time on Windows with `ort-sys`'s prebuilt `/MD` C++ runtime
 # (fatal LNK1169 / LNK2038 mismatch on `RuntimeLibrary`). The pure-Rust
 # suffix-array fallback that ships in the same crate is used instead.
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
 
 # LSP bridge for multi-language support
 lsp-bridge = "0.2"
@@ -136,9 +140,13 @@ name = "sidecar_bench"
 path = "src/bin/sidecar_bench.rs"
 
 [features]
-# No features defined yet. (The `test-utils` feature was removed in
-# the docs/dead-code sweep — the only thing it gated was a
-# `PetgraphBackend::db()` helper that no test actually used.)
+# Default build includes the ML inference stack (ort + tokenizers).
+# Drop it with `--no-default-features` for a leaner build that omits
+# the ONNX runtime and HuggingFace tokenizers; `lain setup` /
+# `lain query` / the `semantic_search` MCP tool then report
+# "ML inference not compiled in this build".
+default = ["nlp"]
+nlp = ["dep:ort", "dep:tokenizers"]
 
 [profile.release]
 opt-level = 3
