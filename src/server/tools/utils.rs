@@ -53,11 +53,15 @@ pub(crate) fn file_content_cache(
 /// repopulates. `None` on I/O error — the caller falls back to the
 /// non-cached path (a `read_lines`-style read) in `read_body_excerpt`.
 pub(crate) fn read_lines_cached(resolved: &Path) -> Option<Vec<String>> {
-    let mtime = std::fs::metadata(resolved)
-        .and_then(|m| m.modified())
-        .ok()?;
     let cache = file_content_cache();
-    {
+    // First, peek the mtime for a fast cache hit: if a recent
+    // read populated the cache and nothing has changed, we serve
+    // the cached lines without touching the file. Drop the lock
+    // before the I/O so a slow filesystem doesn't serialise the
+    // whole cache.
+    let pre_read_mtime: Option<SystemTime> =
+        std::fs::metadata(resolved).and_then(|m| m.modified()).ok();
+    if let Some(mtime) = pre_read_mtime {
         let mut guard = cache.lock();
         if let Some((cached_mtime, cached_lines)) = guard.get(resolved) {
             if *cached_mtime == mtime {
@@ -65,10 +69,22 @@ pub(crate) fn read_lines_cached(resolved: &Path) -> Option<Vec<String>> {
             }
         }
     }
+    // Read the file (this can be slow for large files).
     let content = std::fs::read_to_string(resolved).ok()?;
     let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    // Capture mtime AFTER the read so the stored entry's mtime
+    // matches the file state at the moment its content was read.
+    // Without this, a write that lands between the pre-read mtime
+    // peek and the read would be cached as (old_mtime, new_content)
+    // — internally inconsistent. The next reader would notice the
+    // mtime mismatch and re-read, so this isn't a correctness leak,
+    // but the stored entry wastes a cache slot until the next miss
+    // evicts it.
+    let post_read_mtime: SystemTime = std::fs::metadata(resolved)
+        .and_then(|m| m.modified())
+        .ok()?;
     let mut guard = cache.lock();
-    guard.put(resolved.to_path_buf(), (mtime, lines.clone()));
+    guard.put(resolved.to_path_buf(), (post_read_mtime, lines.clone()));
     Some(lines)
 }
 
