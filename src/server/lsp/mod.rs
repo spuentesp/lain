@@ -178,91 +178,39 @@ fn classify_bridge_error(e: &lsp_bridge::LspBridgeError) -> FailureKind {
     }
 }
 
+// Helper: build the `(ext, LspConfig)` tuple for one entry. Pulled
+// out so the entries that share a binary + install_cmd don't repeat
+// the same 4-line struct literal five times in a row.
+const fn lsp_entry(
+    ext: &'static str,
+    binary: &'static str,
+    install_cmd: Option<&'static str>,
+) -> (&'static str, LspConfig) {
+    (
+        ext,
+        LspConfig {
+            binary,
+            install_cmd,
+        },
+    )
+}
+
+const TS_LS_INSTALL: Option<&'static str> = Some("npm install -g typescript typescript-language-server");
+const CLANGD_INSTALL: Option<&'static str> = Some("brew install llvm");
+
 const LANGUAGE_MAP: &[(&str, LspConfig)] = &[
-    (
-        "rs",
-        LspConfig {
-            binary: "rust-analyzer",
-            install_cmd: Some("rustup component add rust-analyzer"),
-        },
-    ),
-    (
-        "go",
-        LspConfig {
-            binary: "gopls",
-            install_cmd: Some("go install golang.org/x/tools/gopls@latest"),
-        },
-    ),
-    (
-        "ts",
-        LspConfig {
-            binary: "typescript-language-server",
-            install_cmd: Some("npm install -g typescript typescript-language-server"),
-        },
-    ),
-    (
-        "tsx",
-        LspConfig {
-            binary: "typescript-language-server",
-            install_cmd: Some("npm install -g typescript typescript-language-server"),
-        },
-    ),
-    (
-        "js",
-        LspConfig {
-            binary: "typescript-language-server",
-            install_cmd: Some("npm install -g typescript typescript-language-server"),
-        },
-    ),
-    (
-        "jsx",
-        LspConfig {
-            binary: "typescript-language-server",
-            install_cmd: Some("npm install -g typescript typescript-language-server"),
-        },
-    ),
-    (
-        "py",
-        LspConfig {
-            binary: "pylsp",
-            install_cmd: Some("pip install python-lsp-server"),
-        },
-    ),
-    (
-        "java",
-        LspConfig {
-            binary: "jdtls",
-            install_cmd: None,
-        },
-    ),
-    (
-        "c",
-        LspConfig {
-            binary: "clangd",
-            install_cmd: Some("brew install llvm"),
-        },
-    ),
-    (
-        "cpp",
-        LspConfig {
-            binary: "clangd",
-            install_cmd: Some("brew install llvm"),
-        },
-    ),
-    (
-        "h",
-        LspConfig {
-            binary: "clangd",
-            install_cmd: Some("brew install llvm"),
-        },
-    ),
-    (
-        "hpp",
-        LspConfig {
-            binary: "clangd",
-            install_cmd: Some("brew install llvm"),
-        },
-    ),
+    lsp_entry("rs", "rust-analyzer", Some("rustup component add rust-analyzer")),
+    lsp_entry("go", "gopls", Some("go install golang.org/x/tools/gopls@latest")),
+    lsp_entry("ts", "typescript-language-server", TS_LS_INSTALL),
+    lsp_entry("tsx", "typescript-language-server", TS_LS_INSTALL),
+    lsp_entry("js", "typescript-language-server", TS_LS_INSTALL),
+    lsp_entry("jsx", "typescript-language-server", TS_LS_INSTALL),
+    lsp_entry("py", "pylsp", Some("pip install python-lsp-server")),
+    lsp_entry("java", "jdtls", None),
+    lsp_entry("c", "clangd", CLANGD_INSTALL),
+    lsp_entry("cpp", "clangd", CLANGD_INSTALL),
+    lsp_entry("h", "clangd", CLANGD_INSTALL),
+    lsp_entry("hpp", "clangd", CLANGD_INSTALL),
     (
         "cs",
         LspConfig {
