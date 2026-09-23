@@ -60,7 +60,8 @@ pub fn get_commit_history(
             .unwrap_or("(no message)")
             .trim();
         result.push_str(&format!(
-            "**{}** ({} ago)\n  {}\n\n",
+            // `format_ago` already ends in "ago".
+            "**{}** ({})\n  {}\n\n",
             &commit.id[..7.min(commit.id.len())],
             time_str,
             first_line

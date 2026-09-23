@@ -444,7 +444,14 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     let presence_state_seen = Arc::new(Mutex::new(None));
     let overlay_paths = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
     let overlay_revision = Arc::new(AtomicU64::new(0));
-    let id_namespace = crate::schema::RepoNamespace::fresh();
+    // A single bound repo already has a stable, repo-derived namespace;
+    // minting a random one here gave overlay and sensor nodes ids that
+    // matched nothing in that repo's graph.
+    let id_namespace = if *graph.namespace() != crate::schema::RepoNamespace::for_test() {
+        *graph.namespace()
+    } else {
+        crate::schema::RepoNamespace::fresh()
+    };
     let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
     let overlay_updated = Arc::new(Notify::new());
 
@@ -592,7 +599,12 @@ impl LainServer {
 
         let tuning = Arc::new(load_tuning_config(workspace));
 
-        let graph = GraphDatabase::new(memory_path)?;
+        // One stable namespace for every id this server mints, shared
+        // with the graph so the ids it derives itself (co-change File
+        // endpoints) match the scanner's.
+        let id_namespace = crate::schema::RepoNamespace::from_workspace(workspace);
+        let mut graph = GraphDatabase::new(memory_path)?;
+        graph.set_namespace(id_namespace);
         let overlay = VolatileOverlay::new();
 
         let embedder = if let Some(model_path) = embedding_model {
@@ -667,7 +679,6 @@ impl LainServer {
         let presence_state_seen = Arc::new(Mutex::new(None));
         let overlay_paths = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
         let overlay_revision = Arc::new(AtomicU64::new(0));
-        let id_namespace = crate::schema::RepoNamespace::fresh();
         let process_change_lock = Arc::new(tokio::sync::Mutex::new(()));
         let overlay_updated = Arc::new(Notify::new());
 

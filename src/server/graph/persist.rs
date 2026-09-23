@@ -64,11 +64,20 @@ pub(super) fn encode_state(state: &GraphState) -> Result<Vec<u8>, bincode::error
     bincode::serde::encode_to_vec(state, bincode::config::legacy())
 }
 
-/// Decode bytes into a `GraphState`. Mirrors [`encode_state`].
+/// Upper bound on what one decode may allocate. Without a limit a
+/// corrupt length prefix (an interrupted write, a full disk, another
+/// version's format) asked for exabytes and panicked with "capacity
+/// overflow" before the fail-soft path in `load_from_disk` could run —
+/// `lain oneshot`, `query` and `doctor` all crashed until `.lain` was
+/// deleted by hand. With it, the decode returns an error instead.
+pub(crate) const DECODE_LIMIT: usize = 1 << 32;
+
+/// Decode bytes into a `GraphState`. Mirrors [`encode_state`]; the
+/// layout is the same, only allocation is bounded.
 pub(super) fn decode_state(
     data: &[u8],
 ) -> Result<(GraphState, usize), bincode::error::DecodeError> {
-    bincode::serde::decode_from_slice(data, bincode::config::legacy())
+    bincode::serde::decode_from_slice(data, bincode::config::legacy().with_limit::<DECODE_LIMIT>())
 }
 
 /// Strict, read-only inspection for diagnostics. Unlike the runtime loader,
@@ -102,4 +111,17 @@ pub enum GraphInspectionError {
     Incompatible(u32),
     #[error("graph index does not match its nodes")]
     InvalidIndex,
+}
+
+#[cfg(test)]
+mod decode_limit_tests {
+    use super::*;
+
+    /// A clobbered length prefix is an error, not a panic.
+    #[test]
+    fn a_corrupt_length_prefix_is_an_error_not_a_panic() {
+        // Every length prefix reads as u64::MAX.
+        let bytes = vec![0xffu8; 64];
+        assert!(decode_state(&bytes).is_err());
+    }
 }
