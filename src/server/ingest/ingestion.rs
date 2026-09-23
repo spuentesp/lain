@@ -1916,17 +1916,18 @@ mod readiness_progress_tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn default_mode_is_sidecar() {
-        assert_eq!(
-            crate::git::GitSensorMode::default(),
+        // On Unix. The sidecar needs Unix sockets; elsewhere the default
+        // is the in-process sensor.
+        let expected = if cfg!(unix) {
             crate::git::GitSensorMode::Sidecar
-        );
+        } else {
+            crate::git::GitSensorMode::InProcess
+        };
+        assert_eq!(crate::git::GitSensorMode::default(), expected);
         let root = git_fixture_with_one_file();
         let server =
             LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
-        assert_eq!(
-            server.ingest().git().mode(),
-            crate::git::GitSensorMode::Sidecar
-        );
+        assert_eq!(server.ingest().git().mode(), expected);
     }
 
     #[allow(clippy::await_holding_lock)]

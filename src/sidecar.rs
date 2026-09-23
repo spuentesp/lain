@@ -525,6 +525,18 @@ impl SidecarInner {
             let _ = stream.flush();
         }
         if let Some(mut child) = self.child.take() {
+            // Give the sidecar a moment to act on `Shutdown` before killing
+            // it. An immediate kill landed while it was already exiting —
+            // under `cargo llvm-cov` that truncated its profile mid-write
+            // and failed the coverage merge ("file header is corrupt").
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => break,
+                }
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -550,19 +562,29 @@ impl Drop for SidecarInner {
 fn generate_socket_path() -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut path = std::env::temp_dir();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    path.push(format!(
-        "lain-sidecar-{}-{}-{}.sock",
+    let name = format!(
+        "lain-sidecar-{}-{}-{:x}.sock",
         std::process::id(),
         seq,
         nanos
-    ));
+    );
+    let path = std::env::temp_dir().join(&name);
+    // A Unix socket path is capped at 104 bytes (macOS) / 108 (Linux).
+    // A long `$TMPDIR` pushed it over, and the sidecar died on bind with
+    // only "child exited prematurely" to show for it. `/tmp` always fits.
+    if cfg!(unix) && path.as_os_str().len() > MAX_SOCKET_PATH {
+        return Path::new("/tmp").join(name);
+    }
     path
 }
+
+/// The smallest `sun_path` limit among supported platforms (macOS), less
+/// the trailing NUL.
+const MAX_SOCKET_PATH: usize = 103;
 
 #[cfg(test)]
 mod socket_path_tests {
@@ -573,6 +595,14 @@ mod socket_path_tests {
         let paths: std::collections::HashSet<_> =
             (0..1000).map(|_| super::generate_socket_path()).collect();
         assert_eq!(paths.len(), 1000);
+    }
+
+    /// A long `$TMPDIR` must not produce a path too long to bind.
+    #[cfg(unix)]
+    #[test]
+    fn socket_paths_fit_the_platform_limit() {
+        let path = super::generate_socket_path();
+        assert!(path.as_os_str().len() <= super::MAX_SOCKET_PATH, "{path:?}");
     }
 }
 

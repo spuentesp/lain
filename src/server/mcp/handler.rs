@@ -3184,12 +3184,18 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["git_sensor"]["kind"], "in_process");
 
-        // 2. Default mode (Sidecar) reports ok status and sidecar kind.
-        let sidecar_sensor = AnyGitSensor::from_env(&repo_root).unwrap();
-        assert_eq!(sidecar_sensor.mode(), GitSensorMode::Sidecar);
-        let sidecar_body = build_health_body(0, 0, None, None, Some(&sidecar_sensor));
-        assert_eq!(sidecar_body["status"], "ok");
-        assert_eq!(sidecar_body["git_sensor"]["kind"], "sidecar");
+        // 2. The default mode reports ok status and its kind: the sidecar
+        //    on Unix, the in-process sensor where there are no Unix sockets.
+        let (mode, kind) = if cfg!(unix) {
+            (GitSensorMode::Sidecar, "sidecar")
+        } else {
+            (GitSensorMode::InProcess, "in_process")
+        };
+        let default_sensor = AnyGitSensor::from_env(&repo_root).unwrap();
+        assert_eq!(default_sensor.mode(), mode);
+        let default_body = build_health_body(0, 0, None, None, Some(&default_sensor));
+        assert_eq!(default_body["status"], "ok");
+        assert_eq!(default_body["git_sensor"]["kind"], kind);
 
         // 3. Dead sidecar reports degraded status and reason.
         let dead_sidecar_json = serde_json::json!({
