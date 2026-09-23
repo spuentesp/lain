@@ -56,12 +56,12 @@ the background; on the next turn it can ask *"if I change
 **First query**
 
 ```bash
-# After your agent has indexed once, drop into a terminal:
-curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_blast_radius","arguments":{"symbol":"validate_token","depth":"1..3"}},"id":1}'
+# From the repository, in a terminal (no server needed):
+lain oneshot get_blast_radius validate_token
 ```
 
-Expected: a JSON `result.content[0].text` listing the callers of `validate_token` plus their paths.
+Expected: `validate_token`'s direct callers with their files, then the
+indirect ones with their depth. Use a symbol from your repository.
 
 ## Federation (multi-repo)
 
@@ -88,12 +88,12 @@ Add to your agent's MCP config:
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"find_anchors","arguments":{"repo_id":"bytes","limit":10}},"id":1}'
 
-# Then, with the top result as the symbol:
+# Then, with the top result as the symbol, pinned to the repo it came from:
 curl -s -X POST http://localhost:9999/mcp -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius","arguments":{"symbol":"<top-anchor>","depth":"1..3"}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_cross_repo_blast_radius_for_repo","arguments":{"repo_id":"bytes","symbol":"<top-anchor>","depth":"1..3"}},"id":1}'
 ```
 
-Expected: the first call returns a numbered list of `bytes` anchors; replace `<top-anchor>` with the first item and the second response's `result.content[0].text` lists that symbol's callers across both `bytes` and `tokio`.
+Expected: the first call returns a numbered list of `bytes` anchors; replace `<top-anchor>` with the first item (e.g. `put_slice`) and the second response lists that symbol's callers grouped by repo, in both `bytes` and `tokio`. Pinning `repo_id` matters: `put_slice` is also defined in tokio, so the unpinned `get_cross_repo_blast_radius` asks you to choose.
 
 ### Smoke test the federation
 

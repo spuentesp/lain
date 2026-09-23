@@ -123,7 +123,7 @@ runs. Higher disk cost but you can browse history with any git tool.
 | Field | Type   | Required | Default  | Notes |
 |-------|--------|----------|----------|-------|
 | `url` | string | yes      | —        | Any URL `git clone` accepts (https, ssh, file://). Must be non-empty. |
-| `ref` | string | no       | `"main"` | Branch, tag, or remote-tracking branch. lain resets `HEAD` to `origin/<ref>`. |
+| `ref` | string | no       | `"main"` | Branch, tag, or remote-tracking branch. lain resets `HEAD` to `origin/<ref>`. `lain repos add` writes the remote's default branch here (`master` for tokio-rs repos); set it yourself when writing the file by hand for a repo whose default branch is not `main`. |
 
 **Use when:** you need full git history (e.g. co-change mining across
 many commits) or you want operators to inspect the cloned repo

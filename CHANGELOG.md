@@ -32,6 +32,42 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- `lain mcp` minted node ids under a random per-process namespace: ids
+  changed on every restart, and co-change edges (derived under the test
+  namespace) were silently dropped, so the co-change radar, `find_related`
+  partners and `explain_dispatch` co-change evidence were always empty.
+  Ids now derive from the workspace path; old graphs are rebuilt once.
+- Co-change partners were read in one direction only, hiding every
+  partner whose path sorts before the queried file's.
+- Federation: calls from a repo indexed before the repo it calls into
+  never linked (cobra → pflag: 0 edges). A cross-repo link pass now runs
+  once every repo is indexed, and on every start. Name-only links also
+  require the calling repo to declare a dependency on the target in its
+  manifests, removing links like pflag's `fmt.Println` → cobra.
+- `lain workspaces create` wrote the workspace list over `repos.yaml`,
+  deleting every repo; workspaces now go to `workspaces.yaml` beside it.
+- `lain repos add` defaulted `--ref` to `main`; it now asks the remote
+  for its default branch (the README's tokio-rs examples use `master`)
+  and confirms what it added.
+- A corrupt or foreign `graph.bin` panicked (`capacity overflow`) in
+  `oneshot`, `query` and `doctor`; decoding is now bounded and the graph
+  is rebuilt.
+- `search_code` without an embedding model matched the whole query as
+  one substring, so multi-word queries found nothing; it now matches by
+  words (snake_case, camelCase, plurals) and shows symbol names.
+- `understand_repository` reported `semantic_search: ready` with no model.
+- `lain_intent` advertised `scopes` / `add_scopes` / `remove_scopes` as
+  strings but required arrays, so schema-following calls failed.
+- Unscoped `get_health` on a multi-repo server errored; it now reports
+  the federation and each repo.
+- `dict.update()` / `arr.push()`-style calls on other values no longer
+  link to the one user-defined method of that name in another file;
+  Python `@overload` stubs are not definitions; overloads in one
+  Java/C#/Kotlin/Scala/Swift/C++ file receive calls from other files.
+- `install.sh` under `curl | bash` never added lain to `PATH`; it now
+  asks on the terminal (unchanged when there is none).
+- `scripts/demo.sh` runs against the full tool profile and covers the
+  intent tools; `make schema` names the binary.
 - TypeScript is parsed with the TypeScript grammar; exported, method and
   arrow-function definitions are indexed in JS/TS.
 - Python methods and decorated definitions are indexed.
