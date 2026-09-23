@@ -17,8 +17,10 @@ pub enum ReposAction {
     Add {
         name: String,
         url: String,
-        #[arg(long, default_value = "main")]
-        ref_: String,
+        /// Branch or tag to index. Defaults to the remote's default branch
+        /// (`main`, `master`, …), asked of the remote at add time.
+        #[arg(long)]
+        ref_: Option<String>,
     },
     /// List all repos registered in `repos.yaml`.
     List,
@@ -29,7 +31,19 @@ pub enum ReposAction {
 /// Dispatch a `lain repos <action>` invocation.
 pub fn run(action: ReposAction, config_path: &Path) -> Result<()> {
     match action {
-        ReposAction::Add { name, url, ref_ } => add(config_path, &name, &url, &ref_),
+        ReposAction::Add { name, url, ref_ } => {
+            let ref_ = match ref_ {
+                Some(r) => r,
+                None => remote_default_branch(&url).unwrap_or_else(|| {
+                    eprintln!(
+                        "warning: could not ask {url} for its default branch; using 'main' \
+                         (pass --ref to choose)"
+                    );
+                    "main".to_string()
+                }),
+            };
+            add(config_path, &name, &url, &ref_)
+        }
         ReposAction::List => list(config_path),
         ReposAction::Remove { name } => remove(config_path, &name),
     }
@@ -53,7 +67,32 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
         .with_context(|| format!("write {}", config_path.display()))?;
     crate::cli::signal::signal_reload(config_path)
         .with_context(|| format!("signal reload after adding '{name}'"))?;
+    println!(
+        "Added repo '{name}' ({url} @ {ref_}) to {}",
+        config_path.display()
+    );
     Ok(())
+}
+
+/// The branch a remote's `HEAD` points at. A fixed `main` default broke
+/// the README's own example: `tokio-rs/bytes` and `tokio-rs/tokio` use
+/// `master`, and cloning `--branch main` fails.
+fn remote_default_branch(url: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["ls-remote", "--symref", url, "HEAD"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_symref_head(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `ref: refs/heads/master\tHEAD` → `master`.
+fn parse_symref_head(ls_remote: &str) -> Option<String> {
+    ls_remote.lines().find_map(|l| {
+        let target = l.strip_prefix("ref: ")?.split('\t').next()?;
+        target.strip_prefix("refs/heads/").map(str::to_string)
+    })
 }
 
 /// `lain repos list`
@@ -88,6 +127,14 @@ fn remove(config_path: &Path, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parses_the_remote_default_branch() {
+        let out = "ref: refs/heads/master\tHEAD\nabc123\tHEAD\n";
+        assert_eq!(parse_symref_head(out).as_deref(), Some("master"));
+        assert_eq!(parse_symref_head("abc123\tHEAD\n"), None);
+    }
+
     use super::*;
     use std::fs;
     use std::path::PathBuf;

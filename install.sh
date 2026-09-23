@@ -22,6 +22,7 @@ OPT_YES=""
 # OPT_INTERACTIVE already set (e.g. tests driving the helper) don't get
 # clobbered by the source-time re-initialization.
 OPT_INTERACTIVE="${OPT_INTERACTIVE:-}"
+OPT_YES_AUTO="${OPT_YES_AUTO:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -104,6 +105,10 @@ apply_noninteractive_defaults() {
     return 0   # stdin is a real terminal; keep existing behavior
   fi
   OPT_YES="yes"
+  # Remember that --yes was inferred, not asked for: under `curl | bash`
+  # stdin is the pipe even when a person is at the terminal, and the PATH
+  # step below can still ask them through /dev/tty.
+  OPT_YES_AUTO="yes"
   echo "[install.sh] stdin is not a TTY — enabling --yes mode automatically."
   echo "[install.sh] Pass --interactive to answer prompts (e.g. via heredoc)."
   return 0
@@ -139,6 +144,17 @@ prompt_path_mutation() {
   if [ -n "$OPT_YES" ] && [ -t 0 ]; then
     # TTY + explicit --yes: user confirmed on a real terminal.
     do_add="yes"
+  elif [ -n "$OPT_YES_AUTO" ] && [ -n "$shell_rc" ] && (exec 3</dev/tty) 2>/dev/null; then
+    # `curl … | bash` at a terminal: stdin is the script, but a person is
+    # there. The README promises this install puts lain on PATH, so ask
+    # them on the terminal itself (default yes) rather than never doing it.
+    echo ""
+    echo -e "${YELLOW}[PATH]${NC} lain is not in your PATH."
+    read -p "Add to $shell_rc automatically? [Y/n] " -n 1 -r path_reply </dev/tty || path_reply="n"
+    echo ""
+    if [[ $path_reply =~ ^[Yy]$ ]] || [ -z "$path_reply" ]; then
+      do_add="yes"
+    fi
   elif [ -n "$OPT_YES" ] && [ ! -t 0 ]; then
     # Non-interactive install — the footgun we're fixing.
     echo "[PATH] stdin is not a TTY; skipping auto-mutation of $shell_rc."
@@ -612,7 +628,9 @@ main() {
     info "Installation complete!"
     echo ""
     echo "Next steps:"
-    echo "  1. Open a new terminal (or: source ~/.zshrc)"
+    local rc_hint="~/.bashrc"
+    if [ "$(basename "${SHELL:-}")" = "zsh" ]; then rc_hint="~/.zshrc"; fi
+    echo "  1. Open a new terminal (or: source $rc_hint)"
     echo "  2. Restart your agent (Claude Code, Cursor, etc.)"
     echo "  3. Try: lain query \"find Function | limit 5\""
     echo ""
