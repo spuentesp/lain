@@ -550,13 +550,12 @@ impl LspMultiplexer {
     /// `SkippedNoSentinel`. An already-`unavailable` binary records
     /// `SkippedUnavailable` and returns `Ok(())` — the operator gets
     /// the existing tree-sitter fallback for that language, just like
-    /// before this PR. Phase 1 (`prewarm_phase1`) and Phase 3
-    /// (`record_prewarm`) hold the mux mutex briefly. Phase 2 (the
-    /// bridge round-trips) runs lock-free wrt this mux so two
-    /// prewarm tasks routed to the same multiplexer serialise on
-    /// the bridge mutex only when they actually contend on the
-    /// same binary, rather than waiting for each other's
-    /// `prewarm_state` write to land under our mux.
+    /// before this PR. `prewarm_phase1` holds the mux mutex briefly;
+    /// the bridge round-trips (which would have been a "Phase 2") run
+    /// lock-free wrt this mux so two prewarm tasks routed to the same
+    /// multiplexer serialise on the bridge mutex only when they
+    /// actually contend on the same binary, rather than waiting for
+    /// each other's `prewarm_state` write to land under our mux.
     ///
     /// The only meaningful phase held under the mux is the LSP
     /// child spawn inside `ensure_server` (bounded by
