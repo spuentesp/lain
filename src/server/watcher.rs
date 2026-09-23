@@ -112,12 +112,6 @@ pub fn spawn_config_watcher(
     })
 }
 
-/// File extensions to watch (source code files)
-const WATCHED_EXTENSIONS: &[&str] = &[
-    "rs", "py", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb",
-    "swift", "kt", "scala", "vue", "svelte",
-];
-
 /// Debounce window for rapid file changes
 const DEBOUNCE_MS: u64 = 100;
 
@@ -672,7 +666,7 @@ fn is_watched_file(path: &Path) -> bool {
     // Check extension
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|ext| WATCHED_EXTENSIONS.contains(&ext))
+        .map(crate::server::treesitter::is_indexed_extension)
         .unwrap_or(false)
 }
 
