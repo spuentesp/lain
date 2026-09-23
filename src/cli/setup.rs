@@ -14,6 +14,7 @@
 
 use crate::cli::doctor;
 use crate::cli::io::write_file_atomic;
+#[cfg(feature = "nlp")]
 use crate::server::nlp::NlpEmbedder;
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
@@ -121,6 +122,7 @@ fn write_intent_prompt(workspace: &Path) -> Result<PathBuf, String> {
 /// entry point already honors), the CWD-relative default `NlpEmbedder`
 /// falls back to, then the shared install directory `install.sh
 /// --download-model` and this command both write to.
+#[cfg(feature = "nlp")]
 fn locate_existing_model() -> Option<(PathBuf, PathBuf)> {
     if let Some(env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
         let (model, tokenizer) = NlpEmbedder::resolve_model_paths(Path::new(&env));
@@ -216,6 +218,7 @@ fn download_model() -> Result<(PathBuf, PathBuf)> {
 /// one, or offer to download one, respecting `--no-model` / `--yes` /
 /// interactivity. Never downloads in `--json` mode without `--yes` —
 /// a prompt would corrupt the JSON output on stdout.
+#[cfg(feature = "nlp")]
 fn resolve_semantic_model(opts: &SetupOptions) -> SemanticModelStatus {
     if let Some((model, _)) = locate_existing_model() {
         return SemanticModelStatus {
@@ -281,6 +284,22 @@ fn resolve_semantic_model(opts: &SetupOptions) -> SemanticModelStatus {
             model_path: None,
             detail: Some(format!("{e:#}")),
         },
+    }
+}
+
+/// Stub used when the `nlp` feature is off: there's no model to find
+/// or download, so report Skipped and let the rest of `setup` (MCP
+/// wiring, agent configuration) continue normally.
+#[cfg(not(feature = "nlp"))]
+fn resolve_semantic_model(_opts: &SetupOptions) -> SemanticModelStatus {
+    SemanticModelStatus {
+        state: SemanticModelState::Skipped,
+        model_path: None,
+        detail: Some(
+            "ML inference not compiled in this build; semantic_search unavailable \
+             (rebuild with --features nlp to enable)"
+                .into(),
+        ),
     }
 }
 

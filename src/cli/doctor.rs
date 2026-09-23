@@ -394,6 +394,7 @@ fn observe_repository(report: &mut DoctorReport, root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "nlp")]
 fn observe_semantic(report: &mut DoctorReport) {
     let configured = std::env::var_os("LAIN_EMBEDDING_MODEL");
     let (model, tokenizer) = configured
@@ -424,6 +425,19 @@ fn observe_semantic(report: &mut DoctorReport) {
     capability.remediation = Some(action.into());
     report.capabilities.semantic_search = capability;
     report.problem("semantic_unverified", reason, action, true);
+}
+
+/// Stub for `--no-default-features`: the nlp subsystem isn't compiled
+/// in, so report it as UnavailableOptional (not an error — the build
+/// intentionally omits ML inference) and skip the model-presence check.
+#[cfg(not(feature = "nlp"))]
+fn observe_semantic(report: &mut DoctorReport) {
+    let mut capability = Capability::new(CapabilityState::UnavailableOptional, true);
+    capability.reason =
+        Some("ML inference not compiled in this build (built with --no-default-features).".into());
+    capability.remediation =
+        Some("Rebuild with `cargo install lain --features nlp` to enable semantic_search.".into());
+    report.capabilities.semantic_search = capability;
 }
 
 pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {

@@ -1,5 +1,7 @@
 use crate::graph::GraphDatabase;
+#[cfg(feature = "nlp")]
 use crate::nlp::NlpEmbedder;
+#[cfg(feature = "nlp")]
 use crate::query::executor::Executor;
 use crate::query::spec::{
     ConnectOp, DepthSpec, Direction, EdgeSelector, FilterOp, FindOp, GraphOp, GroupBy, GroupOp,
@@ -12,49 +14,66 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Result<()> {
-    // Resolve the workspace root: explicit `--workspace`, else walk up
-    // for `.git` like `lain mcp` does. The graph lives at
-    // `<workspace>/.lain/graph.bin` (written by `lain mcp` / `lain
-    // server` indexing).
-    let root = match workspace {
-        Some(p) => p.to_path_buf(),
-        None => crate::cli::workspace::find_git_workspace_root(None)
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no `.git` found in any parent directory — pass `--workspace PATH` to override"
-                )
-            })?,
-    };
-    let memory_path = root.join(".lain/graph.bin");
-
-    let graph = match GraphDatabase::new(&memory_path) {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("Error: Failed to load graph at {:?}: {}", memory_path, e);
-            eprintln!("\nHint: Run 'lain mcp' (or 'lain server') first to build the code graph.");
-            std::process::exit(1);
-        }
-    };
-
-    let embedder = NlpEmbedder::new()?;
-    let cache = Arc::new(Mutex::new(HashMap::new()));
-    let mut executor = Executor::new(&graph, &embedder, &cache, &root);
-    let spec = parse_query_string(expression);
-
-    match executor.execute(&spec) {
-        Ok(result) => {
-            let json = serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into());
-            println!("{}", json);
-        }
-        Err(e) => {
-            eprintln!("Query error: {}", e);
-            std::process::exit(1);
-        }
+    // Without the `nlp` feature the query executor (which depends on
+    // `NlpEmbedder`) is gated out. The lexical operators in the query
+    // language don't need embeddings, but the executor does. Surface a
+    // clear message instead of letting the build fail with a confusing
+    // type error.
+    #[cfg(not(feature = "nlp"))]
+    {
+        eprintln!(
+            "Error: `lain query` requires the `nlp` feature, which is not compiled in this build."
+        );
+        eprintln!("Hint: rebuild with `cargo install lain --features nlp`.");
+        std::process::exit(1);
     }
 
-    Ok(())
+    #[cfg(feature = "nlp")]
+    {
+        // Resolve the workspace root: explicit `--workspace`, else walk up
+        // for `.git` like `lain mcp` does. The graph lives at
+        // `<workspace>/.lain/graph.bin` (written by `lain mcp` / `lain
+        // server` indexing).
+        let root = match workspace {
+            Some(p) => p.to_path_buf(),
+            None => crate::cli::workspace::find_git_workspace_root(None)
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no `.git` found in any parent directory — pass `--workspace PATH` to override"
+                    )
+                })?,
+        };
+        let memory_path = root.join(".lain/graph.bin");
+
+        let graph = match GraphDatabase::new(&memory_path) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("Error: Failed to load graph at {:?}: {}", memory_path, e);
+                eprintln!("\nHint: Run 'lain mcp' (or 'lain server') first to build the code graph.");
+                std::process::exit(1);
+            }
+        };
+
+        let embedder = NlpEmbedder::new()?;
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut executor = Executor::new(&graph, &embedder, &cache, &root);
+        let spec = parse_query_string(expression);
+
+        match executor.execute(&spec) {
+            Ok(result) => {
+                let json = serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into());
+                println!("{}", json);
+            }
+            Err(e) => {
+                eprintln!("Query error: {}", e);
+                std::process::exit(1);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn parse_query_string(expr: &str) -> QuerySpec {

@@ -231,7 +231,7 @@ impl RuntimeTraceStore {
     pub fn snapshot(&self) -> Vec<RuntimeEdge> {
         let guard = self.inner.lock();
         let mut v: Vec<_> = guard.edges.values().cloned().collect();
-        v.sort_by(|a, b| b.last_seen_unix.cmp(&a.last_seen_unix));
+        v.sort_by_key(|e| std::cmp::Reverse(e.last_seen_unix));
         v
     }
 
