@@ -34,7 +34,8 @@ use std::time::Duration;
 /// checking the id itself.
 pub struct StdioSession {
     child: Child,
-    stdin: ChildStdin,
+    /// `None` once [`Self::shutdown`] has closed it.
+    stdin: Option<ChildStdin>,
     rx: mpsc::Receiver<Value>,
     stderr_rx: Option<mpsc::Receiver<String>>,
 }
@@ -92,7 +93,7 @@ impl StdioSession {
 
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             rx,
             stderr_rx,
         })
@@ -100,8 +101,12 @@ impl StdioSession {
 
     /// Write one JSON-RPC message, newline-terminated, and flush.
     pub fn send(&mut self, value: &Value) -> Result<()> {
-        writeln!(self.stdin, "{value}").context("write to subprocess stdin")?;
-        self.stdin.flush().context("flush subprocess stdin")
+        let stdin = self
+            .stdin
+            .as_mut()
+            .context("subprocess stdin already closed")?;
+        writeln!(stdin, "{value}").context("write to subprocess stdin")?;
+        stdin.flush().context("flush subprocess stdin")
     }
 
     /// Block for the next message carrying an `id` (notifications are
@@ -120,11 +125,26 @@ impl StdioSession {
             .unwrap_or_default()
     }
 
-    /// Kill and reap the subprocess. Idempotent; also runs on `Drop`
+    /// Stop and reap the subprocess. Idempotent; also runs on `Drop`
     /// as a safety net, but callers should call this explicitly once
     /// they're done so the exit is deterministic rather than tied to
     /// when the `StdioSession` value happens to go out of scope.
+    ///
+    /// Closes stdin first — an MCP stdio server exits on EOF — and kills
+    /// only a child still running after a short grace period. Killing
+    /// outright could land while the child was already exiting: under
+    /// `cargo llvm-cov` that truncated its profile and failed the merge
+    /// ("file header is corrupt").
     pub fn shutdown(&mut self) {
+        drop(self.stdin.take());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => break,
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

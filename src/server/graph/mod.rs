@@ -34,9 +34,30 @@ use tracing::warn;
 /// Paths outside `workspace` (out-of-tree dependencies surfaced by LSP) are
 /// kept in their own string form rather than being forced into a bogus
 /// relative path; they are stable, just not workspace-relative.
+///
+/// The workspace and the path may name the same directory through different
+/// spellings — a symlink, like macOS's `/var` → `/private/var` under every
+/// temp dir, or a checkout reached through a linked directory. A literal
+/// prefix match then failed for every file, so every node id carried an
+/// absolute path, and cross-repo edges (keyed by relative path) never
+/// matched. The canonical forms are compared only when the literal match
+/// fails, so the common case costs nothing extra.
 pub fn graph_path(workspace: &Path, path: &Path) -> String {
-    let rel = path.strip_prefix(workspace).unwrap_or(path);
-    crate::server::path_util::posix_string(rel)
+    if let Ok(rel) = path.strip_prefix(workspace) {
+        return crate::server::path_util::posix_string(rel);
+    }
+    let canonical_rel = || -> Option<PathBuf> {
+        let ws = dunce::canonicalize(workspace).ok()?;
+        if let Ok(rel) = path.strip_prefix(&ws) {
+            return Some(rel.to_path_buf());
+        }
+        let p = dunce::canonicalize(path).ok()?;
+        p.strip_prefix(&ws).ok().map(Path::to_path_buf)
+    };
+    match canonical_rel() {
+        Some(rel) => crate::server::path_util::posix_string(&rel),
+        None => crate::server::path_util::posix_string(path),
+    }
 }
 
 #[derive(Clone)]
@@ -1806,6 +1827,30 @@ mod replace_tests {
         assert!(edges.iter().any(|e| e.target_id == f.id), "{edges:?}");
         let saved = g.build_state();
         assert_eq!(saved.index_map.len(), saved.graph.node_count());
+    }
+
+    /// A workspace reached through a symlink still yields relative keys.
+    #[cfg(unix)]
+    #[test]
+    fn graph_path_sees_through_a_symlinked_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::fs::write(real.join("src/lib.rs"), "").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real = dunce::canonicalize(&real).unwrap();
+
+        // Workspace spelled through the link, file path canonical…
+        assert_eq!(graph_path(&link, &real.join("src/lib.rs")), "src/lib.rs");
+        // …and the other way round.
+        assert_eq!(graph_path(&real, &link.join("src/lib.rs")), "src/lib.rs");
+        // Outside the workspace stays absolute.
+        let outside = tmp.path().join("elsewhere.rs");
+        assert_eq!(
+            graph_path(&real, &outside),
+            crate::server::path_util::posix_string(&outside)
+        );
     }
 
     /// The sweep drops files git no longer tracks and leaves the rest alone.

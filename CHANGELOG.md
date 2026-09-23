@@ -54,6 +54,16 @@ All notable changes to LAIN are documented here. Versions follow
   several agents in one server contended: the polled lock let a waiter
   lose every race until the deadline. Threads of one process now queue
   fairly before polling it.
+- A workspace reached through a symlink (every macOS temp dir: `/var` →
+  `/private/var`, or a linked checkout) got absolute paths in every node
+  id, so cross-repo edges never matched. Paths are now compared in
+  canonical form when the literal prefix does not match.
+- The git sidecar's socket path could exceed the Unix limit under a long
+  `$TMPDIR`, and the sidecar died with only "exited prematurely". It
+  falls back to `/tmp`.
+- The sidecar and the stdio MCP probe are asked to exit before being
+  killed; the immediate kill interrupted their exit (and truncated
+  coverage profiles in CI).
 - The Windows release packaging script passed a `D:\...` path to GNU
   tar, which read it as a remote host.
 - `scripts/acceptance/run.py` checks the README's claims end to end

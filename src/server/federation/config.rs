@@ -168,7 +168,13 @@ repos:
         let cfg: FederationConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.repos.len(), 2);
         assert_eq!(cfg.max_concurrent_indexers, 4);
-        assert_eq!(cfg.git_sensor_mode(), crate::git::GitSensorMode::Sidecar);
+        // The sidecar needs Unix sockets; elsewhere the default is in-process.
+        let expected = if cfg!(unix) {
+            crate::git::GitSensorMode::Sidecar
+        } else {
+            crate::git::GitSensorMode::InProcess
+        };
+        assert_eq!(cfg.git_sensor_mode(), expected);
     }
 
     #[test]
