@@ -63,7 +63,10 @@ for dll in "${dlls[@]}"; do
   files+=("$name")
 done
 
-tar czf "$archive_tmp" -C "$stage" "${files[@]}"
+# Write through the shell, not `tar czf <path>`: GNU tar (Git Bash on the
+# Windows runners) reads `D:\a\_temp\x.tar.gz` as a remote `host:path`
+# and fails with "Cannot connect to D: resolve failed".
+tar czf - -C "$stage" "${files[@]}" > "$archive_tmp"
 mv -f "$archive_tmp" "$archive"
 archive_tmp=""
 

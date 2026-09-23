@@ -28,8 +28,11 @@
 //! failure, and the whole subsystem is advisory to begin with.
 
 use crate::server::sentinel::{self, Acquire};
+use parking_lot::{FairMutex, FairMutexGuard};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 /// How long to keep retrying before giving up and proceeding unlocked.
@@ -54,6 +57,30 @@ pub struct StateLock {
     /// `false` when acquisition timed out and the caller proceeded
     /// anyway — dropping must not remove someone else's sentinel.
     held: bool,
+    /// This process's turn, released after the sentinel (fields drop
+    /// after `Drop::drop`).
+    _turn: Option<FairMutexGuard<'static, ()>>,
+}
+
+/// One fair queue per state file for the threads of this process.
+///
+/// The sentinel is polled, so it is not fair: a thread that just
+/// released it takes it again before sleeping waiters wake. With eight
+/// agents in one server, a waiter could lose every race for the whole
+/// deadline and get `CoordinationError::Unavailable` — seen on macOS CI
+/// (`concurrent_agents_contention_benchmark`). Queueing this process's
+/// threads first leaves only one of them polling the sentinel, which then
+/// only arbitrates between processes. The mutexes are leaked: one per
+/// distinct state path for the life of the process.
+fn turn_for(path: &Path) -> &'static FairMutex<()> {
+    static TURNS: OnceLock<Mutex<HashMap<PathBuf, &'static FairMutex<()>>>> = OnceLock::new();
+    let mut turns = TURNS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    turns
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Box::leak(Box::new(FairMutex::new(()))))
 }
 
 impl StateLock {
@@ -110,13 +137,24 @@ pub fn acquire_with(
     let stale_after = Duration::from_secs(stale_after_secs);
     let path = lock_path_for(state_path);
     let deadline = SystemTime::now() + acquire_timeout;
+    let Some(turn) = turn_for(&path).try_lock_for(acquire_timeout) else {
+        return StateLock {
+            path,
+            held: false,
+            _turn: None,
+        };
+    };
     loop {
         match sentinel::try_acquire(&path, stale_after) {
             Acquire::Acquired(mut f) => {
                 // Record the owner so a human debugging a stuck lock can
                 // see which process to look at.
                 let _ = writeln!(f, "{}", std::process::id());
-                return StateLock { path, held: true };
+                return StateLock {
+                    path,
+                    held: true,
+                    _turn: Some(turn),
+                };
             }
             Acquire::Stale => {
                 // The holder died. Remove and retry; if two peers race
@@ -125,13 +163,23 @@ pub fn acquire_with(
             }
             Acquire::Held => {
                 if SystemTime::now() >= deadline {
-                    return StateLock { path, held: false };
+                    return StateLock {
+                        path,
+                        held: false,
+                        _turn: None,
+                    };
                 }
                 std::thread::sleep(retry_interval);
             }
             // Unwritable state dir, permissions, read-only mount:
             // proceed unlocked rather than breaking presence.
-            Acquire::Unavailable(_) => return StateLock { path, held: false },
+            Acquire::Unavailable(_) => {
+                return StateLock {
+                    path,
+                    held: false,
+                    _turn: None,
+                }
+            }
         }
     }
 }
