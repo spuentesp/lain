@@ -1420,8 +1420,11 @@
     "inputSchema": {
       "properties": {
         "add_scopes": {
-          "description": "add_scopes",
-          "type": "string"
+          "description": "paths or symbols the intent covers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "agent_id": {
           "description": "agent_id",
@@ -1436,12 +1439,18 @@
           "type": "string"
         },
         "remove_scopes": {
-          "description": "remove_scopes",
-          "type": "string"
+          "description": "paths or symbols the intent covers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "scopes": {
-          "description": "scopes",
-          "type": "string"
+          "description": "paths or symbols the intent covers",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "session_token": {
           "description": "session_token",
