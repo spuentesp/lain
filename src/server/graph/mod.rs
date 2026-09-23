@@ -1453,12 +1453,14 @@ impl GraphDatabase {
             .node_weights()
             .filter(|n| n.node_type == NodeType::File)
             .take(20)
+            // With the node's own line: scanner File nodes have none, but a
+            // language server's FILE-kind symbols carry one in their id.
             .any(|n| {
                 n.id != GraphNode::generate_id(
                     &NodeType::File,
                     &n.path,
                     &n.name,
-                    None,
+                    n.line_start,
                     &self.namespace,
                 )
             });
@@ -1636,7 +1638,12 @@ impl GraphDatabase {
                 .push(idx);
         }
 
-        *self.graph.write() = state.graph;
+        // Swap the graph and refill the indices under one write lock. The
+        // indices are shared by every clone, so refilling them after the
+        // lock dropped let a concurrent reader see the new graph with an
+        // empty index (or stale NodeIndex values into it).
+        let mut graph = self.graph.write();
+        *graph = state.graph;
         self.index_map.clear();
         for (k, v) in state.index_map {
             self.index_map.insert(k, v);
@@ -1645,6 +1652,7 @@ impl GraphDatabase {
         for (k, v) in path_index {
             self.path_index.insert(k, v);
         }
+        drop(graph);
         *self.last_commit.write() = state.last_commit;
         Ok(())
     }
@@ -2223,6 +2231,17 @@ mod clone_tests {
         assert!(!db.minted_in_other_namespace(), "same namespace");
         db.set_namespace(crate::schema::RepoNamespace::from_workspace(&tmp));
         assert!(db.minted_in_other_namespace(), "different namespace");
+
+        // A language server's FILE-kind symbol carries its line in its id;
+        // it is not a sign of another namespace.
+        let ns = crate::schema::RepoNamespace::from_workspace(&tmp);
+        let lsp_file = GraphNode::new_in(NodeType::File, "b.rs".into(), "src/b.rs".into(), &ns)
+            .with_location_in(0, 40, &ns);
+        let fresh = GraphDatabase::new(&tmp.join("fresh")).unwrap();
+        let mut fresh = fresh;
+        fresh.set_namespace(ns);
+        fresh.insert_nodes_batch(&[lsp_file]).unwrap();
+        assert!(!fresh.minted_in_other_namespace(), "LSP file symbol");
 
         db.reset().unwrap();
         assert_eq!(db.get_stats(), (0, 0));

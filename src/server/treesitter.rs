@@ -785,7 +785,9 @@ fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
         "scope",
         "target",
     ];
-    const SELF_LIKE: &[&str] = &["self", "this", "cls", "super", "Self", "$this", "base"];
+    const SELF_LIKE: &[&str] = &[
+        "self", "this", "cls", "super", "Self", "$this", "base", "parent", "static",
+    ];
     let mut node = *name;
     for _ in 0..4 {
         let Some(parent) = node.parent() else {
@@ -805,8 +807,11 @@ fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
                 .filter(|r| r.end_byte() <= name.start_byte())
         });
         if let Some(r) = receiver {
-            let text = r.utf8_text(src_bytes).unwrap_or_default();
-            return !SELF_LIKE.contains(&text.trim());
+            let text = r.utf8_text(src_bytes).unwrap_or_default().trim();
+            // `super().update()` (Python) and `parent::get()` / `static::`
+            // (PHP) reach the class's own hierarchy, like `self`.
+            let own = SELF_LIKE.contains(&text) || text.starts_with("super(");
+            return !own;
         }
         let kind = parent.kind();
         if kind.contains("call") || kind.contains("invocation") {
@@ -1696,7 +1701,11 @@ function helper(): int { return 1; }
             ),
             (
                 "a.php",
-                "<?php function f($d) { $d->update(1); $this->update(2); update(3); }",
+                "<?php function f($d) { $d->update(1); $this->update(2); parent::update(3); update(4); }",
+            ),
+            (
+                "b.py",
+                "class A(B):\n    def f(self, d):\n        d.update(1)\n        super().update(2)\n",
             ),
             (
                 "A.cs",

@@ -150,7 +150,9 @@ prompt_path_mutation() {
     # them on the terminal itself (default yes) rather than never doing it.
     echo ""
     echo -e "${YELLOW}[PATH]${NC} lain is not in your PATH."
-    read -p "Add to $shell_rc automatically? [Y/n] " -n 1 -r path_reply </dev/tty || path_reply="n"
+    # Time out rather than hang: a script run with piped stdin from a
+    # terminal (`yes | ./install.sh`) has a /dev/tty but nobody answering.
+    read -t 30 -p "Add to $shell_rc automatically? [Y/n] (30s) " -n 1 -r path_reply </dev/tty || path_reply="n"
     echo ""
     if [[ $path_reply =~ ^[Yy]$ ]] || [ -z "$path_reply" ]; then
       do_add="yes"

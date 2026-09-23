@@ -94,17 +94,6 @@ pub fn revision_meta(
     Some(meta)
 }
 
-/// Schema for one tool argument. The MCP `tools/list` response
-/// describes each tool's `input_schema` as a JSON Schema object;
-/// callers that don't include the schema field get rejected by
-/// schema-respecting clients — Claude Code serialized the array into
-/// a JSON *string* and the handler rejected it with "invalid type:
-/// string, expected a sequence" (found in the live end-to-end review).
-///
-/// `name` is the argument key (e.g. `"files"`, `"symbols"`, `"limit"`).
-/// The default branch returns `{"type": "string"}` for unknown
-/// argument names; the typed branches cover the special-cased args
-/// (claim/release's `files`, the generic `symbols` array, `limit`).
 /// [`arg_property_schema`] with per-tool meanings. Argument names are
 /// shared across tools with different meanings — `kind` is an agent kind
 /// for `register_agent` but an annotation kind for `add_annotation` — and
@@ -146,6 +135,17 @@ fn annotation_target_schema() -> serde_json::Value {
     })
 }
 
+/// Schema for one tool argument. The MCP `tools/list` response
+/// describes each tool's `input_schema` as a JSON Schema object;
+/// callers that don't include the schema field get rejected by
+/// schema-respecting clients — Claude Code serialized the array into
+/// a JSON *string* and the handler rejected it with "invalid type:
+/// string, expected a sequence" (found in the live end-to-end review).
+///
+/// `name` is the argument key (e.g. `"files"`, `"symbols"`, `"limit"`).
+/// The default branch returns `{"type": "string"}` for unknown
+/// argument names; the typed branches cover the special-cased args
+/// (claim/release's `files`, the generic `symbols` array, `limit`).
 pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut p = serde_json::Map::new();
     match name {

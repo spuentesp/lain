@@ -1165,13 +1165,6 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &AnyGitSensor) {
     }
 }
 
-/// Inputs for one repository indexing pass. The references deliberately tie
-/// the graph, overlay, sensors, and namespace to the same call lifetime.
-///
-/// Field names match the per-subsystem config structs in this crate
-/// (`ToolContextDeps`, `ToolExecutorConfig`): `graph`, `lsp_pool`,
-/// `git`, `overlay`, `namespace`. The shorter `db`/`lsp` would have
-/// been a footgun for anyone matching the two-struct pattern.
 /// Link a federation repo's calls into the other repos, once every repo's
 /// symbols are known.
 ///
@@ -1243,6 +1236,13 @@ pub async fn relink_cross_repo(
     Ok(n)
 }
 
+/// Inputs for one repository indexing pass. The references deliberately tie
+/// the graph, overlay, sensors, and namespace to the same call lifetime.
+///
+/// Field names match the per-subsystem config structs in this crate
+/// (`ToolContextDeps`, `ToolExecutorConfig`): `graph`, `lsp_pool`,
+/// `git`, `overlay`, `namespace`. The shorter `db`/`lsp` would have
+/// been a footgun for anyone matching the two-struct pattern.
 pub struct IndexRequest<'a> {
     pub path: &'a Path,
     pub graph: &'a GraphDatabase,

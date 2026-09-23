@@ -385,7 +385,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The sidecar serves a Unix domain socket, so there is nothing to run on
-/// Windows (lain uses its in-process git sensor there). The binary still
+/// Windows (the in-process git sensor is used there). The binary still
 /// answers `--version`: the release archive and the npm shim check it.
 #[cfg(not(unix))]
 fn main() {
@@ -393,6 +393,6 @@ fn main() {
         println!("lain-git-sidecar {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    eprintln!("lain-git-sidecar needs Unix domain sockets; on this platform lain uses its in-process git sensor");
+    eprintln!("lain-git-sidecar needs Unix domain sockets; on this platform the in-process git sensor is used instead");
     std::process::exit(1);
 }
