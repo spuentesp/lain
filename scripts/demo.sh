@@ -31,6 +31,10 @@ SUBJECT="$WORK/subject"
 URL="http://127.0.0.1:$PORT"
 MCP="$URL/mcp"
 LAIN="${LAIN:-$REPO_ROOT/target/release/lain}"
+# This suite exercises every tool, so its servers advertise the full
+# surface. The default `semantic` profile shows agents a curated subset;
+# without this the tool-count and coverage checks fail against it.
+export LAIN_TOOL_PROFILE="${LAIN_TOOL_PROFILE:-full}"
 MODEL="${LAIN_EMBEDDING_MODEL:-/tmp/lainmodel}"
 QUICK=0
 NO_BUILD=0
@@ -251,10 +255,10 @@ TOOL_COUNT=$(_parse_mcp_resp "import json,sys; print(len(json.load(sys.stdin)['r
   -s -m 30 -X POST "$MCP" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 if [ -n "${MODEL_ARGS[*]:-}" ]; then
-  check "tools/list advertises the full surface" "76" "$TOOL_COUNT"
+  check "tools/list advertises the full surface" "80" "$TOOL_COUNT"
 else
   # Wishlist #9: a tool that cannot answer is not offered.
-  check "tools/list hides semantic_search with no model" "75" "$TOOL_COUNT"
+  check "tools/list hides semantic_search with no model" "79" "$TOOL_COUNT"
 fi
 
 # get_capabilities (AGENT_UX_ROADMAP M4): graph-independent, always
@@ -379,6 +383,12 @@ check_absent  "find_dead_code excludes the hub"       "orchestrate" "$DC"
 AN=$(call find_anchors)
 TOP=$(printf '%s' "$AN" | sed -n 's/^1\. \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p' | head -1)
 check "find_anchors ranks the hub first" "orchestrate" "${TOP:-none}"
+
+# helper_a has one static caller, so dispatch analysis has evidence.
+ED=$(call explain_dispatch '{"symbol":"helper_a"}')
+check_contains "explain_dispatch reports the static caller" "static_callers" "$ED"
+check_absent  "explain_dispatch does not claim insufficient evidence" \
+  "insufficient_evidence" "$ED"
 
 CC=$(call get_call_chain '{"from":"entry","to":"helper_a"}')
 check_contains "get_call_chain links entry to helper_a" "helper_a" "$CC"
@@ -544,6 +554,15 @@ else
 
   call release_files "{\"agent_id\":\"$B_ID\",\"session_token\":\"$B_TOK\",\"files\":[\"src/core.rs\"]}" >/dev/null
   check_absent "list_subagents answers" "__RPC_ERROR__" "$(call list_subagents)"
+
+  # Intents: a goal plus the scopes it touches, shared with every agent.
+  IN=$(call lain_intent "{\"agent_id\":\"$A_ID\",\"session_token\":\"$A_TOK\",\"goal\":\"demo: refactor core\",\"scopes\":[\"src/core.rs\"]}")
+  check_contains "lain_intent declares an intent"      "intent_id"           "$IN"
+  check_contains "list_active_intents shows the goal" "demo: refactor core" "$(call list_active_intents)"
+
+  UN=$(call unregister_agent "{\"agent_id\":\"$A_ID\",\"session_token\":\"$A_TOK\"}")
+  check_contains "unregister_agent removes the session" "\"removed\":true" "$UN"
+  check_absent   "and alpha is no longer listed" "\"alpha\"" "$(call list_active_agents)"
 fi
 
 # ══ 8. Semantic search ════════════════════════════════════════════════

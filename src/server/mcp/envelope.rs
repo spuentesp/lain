@@ -147,6 +147,17 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
             p.insert("items".into(), serde_json::json!({ "type": "string" }));
             p.insert("description".into(), "symbol names".into());
         }
+        // `lain_intent` deserializes these as `Vec<String>`; advertising
+        // them as strings made every schema-following call fail with
+        // "invalid type: string, expected a sequence".
+        "scopes" | "add_scopes" | "remove_scopes" => {
+            p.insert("type".into(), "array".into());
+            p.insert("items".into(), serde_json::json!({ "type": "string" }));
+            p.insert(
+                "description".into(),
+                "paths or symbols the intent covers".into(),
+            );
+        }
         "limit" => {
             p.insert("type".into(), "integer".into());
             p.insert("description".into(), "max results".into());
