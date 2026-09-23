@@ -308,6 +308,20 @@ pub fn resolve_static_edges(
             .filter(|(_, _, path)| may_link_across(&sr.file_path, path))
             .collect();
 
+        // A call through another object is not the caller calling itself:
+        // `session.request(...)` inside the module-level `request()` in
+        // requests/api.py calls `Session.request`. With the caller left in,
+        // the same-file preference picked it, the self-edge was dropped, and
+        // the package's main entry point vanished from `Session.request`'s
+        // callers.
+        let candidates: Vec<_> = if sr.foreign_receiver {
+            candidates
+                .into_iter()
+                .filter(|(id, _, _)| *id != source_node.id)
+                .collect()
+        } else {
+            candidates
+        };
         let resolved: Vec<&(String, crate::schema::NodeType, String)> = if candidates.len() == 1 {
             // `d.update()` on a dict, `arr.push()` on an array: a common
             // container / string / promise method called on some other
@@ -821,6 +835,45 @@ mod ambiguous_name_tests {
             foreign_receiver: true,
         };
         assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
+    }
+
+    /// `session.request(...)` inside requests/api.py's module-level
+    /// `request()` calls `Session.request`, not itself.
+    #[test]
+    fn a_call_through_another_object_is_not_a_self_call() {
+        let tmp = std::env::temp_dir().join("lain_resolve_foreign_self");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let api = GraphNode::new(NodeType::Function, "request".into(), "src/api.py".into())
+            .with_location_in(1, 20, &ns);
+        let session = GraphNode::new(
+            NodeType::Function,
+            "request".into(),
+            "src/sessions.py".into(),
+        )
+        .with_location_in(1, 50, &ns);
+        let (api_id, session_id) = (api.id.clone(), session.id.clone());
+        db.upsert_node(api).unwrap();
+        db.upsert_node(session).unwrap();
+
+        let call = |foreign_receiver| StaticFileRef {
+            file_path: "src/api.py".to_string(),
+            source_line: 10,
+            target_name: "request".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver,
+        };
+        let edges = resolve_static_edges(&db, &[call(true)], None, None);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(
+            (edges[0].source_id.as_str(), edges[0].target_id.as_str()),
+            (api_id.as_str(), session_id.as_str())
+        );
+
+        // A bare `request()` there is recursion: no edge, and certainly
+        // not one to the other file's `request`.
+        assert!(resolve_static_edges(&db, &[call(false)], None, None).is_empty());
     }
 
     /// A call outside every named definition (a test callback, a

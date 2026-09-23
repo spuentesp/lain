@@ -97,19 +97,39 @@ pub async fn get_call_chain(
             },
         }
     };
-    let start = resolve(from)?;
-    let end = resolve(to)?;
+    // A bare name can name several definitions — `request` is both
+    // `requests.api.request` and `Session.request`. Picking one of them
+    // (the first by path) answered "no path" whenever the chain ran
+    // through another, so search from and to every definition of it.
+    let all_named = |handle: &str| -> Result<Vec<GraphNode>, LainError> {
+        if overlay.get_node(handle).is_none() && !matches!(graph.get_node(handle), Ok(Some(_))) {
+            let mut named = graph.find_all_nodes_by_name(handle);
+            for n in overlay.find_nodes_by_name(handle) {
+                if n.name == handle && !named.iter().any(|m| m.id == n.id) {
+                    named.push(n);
+                }
+            }
+            if !named.is_empty() {
+                return Ok(named);
+            }
+        }
+        Ok(vec![resolve(handle)?])
+    };
+    let starts = all_named(from)?;
+    let ends: HashSet<String> = all_named(to)?.into_iter().map(|n| n.id).collect();
 
     let mut queue = VecDeque::new();
     let mut parents = HashMap::new();
 
-    queue.push_back(start.id.clone());
-    parents.insert(start.id.clone(), None);
+    for start in &starts {
+        queue.push_back(start.id.clone());
+        parents.insert(start.id.clone(), None);
+    }
 
-    let mut found = false;
+    let mut found = None;
     while let Some(current_id) = queue.pop_front() {
-        if current_id == end.id {
-            found = true;
+        if ends.contains(&current_id) {
+            found = Some(current_id);
             break;
         }
 
@@ -132,15 +152,15 @@ pub async fn get_call_chain(
         }
     }
 
-    if !found {
+    let Some(end_id) = found else {
         return Ok(format!(
             "No call path found from '{}' to '{}' in Merged Brain.",
             from, to
         ));
-    }
+    };
 
     let mut path = Vec::new();
-    let mut current = Some(end.id.clone());
+    let mut current = Some(end_id);
     while let Some(id) = current {
         let node = if let Some(n) = overlay.get_node(&id) {
             Some(n)
@@ -148,7 +168,14 @@ pub async fn get_call_chain(
             graph.get_node(&id)?
         };
         if let Some(n) = node {
-            path.push(n.name);
+            // Say which definition an ambiguous endpoint turned out to be.
+            let at_start = parents.get(&id).is_some_and(|p| p.is_none());
+            let at_end = path.is_empty();
+            if (at_start && starts.len() > 1) || (at_end && ends.len() > 1) {
+                path.push(format!("{} ({})", n.name, n.path));
+            } else {
+                path.push(n.name);
+            }
         }
         current = parents.get(&id).cloned().flatten();
     }

@@ -32,6 +32,28 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- Re-indexing a directory added a second copy of its `Namespace` node,
+  splitting its edges and making `lain doctor` reject the saved graph as
+  corrupt ("graph index does not match its nodes"). The copy is now
+  refreshed in place, and graphs already on disk are repaired on load.
+- `lain doctor` reported the graph stale right after `lain setup`, which
+  writes `.mcp.json` into the repository. Only changes to files the index
+  reads count now.
+- A call through another object (`session.request(...)` inside requests'
+  module-level `request()`) resolved to the caller itself and was
+  dropped, so `Session.request` lost its main caller.
+- `get_call_chain` searched from one arbitrary definition of an ambiguous
+  name and answered "no path"; it now searches from all of them and says
+  which one the path starts at.
+- Kotlin: `!isDone()` / `-offset()` calls were missed (the grammar parses
+  them as a call of the prefix expression).
+- JavaScript/TypeScript: `export const useCart = defineStore(...)` (Pinia
+  stores, composables, `styled.x`, slices) is indexed, so its callers are
+  found.
+- `scripts/acceptance/run.py` checks the README's claims end to end
+  against pinned open-source repositories — who-calls answers in every
+  listed language, the single-repo flow, and the multi-repo flow.
+
 - `lain mcp` minted node ids under a random per-process namespace: ids
   changed on every restart, and co-change edges (derived under the test
   namespace) were silently dropped, so the co-change radar, `find_related`

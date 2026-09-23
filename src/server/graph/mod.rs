@@ -400,6 +400,21 @@ impl GraphDatabase {
                     if !seen_ids.insert(node.id.clone()) {
                         continue;
                     }
+                    // A Namespace kept above comes back in the fresh scan
+                    // under the same id. Adding it again left two nodes for
+                    // one id — edges split between them, and `lain doctor`
+                    // rejecting the saved graph ("graph index does not match
+                    // its nodes") after every re-index. Refresh it in place.
+                    if let Some(existing) = self.index_map.get(&node.id).map(|r| *r.value()) {
+                        if let Some(w) = graph.node_weight_mut(existing).filter(|w| w.id == node.id)
+                        {
+                            *w = (*node).clone();
+                            if !fresh.contains(&existing) {
+                                fresh.push(existing);
+                            }
+                            continue;
+                        }
+                    }
                     let idx = graph.add_node((*node).clone());
                     self.index_map.insert(node.id.clone(), idx);
                     fresh.push(idx);
@@ -1630,6 +1645,9 @@ impl GraphDatabase {
             return Ok(());
         }
 
+        let mut state = state;
+        persist::heal_duplicate_ids(&mut state);
+
         let mut path_index = HashMap::new();
         for (idx, node) in state.graph.node_references() {
             path_index
@@ -1741,6 +1759,53 @@ mod replace_tests {
             g.find_node_by_name("src").is_some(),
             "namespace must survive"
         );
+    }
+
+    /// Re-scanning a directory re-emits its Namespace node under the same
+    /// id; that must refresh the kept node, not add a second one.
+    #[test]
+    fn replace_does_not_duplicate_a_kept_namespace() {
+        let g = db("lain_test_replace_ns_dup");
+        let ns = GraphNode::new(NodeType::Namespace, "src".into(), "src".into());
+        g.insert_nodes_batch(std::slice::from_ref(&ns)).unwrap();
+
+        for _ in 0..2 {
+            g.replace_nodes_for_paths(&["src".to_string()], std::slice::from_ref(&ns))
+                .unwrap();
+        }
+
+        assert_eq!(g.find_all_nodes_by_name("src").len(), 1);
+        let state = g.build_state();
+        assert_eq!(state.index_map.len(), state.graph.node_count());
+    }
+
+    /// A graph saved with a duplicated Namespace loads with one copy, and
+    /// the stray copy's edges move onto it.
+    #[test]
+    fn load_heals_duplicate_ids() {
+        let tmp = std::env::temp_dir().join("lain_test_heal_dup");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let g = GraphDatabase::new(&tmp).unwrap();
+        let ns = GraphNode::new(NodeType::Namespace, "src".into(), "src".into());
+        let f = GraphNode::new(NodeType::File, "a.rs".into(), "src/a.rs".into());
+        g.insert_nodes_batch(&[ns.clone(), f.clone()]).unwrap();
+
+        let mut state = g.build_state();
+        let stray = state.graph.add_node(ns.clone());
+        let file = state.index_map[&f.id];
+        state.graph.add_edge(
+            stray,
+            file,
+            GraphEdge::new(EdgeType::Contains, ns.id.clone(), f.id.clone()),
+        );
+        std::fs::write(&g.persistence_path, persist::encode_state(&state).unwrap()).unwrap();
+
+        g.load_from_disk().unwrap();
+        assert_eq!(g.find_all_nodes_by_name("src").len(), 1);
+        let edges = g.get_edges_from(&ns.id).unwrap();
+        assert!(edges.iter().any(|e| e.target_id == f.id), "{edges:?}");
+        let saved = g.build_state();
+        assert_eq!(saved.index_map.len(), saved.graph.node_count());
     }
 
     /// The sweep drops files git no longer tracks and leaves the rest alone.
