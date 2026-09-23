@@ -1213,7 +1213,7 @@ impl ToolHandler for FindSymbolHandler {
          a per-name lookup per match. Cost: cheap (graph index hit)."
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"path_hint":{"type":"string"},"type_filter":{"type":"string","enum":["function","method","class","struct","interface","trait","enum","module","file"]}},"required":["name"]}"#
     }
     fn capability(&self) -> ToolCapability {
         ToolCapability::ReadOnly

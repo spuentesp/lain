@@ -105,6 +105,47 @@ pub fn revision_meta(
 /// The default branch returns `{"type": "string"}` for unknown
 /// argument names; the typed branches cover the special-cased args
 /// (claim/release's `files`, the generic `symbols` array, `limit`).
+/// [`arg_property_schema`] with per-tool meanings. Argument names are
+/// shared across tools with different meanings — `kind` is an agent kind
+/// for `register_agent` but an annotation kind for `add_annotation` — and
+/// the name-only mapping gave annotations the agent description.
+pub fn tool_arg_property_schema(
+    tool: &str,
+    name: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    if name == "kind" && matches!(tool, "add_annotation" | "list_annotations") {
+        let mut p = serde_json::Map::new();
+        p.insert("type".into(), "string".into());
+        p.insert(
+            "enum".into(),
+            serde_json::json!(["note", "warning", "todo", "investigation", "fix"]),
+        );
+        p.insert(
+            "description".into(),
+            "annotation kind (default: note)".into(),
+        );
+        return p;
+    }
+    arg_property_schema(name)
+}
+
+/// One annotation target, shared by `target` and each `refs` item.
+fn annotation_target_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+        "properties": {
+            "kind": { "type": "string", "enum": ["symbol", "file", "repo", "edge"] },
+            "symbol": { "type": "string" },
+            "file": { "type": "string" },
+            "repo_id": { "type": "string" },
+            "from": { "type": "string" },
+            "to": { "type": "string" }
+        },
+        "required": ["kind"]
+    })
+}
+
 pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut p = serde_json::Map::new();
     match name {
@@ -167,29 +208,15 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
         // of the JSON-string fallback the default branch would
         // produce.
         "target" => {
-            p.insert("type".into(), "object".into());
-            p.insert(
-                "description".into(),
-                "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.".into(),
-            );
-            p.insert(
-                "properties".into(),
-                serde_json::json!({
-                    "kind": { "type": "string", "enum": ["symbol", "file", "repo", "edge"] },
-                    "symbol": { "type": "string" },
-                    "file": { "type": "string" },
-                    "repo_id": { "type": "string" },
-                    "from": { "type": "string" },
-                    "to": { "type": "string" }
-                }),
-            );
+            if let serde_json::Value::Object(m) = annotation_target_schema() {
+                p = m;
+            }
         }
         "refs" => {
             p.insert("type".into(), "array".into());
-            p.insert(
-                "items".into(),
-                serde_json::json!({ "$ref": "#/properties/target" }),
-            );
+            // Inline, not `$ref: #/properties/target`: `leave_handoff_note`
+            // takes `refs` but has no `target`, so the reference dangled.
+            p.insert("items".into(), annotation_target_schema());
             p.insert(
                 "description".into(),
                 "Cross-references to other annotation targets.".into(),

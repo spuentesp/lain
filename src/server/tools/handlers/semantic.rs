@@ -449,14 +449,18 @@ fn parse_node_type(s: &str) -> Result<NodeType, LainError> {
     Ok(match s {
         "function" | "func" | "fn" => NodeType::Function,
         "struct" | "structure" => NodeType::Struct,
-        "trait" | "interface" => NodeType::Trait,
+        "trait" => NodeType::Trait,
+        // Java / Go / TypeScript / C# / Swift / Kotlin / PHP interfaces are
+        // `Interface` nodes; mapping this to `Trait` matched none of them.
+        "interface" | "protocol" => NodeType::Interface,
+        "enum" => NodeType::Enum,
         "module" | "namespace" | "ns" => NodeType::Module,
         "file" => NodeType::File,
         "method" => NodeType::Method,
         "class" => NodeType::Class,
         other => {
             return Err(LainError::Other(format!(
-                "unsupported type_filter `{other}` (try function/struct/trait/module/file)"
+                "unsupported type_filter `{other}` (try function/class/struct/interface/trait/enum/module/file)"
             )))
         }
     })

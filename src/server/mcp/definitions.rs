@@ -18,7 +18,7 @@
 //! [`crate::tools::definitions::ToolDefinition`], the type the
 //! `ToolRegistry` already enumerates.
 
-use crate::server::mcp::envelope::arg_property_schema;
+use crate::server::mcp::envelope::tool_arg_property_schema;
 use rust_mcp_schema::{Tool, ToolInputSchema};
 
 /// A typed tool declaration. `name`, `description`, and
@@ -49,10 +49,10 @@ impl ToolDef {
     pub fn to_input_schema(&self) -> ToolInputSchema {
         let mut props = std::collections::BTreeMap::new();
         for req in self.required_args {
-            props.insert((*req).to_string(), arg_property_schema(req));
+            props.insert((*req).to_string(), tool_arg_property_schema(self.name, req));
         }
         for opt in self.optional_args {
-            props.insert((*opt).to_string(), arg_property_schema(opt));
+            props.insert((*opt).to_string(), tool_arg_property_schema(self.name, opt));
         }
         ToolInputSchema::new(
             self.required_args.iter().map(|s| s.to_string()).collect(),
@@ -338,13 +338,13 @@ pub fn defs_to_value_tools(defs: &[ToolDef]) -> Vec<serde_json::Value> {
             for req in d.required_args {
                 props.insert(
                     (*req).to_string(),
-                    serde_json::Value::Object(arg_property_schema(req)),
+                    serde_json::Value::Object(tool_arg_property_schema(d.name, req)),
                 );
             }
             for opt in d.optional_args {
                 props.insert(
                     (*opt).to_string(),
-                    serde_json::Value::Object(arg_property_schema(opt)),
+                    serde_json::Value::Object(tool_arg_property_schema(d.name, opt)),
                 );
             }
             let input_schema = serde_json::json!({

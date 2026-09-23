@@ -98,7 +98,57 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
 /// this function is never consulted anyway, but listing them costs
 /// nothing and documents the intent.
 fn requires_repo_scope(tool_name: &str) -> bool {
-    !matches!(tool_name, "query_graph")
+    // `get_agent_strategy` and `describe_schema` answer the same for every
+    // repository; demanding a repo id for them only blocked the agent.
+    !matches!(
+        tool_name,
+        "query_graph" | "get_agent_strategy" | "describe_schema"
+    )
+}
+
+/// Whether `name` is dispatched through the `McpToolEntry` inventory,
+/// which runs before repo scoping and never reads `repo_id`.
+fn is_inventory_tool(name: &str) -> bool {
+    inventory::iter::<McpToolEntry>().any(|e| e.name == name)
+}
+
+/// On a federation server a per-repo tool is routed by `repo_id` (or a
+/// `symbol` only one repository defines), but it advertised the
+/// single-repo schema, which has no `repo_id`. A schema-following agent
+/// could not call `find_symbol`, `search_code`, `find_anchors`, … at all
+/// once a second repository was registered. Declare it, naming the ids.
+fn advertise_repo_scope(name: &str, schema: &mut serde_json::Value, fed: &FederatedIndex) {
+    if !requires_repo_scope(name) || is_inventory_tool(name) {
+        return;
+    }
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    let props = obj
+        .entry("properties")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(props) = props.as_object_mut() else {
+        return;
+    };
+    if props.contains_key("repo_id") {
+        return;
+    }
+    let ids: Vec<String> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    props.insert(
+        "repo_id".into(),
+        serde_json::json!({
+            "type": "string",
+            "description": format!(
+                "Repository to run against: one of {}. Required when the server hosts more \
+                 than one repository, unless `symbol` names a symbol only one of them defines.",
+                ids.join(", ")
+            ),
+        }),
+    );
 }
 
 /// Resolve which repo an existing per-repo MCP tool call should be routed to
@@ -571,7 +621,11 @@ impl ServerHandler for LainHandler {
         let mut tools: Vec<Tool> = crate::tools::registry::ToolRegistry::definitions()
             .iter()
             .map(|def| {
-                let input_schema = serde_json::from_value(def.input_schema.clone())
+                let mut schema = def.input_schema.clone();
+                if let Some(fed) = &self.federation {
+                    advertise_repo_scope(def.name, &mut schema, fed);
+                }
+                let input_schema = serde_json::from_value(schema)
                     .unwrap_or_else(|_| ToolInputSchema::new(vec![], None, None));
                 Tool {
                     name: def.name.to_string(),
@@ -594,7 +648,11 @@ impl ServerHandler for LainHandler {
         // Append special-case tools handled in ToolExecutor::call_inner
         // so MCP clients can see the full surface in tools/list.
         for special in special_tool_definitions() {
-            let input_schema = serde_json::from_value(special.input_schema.clone())
+            let mut schema = special.input_schema.clone();
+            if let Some(fed) = &self.federation {
+                advertise_repo_scope(special.name, &mut schema, fed);
+            }
+            let input_schema = serde_json::from_value(schema)
                 .unwrap_or_else(|_| ToolInputSchema::new(vec![], None, None));
             tools.push(Tool {
                 name: special.name.to_string(),
@@ -1848,10 +1906,14 @@ async fn handle_request(
                         let mut tools: Vec<serde_json::Value> = tools_vec
                             .iter()
                             .map(|def| {
+                                let mut schema = def.input_schema.clone();
+                                if let Some(fed) = federation.as_deref() {
+                                    advertise_repo_scope(def.name, &mut schema, fed);
+                                }
                                 serde_json::json!({
                                     "name": def.name,
                                     "description": def.description,
-                                    "inputSchema": def.input_schema
+                                    "inputSchema": schema
                                 })
                             })
                             .collect();
@@ -2687,6 +2749,63 @@ mod tests {
         let rid = resolve_repo_or_error(&fed, "", &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    /// On a federation server, tools routed by `repo_id` declare it; tools
+    /// that never read it (inventory-dispatched, repo-independent) do not.
+    #[tokio::test]
+    async fn federation_schemas_declare_repo_id_where_it_is_needed() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let mut dirs = Vec::new();
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+            dirs.push(src_dir);
+        }
+        let schema_for = |name: &str| {
+            let mut schema = crate::tools::registry::ToolRegistry::definitions()
+                .into_iter()
+                .find(|d| d.name == name)
+                .map(|d| d.input_schema)
+                .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+            advertise_repo_scope(name, &mut schema, &fed);
+            schema
+        };
+        let find = schema_for("find_symbol");
+        let desc = find["properties"]["repo_id"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(desc.contains("repo-a") && desc.contains("repo-b"), "{find}");
+        assert!(schema_for("get_agent_strategy")["properties"]
+            .get("repo_id")
+            .is_none());
+        assert!(schema_for("claim_files")["properties"]
+            .get("repo_id")
+            .is_none());
+    }
+
+    /// Annotation `kind` is an annotation kind, not an agent kind, and
+    /// `refs` is self-contained (it used to `$ref` a `target` that
+    /// `leave_handoff_note` does not have).
+    #[test]
+    fn annotation_schemas_describe_their_own_arguments() {
+        use crate::server::mcp::envelope::tool_arg_property_schema;
+        let kind = tool_arg_property_schema("add_annotation", "kind");
+        assert_eq!(kind["enum"][0], "note");
+        let agent_kind = tool_arg_property_schema("register_agent", "kind");
+        assert!(agent_kind.get("enum").is_none());
+        let refs = tool_arg_property_schema("leave_handoff_note", "refs");
+        assert!(refs["items"].get("$ref").is_none());
+        assert_eq!(refs["items"]["required"][0], "kind");
     }
 
     /// `get_health` without scoping, across several repos, reports the
