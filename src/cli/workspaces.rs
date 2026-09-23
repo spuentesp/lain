@@ -70,7 +70,8 @@ pub enum WorkspacesAction {
 /// individual `run_*` helpers each take `Option<&Path>` and resolve
 /// from there.
 pub async fn run(action: WorkspacesAction, config: &Path) -> Result<()> {
-    let config = Some(config);
+    let workspaces_file = workspaces_file_for(config);
+    let config = Some(workspaces_file.as_path());
     match action {
         WorkspacesAction::Create {
             name,
@@ -86,6 +87,23 @@ pub async fn run(action: WorkspacesAction, config: &Path) -> Result<()> {
         WorkspacesAction::Use { name } => run_use(&name, config),
         WorkspacesAction::Current => run_current(),
         WorkspacesAction::Forget { name } => run_forget(&name, config),
+    }
+}
+
+/// `--config` names the project's `repos.yaml` (the flag and its default
+/// are shared with `lain repos`); workspaces live beside it in
+/// `workspaces.yaml`, which is where `lain server` reads them. Writing the
+/// workspaces file *to* the `repos.yaml` path replaced every registered
+/// repo with the workspace list. A path already naming a workspaces file
+/// is used as given.
+fn workspaces_file_for(config: &Path) -> PathBuf {
+    if config
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().ends_with("workspaces.yaml"))
+    {
+        config.to_path_buf()
+    } else {
+        config.with_file_name("workspaces.yaml")
     }
 }
 
@@ -392,4 +410,47 @@ pub fn run_forget(name: &str, config: Option<&Path>) -> Result<()> {
     save(&path, &f)?;
     println!("Forgot workspace '{name}'");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `lain workspaces create` with the default `--config ./repos.yaml`
+    /// must leave the repos alone and write `workspaces.yaml` beside it.
+    #[tokio::test]
+    async fn create_with_the_repos_config_writes_the_sibling_workspaces_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repos = dir.path().join("repos.yaml");
+        let original = "data_dir: ./.lain/federation\nrepos:\n- id: pflag\n  source:\n    type: local_clone\n    url: https://example.invalid/pflag.git\n    ref: main\n";
+        std::fs::write(&repos, original).unwrap();
+        let action = WorkspacesAction::Create {
+            name: "spf13".into(),
+            description: None,
+            members: vec!["pflag".into()],
+        };
+        // The reload signal may fail with no server listening; the files
+        // are what matter here.
+        let _ = run(action, &repos).await;
+        assert_eq!(
+            std::fs::read_to_string(&repos).unwrap(),
+            original,
+            "repos.yaml untouched"
+        );
+        let ws = std::fs::read_to_string(dir.path().join("workspaces.yaml")).unwrap();
+        assert!(
+            ws.contains("spf13"),
+            "workspace written beside it; got {ws}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_workspaces_path_is_used_as_given() {
+        let p = Path::new("/x/team-workspaces.yaml");
+        assert_eq!(workspaces_file_for(p), p);
+        assert_eq!(
+            workspaces_file_for(Path::new("./repos.yaml")),
+            Path::new("./workspaces.yaml")
+        );
+    }
 }
