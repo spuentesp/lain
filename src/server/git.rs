@@ -32,9 +32,12 @@ impl GitSensor {
     pub fn new(workspace: &Path) -> Result<Self, LainError> {
         let repo = Repository::open(workspace)?;
 
+        // Canonical, like the sidecar's: through a symlinked path (macOS
+        // temp dirs: `/var` → `/private/var`) the two modes otherwise
+        // reported the same tracked files under different spellings.
         Ok(Self {
             repo,
-            workspace: workspace.to_path_buf(),
+            workspace: dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
         })
     }
 
@@ -152,7 +155,9 @@ impl GitSensor {
 
     /// Get diff content for a specific file
     pub fn get_file_diff(&self, path: &Path) -> Result<String, LainError> {
-        let relative = path.strip_prefix(&self.workspace).unwrap_or(path);
+        // Callers may spell the path through a symlink; the workspace is
+        // canonical.
+        let relative = crate::server::graph::graph_path(&self.workspace, path);
 
         let mut opts = DiffOptions::new();
         opts.pathspec(relative);

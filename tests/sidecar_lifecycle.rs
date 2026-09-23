@@ -1,5 +1,9 @@
 //! Integration tests for SidecarGitSensor lifecycle management,
 //! transparent auto-respawn, respawn budget enforcement, and health monitoring.
+//!
+//! The sidecar talks over a Unix socket; on other platforms Lain uses the
+//! in-process sensor and there is no sidecar to test.
+#![cfg(unix)]
 
 use lain::error::LainError;
 use lain::sidecar::SidecarGitSensor;

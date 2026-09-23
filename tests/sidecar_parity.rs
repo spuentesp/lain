@@ -1,5 +1,9 @@
 //! Integration tests verifying identical behavior and outputs between
 //! AnyGitSensor::InProcess and AnyGitSensor::Sidecar across all Git queries.
+//!
+//! The sidecar talks over a Unix socket; on other platforms Lain uses the
+//! in-process sensor and there is no sidecar to test.
+#![cfg(unix)]
 
 use lain::git::{AnyGitSensor, GitSensorMode};
 use std::path::Path;
