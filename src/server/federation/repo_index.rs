@@ -1047,6 +1047,18 @@ impl RepoIndex {
             if matches!(change.change_type, crate::git::ChangeType::Deleted) {
                 continue;
             }
+            // Only source Lain can read. An untracked build tree (`target/`,
+            // `Cargo.lock`, fingerprints) otherwise went through the LSP one
+            // file at a time after every build: thousands of "no LSP symbols"
+            // warnings and no nodes to show for it.
+            let indexed = change
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(crate::treesitter::is_indexed_extension);
+            if !indexed {
+                continue;
+            }
             match self
                 .process_overlay_change(&change.path, &self.last_overlay_lsp_failures)
                 .await
