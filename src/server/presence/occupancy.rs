@@ -1166,19 +1166,19 @@ impl Default for OccupancyMap {
 /// receiver to stream these to clients.
 ///
 /// Variants:
-/// - `AgentJoined` — a new session was registered.
-/// - `AgentLeft` — a session was explicitly removed (not via expiry).
-/// - `HeartbeatExpired` — the expiry loop dropped a stale session.
-/// - `ClaimGranted` / `ClaimReleased` — occupancy map changes.
-/// - `ConflictDetected` — an occupancy claim came back with conflicts.
-/// - `EditLanded` — a successful write path appended an `AuditEvent`
-///   (PR 2 / Task 2.4). The wire JSON for this variant carries the
-///   `EditLanded` tag wrapping the inner `AuditEvent`'s fields
-///   (serde's external-tag default). Downstream consumers read the
-///   audit data from `data["EditLanded"]`. The SSE frame's `event:`
-///   field is set to `"edit_landed"`, so the stream shape is symmetric
-///   with `get_audit_log`'s responses — both serialize the seven
-///   `AuditEvent` fields under the same JSON keys.
+///   - `AgentJoined` — a new session was registered.
+///   - `AgentLeft` — a session was explicitly removed (not via expiry).
+///   - `HeartbeatExpired` — the expiry loop dropped a stale session.
+///   - `ClaimGranted` / `ClaimReleased` — occupancy map changes.
+///   - `ConflictDetected` — an occupancy claim came back with conflicts.
+///   - `EditLanded` — a successful write path appended an `AuditEvent`
+///     (PR 2 / Task 2.4). The wire JSON for this variant carries the
+///     `EditLanded` tag wrapping the inner `AuditEvent`'s fields
+///     (serde's external-tag default). Downstream consumers read the
+///     audit data from `data["EditLanded"]`. The SSE frame's `event:`
+///     field is set to `"edit_landed"`, so the stream shape is symmetric
+///     with `get_audit_log`'s responses — both serialize the seven
+///     `AuditEvent` fields under the same JSON keys.
 
 /// Compute the BLAKE3-256 hash of a symbol's body bytes so the
 /// occupancy layer can tell when the source under a claimed symbol

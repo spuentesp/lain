@@ -337,10 +337,10 @@ async fn run_git_sensor_watchdog<T>(
 /// Bug #2 sidecar watchdog loop. Extracted so behavior can be unit-tested.
 /// When running in `Sidecar` mode, there is no parent in-process mutex to wedge.
 /// Instead, this loop periodically polls `git.sidecar_health()`:
-/// - If `alive` is false, it writes the timestamp to `busy_since` (just like the
-///   mutex watchdog) and logs a warning.
-/// - When `alive` recovers to true, it clears `busy_since`.
-/// Honors `cancel` and clears `busy_since` on exit.
+///   - If `alive` is false, it writes the timestamp to `busy_since` (just like
+///     the mutex watchdog) and logs a warning.
+///   - When `alive` recovers to true, it clears `busy_since`.
+///   - Honors `cancel` and clears `busy_since` on exit.
 async fn run_sidecar_watchdog(
     git: Arc<AnyGitSensor>,
     busy_since: Arc<AtomicU64>,
