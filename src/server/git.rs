@@ -499,10 +499,12 @@ impl GitSensor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GitSensorMode {
-    /// Direct in-process `libgit2` calls wrapped in a mutex.
+    /// Direct in-process `libgit2` calls wrapped in a mutex. The default
+    /// where the sidecar cannot run (no Unix domain sockets: Windows).
+    #[cfg_attr(not(unix), default)]
     InProcess,
     /// Isolated child daemon process communicating via Unix domain socket IPC.
-    #[default]
+    #[cfg_attr(unix, default)]
     Sidecar,
 }
 
@@ -568,6 +570,12 @@ impl AnyGitSensor {
             GitSensorMode::InProcess => {
                 let sensor = GitSensor::new(workspace)?;
                 Ok(Self::InProcess(Arc::new(parking_lot::Mutex::new(sensor))))
+            }
+            GitSensorMode::Sidecar if cfg!(not(unix)) => {
+                tracing::warn!(
+                    "git sidecar needs Unix domain sockets; using the in-process git sensor"
+                );
+                Self::new(workspace, GitSensorMode::InProcess)
             }
             GitSensorMode::Sidecar => {
                 let sensor = SidecarGitSensor::new(workspace)?;
