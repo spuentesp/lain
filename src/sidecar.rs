@@ -15,12 +15,15 @@ use crate::sidecar_proto::{
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+#[cfg(not(unix))]
+use unsupported::UnixStream;
 
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPAWN_WINDOW: Duration = Duration::from_secs(30);
@@ -535,18 +538,42 @@ impl Drop for SidecarInner {
     }
 }
 
+/// A socket path no other sidecar of this process can be handed.
+///
+/// `pid + nanoseconds` was not unique: macOS clocks resolve microseconds,
+/// so two sidecars spawned in the same microsecond (a federation starts
+/// one per repo, concurrently) got the same path. The second child's
+/// stale-socket cleanup deleted the first one's live socket before binding
+/// its own — either failing with "File exists" or leaving one repo's git
+/// client connected to another repo's sidecar. The per-process counter
+/// makes the path unique; the timestamp keeps it unique across restarts.
 fn generate_socket_path() -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut path = std::env::temp_dir();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     path.push(format!(
-        "lain-sidecar-{}-{}.sock",
+        "lain-sidecar-{}-{}-{}.sock",
         std::process::id(),
+        seq,
         nanos
     ));
     path
+}
+
+#[cfg(test)]
+mod socket_path_tests {
+    /// Paths generated back to back — faster than the clock ticks — are
+    /// all distinct.
+    #[test]
+    fn socket_paths_are_unique_within_a_process() {
+        let paths: std::collections::HashSet<_> =
+            (0..1000).map(|_| super::generate_socket_path()).collect();
+        assert_eq!(paths.len(), 1000);
+    }
 }
 
 fn resolve_sidecar_binary(custom: Option<&Path>) -> Result<PathBuf, LainError> {
@@ -649,5 +676,52 @@ fn proto_to_repoidentity(i: ProtoRepoIdentity) -> RepoIdentity {
     RepoIdentity {
         owner: i.owner,
         name: i.name,
+    }
+}
+
+/// The sidecar speaks over a Unix domain socket. Where there is none
+/// (Windows), this stand-in keeps the client compiling; every call fails,
+/// and the git sensor defaults to in-process there, so it is never reached
+/// in practice. `dev` did not compile for Windows at all without it.
+#[cfg(not(unix))]
+mod unsupported {
+    use std::io;
+    use std::path::Path;
+    use std::time::Duration;
+
+    pub struct UnixStream;
+
+    fn unsupported() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the git sidecar needs Unix domain sockets; set LAIN_GIT_SENSOR=in_process",
+        )
+    }
+
+    impl UnixStream {
+        pub fn connect<P: AsRef<Path>>(_path: P) -> io::Result<Self> {
+            Err(unsupported())
+        }
+        pub fn set_read_timeout(&self, _t: Option<Duration>) -> io::Result<()> {
+            Err(unsupported())
+        }
+        pub fn set_write_timeout(&self, _t: Option<Duration>) -> io::Result<()> {
+            Err(unsupported())
+        }
+    }
+
+    impl io::Read for UnixStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(unsupported())
+        }
+    }
+
+    impl io::Write for UnixStream {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(unsupported())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(unsupported())
+        }
     }
 }
