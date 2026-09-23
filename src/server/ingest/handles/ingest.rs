@@ -8,7 +8,7 @@
 use crate::git::AnyGitSensor;
 use crate::graph::GraphDatabase;
 use crate::lsp::LspPool;
-use crate::nlp::{CrossEncoder, NlpEmbedder};
+use crate::nlp::NlpEmbedder;
 use crate::overlay::{broadcast_overlay_diff, OverlayDiff, RevisionId, VolatileOverlay};
 use crate::schema::{GraphNode, RepoNamespace};
 use crate::server::ingest::config::LainConfig;
