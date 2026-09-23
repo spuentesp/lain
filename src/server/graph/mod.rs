@@ -42,8 +42,11 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 #[derive(Clone)]
 pub struct GraphDatabase {
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
-    index_map: DashMap<String, NodeIndex>,
-    path_index: DashMap<String, Vec<NodeIndex>>,
+    /// Shared with every clone, like `graph`: a clone taken before indexing
+    /// (the tool context is one) must see the ids and paths written later,
+    /// or lookups by id/path miss nodes the shared `graph` already holds.
+    index_map: Arc<DashMap<String, NodeIndex>>,
+    path_index: Arc<DashMap<String, Vec<NodeIndex>>>,
     last_commit: Arc<RwLock<Option<String>>>,
     persistence_path: PathBuf,
     /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
@@ -141,8 +144,8 @@ impl GraphDatabase {
     fn empty(memory_path: &Path) -> Self {
         Self {
             graph: Arc::new(RwLock::new(StableGraph::new())),
-            index_map: DashMap::new(),
-            path_index: DashMap::new(),
+            index_map: Arc::new(DashMap::new()),
+            path_index: Arc::new(DashMap::new()),
             last_commit: Arc::new(RwLock::new(None)),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
@@ -2103,6 +2106,45 @@ mod anchor_hub_tests {
             hub_score > dead_score,
             "live hub ({hub_score}) must outrank dead function \
              ({dead_score}) of identical size_factor"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+
+    /// The tool context holds a clone taken at startup, before a cold index
+    /// runs. When the id/path indices were copied rather than shared, that
+    /// clone saw the nodes (shared `graph`) but none of their ids or paths:
+    /// callers, blast radius and freshness all answered "nothing" for the
+    /// whole first session on a new repo.
+    #[test]
+    fn clone_taken_before_indexing_sees_later_writes() {
+        let tmp = std::env::temp_dir().join("lain_test_clone_shares_indices");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let writer = GraphDatabase::new(&tmp).unwrap();
+        let reader = writer.clone();
+
+        let caller = GraphNode::new(NodeType::Function, "caller".into(), "src/a.rs".into());
+        let callee = GraphNode::new(NodeType::Function, "callee".into(), "src/a.rs".into());
+        let (caller_id, callee_id) = (caller.id.clone(), callee.id.clone());
+        writer.insert_nodes_batch(&[caller, callee]).unwrap();
+        writer
+            .insert_edges_batch(&[GraphEdge::new(
+                EdgeType::Calls,
+                caller_id.clone(),
+                callee_id.clone(),
+            )])
+            .unwrap();
+
+        assert!(reader.get_node(&callee_id).unwrap().is_some(), "id lookup");
+        let incoming = reader.get_edges_to(&callee_id).unwrap();
+        assert_eq!(incoming.len(), 1, "edge visible through the clone");
+        assert_eq!(incoming[0].source_id, caller_id);
+        assert!(
+            reader.has_node_at_path("src/a.rs"),
+            "path index visible through the clone"
         );
     }
 }
