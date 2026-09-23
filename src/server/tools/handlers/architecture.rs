@@ -650,24 +650,7 @@ pub fn understand_repository(
 /// `repository.languages` field. Returns the empty string for unknown
 /// extensions so the caller can filter them out.
 fn language_for_ext(ext: &str) -> &'static str {
-    match ext {
-        "rs" => "Rust",
-        "ts" | "tsx" => "TypeScript",
-        "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
-        "py" | "pyi" => "Python",
-        "go" => "Go",
-        "java" => "Java",
-        "rb" => "Ruby",
-        "c" | "h" => "C",
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => "C++",
-        "cs" => "C#",
-        "swift" => "Swift",
-        "kt" | "kts" => "Kotlin",
-        "scala" => "Scala",
-        "vue" => "Vue",
-        "svelte" => "Svelte",
-        _ => "",
-    }
+    crate::server::treesitter::language_name(ext).unwrap_or("")
 }
 
 /// Project one of the four canonical capability keys to a
