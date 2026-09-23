@@ -1182,12 +1182,13 @@ impl Default for OccupancyMap {
 
 /// Compute the BLAKE3-256 hash of a symbol's body bytes so the
 /// occupancy layer can tell when the source under a claimed symbol
-/// has changed. Reads the file, asks the tree-sitter extractor for
-/// the symbol's `byte_start..byte_end`, and hashes that slice.
+/// has changed.
 ///
-/// Returns `None` if the file is unreadable, non-UTF-8, or doesn't
-/// define the symbol — callers fall back to `SymbolHash::zero()` so a
-/// stale content_hash can never block a `claim`.
+/// Reads the file, asks the tree-sitter extractor for the symbol's
+/// `byte_start..byte_end`, and hashes that slice. Returns `None` if the
+/// file is unreadable, non-UTF-8, or doesn't define the symbol —
+/// callers fall back to `SymbolHash::zero()` so a stale content_hash
+/// can never block a `claim`.
 pub(crate) fn compute_symbol_hash(path: &Path, symbol: &str) -> Option<SymbolHash> {
     let bytes = std::fs::read(path).ok()?;
     let src = std::str::from_utf8(&bytes).ok()?;
