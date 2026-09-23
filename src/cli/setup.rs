@@ -38,6 +38,12 @@ pub struct SetupOptions {
     /// Never attempt the model download, don't ask, don't report it as
     /// actionable — just note it's absent.
     pub no_model: bool,
+    /// Which optional language servers to install: `none`, `detected`
+    /// (every missing one for the languages found), or a comma list of
+    /// languages / extensions. `None` asks on a TTY and installs nothing
+    /// otherwise. `--yes` deliberately does not imply any: servers are
+    /// global installs the user should choose.
+    pub lsp: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -299,37 +305,312 @@ fn prompt_yes_no(question: &str) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes" | "YES" | "Yes")
 }
 
-/// Detect languages by root-level manifest presence. Deliberately
-/// shallow — a one-level check, not a repo walk — this is a display
-/// hint for the setup transcript, not a build-system integration.
-fn detect_languages(root: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    let checks: &[(&str, &str)] = &[
-        ("Cargo.toml", "Rust"),
-        ("go.mod", "Go"),
-        ("pyproject.toml", "Python"),
-        ("setup.py", "Python"),
-        ("requirements.txt", "Python"),
-        ("pom.xml", "Java"),
-        ("build.gradle", "Java/Kotlin"),
-        ("build.gradle.kts", "Kotlin"),
-        ("Gemfile", "Ruby"),
-        ("composer.json", "PHP"),
+/// A language found in the repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedLanguage {
+    name: String,
+    /// Tracked files in this language; 0 when only a manifest was seen.
+    files: usize,
+    /// The extension used to look up its language server.
+    ext: String,
+}
+
+/// Detect languages from the repository's tracked files, most files first.
+/// Falls back to root-level manifests when git lists nothing (not a clone,
+/// or nothing committed yet).
+fn detect_languages(root: &Path) -> Vec<DetectedLanguage> {
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    // language -> (files, ext -> count)
+    let mut counts: std::collections::BTreeMap<
+        &'static str,
+        (usize, std::collections::BTreeMap<String, usize>),
+    > = Default::default();
+    for path in tracked.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let path = String::from_utf8_lossy(path);
+        let Some(ext) = Path::new(path.as_ref())
+            .extension()
+            .and_then(|e| e.to_str())
+        else {
+            continue;
+        };
+        let Some(name) = crate::server::treesitter::language_name(ext) else {
+            continue;
+        };
+        let entry = counts.entry(name).or_default();
+        entry.0 += 1;
+        *entry.1.entry(ext.to_string()).or_default() += 1;
+    }
+    let mut found: Vec<DetectedLanguage> = counts
+        .into_iter()
+        .map(|(name, (files, exts))| DetectedLanguage {
+            name: name.to_string(),
+            files,
+            // The most common extension, preferring one with a server.
+            ext: exts
+                .iter()
+                .filter(|(e, _)| crate::server::lsp::language_server_for(e).is_some())
+                .max_by_key(|(_, n)| **n)
+                .or_else(|| exts.iter().max_by_key(|(_, n)| **n))
+                .map(|(e, _)| e.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    found.sort_by(|a, b| b.files.cmp(&a.files).then(a.name.cmp(&b.name)));
+    if found.is_empty() {
+        found = detect_languages_from_manifests(root);
+    }
+    found
+}
+
+/// Manifest presence at the root: a shallow hint for repositories git
+/// cannot list yet.
+fn detect_languages_from_manifests(root: &Path) -> Vec<DetectedLanguage> {
+    let mut found: Vec<DetectedLanguage> = Vec::new();
+    let checks: &[(&str, &str, &str)] = &[
+        ("Cargo.toml", "Rust", "rs"),
+        ("go.mod", "Go", "go"),
+        ("pyproject.toml", "Python", "py"),
+        ("setup.py", "Python", "py"),
+        ("requirements.txt", "Python", "py"),
+        ("pom.xml", "Java", "java"),
+        ("build.gradle", "Java/Kotlin", "java"),
+        ("build.gradle.kts", "Kotlin", "kt"),
+        ("Gemfile", "Ruby", "rb"),
+        ("composer.json", "PHP", "php"),
     ];
-    for (file, lang) in checks {
-        if root.join(file).is_file() && !found.contains(&lang.to_string()) {
-            found.push(lang.to_string());
+    for (file, lang, ext) in checks {
+        if root.join(file).is_file() && !found.iter().any(|d| d.name == *lang) {
+            found.push(DetectedLanguage {
+                name: lang.to_string(),
+                files: 0,
+                ext: ext.to_string(),
+            });
         }
     }
     if root.join("package.json").is_file() {
-        let lang = if root.join("tsconfig.json").is_file() {
-            "TypeScript"
+        let (name, ext) = if root.join("tsconfig.json").is_file() {
+            ("TypeScript", "ts")
         } else {
-            "JavaScript"
+            ("JavaScript", "js")
         };
-        found.push(lang.to_string());
+        found.push(DetectedLanguage {
+            name: name.to_string(),
+            files: 0,
+            ext: ext.to_string(),
+        });
     }
     found
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageServerState {
+    /// Already on PATH.
+    Installed,
+    /// Not on PATH and not selected. The built-in parser still covers it.
+    NotInstalled,
+    /// Installed by this run.
+    InstalledNow,
+    /// Selected, but `--dry-run` / `--print-config` changes nothing.
+    WouldInstall,
+    /// Selected, and the install command failed.
+    InstallFailed,
+    /// Selected, but there is no command Lain can run here (no automated
+    /// installer, or Homebrew off macOS).
+    NoInstaller,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LanguageServerStatus {
+    pub language: String,
+    pub files: usize,
+    /// Always `built_in`: every language Lain detects has a compiled-in
+    /// parser, so the server below is never required.
+    pub parser: &'static str,
+    pub server: &'static str,
+    pub state: LanguageServerState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_cmd: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Report each detected language's optional server and install the ones the
+/// user selects (`--lsp`, or an interactive pick). Never installs anything
+/// the user did not choose.
+fn resolve_language_servers(
+    opts: &SetupOptions,
+    detected: &[DetectedLanguage],
+) -> Result<Vec<LanguageServerStatus>> {
+    let mut statuses: Vec<(crate::server::lsp::LanguageServer, LanguageServerStatus)> = Vec::new();
+    let mut push = |name: &str, files: usize, server: crate::server::lsp::LanguageServer| {
+        if statuses.iter().any(|(s, _)| s.binary == server.binary) {
+            return;
+        }
+        statuses.push((
+            server,
+            LanguageServerStatus {
+                language: name.to_string(),
+                files,
+                parser: "built_in",
+                server: server.binary,
+                state: if server.is_installed() {
+                    LanguageServerState::Installed
+                } else {
+                    LanguageServerState::NotInstalled
+                },
+                // Only a command that can run on this machine: offering
+                // `brew install llvm` on Linux would be advice that fails.
+                install_cmd: server.install_argv().ok().and(server.install_cmd),
+                detail: None,
+            },
+        ));
+    };
+    for lang in detected {
+        if let Some(server) = crate::server::lsp::language_server_for(&lang.ext) {
+            push(&lang.name, lang.files, server);
+        }
+    }
+
+    // Which binaries to install.
+    let selected: Vec<&'static str> = match opts.lsp.as_deref().map(str::trim) {
+        Some("none") | Some("") => Vec::new(),
+        Some("detected") | Some("all") => statuses
+            .iter()
+            .filter(|(_, st)| st.state == LanguageServerState::NotInstalled)
+            .map(|(s, _)| s.binary)
+            .collect(),
+        Some(list) => {
+            let mut picked = Vec::new();
+            for item in list.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+                let server = crate::server::lsp::language_server_for(item).ok_or_else(|| {
+                    anyhow!(
+                        "--lsp: no language server known for '{item}'; use a language \
+                         (python, go, typescript, ...) or an extension (py, go, ts, ...)"
+                    )
+                })?;
+                // A language the repo doesn't (yet) contain is still a valid pick.
+                let name = crate::server::treesitter::language_name(item.trim_start_matches('.'))
+                    .unwrap_or(item);
+                push(name, 0, server);
+                picked.push(server.binary);
+            }
+            picked
+        }
+        None if opts.json || opts.print_config || !is_stdin_tty() => Vec::new(),
+        None => {
+            let missing: Vec<&LanguageServerStatus> = statuses
+                .iter()
+                .map(|(_, st)| st)
+                .filter(|st| st.state == LanguageServerState::NotInstalled)
+                .collect();
+            prompt_language_servers(&missing)
+        }
+    };
+
+    for (server, status) in statuses.iter_mut() {
+        if !selected.contains(&server.binary) || status.state == LanguageServerState::Installed {
+            continue;
+        }
+        let argv = match server.install_argv() {
+            Ok(argv) => argv,
+            Err(e) => {
+                status.state = LanguageServerState::NoInstaller;
+                status.detail = Some(e.to_string());
+                continue;
+            }
+        };
+        if opts.dry_run || opts.print_config {
+            status.state = LanguageServerState::WouldInstall;
+            continue;
+        }
+        if !opts.json {
+            println!("  Installing {} ({})…", server.binary, argv.join(" "));
+        }
+        let mut cmd = Command::new(argv[0]);
+        cmd.args(&argv[1..]).stdin(Stdio::null());
+        if opts.json {
+            // Keep stdout for the JSON report.
+            cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() && server.is_installed() => {
+                status.state = LanguageServerState::InstalledNow;
+            }
+            Ok(out) => {
+                status.state = LanguageServerState::InstallFailed;
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                status.detail = Some(if out.status.success() {
+                    format!("install finished but {} is not on PATH", server.binary)
+                } else if tail.is_empty() {
+                    format!("`{}` exited with {}", argv.join(" "), out.status)
+                } else {
+                    tail
+                });
+            }
+            Err(e) => {
+                status.state = LanguageServerState::InstallFailed;
+                status.detail = Some(format!("could not run `{}`: {e}", argv[0]));
+            }
+        }
+    }
+    Ok(statuses.into_iter().map(|(_, st)| st).collect())
+}
+
+/// Ask which missing servers to install. Enter (the default) installs none.
+fn prompt_language_servers(missing: &[&LanguageServerStatus]) -> Vec<&'static str> {
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    println!();
+    println!("  Language servers are optional: the built-in parsers already index every");
+    println!("  language below. A server adds precision on top.");
+    for (i, st) in missing.iter().enumerate() {
+        println!(
+            "    {}) {:<12} {:<28} {}",
+            i + 1,
+            st.language,
+            st.server,
+            st.install_cmd
+                .unwrap_or("(install manually with your package manager)")
+        );
+    }
+    print!("  Install which? Numbers (e.g. 1,3), \"all\", or Enter to skip: ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Vec::new();
+    }
+    parse_server_selection(&line, missing)
+}
+
+fn parse_server_selection(input: &str, missing: &[&LanguageServerStatus]) -> Vec<&'static str> {
+    let input = input.trim();
+    if input.eq_ignore_ascii_case("all") {
+        return missing.iter().map(|st| st.server).collect();
+    }
+    let mut picked = Vec::new();
+    for n in input
+        .split([',', ' '])
+        .filter_map(|t| t.trim().parse::<usize>().ok())
+    {
+        if let Some(st) = n.checked_sub(1).and_then(|i| missing.get(i)) {
+            if !picked.contains(&st.server) {
+                picked.push(st.server);
+            }
+        }
+    }
+    picked
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1377,6 +1658,7 @@ pub struct SetupReport {
     pub server_version: &'static str,
     pub repository: PathBuf,
     pub languages: Vec<String>,
+    pub language_servers: Vec<LanguageServerStatus>,
     pub capabilities: crate::server::readiness::Capabilities,
     pub semantic_model: SemanticModelStatus,
     pub configuration: ConfigurationOutcome,
@@ -1400,8 +1682,10 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         })?;
 
     let doctor_report = doctor::build_report(Some(&root))?;
-    let languages = detect_languages(&root);
+    let detected = detect_languages(&root);
     let semantic = resolve_semantic_model(&opts);
+    let language_servers = resolve_language_servers(&opts, &detected)?;
+    let languages: Vec<String> = detected.into_iter().map(|d| d.name).collect();
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
     let agent = match &opts.agent {
@@ -1457,6 +1741,7 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         server_version: env!("CARGO_PKG_VERSION"),
         repository: root,
         languages,
+        language_servers,
         capabilities: doctor_report.capabilities,
         semantic_model: semantic,
         configuration,
@@ -1487,7 +1772,27 @@ fn print_human(report: &SetupReport) {
     if report.languages.is_empty() {
         println!("  Languages         ○ none detected");
     } else {
-        println!("  Languages         ✓ {}", report.languages.join(", "));
+        println!(
+            "  Languages         ✓ {} (built-in parsers)",
+            report.languages.join(", ")
+        );
+    }
+    for st in &report.language_servers {
+        let (mark, state) = match st.state {
+            LanguageServerState::Installed => ("✓", "installed"),
+            LanguageServerState::InstalledNow => ("✓", "installed now"),
+            LanguageServerState::NotInstalled => ("○", "optional, not installed"),
+            LanguageServerState::WouldInstall => ("○", "would install (dry run)"),
+            LanguageServerState::InstallFailed => ("×", "install failed"),
+            LanguageServerState::NoInstaller => ("○", "install manually"),
+        };
+        println!(
+            "  {:<17} {mark} {} {state} ({})",
+            "", st.server, st.language
+        );
+        if let Some(detail) = &st.detail {
+            println!("  {:<19} {detail}", "");
+        }
     }
     for (label, capability) in [
         ("Structural index", &report.capabilities.symbols),
@@ -1786,10 +2091,133 @@ mod tests {
         std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
         std::fs::write(tmp.path().join("package.json"), "{}").unwrap();
         std::fs::write(tmp.path().join("tsconfig.json"), "{}").unwrap();
-        let langs = detect_languages(tmp.path());
+        let langs: Vec<String> = detect_languages(tmp.path())
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
         assert!(langs.contains(&"Rust".to_string()));
         assert!(langs.contains(&"TypeScript".to_string()));
         assert!(!langs.contains(&"JavaScript".to_string()));
+    }
+
+    /// Tracked files, not root manifests: a Go service and Python scripts
+    /// in one repo are both found, most files first.
+    #[test]
+    fn detect_languages_counts_tracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("svc")).unwrap();
+        for f in ["svc/a.go", "svc/b.go", "tool.py", "README.md"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        let langs = detect_languages(root);
+        assert_eq!(
+            langs
+                .iter()
+                .map(|d| (d.name.as_str(), d.files))
+                .collect::<Vec<_>>(),
+            vec![("Go", 2), ("Python", 1)]
+        );
+        assert_eq!(langs[0].ext, "go");
+    }
+
+    fn status(language: &str, server: &'static str) -> LanguageServerStatus {
+        LanguageServerStatus {
+            language: language.into(),
+            files: 1,
+            parser: "built_in",
+            server,
+            state: LanguageServerState::NotInstalled,
+            install_cmd: None,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn server_selection_defaults_to_none() {
+        let (a, b) = (status("Go", "gopls"), status("Python", "pylsp"));
+        let missing = vec![&a, &b];
+        assert!(parse_server_selection("", &missing).is_empty());
+        assert!(parse_server_selection("  \n", &missing).is_empty());
+        assert_eq!(parse_server_selection("2", &missing), vec!["pylsp"]);
+        assert_eq!(
+            parse_server_selection("1, 2,2 9", &missing),
+            vec!["gopls", "pylsp"]
+        );
+        assert_eq!(
+            parse_server_selection("ALL", &missing),
+            vec!["gopls", "pylsp"]
+        );
+    }
+
+    /// Non-interactive runs, and `--yes`, never install a language server
+    /// the user did not name.
+    #[test]
+    fn language_servers_are_never_installed_unasked() {
+        let detected = vec![DetectedLanguage {
+            name: "Go".into(),
+            files: 3,
+            ext: "go".into(),
+        }];
+        let opts = SetupOptions {
+            workspace: None,
+            agent: None,
+            json: true,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+            lsp: None,
+        };
+        let statuses = resolve_language_servers(&opts, &detected).unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert!(matches!(
+            statuses[0].state,
+            LanguageServerState::Installed | LanguageServerState::NotInstalled
+        ));
+    }
+
+    #[test]
+    fn lsp_flag_dry_run_reports_without_installing() {
+        let opts = SetupOptions {
+            workspace: None,
+            agent: None,
+            json: true,
+            dry_run: true,
+            print_config: false,
+            yes: false,
+            no_model: true,
+            // A server that is certainly not installed on the test machine.
+            lsp: Some("svelte".into()),
+        };
+        let statuses = resolve_language_servers(&opts, &[]).unwrap();
+        let st = statuses
+            .iter()
+            .find(|s| s.server == "svelte-language-server")
+            .unwrap();
+        if !which::which("svelte-language-server").is_ok() {
+            assert_eq!(st.state, LanguageServerState::WouldInstall);
+        }
+        assert!(resolve_language_servers(
+            &SetupOptions {
+                lsp: Some("klingon".into()),
+                ..opts
+            },
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -1809,6 +2237,7 @@ mod tests {
             print_config: false,
             yes: false,
             no_model: true,
+            lsp: None,
         };
         let outcome = configure_generic(tmp.path(), Path::new("/usr/bin/lain"), None, &opts);
         assert_eq!(outcome.state, ConfigurationState::WouldConfigure);
@@ -1826,6 +2255,7 @@ mod tests {
             print_config: false,
             yes: false,
             no_model: true,
+            lsp: None,
         };
         let first = configure_generic(tmp.path(), Path::new("/usr/bin/lain"), None, &opts);
         assert_eq!(first.state, ConfigurationState::Configured);
@@ -1892,6 +2322,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_codex(
             _tmp.path(),
@@ -1930,6 +2361,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_codex(
             _tmp.path(),
@@ -1962,6 +2394,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_codex(
             _tmp.path(),
@@ -1999,6 +2432,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_cursor(
             _tmp.path(),
@@ -2038,6 +2472,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_cursor(
             _tmp.path(),
@@ -2069,6 +2504,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_cursor(
             _tmp.path(),
@@ -2111,6 +2547,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_vscode(
             tmp.path(),
@@ -2145,6 +2582,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_vscode(
             tmp.path(),
@@ -2183,6 +2621,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_continue(
             _tmp.path(),
@@ -2234,6 +2673,7 @@ mod tests {
             print_config: false,
             yes: true,
             no_model: true,
+            lsp: None,
         };
         let out = configure_continue(
             _tmp.path(),

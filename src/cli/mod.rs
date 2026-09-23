@@ -280,6 +280,12 @@ pub enum Commands {
         /// Never attempt to install the optional embedding model.
         #[arg(long)]
         no_model: bool,
+        /// Optional language servers to install: `none`, `detected` (every
+        /// missing one for this repo's languages), or a comma list such as
+        /// `python,go`. Omit to be asked (TTY only); non-interactive runs
+        /// install none. Every language is indexed without them.
+        #[arg(long, value_name = "none|detected|LANG,...")]
+        lsp: Option<String>,
     },
 }
 
