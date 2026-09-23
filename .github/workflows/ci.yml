@@ -249,7 +249,7 @@ jobs:
           bash scripts/package-windows-release.sh \
             target/debug \
             "$RUNNER_TEMP/lain-windows-ci.tar.gz"
-          tar tzf "$RUNNER_TEMP/lain-windows-ci.tar.gz"
+          tar tzf - < "$RUNNER_TEMP/lain-windows-ci.tar.gz"
 
       - name: Run tests
         shell: bash

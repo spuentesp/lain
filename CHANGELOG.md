@@ -50,6 +50,12 @@ All notable changes to LAIN are documented here. Versions follow
 - JavaScript/TypeScript: `export const useCart = defineStore(...)` (Pinia
   stores, composables, `styled.x`, slices) is indexed, so its callers are
   found.
+- Presence claims could fail with "state-file lock not acquired" when
+  several agents in one server contended: the polled lock let a waiter
+  lose every race until the deadline. Threads of one process now queue
+  fairly before polling it.
+- The Windows release packaging script passed a `D:\...` path to GNU
+  tar, which read it as a remote host.
 - `scripts/acceptance/run.py` checks the README's claims end to end
   against pinned open-source repositories — who-calls answers in every
   listed language, the single-repo flow, and the multi-repo flow.
