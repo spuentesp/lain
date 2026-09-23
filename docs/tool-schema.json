@@ -169,6 +169,17 @@
           "type": "string"
         },
         "type_filter": {
+          "enum": [
+            "function",
+            "method",
+            "class",
+            "struct",
+            "interface",
+            "trait",
+            "enum",
+            "module",
+            "file"
+          ],
           "type": "string"
         }
       },
@@ -1203,13 +1214,50 @@
           "type": "string"
         },
         "kind": {
-          "description": "agent kind, e.g. claude-code | codex | kimi | agy (any string is accepted)",
+          "description": "annotation kind (default: note)",
+          "enum": [
+            "note",
+            "warning",
+            "todo",
+            "investigation",
+            "fix"
+          ],
           "type": "string"
         },
         "refs": {
           "description": "Cross-references to other annotation targets.",
           "items": {
-            "$ref": "#/properties/target"
+            "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "symbol",
+                  "file",
+                  "repo",
+                  "edge"
+                ],
+                "type": "string"
+              },
+              "repo_id": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "type": "array"
         },
@@ -1245,6 +1293,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "kind"
+          ],
           "type": "object"
         }
       },
@@ -1266,7 +1317,14 @@
           "type": "string"
         },
         "kind": {
-          "description": "agent kind, e.g. claude-code | codex | kimi | agy (any string is accepted)",
+          "description": "annotation kind (default: note)",
+          "enum": [
+            "note",
+            "warning",
+            "todo",
+            "investigation",
+            "fix"
+          ],
           "type": "string"
         },
         "limit": {
@@ -1309,6 +1367,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "kind"
+          ],
           "type": "object"
         }
       },
@@ -1356,7 +1417,37 @@
         "refs": {
           "description": "Cross-references to other annotation targets.",
           "items": {
-            "$ref": "#/properties/target"
+            "description": "Annotation target. Discriminated by `kind`: symbol|file|repo|edge.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "symbol",
+                  "file",
+                  "repo",
+                  "edge"
+                ],
+                "type": "string"
+              },
+              "repo_id": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
           },
           "type": "array"
         },
