@@ -217,9 +217,9 @@ pub fn extract_refs_with_locals(
         ),
         "js" | "jsx" | "ts" | "tsx" => extract(
             source,
-            tree_sitter_javascript::language(),
-            &[JS_CALLS_1, JS_CALLS_2, JS_NEW],
-            &[JS_TYPES],
+            js_family_language(ext),
+            &[JS_CALLS_1, JS_CALLS_2, JS_CALLS_3, JS_NEW],
+            &[JS_TYPES, TS_TYPES],
             local_definitions,
         ),
         _ => vec![],
@@ -246,8 +246,25 @@ const PY_TYPES: &str = "(identifier) @name";
 const JS_CALLS_1: &str = "(call_expression function: (identifier) @name)";
 const JS_CALLS_2: &str =
     "(call_expression function: (member_expression property: (property_identifier) @name))";
+/// `this.#retry()` — a private method's name is its own node kind.
+const JS_CALLS_3: &str =
+    "(call_expression function: (member_expression property: (private_property_identifier) @name))";
 const JS_NEW: &str = "(new_expression constructor: (identifier) @name)";
 const JS_TYPES: &str = "(identifier) @name";
+/// TypeScript names types with `type_identifier`; the pattern does not compile
+/// against the JavaScript grammar and is skipped there.
+const TS_TYPES: &str = "(type_identifier) @name";
+
+/// The grammar for a JS-family extension. TypeScript needs its own: parsed as
+/// JavaScript, type annotations turn most of a file into ERROR nodes and
+/// nothing inside them is extracted.
+fn js_family_language(ext: &str) -> Language {
+    match ext {
+        "ts" => tree_sitter_typescript::language_typescript(),
+        "tsx" => tree_sitter_typescript::language_tsx(),
+        _ => tree_sitter_javascript::language(),
+    }
+}
 
 // ── Core extractor ────────────────────────────────────────────────────────────
 
@@ -364,9 +381,7 @@ pub fn extract_strings(path: &Path, source: &str) -> Vec<StringLiteral> {
     match ext {
         "rs" => extract_string_literals(source, tree_sitter_rust::language()),
         "py" => extract_string_literals(source, tree_sitter_python::language()),
-        "js" | "jsx" | "ts" | "tsx" => {
-            extract_string_literals(source, tree_sitter_javascript::language())
-        }
+        "js" | "jsx" | "ts" | "tsx" => extract_string_literals(source, js_family_language(ext)),
         _ => vec![],
     }
 }
@@ -407,7 +422,7 @@ pub fn extract_definitions(path: &Path, source: &str) -> Vec<SymbolDef> {
     match ext {
         "rs" => extract_definitions_rust(source),
         "py" => extract_definitions_python(source),
-        "js" | "jsx" | "ts" | "tsx" => extract_definitions_js(source),
+        "js" | "jsx" | "ts" | "tsx" => extract_definitions_js(source, js_family_language(ext)),
         _ => vec![],
     }
 }
@@ -627,53 +642,74 @@ fn python_def_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
     None
 }
 
-fn extract_definitions_js(source: &str) -> Vec<SymbolDef> {
+fn extract_definitions_js(source: &str, language: Language) -> Vec<SymbolDef> {
     PARSER.with(|parser| {
         let mut parser = parser.lock();
-        if parser
-            .set_language(&tree_sitter_javascript::language())
-            .is_err()
-        {
+        if parser.set_language(&language).is_err() {
             return vec![];
         }
         let Some(tree) = parser.parse(source, None) else {
             return vec![];
         };
 
+        let src_bytes = source.as_bytes();
         let mut defs = Vec::new();
-        let root = tree.root_node();
 
-        for child in root.children(&mut root.walk()) {
-            match child.kind() {
-                "function_declaration" => {
-                    if let Some(name) = js_function_name(&child, source) {
-                        defs.push(SymbolDef {
-                            name,
-                            kind: NodeType::Function,
-                            line_start: child.start_position().row as u32,
-                            line_end: child.end_position().row as u32,
-                            byte_start: child.start_byte() as u32,
-                            byte_end: child.end_byte() as u32,
-                            is_deprecated: false,
-                            labels: Vec::new(),
-                        });
-                    }
+        // Match definitions at any depth, as the Rust extractor does. A
+        // top-level-only walk missed anything under `export` (an
+        // `export_statement` wraps the declaration), every class method, and
+        // functions bound with `const f = () => ...` — most of modern JS/TS.
+        // Patterns naming TypeScript-only nodes fail to compile against the
+        // JavaScript grammar (and `field_definition` against TypeScript's);
+        // those are skipped.
+        const FN_VALUE: &str = "[(arrow_function) (function_expression) (generator_function)]";
+        let patterns: Vec<(String, NodeType)> = vec![
+            ("(function_declaration) @d".into(), NodeType::Function),
+            (
+                "(generator_function_declaration) @d".into(),
+                NodeType::Function,
+            ),
+            ("(method_definition) @d".into(), NodeType::Function),
+            (
+                format!("(variable_declarator value: {FN_VALUE}) @d"),
+                NodeType::Function,
+            ),
+            (
+                format!("(public_field_definition value: {FN_VALUE}) @d"),
+                NodeType::Function,
+            ),
+            (
+                format!("(field_definition value: {FN_VALUE}) @d"),
+                NodeType::Function,
+            ),
+            ("(class_declaration) @d".into(), NodeType::Class),
+            ("(abstract_class_declaration) @d".into(), NodeType::Class),
+            ("(interface_declaration) @d".into(), NodeType::Interface),
+            ("(enum_declaration) @d".into(), NodeType::Enum),
+        ];
+
+        for (pattern, kind) in &patterns {
+            let Ok(query) = Query::new(&language, pattern) else {
+                continue;
+            };
+            let mut cursor = QueryCursor::new();
+            for m in cursor.matches(&query, tree.root_node(), src_bytes) {
+                for cap in m.captures {
+                    let node = cap.node;
+                    let Some(name) = js_def_name(&node, src_bytes) else {
+                        continue;
+                    };
+                    defs.push(SymbolDef {
+                        name,
+                        kind: kind.clone(),
+                        line_start: node.start_position().row as u32,
+                        line_end: node.end_position().row as u32,
+                        byte_start: node.start_byte() as u32,
+                        byte_end: node.end_byte() as u32,
+                        is_deprecated: false,
+                        labels: Vec::new(),
+                    });
                 }
-                "class_declaration" => {
-                    if let Some(name) = js_class_name(&child, source) {
-                        defs.push(SymbolDef {
-                            name,
-                            kind: NodeType::Class,
-                            line_start: child.start_position().row as u32,
-                            line_end: child.end_position().row as u32,
-                            byte_start: child.start_byte() as u32,
-                            byte_end: child.end_byte() as u32,
-                            is_deprecated: false,
-                            labels: Vec::new(),
-                        });
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -681,30 +717,20 @@ fn extract_definitions_js(source: &str) -> Vec<SymbolDef> {
     })
 }
 
-fn js_function_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" {
-            return child
-                .utf8_text(source.as_bytes())
-                .ok()
-                .map(|s| s.to_string());
-        }
+/// The declared name, or `None` for computed/string/number keys and
+/// destructuring patterns, which name nothing a caller could reference.
+/// JavaScript's `field_definition` calls the field `property`, not `name`.
+fn js_def_name(node: &tree_sitter::Node, src_bytes: &[u8]) -> Option<String> {
+    let name = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("property"))?;
+    match name.kind() {
+        "identifier"
+        | "type_identifier"
+        | "property_identifier"
+        | "private_property_identifier" => name.utf8_text(src_bytes).ok().map(str::to_string),
+        _ => None,
     }
-    None
-}
-
-fn js_class_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" {
-            return child
-                .utf8_text(source.as_bytes())
-                .ok()
-                .map(|s| s.to_string());
-        }
-    }
-    None
 }
 
 /// Core string literal extractor using tree-sitter
@@ -938,6 +964,94 @@ class Foo:
         let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"hello"), "got: {:?}", names);
         assert!(names.contains(&"Foo"), "got: {:?}", names);
+    }
+
+    #[test]
+    fn test_extract_definitions_finds_typescript_symbols() {
+        let source = r#"
+import { thing } from './thing';
+
+export interface Options { retry: number }
+export enum Mode { A, B }
+
+export class Ky {
+    #options: Options;
+    constructor(options: Options) { this.#options = options; }
+    async #retry<T>(fn: () => Promise<T>): Promise<T> { return fn(); }
+    private handle = (x: number): number => x + 1;
+    static create(input: string): Ky { return new Ky({ retry: 2 }); }
+}
+
+export const mergeHeaders = (a: Headers, b: Headers): Headers => a;
+export function plain(x: number): number { return x; }
+export abstract class Base { abstract run(): void; }
+const { destructured } = thing;
+"#;
+        let defs = extract_definitions(Path::new("ky.ts"), source);
+        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+        for want in [
+            "Options",
+            "Mode",
+            "Ky",
+            "constructor",
+            "#retry",
+            "handle",
+            "create",
+            "mergeHeaders",
+            "plain",
+            "Base",
+        ] {
+            assert!(names.contains(&want), "missing {want}; got: {:?}", names);
+        }
+        assert!(
+            !names.contains(&"destructured"),
+            "patterns name nothing; got: {:?}",
+            names
+        );
+        let kind = |n: &str| defs.iter().find(|d| d.name == n).unwrap().kind.clone();
+        assert_eq!(kind("Ky"), NodeType::Class);
+        assert_eq!(kind("Options"), NodeType::Interface);
+        assert_eq!(kind("Mode"), NodeType::Enum);
+        assert_eq!(kind("mergeHeaders"), NodeType::Function);
+    }
+
+    #[test]
+    fn test_extract_definitions_finds_exported_js_symbols() {
+        let source = r#"
+export class Client {
+    #secret = () => 1;
+    send(req) { return this.#secret(); }
+}
+export const build = function (opts) { return opts; };
+export default function main() {}
+"#;
+        let defs = extract_definitions(Path::new("client.js"), source);
+        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+        for want in ["Client", "#secret", "send", "build", "main"] {
+            assert!(names.contains(&want), "missing {want}; got: {:?}", names);
+        }
+    }
+
+    #[test]
+    fn test_extract_refs_finds_typescript_calls() {
+        let source = r#"
+export class Ky {
+    async #retry(): Promise<Response> { return this.#fetch(); }
+    #fetch(): Promise<Response> { return fetch(mergeHeaders(a, b)); }
+}
+"#;
+        let refs = extract_refs_with_locals(Path::new("ky.ts"), source, &HashSet::new());
+        let calls: Vec<_> = refs
+            .iter()
+            .filter(|r| matches!(r.edge_type, EdgeType::Calls))
+            .map(|r| r.target_name.as_str())
+            .collect();
+        assert!(calls.contains(&"mergeHeaders"), "got: {:?}", calls);
+        assert!(
+            calls.contains(&"#fetch"),
+            "private method call; got: {:?}",
+            calls
+        );
     }
 
     #[test]
