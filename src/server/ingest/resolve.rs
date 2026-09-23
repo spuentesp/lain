@@ -332,7 +332,10 @@ pub fn resolve_static_edges(
             // overloads, not unrelated symbols. Link the call to the group
             // rather than drop it; `Foo.bar(1)` and `Foo.bar("x")` both
             // call "bar in Foo.java".
+            let builtin_on_foreign =
+                sr.foreign_receiver && COMMON_METHOD_NAMES.contains(&sr.target_name.as_str());
             let overload_group = same_file.is_empty()
+                && !builtin_on_foreign
                 && !candidates.is_empty()
                 && candidates.iter().all(|(_, _, p)| p == &candidates[0].2)
                 && matches!(
@@ -798,6 +801,22 @@ mod ambiguous_name_tests {
             file_path: "src/TypeSpec.java".to_string(),
             source_line: 25,
             target_name: "emit".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: true,
+        };
+        assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
+
+        // `map.put(k, v)` on some other value must not link to a class's
+        // `put` overloads either.
+        for lines in [(60, 70), (80, 90)] {
+            let n = GraphNode::new(NodeType::Function, "put".into(), "src/Cache.java".into())
+                .with_location_in(lines.0, lines.1, &ns);
+            db.upsert_node(n).unwrap();
+        }
+        let r = StaticFileRef {
+            file_path: "src/TypeSpec.java".to_string(),
+            source_line: 25,
+            target_name: "put".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: true,
         };

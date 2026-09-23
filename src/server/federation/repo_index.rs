@@ -484,24 +484,6 @@ impl RepoIndex {
         self.db.all_edges()
     }
 
-    /// Run the per-repo ingestion pipeline: tree-sitter extract → LSP hydrate
-    /// → git co-change, scoped to `source.local_path()`. On success,
-    /// transitions health from `Indexing` → `Ready` and stamps `last_indexed`.
-    /// On failure, transitions to `Degraded` (the caller does not retry).
-    ///
-    /// The git mutex is held for the entire call so the watcher callback
-    /// (which schedules another `index()`) blocks until we finish, avoiding
-    /// two concurrent writes to the same per-repo graph. The guard is
-    /// `Send` and is held across `.await` points inside `index_one_repo`.
-    ///
-    /// The whole pipeline is wrapped in [`Self::index_timeout`]. The inner
-    /// stages already have their own budgets (`LSP_STARTUP_TIMEOUT`,
-    /// `LSP_REQUEST_TIMEOUT`, the `scan_timeout_secs` ingest cap), but a
-    /// top-level bound keeps a misbehaving stage — a stuck child process,
-    /// a tree-sitter parser wedged on a pathological file, an unresponsive
-    /// git2 call — from holding the git mutex forever. When the timeout
-    /// fires we transition to `Degraded` so the watcher (if any) keeps
-    /// polling rather than wedging the federation.
     /// Re-resolve this repo's calls into the rest of the federation; see
     /// [`crate::server::ingest::ingestion::relink_cross_repo`]. Returns the
     /// number of cross-repo edges added (0 without a resolver).
@@ -521,6 +503,24 @@ impl RepoIndex {
         .await
     }
 
+    /// Run the per-repo ingestion pipeline: tree-sitter extract → LSP hydrate
+    /// → git co-change, scoped to `source.local_path()`. On success,
+    /// transitions health from `Indexing` → `Ready` and stamps `last_indexed`.
+    /// On failure, transitions to `Degraded` (the caller does not retry).
+    ///
+    /// The git mutex is held for the entire call so the watcher callback
+    /// (which schedules another `index()`) blocks until we finish, avoiding
+    /// two concurrent writes to the same per-repo graph. The guard is
+    /// `Send` and is held across `.await` points inside `index_one_repo`.
+    ///
+    /// The whole pipeline is wrapped in [`Self::index_timeout`]. The inner
+    /// stages already have their own budgets (`LSP_STARTUP_TIMEOUT`,
+    /// `LSP_REQUEST_TIMEOUT`, the `scan_timeout_secs` ingest cap), but a
+    /// top-level bound keeps a misbehaving stage — a stuck child process,
+    /// a tree-sitter parser wedged on a pathological file, an unresponsive
+    /// git2 call — from holding the git mutex forever. When the timeout
+    /// fires we transition to `Degraded` so the watcher (if any) keeps
+    /// polling rather than wedging the federation.
     pub async fn index(self: &Arc<Self>) -> Result<(), LainError> {
         let path = self.source.local_path().to_path_buf();
         // Borrow `self.db` directly instead of cloning. `GraphDatabase`

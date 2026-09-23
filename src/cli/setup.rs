@@ -506,7 +506,9 @@ fn resolve_language_servers(
             }
             picked
         }
-        None if opts.json || opts.print_config || !is_stdin_tty() => Vec::new(),
+        // `--yes` means "ask nothing", and servers are never installed
+        // unasked, so it selects none rather than stopping at the prompt.
+        None if opts.json || opts.print_config || opts.yes || !is_stdin_tty() => Vec::new(),
         None => {
             let missing: Vec<&LanguageServerStatus> = statuses
                 .iter()

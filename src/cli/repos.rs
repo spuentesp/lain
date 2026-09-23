@@ -78,13 +78,33 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
 /// the README's own example: `tokio-rs/bytes` and `tokio-rs/tokio` use
 /// `master`, and cloning `--branch main` fails.
 fn remote_default_branch(url: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
+    use std::io::Read;
+    // Never prompt for credentials, and give up after 20s: this is only a
+    // default, and `--ref` always works.
+    let mut child = std::process::Command::new("git")
         .args(["ls-remote", "--symref", url, "HEAD"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    parse_symref_head(&String::from_utf8_lossy(&out.stdout))
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => break,
+            Some(_) => return None,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    parse_symref_head(&out)
 }
 
 /// `ref: refs/heads/master\tHEAD` → `master`.

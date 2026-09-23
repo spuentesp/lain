@@ -715,6 +715,9 @@ impl FederatedIndex {
     }
 
     fn rebuild_symbol_index(&self) {
+        // Dependency answers can change with the index (a manifest edited,
+        // a repo re-added elsewhere); recompute them lazily.
+        self.depends_cache.clear();
         self.symbol_to_repos.clear();
         let mut tmp: HashMap<String, Vec<RepoId>> = HashMap::new();
         // Snapshot the repo ids we have, then release the read lock before

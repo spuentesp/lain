@@ -1030,14 +1030,12 @@ pub fn backfill_heuristics(workspace: &str, graph: Option<&str>, dry_run: bool) 
     let mut graph = GraphDatabase::new(&graph_path)
         .with_context(|| format!("open graph at {}", graph_path.display()))?;
 
-    let ns = RepoNamespace::fresh();
-    graph.set_namespace(ns.clone());
-    // The dynamic_dispatch_sensor reads graph paths via `graph_path`
-    // which mints IDs under the configured namespace; setting it here
-    // keeps backfilled edges compatible with whatever namespace the
-    // graph was originally built with. `RepoNamespace::fresh()` is
-    // per-run, so a re-backfill produces the same IDs and the upsert
-    // path naturally de-duplicates edges the operator already merged.
+    // The namespace `lain mcp` builds this workspace's graph under, so
+    // backfilled edges mint the same ids as the nodes already persisted
+    // (and a re-backfill mints the same ids again, which the upsert path
+    // de-duplicates). A per-run random namespace matched none of them.
+    let ns = RepoNamespace::from_workspace(ws_path);
+    graph.set_namespace(ns);
     let before = graph.all_edges().len();
     let added = scan_workspace_dispatch(&graph, ws_path, &ns)
         .with_context(|| format!("scan workspace {}", ws_path.display()))?;

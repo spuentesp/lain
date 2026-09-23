@@ -121,6 +121,16 @@ fn advertise_repo_scope(name: &str, schema: &mut serde_json::Value, fed: &Federa
     if !requires_repo_scope(name) || is_inventory_tool(name) {
         return;
     }
+    // Only needed — and only accepted as required — with several repos;
+    // a single-repo server routes everything to its one repo.
+    let ids: Vec<String> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    if ids.len() < 2 {
+        return;
+    }
     let Some(obj) = schema.as_object_mut() else {
         return;
     };
@@ -133,11 +143,6 @@ fn advertise_repo_scope(name: &str, schema: &mut serde_json::Value, fed: &Federa
     if props.contains_key("repo_id") {
         return;
     }
-    let ids: Vec<String> = fed
-        .list_repos()
-        .into_iter()
-        .map(|(id, _)| id.as_str().to_string())
-        .collect();
     props.insert(
         "repo_id".into(),
         serde_json::json!({
@@ -2791,6 +2796,19 @@ mod tests {
         assert!(schema_for("claim_files")["properties"]
             .get("repo_id")
             .is_none());
+
+        // One repository: nothing to choose, so the schema is unchanged.
+        let single = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let src_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(src_dir.path()).unwrap();
+        let src: Box<dyn RepoSource> = Box::new(
+            WorkspaceDirSource::new(RepoId::new("only").unwrap(), src_dir.path().to_path_buf())
+                .unwrap(),
+        );
+        single.add_repo(src, tmp.path()).await.unwrap();
+        let mut schema = serde_json::json!({"type": "object", "properties": {}});
+        advertise_repo_scope("find_symbol", &mut schema, &single);
+        assert!(schema["properties"].get("repo_id").is_none(), "{schema}");
     }
 
     /// Annotation `kind` is an annotation kind, not an agent kind, and

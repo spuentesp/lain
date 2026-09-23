@@ -643,12 +643,11 @@ fn query_terms(query: &str) -> Vec<String> {
         "the", "and", "for", "with", "this", "that", "from", "into", "how", "what", "where",
         "which", "who", "does", "when", "are", "code", "function", "method",
     ];
-    let mut terms: Vec<String> = search_terms(query)
+    let mut seen = std::collections::HashSet::new();
+    search_terms(query)
         .into_iter()
-        .filter(|t| t.len() >= 3 && !STOP.contains(&t.as_str()))
-        .collect();
-    terms.dedup();
-    terms
+        .filter(|t| t.len() >= 3 && !STOP.contains(&t.as_str()) && seen.insert(t.clone()))
+        .collect()
 }
 
 fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
@@ -671,13 +670,21 @@ fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
                 return None;
             }
             let name_terms = search_terms(&n.name);
-            let path_terms = search_terms(&n.path);
             let has = |words: &[String], t: &str| words.iter().any(|w| words_match(w, t));
             let in_name = terms.iter().filter(|t| has(&name_terms, t)).count();
-            let in_path = terms
-                .iter()
-                .filter(|t| !has(&name_terms, t) && has(&path_terms, t))
-                .count();
+            if in_name == 0 {
+                return None;
+            }
+            // Path words only matter when the name alone is short of the bar.
+            let in_path = if in_name >= needed {
+                0
+            } else {
+                let path_terms = search_terms(&n.path);
+                terms
+                    .iter()
+                    .filter(|t| !has(&name_terms, t) && has(&path_terms, t))
+                    .count()
+            };
             (in_name >= 1 && in_name + in_path >= needed)
                 .then_some(((in_name * 2 + in_path) as u32, n))
         })
