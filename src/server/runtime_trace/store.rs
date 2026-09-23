@@ -15,7 +15,9 @@
 use super::spans::SpanRecord;
 use crate::schema::{EdgeProvenance, EdgeType, GraphEdge};
 use crate::server::time::now_unix;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Configuration for the store. Constructed from environment vars
