@@ -100,6 +100,36 @@ pub async fn run_server(
         }
     }
 
+    // Second pass: every repo's symbols are now known, so calls from a
+    // repo indexed early into one indexed later can finally resolve.
+    let repo_ids: Vec<_> = fed.list_repos().into_iter().map(|(id, _)| id).collect();
+    if repo_ids.len() > 1 {
+        for id in &repo_ids {
+            let Some(repo) = fed.get_repo(id) else {
+                continue;
+            };
+            match repo.relink_cross_repo().await {
+                Ok(0) => {}
+                Ok(n) => {
+                    info!(
+                        "lain server: linked {n} cross-repo edge(s) from '{}'",
+                        id.as_str()
+                    );
+                    if let Err(e) = fed.project_repo(id).await {
+                        tracing::warn!(
+                            "lain server: project_repo for '{}' after cross-repo link failed: {e}",
+                            id.as_str()
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "lain server: cross-repo link for '{}' failed: {e}",
+                    id.as_str()
+                ),
+            }
+        }
+    }
+
     let transport_enum = match transport {
         "http" => Transport::Http,
         "stdio" => Transport::Stdio,

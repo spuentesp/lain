@@ -161,6 +161,46 @@ pub fn resolve_repo_for_tool(
     }
 }
 
+/// `get_health` for a multi-repo federation: the aggregate, then one line
+/// per repo. Per-repo detail stays one `repo_id` away.
+fn federation_health_report(fed: &FederatedIndex) -> String {
+    use crate::server::mcp::federation_tools::federation::{get_federation_health, list_repos};
+    let h = get_federation_health(fed);
+    let mut out = format!(
+        "## Lain Server Health (federation)\n\n\
+         - **Status:** {}\n\
+         - **Repositories:** {} ({} ready, {} indexing, {} degraded, {} unavailable)\n\
+         - **Nodes / edges:** {} / {}\n\n### Repositories\n",
+        if h.healthy {
+            "Operational ✅"
+        } else {
+            "Degraded ⚠"
+        },
+        h.total_repos,
+        h.ready,
+        h.indexing,
+        h.degraded,
+        h.unavailable,
+        h.total_nodes,
+        h.total_edges,
+    );
+    for r in list_repos(fed) {
+        out.push_str(&format!(
+            "- **{}**: {} — {} nodes, {} edges{}\n",
+            r.id,
+            r.health,
+            r.node_count,
+            r.edge_count,
+            r.last_error
+                .as_deref()
+                .map(|e| format!(" (last error: {e})"))
+                .unwrap_or_default()
+        ));
+    }
+    out.push_str("\nPass `repo_id` for one repository's full health report.\n");
+    out
+}
+
 /// Run the federation-mode repo resolver against a tool call's `args`. Returns
 /// `Ok(repo_id)` when the call is safe to dispatch, or `Err(text)` with the
 /// pre-formatted error string the caller should surface as `is_error: true`.
@@ -380,6 +420,16 @@ async fn dispatch_tool_call(
     }
 
     if let Some(fed) = federation {
+        // A health check that fails unless you already know a repo id is
+        // no health check: unscoped `get_health` across several repos
+        // answers for the federation, per repo.
+        if name == "get_health"
+            && fed.list_repos().len() > 1
+            && !args_map.contains_key("repo_id")
+            && !args_map.contains_key("symbol")
+        {
+            return (federation_health_report(fed), false);
+        }
         if requires_repo_scope(name) {
             match resolve_repo_or_error(fed, name, &args_map) {
                 Ok(rid) => {
@@ -2637,6 +2687,34 @@ mod tests {
         let rid = resolve_repo_or_error(&fed, "", &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    /// `get_health` without scoping, across several repos, reports the
+    /// federation and each repo instead of demanding a repo id.
+    #[tokio::test]
+    async fn unscoped_get_health_reports_every_repo() {
+        use crate::federation::repo_source::RepoSource;
+        use crate::federation::repo_source::WorkspaceDirSource;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let mut dirs = Vec::new();
+        for name in ["repo-a", "repo-b"] {
+            let src_dir = tempfile::tempdir().unwrap();
+            git2::Repository::init(src_dir.path()).unwrap();
+            let src: Box<dyn RepoSource> = Box::new(
+                WorkspaceDirSource::new(RepoId::new(name).unwrap(), src_dir.path().to_path_buf())
+                    .unwrap(),
+            );
+            fed.add_repo(src, tmp.path()).await.unwrap();
+            dirs.push(src_dir);
+        }
+        let report = federation_health_report(&fed);
+        assert!(report.contains("Repositories:** 2"), "{report}");
+        assert!(
+            report.contains("**repo-a**") && report.contains("**repo-b**"),
+            "{report}"
+        );
     }
 
     /// D-H4 Part A: the multi-repo Config error must name the tool that

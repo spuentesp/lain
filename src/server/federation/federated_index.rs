@@ -80,6 +80,9 @@ pub struct FederatedIndex {
     persist_lock: parking_lot::Mutex<()>,
     /// Serializes membership changes with complete backend projections.
     projection_lock: parking_lot::Mutex<()>,
+    /// `(source, target) -> source declares a dependency on target`;
+    /// see [`Self::repo_depends_on`].
+    depends_cache: DashMap<(String, String), bool>,
 }
 
 /// Collapse a per-definition repo list to the distinct repos in it,
@@ -113,6 +116,7 @@ impl FederatedIndex {
             manifest_path: RwLock::new(None),
             persist_lock: parking_lot::Mutex::new(()),
             projection_lock: parking_lot::Mutex::new(()),
+            depends_cache: DashMap::new(),
         }
     }
 
@@ -781,6 +785,204 @@ fn parse_node_type(s: &str) -> NodeType {
     }
 }
 
+impl FederatedIndex {
+    /// Whether `source` declares a dependency on `target` in its manifests
+    /// (go.mod, package.json, Cargo.toml, pyproject.toml, requirements,
+    /// pom.xml, Gradle, Gemfile, composer.json, …): one of `target`'s
+    /// identifiers — repo id, directory name, or the module / package name
+    /// it declares — appears there as a whole token. A source with no
+    /// manifest at all cannot say, so it is not restricted.
+    fn repo_depends_on(&self, source: &RepoId, target: &RepoId) -> bool {
+        let key = (source.as_str().to_string(), target.as_str().to_string());
+        if let Some(hit) = self.depends_cache.get(&key) {
+            return *hit;
+        }
+        let (Some(src), Some(tgt)) = (self.get_repo(source), self.get_repo(target)) else {
+            return false;
+        };
+        let manifests = read_manifests(src.source().local_path());
+        let answer = if manifests.is_empty() {
+            true
+        } else {
+            let text = manifests.to_lowercase();
+            declared_identifiers(target, tgt.source().local_path())
+                .iter()
+                .any(|id| contains_token(&text, id))
+        };
+        self.depends_cache.insert(key, answer);
+        answer
+    }
+}
+
+const MANIFEST_FILES: &[&str] = &[
+    "go.mod",
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "Pipfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "Gemfile",
+    "composer.json",
+    "Package.swift",
+    "build.sbt",
+    "CMakeLists.txt",
+    "vcpkg.json",
+    "conanfile.txt",
+];
+
+/// Manifest text at the repo root and one directory down (monorepo
+/// packages), plus any `*.csproj` / `*.gemspec` there.
+fn read_manifests(root: &Path) -> String {
+    let mut dirs = vec![root.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| {
+            p.is_dir()
+                && !p
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        }));
+    }
+    let mut text = String::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let is_manifest = MANIFEST_FILES.contains(&name.as_str())
+                || name.ends_with(".csproj")
+                || name.ends_with(".gemspec")
+                || (name.starts_with("requirements") && name.ends_with(".txt"));
+            if is_manifest {
+                if let Ok(t) = std::fs::read_to_string(&path) {
+                    text.push_str(&t);
+                    text.push('\n');
+                }
+            }
+        }
+    }
+    text
+}
+
+/// Names another repo would use to depend on `repo`: its id, its directory,
+/// and the module / package name it declares for itself.
+fn declared_identifiers(repo: &RepoId, root: &Path) -> Vec<String> {
+    let mut ids = vec![repo.as_str().to_lowercase()];
+    if let Some(dir) = root.file_name() {
+        ids.push(dir.to_string_lossy().to_lowercase());
+    }
+    let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
+    // go.mod: `module github.com/spf13/pflag` — the full path and its last segment.
+    if let Some(module) = read("go.mod")
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("module "))
+    {
+        let module = module.trim().to_lowercase();
+        if let Some(last) = module.rsplit('/').next() {
+            ids.push(last.to_string());
+        }
+        ids.push(module);
+    }
+    // package.json / Cargo.toml / pyproject.toml: the first `name` entry.
+    for (file, sep) in [
+        ("package.json", ':'),
+        ("Cargo.toml", '='),
+        ("pyproject.toml", '='),
+    ] {
+        if let Some(name) = read(file).lines().find_map(|l| {
+            let l = l.trim().trim_start_matches('"');
+            let rest = l.strip_prefix("name")?.trim_start_matches('"').trim_start();
+            let v = rest
+                .strip_prefix(sep)?
+                .trim()
+                .trim_matches(|c| c == '"' || c == ',' || c == '\'');
+            (!v.is_empty()).then(|| v.to_lowercase())
+        }) {
+            ids.push(name);
+        }
+    }
+    ids.retain(|i| i.len() >= 2);
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// `needle` occurs in `hay` bounded by characters that cannot be part of a
+/// package name, so `pflag` matches `github.com/spf13/pflag v1.0.5` but not
+/// `mypflagger` — nor `tokio` in `github.com/tokio-rs/bytes` or `tokio.rs`:
+/// `-` and `.` belong to names, so bytes' own repository URL is not a
+/// dependency on tokio.
+fn contains_token(hay: &str, needle: &str) -> bool {
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.');
+    hay.match_indices(needle).any(|(i, _)| {
+        let before = hay[..i].chars().next_back();
+        let after = hay[i + needle.len()..].chars().next();
+        !before.is_some_and(part) && !after.is_some_and(part)
+    })
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_bounded() {
+        assert!(contains_token(
+            "require github.com/spf13/pflag v1.0.5",
+            "pflag"
+        ));
+        assert!(contains_token(
+            "\"dependencies\": {\"left-pad\": \"1\"}",
+            "left-pad"
+        ));
+        assert!(!contains_token("mypflagger", "pflag"));
+        assert!(!contains_token(
+            "repository = \"https://github.com/tokio-rs/bytes\"",
+            "tokio"
+        ));
+        assert!(!contains_token("homepage = \"https://tokio.rs\"", "tokio"));
+        assert!(contains_token(
+            "[dependencies]\ntokio = { version = \"1\" }",
+            "tokio"
+        ));
+        assert!(contains_token("bytes = \"1.0\"", "bytes"));
+    }
+
+    #[test]
+    fn declared_identifiers_read_the_module_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module github.com/spf13/pflag\n\ngo 1.12\n",
+        )
+        .unwrap();
+        let ids = declared_identifiers(&RepoId::new("flags").unwrap(), dir.path());
+        assert!(ids.contains(&"pflag".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"github.com/spf13/pflag".to_string()),
+            "{ids:?}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"@acme/core\",\n}",
+        )
+        .unwrap();
+        let ids = declared_identifiers(&RepoId::new("core").unwrap(), dir.path());
+        assert!(ids.contains(&"@acme/core".to_string()), "{ids:?}");
+    }
+}
+
 impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
     fn refresh(&self) {
         self.rebuild_symbol_index();
@@ -834,7 +1036,10 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
                 let distinct = distinct_repos(entries.value());
                 distinct.into_iter().filter(|r| r != source_repo).collect()
             };
-            if cross_repos.len() == 1 {
+            // A bare name only means "that repo's symbol" if the calling
+            // repo depends on that repo: pflag's `fmt.Println(...)` and
+            // `Usage()` linked to cobra's methods of the same name.
+            if cross_repos.len() == 1 && self.repo_depends_on(source_repo, &cross_repos[0]) {
                 let rid = &cross_repos[0];
                 if let Some(idx) = self.get_repo(rid) {
                     for node in idx.nodes() {

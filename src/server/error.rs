@@ -70,7 +70,10 @@ pub enum LainError {
     #[error("Other error: {0}")]
     Other(String),
 
-    #[error("Ambiguous symbol: matches repos {0:?}")]
+    #[error(
+        "Ambiguous symbol: matches repos {0:?}. Name the repo with \
+         `get_cross_repo_blast_radius_for_repo` (repo_id, symbol, depth)."
+    )]
     AmbiguousSymbol(Vec<crate::federation::repo_id::RepoId>),
 }
 
