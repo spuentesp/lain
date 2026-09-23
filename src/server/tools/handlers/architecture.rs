@@ -575,7 +575,7 @@ pub fn understand_repository(
             }
         }
         let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|(_path, count)| std::cmp::Reverse(*count));
         ranked.into_iter().take(8).map(|(p, _)| p).collect()
     };
 
