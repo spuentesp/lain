@@ -120,17 +120,17 @@ fn language_group(path: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
         "py" | "pyi" => "python",
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
+        // A component's `<script>` imports and is imported by plain modules.
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte" => "js",
         "go" => "go",
         "java" => "java",
-        "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" => "c",
+        "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "c",
         "cs" => "csharp",
-        "rb" => "ruby",
+        "rb" | "rake" => "ruby",
         "swift" => "swift",
         "kt" | "kts" => "kotlin",
-        "scala" => "scala",
-        "vue" => "vue",
-        "svelte" => "svelte",
+        "scala" | "sc" => "scala",
+        "php" => "php",
         _ => return None,
     })
 }
@@ -186,7 +186,15 @@ pub fn resolve_static_edges(
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut seen: HashSet<(String, String)> = HashSet::new();
     for sr in refs {
-        let Some(source_node) = db.get_node_at_location(&sr.file_path, sr.source_line) else {
+        // Code outside any named definition — a test's `it(() => …)`
+        // callback, a script's `if __name__ == "__main__":` block, an
+        // RSpec `describe` — is attributed to its file. Dropping it lost
+        // most callers in JS/TS test suites, where nearly every call sits
+        // in an anonymous callback.
+        let Some(source_node) = db
+            .get_node_at_location(&sr.file_path, sr.source_line)
+            .or_else(|| db.get_file_node(&sr.file_path))
+        else {
             continue;
         };
         let Some(candidates) = name_index.get(sr.target_name.as_str()) else {
@@ -612,6 +620,33 @@ mod ambiguous_name_tests {
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "a unique name must still resolve");
+        assert_eq!(edges[0].target_id, target_id);
+    }
+
+    /// A call outside every named definition (a test callback, a
+    /// `__main__` block) belongs to its file rather than being dropped.
+    #[test]
+    fn a_call_outside_any_definition_is_attributed_to_its_file() {
+        let tmp = std::env::temp_dir().join("lain_resolve_module_scope");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let target = fn_node("create_pinia", "src/a.ts", (1, 5));
+        let target_id = target.id.clone();
+        db.upsert_node(target).unwrap();
+        let file = GraphNode::new(NodeType::File, "a.spec.ts".into(), "test/a.spec.ts".into());
+        let file_id = file.id.clone();
+        db.upsert_node(file).unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "test/a.spec.ts".to_string(),
+            source_line: 7,
+            target_name: "create_pinia".to_string(),
+            edge_type: EdgeType::Calls,
+        }];
+        let edges = resolve_static_edges(&db, &refs, None, None);
+        assert_eq!(edges.len(), 1, "module-scope call must link");
+        assert_eq!(edges[0].source_id, file_id);
         assert_eq!(edges[0].target_id, target_id);
     }
 }

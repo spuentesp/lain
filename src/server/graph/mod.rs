@@ -1484,6 +1484,17 @@ impl GraphDatabase {
         }
     }
 
+    /// The `File` node for `path`, via the path index.
+    pub fn get_file_node(&self, path: &str) -> Option<GraphNode> {
+        let graph = self.graph.read();
+        let indices = self.path_index.get(path)?;
+        indices
+            .iter()
+            .filter_map(|&idx| graph.node_weight(idx))
+            .find(|n| n.node_type == NodeType::File)
+            .cloned()
+    }
+
     pub fn has_references_from(&self, id: &str) -> bool {
         let graph = self.graph.read();
 
