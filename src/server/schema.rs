@@ -489,7 +489,7 @@ pub struct GraphNode {
 /// the node identity; library code (tests, sensor backends) goes
 /// through `RepoNamespace::for_test()` which returns a stable
 /// non-production namespace so tests don't have to thread state.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepoNamespace(pub(crate) uuid::Uuid);
 
 impl RepoNamespace {
@@ -533,6 +533,20 @@ impl RepoNamespace {
         Self(uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_URL,
             repo_id.as_str().as_bytes(),
+        ))
+    }
+
+    /// Stable namespace for a single-repository server (`lain mcp`),
+    /// derived from the canonical workspace path. The per-process random
+    /// namespace it replaces changed every node id on every restart — ids
+    /// an agent was handed stopped resolving — and was never given to the
+    /// graph, so co-change edges were minted against the test namespace
+    /// and silently dropped.
+    pub fn from_workspace(workspace: &std::path::Path) -> Self {
+        let canonical = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        Self(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!("lain-workspace:{}", canonical.display()).as_bytes(),
         ))
     }
 

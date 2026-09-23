@@ -5,7 +5,7 @@
 //! representation, version checks, and read-only inspection live
 //! in [`persist`].
 
-mod persist;
+pub(crate) mod persist;
 
 pub use persist::{inspect_persisted_graph, GraphInspectionError, PATH_FORMAT_VERSION};
 
@@ -1412,14 +1412,24 @@ impl GraphDatabase {
         // Max, not sum: the weights are counts of the same underlying
         // co-change relationship observed through different nodes, so
         // adding them would inflate the number rather than merge it.
+        //
+        // Both directions: a pair is stored once, from the path that sorts
+        // first. Reading only outgoing edges hid every partner whose path
+        // sorts before this file's — `sessions.py` never saw `models.py`.
         let mut by_path: HashMap<String, usize> = HashMap::new();
-        for e in graph
+        for (e, other) in graph
             .edges_directed(idx, Direction::Outgoing)
-            .filter(|e| e.weight().edge_type == EdgeType::CoChangedWith)
+            .map(|e| (e.weight(), e.target()))
+            .chain(
+                graph
+                    .edges_directed(idx, Direction::Incoming)
+                    .map(|e| (e.weight(), e.source())),
+            )
+            .filter(|(w, _)| w.edge_type == EdgeType::CoChangedWith)
         {
-            let target_node = &graph[e.target()];
-            let count = e.weight().weight.unwrap_or(0.0) as usize;
-            let slot = by_path.entry(target_node.path.clone()).or_insert(0);
+            let partner = &graph[other];
+            let count = e.weight.unwrap_or(0.0) as usize;
+            let slot = by_path.entry(partner.path.clone()).or_insert(0);
             *slot = (*slot).max(count);
         }
         let mut out: Vec<(String, usize)> = by_path.into_iter().collect();
@@ -1431,6 +1441,41 @@ impl GraphDatabase {
 
     pub fn get_last_commit(&self) -> Result<Option<String>, LainError> {
         Ok(self.last_commit.read().clone())
+    }
+
+    /// Whether the persisted File nodes were minted under a different id
+    /// namespace than this graph's — a graph written by a Lain that used a
+    /// per-process random namespace. Such a graph must be rebuilt: its ids
+    /// match nothing this process derives (co-change edges, lookups by id).
+    pub fn minted_in_other_namespace(&self) -> bool {
+        let graph = self.graph.read();
+        let stale = graph
+            .node_weights()
+            .filter(|n| n.node_type == NodeType::File)
+            .take(20)
+            .any(|n| {
+                n.id != GraphNode::generate_id(
+                    &NodeType::File,
+                    &n.path,
+                    &n.name,
+                    None,
+                    &self.namespace,
+                )
+            });
+        stale
+    }
+
+    /// Drop every node and edge and forget the indexed commit, so the next
+    /// build is a full scan.
+    pub fn reset(&self) -> Result<(), LainError> {
+        self.check_writable()?;
+        let mut graph = self.graph.write();
+        *graph = StableGraph::new();
+        self.index_map.clear();
+        self.path_index.clear();
+        self.pending_external_edges.lock().clear();
+        *self.last_commit.write() = None;
+        Ok(())
     }
 
     pub fn set_last_commit(&self, hash: String) -> Result<(), LainError> {
@@ -2130,6 +2175,61 @@ mod clone_tests {
     /// clone saw the nodes (shared `graph`) but none of their ids or paths:
     /// callers, blast radius and freshness all answered "nothing" for the
     /// whole first session on a new repo.
+    /// A co-change pair is visible from both files, whichever path sorts
+    /// first.
+    #[test]
+    fn co_change_partners_are_symmetric() {
+        let tmp = std::env::temp_dir().join("lain_test_cochange_symmetric");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let files: Vec<GraphNode> = ["src/models.py", "src/sessions.py"]
+            .iter()
+            .map(|p| {
+                let name = Path::new(p)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                GraphNode::new_in(NodeType::File, name, p.to_string(), &ns)
+            })
+            .collect();
+        db.insert_nodes_batch(&files).unwrap();
+        db.insert_co_change_edges(&[("src/models.py".into(), "src/sessions.py".into(), 3)])
+            .unwrap();
+        assert_eq!(
+            db.get_co_change_partners("src/sessions.py").unwrap(),
+            vec![("src/models.py".to_string(), 3)]
+        );
+        assert_eq!(
+            db.get_co_change_partners("src/models.py").unwrap(),
+            vec![("src/sessions.py".to_string(), 3)]
+        );
+    }
+
+    /// A graph written under another namespace (older Lain: random per
+    /// process) is detected, and `reset` empties it for a full rebuild.
+    #[test]
+    fn a_graph_from_another_namespace_is_detected_and_reset() {
+        let tmp = std::env::temp_dir().join("lain_test_namespace_mismatch");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut db = GraphDatabase::new(&tmp).unwrap();
+        let old_ns = crate::schema::RepoNamespace::fresh();
+        let file = GraphNode::new_in(NodeType::File, "a.rs".into(), "src/a.rs".into(), &old_ns);
+        db.insert_nodes_batch(&[file]).unwrap();
+        db.set_last_commit("abc".into()).unwrap();
+
+        db.set_namespace(old_ns);
+        assert!(!db.minted_in_other_namespace(), "same namespace");
+        db.set_namespace(crate::schema::RepoNamespace::from_workspace(&tmp));
+        assert!(db.minted_in_other_namespace(), "different namespace");
+
+        db.reset().unwrap();
+        assert_eq!(db.get_stats(), (0, 0));
+        assert!(!db.has_node_at_path("src/a.rs"));
+        assert_eq!(db.get_last_commit().unwrap(), None);
+    }
+
     #[test]
     fn clone_taken_before_indexing_sees_later_writes() {
         let tmp = std::env::temp_dir().join("lain_test_clone_shares_indices");
