@@ -226,6 +226,7 @@ impl ToolHandler for UnderstandRepositoryHandler {
             &ctx.git,
             &ctx.readiness,
             budget_tokens,
+            !ctx.embedder.is_stub(),
         )
     }
 }

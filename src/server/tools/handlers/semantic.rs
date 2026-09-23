@@ -28,7 +28,7 @@ use crate::error::LainError;
 use crate::graph::GraphDatabase;
 use crate::nlp::{CrossEncoder, NlpEmbedder};
 use crate::overlay::VolatileOverlay;
-use crate::schema::NodeType;
+use crate::schema::{GraphNode, NodeType};
 use crate::server::presence::OccupancyMap;
 use crate::server::tools::utils::{required_str_arg, resolve_node_ambiguous, str_arg, usize_arg};
 use crate::tuning::TuningConfig;
@@ -585,20 +585,110 @@ fn semantic_call(
     )
 }
 
+/// Words of an identifier or query: split on non-alphanumerics and
+/// camelCase boundaries, lowercased and lightly stemmed, so
+/// `should_bypass_proxies`, `shouldBypassProxy` and "bypass proxy" meet.
+fn search_terms(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in text.chars() {
+        if !c.is_alphanumeric() {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+        cur.extend(c.to_lowercase());
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words.into_iter().map(|w| stem(&w)).collect()
+}
+
+/// Crude suffix stripping — enough for plurals and -ing/-ed forms to
+/// meet their base word; not a linguistic stemmer.
+fn stem(word: &str) -> String {
+    for (suffix, replacement) in [("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")] {
+        if let Some(base) = word.strip_suffix(suffix) {
+            if base.len() >= 3 && !(suffix == "s" && base.ends_with('s')) {
+                return format!("{base}{replacement}");
+            }
+        }
+    }
+    word.to_string()
+}
+
+/// Equal, or one abbreviates the other (`environ` / `environment`,
+/// `config` / `configuration`) with at least four letters in common.
+fn words_match(a: &str, b: &str) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short == long || (short.len() >= 4 && long.starts_with(short))
+}
+
+/// Query words worth matching: stopwords and one- or two-letter words
+/// match too much to rank anything.
+fn query_terms(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "this", "that", "from", "into", "how", "what", "where",
+        "which", "who", "does", "when", "are", "code", "function", "method",
+    ];
+    let mut terms: Vec<String> = search_terms(query)
+        .into_iter()
+        .filter(|t| t.len() >= 3 && !STOP.contains(&t.as_str()))
+        .collect();
+    terms.dedup();
+    terms
+}
+
 fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
+    // An exact substring of the name still ranks first; beyond that a
+    // symbol scores by how many query words its name (and, weighted
+    // lower, its path) contains. Matching the whole query as one
+    // substring made every multi-word query ("proxy bypass environment")
+    // return nothing.
     let needle = query.to_lowercase();
-    let mut hits: Vec<_> = graph
+    let terms = query_terms(query);
+    let needed = terms.len().div_ceil(2).max(1);
+    let mut hits: Vec<(u32, GraphNode)> = graph
         .get_all_nodes()
         .into_iter()
-        .filter(|n| n.name.to_lowercase().contains(&needle))
+        .filter_map(|n| {
+            if n.name.to_lowercase().contains(&needle) {
+                return Some((u32::MAX, n));
+            }
+            if terms.is_empty() {
+                return None;
+            }
+            let name_terms = search_terms(&n.name);
+            let path_terms = search_terms(&n.path);
+            let has = |words: &[String], t: &str| words.iter().any(|w| words_match(w, t));
+            let in_name = terms.iter().filter(|t| has(&name_terms, t)).count();
+            let in_path = terms
+                .iter()
+                .filter(|t| !has(&name_terms, t) && has(&path_terms, t))
+                .count();
+            (in_name >= 1 && in_name + in_path >= needed)
+                .then_some(((in_name * 2 + in_path) as u32, n))
+        })
         .collect();
-    hits.sort_by(|a, b| {
-        b.anchor_score
-            .partial_cmp(&a.anchor_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+    hits.sort_by(|(sa, a), (sb, b)| {
+        sb.cmp(sa)
+            .then_with(|| {
+                b.anchor_score
+                    .partial_cmp(&a.anchor_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.path.cmp(&b.path))
     });
+    let hits: Vec<GraphNode> = hits.into_iter().map(|(_, n)| n).collect();
     if hits.is_empty() {
         return format!("No lexical matches for `{query}`.");
     }
@@ -609,14 +699,17 @@ fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
             .anchor_score
             .map(|s| format!(" anchor={s:.2}"))
             .unwrap_or_default();
+        // The name first: an id alone made every hit need a second call
+        // to learn what it was.
         out.push_str(&format!(
-            "{}. `{}` {} {}{}{}\n",
+            "{}. **{}** {} {}{}{} (`{}`)\n",
             i + 1,
-            n.id,
+            n.name,
             node_type_label(&n.node_type),
             n.path,
             line,
-            anchor
+            anchor,
+            n.id
         ));
     }
     out
@@ -738,6 +831,41 @@ mod m6_tests {
         assert!(out.contains("## search_code: render"));
         assert!(out.contains("mode=lexical"));
         assert!(out.contains("fell_back=false"));
+    }
+
+    /// A multi-word query matches identifiers by their words, across
+    /// snake_case / camelCase and simple plurals.
+    #[test]
+    fn lexical_search_matches_query_words() {
+        let tmp = std::env::temp_dir().join("test_lexical_words");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        for (name, path) in [
+            ("should_bypass_proxies", "src/utils.py"),
+            ("getEnvironProxies", "src/utils.ts"),
+            ("render_page", "src/view.py"),
+        ] {
+            graph
+                .upsert_node(GraphNode::new(NodeType::Function, name.into(), path.into()))
+                .unwrap();
+        }
+        let out = lexical_search(&graph, "proxy bypass environment", 10);
+        assert!(
+            out.contains("src/utils.py"),
+            "snake_case + plural; got:\n{out}"
+        );
+        assert!(
+            out.contains("src/utils.ts"),
+            "camelCase + abbreviation; got:\n{out}"
+        );
+        assert!(
+            !out.contains("src/view.py"),
+            "unrelated symbol; got:\n{out}"
+        );
+        assert_eq!(
+            search_terms("getHTTPResponse_v2"),
+            vec!["get", "httpresponse", "v2"]
+        );
     }
 
     /// `search_code` lexical mode returns "No lexical matches"

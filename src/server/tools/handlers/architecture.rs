@@ -494,6 +494,7 @@ pub fn understand_repository(
     git: &Arc<AnyGitSensor>,
     readiness: &crate::server::readiness::ReadinessHandle,
     budget_tokens: Option<usize>,
+    semantic_model_loaded: bool,
 ) -> Result<String, LainError> {
     // 1. Repository identity — name from workspace basename; languages
     //    from the graph's recorded NodeType population (rust, ts, py,
@@ -588,7 +589,7 @@ pub fn understand_repository(
         "symbols":         capability_state_json(&snap, "symbols"),
         "call_graph":      capability_state_json(&snap, "call_graph"),
         "git_history":     capability_state_json(&snap, "git_history"),
-        "semantic_search": capability_state_json(&snap, "semantic_search"),
+        "semantic_search": semantic_state_json(&snap, semantic_model_loaded),
     });
 
     // 5. Recommended actions — a static intent→tool map. Tools that
@@ -670,23 +671,6 @@ fn capability_state_json(
     // state; the optional `semantic_search` reports Ready if the
     // embedder is loaded, UnavailableOptional otherwise.
     let (state_label, optional) = match key {
-        "semantic_search" => (
-            match snap.phase {
-                // The NLP prewarm is the only phase where the
-                // embedder is actively working; we can't tell
-                // directly from the snapshot whether a model is
-                // loaded, so report `warming_up` whenever the
-                // server is warming and `ready` once `ready` has
-                // been published. Callers that need the
-                // `Unavailable` "no model" signal should call
-                // `semantic_search` directly — that tool returns
-                // a typed `LainError::Unavailable` when no model
-                // is loaded, which is the authoritative answer.
-                crate::server::readiness::IndexPhase::Persisting => "ready",
-                _ => "ready",
-            },
-            true,
-        ),
         _ => (
             match snap.state {
                 crate::server::readiness::IndexState::Ready => "ready",
@@ -700,6 +684,25 @@ fn capability_state_json(
         "state": state_label,
         "optional": optional,
     })
+}
+
+/// `semantic_search` needs the optional embedding model. Without one it is
+/// `unavailable_optional` — `search_code` answers lexically — rather than
+/// `ready`, which this payload used to report unconditionally.
+fn semantic_state_json(
+    snap: &crate::server::readiness::IndexLifecycleSnapshot,
+    model_loaded: bool,
+) -> Value {
+    let state = if !model_loaded {
+        "unavailable_optional"
+    } else {
+        match snap.state {
+            crate::server::readiness::IndexState::Ready => "ready",
+            crate::server::readiness::IndexState::WarmingUp => "warming_up",
+            crate::server::readiness::IndexState::UnavailableError => "unavailable_error",
+        }
+    };
+    json!({ "state": state, "optional": true })
 }
 
 #[cfg(test)]
@@ -804,6 +807,7 @@ mod m5_tests {
             server.ingest().git(),
             server.readiness(),
             None,
+            false,
         )
         .unwrap();
         let _ = server;
