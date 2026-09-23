@@ -109,6 +109,77 @@ pub fn resolve_call_edges(
     edges
 }
 
+/// Method names built-in containers, strings and promises share across
+/// languages. A call to one of these on a foreign receiver only links to a
+/// same-file definition; see `resolve_static_edges`.
+const COMMON_METHOD_NAMES: &[&str] = &[
+    "get",
+    "set",
+    "has",
+    "add",
+    "update",
+    "delete",
+    "remove",
+    "discard",
+    "pop",
+    "push",
+    "append",
+    "extend",
+    "insert",
+    "clear",
+    "copy",
+    "items",
+    "keys",
+    "values",
+    "entries",
+    "setdefault",
+    "map",
+    "filter",
+    "reduce",
+    "forEach",
+    "find",
+    "findIndex",
+    "some",
+    "every",
+    "includes",
+    "indexOf",
+    "slice",
+    "splice",
+    "concat",
+    "sort",
+    "reverse",
+    "split",
+    "replace",
+    "strip",
+    "lstrip",
+    "rstrip",
+    "lower",
+    "upper",
+    "toLowerCase",
+    "toUpperCase",
+    "startswith",
+    "endswith",
+    "startsWith",
+    "endsWith",
+    "format",
+    "encode",
+    "decode",
+    "then",
+    "catch",
+    "finally",
+    "toString",
+    "equals",
+    "hashCode",
+    "contains",
+    "containsKey",
+    "put",
+    "size",
+    "length",
+    "isEmpty",
+    "stream",
+    "collect",
+];
+
 /// The language family a source path belongs to, for the purpose of
 /// deciding whether a name reference may link to it.
 ///
@@ -238,12 +309,41 @@ pub fn resolve_static_edges(
             .collect();
 
         let resolved: Vec<&(String, crate::schema::NodeType, String)> = if candidates.len() == 1 {
+            // `d.update()` on a dict, `arr.push()` on an array: a common
+            // container / string / promise method called on some other
+            // value is almost never the repository's one method of that
+            // name in another file. Linking it made `merge_setting` call
+            // `RequestsCookieJar.update`.
+            if sr.foreign_receiver
+                && COMMON_METHOD_NAMES.contains(&sr.target_name.as_str())
+                && candidates[0].2 != sr.file_path
+            {
+                continue;
+            }
             candidates
         } else {
-            candidates
-                .into_iter()
+            let same_file: Vec<_> = candidates
+                .iter()
+                .copied()
                 .filter(|(_, _, path)| path == &sr.file_path)
-                .collect()
+                .collect();
+            // Overloads: in a statically overloaded language, same-named
+            // definitions that all sit in one file are one method's
+            // overloads, not unrelated symbols. Link the call to the group
+            // rather than drop it; `Foo.bar(1)` and `Foo.bar("x")` both
+            // call "bar in Foo.java".
+            let overload_group = same_file.is_empty()
+                && !candidates.is_empty()
+                && candidates.iter().all(|(_, _, p)| p == &candidates[0].2)
+                && matches!(
+                    language_group(&candidates[0].2),
+                    Some("java" | "csharp" | "kotlin" | "scala" | "swift" | "c")
+                );
+            if overload_group {
+                candidates
+            } else {
+                same_file
+            }
         };
         for (target_id, target_type, _) in resolved {
             if *target_id == source_node.id {
@@ -402,6 +502,7 @@ mod ambiguous_name_tests {
             source_line: 10,
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
@@ -433,6 +534,7 @@ mod ambiguous_name_tests {
             source_line: 15,
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the local definition");
@@ -459,6 +561,7 @@ mod ambiguous_name_tests {
             source_line: 10,
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
@@ -487,6 +590,7 @@ mod ambiguous_name_tests {
             source_line: 10,
             target_name: "renderWidget".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, ".ts -> .tsx is the same language family");
@@ -515,6 +619,7 @@ mod ambiguous_name_tests {
             source_line: 60,
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the Python definition");
@@ -617,10 +722,86 @@ mod ambiguous_name_tests {
             source_line: 15,
             target_name: "sweep_orphans".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "a unique name must still resolve");
         assert_eq!(edges[0].target_id, target_id);
+    }
+
+    /// `d.update()` on some other value does not link to the one
+    /// user-defined `update` in another file; `self.update()` and a
+    /// distinctive name still do.
+    #[test]
+    fn a_common_method_on_a_foreign_receiver_does_not_link_across_files() {
+        let tmp = std::env::temp_dir().join("lain_resolve_foreign_receiver");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        db.upsert_node(fn_node("update", "src/cookies.py", (1, 5)))
+            .unwrap();
+        db.upsert_node(fn_node("merge_cookies", "src/cookies.py", (6, 9)))
+            .unwrap();
+        db.upsert_node(fn_node("merge_setting", "src/sessions.py", (10, 20)))
+            .unwrap();
+        let r = |name: &str, foreign: bool| StaticFileRef {
+            file_path: "src/sessions.py".to_string(),
+            source_line: 15,
+            target_name: name.to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: foreign,
+        };
+        assert!(resolve_static_edges(&db, &[r("update", true)], None, None).is_empty());
+        assert_eq!(
+            resolve_static_edges(&db, &[r("update", false)], None, None).len(),
+            1
+        );
+        assert_eq!(
+            resolve_static_edges(&db, &[r("merge_cookies", true)], None, None).len(),
+            1,
+            "a distinctive method name still links"
+        );
+    }
+
+    /// Overloads of one method in one file (Java) receive the call; the
+    /// same name spread across files stays ambiguous.
+    #[test]
+    fn overloads_in_one_file_receive_calls_from_elsewhere() {
+        let tmp = std::env::temp_dir().join("lain_resolve_overloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        // Real scans give each overload its own id (the line is part of
+        // it); `with_location_in` does the same here.
+        let ns = crate::schema::RepoNamespace::for_test();
+        for lines in [(10, 20), (30, 40)] {
+            let n = GraphNode::new(
+                NodeType::Function,
+                "emit".into(),
+                "src/CodeWriter.java".into(),
+            )
+            .with_location_in(lines.0, lines.1, &ns);
+            db.upsert_node(n).unwrap();
+        }
+        db.upsert_node(fn_node("build", "src/TypeSpec.java", (1, 50)))
+            .unwrap();
+        let r = StaticFileRef {
+            file_path: "src/TypeSpec.java".to_string(),
+            source_line: 25,
+            target_name: "emit".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: true,
+        };
+        assert_eq!(resolve_static_edges(&db, &[r], None, None).len(), 2);
+
+        db.upsert_node(fn_node("emit", "src/Other.java", (1, 5)))
+            .unwrap();
+        let r = StaticFileRef {
+            file_path: "src/TypeSpec.java".to_string(),
+            source_line: 25,
+            target_name: "emit".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: true,
+        };
+        assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
     }
 
     /// A call outside every named definition (a test callback, a
@@ -643,6 +824,7 @@ mod ambiguous_name_tests {
             source_line: 7,
             target_name: "create_pinia".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "module-scope call must link");

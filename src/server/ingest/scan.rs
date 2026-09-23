@@ -14,6 +14,8 @@ pub struct StaticFileRef {
     pub source_line: u32,
     pub target_name: String,
     pub edge_type: EdgeType,
+    /// See [`crate::treesitter::StaticRef::foreign_receiver`].
+    pub foreign_receiver: bool,
 }
 
 /// A string literal that could indicate cross-boundary coupling
@@ -302,6 +304,7 @@ pub async fn scan_file_structure(
                 source_line: r.source_line,
                 target_name: r.target_name,
                 edge_type: r.edge_type,
+                foreign_receiver: r.foreign_receiver,
             })
             .collect();
         let pattern_refs: Vec<PatternRef> = ts
