@@ -24,6 +24,10 @@ pub struct StaticRef {
     pub source_line: u32,
     pub target_name: String,
     pub edge_type: EdgeType,
+    /// A call made on some other value (`d.update()`, `arr.push()`), not
+    /// a bare call or one on `self` / `this`. The resolver uses it to
+    /// avoid linking `dict.update()` to the one user-defined `update`.
+    pub foreign_receiver: bool,
 }
 
 /// Known-bUILTIN blocklist — only canonical std/lib calls that are unambiguously
@@ -745,6 +749,8 @@ pub fn extract_refs_with_locals(
                             source_line: cap.node.start_position().row as u32,
                             target_name: name.to_string(),
                             edge_type: edge_type.clone(),
+                            foreign_receiver: edge_type == EdgeType::Calls
+                                && has_foreign_receiver(&cap.node, src_bytes),
                         });
                     }
                 }
@@ -760,6 +766,55 @@ pub fn extract_refs_with_locals(
         });
     }
     refs
+}
+
+/// Whether a called name is reached through a receiver other than
+/// `self` / `this`: `d.update()`, `this.items.push()`, `list.get(0)`.
+///
+/// Walks up from the name to the member-access node (whatever the grammar
+/// calls it) and reads its receiver field; stops at the call node itself,
+/// which in Java, Ruby and PHP carries the receiver directly.
+fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
+    const RECEIVER_FIELDS: &[&str] = &[
+        "object",
+        "receiver",
+        "operand",
+        "value",
+        "argument",
+        "expression",
+        "scope",
+        "target",
+    ];
+    const SELF_LIKE: &[&str] = &["self", "this", "cls", "super", "Self", "$this", "base"];
+    let mut node = *name;
+    for _ in 0..4 {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        let receiver = RECEIVER_FIELDS.iter().find_map(|f| {
+            parent
+                .child_by_field_name(f)
+                .filter(|r| r.end_byte() <= name.start_byte())
+        });
+        // Kotlin's `navigation_expression` has no field names: the
+        // receiver is its first named child.
+        let receiver = receiver.or_else(|| {
+            (parent.kind() == "navigation_expression")
+                .then(|| parent.named_child(0))
+                .flatten()
+                .filter(|r| r.end_byte() <= name.start_byte())
+        });
+        if let Some(r) = receiver {
+            let text = r.utf8_text(src_bytes).unwrap_or_default();
+            return !SELF_LIKE.contains(&text.trim());
+        }
+        let kind = parent.kind();
+        if kind.contains("call") || kind.contains("invocation") {
+            return false;
+        }
+        node = parent;
+    }
+    false
 }
 
 // ── String Literal Extraction for Semantic Boundaries ──────────────────────
@@ -900,6 +955,9 @@ pub fn extract_definitions(path: &Path, source: &str) -> Vec<SymbolDef> {
         else {
             continue;
         };
+        if spec.id == "python" && is_typing_overload(&node, src_bytes) {
+            continue;
+        }
         let line_start = node.start_position().row as u32;
         let line_end = node.end_position().row as u32;
         if !seen.insert((name.to_string(), line_start, line_end)) {
@@ -922,6 +980,24 @@ pub fn extract_definitions(path: &Path, source: &str) -> Vec<SymbolDef> {
         });
     }
     defs
+}
+
+/// A `@typing.overload` stub: a type signature, not code. Indexing it gave
+/// every overloaded function several same-file definitions, which the
+/// resolver treats as ambiguous, so callers in other files never linked.
+fn is_typing_overload(node: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
+    let Some(parent) = node.parent().filter(|p| p.kind() == "decorated_definition") else {
+        return false;
+    };
+    let mut cursor = parent.walk();
+    let found = parent.children(&mut cursor).any(|c| {
+        c.kind() == "decorator"
+            && c.utf8_text(src_bytes).is_ok_and(|t| {
+                let t = t.trim_start_matches('@').trim();
+                t == "overload" || t.ends_with(".overload")
+            })
+    });
+    found
 }
 
 /// The node holding a definition's name when the query did not capture one.
@@ -1590,6 +1666,78 @@ function helper(): int { return 1; }
                 );
             }
         }
+    }
+
+    /// Receiver detection across grammars: `d.update()` is foreign,
+    /// `self.update()` / `this.update()` and a bare `update()` are not.
+    #[test]
+    fn foreign_receivers_are_detected() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "a.py",
+                "def f(self, d):\n    d.update(1)\n    self.update(2)\n    update(3)\n",
+            ),
+            (
+                "a.ts",
+                "function f(d) { d.update(1); this.update(2); update(3); }",
+            ),
+            (
+                "a.rs",
+                "fn f(d: D) { d.update(1); self.update(2); update(3); }",
+            ),
+            ("a.go", "func f(d D) { d.update(1); update(3) }"),
+            (
+                "A.java",
+                "class A { void f(D d) { d.update(1); this.update(2); update(3); } }",
+            ),
+            (
+                "a.rb",
+                "def f(d)\n  d.update(1)\n  self.update(2)\n  update(3)\nend\n",
+            ),
+            (
+                "a.php",
+                "<?php function f($d) { $d->update(1); $this->update(2); update(3); }",
+            ),
+            (
+                "A.cs",
+                "class A { void F(D d) { d.update(1); this.update(2); update(3); } }",
+            ),
+            (
+                "a.kt",
+                "fun f(d: D) {\n    d.update(1)\n    this.update(2)\n    update(3)\n}\n",
+            ),
+            (
+                "a.swift",
+                "func f(d: D) {\n    d.update(1)\n    self.update(2)\n    update(3)\n}\n",
+            ),
+        ];
+        for (file, src) in cases {
+            let flags: Vec<bool> = extract_refs(Path::new(file), src)
+                .into_iter()
+                .filter(|r| r.target_name == "update" && matches!(r.edge_type, EdgeType::Calls))
+                .map(|r| r.foreign_receiver)
+                .collect();
+            assert_eq!(
+                flags.first(),
+                Some(&true),
+                "{file}: d.update(); got {flags:?}"
+            );
+            assert!(
+                flags.iter().skip(1).all(|f| !f),
+                "{file}: self/bare calls; got {flags:?}"
+            );
+        }
+    }
+
+    /// `@overload` stubs are type signatures; only the implementation is
+    /// a definition.
+    #[test]
+    fn python_overload_stubs_are_not_definitions() {
+        let src = "from typing import overload\n\n@overload\ndef f(x: int) -> int: ...\n@typing.overload\ndef f(x: str) -> str: ...\ndef f(x):\n    return x\n";
+        let defs = extract_definitions(Path::new("m.py"), src);
+        let fs: Vec<_> = defs.iter().filter(|d| d.name == "f").collect();
+        assert_eq!(fs.len(), 1, "got {defs:?}");
+        assert_eq!(fs[0].line_start, 6);
     }
 
     /// Single-file components: the `<script>` block parses as TS/JS and every
