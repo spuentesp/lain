@@ -103,10 +103,6 @@ impl LainServer {
         &self.federation
     }
 
-    pub fn presence_handle(&self) -> &PresenceLayer {
-        &self.presence
-    }
-
     pub fn audit_handle(&self) -> &AuditState {
         &self.audit
     }
