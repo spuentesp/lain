@@ -60,7 +60,15 @@ impl LainServer {
             move || -> Result<(String, i64), LainError> { git_sensor.try_get_latest_commit_info() },
         )
         .await?;
-        let last_commit = self.ingest().graph().get_last_commit()?;
+        let mut last_commit = self.ingest().graph().get_last_commit()?;
+        // A graph persisted by a Lain that minted ids under a per-process
+        // random namespace matches nothing this process derives; the
+        // "already up to date" shortcut below would keep it forever.
+        if last_commit.is_some() && self.ingest().graph().minted_in_other_namespace() {
+            info!("Persisted graph was built under a different id namespace; rebuilding it");
+            self.ingest().graph().reset()?;
+            last_commit = None;
+        }
         self.readiness().update(|snapshot| {
             snapshot.target_commit = Some(latest_commit.clone());
         });
@@ -1164,6 +1172,77 @@ fn sweep_orphans(path: &Path, db: &GraphDatabase, git: &AnyGitSensor) {
 /// (`ToolContextDeps`, `ToolExecutorConfig`): `graph`, `lsp_pool`,
 /// `git`, `overlay`, `namespace`. The shorter `db`/`lsp` would have
 /// been a footgun for anyone matching the two-struct pattern.
+/// Link a federation repo's calls into the other repos, once every repo's
+/// symbols are known.
+///
+/// Repos index one after another, and name-only cross-repo resolution can
+/// only find a symbol whose repo is already indexed: a repo indexed before
+/// the ones it calls into got no cross-repo edges at all (cobra, indexed
+/// before pflag, had 0 edges into it). Cross-repo edges are also not
+/// persisted per repo, so a warm restart lost them too. Running this after
+/// every repo is indexed covers both. Only edges whose target lies in
+/// another repo are added; local resolution already happened.
+pub async fn relink_cross_repo(
+    path: &Path,
+    graph: &GraphDatabase,
+    git: &Arc<AnyGitSensor>,
+    resolver: &dyn crate::federation::cross_repo::CrossRepoResolver,
+    source_repo: &crate::federation::repo_id::RepoId,
+    cancel: &CancellationToken,
+) -> Result<usize, LainError> {
+    let git_sensor = Arc::clone(git);
+    let files = offthread(cancel.clone(), move || {
+        git_sensor.try_get_all_tracked_files()
+    })
+    .await?;
+    let root = path.to_path_buf();
+    let refs = offthread(
+        cancel.clone(),
+        move || -> Result<Vec<StaticFileRef>, LainError> {
+            let mut refs = Vec::new();
+            for file in files {
+                let abs = if file.is_absolute() {
+                    file.clone()
+                } else {
+                    root.join(&file)
+                };
+                let indexed = abs
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(crate::treesitter::is_indexed_extension);
+                if !indexed {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&abs) else {
+                    continue;
+                };
+                let rel = graph_path(&root, &abs);
+                refs.extend(
+                    crate::treesitter::extract_refs(&abs, &content)
+                        .into_iter()
+                        .map(|r| StaticFileRef {
+                            file_path: rel.clone(),
+                            source_line: r.source_line,
+                            target_name: r.target_name,
+                            edge_type: r.edge_type,
+                            foreign_receiver: r.foreign_receiver,
+                        }),
+                );
+            }
+            Ok(refs)
+        },
+    )
+    .await?;
+    let external: Vec<GraphEdge> =
+        super::resolve::resolve_static_edges(graph, &refs, Some(resolver), Some(source_repo))
+            .into_iter()
+            .filter(|e| graph.get_node(&e.target_id).ok().flatten().is_none())
+            .collect();
+    let n = external.len();
+    graph.insert_edges_batch(&external)?;
+    Ok(n)
+}
+
 pub struct IndexRequest<'a> {
     pub path: &'a Path,
     pub graph: &'a GraphDatabase,

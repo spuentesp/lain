@@ -502,6 +502,25 @@ impl RepoIndex {
     /// git2 call — from holding the git mutex forever. When the timeout
     /// fires we transition to `Degraded` so the watcher (if any) keeps
     /// polling rather than wedging the federation.
+    /// Re-resolve this repo's calls into the rest of the federation; see
+    /// [`crate::server::ingest::ingestion::relink_cross_repo`]. Returns the
+    /// number of cross-repo edges added (0 without a resolver).
+    pub async fn relink_cross_repo(self: &Arc<Self>) -> Result<usize, LainError> {
+        let Some(resolver) = self.cross_repo_resolver.lock().clone() else {
+            return Ok(0);
+        };
+        let _index_guard = self.index_lock.lock().await;
+        crate::server::ingest::ingestion::relink_cross_repo(
+            self.source.local_path(),
+            &self.db,
+            &self.git,
+            resolver.as_ref(),
+            self.source.id(),
+            &self.cancel,
+        )
+        .await
+    }
+
     pub async fn index(self: &Arc<Self>) -> Result<(), LainError> {
         let path = self.source.local_path().to_path_buf();
         // Borrow `self.db` directly instead of cloning. `GraphDatabase`
