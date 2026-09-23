@@ -35,7 +35,7 @@ source ~/.zshrc   # or ~/.bashrc
 lain --version
 ```
 
-Rust 1.75 or newer is only needed when building from source. The
+Rust 1.88 or newer is only needed when building from source. The
 [quickstart](docs/QUICKSTART.md) covers non-interactive installation and the
 optional local embedding model.
 
@@ -68,6 +68,23 @@ project-level configuration:
 Restart the agent after setup. Lain walks up from the agent's working directory
 to find `.git`, builds `.lain/graph.bin`, and serves the repository over stdio.
 No `repos.yaml` is needed for one repository.
+
+## Languages
+
+Parsers for Rust, Python, TypeScript, JavaScript, Go, Java, C, C++, C#, Ruby,
+Swift, Kotlin, Scala and PHP are built into the binary, as are the `<script>`
+blocks of Vue and Svelte components. Every one gets definitions and a call
+graph with nothing else installed.
+
+Language servers are optional and only add precision. `lain setup` lists the
+languages it found and asks which servers to install; pressing Enter installs
+none. Non-interactive runs install none unless you name them:
+
+```bash
+lain setup --lsp python,go      # just these
+lain setup --lsp detected       # every missing one for this repository
+lain setup --lsp none
+```
 
 ## First query
 

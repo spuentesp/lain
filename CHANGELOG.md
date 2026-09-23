@@ -7,6 +7,40 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Added
 
+- **Built-in parsers for every supported language.** Go, Java, C, C++,
+  C#, Ruby, Swift, Kotlin, Scala and PHP join Rust, Python and
+  JavaScript/TypeScript, and Vue/Svelte `<script>` blocks are parsed in
+  place. Each gets definitions and call/type edges with no language
+  server installed; before, these languages depended entirely on an
+  installed server, and even then produced no call edges. Queries are
+  compiled once per language instead of once per file.
+- **`lain setup --lsp none|detected|LANG,...`.** Setup detects languages
+  from tracked files, reports each one's optional language server, and
+  installs only the ones picked (interactively, or by this flag). Nothing
+  is installed by default, and `--yes` does not imply any.
+
+### Changed
+
+- `get_health` lists only the languages in the repository, with the
+  built-in parser and whether the optional server is installed, instead
+  of every registered server marked "Missing".
+- Calls outside any named definition (test callbacks, `__main__` blocks,
+  RSpec blocks) are attributed to their file instead of being dropped.
+- tree-sitter 0.22 → 0.25 and current grammars. Building from source
+  needs Rust 1.88 (already true of the dependency tree; the README said
+  1.75).
+
+### Fixed
+
+- TypeScript is parsed with the TypeScript grammar; exported, method and
+  arrow-function definitions are indexed in JS/TS.
+- Python methods and decorated definitions are indexed.
+- The first session on a new repository answered "no callers" for every
+  symbol until restart (graph clones did not share their id/path
+  indices).
+- Rust string literals were never extracted for boundary detection
+  (the shared `(string)` query does not match Rust's `string_literal`).
+
 - **Intent & observability layer** (PRs 1–6 of
   `docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md`). Two new MCP tools:
   `lain_intent` (declare / update per-agent goal + scopes) and
