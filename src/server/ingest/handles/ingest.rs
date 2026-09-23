@@ -29,7 +29,6 @@ pub struct IngestHandle {
     pub(crate) graph: GraphDatabase,
     pub(crate) overlay: VolatileOverlay,
     pub(crate) embedder: NlpEmbedder,
-    pub(crate) cross_encoder: CrossEncoder,
     pub(crate) git: Arc<AnyGitSensor>,
     pub(crate) lsp_pool: Arc<LspPool>,
     pub(crate) tool_executor: ToolExecutor,
@@ -78,7 +77,6 @@ impl IngestHandle {
         graph: GraphDatabase,
         overlay: VolatileOverlay,
         embedder: NlpEmbedder,
-        cross_encoder: CrossEncoder,
         git: Arc<AnyGitSensor>,
         lsp_pool: Arc<LspPool>,
         tool_executor: ToolExecutor,
@@ -94,7 +92,6 @@ impl IngestHandle {
             graph,
             overlay,
             embedder,
-            cross_encoder,
             git,
             lsp_pool,
             tool_executor,
@@ -249,10 +246,6 @@ impl IngestHandle {
 
     pub fn embedder(&self) -> &NlpEmbedder {
         &self.embedder
-    }
-
-    pub fn cross_encoder(&self) -> &CrossEncoder {
-        &self.cross_encoder
     }
 
     pub fn git(&self) -> &Arc<AnyGitSensor> {
