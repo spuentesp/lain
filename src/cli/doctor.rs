@@ -309,11 +309,18 @@ fn dirty(repo: &git2::Repository) -> Result<bool> {
         .recurse_untracked_dirs(true)
         .update_index(false);
     Ok(repo.statuses(Some(&mut options))?.iter().any(|entry| {
-        // LAIN's own cache cannot make an otherwise clean source tree stale.
-        !entry
-            .path()
-            .ok()
-            .is_some_and(|path| path == ".lain" || path.starts_with(".lain/"))
+        // Only a change to a file the index reads can make it stale.
+        // LAIN's own cache, and the `.mcp.json` that `lain setup` writes
+        // into the repository, used to count: following the README
+        // (`setup`, then a query) left `doctor` reporting a stale graph.
+        entry.path().ok().is_some_and(|path| {
+            path != ".lain"
+                && !path.starts_with(".lain/")
+                && Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(crate::server::treesitter::is_indexed_extension)
+        })
     }))
 }
 
@@ -938,5 +945,25 @@ mod tests {
                 "lsp_prewarm JSON missing {k:?}; full: {value}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+
+    /// `lain setup` writes `.mcp.json` into the repository; that must not
+    /// make the index look stale. A new source file must.
+    #[test]
+    fn only_indexed_files_make_the_tree_dirty() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(root.path()).unwrap();
+        std::fs::write(root.path().join(".mcp.json"), "{}").unwrap();
+        std::fs::create_dir(root.path().join(".lain")).unwrap();
+        std::fs::write(root.path().join(".lain/graph.bin"), "x").unwrap();
+        assert!(!dirty(&repo).unwrap());
+
+        std::fs::write(root.path().join("app.py"), "def f(): pass\n").unwrap();
+        assert!(dirty(&repo).unwrap());
     }
 }

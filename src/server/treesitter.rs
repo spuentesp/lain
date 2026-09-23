@@ -289,7 +289,18 @@ const JS_DEFS: &[(&str, NodeType)] = &[
         NodeType::Function,
     ),
     ("(class_declaration) @d", NodeType::Class),
+    EXPORTED_CALL_CONST,
 ];
+/// An exported binding to a call's result — a Pinia store
+/// (`export const useCart = defineStore(…)`), a composable, a `styled.div`,
+/// a Redux slice. Callers invoke it by that name, so without a definition
+/// every `useCart()` was a call to nothing. Unexported bindings are left
+/// out: `const route = useRoute()` in a component is local state, not a
+/// symbol, and indexing it would credit the component's calls to it.
+const EXPORTED_CALL_CONST: (&str, NodeType) = (
+    "(program (export_statement (lexical_declaration (variable_declarator value: (call_expression)) @d)))",
+    NodeType::Constant,
+);
 /// TypeScript's grammar names a class field `public_field_definition` and
 /// adds abstract classes, interfaces and enums.
 const TS_DEFS: &[(&str, NodeType)] = &[
@@ -308,6 +319,7 @@ const TS_DEFS: &[(&str, NodeType)] = &[
     ("(abstract_class_declaration) @d", NodeType::Class),
     ("(interface_declaration) @d", NodeType::Interface),
     ("(enum_declaration) @d", NodeType::Enum),
+    EXPORTED_CALL_CONST,
 ];
 const JS_CALLS: &[&str] = &[
     "(call_expression function: (identifier) @name)",
@@ -536,6 +548,9 @@ static LANGS: &[LangSpec] = &[
             "(call_expression (identifier) @name)",
             // The member is the navigation's last child: `a.b.c()` calls `c`.
             "(call_expression (navigation_expression (identifier) @name .))",
+            // The grammar binds a prefix operator tighter than the call:
+            // `!saveAsArg(x)` parses as a call *of* `!saveAsArg`.
+            "(call_expression (unary_expression (identifier) @name .))",
         ],
         types: &["(user_type (identifier) @name)"],
         strings: &["(string_literal) @s"],
@@ -1532,6 +1547,42 @@ export class Ky {
             .into_iter()
             .map(|d| (d.name, d.kind))
             .collect()
+    }
+
+    #[test]
+    fn exported_call_bindings_are_definitions() {
+        let src = r#"
+import { defineStore } from 'pinia'
+export const useCart = defineStore('cart', () => { total() })
+const route = useRoute()
+function f() { const inner = make() }
+"#;
+        for file in ["stores/cart.ts", "stores/cart.js"] {
+            let defs = def_names(file, src);
+            assert!(
+                defs.contains(&("useCart".into(), NodeType::Constant)),
+                "{file}: {defs:?}"
+            );
+            for absent in ["route", "inner"] {
+                assert!(
+                    !defs.iter().any(|(n, _)| n == absent),
+                    "{file}: {absent} in {defs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kotlin_negated_calls_are_calls() {
+        let src =
+            "fun f() {\n  if (!saveAsArg(a)) {}\n  val y = -offset(1)\n  if (!q.isDone()) {}\n}\n";
+        let calls = call_names("A.kt", src);
+        for want in ["saveAsArg", "offset", "isDone"] {
+            assert!(
+                calls.iter().any(|c| c == want),
+                "{want} missing from {calls:?}"
+            );
+        }
     }
 
     fn call_names(file: &str, source: &str) -> Vec<String> {

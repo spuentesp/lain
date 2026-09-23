@@ -1,0 +1,167 @@
+{
+  "_comment": "Hand-verified ground truth: for each promised language, a real project pinned to a commit, a function defined once, and the exact set of functions (or, for module-level code, files) that call it. Verified by reading every call site at that commit; see README.md next to this file.",
+  "cases": [
+    {
+      "lang": "Rust",
+      "repo": "casey/just",
+      "sha": "6119e6aff518b6550d9030955f905b01051b5772",
+      "symbol": "candidate_recipes",
+      "callers": [
+        "complete_argument",
+        "complete_recipe"
+      ]
+    },
+    {
+      "lang": "Python",
+      "repo": "psf/requests",
+      "sha": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+      "symbol": "get_encoding_from_headers",
+      "callers": [
+        "build_response",
+        "get_unicode_from_response",
+        "test_get_encoding_from_headers"
+      ]
+    },
+    {
+      "lang": "TypeScript",
+      "repo": "sindresorhus/ky",
+      "sha": "0d59458a0a58e1c3d7c6db0ab17ed5c7cd671e47",
+      "symbol": "mergeHeaders",
+      "callers": [
+        "constructor"
+      ]
+    },
+    {
+      "lang": "JavaScript",
+      "repo": "expressjs/express",
+      "sha": "9a34acf03cb818ff3f8bc40e44176e277a25cbb9",
+      "symbol": "createETagGenerator",
+      "callers": [
+        "utils.js"
+      ]
+    },
+    {
+      "lang": "Go",
+      "repo": "spf13/cobra",
+      "sha": "adbc8813901bba65827259daa8e22ff94ec1f30e",
+      "symbol": "CompDebug",
+      "callers": [
+        "CompDebugln",
+        "CompError"
+      ]
+    },
+    {
+      "lang": "Java",
+      "repo": "square/javapoet",
+      "sha": "b9017a9503b76e11b4ad4c1a9f050e2d29112cb0",
+      "symbol": "addArgument",
+      "callers": [
+        "addNamed",
+        "add"
+      ]
+    },
+    {
+      "lang": "C",
+      "repo": "DaveGamble/cJSON",
+      "sha": "6d9f2443ab071f86e5d9b43025a40929ec41c46c",
+      "symbol": "apply_patch",
+      "callers": [
+        "cJSONUtils_ApplyPatches",
+        "cJSONUtils_ApplyPatchesCaseSensitive"
+      ]
+    },
+    {
+      "lang": "C++",
+      "repo": "jarro2783/cxxopts",
+      "sha": "60286ded02a170c85836bc73be1d021168f0f7b4",
+      "symbol": "consume_positional",
+      "callers": [
+        "parse"
+      ]
+    },
+    {
+      "lang": "C#",
+      "repo": "commandlineparser/commandline",
+      "sha": "1e3607b97af6141743edb3c434c06d5b492f6fb3",
+      "symbol": "AddPreOptionsLines",
+      "callers": [
+        "AutoBuild",
+        "DefaultParsingErrorsHandler"
+      ]
+    },
+    {
+      "lang": "Ruby",
+      "repo": "sinatra/sinatra",
+      "sha": "cb22afd7902b566b6eaba6c4ea89739494a65d12",
+      "symbol": "cache_control",
+      "callers": [
+        "expires",
+        "static!"
+      ],
+      "extra_ok": [
+        "HelpersTest"
+      ],
+      "note": "test/helpers_test.rb calls it inside `describe`/`it` blocks, which are not methods; the enclosing class is the honest caller."
+    },
+    {
+      "lang": "Swift",
+      "repo": "Alamofire/Alamofire",
+      "sha": "bda9ed57d72988a3a2ada33d824583541f86eac6",
+      "symbol": "appendStreamCompletion",
+      "callers": [
+        "responseStream",
+        "responseStreamString"
+      ]
+    },
+    {
+      "lang": "Kotlin",
+      "repo": "Kotlin/kotlinx-cli",
+      "sha": "32112b630b3f1e01c2b446173410be895d456e5e",
+      "symbol": "saveAsArg",
+      "callers": [
+        "treatAsArgument",
+        "parse"
+      ]
+    },
+    {
+      "lang": "Scala",
+      "repo": "com-lihaoyi/fansi",
+      "sha": "c8d4e5b56c46f2b360a441ca6d35620819a1ee52",
+      "symbol": "overlayAll",
+      "callers": [
+        "overlay"
+      ],
+      "extra_ok": [
+        "FansiTests"
+      ],
+      "note": "FansiTests.scala:220 calls it inside a utest `test(...)` block; the enclosing object is the honest caller."
+    },
+    {
+      "lang": "PHP",
+      "repo": "vlucas/phpdotenv",
+      "sha": "301c07936b16d88628b126b01d082ba153cf4c40",
+      "symbol": "checkPositiveEntry",
+      "callers": [
+        "testFullParse"
+      ]
+    },
+    {
+      "lang": "Vue",
+      "repo": "vuejs/pinia",
+      "sha": "f4e0cb7a8193f564c27f6527b3f954e114a7534c",
+      "symbol": "useNasaStore",
+      "callers": [
+        "NasaPODSwrv.vue"
+      ]
+    },
+    {
+      "lang": "Svelte",
+      "fixture": "svelte",
+      "symbol": "formatPrice",
+      "callers": [
+        "total",
+        "label"
+      ]
+    }
+  ]
+}
