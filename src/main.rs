@@ -209,6 +209,7 @@ fn main() -> Result<()> {
             print_config,
             yes,
             no_model,
+            lsp,
         }) => {
             let code = lain::cli::setup::run_setup(lain::cli::setup::SetupOptions {
                 workspace,
@@ -218,6 +219,7 @@ fn main() -> Result<()> {
                 print_config,
                 yes,
                 no_model,
+                lsp,
             })
             .unwrap_or_else(|error| {
                 eprintln!("setup failed: {error:#}");

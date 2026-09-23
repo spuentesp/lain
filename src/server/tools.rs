@@ -878,22 +878,67 @@ impl ToolExecutor {
             }
         }
 
+        // Only the languages this repository contains. Listing every server
+        // in the registry as "❌ Missing" read as "install all of these",
+        // when the built-in parsers already cover each language and a
+        // server is an optional precision layer.
         output.push_str("\n### Language Support\n");
-        let langs = {
+        let available: std::collections::HashMap<String, bool> = {
             let lsp = self.ctx.lsp_pool.next();
             let lsp_guard = lsp.lock().await;
-            lsp_guard.get_supported_languages()
+            lsp_guard
+                .get_supported_languages()
+                .into_iter()
+                .map(|(_, binary, ok)| (binary, ok))
+                .collect()
         };
-
-        let mut seen_binaries = std::collections::HashSet::new();
-        for (_, binary, available) in langs {
-            if seen_binaries.contains(&binary) {
+        let mut per_language: std::collections::BTreeMap<
+            &'static str,
+            (usize, Option<&'static str>),
+        > = std::collections::BTreeMap::new();
+        for file in self
+            .ctx
+            .graph
+            .get_nodes_by_type(crate::schema::NodeType::File)
+            .unwrap_or_default()
+        {
+            let Some(ext) = std::path::Path::new(&file.path)
+                .extension()
+                .and_then(|e| e.to_str())
+            else {
                 continue;
+            };
+            let Some(language) = crate::server::treesitter::language_name(ext) else {
+                continue;
+            };
+            let entry = per_language.entry(language).or_insert((0, None));
+            entry.0 += 1;
+            if entry.1.is_none() {
+                entry.1 = crate::server::lsp::language_server_for(ext).map(|s| s.binary);
             }
-            seen_binaries.insert(binary.clone());
-
-            let status = if available { "✅" } else { "❌ (Missing)" };
-            output.push_str(&format!("- **{}**: {}\n", binary, status));
+        }
+        if per_language.is_empty() {
+            output.push_str("- No source files indexed yet.\n");
+        } else {
+            output.push_str(
+                "Built-in parsers cover every language below; language servers are \
+                 optional and only add precision (`lain setup` offers to install them).\n",
+            );
+        }
+        for (language, (files, server)) in &per_language {
+            let server = match server {
+                Some(binary) if available.get(*binary).copied().unwrap_or(false) => {
+                    format!("`{binary}` ✅")
+                }
+                Some(binary) if which::which(binary).is_ok() => {
+                    format!("`{binary}` installed but disabled after repeated failures (restart to retry)")
+                }
+                Some(binary) => format!("`{binary}` optional, not installed"),
+                None => "none registered".to_string(),
+            };
+            output.push_str(&format!(
+                "- **{language}** ({files} files): parser ✅ · language server {server}\n"
+            ));
         }
 
         Ok(output)

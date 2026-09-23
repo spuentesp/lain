@@ -264,7 +264,65 @@ const LANGUAGE_MAP: &[(&str, LspConfig)] = &[
             install_cmd: Some("npm install -g svelte-language-server"),
         },
     ),
+    (
+        "php",
+        LspConfig {
+            binary: "intelephense",
+            install_cmd: Some("npm install -g intelephense"),
+        },
+    ),
 ];
+
+/// The language server Lain can use for a file extension. Optional by
+/// design: the built-in tree-sitter parsers already give every language in
+/// this registry its definitions and call graph, and a server only adds
+/// precision. Nothing installs one unless the user picks it (`lain setup`)
+/// or an agent asks for it by name (`install_language_server`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanguageServer {
+    pub binary: &'static str,
+    pub install_cmd: Option<&'static str>,
+}
+
+/// The language server for a file extension or language name (`"py"`,
+/// `".py"`, `"python"`), if the registry has one.
+pub fn language_server_for(ext_or_language: &str) -> Option<LanguageServer> {
+    let normalized = ext_or_language.trim().trim_start_matches('.');
+    let ext = resolve_language_to_ext(normalized).unwrap_or(normalized);
+    LANGUAGE_MAP
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, c)| LanguageServer {
+            binary: c.binary,
+            install_cmd: c.install_cmd,
+        })
+}
+
+impl LanguageServer {
+    pub fn is_installed(&self) -> bool {
+        which::which(self.binary).is_ok()
+    }
+
+    /// The install command split into argv, or why it cannot run on this
+    /// machine: there is no automated command, or it needs Homebrew off macOS.
+    pub fn install_argv(&self) -> Result<Vec<&'static str>, LainError> {
+        let cmd = self.install_cmd.ok_or_else(|| {
+            LainError::Lsp(format!(
+                "No automated install command available for {}; install it \
+                 with your platform's package manager.",
+                self.binary
+            ))
+        })?;
+        if cmd.contains("brew install") && !cfg!(target_os = "macos") {
+            return Err(LainError::Lsp(format!(
+                "The install command for {} ({cmd}) requires Homebrew and is only \
+                 supported on macOS. Please install it manually for your platform.",
+                self.binary
+            )));
+        }
+        Ok(cmd.split_whitespace().collect())
+    }
+}
 
 /// A symbol with its children for recursive processing
 pub struct HierarchicalSymbol {
@@ -937,27 +995,18 @@ impl LspMultiplexer {
                 ext
             )))?;
 
-        let install_cmd = config.install_cmd.ok_or_else(|| {
-            LainError::Lsp(format!(
-                "No automated install command available for {} ({})",
-                ext, config.binary
-            ))
-        })?;
-
-        // Platform-specific guard for brew
-        if install_cmd.contains("brew install") && !cfg!(target_os = "macos") {
-            return Err(LainError::Lsp(format!(
-                "The install command for {} ({}) requires Homebrew and is only supported on macOS. Please install it manually for your platform.",
-                resolved_ext, config.binary
-            )));
+        let parts = LanguageServer {
+            binary: config.binary,
+            install_cmd: config.install_cmd,
         }
+        .install_argv()?;
 
         info!(
             "Attempting to install LSP server for '{}' using: {}",
-            resolved_ext, install_cmd
+            resolved_ext,
+            parts.join(" ")
         );
 
-        let parts: Vec<&str> = install_cmd.split_whitespace().collect();
         let mut cmd = tokio::process::Command::new(parts[0]);
         if parts.len() > 1 {
             cmd.args(&parts[1..]);
@@ -1270,6 +1319,7 @@ fn resolve_language_to_ext(s: &str) -> Option<&'static str> {
         "java" => Some("java"),
         "vue" => Some("vue"),
         "svelte" => Some("svelte"),
+        "php" => Some("php"),
         _ => None,
     }
 }
