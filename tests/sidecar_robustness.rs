@@ -1,5 +1,9 @@
 //! Comprehensive stress, hang recovery, high concurrency, payload size,
 //! and leak-prevention test suite for Bug #2 libgit2 Sidecar architecture.
+//!
+//! The sidecar talks over a Unix socket; on other platforms Lain uses the
+//! in-process sensor and there is no sidecar to test.
+#![cfg(unix)]
 
 use lain::error::LainError;
 use lain::git::{AnyGitSensor, GitSensorMode};
