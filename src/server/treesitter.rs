@@ -587,59 +587,48 @@ fn extract_definitions_python(source: &str) -> Vec<SymbolDef> {
             return vec![];
         };
 
+        let src_bytes = source.as_bytes();
         let mut defs = Vec::new();
-        let root = tree.root_node();
 
-        // Top-level module: walk for function_definition, class_definition
-        for child in root.children(&mut root.walk()) {
-            match child.kind() {
-                "function_definition" => {
-                    if let Some(name) = python_def_name(&child, source) {
-                        defs.push(SymbolDef {
-                            name,
-                            kind: NodeType::Function,
-                            line_start: child.start_position().row as u32,
-                            line_end: child.end_position().row as u32,
-                            byte_start: child.start_byte() as u32,
-                            byte_end: child.end_byte() as u32,
-                            is_deprecated: false,
-                            labels: Vec::new(),
-                        });
-                    }
+        // Match definitions at any depth, as the Rust extractor does. A
+        // top-level-only walk missed every method (most Python code lives in
+        // classes) and every decorated definition, whose node is a
+        // `decorated_definition` wrapping the `function_definition`.
+        let patterns: &[(&str, NodeType)] = &[
+            ("(function_definition) @d", NodeType::Function),
+            ("(class_definition) @d", NodeType::Class),
+        ];
+
+        for (pattern, kind) in patterns {
+            let Ok(query) = Query::new(&tree_sitter_python::language(), pattern) else {
+                continue;
+            };
+            let mut cursor = QueryCursor::new();
+            for m in cursor.matches(&query, tree.root_node(), src_bytes) {
+                for cap in m.captures {
+                    let node = cap.node;
+                    let Some(name) = node
+                        .child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(src_bytes).ok())
+                    else {
+                        continue;
+                    };
+                    defs.push(SymbolDef {
+                        name: name.to_string(),
+                        kind: kind.clone(),
+                        line_start: node.start_position().row as u32,
+                        line_end: node.end_position().row as u32,
+                        byte_start: node.start_byte() as u32,
+                        byte_end: node.end_byte() as u32,
+                        is_deprecated: false,
+                        labels: Vec::new(),
+                    });
                 }
-                "class_definition" => {
-                    if let Some(name) = python_def_name(&child, source) {
-                        defs.push(SymbolDef {
-                            name,
-                            kind: NodeType::Class,
-                            line_start: child.start_position().row as u32,
-                            line_end: child.end_position().row as u32,
-                            byte_start: child.start_byte() as u32,
-                            byte_end: child.end_byte() as u32,
-                            is_deprecated: false,
-                            labels: Vec::new(),
-                        });
-                    }
-                }
-                _ => {}
             }
         }
 
         defs
     })
-}
-
-fn python_def_name(node: &tree_sitter::Node, source: &str) -> Option<String> {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" {
-            return child
-                .utf8_text(source.as_bytes())
-                .ok()
-                .map(|s| s.to_string());
-        }
-    }
-    None
 }
 
 fn extract_definitions_js(source: &str, language: Language) -> Vec<SymbolDef> {
@@ -959,11 +948,34 @@ def hello(name):
 class Foo:
     def bar(self):
         return 1
+
+    @property
+    def baz(self):
+        return 2
+
+@decorator
+def wrapped():
+    pass
 "#;
         let defs = extract_definitions(Path::new("foo.py"), source);
         let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"hello"), "got: {:?}", names);
         assert!(names.contains(&"Foo"), "got: {:?}", names);
+        // Methods and decorated definitions were invisible to the old
+        // top-level-only walk.
+        assert!(names.contains(&"bar"), "method; got: {:?}", names);
+        assert!(names.contains(&"baz"), "decorated method; got: {:?}", names);
+        assert!(
+            names.contains(&"wrapped"),
+            "decorated function; got: {:?}",
+            names
+        );
+        let bar = defs.iter().find(|d| d.name == "bar").unwrap();
+        let foo = defs.iter().find(|d| d.name == "Foo").unwrap();
+        assert!(
+            bar.line_end - bar.line_start < foo.line_end - foo.line_start,
+            "method span nests inside its class so calls attribute to the method"
+        );
     }
 
     #[test]
