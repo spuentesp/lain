@@ -407,8 +407,7 @@ are documented where they are central to the workflow they belong to:
 - **Presence** ([`multiplayer.md`](multiplayer.md)): `register_agent`,
   `heartbeat`, `unregister_agent`, `list_active_agents`, `who_am_i`,
   `list_subagents`, `my_claims`.
-- **Intent layer** ([`multiplayer.md`](multiplayer.md#intent-layer),
-  [`archive/INTENT_AND_OBSERVABILITY_PLAN.md`](archive/INTENT_AND_OBSERVABILITY_PLAN.md)):
+- **Intent layer** ([`multiplayer.md`](multiplayer.md#intent-layer)):
   `lain_intent` (declare goal + scopes, get coordination level),
   `list_active_intents` (per-agent activity feed), and the
   synchronous `POST /hook/evaluate` endpoint that wraps the
