@@ -110,19 +110,42 @@ pub fn get_context_for_prompt(
 /// repo happily returned the same-named file from wherever the server
 /// happened to be launched — `src/lib.rs` from lain's own checkout
 /// instead of the repo that was asked about. Wrong file, no error.
-fn resolve_against_workspace(workspace: &std::path::Path, path: &str) -> String {
+/// Resolve a caller-supplied path to a file inside the workspace.
+///
+/// Anything that resolves outside it is refused. This used to pass absolute
+/// paths through and join `../..` unchecked, so `get_code_snippet` read any
+/// file on the host — `/etc/passwd`, keys, other repositories — and
+/// `lain server` serves that tool over HTTP.
+fn resolve_against_workspace(workspace: &std::path::Path, path: &str) -> Result<String, LainError> {
     let p = std::path::Path::new(path);
-    if p.is_absolute() {
-        return path.to_string();
+    let candidate = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        workspace.join(p)
+    };
+    let outside = || {
+        LainError::Other(format!(
+            "path '{path}' is outside the repository; pass a path relative to {}",
+            workspace.display()
+        ))
+    };
+    let root = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    match dunce::canonicalize(&candidate) {
+        Ok(real) if real.starts_with(&root) => Ok(real.to_string_lossy().into_owned()),
+        Ok(_) => Err(outside()),
+        // Missing file: refuse `..` escapes lexically, and let the read
+        // report "not found" for anything else.
+        Err(_) => {
+            let escapes = p
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+            if p.is_absolute() || escapes {
+                Err(outside())
+            } else {
+                Ok(candidate.to_string_lossy().into_owned())
+            }
+        }
     }
-    let joined = workspace.join(p);
-    if joined.exists() {
-        return joined.to_string_lossy().into_owned();
-    }
-    // Fall back to the caller's spelling: it may be relative to the
-    // process cwd (single-workspace mode) or simply not exist, and the
-    // read error should name what they actually asked for.
-    path.to_string()
 }
 
 pub fn get_code_snippet(
@@ -135,7 +158,7 @@ pub fn get_code_snippet(
 ) -> Result<String, LainError> {
     let ctx = context_lines.unwrap_or(10);
     let line_num = line.unwrap_or(1) as usize;
-    let disk_path = resolve_against_workspace(workspace, path);
+    let disk_path = resolve_against_workspace(workspace, path)?;
 
     // Try overlay first
     if let Some(node) = overlay.get_node(path) {
@@ -356,6 +379,43 @@ mod call_lines_tests {
         n.line_start = Some(lines.0);
         n.line_end = Some(lines.1);
         n
+    }
+
+    /// `get_code_snippet` reads only inside the repository.
+    #[test]
+    fn paths_outside_the_workspace_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("repo");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/a.py"), "x = 1\n").unwrap();
+        std::fs::write(root.path().join("secret.txt"), "key\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.path().join("secret.txt"), ws.join("link.txt")).unwrap();
+
+        assert!(resolve_against_workspace(&ws, "src/a.py").is_ok());
+        assert!(resolve_against_workspace(&ws, &ws.join("src/a.py").to_string_lossy()).is_ok());
+        for bad in [
+            "../secret.txt",
+            "src/../../secret.txt",
+            "/etc/passwd",
+            "../missing.txt",
+        ] {
+            assert!(
+                resolve_against_workspace(&ws, bad).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        assert!(
+            resolve_against_workspace(&ws, &root.path().join("secret.txt").to_string_lossy())
+                .is_err()
+        );
+        #[cfg(unix)]
+        assert!(
+            resolve_against_workspace(&ws, "link.txt").is_err(),
+            "a symlink out of the repo"
+        );
+        // A missing in-repo path passes through so the read reports "not found".
+        assert!(resolve_against_workspace(&ws, "src/nope.py").is_ok());
     }
 
     /// A Python variable named `fn` is not a Rust definition.

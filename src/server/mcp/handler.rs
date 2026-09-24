@@ -354,6 +354,33 @@ fn gate_for_dispatch(
     )
 }
 
+/// Address the HTTP transport listens on: loopback unless `LAIN_BIND_ADDR`
+/// says otherwise.
+///
+/// It listened on `0.0.0.0` with authentication off unless `LAIN_API_KEYS`
+/// was set, so anyone on the network could call every tool — including
+/// reading the repository's source and claiming files. Exposing it is now a
+/// deliberate choice, and doing so without keys is logged as a warning.
+fn http_bind_host() -> String {
+    let host = std::env::var("LAIN_BIND_ADDR")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    let keys = std::env::var("LAIN_API_KEYS").is_ok_and(|k| !k.trim().is_empty());
+    if !loopback && !keys {
+        tracing::warn!(
+            "HTTP transport exposed on {host} with no LAIN_API_KEYS: anyone who can reach \
+             this port can call every tool"
+        );
+    }
+    host
+}
+
 /// Per-process status snapshot carried into the HTTP request handler
 /// closure. Built once per accepted connection (cloning the cheap
 /// `SystemTime` and Arc-shared Mutexes) so the inner `service_fn`
@@ -1340,7 +1367,8 @@ impl LainMcpServer {
     // pulling `self` across threads (which has non-`Send` fields).
     #[allow(clippy::redundant_locals)]
     pub async fn run_http(self, port: u16) -> SdkResult<()> {
-        info!("Binding Lain MCP HTTP listener on 0.0.0.0:{}", port);
+        let bind_host = http_bind_host();
+        info!("Binding Lain MCP HTTP listener on {}:{}", bind_host, port);
 
         // Bind the HTTP listener *before* spawning the background
         // re-index. The original order spawned the startup task first
@@ -1354,8 +1382,8 @@ impl LainMcpServer {
         // `warming_up` response from `dispatch_tool_call` (see the
         // comment in `run_stdio`) instead of a connection refused, and
         // operators can poll `/health` to observe the stuck state.
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        info!("Lain MCP HTTP server listening on 0.0.0.0:{}", port);
+        let listener = TcpListener::bind(format!("{}:{}", bind_host, port)).await?;
+        info!("Lain MCP HTTP server listening on {}:{}", bind_host, port);
 
         // Same backgrounded re-index as `run_stdio`; see there for
         // the full rationale. HTTP has no equivalent to stdio's

@@ -29,7 +29,8 @@ use std::path::Path;
 /// merging it into a v2 graph would double every node instead of updating
 /// it. `load_from_disk` therefore discards anything that isn't v2 and lets
 /// the caller rebuild from source.
-pub const PATH_FORMAT_VERSION: u32 = 2;
+/// 3: `GraphNode::container` added (bincode layout changed).
+pub const PATH_FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct GraphState {

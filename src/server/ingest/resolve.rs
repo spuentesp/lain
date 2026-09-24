@@ -248,6 +248,21 @@ const COMMON_METHOD_NAMES: &[&str] = &[
     "toMap",
     "toSet",
     "trim",
+    // Rust core traits and std types.
+    "clone",
+    "len",
+    "is_empty",
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "unwrap",
+    "expect",
+    "as_ref",
+    "as_str",
+    "to_string",
+    "to_owned",
+    "borrow",
+    "lock",
 ];
 
 /// The language family a source path belongs to, for the purpose of
@@ -316,7 +331,10 @@ pub fn resolve_static_edges(
     // resolved to the definition in the calling file.
     let mut name_index: HashMap<String, Vec<(String, crate::schema::NodeType, String)>> =
         HashMap::new();
+    // id -> the type it is defined in (`None` for free functions).
+    let mut containers: HashMap<String, Option<String>> = HashMap::new();
     for node in db.get_all_nodes() {
+        containers.insert(node.id.clone(), node.container.clone());
         name_index.entry(node.name.clone()).or_default().push((
             node.id.clone(),
             node.node_type.clone(),
@@ -391,20 +409,112 @@ pub fn resolve_static_edges(
             })
             .collect();
 
-        // A call through another object is not the caller calling itself:
-        // `session.request(...)` inside the module-level `request()` in
-        // requests/api.py calls `Session.request`. With the caller left in,
-        // the same-file preference picked it, the self-edge was dropped, and
-        // the package's main entry point vanished from `Session.request`'s
-        // callers.
-        let candidates: Vec<_> = if sr.foreign_receiver {
+        let container_of = |id: &str| containers.get(id).cloned().flatten();
+        let is_stub = |p: &str| p.ends_with(".pyi") || p.ends_with(".d.ts");
+        // Type stubs (`core.pyi`, `widget.d.ts`) restate definitions that
+        // live in the real module; counted as candidates they made every
+        // such name ambiguous and its callers vanished.
+        let candidates: Vec<_> = if candidates.iter().any(|(_, _, p)| !is_stub(p)) {
             candidates
                 .into_iter()
-                .filter(|(id, _, _)| *id != source_node.id)
+                .filter(|(_, _, p)| !is_stub(p))
                 .collect()
         } else {
             candidates
         };
+        let source_container = source_node.container.clone();
+        let candidates: Vec<_> = if sr.edge_type != EdgeType::Calls {
+            candidates
+        } else if let Some(q) = &sr.qualifier {
+            // `Registry::new()`: Registry's own `new`, or nothing. A
+            // lower-case path is a module (`util::helper`, `detail::f`),
+            // which says nothing about containers.
+            let own: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|(id, _, _)| container_of(id).as_deref() == Some(q.as_str()))
+                .collect();
+            if !own.is_empty() {
+                own
+            } else if q.starts_with(|c: char| c.is_ascii_uppercase())
+                && candidates
+                    .iter()
+                    .any(|(id, _, _)| container_of(id).is_some())
+            {
+                // `String::new()` beside a repo `Registry::new`.
+                continue;
+            } else {
+                candidates
+            }
+        } else if sr.self_receiver {
+            // `self.load()` / `this.render()`: the caller's own type first.
+            let own: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|(id, _, _)| {
+                    source_container.is_some() && container_of(id) == source_container
+                })
+                .collect();
+            if own.is_empty() {
+                candidates
+            } else {
+                own
+            }
+        } else if sr.foreign_receiver {
+            // A call through another object never reaches a free function
+            // of the calling file (`util.parse()` beside a local `parse`),
+            // and is not the caller calling itself — unless the caller is
+            // a method: `child.walk(v)` inside `Tree.walk` is recursion on
+            // another node, not a call to some other file's `walk`.
+            candidates
+                .into_iter()
+                .filter(|(id, _, path)| {
+                    !(path == &sr.file_path
+                        && container_of(id).is_none()
+                        && containers.contains_key(id.as_str()))
+                })
+                .filter(|(id, _, _)| *id != source_node.id || source_container.is_some())
+                .collect()
+        } else {
+            // A bare call. In Java, C#, Kotlin, Swift, C++, Scala and Ruby it
+            // reaches the caller's own methods implicitly; elsewhere
+            // (Python, Rust, JS/TS, Go, PHP) only free functions — `load(x)`
+            // in a file that also has `Cache.load` calls the module one.
+            let implicit_this = matches!(
+                language_group(&sr.file_path),
+                Some("java" | "csharp" | "kotlin" | "swift" | "c" | "scala" | "ruby")
+            );
+            let own: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|(id, _, _)| {
+                    implicit_this
+                        && source_container.is_some()
+                        && container_of(id) == source_container
+                })
+                .collect();
+            let free: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|(id, _, _)| container_of(id).is_none())
+                .collect();
+            if !own.is_empty() {
+                own
+            } else if !free.is_empty() && free.len() < candidates.len() {
+                free
+            } else {
+                candidates
+            }
+        };
+        // Recursion through another instance links nowhere: drop the
+        // caller itself whenever it is still a candidate.
+        if sr.edge_type == EdgeType::Calls
+            && sr.foreign_receiver
+            && source_container.is_some()
+            && candidates.iter().any(|(id, _, _)| *id == source_node.id)
+        {
+            continue;
+        }
         let resolved: Vec<&(String, crate::schema::NodeType, String)> = if candidates.len() == 1 {
             // `d.update()` on a dict, `arr.push()` on an array: a common
             // container / string / promise method called on some other
@@ -603,6 +713,8 @@ mod ambiguous_name_tests {
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
@@ -635,6 +747,8 @@ mod ambiguous_name_tests {
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the local definition");
@@ -662,6 +776,8 @@ mod ambiguous_name_tests {
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
@@ -691,6 +807,8 @@ mod ambiguous_name_tests {
             target_name: "renderWidget".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, ".ts -> .tsx is the same language family");
@@ -720,6 +838,8 @@ mod ambiguous_name_tests {
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the Python definition");
@@ -823,6 +943,8 @@ mod ambiguous_name_tests {
             target_name: "sweep_orphans".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "a unique name must still resolve");
@@ -849,6 +971,8 @@ mod ambiguous_name_tests {
             target_name: name.to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: foreign,
+            self_receiver: false,
+            qualifier: None,
         };
         assert!(resolve_static_edges(&db, &[r("update", true)], None, None).is_empty());
         assert_eq!(
@@ -889,6 +1013,8 @@ mod ambiguous_name_tests {
             target_name: "emit".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: true,
+            self_receiver: false,
+            qualifier: None,
         };
         assert_eq!(resolve_static_edges(&db, &[r], None, None).len(), 2);
 
@@ -900,6 +1026,8 @@ mod ambiguous_name_tests {
             target_name: "emit".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: true,
+            self_receiver: false,
+            qualifier: None,
         };
         assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
 
@@ -916,8 +1044,127 @@ mod ambiguous_name_tests {
             target_name: "put".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: true,
+            self_receiver: false,
+            qualifier: None,
         };
         assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
+    }
+
+    fn def_in(name: &str, path: &str, lines: (u32, u32), container: Option<&str>) -> GraphNode {
+        let ns = crate::schema::RepoNamespace::for_test();
+        let mut n = GraphNode::new(NodeType::Function, name.into(), path.into())
+            .with_location_in(lines.0, lines.1, &ns);
+        n.container = container.map(str::to_string);
+        n
+    }
+
+    fn call_at(file: &str, line: u32, name: &str) -> StaticFileRef {
+        StaticFileRef {
+            file_path: file.into(),
+            source_line: line,
+            target_name: name.into(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
+        }
+    }
+
+    fn fresh(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    fn targets(db: &GraphDatabase, refs: &[StaticFileRef]) -> Vec<String> {
+        resolve_static_edges(db, refs, None, None)
+            .into_iter()
+            .map(|e| e.target_id)
+            .collect()
+    }
+
+    /// `child.walk(v)` inside `Tree.walk` is recursion on another node, not
+    /// a call to `Dir.walk` in another file.
+    #[test]
+    fn recursion_through_another_instance_links_nowhere() {
+        let db = fresh("lain_resolve_recursion");
+        db.upsert_node(def_in("walk", "tree.py", (5, 10), Some("Tree")))
+            .unwrap();
+        db.upsert_node(def_in("walk", "fs.py", (1, 3), Some("Dir")))
+            .unwrap();
+        let mut r = call_at("tree.py", 7, "walk");
+        r.foreign_receiver = true;
+        assert!(targets(&db, &[r]).is_empty());
+    }
+
+    /// One file with a module `load` and `Cache.load`: the bare call is the
+    /// module function, `self.load` is the method.
+    #[test]
+    fn bare_and_self_calls_pick_free_function_and_method() {
+        let db = fresh("lain_resolve_free_vs_method");
+        let free = def_in("load", "app.py", (0, 2), None);
+        let method = def_in("load", "app.py", (4, 6), Some("Cache"));
+        let caller = def_in("warm", "app.py", (7, 12), Some("Cache"));
+        let (free_id, method_id) = (free.id.clone(), method.id.clone());
+        for n in [free, method, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        assert_eq!(targets(&db, &[call_at("app.py", 8, "load")]), vec![free_id]);
+        let mut s = call_at("app.py", 9, "load");
+        s.self_receiver = true;
+        assert_eq!(targets(&db, &[s]), vec![method_id]);
+    }
+
+    /// `Registry::new()` is Registry's `new`; `String::new()` is not.
+    #[test]
+    fn a_type_qualified_call_matches_the_container() {
+        let db = fresh("lain_resolve_qualified");
+        let new = def_in("new", "src/registry.rs", (2, 4), Some("Registry"));
+        let new_id = new.id.clone();
+        db.upsert_node(new).unwrap();
+        db.upsert_node(def_in("main", "src/main.rs", (0, 10), None))
+            .unwrap();
+        let mut ok = call_at("src/main.rs", 2, "new");
+        ok.qualifier = Some("Registry".into());
+        ok.foreign_receiver = true;
+        let mut std = call_at("src/main.rs", 3, "new");
+        std.qualifier = Some("String".into());
+        std.foreign_receiver = true;
+        assert_eq!(targets(&db, &[ok]), vec![new_id]);
+        assert!(targets(&db, &[std]).is_empty());
+    }
+
+    /// `util.parse(x)` beside a local free `parse` calls util's.
+    #[test]
+    fn a_receiver_call_skips_the_calling_files_free_function() {
+        let db = fresh("lain_resolve_module_call");
+        db.upsert_node(def_in("parse", "src/app.py", (0, 2), None))
+            .unwrap();
+        let util = def_in("parse", "src/util.py", (0, 2), None);
+        let util_id = util.id.clone();
+        db.upsert_node(util).unwrap();
+        db.upsert_node(def_in("load", "src/app.py", (4, 9), Some("Config")))
+            .unwrap();
+        let mut r = call_at("src/app.py", 6, "parse");
+        r.foreign_receiver = true;
+        assert_eq!(targets(&db, &[r]), vec![util_id]);
+    }
+
+    /// A `.pyi` stub does not make the real definition ambiguous.
+    #[test]
+    fn stubs_do_not_hide_callers() {
+        let db = fresh("lain_resolve_stub");
+        let real = def_in("compute", "pkg/core.py", (0, 3), None);
+        let real_id = real.id.clone();
+        db.upsert_node(real).unwrap();
+        db.upsert_node(def_in("compute", "pkg/core.pyi", (0, 0), None))
+            .unwrap();
+        db.upsert_node(def_in("main", "pkg/main.py", (0, 5), None))
+            .unwrap();
+        assert_eq!(
+            targets(&db, &[call_at("pkg/main.py", 2, "compute")]),
+            vec![real_id]
+        );
     }
 
     /// `mod tangle;` and `fn tangle` share a name; the call goes to the
@@ -944,6 +1191,8 @@ mod ambiguous_name_tests {
             target_name: "tangle".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         };
         let edges = resolve_static_edges(&db, &[r], None, None);
         assert_eq!(edges.len(), 1, "{edges:?}");
@@ -979,6 +1228,8 @@ mod ambiguous_name_tests {
             target_name: "request".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver,
+            self_receiver: false,
+            qualifier: None,
         };
         let edges = resolve_static_edges(&db, &[call(true)], None, None);
         assert_eq!(edges.len(), 1, "{edges:?}");
@@ -1013,6 +1264,8 @@ mod ambiguous_name_tests {
             target_name: "create_pinia".to_string(),
             edge_type: EdgeType::Calls,
             foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "module-scope call must link");

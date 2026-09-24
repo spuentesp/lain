@@ -471,6 +471,13 @@ pub struct GraphNode {
     /// `"repo_id": null` for None.
     #[serde(default)]
     pub repo_id: Option<String>,
+    /// The type a definition sits in (`Cache` for `Cache.load`, `Registry`
+    /// for a method in `impl Registry`); `None` for a free function. The
+    /// resolver uses it to tell `load(x)` (the module function) from
+    /// `self.load(x)` (the method) when a file defines both, and to match
+    /// `Registry::new()` to Registry's own `new`.
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 /// Per-repository UUID namespace for `GraphNode` ids. Mints a stable
@@ -625,6 +632,7 @@ impl GraphNode {
             commit_hash: None,
             is_hydrated: true,
             repo_id: None,
+            container: None,
         }
     }
 
