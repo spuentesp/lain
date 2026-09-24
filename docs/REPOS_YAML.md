@@ -41,7 +41,7 @@ block startup.
 ## Schema (top-level `FederationConfig`)
 
 ```yaml
-data_dir: <path>                    # optional, default: ./.lain/federation
+data_dir: <path>                    # optional, default: ./.lain/federation (relative to this file)
 max_concurrent_indexers: <usize>    # optional, default: 8
 ready_threshold: <float 0.0..1.0>   # optional, default: 0.8
 repos:

@@ -10,8 +10,23 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+/// A relative `data_dir` (including the default `./.lain/federation`) is
+/// resolved next to the config file. Against the process's cwd, running
+/// `lain server --config ../stack/repos.yaml` from elsewhere created a
+/// fresh data directory there and re-indexed everything from cold.
+fn resolve_data_dir(mut config: FederationConfig, config_path: &Path) -> FederationConfig {
+    if config.data_dir.is_relative() {
+        let base = config_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        config.data_dir = base.join(&config.data_dir);
+    }
+    config
+}
+
 pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, LainError> {
-    let config = FederationConfig::load(config_path)?;
+    let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
     let manifest_path = config.data_dir.join("federation_manifest.bin");
     let _manifest = FederationManifest::load_or_default(&manifest_path)?;
 
@@ -124,7 +139,7 @@ pub async fn load_federation_with_workspace(
     workspaces_path: &Path,
     workspace_name: &str,
 ) -> Result<Arc<FederatedIndex>, LainError> {
-    let config = FederationConfig::load(config_path)?;
+    let config = resolve_data_dir(FederationConfig::load(config_path)?, config_path);
     let manifest_path = config.data_dir.join("federation_manifest.bin");
     let _manifest = FederationManifest::load_or_default(&manifest_path)?;
 
