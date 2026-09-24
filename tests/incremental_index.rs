@@ -381,3 +381,25 @@ async fn incremental_reindex_relinks_shifted_moved_and_new_symbols() {
         "a new symbol got no callers"
     );
 }
+
+/// While readiness is held (a multi-repo federation waiting for its
+/// cross-repo links), a finished pass leaves the repo Indexing; releasing
+/// the hold promotes it.
+#[tokio::test]
+async fn held_readiness_waits_for_release() {
+    use lain::server::federation::health::RepoHealth;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().to_path_buf();
+    std::fs::write(repo.join("a.py"), "def a():\n    return 1\n").unwrap();
+    init_repo(&repo);
+    let data_tmp = tempfile::tempdir().unwrap();
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("held").unwrap(), repo.clone()).unwrap());
+    let ri = Arc::new(RepoIndex::new(source, data_tmp.path()).unwrap());
+
+    ri.hold_ready(true);
+    ri.index().await.expect("index");
+    assert_eq!(ri.health(), RepoHealth::Indexing, "held: still indexing");
+    ri.hold_ready(false);
+    assert_eq!(ri.health(), RepoHealth::Ready, "released: ready");
+}

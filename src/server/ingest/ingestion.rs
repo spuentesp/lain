@@ -727,7 +727,7 @@ impl LainServer {
                 if nlp_cancel.is_cancelled() {
                     return;
                 }
-                if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
+                if let Ok(Some(gn)) = graph_clone.get_node(&node.id) {
                     if crate::server::nlp::needs_embedding(gn.embedding.as_deref()) {
                         let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                         // AGENT_UX_ROADMAP.md M4 follow-up: ONNX
@@ -763,8 +763,7 @@ impl LainServer {
                         // `semantic_search` permanently and silently.
                         match serde_json::to_string(&emb) {
                             Ok(json) => {
-                                gn.embedding = Some(json);
-                                if graph_clone.insert_node(&gn).is_ok() {
+                                if graph_clone.set_embedding(&gn.id, json).unwrap_or(false) {
                                     count += 1;
                                     embedded += 1;
                                     progress(embedded, total, true);
@@ -803,7 +802,7 @@ impl LainServer {
                     if nlp_cancel.is_cancelled() {
                         return;
                     }
-                    if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
+                    if let Ok(Some(gn)) = graph_clone.get_node(&node.id) {
                         if crate::server::nlp::needs_embedding(gn.embedding.as_deref()) {
                             let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                             // Same offthread routing as the prewarm pass:
@@ -831,13 +830,10 @@ impl LainServer {
                             // unparseable embedding it will never retry.
                             match serde_json::to_string(&emb) {
                                 Ok(json) => {
-                                    gn.embedding = Some(json);
-                                    // A dropped insert silently costs the
-                                    // node its embedding, which surfaces
-                                    // later as `semantic_search` missing
-                                    // code that is plainly there.
-                                    if let Err(e) = graph_clone.insert_node(&gn) {
-                                        warn!("embedding not stored for {}: {e}", gn.name);
+                                    // Only onto a node that still exists; a
+                                    // re-index may have removed it meanwhile.
+                                    if !graph_clone.set_embedding(&gn.id, json).unwrap_or(false) {
+                                        total = total.saturating_sub(1);
                                     } else {
                                         embedded += 1;
                                         progress(embedded, total, true);

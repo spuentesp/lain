@@ -685,6 +685,28 @@ impl GraphDatabase {
     /// orphan (no caller to attach to) and is counted in the dropped
     /// return — same behavior as before this change, kept so the
     /// `label` warning still reports the genuinely broken case.
+    /// Attach an embedding to the node `id` if it still exists. Returns
+    /// whether it did.
+    ///
+    /// The background embedding pass computes for milliseconds per node
+    /// while re-indexes run; writing back the copy it read (`upsert_node`)
+    /// resurrected nodes a re-index had deleted in the meantime, and
+    /// overwrote fields a re-index had refreshed.
+    pub fn set_embedding(&self, id: &str, embedding: String) -> Result<bool, LainError> {
+        self.check_writable()?;
+        let mut graph = self.graph.write();
+        let Some(idx) = self.index_map.get(id).map(|r| *r.value()) else {
+            return Ok(false);
+        };
+        match graph.node_weight_mut(idx).filter(|n| n.id == id) {
+            Some(node) => {
+                node.embedding = Some(embedding);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub fn insert_edges_batch(&self, new_edges: &[GraphEdge]) -> Result<usize, LainError> {
         self.check_writable()?;
         let mut graph = self.graph.write();
@@ -1861,6 +1883,25 @@ mod replace_tests {
             graph_path(&real, &outside),
             crate::server::path_util::posix_string(&outside)
         );
+    }
+
+    /// An embedding computed for a node a re-index removed meanwhile does
+    /// not bring it back.
+    #[test]
+    fn set_embedding_never_resurrects_a_node() {
+        let g = db("lain_test_set_embedding");
+        let n = GraphNode::new(NodeType::Function, "gone".into(), "src/gone.rs".into());
+        let id = n.id.clone();
+        g.insert_nodes_batch(std::slice::from_ref(&n)).unwrap();
+        assert!(g.set_embedding(&id, "[1.0]".into()).unwrap());
+        assert_eq!(
+            g.get_node(&id).unwrap().unwrap().embedding.as_deref(),
+            Some("[1.0]")
+        );
+        g.replace_nodes_for_paths(&["src/gone.rs".to_string()], &[])
+            .unwrap();
+        assert!(!g.set_embedding(&id, "[2.0]".into()).unwrap());
+        assert!(g.get_node(&id).unwrap().is_none());
     }
 
     /// The sweep drops files git no longer tracks and leaves the rest alone.
