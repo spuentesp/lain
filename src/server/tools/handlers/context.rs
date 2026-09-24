@@ -329,11 +329,65 @@ fn call_lines_in(
                 break;
             }
         }
-        // Skip the definition itself.
-        if found && !line.trim_start().starts_with("fn ") && !line.contains(&format!("fn {callee}"))
-        {
+        // Skip the definition itself: a definition keyword followed by the
+        // callee's name. This used to skip every line *starting* with
+        // `fn ` — a Rust-only rule that also dropped Python's
+        // `fn = guess_filename(v) or k`, leaving the call "not found".
+        let defines = ["fn", "def", "func", "fun", "function"]
+            .iter()
+            .any(|kw| line.contains(&format!("{kw} {callee}")));
+        if found && !defines {
             out.push(lineno);
         }
     }
     out
+}
+
+#[cfg(test)]
+mod call_lines_tests {
+    use super::*;
+
+    fn caller_in(path: &str, lines: (u32, u32)) -> crate::schema::GraphNode {
+        let mut n = crate::schema::GraphNode::new(
+            crate::schema::NodeType::Function,
+            "caller".into(),
+            path.into(),
+        );
+        n.line_start = Some(lines.0);
+        n.line_end = Some(lines.1);
+        n
+    }
+
+    /// A Python variable named `fn` is not a Rust definition.
+    #[test]
+    fn a_line_starting_with_fn_can_be_a_call() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("models.py"),
+            "def _encode_files(files):\n    fn = guess_filename(v) or k\n    return fn\n",
+        )
+        .unwrap();
+        let lines = call_lines_in(ws.path(), &caller_in("models.py", (1, 3)), "guess_filename");
+        assert_eq!(lines, vec![2]);
+    }
+
+    /// The definition line itself is still skipped, in any language.
+    #[test]
+    fn definition_lines_are_not_call_sites() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("a.py"),
+            "def helper(x):\n    return helper(x - 1)\n",
+        )
+        .unwrap();
+        std::fs::write(ws.path().join("a.rs"), "fn helper() {\n    helper();\n}\n").unwrap();
+        assert_eq!(
+            call_lines_in(ws.path(), &caller_in("a.py", (1, 2)), "helper"),
+            vec![2]
+        );
+        assert_eq!(
+            call_lines_in(ws.path(), &caller_in("a.rs", (1, 3)), "helper"),
+            vec![2]
+        );
+    }
 }

@@ -178,6 +178,76 @@ const COMMON_METHOD_NAMES: &[&str] = &[
     "isEmpty",
     "stream",
     "collect",
+    // Ruby core (Array, Hash, Enumerable, String, Object): sinatra's test
+    // helper defines `include?`, and every `arr.include?(x)` in the repo
+    // linked to it.
+    "include?",
+    "each",
+    "each_value",
+    "each_key",
+    "each_pair",
+    "each_with_index",
+    "each_with_object",
+    "key?",
+    "has_key?",
+    "member?",
+    "fetch",
+    "select",
+    "reject",
+    "detect",
+    "inject",
+    "any?",
+    "all?",
+    "none?",
+    "empty?",
+    "count",
+    "first",
+    "last",
+    "merge",
+    "merge!",
+    "dup",
+    "freeze",
+    "compact",
+    "flatten",
+    "uniq",
+    "sort_by",
+    "group_by",
+    "min",
+    "max",
+    "sum",
+    "join",
+    "to_s",
+    "to_a",
+    "to_h",
+    "to_sym",
+    "to_i",
+    "gsub",
+    "sub",
+    "match",
+    "downcase",
+    "upcase",
+    "start_with?",
+    "end_with?",
+    "delete_if",
+    "keep_if",
+    "tap",
+    "send",
+    "respond_to?",
+    "is_a?",
+    "nil?",
+    // Kotlin / Swift / JS collections and strings.
+    "addAll",
+    "removeAll",
+    "getOrDefault",
+    "getOrPut",
+    "joinToString",
+    "flatMap",
+    "firstOrNull",
+    "lastOrNull",
+    "toList",
+    "toMap",
+    "toSet",
+    "trim",
 ];
 
 /// The language family a source path belongs to, for the purpose of
@@ -306,6 +376,19 @@ pub fn resolve_static_edges(
         let candidates: Vec<&(String, crate::schema::NodeType, String)> = candidates
             .iter()
             .filter(|(_, _, path)| may_link_across(&sr.file_path, path))
+            // A call cannot target a module. Rust's `mod tangle;` names a
+            // Module node after the `fn tangle` it contains, and the pair
+            // read as ambiguous, so `tangle(&markdown)` linked to nothing.
+            .filter(|(_, ty, _)| {
+                sr.edge_type != EdgeType::Calls
+                    || !matches!(
+                        ty,
+                        crate::schema::NodeType::Module
+                            | crate::schema::NodeType::Namespace
+                            | crate::schema::NodeType::Package
+                            | crate::schema::NodeType::File
+                    )
+            })
             .collect();
 
         // A call through another object is not the caller calling itself:
@@ -835,6 +918,39 @@ mod ambiguous_name_tests {
             foreign_receiver: true,
         };
         assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
+    }
+
+    /// `mod tangle;` and `fn tangle` share a name; the call goes to the
+    /// function.
+    #[test]
+    fn a_call_ignores_a_same_named_module() {
+        let tmp = std::env::temp_dir().join("lain_resolve_module_vs_fn");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let module = GraphNode::new(NodeType::Module, "tangle".into(), "src/lib.rs".into())
+            .with_location_in(372, 372, &ns);
+        let func = GraphNode::new(NodeType::Function, "tangle".into(), "src/tangle.rs".into())
+            .with_location_in(2, 40, &ns);
+        let caller = GraphNode::new(NodeType::Function, "search".into(), "src/search.rs".into())
+            .with_location_in(100, 120, &ns);
+        let (func_id, caller_id) = (func.id.clone(), caller.id.clone());
+        for n in [module, func, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        let r = StaticFileRef {
+            file_path: "src/search.rs".to_string(),
+            source_line: 106,
+            target_name: "tangle".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+        };
+        let edges = resolve_static_edges(&db, &[r], None, None);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(
+            (edges[0].source_id.as_str(), edges[0].target_id.as_str()),
+            (caller_id.as_str(), func_id.as_str())
+        );
     }
 
     /// `session.request(...)` inside requests/api.py's module-level

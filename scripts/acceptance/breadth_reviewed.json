@@ -1,0 +1,189 @@
+{
+ "_comment": "Disagreements between breadth.py's textual oracle and Lain, each checked by hand against the source. 'oracle' means the oracle is wrong and Lain's answer is right. A disagreement that is not listed here counts against Lain.",
+ "reviewed": [
+  {
+   "lang": "Rust",
+   "symbol": "get_mut",
+   "file": "src/table.rs",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "self.map.get_mut(key) is HashMap::get_mut, not Table::get_mut"
+  },
+  {
+   "lang": "Rust",
+   "symbol": "env_var_or_default",
+   "file": "*",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "every occurrence is inside just-language strings or test macros (justfile source, S-expressions), not Rust calls"
+  },
+  {
+   "lang": "TypeScript",
+   "symbol": "isForceRetryError",
+   "file": "*",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "example code inside JSDoc comments"
+  },
+  {
+   "lang": "TypeScript",
+   "symbol": "isResponseSizeError",
+   "file": "*",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "example code and prose inside JSDoc comments"
+  },
+  {
+   "lang": "Go",
+   "symbol": "Execute",
+   "file": "cobra_test.go",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "rootCmd.Execute() is inside a raw-string Go program the test compiles, not test code"
+  },
+  {
+   "lang": "C++",
+   "symbol": "check_signed_range",
+   "file": "include/cxxopts.hpp",
+   "side": "extra",
+   "verdict": "oracle",
+   "reason": "detail::check_signed_range<T>(...) is a real call; the oracle's name( pattern cannot see explicit template arguments"
+  },
+  {
+   "lang": "C#",
+   "symbol": "CreateDefaultImmutableInstance",
+   "file": "*",
+   "side": "*",
+   "verdict": "oracle",
+   "reason": "two overloads (a generic one the oracle's regex misses); InstanceBuilder calls the generic one, which the ambiguous name resolves to"
+  },
+  {
+   "lang": "Ruby",
+   "symbol": "each_value",
+   "file": "sinatra-contrib/lib/sinatra/cookies.rb",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "to_hash.each_value(&block) is Hash#each_value"
+  },
+  {
+   "lang": "Ruby",
+   "symbol": "include?",
+   "file": "*",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "Array/String#include? calls, not the test helper's include?"
+  },
+  {
+   "lang": "Ruby",
+   "symbol": "preferred_type",
+   "file": "test/request_test.rb",
+   "side": "extra",
+   "verdict": "oracle",
+   "reason": "request.preferred_type.params: a real call written without parentheses"
+  },
+  {
+   "lang": "Ruby",
+   "symbol": "default_reaction",
+   "file": "*",
+   "side": "extra",
+   "verdict": "oracle",
+   "reason": "default_reaction :deny: real class-body calls written without parentheses"
+  },
+  {
+   "lang": "Swift",
+   "symbol": "basicAuth",
+   "file": "Tests/TestHelpers.swift",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": ".basicAuth(username:password:) there constructs an enum case of the same name"
+  },
+  {
+   "lang": "Swift",
+   "symbol": "makeIterator",
+   "file": "Source/Core/HTTPHeaders.swift",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "headers.makeIterator() is Array.makeIterator"
+  },
+  {
+   "lang": "Swift",
+   "symbol": "responseSerializerDidComplete",
+   "file": "*",
+   "side": "extra",
+   "verdict": "oracle",
+   "reason": "self.responseSerializerDidComplete { ... }: real calls with a trailing closure and no parentheses"
+  },
+  {
+   "lang": "TypeScript",
+   "symbol": "isHTTPError",
+   "file": "source/types/hooks.ts",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "example code and prose inside a JSDoc comment"
+  },
+  {
+   "lang": "Go",
+   "symbol": "ArgsLenAtDash",
+   "file": "command.go",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "c.Flags().ArgsLenAtDash() calls pflag's FlagSet method, not Command.ArgsLenAtDash"
+  },
+  {
+   "lang": "C#",
+   "symbol": "Return",
+   "file": "*",
+   "side": "*",
+   "verdict": "oracle",
+   "reason": "defined twice (Maybe.Return<T> and Either.Return); the oracle's regex misses one, so the name is not unique"
+  },
+  {
+   "lang": "Ruby",
+   "symbol": "user_agent",
+   "file": "test/request_test.rb",
+   "side": "extra",
+   "verdict": "oracle",
+   "reason": "assert_equal 'Test', request.user_agent: a real call without parentheses"
+  },
+  {
+   "lang": "Ruby",
+   "symbol": "remap_extensions",
+   "file": "sinatra-contrib/lib/sinatra/respond_with.rb",
+   "side": "extra",
+   "verdict": "oracle",
+   "reason": "remap_extensions / base.remap_extensions: real calls without parentheses"
+  },
+  {
+   "lang": "Swift",
+   "symbol": "compression",
+   "file": "Tests/TestHelpers.swift",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": ".compression(compression) there constructs an enum case of the same name"
+  },
+  {
+   "lang": "Rust",
+   "symbol": "into_values",
+   "file": "src/table.rs",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "self.map.into_values() is BTreeMap::into_values"
+  },
+  {
+   "lang": "Rust",
+   "symbol": "italic",
+   "file": "src/style.rs",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "self.0.italic() is the terminal-style library's method, not Style::italic"
+  },
+  {
+   "lang": "Rust",
+   "symbol": "extend",
+   "file": "*",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "Vec/HashSet::extend calls, not Tree::extend"
+  }
+ ]
+}

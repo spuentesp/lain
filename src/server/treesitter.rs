@@ -290,7 +290,19 @@ const JS_DEFS: &[(&str, NodeType)] = &[
     ),
     ("(class_declaration) @d", NodeType::Class),
     EXPORTED_CALL_CONST,
+    MEMBER_FUNCTION_ASSIGNMENT,
 ];
+/// `res.sendStatus = function sendStatus(…) {…}`, `exports.parse = (…) => …`,
+/// `Foo.prototype.bar = function () {…}`: how pre-class JavaScript defines
+/// methods — all of Express's `app` and `res` API. Named by the property,
+/// which is what callers write (`res.sendStatus(404)`). Assigning to
+/// `module.exports` itself names no method and is left out.
+const MEMBER_FUNCTION_ASSIGNMENT: (&str, NodeType) = (
+    "((assignment_expression left: (member_expression property: (property_identifier) @name) \
+     right: [(function_expression) (arrow_function) (generator_function)]) @d \
+     (#not-eq? @name \"exports\"))",
+    NodeType::Function,
+);
 /// An exported binding to a call's result — a Pinia store
 /// (`export const useCart = defineStore(…)`), a composable, a `styled.div`,
 /// a Redux slice. Callers invoke it by that name, so without a definition
@@ -320,6 +332,7 @@ const TS_DEFS: &[(&str, NodeType)] = &[
     ("(interface_declaration) @d", NodeType::Interface),
     ("(enum_declaration) @d", NodeType::Enum),
     EXPORTED_CALL_CONST,
+    MEMBER_FUNCTION_ASSIGNMENT,
 ];
 const JS_CALLS: &[&str] = &[
     "(call_expression function: (identifier) @name)",
@@ -361,6 +374,11 @@ static LANGS: &[LangSpec] = &[
             "(call_expression function: (identifier) @name)",
             "(call_expression function: (field_expression field: (field_identifier) @name))",
             "(call_expression function: (scoped_identifier name: (identifier) @name))",
+            // Inside a macro (`format!`, `writeln!`, `assert_eq!`, `vec!`)
+            // the arguments are an unparsed token tree: a call is a name
+            // directly followed by a `(…)` group. Without this every call
+            // made inside a macro was invisible.
+            "((token_tree (identifier) @name . (token_tree) @args) (#match? @args \"^\\\\(\"))",
         ],
         types: &["(type_identifier) @name"],
         strings: &["(string_literal) @s", "(raw_string_literal) @s"],
@@ -459,8 +477,17 @@ static LANGS: &[LangSpec] = &[
         calls: &[
             "(call_expression function: (identifier) @name)",
             "(call_expression function: (field_expression field: (field_identifier) @name))",
-            "(call_expression function: (qualified_identifier name: (identifier) @name))",
             "(call_expression function: (template_function name: (identifier) @name))",
+            // `a::f()`, `a::b::f()`, `detail::check_signed_range<T>(…)`:
+            // each `::` nests another `qualified_identifier`, and queries
+            // cannot recurse, so the depths are spelled out. Only the first
+            // level was matched, which missed every call through a nested
+            // namespace.
+            "(call_expression function: [\
+               (qualified_identifier name: [(identifier) @name (template_function name: (identifier) @name)])\
+               (qualified_identifier name: (qualified_identifier name: [(identifier) @name (template_function name: (identifier) @name)]))\
+               (qualified_identifier name: (qualified_identifier name: (qualified_identifier name: [(identifier) @name (template_function name: (identifier) @name)])))\
+               (qualified_identifier name: (qualified_identifier name: (qualified_identifier name: (qualified_identifier name: [(identifier) @name (template_function name: (identifier) @name)]))))])",
             "(call_expression function: (field_expression field: (template_method name: (field_identifier) @name)))",
             "(new_expression type: (type_identifier) @name)",
         ],
@@ -530,6 +557,9 @@ static LANGS: &[LangSpec] = &[
         calls: &[
             "(call_expression (simple_identifier) @name)",
             "(call_expression (navigation_expression suffix: (navigation_suffix suffix: (simple_identifier) @name)))",
+            // Implicit member: `session.request(.basicAuth())`, the type
+            // coming from context.
+            "(call_expression (prefix_expression \".\" (simple_identifier) @name))",
         ],
         types: &["(type_identifier) @name"],
         strings: &["(line_string_literal) @s"],
@@ -674,7 +704,83 @@ fn script_view<'a>(path: &Path, source: &'a str) -> Option<(&'static LangSpec, C
         let spec = spec_for_ext(if is_ts { "ts" } else { "js" })?;
         return Some((spec, Cow::Owned(masked)));
     }
+    if ext == "cs" {
+        return Some((spec_for_ext(ext)?, blank_cs_conditionals(source)));
+    }
+    let spec = spec_for_ext(ext)?;
+    if spec.id == "c" || spec.id == "cpp" {
+        return Some((spec, blank_attribute_macro_lines(source)));
+    }
     Some((spec_for_ext(ext)?, Cow::Borrowed(source)))
+}
+
+/// Blank C/C++ lines holding nothing but an ALL-CAPS macro name, keeping
+/// byte offsets and line numbers.
+///
+/// Attribute-like macros on their own line (`CXXOPTS_NODISCARD`,
+/// `API_EXPORT`, `FORCEINLINE`) expand to nothing the parser can see; it
+/// reads the macro as the return type and recovers badly — cxxopts'
+/// `make_storage()` was lost that way, with every call to it. A lone
+/// upper-case word is otherwise at most a final enumerator written without
+/// its comma, which is not a definition Lain indexes.
+fn blank_attribute_macro_lines(source: &str) -> Cow<'_, str> {
+    let is_macro_line = |line: &str| {
+        let t = line.trim();
+        t.len() >= 3
+            && t.starts_with(|c: char| c.is_ascii_uppercase())
+            && t.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    };
+    if !source.lines().any(is_macro_line) {
+        return Cow::Borrowed(source);
+    }
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        if is_macro_line(line) {
+            out.extend(
+                line.chars()
+                    .map(|c| if c == '\n' || c == '\r' { c } else { ' ' }),
+            );
+        } else {
+            out.push_str(line);
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Blank C# conditional-compilation lines (`#if`, `#elif`, `#else`,
+/// `#endif`), keeping byte offsets and line numbers.
+///
+/// The grammar handles a directive between statements but not inside an
+/// expression, and it does not recover: commandlineparser's
+/// `TypeConverter.cs` splits a ternary with `#if !SKIP_FSHARP`, the whole
+/// file parsed as one `ERROR`, and every method after it was lost. With
+/// the directives blanked both branches read as ordinary code — here a
+/// valid ternary; at worst a duplicate declaration, which only matters to
+/// a compiler.
+fn blank_cs_conditionals(source: &str) -> Cow<'_, str> {
+    let is_conditional = |line: &str| {
+        let t = line.trim_start();
+        ["#if", "#elif", "#else", "#endif"].iter().any(|d| {
+            t.strip_prefix(d)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+    };
+    if !source.lines().any(is_conditional) {
+        return Cow::Borrowed(source);
+    }
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        if is_conditional(line) {
+            out.extend(
+                line.chars()
+                    .map(|c| if c == '\n' || c == '\r' { c } else { ' ' }),
+            );
+        } else {
+            out.push_str(line);
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Blank everything outside `<script …>…</script>`, preserving newlines and
@@ -726,8 +832,17 @@ fn parse(language: &Language, source: &str) -> Option<tree_sitter::Tree> {
 
 /// Extract all call and type-usage references from a source file.
 /// Returns an empty vec for unsupported file types.
+///
+/// Names the file defines itself are passed as locals, so a method that
+/// shares a builtin's name still gets its calls: phpdotenv's
+/// `Validator::assert` is called as `$this->assert(…)`, and with no locals
+/// the builtin blocklist dropped every such call.
 pub fn extract_refs(path: &Path, source: &str) -> Vec<StaticRef> {
-    extract_refs_with_locals(path, source, &HashSet::new())
+    let locals: HashSet<String> = extract_definitions(path, source)
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    extract_refs_with_locals(path, source, &locals)
 }
 
 /// Extract references with knowledge of locally-defined symbols.
@@ -758,6 +873,9 @@ pub fn extract_refs_with_locals(
         let mut matches = cursor.matches(query, tree.root_node(), src_bytes);
         while let Some(m) = matches.next() {
             for cap in m.captures.iter().filter(|c| c.index == name_idx) {
+                if !is_adjacent_macro_call(&cap.node) {
+                    continue;
+                }
                 if let Ok(name) = cap.node.utf8_text(src_bytes) {
                     if keep(name) {
                         refs.push(StaticRef {
@@ -780,7 +898,102 @@ pub fn extract_refs_with_locals(
             is_user_defined_type(n, local_definitions)
         });
     }
+    if spec.id == "c" || spec.id == "cpp" {
+        refs.extend(macro_body_calls(&tree, src_bytes, local_definitions));
+    }
     refs
+}
+
+/// Words followed by `(` in C/C++ that are not calls.
+const C_KEYWORDS: &[&str] = &[
+    "if",
+    "while",
+    "for",
+    "switch",
+    "return",
+    "sizeof",
+    "alignof",
+    "_Alignof",
+    "offsetof",
+    "defined",
+    "typeof",
+    "__typeof__",
+    "decltype",
+    "static_assert",
+    "_Static_assert",
+    "static_cast",
+    "dynamic_cast",
+    "reinterpret_cast",
+    "const_cast",
+    "noexcept",
+    "alignas",
+    "__attribute__",
+    "__declspec",
+    "do",
+    "else",
+    "case",
+];
+
+/// Calls written inside `#define` bodies.
+///
+/// The grammar keeps a macro's body as raw text, so a function a macro
+/// expands to had no caller at all — in Unity (cJSON's test framework)
+/// every `TEST_ASSERT_EACH_EQUAL_*` expands to `UnityNumToPtr(…)`, and
+/// "who calls `UnityNumToPtr`" answered only the one direct call. Each
+/// `name(` in the body counts, at the `#define`'s line; outside any
+/// function, that attributes it to the header, like other module-scope
+/// calls. The resolver still links only names the repo defines, so a
+/// macro calling another macro adds nothing.
+fn macro_body_calls(
+    tree: &tree_sitter::Tree,
+    src: &[u8],
+    local_definitions: &HashSet<String>,
+) -> Vec<StaticRef> {
+    let mut out = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "preproc_function_def" | "preproc_def") {
+            let Some(body) = node.child_by_field_name("value") else {
+                continue;
+            };
+            let Ok(text) = body.utf8_text(src) else {
+                continue;
+            };
+            let bytes = text.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c.is_ascii_alphabetic() || c == b'_' {
+                    let start = i;
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    {
+                        i += 1;
+                    }
+                    let preceded = start > 0 && matches!(bytes[start - 1], b'.' | b'>' | b'#');
+                    if !preceded && bytes.get(i) == Some(&b'(') {
+                        let name = &text[start..i];
+                        if !C_KEYWORDS.contains(&name)
+                            && is_user_defined_call(name, local_definitions)
+                        {
+                            let line = text[..start].matches('\n').count();
+                            out.push(StaticRef {
+                                source_line: (body.start_position().row + line) as u32,
+                                target_name: name.to_string(),
+                                edge_type: EdgeType::Calls,
+                                foreign_receiver: false,
+                            });
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
+    out
 }
 
 /// Whether a called name is reached through a receiver other than
@@ -789,6 +1002,19 @@ pub fn extract_refs_with_locals(
 /// Walks up from the name to the member-access node (whatever the grammar
 /// calls it) and reads its receiver field; stops at the call node itself,
 /// which in Java, Ruby and PHP carries the receiver directly.
+/// Inside a macro's token tree, only `name(` with nothing between counts as
+/// a call. A space means some other syntax: `just`'s test macros hold an
+/// S-expression DSL, `(call env_var_or_default (+ "a" "b"))`, which the
+/// token-tree call pattern otherwise read as a call. Real calls are written
+/// without the space. Always true outside token trees.
+fn is_adjacent_macro_call(name: &tree_sitter::Node) -> bool {
+    if !name.parent().is_some_and(|p| p.kind() == "token_tree") {
+        return true;
+    }
+    name.next_sibling()
+        .is_some_and(|args| args.start_byte() == name.end_byte())
+}
+
 fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
     const RECEIVER_FIELDS: &[&str] = &[
         "object",
@@ -803,6 +1029,25 @@ fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
     const SELF_LIKE: &[&str] = &[
         "self", "this", "cls", "super", "Self", "$this", "base", "parent", "static",
     ];
+    // Swift implicit member (`.basicAuth()`): the receiver is a type the
+    // context implies, never `self`.
+    if name.parent().is_some_and(|p| {
+        p.kind() == "prefix_expression" && p.child(0).is_some_and(|c| c.kind() == ".")
+    }) {
+        return true;
+    }
+    // Token-tree calls (inside a Rust macro) have no call node: the
+    // receiver, if any, is the token before a preceding `.`.
+    if name.parent().is_some_and(|p| p.kind() == "token_tree") {
+        let Some(dot) = name.prev_sibling().filter(|p| p.kind() == ".") else {
+            return false;
+        };
+        let text = dot
+            .prev_sibling()
+            .and_then(|r| r.utf8_text(src_bytes).ok())
+            .unwrap_or_default();
+        return !SELF_LIKE.contains(&text);
+    }
     let mut node = *name;
     for _ in 0..4 {
         let Some(parent) = node.parent() else {
@@ -1547,6 +1792,186 @@ export class Ky {
             .into_iter()
             .map(|d| (d.name, d.kind))
             .collect()
+    }
+
+    #[test]
+    fn attribute_macro_lines_do_not_hide_definitions() {
+        let src = "class O {\n  CXXOPTS_NODISCARD\n  std::shared_ptr<Value>\n  make_storage() const\n  {\n    return m_value->clone();\n  }\n};\n\
+                   void use(O* details) { details->make_storage(); }\n";
+        let defs = def_names("cxxopts.hpp", src);
+        let storage = extract_definitions(Path::new("cxxopts.hpp"), src)
+            .into_iter()
+            .find(|d| d.name == "make_storage")
+            .unwrap_or_else(|| panic!("make_storage lost: {defs:?}"));
+        assert_eq!(
+            storage.line_start, 2,
+            "line numbers must survive the blanking"
+        );
+        assert!(call_names("cxxopts.hpp", src)
+            .iter()
+            .any(|c| c == "make_storage"));
+    }
+
+    #[test]
+    fn calls_inside_c_macro_bodies_are_calls() {
+        let src =
+            "#define ASSERT_EACH(e, n) UnityAssertArray(UnityNumToPtr((int)e, sizeof(int)), n)\n\
+                   #define PTR_OF(x) (x)->field\n\
+                   #define STRINGIFY(x) #x\n\
+                   #define LOOP(x) do { if (x) { while (x) {} } } while (0)\n\
+                   int helper(void);\n";
+        let calls = call_names("unity_internals.h", src);
+        for want in ["UnityAssertArray", "UnityNumToPtr"] {
+            assert!(
+                calls.iter().any(|c| c == want),
+                "{want} missing from {calls:?}"
+            );
+        }
+        assert!(
+            !calls.iter().any(|c| c == "sizeof" || c == "field"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn swift_implicit_member_calls_are_calls() {
+        let src = "func t() {\n  session.request(.basicAuth(), interceptor: h)\n  let e: Endpoint = .makeEndpoint(forUser: \"u\")\n}\n";
+        let refs = extract_refs(Path::new("Tests/SessionTests.swift"), src);
+        for want in ["basicAuth", "makeEndpoint"] {
+            let r = refs
+                .iter()
+                .find(|r| r.target_name == want)
+                .unwrap_or_else(|| panic!("{want} missing"));
+            assert!(r.foreign_receiver, "{want}: the implied type is not self");
+        }
+    }
+
+    #[test]
+    fn a_method_named_like_a_builtin_keeps_its_same_file_calls() {
+        let src = "<?php\nclass Validator {\n  public function required() { return $this->assert(fn() => true, 'x'); }\n  \
+                   public function assert(callable $c, string $m) { return $this; }\n}\n";
+        let calls = call_names("src/Validator.php", src);
+        assert!(calls.iter().any(|c| c == "assert"), "{calls:?}");
+        // A file that does not define it still treats it as the builtin.
+        let calls = call_names("src/Other.php", "<?php\nfunction f() { assert(true); }\n");
+        assert!(!calls.iter().any(|c| c == "assert"), "{calls:?}");
+    }
+
+    #[test]
+    fn csharp_directives_inside_expressions_do_not_lose_the_file() {
+        let src = "class T {\n\
+            static object A(bool f) {\n\
+                System.Func<object> g = () =>\n\
+            #if !SKIP\n\
+                    f ? Helper.Convert() :\n\
+            #endif\n\
+                    Helper.Fallback();\n\
+                return Build(f);\n\
+            }\n\
+            static object Build(bool f) { return null; }\n\
+            }\n";
+        let defs = def_names("T.cs", src);
+        assert!(
+            defs.iter().any(|(n, _)| n == "Build"),
+            "method after the directive lost: {defs:?}"
+        );
+        let calls = call_names("T.cs", src);
+        for want in ["Convert", "Fallback", "Build"] {
+            assert!(
+                calls.iter().any(|c| c == want),
+                "{want} missing from {calls:?}"
+            );
+        }
+        // Lines are preserved: `Build` is still defined on line 10 (0-based 9).
+        let b = extract_definitions(Path::new("T.cs"), src)
+            .into_iter()
+            .find(|d| d.name == "Build")
+            .unwrap();
+        assert_eq!(b.line_start, 9);
+    }
+
+    #[test]
+    fn cpp_qualified_template_calls_are_calls() {
+        let src = "void f() { detail::check_signed_range<T>(neg, v, t); a::b::convert<int>(x); \
+                   ns1::ns2::plain_call(1); ns1::ns2::ns3::deep_call(); single::level_call(); }";
+        let calls = call_names("x.hpp", src);
+        for want in [
+            "check_signed_range",
+            "convert",
+            "plain_call",
+            "deep_call",
+            "level_call",
+        ] {
+            assert!(
+                calls.iter().any(|c| c == want),
+                "{want} missing from {calls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_calls_inside_macros_are_calls() {
+        let src = "fn f() {\n\
+                   writeln!(out, \"{}\", recipe.spaced_path(a)).unwrap();\n\
+                   assert_eq!(compute_total(x), Some(3));\n\
+                   let v = vec![make_item(1), self.helper_fn(), items[0]];\n\
+                   }\n";
+        let refs = extract_refs(Path::new("src/lib.rs"), src);
+        let call = |n: &str| {
+            refs.iter()
+                .find(|r| matches!(r.edge_type, EdgeType::Calls) && r.target_name == n)
+        };
+        assert!(
+            call("spaced_path")
+                .expect("method call in writeln!")
+                .foreign_receiver
+        );
+        assert!(
+            !call("compute_total")
+                .expect("call in assert_eq!")
+                .foreign_receiver
+        );
+        assert!(!call("make_item").expect("call in vec!").foreign_receiver);
+        assert!(
+            !call("helper_fn")
+                .expect("self call in vec!")
+                .foreign_receiver
+        );
+        assert!(call("items").is_none(), "indexing is not a call");
+        let dsl = "fn t() { test! { tree: (justfile (call env_default (+ \"a\" \"b\"))), } }";
+        let refs = extract_refs(Path::new("src/parser.rs"), dsl);
+        assert!(
+            !refs.iter().any(|r| r.target_name == "env_default"),
+            "an S-expression in a macro is not a call"
+        );
+        assert!(
+            call("writeln").is_none() && call("vec").is_none(),
+            "macro names are not calls"
+        );
+    }
+
+    #[test]
+    fn member_function_assignments_are_definitions() {
+        let src = "res.sendStatus = function sendStatus(code) { return 1 }\n\
+                   exports.parseRange = (a) => a\n\
+                   Router.prototype.handle = function () {}\n\
+                   module.exports = function createApplication() {}\n\
+                   res.statusCode = 404\n";
+        for file in ["lib/response.js", "lib/response.ts"] {
+            let defs = def_names(file, src);
+            for want in ["sendStatus", "parseRange", "handle"] {
+                assert!(
+                    defs.contains(&(want.into(), NodeType::Function)),
+                    "{file}: {want} in {defs:?}"
+                );
+            }
+            for absent in ["exports", "statusCode"] {
+                assert!(
+                    !defs.iter().any(|(n, _)| n == absent),
+                    "{file}: {absent} in {defs:?}"
+                );
+            }
+        }
     }
 
     #[test]

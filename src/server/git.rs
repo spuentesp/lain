@@ -46,7 +46,14 @@ impl GitSensor {
         self.repo.head().is_ok()
     }
 
-    /// Get all tracked files in the repository, respecting .gitignore
+    /// Get all tracked files in the repository.
+    ///
+    /// Ignore rules are not applied: they only concern untracked files, and
+    /// git keeps a tracked file tracked whatever `.gitignore` says. Filtering
+    /// by them dropped real source — cJSON's `.gitignore` lists a bare
+    /// `test` (a build artifact), which matches every directory named
+    /// `test`, and 40-odd tracked files under `tests/unity/**/test/` were
+    /// never indexed.
     pub fn get_all_tracked_files(&self) -> Result<Vec<PathBuf>, LainError> {
         let mut files = Vec::new();
 
@@ -54,18 +61,24 @@ impl GitSensor {
         for entry in index.iter() {
             if let Ok(path) = std::str::from_utf8(&entry.path) {
                 let full_path = self.workspace.join(path);
-                if full_path.is_file() && !self.repo.is_path_ignored(Path::new(path))? {
+                if full_path.is_file() {
                     files.push(full_path);
                 }
             }
         }
 
-        info!("Found {} tracked files (gitignore filtered)", files.len());
+        info!("Found {} tracked files", files.len());
         Ok(files)
     }
 
-    /// Check if a file is ignored by .gitignore
+    /// Check if a file is ignored by .gitignore. A tracked file never is —
+    /// ignore rules only apply to untracked files — so the watcher still
+    /// sees edits to tracked files an ignore pattern happens to match.
     pub fn is_ignored(&self, path: &Path) -> Result<bool, LainError> {
+        let rel = path.strip_prefix(&self.workspace).unwrap_or(path);
+        if self.repo.index()?.get_path(rel, 0).is_some() {
+            return Ok(false);
+        }
         Ok(self.repo.is_path_ignored(path)?)
     }
 
@@ -398,9 +411,9 @@ impl GitSensor {
                 if !full_path.is_file() {
                     continue;
                 }
-                if !self.repo.is_path_ignored(Path::new(&file))? {
-                    files.insert(full_path);
-                }
+                // Committed, so tracked: ignore rules do not apply (see
+                // `get_all_tracked_files`).
+                files.insert(full_path);
             }
         }
         Ok(files.into_iter().collect())
@@ -717,7 +730,8 @@ impl AnyGitSensor {
         }
     }
 
-    /// Get all tracked files in the repository, respecting .gitignore.
+    /// Get all tracked files in the repository (ignore rules do not apply to
+    /// tracked files).
     pub fn get_all_tracked_files(&self) -> Result<Vec<PathBuf>, LainError> {
         match self {
             Self::InProcess(m) => m.lock().get_all_tracked_files(),
@@ -857,4 +871,62 @@ pub fn git_sensor_busy_error() -> LainError {
          call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)"
             .into(),
     )
+}
+
+#[cfg(test)]
+mod tracked_files_tests {
+    use super::*;
+
+    /// A tracked file stays tracked whatever `.gitignore` says — cJSON
+    /// ignores a bare `test` yet tracks `tests/unity/test/tests/*.c`.
+    #[test]
+    fn tracked_files_matching_an_ignore_rule_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".gitignore"), "test\n").unwrap();
+        std::fs::create_dir_all(root.join("tests/unity/test")).unwrap();
+        std::fs::write(
+            root.join("tests/unity/test/testunity.c"),
+            "void t(void) {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("lib.c"), "void l(void) {}\n").unwrap();
+        let repo = git2::Repository::init(root).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".gitignore")).unwrap();
+        index.add_path(Path::new("lib.c")).unwrap();
+        // `git add -f`: libgit2's add_path ignores ignore rules too.
+        index
+            .add_path(Path::new("tests/unity/test/testunity.c"))
+            .unwrap();
+        index.write().unwrap();
+        // An untracked file under the ignored name stays out.
+        std::fs::write(root.join("tests/unity/test/scratch.c"), "").unwrap();
+
+        let sensor = GitSensor::new(root).unwrap();
+        let files: Vec<String> = sensor
+            .get_all_tracked_files()
+            .unwrap()
+            .iter()
+            .map(|p| crate::server::graph::graph_path(root, p))
+            .collect();
+        assert!(
+            files.contains(&"tests/unity/test/testunity.c".to_string()),
+            "{files:?}"
+        );
+        assert!(files.contains(&"lib.c".to_string()), "{files:?}");
+        assert!(!files.iter().any(|f| f.ends_with("scratch.c")), "{files:?}");
+
+        // The watcher's ignore check agrees: edits to the tracked file count.
+        let ws = dunce::canonicalize(root).unwrap();
+        assert!(!sensor
+            .is_ignored(&ws.join("tests/unity/test/testunity.c"))
+            .unwrap());
+        assert!(!sensor
+            .is_ignored(Path::new("tests/unity/test/testunity.c"))
+            .unwrap());
+        assert!(sensor
+            .is_ignored(Path::new("tests/unity/test/scratch.c"))
+            .unwrap());
+    }
 }
