@@ -83,9 +83,20 @@ symbols in this codebase?"
   is the whole thing. No `repos.yaml`, no `workspaces.yaml`, no
   flags. The binary walks up for `.git` and serves.
 
-### Recipe: add lain to Claude Code
+### Recipe: connect your agent with `lain setup`
 
-Add to `.mcp.json` in your repo (or your global `~/.claude.json`):
+The fastest way to configure your AI agent is `lain setup`:
+
+```bash
+lain setup --agent <claude-code|cursor|vscode|continue|codex|generic>
+```
+
+- **Claude Code:** `lain setup --agent claude-code` (configures `.mcp.json` or runs `claude mcp add`).
+- **Cursor:** `lain setup --agent cursor` (writes `~/.cursor/mcp.json`, preserving other servers).
+- **VS Code:** `lain setup --agent vscode` (updates `.vscode/mcp.json` if present, or user-scoped config).
+- **Continue.dev:** `lain setup --agent continue` (updates `~/.continue/config.json`).
+- **Codex:** `lain setup --agent codex` (runs `codex mcp add` or edits `$CODEX_HOME/config.toml`).
+- **Generic / Kimi:** `lain setup --agent generic` writes standard `.mcp.json`:
 
 ```json
 {
@@ -98,140 +109,8 @@ Add to `.mcp.json` in your repo (or your global `~/.claude.json`):
 }
 ```
 
-Restart Claude Code. On the first turn it indexes; on the second
-turn, ask "what calls `parse_input`?" and you should see a
-`mcp__lain__get_blast_radius` call in the tool trace.
+Restart your editor/agent. On the first turn it indexes; on later turns it queries in milliseconds.
 
-**Verification:** `lain --version` reports a version, the agent
-sees `mcp__lain__*` tools, and the first call to any tool returns
-in under a second after the first index completes.
-
-**Pitfalls:** first call after install is the re-index — wait it
-out, then query. If `get_health` says `Status: Degraded`, raise
-`LAIN_REINDEX_TIMEOUT` (default 300s) and restart.
-
-### Recipe: add lain to Kimi Code
-
-The Kimi plugin shim under `npm-shim/` wraps the same `lain mcp`
-binary. Install:
-
-```bash
-npm install -g @spuentesp/lain-mcp
-```
-
-Then add to your Kimi MCP config:
-
-```json
-{ "mcpServers": { "lain": { "command": "lain", "args": ["mcp"] } } }
-```
-
-The npm package exists for hosts that prefer to install via npm;
-it downloads the same prebuilt binary that `install.sh` does.
-
-**Verification:** `lain --version` works, Kimi sees the tools.
-
-**Pitfalls:** if `npm install` warns about `postinstall`, that is
-the binary download — it is expected. Allow it.
-
-### Recipe: add lain to Cursor / VS Code Copilot / Continue.dev
-
-The MCP config schema is the same across these hosts. For each,
-locate the MCP servers setting and add:
-
-```json
-{
-  "lain": {
-    "command": "lain",
-    "args": ["mcp"]
-  }
-}
-```
-
-**Cursor:** `Settings` → `Cursor Settings` → `MCP` → `Add new
-global MCP server`. Paste the JSON.
-
-**VS Code Copilot:** `.vscode/mcp.json` in the workspace, or the
-Copilot Chat MCP settings UI.
-
-**Continue.dev:** `~/.continue/config.json` under
-`"experimental.modelContextProtocolServers"`.
-
-**Verification:** each host lists `lain` (or `mcp__lain__*`)
-tools in its tool picker.
-
-**Pitfalls:** some hosts cache the tool list per workspace; if
-you change the binary version, restart the host to force a refresh.
-
-### Recipe: add lain to Cursor
-
-```bash
-lain setup --agent cursor
-```
-
-Writes `~/.cursor/mcp.json` with the standard `mcpServers.lain`
-entry, preserving every other setting. Cursor reads that file
-directly — no CLI to shell out to. Verification: open Cursor,
-navigate to Settings → MCP, the `lain` server should appear as
-`connected` after the first agent turn.
-
-### Recipe: add lain to VS Code
-
-```bash
-lain setup --agent vscode
-```
-
-Resolves the config path as follows:
-1. If `<workspace>/.vscode/mcp.json` exists, the adapter edits
-   it in place (project-scoped — what the dev team committed).
-2. Otherwise writes to the user-scoped path
-   (`$XDG_CONFIG_HOME/Code/User/mcp.json` on Linux,
-   `~/Library/Application Support/Code/User/mcp.json` on macOS,
-   `%APPDATA%\Code\User\mcp.json` on Windows).
-
-The user-scoped path is what VS Code reads for MCP servers
-declared via the Settings UI. The adapter never silently
-overwrites a project-scoped config — if you committed one
-deliberately, that's the file that gets edited.
-
-Verification: in VS Code, run `MCP: List Servers` from the
-command palette; `lain` should appear with a green status.
-
-### Recipe: add lain to Continue.dev
-
-```bash
-lain setup --agent continue
-```
-
-Writes `~/.continue/config.json` under
-`experimental.modelContextProtocolServers` (an array of MCP
-server entries, one per editor integration). The adapter
-deduplicates by `name`: any existing `lain` entry is replaced
-by the freshly-configured one, and every other entry is left
-intact.
-
-Verification: open Continue, the `lain` model-context-protocol
-server should appear in the model dropdown.
-
-### Recipe: add lain to Codex
-
-```bash
-lain setup --agent codex
-```
-
-If the `codex` CLI is on `PATH`, the adapter shells out to it:
-
-```bash
-codex mcp add lain -- /usr/bin/lain mcp
-```
-
-This delegates JSON editing to the editor's own CLI rather than
-reimplementing safe-edit logic here. When the CLI isn't available,
-the adapter falls back to a direct edit of `$CODEX_HOME/config.toml`
-(or `~/.codex/config.toml` if `CODEX_HOME` is unset), preserving
-every other `[mcp_servers.*]` table.
-
-Verification: `codex mcp list` shows the `lain` server; opening
-Codex, the MCP tool picker exposes `mcp__lain__*`.
 
 ### Recipe: first useful query after install
 

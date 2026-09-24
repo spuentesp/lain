@@ -484,188 +484,36 @@ a precise measurement.
 
 ## Troubleshooting
 
-The errors below are the ones the implementation actually produces.
-Each entry lists the literal error text, what it means, and what to do.
+### Common errors
 
-### `NotFound: symbol <name> not found in any repo`
+| Error | Cause | Remediation |
+|---|---|---|
+| `NotFound: symbol <name> not found...` | Repo still indexing or symbol absent | Verify `list_repos` health is `ready`; check short name |
+| `AmbiguousSymbol` | Multiple repos own identical function name | Disambiguate by supplying `repo_id` from error candidates |
+| `NotFound: repo <id>` / `Invalid repo id` | Id is unregistered or invalid (empty, contains `:`, `/`) | Check `list_repos` for canonical spelling |
+| `NotFound: symbol <name> in repo <id>` | Specified repo does not define the symbol | Use `search_org` to locate owning repo |
+| `Config: no repos registered` / `multiple repos` | Empty config or missing required `repo_id`/`symbol` | Check `repos.yaml` or provide disambiguating argument |
+| `Config: yaml: ...` | Configuration parsing error | Check indentation, `id`, and `source.type` syntax |
+| `Invalid argument: ...` / `Invalid depth: ...` | Malformed limit or depth (`<start>..<end>`) | Format depth as `"1..3"` (exclusive end); limit as positive integer |
+| `truncated: true` | Traversal hit 1000-node cap | Decrease `depth` or use `search_org` first |
 
-The symbol isn't in the federation's `symbol_to_repos` index nor in the
-backend's `find_nodes_by_name` fallback. Common causes:
+### Repository health states
 
-- The repo that owns the symbol hasn't finished indexing yet. Check
-  `list_repos` and confirm the owning repo's `health` is `ready`.
-- The repo isn't registered in `repos.yaml`. Check `list_repos` —
-  every registered repo should be present even when degraded.
-- The symbol has a different name than expected (e.g. fully-qualified
-  vs. short name). `resolve_symbol` matches on the short name only.
+- **`indexing`**: initial state; transitions to `ready` upon completion.
+- **`degraded`**: `index()` failed; check server logs for language server binary or permission issues.
+- **`unavailable`**: source `fetch()` failed (e.g., unreachable remote).
+- **`missing`**: expected repository data directory is missing.
 
-### `AmbiguousSymbol`
+### Git sensor & sidecar troubleshooting
 
-Multiple repos own a function with the same name. The tool result will
-include a JSON payload of shape:
+Git operations run via the `lain-git-sidecar` child daemon by default (2 s IPC timeout, automatic bounded recovery).
 
-```json
-{
-  "error": "ambiguous_symbol",
-  "candidates": ["bytes", "tokio"],
-  "message": "Multiple repos match this symbol; specify repo_id or disambiguate."
-}
-```
-
-**Action:** present the candidates to the user, then re-call with an
-explicit `repo_id` (or use `get_cross_repo_blast_radius_for_repo`).
-
-### `NotFound: repo <id>`
-
-The caller passed a well-formed `repo_id` that isn't registered. Only
-raised by `get_repo_info` — the cross-repo blast-radius tools don't look
-up by registration; they filter by the `repo_id` prefix on the symbol
-search. Check `list_repos` for the canonical id spelling.
-
-### `Invalid repo id: <id>`
-
-The caller passed a `repo_id` that fails `RepoId::new`'s validation
-(empty string, contains `:`, or contains `/`). Raised by any tool that
-validates the `repo_id` directly: `get_repo_info`,
-`get_cross_repo_blast_radius_for_repo`, and the per-repo tool resolver
-(`resolve_repo_for_tool`). Fix the id to match `RepoId`'s rules and
-retry.
-
-### `NotFound: symbol <name> not found in repo <id>`
-
-Only raised by `get_cross_repo_blast_radius_for_repo`. The repo is
-registered but doesn't own a symbol with that name. Check
-`get_repo_info(<repo_id>)` to confirm the repo is `ready`, then
-`search_org` to find what the repo does own.
-
-### `Config: no repos registered`
-
-The federation has zero repos but a tool that needs repo resolution was
-called. The config file was either empty or failed to load. Check the
-server logs for the load error.
-
-### `Config: multiple repos; specify repo_id or symbol`
-
-A tool that needs repo resolution was called without `repo_id` or
-`symbol` and the federation has more than one repo. The agent must
-either pass one of those args or present the user with a list.
-
-### `Config: yaml: <serde_yaml error>`
-
-The `repos.yaml` failed to parse. Common causes: bad indentation,
-unknown `source.type`, missing `id` or `source`. See
-[`docs/REPOS_YAML.md`](REPOS_YAML.md) for the schema.
-
-### `Missing required argument: <name>`
-
-The tool's args object didn't include a required key. The tool's name
-appears in the literal error text. Re-call with the missing key.
-
-### `Invalid argument: limit must be a non-negative integer`
-
-`search_org` was called with a `limit` that's not a non-negative
-integer (or a string that fails to parse as one). Pass `limit` as a
-JSON number (or a string of digits).
-
-### `Invalid depth: expected "<start>..<end>", got "<input>"`
-
-`get_cross_repo_blast_radius*` was called with a `depth` that isn't a
-`Range<u32>` literal of the form `"<start>..<end>"`. The trailing
-`got "<input>"` echoes the offending value (debug-quoted) so you can
-see what the parser saw. The end is **exclusive**. For example,
-`depth: "1..3"` traverses depth 1 and 2 only.
-
-### Repo stuck in `indexing` / `degraded` / `unavailable` / `missing`
-
-The federation still serves partial results when some repos are
-unhealthy — `get_federation_health` reports counts per bucket, and
-`list_repos` reports per-repo health. Watch the server logs:
-
-- `indexing` — initial state; should transition to `ready` once
-  `RepoIndex::index()` completes. If it lingers, check the per-repo
-  data dir and the `data_dir` write permissions.
-- `degraded` — `RepoIndex::index()` returned an error. The server logs
-  the underlying error. Common causes: language-server binary not on
-  `PATH` (LSP hydration is best-effort), permission errors, disk full.
-- `unavailable` — the source's `fetch()` failed (e.g. shallow clone
-  couldn't reach the remote). The repo is registered but unindexable
-  on this run.
-- `missing` — the repo's expected data directory is gone. Check that
-  `data_dir/<id>` still exists and is readable.
-
-### `lain server` exits immediately
-
-- `Config: yaml: ...` — bad config. Validate the YAML with
-  `cargo test --lib config` (the unit tests in `src/federation/config.rs`
-  cover the schema).
-- `Io: read config: ...` — config file not found at `--config`. Check
-  the path.
-- `unknown transport: <x> (expected 'http' or 'stdio')` — `--transport`
-  must be `http` or `stdio`.
-
-### `truncated: true` on a blast-radius result
-
-The traversal hit the 1000-node cap. Re-call with a smaller `depth`,
-a different seed, or use `search_org` first to confirm the symbol
-exists in exactly one repo and isn't a high-fanout hub.
-
-### Repo `degraded` with `Other: GitSensor mutex held by another thread; a prior index() call may be wedged in libgit2 (Bug #2, 2026-09-18 postmortem)`
-
-A libgit2 call (`repo.head()`, packed-refs read, etc.) inside a
-prior `RepoIndex::index()` wedged — typically because the underlying
-filesystem was slow or the working tree is on a path libgit2 can't
-handle cleanly (large monorepo, NFS, virtualized FS). The
-parking_lot `GitSensor` mutex stays held by the stuck
-`spawn_blocking` thread. Every subsequent watcher-triggered
-`index_forced()` call would block forever on `lock()` (pre-fix
-Bug #2 from the 2026-09-18 Tauri federation trial).
-
-**Mitigation (already shipped):** `build_core_memory` uses
-`try_lock` in its offthread closures, so the new call fails fast
-with this exact error string, `repo.index()` returns the error, and
-the federation demotes the repo to `degraded` instead of hanging
-the process. The original stuck `spawn_blocking` thread is left to
-finish when libgit2 returns; this is a mitigation, not a root-cause
-fix (libgit2 is fundamentally non-cancellable from Rust).
-
-**Watchdog (added shortly after the mitigation):** `LainServer`
-also spawns a watchdog task that probes the parking_lot `GitSensor`
-mutex with `try_lock` every 5 s. If the mutex has been continuously
-held for longer than `LAIN_GIT_SENSOR_BUSY_THRESHOLD_SECS`
-(default 30 s, well below the 60 s `index_timeout()` budget), the
-watchdog emits a single `tracing::warn!` per hold with the elapsed
-time and a pointer to `scripts/debug-hung-server.sh`. Operators see
-the hang at ~30 s instead of waiting the full 5-minute budget. The
-warning is `warned`-once: cleared when the mutex is observed free, so
-a single transient hold doesn't spam the log.
-
-**Current behavior on `dev`:** Git operations use the
-`lain-git-sidecar` child process by default. Each IPC call has a 2 s
-timeout; a failed call tears down the child, respawns it, and retries
-once. Recovery is bounded to three respawns in 30 s so a persistent
-failure returns an error instead of creating a restart loop. Set
-`LAIN_GIT_SENSOR=in_process` only when diagnosing or working around a
-sidecar-specific problem.
-
-**Action:**
-
-- Check `get_health` or `get_capabilities`. Sidecar telemetry includes
-  `alive`, `child_pid`, recent respawns, consecutive failures, and the
-  last call duration. A dead sidecar degrades health and subsequent Git
-  calls attempt bounded recovery.
-- For diagnosis, run `scripts/debug-hung-server.sh <repos.yaml>`.
-  The script launches `lain server` with `--log-level debug
-  --reindex-timeout 0`, captures the log, polls for the
-  tell-tale milestone signatures, and dumps `/proc/<pid>/{wchan,
-  status,stack}` if the process appears wedged so you can see which
-  syscall each thread is stuck on.
-- The repo's `last_index_error` (visible via `get_repo_info`)
-  carries the same error string; this is the persistent record of
-  what libgit2 was doing when it wedged. Pair it with
-  `/proc/<pid>/wchan` from a stuck run to file a useful upstream
-  issue if the hang reproduces on a non-Tauri repo.
+- Check `get_health` or `get_capabilities`: sidecar telemetry reports `alive`, `child_pid`, and failure metrics.
+- Set `LAIN_GIT_SENSOR=in_process` only when diagnosing sidecar-specific issues.
+- For deep diagnosis of wedged processes, use `scripts/debug-hung-server.sh <repos.yaml>`.
 
 ---
+
 
 ## Workspaces
 
