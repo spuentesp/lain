@@ -661,6 +661,7 @@ impl LainServer {
         // token never cancels its parent; cancelling the parent
         // cancels every child.
         let nlp_cancel: CancellationToken = cancel.child_token();
+        let nlp_readiness = self.readiness().clone();
         tokio::spawn(async move {
             if nlp_cancel.is_cancelled() {
                 return;
@@ -677,6 +678,26 @@ impl LainServer {
             let (prewarm_nodes, rest_nodes) = anchors.split_at(prewarm_count);
             let prewarm: Vec<_> = prewarm_nodes.iter().map(|(_, n)| n.clone()).collect();
             let rest: Vec<_> = rest_nodes.iter().map(|(_, n)| n.clone()).collect();
+
+            let already = anchors
+                .iter()
+                .filter(|(_, n)| n.embedding.is_some())
+                .count();
+            // `total` drops for symbols that vanish before the pass reaches
+            // them (replaced by a concurrent update): they cannot be
+            // embedded, and counting them left coverage looking short.
+            let progress = |embedded: usize, total: usize, running: bool| {
+                nlp_readiness.update(|s| {
+                    s.embeddings = Some(crate::server::readiness::EmbeddingProgress {
+                        embedded: embedded as u64,
+                        total: total as u64,
+                        running,
+                    });
+                });
+            };
+            let mut embedded = already;
+            let mut total = anchors.len();
+            progress(embedded, total, true);
 
             info!("NLP pre-warming {} anchor nodes...", prewarm.len());
             let mut count = 0;
@@ -723,6 +744,8 @@ impl LainServer {
                                 gn.embedding = Some(json);
                                 if graph_clone.insert_node(&gn).is_ok() {
                                     count += 1;
+                                    embedded += 1;
+                                    progress(embedded, total, true);
                                 }
                             }
                             Err(e) => warn!(
@@ -732,6 +755,9 @@ impl LainServer {
                             ),
                         }
                     }
+                } else {
+                    total = total.saturating_sub(1);
+                    progress(embedded, total, true);
                 }
             }
             info!(
@@ -790,6 +816,9 @@ impl LainServer {
                                     // code that is plainly there.
                                     if let Err(e) = graph_clone.insert_node(&gn) {
                                         warn!("embedding not stored for {}: {e}", gn.name);
+                                    } else {
+                                        embedded += 1;
+                                        progress(embedded, total, true);
                                     }
                                 }
                                 Err(e) => {
@@ -797,10 +826,14 @@ impl LainServer {
                                 }
                             }
                         }
+                    } else {
+                        total = total.saturating_sub(1);
+                        progress(embedded, total, true);
                     }
                 }
                 budget = budget.saturating_sub(batch_len);
             }
+            progress(embedded, total, false);
             info!("NLP lazy enrichment pass complete.");
         });
 

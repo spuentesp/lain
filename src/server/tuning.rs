@@ -99,7 +99,11 @@ pub struct IngestionConfig {
     pub nlp_prewarm_count: usize,
     /// NLP background: nodes embedded per batch chunk.
     pub nlp_batch_size: usize,
-    /// NLP background: max nodes embedded per interval pass (backpressure).
+    /// NLP background: max nodes embedded by the pass that follows each
+    /// index build. The default covers every symbol. It used to be 20,
+    /// and since there is one pass per build, not one per interval, the
+    /// rest were embedded only as a side effect of queries (200 per call):
+    /// semantic search ranked a history-dependent subset of the code.
     pub nlp_budget_per_pass: usize,
     /// NLP: cap on intra-op threads per embedding call. 0 = auto-detect
     /// (uses min(system cores, 4) — 4 is enough for bge-small/bge-base
@@ -161,7 +165,7 @@ impl Default for IngestionConfig {
             cochange_min_pair_count: 2,
             nlp_prewarm_count: 20,
             nlp_batch_size: 50,
-            nlp_budget_per_pass: 20,
+            nlp_budget_per_pass: 1_000_000,
             nlp_max_threads: 0, // 0 = auto-detect (min(cores, 4))
             lsp_prewarm_timeout_secs: 30,
             lsp_prewarm_max_files: 50,

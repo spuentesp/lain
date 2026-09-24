@@ -554,6 +554,7 @@ impl ToolExecutor {
             structural: CapabilityState,
             retry_after_ms: Option<u64>,
             semantic_stub: bool,
+            embeddings_running: bool,
         ) -> Capabilities {
             let mut symbols = Capability::new(structural, false);
             let mut call_graph = Capability::new(structural, false);
@@ -563,6 +564,12 @@ impl ToolExecutor {
             }
             let semantic_search = if semantic_stub {
                 Capability::new(CapabilityState::UnavailableOptional, true)
+            } else if structural == CapabilityState::Ready && embeddings_running {
+                // Answers already, but from a partial embedding set that
+                // keeps changing until the background pass ends.
+                let mut c = Capability::new(CapabilityState::WarmingUp, true);
+                c.retry_after_ms = Some(5_000);
+                c
             } else {
                 Capability::new(structural, true)
             };
@@ -575,6 +582,12 @@ impl ToolExecutor {
         }
 
         let semantic_stub = self.ctx.embedder.is_stub();
+        let embeddings_running = self
+            .ctx
+            .readiness
+            .snapshot()
+            .embeddings
+            .is_some_and(|e| e.running);
 
         // Federation mode: each repo owns its own RepoHealth, so
         // `capabilities` (kept for backward compatibility) becomes the
@@ -610,7 +623,12 @@ impl ToolExecutor {
                         worst = structural;
                         worst_retry_after_ms = snapshot.retry_after_ms;
                     }
-                    let caps = capabilities_for(structural, snapshot.retry_after_ms, semantic_stub);
+                    let caps = capabilities_for(
+                        structural,
+                        snapshot.retry_after_ms,
+                        semantic_stub,
+                        embeddings_running,
+                    );
                     let r = readiness_by_id.get(id);
                     serde_json::json!({
                         "id": id.as_str(),
@@ -625,7 +643,12 @@ impl ToolExecutor {
                     })
                 })
                 .collect();
-            let aggregate = capabilities_for(worst, worst_retry_after_ms, semantic_stub);
+            let aggregate = capabilities_for(
+                worst,
+                worst_retry_after_ms,
+                semantic_stub,
+                embeddings_running,
+            );
 
             return serde_json::to_string(&serde_json::json!({
                 "schema_version": SCHEMA_VERSION,
@@ -639,7 +662,12 @@ impl ToolExecutor {
 
         let lifecycle = self.ctx.readiness.snapshot();
         let structural = structural_state(lifecycle.state);
-        let capabilities = capabilities_for(structural, lifecycle.retry_after_ms, semantic_stub);
+        let capabilities = capabilities_for(
+            structural,
+            lifecycle.retry_after_ms,
+            semantic_stub,
+            embeddings_running,
+        );
         // Surface the active tool profile so an agent can self-
         // discover whether it's running on the curated Semantic
         // surface or the full 80-tool surface. An agent that
