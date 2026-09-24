@@ -3851,7 +3851,10 @@ mod tests {
         let gated = gate_for_dispatch(&executor, Some(&fed), "query_graph", &args)
             .expect("query_graph on alpha must gate while alpha is indexing");
         assert_eq!(gated.blocking_repos, vec!["alpha"]);
-        args.insert("repo_id".into(), serde_json::Value::String("ready-repo".into()));
+        args.insert(
+            "repo_id".into(),
+            serde_json::Value::String("ready-repo".into()),
+        );
         assert!(gate_for_dispatch(&executor, Some(&fed), "query_graph", &args).is_none());
     }
 
