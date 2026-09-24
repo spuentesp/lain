@@ -1140,13 +1140,6 @@ const SELF_LIKE: &[&str] = &[
     "self", "this", "cls", "super", "Self", "$this", "base", "parent", "static",
 ];
 
-fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
-    matches!(
-        call_receiver(name, src_bytes),
-        Receiver::Foreign | Receiver::Qualified(_)
-    )
-}
-
 /// The receiver of the call whose callee name is `name`.
 pub(crate) fn call_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> Receiver {
     const RECEIVER_FIELDS: &[&str] = &[
@@ -1463,6 +1456,21 @@ fn container_of(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
                 stack.extend(n.children(&mut c));
             }
         }
+        // Kotlin extension function: `fun ArgParser.avoidProcessExit()` is
+        // called as `parser.avoidProcessExit()`, a member of its receiver
+        // type. As a container-less "free function" the resolver dropped
+        // every such call made through a receiver.
+        "function_declaration" => {
+            let mut c = node.walk();
+            let kids: Vec<_> = node.children(&mut c).collect();
+            if let Some(dot) = kids.iter().position(|k| k.kind() == ".") {
+                if let Some(recv) = dot.checked_sub(1).map(|i| kids[i]) {
+                    if matches!(recv.kind(), "user_type" | "nullable_type") {
+                        return text(recv).and_then(base);
+                    }
+                }
+            }
+        }
         // C++: `void Foo::bar() {}` outside the class.
         "function_definition" => {
             let mut d = node.child_by_field_name("declarator");
@@ -1472,7 +1480,15 @@ fn container_of(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
                         return text(scope).and_then(base);
                     }
                 }
-                d = n.child_by_field_name("declarator");
+                // `int& Foo::bar()`: a reference declarator holds the
+                // function declarator as a plain child, not a field.
+                d = n.child_by_field_name("declarator").or_else(|| {
+                    let mut c = n.walk();
+                    let next = n
+                        .named_children(&mut c)
+                        .find(|k| k.kind().ends_with("declarator"));
+                    next
+                });
             }
         }
         _ => {}
@@ -2109,12 +2125,14 @@ export class Ky {
              &[("new", Some("Registry"))]),
             ("a.go", "package p\ntype Server struct{}\nfunc (s *Server) Refresh() {}\nfunc Free() {}\n",
              &[("Refresh", Some("Server")), ("Free", None)]),
-            ("a.cpp", "class Foo { void inl() {} };\nvoid Foo::bar() {}\nvoid free_fn() {}\n",
-             &[("inl", Some("Foo")), ("bar", Some("Foo")), ("free_fn", None)]),
+            ("a.cpp", "class Foo { void inl() {} };\nvoid Foo::bar() {}\nvoid free_fn() {}\nint const& Foo::ref() const { return x; }\nint* Foo::ptr() { return 0; }\n",
+             &[("inl", Some("Foo")), ("bar", Some("Foo")), ("free_fn", None), ("ref", Some("Foo")), ("ptr", Some("Foo"))]),
             ("a.ts", "class Widget { render() {} }\nfunction render2() {}\n",
              &[("render", Some("Widget")), ("render2", None)]),
             ("a.rb", "class Tree\n  def walk(v)\n  end\nend\n", &[("walk", Some("Tree"))]),
             ("b.py", "class C:\n    def run(self):\n        def inner():\n            pass\n", &[("run", Some("C")), ("inner", None)]),
+            ("a.kt", "fun ArgParser.quiet() = 1\nfun <T> List<T>.second(): T = this[1]\nfun top() {}\n",
+             &[("quiet", Some("ArgParser")), ("second", Some("List")), ("top", None)]),
         ];
         for (file, src, want) in cases {
             let defs = extract_definitions(Path::new(file), src);

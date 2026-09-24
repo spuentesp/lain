@@ -210,11 +210,19 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
             .pointer("/result/content/0/text")
             .and_then(|v| v.as_str())
             .and_then(|text| serde_json::from_str::<Value>(text).ok());
-        let is_warming_up = gate_envelope
-            .as_ref()
-            .and_then(|v| v.get("state"))
-            .and_then(|s| s.as_str())
-            == Some("warming_up");
+        // An ungated tool answers mid-index with a partial result and a
+        // "still indexing" note. A persistent client can ask again later;
+        // a one-shot cannot, so wait for the whole index like the gate does.
+        let partial = response
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t.contains(crate::server::mcp::handler::INDEXING_NOTE_MARKER));
+        let is_warming_up = partial
+            || gate_envelope
+                .as_ref()
+                .and_then(|v| v.get("state"))
+                .and_then(|s| s.as_str())
+                == Some("warming_up");
         if !is_warming_up {
             break response;
         }
