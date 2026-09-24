@@ -261,6 +261,9 @@ fn federation_health_report(fed: &FederatedIndex) -> String {
         h.total_nodes,
         h.total_edges,
     );
+    for (repo, error) in fed.load_errors() {
+        out.push_str(&format!("- **{repo}**: not loaded — {error}\n"));
+    }
     for r in list_repos(fed) {
         out.push_str(&format!(
             "- **{}**: {} — {} nodes, {} edges{}\n",
