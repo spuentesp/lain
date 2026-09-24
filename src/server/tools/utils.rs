@@ -184,10 +184,10 @@ pub fn resolve_node_ambiguous(
     overlay: &VolatileOverlay,
     handle: &str,
 ) -> Result<(GraphNode, Vec<GraphNode>), LainError> {
-    let node = resolve_node(graph, overlay, handle)?;
+    let mut node = resolve_node(graph, overlay, handle)?;
     // Only a bare-name lookup can be ambiguous: an id or a path already
     // names one node.
-    let others: Vec<GraphNode> = if node.name == handle {
+    let mut others: Vec<GraphNode> = if node.name == handle {
         graph
             .find_all_nodes_by_name(handle)
             .into_iter()
@@ -196,6 +196,24 @@ pub fn resolve_node_ambiguous(
     } else {
         Vec::new()
     };
+    // These tools ask about a symbol. When a container shares its name —
+    // Rust's `mod tangle;` beside `fn tangle` — answer about the symbol:
+    // "who calls the module `tangle`" has no answer.
+    let is_container = |n: &GraphNode| {
+        matches!(
+            n.node_type,
+            crate::schema::NodeType::Module
+                | crate::schema::NodeType::Namespace
+                | crate::schema::NodeType::Package
+                | crate::schema::NodeType::File
+        )
+    };
+    if is_container(&node) {
+        if let Some(i) = others.iter().position(|n| !is_container(n)) {
+            let symbol = others.remove(i);
+            others.insert(0, std::mem::replace(&mut node, symbol));
+        }
+    }
     Ok((node, others))
 }
 

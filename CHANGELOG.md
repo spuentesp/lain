@@ -32,6 +32,29 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- Who-calls accuracy, measured on 30 symbols per language against a
+  textual oracle with every disagreement reviewed by hand
+  (`scripts/acceptance/breadth.py`): all 14 languages now agree. Fixed
+  along the way:
+  - tracked files matching a `.gitignore` pattern were never indexed
+    (cJSON ignores `test`, dropping 40-odd tracked files), and edits to
+    them were ignored by the watcher;
+  - JavaScript `obj.method = function …` / `exports.fn = …` definitions
+    (all of Express's `app`/`res` API) were not indexed;
+  - Rust calls inside macros (`format!`, `assert_eq!`, `vec!`, …);
+  - C/C++ calls inside `#define` bodies; `ns1::ns2::f()` and
+    `ns::f<T>()` calls; definitions after an attribute macro on its own
+    line (`CXXOPTS_NODISCARD`);
+  - C# files with `#if` inside an expression parsed as one error and lost
+    every method after it;
+  - Swift implicit-member calls (`.basicAuth()`);
+  - a method named like a builtin (`$this->assert(…)`) lost its calls;
+  - Ruby core methods (`include?`, `each_value`, …) called on other
+    objects linked to same-named repo methods;
+  - a call never resolves to a module (`mod tangle;` hid `fn tangle`),
+    and symbol tools prefer the symbol over a same-named module;
+  - `get_call_sites` skipped any line starting with `fn ` as a Rust
+    definition, including Python's `fn = guess_filename(v)`.
 - Semantic search ranked a history-dependent subset of the code: the
   background embedding pass stopped after 20 symbols (one pass per build,
   budget 20), and the rest were embedded only as a side effect of

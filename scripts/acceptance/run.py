@@ -44,14 +44,25 @@ class Mcp:
         # `lain mcp` finds its repository from the *agent host's* working
         # directory (its parent process), so start it from inside the
         # project, as a host running in that project would.
+        #
+        # Stay there until the server has answered `initialize`: it reads
+        # /proc/$PPID/cwd while starting up, and changing back right after
+        # the spawn raced it — it then indexed whatever directory this
+        # process had returned to.
         with in_dir(cwd):
             self.p = subprocess.Popen([lain, "mcp"], cwd=cwd, env=env, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        self.id = 0
-        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
-                                "clientInfo": {"name": "acceptance", "version": "1"}})
-        self.p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
-        self.p.stdin.flush()
+            self.id = 0
+            self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                    "clientInfo": {"name": "acceptance", "version": "1"}})
+            self.p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+            self.p.stdin.flush()
+            health = self.call("get_health", {})
+        m = re.search(r"\*\*Workspace:\*\* (.+)", health)
+        got = os.path.realpath(m.group(1).strip()) if m else None
+        if got != os.path.realpath(cwd):
+            self.close()
+            raise RuntimeError(f"lain mcp indexed {got}, not {cwd}")
 
     def rpc(self, method, params):
         self.id += 1
