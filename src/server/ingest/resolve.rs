@@ -493,10 +493,19 @@ pub fn resolve_static_edges(
                         && container_of(id) == source_container
                 })
                 .collect();
+            // A type is not a free function: `new Foo(x)` names both the
+            // class and its constructor, and preferring the class as the
+            // "free" candidate hid the constructor's callers.
             let free: Vec<_> = candidates
                 .iter()
                 .copied()
-                .filter(|(id, _, _)| container_of(id).is_none())
+                .filter(|(id, ty, _)| {
+                    container_of(id).is_none()
+                        && matches!(
+                            ty,
+                            crate::schema::NodeType::Function | crate::schema::NodeType::Method
+                        )
+                })
                 .collect();
             if !own.is_empty() {
                 own
@@ -1118,6 +1127,39 @@ mod ambiguous_name_tests {
         let mut s = call_at("app.py", 9, "load");
         s.self_receiver = true;
         assert_eq!(targets(&db, &[s]), vec![method_id]);
+    }
+
+    /// `new Widget(x)` in another file names the class and its
+    /// constructor; the class must not win as a "free" candidate.
+    #[test]
+    fn a_constructor_call_reaches_the_constructor() {
+        let db = fresh("lain_resolve_ctor");
+        let ns = crate::schema::RepoNamespace::for_test();
+        let class = GraphNode::new(NodeType::Class, "Widget".into(), "Widget.cs".into())
+            .with_location_in(0, 20, &ns);
+        let ctor = def_in("Widget", "Widget.cs", (2, 5), Some("Widget"));
+        let caller = def_in("Build", "App.cs", (0, 9), Some("App"));
+        let ctor_id = ctor.id.clone();
+        for n in [class, ctor, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        assert!(targets(&db, &[call_at("App.cs", 3, "Widget")]).contains(&ctor_id));
+    }
+
+    /// `Self::new(src).tokenize()` inside `Lexer::lex` reaches the
+    /// same file's `Lexer::tokenize`.
+    #[test]
+    fn a_call_on_a_constructed_value_reaches_the_same_files_method() {
+        let db = fresh("lain_resolve_same_file_method");
+        let method = def_in("tokenize", "lexer.rs", (10, 12), Some("Lexer"));
+        let caller = def_in("lex", "lexer.rs", (2, 4), Some("Lexer"));
+        let method_id = method.id.clone();
+        for n in [method, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        let mut r = call_at("lexer.rs", 3, "tokenize");
+        r.foreign_receiver = true;
+        assert_eq!(targets(&db, &[r]), vec![method_id]);
     }
 
     /// `Registry::new()` is Registry's `new`; `String::new()` is not.

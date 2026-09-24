@@ -184,6 +184,14 @@
    "side": "missing",
    "verdict": "oracle",
    "reason": "Vec/HashSet::extend calls, not Tree::extend"
+  },
+  {
+   "lang": "Java",
+   "symbol": "joining",
+   "file": "src/test/java/com/squareup/javapoet/CodeBlockTest.java",
+   "side": "missing",
+   "verdict": "oracle",
+   "reason": "CodeBlock.joining(\" || \") calls CodeBlock's static joining (a generic method the oracle's regex misses), not the test method of the same name"
   }
  ]
 }

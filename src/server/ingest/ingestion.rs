@@ -1559,7 +1559,6 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
     }
-    let mut all_static_refs = all_static_refs;
     if last_commit.is_some() && !force {
         let tracked = git.get_all_tracked_files().unwrap_or_default();
         all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));

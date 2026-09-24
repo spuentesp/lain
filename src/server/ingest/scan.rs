@@ -299,6 +299,7 @@ pub async fn scan_file_structure(
             Err(e) => return Err(e),
         };
         apply_attribute_labels(&ts.defs, &mut nodes);
+        apply_tree_sitter_containers(&ts.defs, &mut nodes);
         let path_str = relative_path.clone();
         let static_refs: Vec<StaticFileRef> = ts
             .static_refs
@@ -377,6 +378,30 @@ pub async fn scan_file_batch(
 /// [`extract_tree_sitter_file`]) so this function stays sync and
 /// trivially callable from tests. The offthread boundary lives at
 /// the caller side where the cancel token can be observed.
+/// The type each definition belongs to, taken from tree-sitter whatever
+/// built the nodes. The LSP's symbol tree does not always say: rust-analyzer
+/// reports `impl Lexer<'src>` as a non-type symbol, so its methods arrived
+/// with no container, read as free functions, and every `x.method()` call
+/// from the same file was dropped as "a free function through a receiver".
+fn apply_tree_sitter_containers(defs: &[crate::treesitter::SymbolDef], nodes: &mut [GraphNode]) {
+    for node in nodes.iter_mut() {
+        let Some(line) = node.line_start else {
+            continue;
+        };
+        // LSP ranges can start at a doc comment or attribute above the
+        // name, so match the nearest same-named definition a few lines on.
+        let hit = defs
+            .iter()
+            .filter(|d| d.name == node.name && d.container.is_some())
+            .map(|d| ((d.line_start as i64 - line as i64).abs(), d))
+            .filter(|(dist, _)| *dist <= 8)
+            .min_by_key(|(dist, _)| *dist);
+        if let Some((_, def)) = hit {
+            node.container = def.container.clone();
+        }
+    }
+}
+
 fn apply_attribute_labels(defs: &[crate::treesitter::SymbolDef], nodes: &mut [GraphNode]) {
     if defs.is_empty() {
         return;
@@ -773,6 +798,25 @@ mod attribute_label_tests {
             "#[tokio::test] must file as `test`, not `tokio`"
         );
         assert_eq!(label("prod"), None, "production code stays unlabelled");
+    }
+
+    #[test]
+    fn lsp_nodes_take_their_container_from_tree_sitter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("lexer.rs");
+        let src = "struct Lexer;\nimpl<'a> Lexer<'a> {\n  /// doc\n  fn tokenize(self) {}\n}\nfn free() {}\n";
+        std::fs::write(&f, src).unwrap();
+        let defs = crate::treesitter::extract_definitions(&f, src);
+        // As rust-analyzer hands them over: no container, the range
+        // starting at the doc comment.
+        let mut method = GraphNode::new(NodeType::Function, "tokenize".into(), "lexer.rs".into());
+        method.line_start = Some(2);
+        let mut free = GraphNode::new(NodeType::Function, "free".into(), "lexer.rs".into());
+        free.line_start = Some(5);
+        let mut nodes = vec![method, free];
+        apply_tree_sitter_containers(&defs, &mut nodes);
+        assert_eq!(nodes[0].container.as_deref(), Some("Lexer"));
+        assert_eq!(nodes[1].container, None);
     }
 
     #[test]
