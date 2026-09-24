@@ -609,10 +609,18 @@ impl AnyGitSensor {
                 );
                 Self::new(workspace, GitSensorMode::InProcess)
             }
-            GitSensorMode::Sidecar => {
-                let sensor = SidecarGitSensor::new(workspace)?;
-                Ok(Self::Sidecar(Arc::new(sensor)))
-            }
+            GitSensorMode::Sidecar => match SidecarGitSensor::new(workspace) {
+                Ok(sensor) => Ok(Self::Sidecar(Arc::new(sensor))),
+                // No usable sidecar (missing, or from another build): the
+                // in-process sensor gives the same answers without the
+                // crash isolation, which beats refusing to start or
+                // indexing through a mismatched binary.
+                Err(LainError::Unavailable(why)) => {
+                    tracing::warn!("{why}; using the in-process git sensor");
+                    Self::new(workspace, GitSensorMode::InProcess)
+                }
+                Err(e) => Err(e),
+            },
         }
     }
 
