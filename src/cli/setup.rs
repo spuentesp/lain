@@ -1551,28 +1551,40 @@ fn configure_continue(
 
 fn prompt_agent_choice() -> String {
     println!();
-    println!("  Choose an agent");
+    println!("  Choose an agent (Enter for the marked one)");
     println!("  › 1) Claude Code");
     println!("    2) Codex");
     println!("    3) Cursor");
     println!("    4) VS Code");
     println!("    5) Continue");
     println!("    6) Generic MCP");
-    print!("> ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_ok() {
-        match line.trim() {
-            "1" => return "claude-code".to_string(),
-            "2" => return "codex".to_string(),
-            "3" => return "cursor".to_string(),
-            "4" => return "vscode".to_string(),
-            "5" => return "continue".to_string(),
-            "6" => return "generic".to_string(),
-            _ => {}
+    // Enter picks the marked default. It used to pick Generic — as did any
+    // unrecognised answer, silently.
+    for _ in 0..3 {
+        print!("> ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            break; // EOF: take the default
         }
+        if let Some(agent) = agent_from_answer(&line) {
+            return agent.to_string();
+        }
+        println!("  Type 1-6 or a name (claude, codex, cursor, vscode, continue, generic).");
     }
-    "generic".to_string()
+    "claude-code".to_string()
+}
+
+fn agent_from_answer(answer: &str) -> Option<&'static str> {
+    Some(match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "claude" | "claude-code" | "claude code" => "claude-code",
+        "2" | "codex" => "codex",
+        "3" | "cursor" => "cursor",
+        "4" | "vscode" | "vs code" => "vscode",
+        "5" | "continue" => "continue",
+        "6" | "generic" | "generic mcp" => "generic",
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -1683,13 +1695,8 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
             })
         })?;
 
-    let doctor_report = doctor::build_report(Some(&root))?;
-    let detected = detect_languages(&root);
-    let semantic = resolve_semantic_model(&opts);
-    let language_servers = resolve_language_servers(&opts, &detected)?;
-    let languages: Vec<String> = detected.into_iter().map(|d| d.name).collect();
-    let exe = std::env::current_exe().context("locate current lain binary")?;
-
+    // Settle the agent first: an unknown `--agent` used to fail only after
+    // language servers were installed and the model download started.
     let agent = match &opts.agent {
         Some(a) => a.clone(),
         None if !opts.json && is_stdin_tty() => prompt_agent_choice(),
@@ -1713,6 +1720,13 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
              generic, claude-code, codex, cursor, vscode, continue"
         ));
     }
+
+    let doctor_report = doctor::build_report(Some(&root))?;
+    let detected = detect_languages(&root);
+    let semantic = resolve_semantic_model(&opts);
+    let language_servers = resolve_language_servers(&opts, &detected)?;
+    let languages: Vec<String> = detected.into_iter().map(|d| d.name).collect();
+    let exe = std::env::current_exe().context("locate current lain binary")?;
 
     let configuration = match agent.as_str() {
         "claude-code" => configure_claude_code(&exe, semantic.model_path.as_deref(), &opts),
@@ -1867,8 +1881,19 @@ fn print_human(report: &SetupReport) {
         }
     }
     println!();
-    if report.ready {
+    let indexed = matches!(
+        report.capabilities.symbols.state,
+        crate::server::readiness::CapabilityState::Ready
+            | crate::server::readiness::CapabilityState::StaleUsable
+    );
+    if report.ready && indexed {
         println!("  Ready. Ask your agent a question about this repository.");
+    } else if report.ready {
+        // Setup configures the agent; the index is built when the agent
+        // first starts Lain. "Ready" here read as a contradiction of
+        // `lain doctor`, which says the index is missing.
+        println!("  Configured. Lain indexes this repository when your agent first starts it");
+        println!("  (or run `lain oneshot find_anchors` now); `lain doctor` shows progress.");
     } else {
         println!("  Setup did not complete. See the messages above.");
     }
@@ -1878,6 +1903,15 @@ fn print_human(report: &SetupReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_answers() {
+        assert_eq!(agent_from_answer("\n"), Some("claude-code"));
+        assert_eq!(agent_from_answer("claude"), Some("claude-code"));
+        assert_eq!(agent_from_answer(" 6 "), Some("generic"));
+        assert_eq!(agent_from_answer("Codex"), Some("codex"));
+        assert_eq!(agent_from_answer("bogus"), None);
+    }
 
     #[test]
     fn merge_mcp_json_creates_new_file_shape() {

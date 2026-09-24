@@ -122,13 +122,12 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         serde_json::from_str(&args[0])
             .with_context(|| format!("parse JSON object from oneshot arg: {}", args[0]))?
     } else {
-        // Form 3: bare positional. Wrap the first bare arg as
-        // `{"symbol": <arg>}` for the common single-symbol tools.
-        let first = &args[0];
-        let parsed = serde_json::from_str(first).unwrap_or_else(|_| json!(first));
-        let mut map = serde_json::Map::new();
-        map.insert("symbol".into(), parsed);
-        Value::Object(map)
+        // Form 3: bare positionals, assigned to the tool's required
+        // arguments in the order its schema declares them:
+        // `get_call_chain login helper` -> {from, to}, `find_symbol x` ->
+        // {name}. Only the first was used, always as `symbol`, so both of
+        // those failed with "missing required argument".
+        positional_args(tool, args)?
     };
 
     let timeout_secs: u64 = std::env::var("LAIN_ONESHOT_TIMEOUT")
@@ -276,4 +275,69 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         ));
     }
     Ok(())
+}
+
+/// Map bare positional arguments onto `tool`'s required arguments.
+fn positional_args(tool: &str, args: &[String]) -> Result<Value> {
+    let schemas = crate::server::mcp::definitions::dump_tools_schema(&[]);
+    let schema = schemas
+        .iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(tool))
+        .and_then(|t| t.get("inputSchema"));
+    let required: Vec<String> = schema
+        .and_then(|s| s.get("required"))
+        .and_then(|r| r.as_array())
+        .map(|r| {
+            r.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_property = |name: &str| {
+        schema
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.get(name))
+            .is_some()
+    };
+    let names: Vec<String> = if !required.is_empty() {
+        required
+    } else if has_property("symbol") || schema.is_none() {
+        vec!["symbol".to_string()]
+    } else {
+        Vec::new()
+    };
+    if args.len() > names.len() {
+        anyhow::bail!(
+            "`{tool}` takes {} positional argument(s) ({}); got {}. Use key=value for the others.",
+            names.len(),
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            },
+            args.len()
+        );
+    }
+    let mut map = serde_json::Map::new();
+    for (name, raw) in names.iter().zip(args) {
+        let parsed = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
+        map.insert(name.clone(), parsed);
+    }
+    Ok(Value::Object(map))
+}
+
+#[cfg(test)]
+mod positional_tests {
+    use super::*;
+
+    #[test]
+    fn positionals_follow_the_required_arguments() {
+        let v = positional_args("get_call_chain", &["login".into(), "helper".into()]).unwrap();
+        assert_eq!(v, json!({"from": "login", "to": "helper"}));
+        let v = positional_args("find_symbol", &["helper".into()]).unwrap();
+        assert_eq!(v, json!({"name": "helper"}));
+        let v = positional_args("get_blast_radius", &["helper".into()]).unwrap();
+        assert_eq!(v, json!({"symbol": "helper"}));
+        assert!(positional_args("find_symbol", &["a".into(), "b".into()]).is_err());
+    }
 }
