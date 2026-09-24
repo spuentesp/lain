@@ -84,9 +84,20 @@ symbols in this codebase?"
   is the whole thing. No `repos.yaml`, no `workspaces.yaml`, no
   flags. The binary walks up for `.git` and serves.
 
-### Recipe: add lain to Claude Code
+### Recipe: connect your agent with `lain setup`
 
-Add to `.mcp.json` in your repo (or your global `~/.claude.json`):
+The fastest way to configure your AI agent is `lain setup`:
+
+```bash
+lain setup --agent <claude-code|cursor|vscode|continue|codex|generic>
+```
+
+- **Claude Code:** `lain setup --agent claude-code` (configures `.mcp.json` or runs `claude mcp add`).
+- **Cursor:** `lain setup --agent cursor` (writes `~/.cursor/mcp.json`, preserving other servers).
+- **VS Code:** `lain setup --agent vscode` (updates `.vscode/mcp.json` if present, or user-scoped config).
+- **Continue.dev:** `lain setup --agent continue` (updates `~/.continue/config.json`).
+- **Codex:** `lain setup --agent codex` (runs `codex mcp add` or edits `$CODEX_HOME/config.toml`).
+- **Generic / Kimi:** `lain setup --agent generic` writes standard `.mcp.json`:
 
 ```json
 {
@@ -99,9 +110,7 @@ Add to `.mcp.json` in your repo (or your global `~/.claude.json`):
 }
 ```
 
-Restart Claude Code. On the first turn it indexes; on the second
-turn, ask "what calls `parse_input`?" and you should see a
-`mcp__lain__get_blast_radius` call in the tool trace.
+Restart your editor/agent. On the first turn it indexes; on later turns it queries in milliseconds.
 
 **Verification:** `lain --version` reports a version, the agent
 sees `mcp__lain__*` tools, and the first call to any tool returns

@@ -27,23 +27,15 @@ Last verified against `dev` on 2026-09-21.
 - **Status:** blocked on the upstream `lsp-bridge` API.
 - **Background:** libgit2, tree-sitter, and ONNX work has moved off Tokio
   worker threads. LSP round trips remain async-only but are cancellation-aware.
-- **Work:** file the prepared request in
-  [`UPSTREAM_LSP_BRIDGE_ISSUE.md`](UPSTREAM_LSP_BRIDGE_ISSUE.md), then migrate
-  the local call sites after upstream exposes blocking entry points or the raw
-  stdio transport.
+- **Work:** migrate local call sites once upstream `lsp-bridge` exposes
+  blocking entry points or raw stdio transport.
 - **Acceptance:** hot LSP calls run outside Tokio worker threads while retaining
   cancellation and timeout behavior.
 
 ## Planned capability expansions
 
-These are scoped plans, not partially implemented promises:
-
-- [`hybrid-lsp-expansion.md`](hybrid-lsp-expansion.md): LSP implementation,
-  type-definition, and call-hierarchy edges.
-- [`otlp-grpc-ingest.md`](otlp-grpc-ingest.md): optional OTLP gRPC/protobuf
-  ingest alongside the existing lightweight HTTP/JSON path.
-
-Each plan should be updated or removed when its implementation lands.
+- **Hybrid LSP expansion:** LSP implementation, type-definition, and call-hierarchy edges.
+- **OTLP gRPC ingest:** optional OTLP gRPC/protobuf ingest alongside the existing lightweight HTTP/JSON path.
 
 ## Trust and release work
 
