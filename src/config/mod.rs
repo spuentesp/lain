@@ -114,6 +114,22 @@ pub fn state_dir() -> PathBuf {
         .join("state")
 }
 
+/// Create a workspace's `.lain/` state directory with a `.gitignore` of
+/// `*` inside, so the graph, prompt and tuning files never show up in
+/// `git status` (the same trick tool caches such as `.pytest_cache` use).
+/// An existing `.gitignore` there is left alone.
+pub fn create_state_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(
+            ignore,
+            "# Created by Lain: local index state, not for version control.\n*\n",
+        )?;
+    }
+    Ok(())
+}
+
 /// Resolve the persisted-state file for a given workspace. The
 /// filename is `<stem>-<hash>.json` where `stem` is the last
 ///     path component of the workspace, sanitized to only alphanumerics

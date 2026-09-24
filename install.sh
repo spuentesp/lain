@@ -576,15 +576,18 @@ main() {
   # no repos.yaml, and runs on stdio. (`lain init` was removed in the
   # CLI consolidation; registration is done here directly.)
   local lain_bin="${INSTALL_DIR}/${BIN_NAME}"
-  local lain_args="mcp"
+  # An array, so a model path with spaces stays one argument.
+  local lain_args=(mcp)
   if [ -n "$model_path" ]; then
-    lain_args="mcp --embedding-model $model_path"
+    lain_args=(mcp --embedding-model "$model_path")
   fi
+  # JSON string escaping for the paths shown in the manual-config hint.
+  json_str() { local v=${1//\\/\\\\}; v=${v//\"/\\\"}; printf '"%s"' "$v"; }
   local mcp_json
   if [ -n "$model_path" ]; then
-    mcp_json=$(printf '{"mcpServers":{"lain":{"command":"%s","args":["mcp","--embedding-model","%s"]}}}' "$lain_bin" "$model_path")
+    mcp_json=$(printf '{"mcpServers":{"lain":{"command":%s,"args":["mcp","--embedding-model",%s]}}}' "$(json_str "$lain_bin")" "$(json_str "$model_path")")
   else
-    mcp_json=$(printf '{"mcpServers":{"lain":{"command":"%s","args":["mcp"]}}}' "$lain_bin")
+    mcp_json=$(printf '{"mcpServers":{"lain":{"command":%s,"args":["mcp"]}}}' "$(json_str "$lain_bin")")
   fi
 
   echo ""
@@ -602,8 +605,7 @@ main() {
   case "$agent" in
     claude)
       if command -v claude >/dev/null 2>&1; then
-        # shellcheck disable=SC2086
-        if claude mcp add --scope user lain -- "$lain_bin" $lain_args; then
+        if claude mcp add --scope user lain -- "$lain_bin" "${lain_args[@]}"; then
           info "Registered 'lain' MCP server with Claude Code (user scope)"
         else
           warn "claude mcp add failed; add this manually to your MCP config:"
