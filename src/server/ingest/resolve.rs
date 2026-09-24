@@ -606,7 +606,11 @@ pub fn resolve_pattern_edges(
     }
 
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
-    for (value, files) in value_to_files {
+    for (value, mut files) in value_to_files {
+        // Everything below is ordered, so the capped edge set is the same
+        // on every run; HashMap order made Pattern edges differ between
+        // two indexes of one commit.
+        files.sort();
         if files.len() < 2 || files.len() > limits.max_files_per_value {
             continue;
         }
@@ -622,7 +626,7 @@ pub fn resolve_pattern_edges(
         let pairs = dirs.len() * (dirs.len() - 1) / 2;
         scored.push((pairs, value, files));
     }
-    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
     let max_edges = (scored.len() * limits.edges_per_value).min(limits.max_edges);
     let mut edges: Vec<GraphEdge> = Vec::new();
@@ -632,7 +636,8 @@ pub fn resolve_pattern_edges(
         if edges.len() >= max_edges {
             break;
         }
-        let mut dirs: HashMap<String, String> = HashMap::new();
+        let mut dirs: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         for f in &files {
             if let Some(parent) = std::path::Path::new(f).parent() {
                 let parent_str = parent.to_string_lossy().to_string();
