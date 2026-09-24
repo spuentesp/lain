@@ -1,74 +1,64 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Resolve the workspace root for `lain mcp`'s no-arg case, by
-/// preferring the parent process's cwd (the agent harness's cwd,
-/// which differs from ours when the harness pins our cwd to a plugin
-/// root) and falling back to the process's own cwd.
-///
-/// See `find_git_workspace_root_resolved` for the full policy. This
-/// wrapper exists so existing callers keep their `Some(p)` / `None`
-/// ergonomics; the resolution logic is in the inner function so
-/// tests can inject the parent-cwd value directly.
+/// Resolve the workspace root for `lain mcp`'s no-arg case. See
+/// `find_git_workspace_root_resolved` for the policy; this wrapper
+/// supplies the real process and parent-process working directories.
 pub fn find_git_workspace_root(start: Option<&Path>) -> Result<Option<PathBuf>> {
-    find_git_workspace_root_resolved(start, parent_process_cwd().as_deref())
+    find_git_workspace_root_resolved(
+        start,
+        std::env::current_dir().ok().as_deref(),
+        parent_process_cwd().as_deref(),
+    )
 }
 
 /// Resolve the workspace root for the `lain mcp` no-arg case.
 ///
-/// Policy (mirrors the user-facing contract for any agent harness):
+/// Policy:
 ///   1. If `start` is `Some(p)`, walk up from `p` only — explicit
-///      overrides everything. Used when the caller passed
-///      `--workspace PATH` (one or many), or when the env-var
-///      `LAIN_WORKSPACE` is set and we're processing one of its entries.
-///   2. Otherwise, walk up from the **parent process's** cwd (the agent
-///      harness's cwd — read via `/proc/$PPID/cwd` on Linux). This is
-///      what makes `lain mcp` work under Kimi, where the plugin
-///      security model pins our cwd to the plugin root; without this,
-///      the walk-up lands in the plugin dir instead of the user's repo.
-///   3. If the parent cwd has no `.git` ancestor (macOS, sandboxed env,
-///      parent already reaped), walk up from the process's own cwd.
+///      overrides everything (`--workspace PATH`, `LAIN_WORKSPACE`).
+///   2. Otherwise, the process's **own** cwd: the directory the host
+///      launched us in is the project it means. Every config `lain setup`
+///      writes is a bare `lain mcp`, so a host that starts one server per
+///      project by setting the child's cwd depends on this.
+///   3. Otherwise the **parent** process's cwd (`/proc/$PPID/cwd` on
+///      Linux) — for hosts that pin our cwd somewhere else. Kimi runs
+///      plugin servers in the plugin's own directory, recognised by its
+///      `kimi.plugin.json`; that directory is skipped in step 2.
 ///
-/// Returns the first `.git` ancestor found, or `None` if neither
-/// candidate has one within 16 levels.
+/// Either candidate is skipped when the git root it resolves to contains
+/// the running `lain` binary: that is the dev/test runner (`cargo test`,
+/// `cargo run`), whose cwd is Lain's own source tree.
+///
+/// The parent's cwd used to come first, so a host that set our cwd to a
+/// project but itself ran elsewhere got the wrong repository indexed.
 fn find_git_workspace_root_resolved(
     start: Option<&Path>,
+    process_cwd: Option<&Path>,
     parent_cwd: Option<&Path>,
 ) -> Result<Option<PathBuf>> {
     if let Some(p) = start {
         return walk_up_for_git(p);
     }
-    let process_cwd = std::env::current_dir().ok();
-    // `(path, is_parent_cwd)` so the loop can distinguish the
-    // parent-cwd candidate from the process-cwd candidate when
-    // applying the dev-environment skip below.
-    let candidates: [(&Path, bool); 2] = [
-        (parent_cwd.unwrap_or(Path::new("")), true),
-        (process_cwd.as_deref().unwrap_or(Path::new("")), false),
-    ];
-    for (c, is_parent_cwd) in candidates {
+    let own = process_cwd.filter(|c| !is_plugin_root(c));
+    for c in [own, parent_cwd].into_iter().flatten() {
         if c.as_os_str().is_empty() {
             continue;
         }
         if let Some(found) = walk_up_for_git(c)? {
-            // Skip `parent_cwd` when this binary lives inside the
-            // git root it just resolved to. That happens when the
-            // parent process is the dev/test runner (`cargo test`,
-            // `cargo run`): its cwd is the project containing the
-            // `lain` binary itself, so walking up from there lands
-            // on the source tree we are NOT trying to analyze. The
-            // fix is to try the next candidate (typically the
-            // process's own cwd) instead. Real agent harnesses
-            // (Kimi, Claude Code, a plain shell) put the binary in
-            // a plugin dir or on `$PATH`, so this filter never
-            // fires for them.
-            if is_parent_cwd && binary_lives_inside(&found) {
+            if binary_lives_inside(&found) {
                 continue;
             }
             return Ok(Some(found));
         }
     }
     Ok(None)
+}
+
+/// A directory an agent harness pins plugin servers to: Kimi's plugin
+/// root holds `kimi.plugin.json`.
+fn is_plugin_root(dir: &Path) -> bool {
+    dir.join("kimi.plugin.json").is_file()
 }
 
 /// True when the running binary's canonical path is inside `root`
@@ -172,134 +162,88 @@ mod tests {
         tmp
     }
 
-    #[test]
-    fn resolved_prefers_parent_cwd_over_process_cwd() {
-        // Two candidate directories; only the parent has a .git. The
-        // helper must pick the parent, not the process cwd.
-        let agent_dir = mk_repo();
-        let bare_dir = tempfile::tempdir().unwrap(); // no .git
-        let result = find_git_workspace_root_resolved(None, Some(agent_dir.path())).unwrap();
-        let resolved = result.expect("should find .git via parent cwd");
-        assert!(resolved.join(".git").exists());
-        assert_ne!(resolved, bare_dir.path().canonicalize().unwrap());
+    fn canon(p: &Path) -> PathBuf {
+        p.canonicalize().unwrap()
     }
 
     #[test]
-    fn resolved_falls_back_to_process_cwd_when_no_parent() {
-        // No parent cwd given — should at minimum walk up from the
-        // process cwd (which here is the test runner's cwd, somewhere
-        // inside this very repo, so .git IS an ancestor). Assert Ok.
-        let result = find_git_workspace_root_resolved(None, None).unwrap();
-        assert!(result.is_some(), "test runner cwd has a .git ancestor");
+    fn resolved_prefers_process_cwd_over_parent_cwd() {
+        let own = mk_repo();
+        let parent = mk_repo();
+        let found = find_git_workspace_root_resolved(None, Some(own.path()), Some(parent.path()))
+            .unwrap()
+            .expect("own cwd resolves");
+        assert_eq!(canon(&found), canon(own.path()));
     }
 
     #[test]
-    fn resolved_explicit_start_overrides_parent_cwd() {
-        // Explicit --workspace PATH beats whatever the parent cwd says.
-        let explicit = mk_repo();
-        let agent_dir = mk_repo();
-        let result =
-            find_git_workspace_root_resolved(Some(explicit.path()), Some(agent_dir.path()))
+    fn resolved_uses_parent_cwd_from_a_plugin_root() {
+        // Kimi pins our cwd to the plugin directory — even when that is
+        // itself a git checkout.
+        let plugin = mk_repo();
+        fs::write(plugin.path().join("kimi.plugin.json"), "{}").unwrap();
+        let project = mk_repo();
+        let found =
+            find_git_workspace_root_resolved(None, Some(plugin.path()), Some(project.path()))
                 .unwrap()
-                .expect("explicit start must resolve");
-        // Compare canonicalized paths — the tmpdir can be a symlink on macOS.
-        let resolved = result.canonicalize().unwrap();
-        let expected = explicit.path().canonicalize().unwrap();
-        assert_eq!(resolved, expected);
+                .expect("parent cwd resolves");
+        assert_eq!(canon(&found), canon(project.path()));
+    }
+
+    #[test]
+    fn resolved_falls_back_to_parent_when_own_cwd_is_not_a_repo() {
+        let bare = tempfile::tempdir().unwrap();
+        let parent = mk_repo();
+        let found = find_git_workspace_root_resolved(None, Some(bare.path()), Some(parent.path()))
+            .unwrap()
+            .expect("parent resolves");
+        assert_eq!(canon(&found), canon(parent.path()));
+    }
+
+    #[test]
+    fn resolved_explicit_start_overrides_both() {
+        let explicit = mk_repo();
+        let own = mk_repo();
+        let parent = mk_repo();
+        let found = find_git_workspace_root_resolved(
+            Some(explicit.path()),
+            Some(own.path()),
+            Some(parent.path()),
+        )
+        .unwrap()
+        .expect("explicit start must resolve");
+        assert_eq!(canon(&found), canon(explicit.path()));
     }
 
     #[test]
     fn resolved_returns_none_when_neither_has_git() {
-        // Synthetic parents and no process-cwd ancestor reachable.
-        // We can't easily null out the process cwd, but we can construct
-        // a synthetic parent and assert the function doesn't blow up
-        // when both candidates are git-less at the synthetic level.
-        let agent_dir = tempfile::tempdir().unwrap(); // no .git
-        let result = find_git_workspace_root_resolved(None, Some(agent_dir.path())).unwrap();
-        // Process cwd has .git (we're inside this repo); resolution
-        // will find it. What we're really asserting is "doesn't crash,
-        // doesn't use the synthetic git-less parent".
-        if let Some(found) = result {
-            assert_ne!(
-                found.canonicalize().unwrap(),
-                agent_dir.path().canonicalize().unwrap()
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        // Tempdirs can sit inside a checkout (a shared TMPDIR); only assert
+        // when they are genuinely outside any repository.
+        if walk_up_for_git(a.path()).unwrap().is_none()
+            && walk_up_for_git(b.path()).unwrap().is_none()
+        {
+            assert!(
+                find_git_workspace_root_resolved(None, Some(a.path()), Some(b.path()))
+                    .unwrap()
+                    .is_none()
             );
         }
     }
 
     #[test]
-    fn resolved_skips_parent_cwd_when_binary_lives_inside_it() {
-        // Pre-fix bug: when the parent process is `cargo test`, its
-        // cwd is the project being tested — the same git repo the
-        // `lain` binary lives in. The walk-up from parent_cwd then
-        // resolves to the test runner's own workspace, not the test
-        // fixture, and `lain mcp` is asked to index the entire
-        // source tree (which times out). The fix is to skip the
-        // parent_cwd candidate when the running binary is inside
-        // the git root it resolved to, falling through to the
-        // process's own cwd.
-        //
-        // We simulate the scenario by giving a synthetic parent that
-        // is the directory containing the `lain` test binary itself.
-        // The check `binary_lives_inside` canonicalizes both paths
-        // before comparing, so the test binary's actual location
-        // (target/debug/deps/...) is matched against the source tree
-        // (which is the binary's git ancestor).
-        let bin = std::env::current_exe().expect("locate test binary");
-        let bin = bin.canonicalize().expect("canonicalize test binary");
-        // Walk up from the binary to its git ancestor — that's the
-        // "project root" we want to pretend is the parent's cwd.
-        let mut ancestor = bin.parent().expect("binary has parent dir");
-        let project_root = loop {
-            if ancestor.join(".git").exists() {
-                break ancestor.to_path_buf();
-            }
-            match ancestor.parent() {
-                Some(p) => ancestor = p,
-                None => panic!("test binary's git ancestor not found"),
-            }
+    fn resolved_skips_the_repository_holding_the_binary() {
+        // `cargo test` / `cargo run`: the binary lives in Lain's own tree.
+        let bin = canon(&std::env::current_exe().unwrap());
+        let Some(lain_root) = bin.ancestors().find(|a| a.join(".git").exists()) else {
+            return; // binary built outside any checkout
         };
-        // Sanity: this is the lain repo, so the test binary DOES
-        // live inside it. That makes the parent candidate "dev env"
-        // and the helper must skip it.
-        assert!(
-            binary_lives_inside(&project_root),
-            "binary_lives_inside returned false for the actual test fixture — \
-             the helper is broken or the test isn't running from the right place"
-        );
-        // Now resolve with parent_cwd set to the project root. The
-        // helper must skip it and fall through to process_cwd.
-        let result = find_git_workspace_root_resolved(None, Some(&project_root)).unwrap();
-        match result {
-            Some(found) => {
-                let found = found.canonicalize().unwrap();
-                // The result must NOT be the project root (the
-                // parent candidate that we just established must
-                // be skipped). It will be the lain repo's own git
-                // ancestor because that's where the test runner
-                // lives — but crucially it must not have come from
-                // the parent_cwd path. The integration test
-                // `oneshot_discovers_workspace_from_cwd` is the
-                // end-to-end check that the right workspace is
-                // chosen; here we only assert the skip is wired up.
-                // The fallthrough is the process cwd's own git root. That
-                // is usually `project_root` too, but not when the build
-                // directory sits outside the checkout (a worktree nested
-                // in another repo, or a shared `CARGO_TARGET_DIR`), so
-                // compare against what the process cwd resolves to.
-                let cwd = std::env::current_dir().unwrap();
-                let expected = walk_up_for_git(&cwd)
-                    .unwrap()
-                    .expect("cwd is in a git repo");
-                assert_eq!(found, expected.canonicalize().unwrap());
-            }
-            None => {
-                // Acceptable only if the process cwd is not inside
-                // a git repo at all. In normal `cargo test` runs
-                // it is, so we should get Some.
-                panic!("expected Some resolution from process cwd fallback");
-            }
-        }
+        let fixture = mk_repo();
+        let found = find_git_workspace_root_resolved(None, Some(lain_root), Some(fixture.path()))
+            .unwrap()
+            .expect("the fixture resolves");
+        assert_eq!(canon(&found), canon(fixture.path()));
     }
 
     // --- parent_process_cwd direct tests (Linux only meaningful) ---

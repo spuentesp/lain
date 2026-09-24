@@ -59,6 +59,10 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
     // operator's existing configuration with no error message. The
     // sibling `remove` already does this right (uses `?` via
     // `with_context`).
+    // Validate the id now: `lain server` rejects ids like `a/b` or ``,
+    // and accepting them here left a config the server would not start on.
+    crate::federation::repo_id::RepoId::new(name)
+        .map_err(|e| anyhow::anyhow!("invalid repo id '{name}': {e}"))?;
     let mut file = load_or_default(config_path)?;
     if file.repos.iter().any(|r| r.id == name) {
         anyhow::bail!("repo '{name}' already exists in {}", config_path.display());
@@ -143,9 +147,7 @@ fn list(config_path: &Path) -> Result<()> {
 /// doesn't exist, return the default (legitimate "no repos yet"
 /// case). If the file exists but is unreadable / invalid YAML,
 /// propagate the error so the caller surfaces it.
-fn load_or_default(
-    config_path: &Path,
-) -> Result<crate::federation::config::FederationConfig> {
+fn load_or_default(config_path: &Path) -> Result<crate::federation::config::FederationConfig> {
     if !config_path.exists() {
         return Ok(crate::federation::config::FederationConfig::default());
     }
@@ -225,6 +227,32 @@ repos:
         remove(&path, "existing").unwrap();
         let file = FederationConfig::load(&path).unwrap();
         assert!(file.repos.is_empty());
+    }
+
+    #[test]
+    fn add_rejects_ids_the_server_would_reject() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repos.yaml");
+        for bad in ["a/b", "", "x:y"] {
+            assert!(
+                add(&path, bad, "https://example.com/x.git", "main").is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(!path.exists(), "nothing written");
+    }
+
+    /// A config that does not parse is an error, not an empty file to
+    /// overwrite.
+    #[test]
+    fn add_refuses_to_overwrite_an_unparsable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repos.yaml");
+        let original = "repos:\n  - id: legacy\n    source: {type: svn_checkout, url: svn://x}\n";
+        std::fs::write(&path, original).unwrap();
+        assert!(add(&path, "bytes", "https://example.com/b.git", "main").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(list(&path).is_err());
     }
 
     #[test]
