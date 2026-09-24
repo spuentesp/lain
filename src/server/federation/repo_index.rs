@@ -90,6 +90,17 @@ pub struct RepoIndex {
     git: Arc<AnyGitSensor>,
     index_lock: AsyncMutex<()>,
     health: Arc<RwLock<RepoHealth>>,
+    /// While set, a finished index pass leaves the repo `Indexing` rather
+    /// than `Ready`. `lain server` holds every repo of a multi-repo
+    /// federation until cross-repo links exist; a watcher-triggered pass
+    /// (an uncommitted edit during startup) used to flip it to `Ready`
+    /// early.
+    hold_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when a watcher-triggered pass changed this repo's graph, so the
+    /// federation re-projects it; the global backend otherwise kept the
+    /// pre-edit symbols (search_org, cross-repo blast radius) until a
+    /// restart.
+    projection_stale: Arc<std::sync::atomic::AtomicBool>,
     last_indexed: Arc<RwLock<SystemTime>>,
     /// Threshold for cold-start cycle detection. If `index_forced`
     /// fires within this many seconds of the previous successful
@@ -307,6 +318,8 @@ impl RepoIndex {
             git,
             index_lock: AsyncMutex::new(()),
             health: Arc::new(RwLock::new(RepoHealth::Indexing)),
+            hold_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            projection_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_indexed: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
             last_index_error: Arc::new(RwLock::new(None)),
             server_overlay: parking_lot::Mutex::new(Arc::new(VolatileOverlay::new())),
@@ -588,7 +601,7 @@ impl RepoIndex {
 
         *self.last_indexed.write() = SystemTime::now();
         *self.last_index_error.write() = None;
-        self.set_health(RepoHealth::Ready);
+        self.mark_ready();
         // Cold-boot race closure: the dispatcher awaits this on the
         // active repo when the per-repo graph is empty. Firing it
         // here (and only on success) means a resolve that lands
@@ -722,7 +735,7 @@ impl RepoIndex {
 
         *self.last_indexed.write() = SystemTime::now();
         *self.last_index_error.write() = None;
-        self.set_health(RepoHealth::Ready);
+        self.mark_ready();
         // Same cold-boot race closure as `index()`: a tool call that
         // arrives during a watcher-driven re-index gets the same
         // bounded-wait window the boot path gets.
@@ -736,6 +749,35 @@ impl RepoIndex {
     /// only a Weak reference while idle, so it cannot keep a removed repo alive.
     /// Deactivation drops the watcher and aborts its receiver task; an in-flight
     /// overlay scan must pass the active gate before publishing any nodes.
+    /// `Ready`, unless the startup hold is on (see `hold_ready`).
+    fn mark_ready(&self) {
+        if self.hold_ready.load(std::sync::atomic::Ordering::SeqCst) {
+            self.set_health(RepoHealth::Indexing);
+        } else {
+            self.set_health(RepoHealth::Ready);
+        }
+    }
+
+    /// Hold (`true`) or release (`false`) readiness. Releasing promotes a
+    /// repo whose pass finished while held.
+    pub fn hold_ready(&self, hold: bool) {
+        self.hold_ready
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
+        if !hold
+            && self.health() == RepoHealth::Indexing
+            && self.last_indexed() != SystemTime::UNIX_EPOCH
+        {
+            self.set_health(RepoHealth::Ready);
+        }
+    }
+
+    /// Whether the graph changed since the federation last projected it;
+    /// clears the flag.
+    pub fn take_projection_stale(&self) -> bool {
+        self.projection_stale
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub async fn start_watcher(self: &Arc<Self>) -> Result<(), LainError> {
         let active = self.active.lock();
         if !*active || self.watcher.lock().is_some() {
@@ -819,6 +861,11 @@ impl RepoIndex {
                     let index_result = me_for_task.index_forced().await;
                     if cancel.is_cancelled() {
                         break;
+                    }
+                    if index_result.is_ok() {
+                        me_for_task
+                            .projection_stale
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     if let Err(e) = index_result {
                         if !matches!(e, LainError::Cancelled) {
