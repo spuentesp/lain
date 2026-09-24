@@ -1395,7 +1395,7 @@ impl ToolHandler for SearchCodeHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        handlers::semantic::search_code(
+        let mut text = handlers::semantic::search_code(
             &ctx.workspace,
             &ctx.graph,
             &ctx.overlay,
@@ -1404,7 +1404,21 @@ impl ToolHandler for SearchCodeHandler {
             &ctx.embedding_cache,
             &ctx.tuning,
             args,
-        )
+        )?;
+        // Semantic answers come from whatever the background pass has
+        // embedded so far; say so while it runs, or an agent takes a
+        // partial ranking as final.
+        if text.contains("mode=semantic") {
+            if let Some(e) = ctx.readiness.snapshot().embeddings.filter(|e| e.running) {
+                text.push_str(&format!(
+                    "\n\n⏳ Semantic index still building: {} of {} symbols embedded. \
+                     Rankings may change until it finishes; `get_capabilities` shows \
+                     semantic_search as warming_up until then.",
+                    e.embedded, e.total
+                ));
+            }
+        }
+        Ok(text)
     }
 }
 inventory::submit!(ToolHandlerEntry(&SearchCodeHandler));

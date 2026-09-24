@@ -32,6 +32,13 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- Semantic search ranked a history-dependent subset of the code: the
+  background embedding pass stopped after 20 symbols (one pass per build,
+  budget 20), and the rest were embedded only as a side effect of
+  queries, 200 at a time. The pass now covers every symbol (about 20 s
+  for psf/requests), `get_capabilities` reports `semantic_search` as
+  `warming_up` with `indexing.embeddings` progress until it finishes,
+  and `search_code` notes a partial index in its answer.
 - `lain server` indexed every repo before it started listening, so it
   answered nothing — not even `/health` — for seconds (rust-analyzer
   installed) to minutes (large federations). Indexing now runs in the

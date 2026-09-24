@@ -315,11 +315,76 @@ def _multi_repo_flow(args, env, d, lain, port):
         srv.wait(timeout=30)
 
 
+# Plain-English questions about psf/requests whose answers do not share
+# words with the function name; each target was confirmed from its
+# docstring or body. Lexical search cannot answer these by design.
+SEMANTIC_CASES = [
+    ("read the username and password for a host from the user's credentials file", "get_netrc_auth"),
+    ("how many bytes remain to be read from a file-like object", "super_len"),
+    ("check whether an IP address falls inside a subnet", "address_in_network"),
+    ("which character set did the server declare for the response body", "get_encoding_from_headers"),
+    ("detect whether JSON bytes are UTF-32 or UTF-16 by looking at the first bytes", "guess_json_utf"),
+    ("add http:// to an address that has no protocol", "prepend_scheme_if_needed"),
+    ("pull the login credentials out of a link", "get_auth_from_url"),
+    ("move the upload stream back to where it started before sending again", "rewind_body"),
+    ("split a Link response header into a list of dictionaries", "parse_header_links"),
+    ("temporarily change an environment variable", "set_environ"),
+    ("the string that identifies this library to web servers", "default_user_agent"),
+    ("convert a mask length like 24 into dotted decimal form", "dotted_netmask"),
+]
+# all-MiniLM-L6-v2 places 8 of 12 in the top 5 (7 at rank 1). The bar is
+# that measured level, so a regression shows; it is not a claim that every
+# question is answered.
+SEMANTIC_MIN_HITS = 8
+
+
+def check_semantic_search(args, env):
+    """README: semantic search with the optional model, as `lain setup` wires it."""
+    name = "semantic search (model installed): plain-English questions find the function"
+    if args.only and args.only.lower() not in name.lower():
+        return
+    if not os.path.isfile(args.model):
+        record(name, False, f"model not found at {args.model}; pass --model or run `lain setup`")
+        return
+    repo = checkout(args.work, "psf/requests", "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60")
+    shutil.rmtree(os.path.join(repo, ".lain"), ignore_errors=True)
+    menv = {**env, "LAIN_EMBEDDING_MODEL": args.model}
+    mcp = Mcp(args.lain, repo, menv)
+    try:
+        mcp.wait_ready()
+        # `ready` for semantic search means every symbol is embedded.
+        start = time.time()
+        while True:
+            caps = json.loads(mcp.call("get_capabilities", {}))
+            if caps["capabilities"]["semantic_search"]["state"] == "ready":
+                break
+            if time.time() - start > 600:
+                record(name, False, f"semantic_search never became ready: {caps['capabilities']['semantic_search']}")
+                return
+            time.sleep(2)
+        emb = caps.get("indexing", {}).get("embeddings") or {}
+        hits, misses = 0, []
+        for q, want in SEMANTIC_CASES:
+            out = mcp.call("search_code", {"query": q, "mode": "semantic", "limit": 5})
+            names = re.findall(r"^\d+\. ([A-Za-z_]\w*) \(", out, re.M)[:5]
+            if want in names:
+                hits += 1
+            else:
+                misses.append(want)
+    finally:
+        mcp.close()
+    record(name, hits >= SEMANTIC_MIN_HITS,
+           f"{hits}/{len(SEMANTIC_CASES)} in top 5 (bar {SEMANTIC_MIN_HITS}); "
+           f"embedded {emb.get('embedded')}/{emb.get('total')}; missed {misses}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lain", required=True)
     ap.add_argument("--work", default=os.path.join(os.getcwd(), "target", "acceptance"))
     ap.add_argument("--only", default="")
+    ap.add_argument("--model", default=os.path.expanduser("~/.local/lain/models/all-MiniLM-L6-v2.onnx"),
+                    help="embedding model for the semantic check (what `lain setup` installs)")
     args = ap.parse_args()
     args.lain = os.path.abspath(args.lain)
     os.makedirs(args.work, exist_ok=True)
@@ -334,6 +399,7 @@ def main():
     check_languages(args, env)
     check_single_repo_flow(args, env)
     check_multi_repo_flow(args, env)
+    check_semantic_search(args, env)
     failed = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} claims hold.")
     for n, _, d in failed:
