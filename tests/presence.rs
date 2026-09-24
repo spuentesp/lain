@@ -1742,12 +1742,11 @@ async fn get_recent_activity_tool_groups_by_path() {
     //      which canonicalizes to `/private/var/folders/…/T/…` —
     //      using the resolved form keeps the claimed paths and the
     //      glob pattern aligned on every platform.
+    // Claims must be inside the workspace now, and the audit log records
+    // them relative to its root — so claim relative paths and glob on the
+    // same relative prefix.
     let run_id = uuid::Uuid::new_v4().to_string();
-    let sibling = std::fs::canonicalize(tmp.path())
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| tmp.path().to_path_buf());
-    let prefix = format!("{}/hermetic-{}/", sibling.display(), run_id);
+    let prefix = format!("hermetic-{}/", run_id);
     let p1 = format!("{}alpha.rs", prefix);
     let p2 = format!("{}beta.rs", prefix);
     let p3 = format!("{}gamma.rs", prefix);
@@ -2468,4 +2467,37 @@ async fn claim_files_accepts_string_form_files() {
     let claims = server.occupancy().list_for_agent(&AgentId(alice.0.clone()));
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].path.to_string_lossy(), "src/a.rs");
+}
+
+/// Claims are for this repository's files: a path outside it is refused,
+/// not granted and written to the audit log under this workspace.
+#[test]
+fn claims_outside_the_workspace_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    git2::Repository::init(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
+    let mem = tmp.path().join(".lain/graph.bin");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
+    let agent = server.presence().register(
+        "outsider".into(),
+        AgentKind::ClaudeCode,
+        AgentMode::Interactive,
+        None,
+        None,
+    );
+    let claim = |path: &str| {
+        lain::server::mcp::presence_tools::run_claim_files(
+            &server,
+            serde_json::json!({"agent_id": agent.id.as_str(), "session_token": agent.session_token,
+                   "files": [{"path": path, "symbols": ["x"]}]}),
+        )
+    };
+    assert!(claim("a.rs").is_ok());
+    assert!(claim("src/../a.rs").is_ok());
+    let inside_abs = tmp.path().join("a.rs");
+    assert!(claim(inside_abs.to_str().unwrap()).is_ok());
+    for bad in ["../other/b.rs", "/etc/passwd", "src/../../x.rs"] {
+        let err = claim(bad).expect_err(bad);
+        assert!(err.contains("outside the repository"), "{bad}: {err}");
+    }
 }

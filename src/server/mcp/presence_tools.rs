@@ -458,6 +458,42 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         .iter()
         .flat_map(|f| f.symbols.clone().unwrap_or_default())
         .collect();
+    // Claims are for files of this workspace (or, on a federation, of its
+    // repositories). `../other/b.py` and `/etc/passwd` used to be granted
+    // and written to the audit log under this workspace.
+    let roots: Vec<std::path::PathBuf> = {
+        let mut r = vec![server.ingest().config().workspace.clone()];
+        if let Some(fed) = server.federation() {
+            r.extend(fed.repo_paths());
+        }
+        r.into_iter()
+            .map(|p| dunce::canonicalize(&p).unwrap_or(p))
+            .collect()
+    };
+    for f in &a.files {
+        let p = std::path::Path::new(&f.path);
+        let inside = if p.is_absolute() {
+            let real = dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            roots.iter().any(|root| real.starts_with(root))
+        } else {
+            // Lexically: `a/../b` is fine, `../b` leaves the root.
+            let mut depth: i32 = 0;
+            p.components().all(|c| {
+                match c {
+                    std::path::Component::ParentDir => depth -= 1,
+                    std::path::Component::Normal(_) => depth += 1,
+                    _ => {}
+                }
+                depth >= 0
+            })
+        };
+        if !inside {
+            return Err(format!(
+                "claim_files: '{}' is outside the repository; claim paths relative to its root",
+                f.path
+            ));
+        }
+    }
     let requests: Vec<ClaimRequest> = a
         .files
         .into_iter()
