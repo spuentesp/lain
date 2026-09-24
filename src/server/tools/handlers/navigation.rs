@@ -4,7 +4,7 @@ use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::graph::GraphDatabase;
 use crate::overlay::VolatileOverlay;
-use crate::schema::{GraphNode, NodeType};
+use crate::schema::{EdgeType, GraphNode, NodeType};
 use crate::server::tools::utils::{resolve_node, resolve_node_federation_fallback};
 use crate::server::tools::{UiSession, UiSessionData};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -101,6 +101,11 @@ pub async fn get_call_chain(
     // `requests.api.request` and `Session.request`. Picking one of them
     // (the first by path) answered "no path" whenever the chain ran
     // through another, so search from and to every definition of it.
+    if from.trim().is_empty() || to.trim().is_empty() {
+        return Err(LainError::NotFound(
+            "get_call_chain needs non-empty `from` and `to`".to_string(),
+        ));
+    }
     let all_named = |handle: &str| -> Result<Vec<GraphNode>, LainError> {
         if overlay.get_node(handle).is_none() && !matches!(graph.get_node(handle), Ok(Some(_))) {
             let mut named = graph.find_all_nodes_by_name(handle);
@@ -133,15 +138,21 @@ pub async fn get_call_chain(
             break;
         }
 
+        // Calls only: following Contains / CoChangedWith / Pattern edges
+        // reported "app.py → helper" (a file containing a function) as a
+        // call chain.
+        let is_call = |t: &EdgeType| matches!(t, EdgeType::Calls | EdgeType::CallsHttp);
         let mut targets = HashSet::new();
         if let Ok(edges) = graph.get_edges_from(&current_id) {
-            for e in edges {
+            for e in edges.into_iter().filter(|e| is_call(&e.edge_type)) {
                 targets.insert(e.target_id);
             }
         }
         let overlay_edges = overlay.get_outgoing_edges(&current_id);
-        for (target, _) in overlay_edges {
-            targets.insert(target.id);
+        for (target, edge_type) in overlay_edges {
+            if is_call(&edge_type) {
+                targets.insert(target.id);
+            }
         }
 
         for tid in targets {
