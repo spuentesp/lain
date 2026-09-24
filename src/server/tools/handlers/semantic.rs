@@ -53,6 +53,12 @@ pub fn find_symbol(
 ) -> Result<String, LainError> {
     let _ = overlay; // kept for API parity with the other M6 handlers
     let name = required_str_arg(args, "name")?;
+    // An empty name matched every nameless node (each File).
+    if name.trim().is_empty() {
+        return Err(LainError::NotFound(
+            "find_symbol needs a non-empty `name`".to_string(),
+        ));
+    }
     let path_hint = str_arg(args, "path_hint");
     let type_filter = str_arg(args, "type_filter").to_lowercase();
     let type_filter: Option<NodeType> = if type_filter.is_empty() {
@@ -66,7 +72,20 @@ pub fn find_symbol(
         hits.retain(|n| n.path.contains(hint));
     }
     if let Some(target) = type_filter {
-        hits.retain(|n| n.node_type == target);
+        // `method` has no node type of its own in most graphs: a method is
+        // a function defined in a type (`container`). `module` also covers
+        // the Namespace and Package nodes directories and packages get.
+        hits.retain(|n| match target {
+            NodeType::Method => {
+                n.node_type == NodeType::Method
+                    || (n.node_type == NodeType::Function && n.container.is_some())
+            }
+            NodeType::Module => matches!(
+                n.node_type,
+                NodeType::Module | NodeType::Namespace | NodeType::Package
+            ),
+            _ => n.node_type == target,
+        });
     }
     // Deterministic order: anchor score desc, then path asc, then
     // name asc as a tiebreaker for the rare dedup tie.
@@ -97,7 +116,7 @@ pub fn find_symbol(
         ));
     } else {
         out.push_str(&format!(
-            "Found {} matches. Disambiguate with the `path` argument:\n\n",
+            "Found {} matches. Disambiguate with the `path_hint` argument:\n\n",
             hits.len()
         ));
     }
@@ -401,6 +420,19 @@ pub fn search_code(
     let mut fell_back = false;
     let (effective_mode, body) = match mode.as_str() {
         "lexical" => ("lexical", lexical_search(graph, &query, limit)),
+        // No model: the stub embeds everything as zeros, so a semantic
+        // search "succeeded" with 0 results. Say so and answer lexically.
+        "semantic" if embedder.is_stub() => {
+            fell_back = true;
+            (
+                "lexical",
+                format!(
+                    "Semantic search unavailable: no embedding model is configured \
+                     (`lain setup` installs one).\n\nFalling back to lexical:\n\n{}",
+                    lexical_search(graph, &query, limit)
+                ),
+            )
+        }
         "semantic" => match semantic_call(
             workspace,
             graph,
@@ -479,11 +511,12 @@ fn parse_node_type(s: &str) -> Result<NodeType, LainError> {
         "enum" => NodeType::Enum,
         "module" | "namespace" | "ns" => NodeType::Module,
         "file" => NodeType::File,
+        "package" => NodeType::Module,
         "method" => NodeType::Method,
         "class" => NodeType::Class,
         other => {
             return Err(LainError::Other(format!(
-                "unsupported type_filter `{other}` (try function/class/struct/interface/trait/enum/module/file)"
+                "unsupported type_filter `{other}` (try function/method/class/struct/interface/trait/enum/module/file)"
             )))
         }
     })
@@ -869,7 +902,7 @@ mod m6_tests {
         let (graph, overlay) = make_test_graph();
         let m = args(&[("name", "parse")]);
         let out = find_symbol(&graph, &overlay, &m).unwrap();
-        assert!(out.contains("Disambiguate with the `path` argument"));
+        assert!(out.contains("Disambiguate with the `path_hint` argument"));
         assert!(out.contains("/src/main.rs"));
         assert!(out.contains("/src/util.rs"));
     }
@@ -891,7 +924,7 @@ mod m6_tests {
         let (graph, overlay) = make_test_graph();
         let m = args(&[("name", "parse"), ("type_filter", "function")]);
         let out = find_symbol(&graph, &overlay, &m).unwrap();
-        assert!(out.contains("Disambiguate with the `path` argument"));
+        assert!(out.contains("Disambiguate with the `path_hint` argument"));
         // The two `parse` nodes are Functions — narrowing kept both.
         assert_eq!(out.matches("/src/").count(), 2);
     }
