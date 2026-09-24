@@ -267,6 +267,13 @@ fn load_workspaces_for_server(
 /// when their pass finishes, so tools and `get_health` report progress
 /// honestly in the meantime.
 async fn index_federation(fed: Arc<FederatedIndex>) {
+    // With several repos, a repo is not ready when its own pass ends:
+    // calls into repos indexed after it are linked by the second pass
+    // below. Hold it in `Indexing` until then, or a client that waits for
+    // `ready` queries the cross-repo graph before it exists.
+    let multi_repo = fed.list_repos().len() > 1;
+    let mut held: Vec<crate::federation::repo_id::RepoId> = Vec::new();
+
     // `load_federation` adds each repo to the federation and projects whatever
     // nodes are already in the per-repo DB, but it does NOT run the indexing
     // pipeline (`tree-sitter` extract → LSP hydrate → git co-change). For a
@@ -292,6 +299,10 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
                     id.as_str()
                 );
             } else {
+                if multi_repo {
+                    repo.set_health(RepoHealth::Indexing);
+                    held.push(id.clone());
+                }
                 // After indexing, re-project so the global backend sees the
                 // newly-extracted nodes/edges.
                 if let Err(e) = fed.project_repo(&id).await {
@@ -345,6 +356,11 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
                     id.as_str()
                 ),
             }
+        }
+    }
+    for id in held {
+        if let Some(repo) = fed.get_repo(&id) {
+            repo.set_health(RepoHealth::Ready);
         }
     }
 }
