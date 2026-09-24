@@ -42,12 +42,6 @@ single-repository setup, federation, and basic troubleshooting.
 - [Graph data-source decision](opinions/graph-tab-data-source.md): why the
   Command Center graph uses `get_workspace_graph`
 
-Active, scoped capability plans:
-
-- [Hybrid LSP expansion](hybrid-lsp-expansion.md)
-- [OTLP gRPC ingest](otlp-grpc-ingest.md)
-- [Upstream `lsp-bridge` request](UPSTREAM_LSP_BRIDGE_ISSUE.md)
-
 `METADATA.toml` belongs to the release workflow rather than the reading path.
 
 Completed plans, audits, review notes, and the academic SRS package live in Git
