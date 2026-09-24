@@ -272,7 +272,13 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     // below. Hold it in `Indexing` until then, or a client that waits for
     // `ready` queries the cross-repo graph before it exists.
     let multi_repo = fed.list_repos().len() > 1;
-    let mut held: Vec<crate::federation::repo_id::RepoId> = Vec::new();
+    if multi_repo {
+        for (id, _) in fed.list_repos() {
+            if let Some(repo) = fed.get_repo(&id) {
+                repo.hold_ready(true);
+            }
+        }
+    }
 
     // `load_federation` adds each repo to the federation and projects whatever
     // nodes are already in the per-repo DB, but it does NOT run the indexing
@@ -299,10 +305,6 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
                     id.as_str()
                 );
             } else {
-                if multi_repo {
-                    repo.set_health(RepoHealth::Indexing);
-                    held.push(id.clone());
-                }
                 // After indexing, re-project so the global backend sees the
                 // newly-extracted nodes/edges.
                 if let Err(e) = fed.project_repo(&id).await {
@@ -358,13 +360,34 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
             }
         }
     }
-    for id in held {
-        // Only promote what is still held: a watcher-triggered re-index may
-        // have finished (Ready) or failed (Degraded) in the meantime, and
-        // overwriting Degraded with Ready would hide the failure.
+    for (id, _) in fed.list_repos() {
         if let Some(repo) = fed.get_repo(&id) {
-            if repo.health() == RepoHealth::Indexing {
-                repo.set_health(RepoHealth::Ready);
+            repo.hold_ready(false);
+        }
+    }
+
+    // Keep the federation's global view current: a watcher-triggered
+    // re-index changes one repo's graph, and until it is projected again
+    // search_org and the cross-repo tools answer from the old one.
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        for (id, _) in fed.list_repos() {
+            let Some(repo) = fed.get_repo(&id) else {
+                continue;
+            };
+            if !repo.take_projection_stale() {
+                continue;
+            }
+            if multi_repo {
+                if let Err(e) = repo.relink_cross_repo().await {
+                    tracing::warn!(
+                        "lain server: cross-repo relink for '{}' failed: {e}",
+                        id.as_str()
+                    );
+                }
+            }
+            if let Err(e) = fed.project_repo(&id).await {
+                tracing::warn!("lain server: re-projecting '{}' failed: {e}", id.as_str());
             }
         }
     }
