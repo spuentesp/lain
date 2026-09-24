@@ -663,7 +663,10 @@ impl LainServer {
         let nlp_cancel: CancellationToken = cancel.child_token();
         let nlp_readiness = self.readiness().clone();
         tokio::spawn(async move {
-            if nlp_cancel.is_cancelled() {
+            // Without a model there is nothing to compute: the stub returns
+            // zero vectors, and storing one per symbol cost memory and disk
+            // and marked every symbol "embedded" for when a model arrives.
+            if nlp_cancel.is_cancelled() || embedder_clone.is_stub() {
                 return;
             }
             let all_nodes = graph_clone.get_all_nodes();
@@ -681,7 +684,7 @@ impl LainServer {
 
             let already = anchors
                 .iter()
-                .filter(|(_, n)| n.embedding.is_some())
+                .filter(|(_, n)| !crate::server::nlp::needs_embedding(n.embedding.as_deref()))
                 .count();
             // `total` drops for symbols that vanish before the pass reaches
             // them (replaced by a concurrent update): they cannot be
@@ -706,7 +709,7 @@ impl LainServer {
                     return;
                 }
                 if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
-                    if gn.embedding.is_none() {
+                    if crate::server::nlp::needs_embedding(gn.embedding.as_deref()) {
                         let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                         // AGENT_UX_ROADMAP.md M4 follow-up: ONNX
                         // inference is sync CPU work — route it
@@ -782,7 +785,7 @@ impl LainServer {
                         return;
                     }
                     if let Ok(Some(mut gn)) = graph_clone.get_node(&node.id) {
-                        if gn.embedding.is_none() {
+                        if crate::server::nlp::needs_embedding(gn.embedding.as_deref()) {
                             let text = crate::tools::utils::build_enriched_text(&gn, &ws_for_nlp);
                             // Same offthread routing as the prewarm pass:
                             // keep ONNX off the async runtime.
@@ -835,6 +838,14 @@ impl LainServer {
             }
             progress(embedded, total, false);
             info!("NLP lazy enrichment pass complete.");
+            // The graph was saved before this pass ran; without a save here
+            // every restart recomputed every embedding (minutes on a large
+            // repository).
+            if embedded > already {
+                if let Err(e) = graph_clone.save_to_disk().await {
+                    warn!("embeddings computed but not saved: {e}");
+                }
+            }
         });
 
         // Orphan sweep. Reclaims nodes whose file is no longer tracked: files

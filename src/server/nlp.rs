@@ -559,6 +559,19 @@ pub fn resolve_intra_threads(max_threads: usize) -> usize {
     }
 }
 
+/// A stored embedding that carries no meaning: missing, unparsable, or the
+/// all-zero vector the stub embedder returns. Graphs indexed without a model
+/// hold zero vectors; treated as real they were never re-embedded once a
+/// model was installed, and semantic search stayed blind to those symbols.
+pub fn needs_embedding(stored: Option<&str>) -> bool {
+    match stored {
+        None => true,
+        Some(json) => {
+            serde_json::from_str::<Vec<f32>>(json).map_or(true, |v| v.iter().all(|x| *x == 0.0))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// `resolve_model_paths` accepts the documented directory form
@@ -590,6 +603,14 @@ mod query_prefix_tests {
     //! call sites had already broken. These pin the contract at the
     //! embedder, where it now lives.
     use super::*;
+
+    #[test]
+    fn zero_or_missing_embeddings_need_embedding() {
+        assert!(needs_embedding(None));
+        assert!(needs_embedding(Some("not json")));
+        assert!(needs_embedding(Some("[0.0,0.0,0.0]")));
+        assert!(!needs_embedding(Some("[0.0,0.5,0.0]")));
+    }
 
     #[test]
     fn default_is_no_prefix_so_mini_lm_behaviour_is_unchanged() {

@@ -92,9 +92,11 @@ pub fn semantic_search(
         // embeds per query adds 22s. With caching, query 2+ runs in <1s.
         let emb_opt: Option<Vec<f32>> = if let Some(cached) = cache.get(&node.id) {
             Some(cached.clone())
-        } else if let Some(ref e_json) = node.embedding {
-            serde_json::from_str::<Vec<f32>>(e_json).ok()
-        } else if volatile_embed_count < 200 {
+        } else if !crate::server::nlp::needs_embedding(node.embedding.as_deref()) {
+            node.embedding
+                .as_deref()
+                .and_then(|e| serde_json::from_str::<Vec<f32>>(e).ok())
+        } else if volatile_embed_count < 200 && !embedder.is_stub() {
             // Cap cold-query on-demand embeddings so a single search call
             // stays fast even on large corpora. The per-call cache (set on
             // line below) means subsequent calls within the same process
@@ -122,7 +124,8 @@ pub fn semantic_search(
             // ~3 KB (384 floats * 8 bytes JSON), so 200 new writes add
             // ~600 KB to graph.bin. Cheap, and the alternative (re-
             // embedding on every cold start) costs 8-30 s.
-            if node.embedding.is_none() {
+            if crate::server::nlp::needs_embedding(node.embedding.as_deref()) && !embedder.is_stub()
+            {
                 if let Ok(emb_json) = serde_json::to_string(&emb) {
                     let mut updated = node.clone();
                     updated.embedding = Some(emb_json);
