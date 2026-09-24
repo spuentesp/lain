@@ -1273,6 +1273,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
