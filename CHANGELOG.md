@@ -27,8 +27,8 @@ All notable changes to LAIN are documented here. Versions follow
 - Calls outside any named definition (test callbacks, `__main__` blocks,
   RSpec blocks) are attributed to their file instead of being dropped.
 - tree-sitter 0.22 → 0.25 and current grammars. Building from source
-  needs Rust 1.88 (already true of the dependency tree; the README said
-  1.75).
+  needs Rust 1.89: the dependency tree already needed 1.88 (the README
+  said 1.75), and the presence lock uses std file locks (1.89).
 
 ### Fixed
 

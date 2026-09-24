@@ -163,7 +163,7 @@ pub async fn get_context(
     )?;
 
     let source_section = match resolve_for_snippet(graph, overlay, &symbol) {
-        Ok((Some(ls), Some(le), Some(ref p))) => {
+        Ok((Some(ls), Some(_le), Some(ref p))) => {
             match crate::server::tools::handlers::context::get_code_snippet(
                 graph,
                 overlay,

@@ -35,7 +35,7 @@ source ~/.zshrc   # or ~/.bashrc
 lain --version
 ```
 
-Rust 1.88 or newer is only needed when building from source. The
+Rust 1.89 or newer is only needed when building from source. The
 [quickstart](docs/QUICKSTART.md) covers non-interactive installation and the
 optional local embedding model.
 
