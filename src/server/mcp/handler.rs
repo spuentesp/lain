@@ -100,10 +100,22 @@ fn parse_depth_range(s: &str) -> Result<std::ops::Range<u32>, String> {
 fn requires_repo_scope(tool_name: &str) -> bool {
     // `get_agent_strategy` and `describe_schema` answer the same for every
     // repository; demanding a repo id for them only blocked the agent.
+    // `get_capabilities` aggregates every repository's readiness itself;
+    // requiring a repo id for it broke the `next_action` the warming-up
+    // response points at.
     !matches!(
         tool_name,
-        "query_graph" | "get_agent_strategy" | "describe_schema"
+        "get_agent_strategy" | "describe_schema" | "get_capabilities"
     )
+}
+
+/// The argument that names a symbol for this tool, used to route a
+/// federation call to the one repository defining it.
+fn symbol_hint<'a>(args: &'a Map<String, serde_json::Value>) -> Option<&'a str> {
+    ["symbol", "name", "from"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
 }
 
 /// Whether `name` is dispatched through the `McpToolEntry` inventory,
@@ -178,7 +190,17 @@ pub fn resolve_repo_for_tool(
     explicit_repo: Option<&str>,
 ) -> Result<RepoId, LainError> {
     if let Some(r) = explicit_repo {
-        return RepoId::new(r);
+        // An unknown id used to route to the empty placeholder graph and
+        // answer "No matches" — indistinguishable from a real miss.
+        let listed = fed.list_repos();
+        if let Some((id, _)) = listed.iter().find(|(id, _)| id.as_str() == r) {
+            return Ok(id.clone());
+        }
+        let known: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
+        return Err(LainError::Config(format!(
+            "unknown repo_id '{r}'; registered: {}",
+            known.join(", ")
+        )));
     }
     match symbol_hint {
         Some(s) => match fed.resolve_symbol(s) {
@@ -273,9 +295,8 @@ fn resolve_repo_or_error(
     tool_name: &str,
     args: &Map<String, serde_json::Value>,
 ) -> Result<RepoId, String> {
-    let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
     let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
-    match resolve_repo_for_tool(fed, tool_name, symbol_hint, explicit_repo) {
+    match resolve_repo_for_tool(fed, tool_name, symbol_hint(args), explicit_repo) {
         Ok(rid) => Ok(rid),
         Err(LainError::AmbiguousSymbol(candidates)) => {
             let payload = serde_json::json!({
@@ -337,9 +358,8 @@ fn gate_for_dispatch(
 
     let resolved: Vec<(RepoId, crate::federation::health::RepoHealth)> =
         if requires_repo_scope(name) {
-            let symbol_hint = args.get("symbol").and_then(|v| v.as_str());
             let explicit_repo = args.get("repo_id").and_then(|v| v.as_str());
-            match resolve_repo_for_tool(fed, name, symbol_hint, explicit_repo) {
+            match resolve_repo_for_tool(fed, name, symbol_hint(args), explicit_repo) {
                 Ok(id) => vec![fed.list_repos().into_iter().find(|(rid, _)| rid == &id)?],
                 Err(_) => return None,
             }
@@ -533,7 +553,16 @@ async fn dispatch_tool_call(
 
     match executor.call(name, args).await {
         Ok(mut text) => {
-            if let Some(note) = federation.and_then(|fed| indexing_notice(fed, name)) {
+            let scoped = args_map.get("repo_id").and_then(|v| v.as_str());
+            let note = match federation {
+                Some(fed) => indexing_notice(fed, name, scoped),
+                // A single-workspace server: its own startup index.
+                None => (PARTIAL_GRAPH_TOOLS.contains(&name)
+                    && executor.ctx.readiness.snapshot().state
+                        == crate::server::readiness::IndexState::WarmingUp)
+                    .then(|| indexing_note("this repository")),
+            };
+            if let Some(note) = note {
                 text.push_str(&note);
             }
             (text, false)
@@ -558,25 +587,30 @@ const PARTIAL_GRAPH_TOOLS: &[&str] = &[
 /// honest if the answer says it may be incomplete: `find_symbol` said
 /// "No matches" for a symbol the pass had not reached yet, and
 /// `get_health` said "Operational".
-fn indexing_notice(fed: &FederatedIndex, name: &str) -> Option<String> {
+fn indexing_notice(fed: &FederatedIndex, name: &str, repo_id: Option<&str>) -> Option<String> {
     if !PARTIAL_GRAPH_TOOLS.contains(&name) {
         return None;
     }
+    // A call scoped to one repository is only affected by that one.
     let indexing: Vec<String> = fed
         .list_repos()
         .into_iter()
         .filter(|(_, h)| *h == crate::federation::health::RepoHealth::Indexing)
         .map(|(id, _)| id.as_str().to_string())
+        .filter(|id| repo_id.is_none_or(|r| r == id))
         .collect();
     if indexing.is_empty() {
         return None;
     }
-    Some(format!(
-        "\n\n⏳ Still indexing: {}. This answer covers only what has been \
+    Some(indexing_note(&indexing.join(", ")))
+}
+
+fn indexing_note(what: &str) -> String {
+    format!(
+        "\n\n⏳ Still indexing: {what}. This answer covers only what has been \
          indexed so far and may be incomplete; retry when `get_health` no \
-         longer shows this note.",
-        indexing.join(", ")
-    ))
+         longer shows this note."
+    )
 }
 
 /// Wrap an args `Map<String, Value>` as a single `Value::Object` so
@@ -2687,10 +2721,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicit_repo_wins() {
+    #[tokio::test]
+    async fn explicit_repo_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _a = add_test_repo(&fed, tmp.path(), "repo-a").await;
+        let _b = add_test_repo(&fed, tmp.path(), "repo-b").await;
         let rid = resolve_repo_for_tool(&fed, "", None, Some("repo-a")).unwrap();
         assert_eq!(rid.as_str(), "repo-a");
     }
@@ -2832,10 +2868,12 @@ mod tests {
     /// hint is ignored — `resolve_repo_or_error` short-circuits to the
     /// explicit id. This is the priority ordering documented on
     /// `resolve_repo_for_tool`: explicit > symbol > single-repo fallback.
-    #[test]
-    fn explicit_repo_id_overrides_symbol_hint() {
+    #[tokio::test]
+    async fn explicit_repo_id_overrides_symbol_hint() {
         let tmp = tempfile::tempdir().unwrap();
         let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _r = add_test_repo(&fed, tmp.path(), "explicit-repo").await;
+        let _o = add_test_repo(&fed, tmp.path(), "other-repo").await;
         let mut args = Map::new();
         args.insert(
             "repo_id".into(),
@@ -3534,11 +3572,11 @@ mod tests {
     /// casualty — it takes no `symbol` or `repo_id`, so the resolver had
     /// nothing to work with and surfaced "multiple repos" on every call.
     #[test]
-    fn query_graph_does_not_require_repo_scope() {
-        assert!(
-            !requires_repo_scope("query_graph"),
-            "query_graph is federation-wide; the resolver must be skipped",
-        );
+    fn query_graph_is_routed_to_a_repo() {
+        // It runs against one repository's graph; unscoped on a federation
+        // it ran against the empty placeholder and always returned 0.
+        assert!(requires_repo_scope("query_graph"));
+        assert!(!requires_repo_scope("get_capabilities"));
     }
 
     /// Default is `true`: every tool that isn't explicitly classified must
@@ -3669,18 +3707,9 @@ mod tests {
             );
         }
 
-        // Federation-wide tool — must NOT pass through the resolver.
-        // The Part B fix added `query_graph` to the
-        // `requires_repo_scope` exclusion list; the dispatcher checks
-        // that list before calling `resolve_repo_or_error`, so the
-        // resolver is never invoked for these tools. A regression that
-        // sends `query_graph` through the resolver would re-surface the
-        // original "multiple repos" message on every call, so we pin
-        // the classifier here.
-        assert!(
-            !requires_repo_scope("query_graph"),
-            "query_graph must not require scope; the resolver should be skipped before it sees the call",
-        );
+        // `query_graph` is routed like the others now: it answers from
+        // one repository's graph.
+        assert!(requires_repo_scope("query_graph"));
     }
 
     async fn add_test_repo(
@@ -3706,6 +3735,29 @@ mod tests {
         ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."))
     }
 
+    /// An unregistered `repo_id` is an error naming the real ones, not a
+    /// silent query of the empty placeholder graph.
+    #[tokio::test]
+    async fn unknown_repo_id_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _a = add_test_repo(&fed, tmp.path(), "ra").await;
+        let _b = add_test_repo(&fed, tmp.path(), "rb").await;
+        assert_eq!(
+            resolve_repo_for_tool(&fed, "find_symbol", None, Some("rb"))
+                .unwrap()
+                .as_str(),
+            "rb"
+        );
+        let err = resolve_repo_for_tool(&fed, "find_symbol", None, Some("zz")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown repo_id 'zz'") && msg.contains("ra") && msg.contains("rb"),
+            "{msg}"
+        );
+        assert!(resolve_repo_for_tool(&fed, "find_symbol", None, Some("rb ")).is_err());
+    }
+
     /// Tools that answer from a partial graph say so while a repo is
     /// still indexing, and stop saying so once it is ready.
     #[tokio::test]
@@ -3718,12 +3770,16 @@ mod tests {
         let repo = fed.get_repo(&RepoId::new("busy").unwrap()).unwrap();
 
         repo.set_health(RepoHealth::Indexing);
-        let note = indexing_notice(&fed, "find_symbol").expect("indexing must be noted");
+        let note = indexing_notice(&fed, "find_symbol", None).expect("indexing must be noted");
         assert!(note.contains("busy"), "{note}");
-        assert!(indexing_notice(&fed, "claim_files").is_none());
+        assert!(indexing_notice(&fed, "claim_files", None).is_none());
+        assert!(
+            indexing_notice(&fed, "find_symbol", Some("other")).is_none(),
+            "scoped to another repo"
+        );
 
         repo.set_health(RepoHealth::Ready);
-        assert!(indexing_notice(&fed, "find_symbol").is_none());
+        assert!(indexing_notice(&fed, "find_symbol", None).is_none());
     }
 
     /// M4 step 8: a repo-scoped tool call must gate only on the repo it
@@ -3767,12 +3823,10 @@ mod tests {
         assert_eq!(gated.blocking_repos, vec!["broken-repo"]);
     }
 
-    /// M4 step 8: a federation-wide tool (`requires_repo_scope` ==
-    /// false) gates against every loaded repo and reports every blocking
-    /// repo id, sorted, regardless of `FederatedIndex::list_repos`'s
-    /// iteration order or which repo was added first.
+    /// A repo-scoped graph tool gates only on the repository it is routed
+    /// to, not on others that are indexing or degraded.
     #[tokio::test]
-    async fn federation_wide_tool_call_reports_every_blocking_repo_sorted() {
+    async fn scoped_query_gates_only_on_its_repo() {
         use crate::server::federation::health::RepoHealth;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3790,10 +3844,15 @@ mod tests {
             .unwrap()
             .set_health(RepoHealth::Ready);
 
+        // `query_graph` is routed to one repository: it gates on that one.
         let executor = test_executor();
-        let gated = gate_for_dispatch(&executor, Some(&fed), "query_graph", &Map::new())
-            .expect("query_graph must gate while alpha/zeta are not ready");
-        assert_eq!(gated.blocking_repos, vec!["alpha", "zeta"]);
+        let mut args = Map::new();
+        args.insert("repo_id".into(), serde_json::Value::String("alpha".into()));
+        let gated = gate_for_dispatch(&executor, Some(&fed), "query_graph", &args)
+            .expect("query_graph on alpha must gate while alpha is indexing");
+        assert_eq!(gated.blocking_repos, vec!["alpha"]);
+        args.insert("repo_id".into(), serde_json::Value::String("ready-repo".into()));
+        assert!(gate_for_dispatch(&executor, Some(&fed), "query_graph", &args).is_none());
     }
 
     /// AGENT_UX_ROADMAP.md M4 step 10: structural pin so a future change
