@@ -41,7 +41,13 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
     let embedder = NlpEmbedder::new()?;
     let cache = Arc::new(Mutex::new(HashMap::new()));
     let mut executor = Executor::new(&graph, &embedder, &cache, &root);
-    let spec = parse_query_string(expression);
+    let spec = match parse_query(expression) {
+        Ok(spec) => spec,
+        Err(e) => {
+            eprintln!("Query error: {e}");
+            std::process::exit(2);
+        }
+    };
 
     match executor.execute(&spec) {
         Ok(result) => {
@@ -55,6 +61,42 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
     }
 
     Ok(())
+}
+
+/// A `query_graph` ops array as JSON (`{"ops": [...]}` or `[...]`, as the
+/// docs describe), or the pipe syntax (`find Function name X | connect
+/// Calls incoming depth 2`). Unrecognised input is an error: it used to be
+/// ignored, and the query returned every node with exit 0.
+fn parse_query(expr: &str) -> Result<QuerySpec, String> {
+    let t = expr.trim();
+    if t.starts_with('{') {
+        return serde_json::from_str(t).map_err(|e| format!("invalid JSON query: {e}"));
+    }
+    if t.starts_with('[') {
+        let ops: serde_json::Value =
+            serde_json::from_str(t).map_err(|e| format!("invalid JSON ops array: {e}"))?;
+        return serde_json::from_value(serde_json::json!({ "ops": ops }))
+            .map_err(|e| format!("invalid JSON ops array: {e}"));
+    }
+    const STEPS: &[&str] = &[
+        "find",
+        "connect",
+        "filter",
+        "semantic_filter",
+        "sort",
+        "group",
+        "limit",
+    ];
+    for part in t.split('|').map(str::trim) {
+        let word = part.split_whitespace().next().unwrap_or("");
+        if !STEPS.contains(&word) {
+            return Err(format!(
+                "unknown query step '{part}'; expected one of: {}, or a JSON ops array",
+                STEPS.join(", ")
+            ));
+        }
+    }
+    Ok(parse_query_string(t))
 }
 
 fn parse_query_string(expr: &str) -> QuerySpec {
@@ -265,5 +307,22 @@ fn name_selector_from_string(s: &str) -> NameSelector {
         NameSelector::StartsWith(s[1..s.len() - 1].to_string())
     } else {
         NameSelector::Exact(s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn json_pipe_and_garbage() {
+        let json = r#"{"ops":[{"op":"find","type":"Function","name":"helper"}]}"#;
+        assert_eq!(parse_query(json).unwrap().ops.len(), 1);
+        let arr = r#"[{"op":"find","type":"Function","name":"helper"}]"#;
+        assert_eq!(parse_query(arr).unwrap().ops.len(), 1);
+        assert!(parse_query("find Function name helper | connect Calls incoming depth 2").is_ok());
+        assert!(parse_query("garbage").is_err());
+        assert!(parse_query("find Function | frobnicate").is_err());
+        assert!(parse_query("{not json").is_err());
     }
 }
