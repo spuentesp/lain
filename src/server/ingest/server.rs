@@ -420,8 +420,12 @@ impl LainServer {
         self.presence.with_shared_presence(f)
     }
 
+    /// Best-effort refresh for read-only listings: a failed read leaves
+    /// the in-memory view as it was, so log it rather than fail the call.
     pub fn refresh_shared_presence(&self) {
-        self.presence.refresh_shared_presence();
+        if let Err(e) = self.presence.refresh_shared_presence() {
+            tracing::warn!("presence refresh from disk failed: {e}");
+        }
     }
 
     /// Install a persist callback on `presence`, `occupancy`,

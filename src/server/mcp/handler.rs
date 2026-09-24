@@ -608,9 +608,12 @@ fn indexing_notice(fed: &FederatedIndex, name: &str, repo_id: Option<&str>) -> O
     Some(indexing_note(&indexing.join(", ")))
 }
 
+/// How every partial-index note starts; `lain oneshot` keys its retry on it.
+pub const INDEXING_NOTE_MARKER: &str = "⏳ Still indexing:";
+
 fn indexing_note(what: &str) -> String {
     format!(
-        "\n\n⏳ Still indexing: {what}. This answer covers only what has been \
+        "\n\n{INDEXING_NOTE_MARKER} {what}. This answer covers only what has been \
          indexed so far and may be incomplete; retry when `get_health` no \
          longer shows this note."
     )
