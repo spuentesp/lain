@@ -141,29 +141,11 @@ Two-pass percentile-normalized to `[0, 100]` per corpus. Top
 symbol = 100; everything else scales. Search formula
 `sim + anchor_weight × anchor` is consistent across reindexes.
 
-```mermaid
-flowchart LR
-    F1[Function fan=47] --> P[percentile]
-    F2[Function fan=12] --> P
-    F3[Function fan=3]  --> P
-    P --> S["Anchor scores 100/42/11"]
-```
-
-## Volatile overlay (`src/overlay.rs`)
+## Volatile overlay (`src/server/overlay.rs`)
 
 In-memory graph layer *on top of* the persistent graph. Reads see
 `(persistent ∪ overlay)` with overlay precedence; writes go to
 overlay first; periodic sync flushes in batches.
-
-```mermaid
-flowchart LR
-    FW[notify watcher] --> OV[overlay]
-    LSP[LSP pool] --> OV
-    GIT[git sensor] --> OV
-    OV -.30s tick.-> PG[".lain/graph.bin"]
-    Q[query/get_blast_radius/semantic_search] --> OV
-    Q -.fall-through.-> PG
-```
 
 `get_health`'s `_meta.revision` moves on overlays but not on
 presence changes — it counts *what the graph sees*, not *what the
@@ -190,22 +172,6 @@ prefix; `embed()` never does. The convention was promoted to an
 API invariant after two of three query paths had silently omitted
 it.
 
-```mermaid
-flowchart TB
-    Q[semantic_search] --> T[tokenize]
-    T --> P[+ query_prefix]
-    P --> ONX[ONNX forward]
-    ONX --> QE[query embedding]
-    C[node.embedding] --> P1[Pass 1 cache]
-    V[volatile nodes] --> P2[Pass 2 cold batch]
-    P2 --> ONX
-    P1 --> SCORE["hybrid score"]
-    QE --> SCORE
-    SCORE --> AN["+ anchor"]
-    AN --> RR[optional cross-encoder rerank]
-    RR --> TOP[top-K + body excerpts]
-```
-
 Two-pass scoring: in-memory cache + persisted `node.embedding`,
 then cold batched forward pass for uncached nodes with right-
 padding to longest input. Hybrid score:
@@ -214,7 +180,7 @@ padding to longest input. Hybrid score:
 `nlp_max_threads` in `tuning.toml` (0 = `min(cores, 4)`). BGE
 inference doesn't benefit from more than 4.
 
-## Git sensor (`src/git.rs`)
+## Git sensor (`src/server/git.rs`)
 
 Walks commit history for `CoChangedWith` edges (Jaccard similarity
 on file-change sets). `get_coupling_radar` reports the result.
@@ -223,7 +189,7 @@ on file-change sets). `get_coupling_radar` reports the result.
 `RepoIdentity { owner, name }`. Used by `get_agent_strategy` to
 orient the agent in the repo.
 
-## Background jobs (`src/server/jobs.rs`)
+## Background jobs (`src/server/ingest/jobs.rs`)
 
 | Job | Trigger | Cadence |
 |-----|---------|---------|
@@ -234,23 +200,6 @@ orient the agent in the repo.
 | Full enrichment | `run_enrichment` | manual |
 
 ## Federation (`src/server/federation/`)
-
-```mermaid
-flowchart TB
-    subgraph FI["FederatedIndex"]
-        M["RwLock&lt;HashMap&lt;RepoId, Arc&lt;RepoIndex&gt;&gt;&gt;"]
-        R["symbol_to_repos index"]
-        G["Arc&lt;dyn GraphBackend&gt;"]
-    end
-    R1["RepoIndex auth-svc<br/>(LSP, petgraph, watcher)"]
-    R2["RepoIndex billing-svc<br/>(LSP, petgraph, watcher)"]
-    M --> R1
-    M --> R2
-    R1 -.project_repo.-> G
-    R2 -.project_repo.-> G
-    R --> G
-    G --> T[federation tools]
-```
 
 Two key traits:
 
@@ -308,46 +257,17 @@ the owning repo.
 
 ## MCP transports
 
-```mermaid
-flowchart LR
-    subgraph STD["stdio"]
-        C1[Client] -->|stdin/stdout JSON-RPC| H1[handler]
-    end
-    subgraph HTTP["http"]
-        C2[curl/browser] -->|POST /mcp| H2[handler]
-        C2 -->|GET /| SP[SPA]
-        C2 -->|GET /events| SSE
-        C2 -->|GET /health| HC
-    end
-```
-
-Tools registered via `inventory::collect!(ToolHandlerEntry)` (in
+Tools are registered via `inventory::collect!(ToolHandlerEntry)` (in
 `src/server/tools/registry.rs`), where each entry wraps a
-`&'static dyn ToolHandler`.
-Handler dispatches by tool name.
+`&'static dyn ToolHandler`. The handler dispatches by tool name over
+stdio or HTTP.
 
 ## Data flow
 
 ### Initial indexing
 
-```mermaid
-sequenceDiagram
-    participant New
-    participant Mem as build_core_memory
-    participant Scan
-    participant Ing as Resolve
-    participant Anch
-    participant FS
-
-    New->>Mem: start pipeline
-    Mem->>Scan: scan_file_batch
-    Scan-->>Mem: Map phase
-    Mem->>Ing: link edges
-    Ing-->>Mem: resolved
-    Mem->>Anch: calculate_anchor_scores
-    Anch-->>Mem: enriched
-    Mem->>FS: persist
-```
+`LainServer::new` starts the pipeline: `scan_file_batch` scans workspace files,
+links syntactic and semantic edges, calculates anchor scores, and persists to disk.
 
 ### Incremental sync
 
@@ -400,18 +320,6 @@ Two fields exist so an agent can tell whether to trust the answer:
 | `LAIN_AGENT_NAME` | (none) | Override agent name |
 | `RUST_LOG` | `info` | tracing level |
 
-### `lain server` flags
-
-```
---config <path>            Path to repos.yaml (default: ./repos.yaml)
---transport <mode>          stdio | http (default: stdio)
---port <port>               HTTP port (default: 9999)
---workspace <name>          Workspace or "auto"
---log-level <env-filter>    tracing EnvFilter (default: info)
---embedding-model <path>    ONNX model path
---no-process-attribution    Disable /proc/<pid>/fd
-```
-
 ## Persistence
 
 | Path | What |
@@ -423,55 +331,15 @@ Two fields exist so an agent can tell whether to trust the answer:
 | `~/.local/lain/run/<stem>.sock` | hot-reload socket |
 | `~/.config/lain/recent_projects.json` | recent project list |
 
-Inspect: `curl -X POST http://localhost:9999/mcp ... '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"describe_schema","arguments":{}},"id":99}'` (for the canonical node/edge schema) or `lain schema dump` (for the wire-format tool surface)
+Inspect via `curl -X POST http://localhost:9999/mcp ... '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"describe_schema","arguments":{}},"id":99}'` or `lain schema dump`.
 
-## Directory layout
+## Code organization
 
-```
-src/
-├── main.rs, lib.rs, state.rs
-├── server/
-│   ├── mod.rs                       # LainServer, transports
-│   ├── federation/                  # config, repo_id, repo_source,
-│   │                                # repo_index, federated_index,
-│   │                                # graph_backend, matching,
-│   │                                # workspace, loader, health,
-│   │                                # manifest
-│   ├── mcp/                         # handler, federation_tools/,
-│   │                                # presence_tools/, definitions,
-│   │                                # envelope, overlay_sse,
-│   │                                # command_center/ (SPA)
-│   ├── tools/                       # executor, registry,
-│   │                                # handlers/<category>.rs
-│   ├── query/                       # spec, executor, schema
-│   ├── ingest/                      # server, ingestion, scan,
-│   │                                # resolve, jobs, background,
-│   │                                # config, constructors
-│   ├── sensors/                     # http_sensor, graphql_sensor,
-│   │                                # openapi_sensor, proto_sensor,
-│   │                                # websocket_sensor
-│   ├── overlay.rs, overlay/stream.rs
-│   ├── graph.rs, lsp.rs, nlp.rs, git.rs, treesitter.rs
-│   ├── toolchains.rs, watcher.rs, reload.rs
-│   ├── schema.rs, tuning.rs
-│   ├── presence.rs, presence_lock.rs
-│   ├── attribution.rs, audit.rs, auth.rs
-│   ├── build_info.rs, sse.rs, events_log.rs
-│   ├── state_lock.rs, sync_status.rs, revision_log.rs
-│   ├── glob_match.rs, sentinel.rs, time.rs, error.rs
-│   └── refresh/
-├── cli/                             # subcommands + dispatch
-└── config/                          # config types
-```
+The codebase is structured under `src/`:
+- `server/`: core engine, MCP protocol handlers, graph storage, federation, and background sync.
+- `cli/`: subcommand implementations (`server`, `mcp`, `setup`, `doctor`, `query`, etc.).
+- `bin/`: executable entry points including `lain-git-sidecar`.
 
-> Directory listing is incomplete: `mod.rs` files in `federation/`,
-> `ingest/`, `mcp/`, `query/`, `sensors/`, `refresh/` are elided,
-> `audit_tools.rs` / `command_center_assets.rs` under `mcp/` are
-> grouped into the SPA line, and several audit / debug helpers
-> (`audit.rs`, `state_lock.rs`, `glob_match.rs`, `sentinel.rs`,
-> `time.rs`) live as siblings at the top of `src/server/`. Run
-> `find src/server -maxdepth 2 -type f -name '*.rs' | sort` for the
-> canonical file list.
 
 ## License
 
