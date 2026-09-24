@@ -495,11 +495,18 @@ impl SidecarInner {
         };
         self.write_request(&req)?;
         match self.read_response()? {
-            Response::HandshakeAck { version } => {
+            Response::HandshakeAck { version, build } => {
                 if version != PROTOCOL_VERSION {
-                    return Err(LainError::Fatal(format!(
+                    return Err(LainError::Unavailable(format!(
                         "git sidecar handshake version mismatch: expected {}, got {}",
                         PROTOCOL_VERSION, version
+                    )));
+                }
+                let ours = crate::sidecar_proto::build_id();
+                if build != ours {
+                    return Err(LainError::Unavailable(format!(
+                        "git sidecar is build {build}, this lain is {ours}; install the \
+                         matching lain-git-sidecar next to lain or set LAIN_GIT_SIDECAR_BIN"
                     )));
                 }
                 Ok(())
@@ -508,7 +515,7 @@ impl SidecarInner {
                 expected,
                 received,
                 reason,
-            } => Err(LainError::Fatal(format!(
+            } => Err(LainError::Unavailable(format!(
                 "git sidecar handshake rejected: expected {expected}, received {received}, reason: {reason}"
             ))),
             other => Err(LainError::Fatal(format!(

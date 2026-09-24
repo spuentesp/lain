@@ -210,6 +210,7 @@ mod unix_sidecar {
                     &mut stream,
                     &Response::HandshakeAck {
                         version: PROTOCOL_VERSION,
+                        build: lain::sidecar_proto::build_id(),
                     },
                 )?;
                 stream.flush()?;
@@ -269,6 +270,7 @@ mod unix_sidecar {
                 if *version == PROTOCOL_VERSION {
                     Response::HandshakeAck {
                         version: PROTOCOL_VERSION,
+                        build: lain::sidecar_proto::build_id(),
                     }
                 } else {
                     Response::HandshakeNack {
