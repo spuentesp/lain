@@ -706,7 +706,17 @@ impl GraphDatabase {
                         .get(&edge.target_id)
                         .map(|r| *r.value())
                         .unwrap();
-                    graph.add_edge(s, t, edge.clone());
+                    // One edge per (source, target, type). Re-inserting an
+                    // existing edge — every incremental pass re-emits the
+                    // folder `Contains` edges it keeps, and re-resolving
+                    // unchanged callers re-emits their calls — piled up
+                    // duplicates that inflated every count.
+                    let exists = graph
+                        .edges_connecting(s, t)
+                        .any(|e| e.weight().edge_type == edge.edge_type);
+                    if !exists {
+                        graph.add_edge(s, t, edge.clone());
+                    }
                 }
                 (true, false) => {
                     // Caller exists locally, callee lives in another

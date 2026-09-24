@@ -359,6 +359,14 @@ fn call_lines_in(
                 break;
             }
         }
+        // An import names the callee without calling it.
+        let t = line.trim_start();
+        if ["import ", "from ", "use ", "#include", "using ", "require "]
+            .iter()
+            .any(|kw| t.starts_with(kw))
+        {
+            continue;
+        }
         // Skip the definition itself: a definition keyword followed by the
         // callee's name. This used to skip every line *starting* with
         // `fn ` — a Rust-only rule that also dropped Python's
@@ -475,6 +483,13 @@ mod call_lines_tests {
         .unwrap();
         let lines = call_lines_in(ws.path(), &caller_in("models.py", (1, 3)), "guess_filename");
         assert_eq!(lines, vec![2]);
+        std::fs::write(
+            ws.path().join("m.py"),
+            "from pkg.b import guess_filename\n\ndef f(v):\n    return guess_filename(v)\n",
+        )
+        .unwrap();
+        let lines = call_lines_in(ws.path(), &caller_in("m.py", (0, 3)), "guess_filename");
+        assert_eq!(lines, vec![4], "the import line is not a call site");
     }
 
     /// The definition line itself is still skipped, in any language.

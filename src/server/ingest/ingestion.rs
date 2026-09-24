@@ -551,6 +551,25 @@ impl LainServer {
             "Resolving {} tree-sitter static references...",
             all_static_refs.len()
         );
+        if last_commit.is_some() {
+            let git_sensor = Arc::clone(self.ingest().git());
+            let tracked = offthread(cancel.clone(), move || {
+                git_sensor.try_get_all_tracked_files()
+            })
+            .await
+            .unwrap_or_default();
+            let extra = refs_into_rescanned(
+                &self.ingest().config().workspace,
+                self.ingest().graph(),
+                &files_to_scan,
+                &tracked,
+            );
+            info!(
+                "Re-resolving {} references into the rescanned files",
+                extra.len()
+            );
+            all_static_refs.extend(extra);
+        }
         let static_edges = super::resolve::resolve_static_edges(
             self.ingest().graph(),
             &all_static_refs,
@@ -1544,6 +1563,11 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     if cancel.is_cancelled() {
         return Err(LainError::Cancelled);
     }
+    let mut all_static_refs = all_static_refs;
+    if last_commit.is_some() && !force {
+        let tracked = git.get_all_tracked_files().unwrap_or_default();
+        all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
+    }
     let static_edges =
         super::resolve::resolve_static_edges(graph, &all_static_refs, resolver, source_repo);
     info!(
@@ -1627,6 +1651,81 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
     );
     overlay.touch();
     Ok(())
+}
+
+/// References from files an incremental pass did *not* rescan to symbols
+/// the rescanned files define.
+///
+/// A node's id includes its line, so a commit that shifts a function down a
+/// line — or moves it to another file, or adds a function others already
+/// call — gives it a new id. Edges from unchanged files were only carried
+/// over for ids that survived, and those files' references were never
+/// resolved again: the callers were gone for good (`assess_change` then
+/// reported 0 dependents, "low" risk) until a full re-index. Re-resolving
+/// just the references into the rescanned files' names makes an
+/// incremental pass agree with a fresh one.
+pub(crate) fn refs_into_rescanned(
+    root: &Path,
+    graph: &GraphDatabase,
+    rescanned: &[PathBuf],
+    tracked: &[PathBuf],
+) -> Vec<StaticFileRef> {
+    use crate::schema::NodeType;
+    let scanned: HashSet<String> = rescanned.iter().map(|p| graph_path(root, p)).collect();
+    let names: HashSet<String> = graph
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| {
+            scanned.contains(&n.path)
+                && !matches!(
+                    n.node_type,
+                    NodeType::File | NodeType::Namespace | NodeType::Module | NodeType::Package
+                )
+        })
+        .map(|n| n.name)
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for abs in tracked {
+        let rel = graph_path(root, abs);
+        if scanned.contains(&rel) {
+            continue;
+        }
+        let indexed = abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(crate::treesitter::is_indexed_extension);
+        if !indexed {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(abs) else {
+            continue;
+        };
+        // Cheap pre-filter: skip files that never mention one of the names.
+        let mentions = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|w| names.contains(w));
+        if !mentions {
+            continue;
+        }
+        out.extend(
+            crate::treesitter::extract_refs(abs, &text)
+                .into_iter()
+                .filter(|r| names.contains(&r.target_name))
+                .map(|r| StaticFileRef {
+                    file_path: rel.clone(),
+                    source_line: r.source_line,
+                    target_name: r.target_name,
+                    edge_type: r.edge_type,
+                    foreign_receiver: r.foreign_receiver,
+                    self_receiver: r.self_receiver,
+                    qualifier: r.qualifier,
+                }),
+        );
+    }
+    out
 }
 
 #[cfg(test)]
