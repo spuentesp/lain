@@ -578,14 +578,20 @@ mod tests {
             },
         };
 
-        // Plant a fresh sentinel so the next `state_lock::acquire`
-        // call hits the timeout path. `with_shared_presence` must
-        // observe `!lock.is_held()` and surface `Unavailable`.
+        // Hold the lock from another handle (as a peer process would) so
+        // the next `state_lock::acquire` times out. `with_shared_presence`
+        // must observe `!lock.is_held()` and surface `Unavailable`.
         if let Some(parent) = l.state_path().parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let sentinel = l.state_path().with_extension("json.lock");
-        std::fs::write(&sentinel, "forced-by-test\n").unwrap();
+        let lock_path = l.state_path().with_extension("json.lock");
+        let peer = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        peer.try_lock().expect("peer takes the lock");
 
         let result: Result<(), CoordinationError> = l.with_shared_presence(|| ());
         assert!(
@@ -595,7 +601,7 @@ mod tests {
 
         // Cleanup: remove the sentinel so other tests don't trip
         // over it.
-        let _ = std::fs::remove_file(&sentinel);
+        drop(peer);
     }
 
     /// Unit test for the I/O-failure path the user identified: the

@@ -224,6 +224,17 @@ pub async fn run_mcp(
     // graph never advances past the commit it was first built from.
     crate::server::ingest::background::spawn_commit_sync(server.clone());
 
+    // Expire stale sessions and claim TTLs. Only the federation server
+    // started this, so under `lain mcp` a crashed agent's edit claims — and
+    // any `ttl_seconds` claim — were never dropped, blocking every other
+    // agent on those files for good.
+    crate::server::ingest::background::spawn_presence_expiry_loop(
+        server.presence().clone(),
+        server.occupancy().clone(),
+        server.presence_event_tx().clone(),
+        server.audit_handle().events_log().clone(),
+    );
+
     // Hand the executor's tool surface to a federation-free
     // `LainMcpServer`. Single-workspace mode — per-repo tools run
     // against `server.tool_executor.graph` directly. The re-index
