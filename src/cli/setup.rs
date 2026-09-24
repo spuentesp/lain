@@ -791,8 +791,41 @@ fn claude_cli_available() -> bool {
         .unwrap_or(false)
 }
 
-fn claude_mcp_configured(name: &str) -> bool {
-    Command::new("claude")
+/// A `claude` invocation run from the workspace: local- and
+/// project-scope registrations belong to the directory `claude` runs in,
+/// so running it from the caller's cwd would register the wrong project
+/// when `--workspace` points elsewhere.
+fn claude_command(opts: &SetupOptions) -> Command {
+    let mut cmd = Command::new("claude");
+    if let Some(ws) = opts.workspace.as_ref() {
+        cmd.current_dir(ws);
+    }
+    cmd
+}
+
+/// The `--scope` value of an existing registration, read from `claude mcp
+/// get`'s "Scope: User config (…)" line. Re-registering must keep it: the
+/// installer registers at user scope, and a scope-less `add` would
+/// silently narrow that to this one project.
+fn claude_scope_of(get_output: &str) -> Option<&'static str> {
+    let line = get_output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Scope:"))?
+        .trim()
+        .to_ascii_lowercase();
+    if line.starts_with("user") {
+        Some("user")
+    } else if line.starts_with("project") {
+        Some("project")
+    } else if line.starts_with("local") {
+        Some("local")
+    } else {
+        None
+    }
+}
+
+fn claude_mcp_configured(opts: &SetupOptions, name: &str) -> bool {
+    claude_command(opts)
         .args(["mcp", "get", name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -819,7 +852,27 @@ fn configure_claude_code(
         };
     }
 
-    let mut add_args: Vec<String> = vec!["mcp".into(), "add".into(), "lain".into()];
+    let already_configured = claude_mcp_configured(opts, "lain");
+    // Captured before anything is removed: it carries the scope to keep,
+    // and it is the only record of the old entry if the new `add` fails.
+    let previous_config = if already_configured {
+        claude_command(opts)
+            .args(["mcp", "get", "lain"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    };
+    let scope = previous_config.as_deref().and_then(claude_scope_of);
+
+    let mut add_args: Vec<String> = vec!["mcp".into(), "add".into()];
+    if let Some(scope) = scope {
+        add_args.push("--scope".into());
+        add_args.push(scope.into());
+    }
+    add_args.push("lain".into());
     if let Some(model) = model {
         add_args.push("-e".into());
         add_args.push(format!("LAIN_EMBEDDING_MODEL={}", model.display()));
@@ -843,10 +896,19 @@ fn configure_claude_code(
         };
     }
 
-    let already_configured = claude_mcp_configured("lain");
+    let remove_args: Vec<String> = match scope {
+        Some(scope) => vec![
+            "mcp".into(),
+            "remove".into(),
+            "--scope".into(),
+            scope.into(),
+            "lain".into(),
+        ],
+        None => vec!["mcp".into(), "remove".into(), "lain".into()],
+    };
     if opts.dry_run {
         let plan = if already_configured {
-            format!("claude mcp remove lain && {command_line}")
+            format!("claude {} && {command_line}", remove_args.join(" "))
         } else {
             command_line
         };
@@ -871,25 +933,15 @@ fn configure_claude_code(
     // `claude mcp get`'s output before removing, and if the replacement
     // `add` fails, surface it so the user can restore by hand instead
     // of having to remember or reconstruct what they had.
-    let previous_config = if already_configured {
-        Command::new("claude")
-            .args(["mcp", "get", "lain"])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
-    };
     if already_configured {
-        let _ = Command::new("claude")
-            .args(["mcp", "remove", "lain"])
+        let _ = claude_command(opts)
+            .args(&remove_args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
 
-    match Command::new("claude").args(&add_args).output() {
+    match claude_command(opts).args(&add_args).output() {
         Ok(out) if out.status.success() => {
             // PR 4: drop the intent protocol into `.lain/PROMPT.md`
             // alongside the existing setup artifacts. The user copies
@@ -1003,49 +1055,52 @@ fn build_codex_entry(exe: &Path, model: Option<&Path>) -> Value {
     entry
 }
 
-/// Merge `entry` into `path`'s `[mcp_servers]` table under
-/// `server_name`, preserving every other key. Codex's `config.toml`
-/// is TOML; we parse with the `toml` crate already in `Cargo.toml`,
-/// preserve the document order via `toml::Value::Table`, and emit
-/// the result via `toml::to_string_pretty`. Refuses (rather than
-/// silently rewrites) a file that isn't valid TOML — same contract
-/// as the JSON adapters.
-fn merge_codex_toml(path: &Path, server_name: &str, entry: Value) -> Result<toml::Value> {
-    let mut doc: toml::Value = if path.is_file() {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        text.parse::<toml::Value>().with_context(|| {
-            format!(
-                "{} contains invalid TOML; nothing was changed",
-                path.display()
-            )
-        })?
+/// Merge `entry` into `[mcp_servers.<server_name>]` of Codex's
+/// `config.toml`, returning the new file text. Edits the document in
+/// place with `toml_edit`, so the user's comments, key order and
+/// formatting survive; only the `lain` table is replaced. Refuses
+/// (rather than silently rewrites) a file that isn't valid TOML — same
+/// contract as the JSON adapters.
+fn merge_codex_toml(path: &Path, server_name: &str, entry: Value) -> Result<String> {
+    let text = if path.is_file() {
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
     } else {
-        toml::Value::Table(toml::map::Map::new())
+        String::new()
     };
-    let toml::Value::Table(ref mut root) = doc else {
-        return Err(anyhow!(
-            "{} does not contain a TOML table at the top level; nothing was changed",
+    let mut doc = text.parse::<toml_edit::DocumentMut>().with_context(|| {
+        format!(
+            "{} contains invalid TOML; nothing was changed",
             path.display()
-        ));
-    };
-    let servers = root
-        .entry("mcp_servers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let toml::Value::Table(ref mut servers_tbl) = servers else {
+        )
+    })?;
+    // `serde_json::Value` -> TOML goes through the `toml` crate, whose
+    // output `toml_edit` then parses as a table item to splice in.
+    let toml_entry: toml::Value = toml::Value::try_from(&entry)
+        .map_err(|e| anyhow!("could not convert codex entry to TOML: {e}"))?;
+    let mut wrapper = toml::map::Map::new();
+    wrapper.insert("entry".to_string(), toml_entry);
+    let fragment = toml::to_string(&toml::Value::Table(wrapper))
+        .map_err(|e| anyhow!("could not render codex entry: {e}"))?;
+    let mut fragment = fragment
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow!("could not render codex entry: {e}"))?;
+    let entry_item = fragment
+        .remove("entry")
+        .ok_or_else(|| anyhow!("could not render codex entry"))?;
+
+    let servers = doc.entry("mcp_servers").or_insert_with(|| {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        toml_edit::Item::Table(t)
+    });
+    let Some(servers_tbl) = servers.as_table_like_mut() else {
         return Err(anyhow!(
             "{}'s `mcp_servers` key is not a TOML table; nothing was changed",
             path.display()
         ));
     };
-    // `serde_json::Value` -> `toml::Value` is lossy in theory but the
-    // shape we build (`command`/`args`/`env`) maps cleanly. The
-    // conversion is explicit so any future schema addition is a
-    // single grep site.
-    let toml_entry: toml::Value = toml::Value::try_from(&entry)
-        .map_err(|e| anyhow!("could not convert codex entry to TOML: {e}"))?;
-    servers_tbl.insert(server_name.to_string(), toml_entry);
-    Ok(doc)
+    servers_tbl.insert(server_name, entry_item);
+    Ok(doc.to_string())
 }
 
 fn configure_codex(
@@ -1059,18 +1114,14 @@ fn configure_codex(
 
     // Prefer the CLI when available; fall back to a direct TOML edit.
     if codex_cli_available() {
-        let mut add_args: Vec<String> = vec![
-            "mcp".into(),
-            "add".into(),
-            "lain".into(),
-            "--".into(),
-            exe.display().to_string(),
-            "mcp".into(),
-        ];
+        // `--env` is Codex's option and must come before `--`; anything
+        // after it is the server's own command line.
+        let mut add_args: Vec<String> = vec!["mcp".into(), "add".into(), "lain".into()];
         if let Some(m) = model {
-            add_args.push("-e".into());
+            add_args.push("--env".into());
             add_args.push(format!("LAIN_EMBEDDING_MODEL={}", m.display()));
         }
+        add_args.extend(["--".into(), exe.display().to_string(), "mcp".into()]);
         let command_line = format!("codex {}", add_args.join(" "));
 
         if opts.print_config {
@@ -1125,7 +1176,7 @@ fn configure_codex(
             }
         }
     };
-    let pretty = toml::to_string_pretty(&merged).unwrap_or_default();
+    let pretty = merged;
 
     if opts.print_config {
         println!("{pretty}");
@@ -1379,7 +1430,9 @@ fn merge_vscode_json(path: &Path, server_name: &str, entry: Value) -> Result<Val
     let mut root: Value = if path.is_file() {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| {
+        // VS Code's `mcp.json` is JSONC: comments and trailing commas
+        // are legal there, so accept them rather than refuse the file.
+        serde_json::from_str(&strip_jsonc(&text)).with_context(|| {
             format!(
                 "{} contains invalid JSON; nothing was changed",
                 path.display()
@@ -1405,13 +1458,118 @@ fn merge_vscode_json(path: &Path, server_name: &str, entry: Value) -> Result<Val
     Ok(root)
 }
 
+/// Plain JSON from JSONC: drops `//` and `/* */` comments outside
+/// strings and commas that directly precede `}` or `]`.
+fn strip_jsonc(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                out.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if chars[i - 1] == '"' {
+                    break;
+                }
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i += 2;
+        } else if c == ',' {
+            // A trailing comma: the next significant character closes
+            // the object or array. Comments in between are skipped by
+            // the main loop, so look past whitespace and comments here.
+            let mut j = i + 1;
+            loop {
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if chars.get(j) == Some(&'/') && chars.get(j + 1) == Some(&'/') {
+                    while j < chars.len() && chars[j] != '\n' {
+                        j += 1;
+                    }
+                } else if chars.get(j) == Some(&'/') && chars.get(j + 1) == Some(&'*') {
+                    j += 2;
+                    while j < chars.len() && !(chars[j] == '*' && chars.get(j + 1) == Some(&'/')) {
+                        j += 1;
+                    }
+                    j += 2;
+                } else {
+                    break;
+                }
+            }
+            if !matches!(chars.get(j), Some('}') | Some(']')) {
+                out.push(c);
+            }
+            i += 1;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
 // ─── Continue (M8) ───────────────────────────────────────────────────────────
 //
-// Continue reads `~/.continue/config.json`. The MCP-server list lives
-// under `experimental.modelContextProtocolServers` and is an array,
-// not a map — the apply step removes any existing `lain` entry then
-// appends the new one. Same atomic-write / backup contract as the
-// other JSON adapters.
+// Continue's current config is YAML (`~/.continue/config.yaml`), and it
+// also loads standalone block files from `<workspace>/.continue/mcpServers/`.
+// When the user is on YAML (or has no Continue config yet) we write a
+// `lain.yaml` block there — no rewrite of the user's own file, so its
+// comments survive. Only a legacy `config.json` setup (no `config.yaml`)
+// gets the JSON edit: `experimental.modelContextProtocolServers` is an
+// array of `{ "transport": { "type": "stdio", command, args, env } }`,
+// and the apply step replaces any existing `lain` entry. Same atomic-write
+// / backup contract as the other JSON adapters.
+
+fn continue_yaml_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".continue/config.yaml")
+}
+
+fn continue_block_path(root: &Path) -> PathBuf {
+    root.join(".continue/mcpServers/lain.yaml")
+}
+
+/// The workspace block file. Strings are JSON-quoted, which YAML reads
+/// as double-quoted scalars, so paths with spaces or colons are safe.
+fn build_continue_block(exe: &Path, model: Option<&Path>) -> String {
+    let q = |s: String| serde_json::to_string(&s).unwrap_or_default();
+    let mut out = format!(
+        "name: Lain\nversion: 0.0.1\nschema: v1\nmcpServers:\n  - name: lain\n    command: {}\n    args: [\"mcp\"]\n",
+        q(exe.display().to_string())
+    );
+    if let Some(model) = model {
+        out.push_str(&format!(
+            "    env:\n      LAIN_EMBEDDING_MODEL: {}\n",
+            q(model.display().to_string())
+        ));
+    }
+    out
+}
+
+/// Whether an entry in the legacy array is Lain's: ours carry
+/// `"name": "lain"`; entries written before the schema fix had the
+/// command at the top level.
+fn is_lain_continue_entry(s: &Value, server_name: &str) -> bool {
+    s.get("name").and_then(|n| n.as_str()) == Some(server_name)
+}
 
 fn continue_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1459,36 +1617,33 @@ fn merge_continue_json(path: &Path, server_name: &str, entry: Value) -> Result<V
     // contract is "leave every other key untouched" — we leave
     // other servers in the array intact, just remove this one's
     // prior version.
-    servers_arr.retain(|s| {
-        s.get("name")
-            .and_then(|n| n.as_str())
-            .map(|n| n != server_name)
-            .unwrap_or(true)
-    });
+    servers_arr.retain(|s| !is_lain_continue_entry(s, server_name));
     servers_arr.push(entry);
     Ok(root)
 }
 
 fn build_continue_entry(exe: &Path, model: Option<&Path>) -> Value {
-    let mut entry = json!({
-        "name": "lain",
-        "transport": "stdio",
+    let mut transport = json!({
+        "type": "stdio",
         "command": exe.display().to_string(),
         "args": ["mcp"],
     });
     if let Some(model) = model {
-        entry["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
+        transport["env"] = json!({ "LAIN_EMBEDDING_MODEL": model.display().to_string() });
     }
-    entry
+    json!({ "name": "lain", "transport": transport })
 }
 
 fn configure_continue(
-    _root: &Path,
+    root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
 ) -> ConfigurationOutcome {
     let config_path = continue_config_path();
+    if continue_yaml_path().is_file() || !config_path.is_file() {
+        return configure_continue_block(root, exe, model, opts);
+    }
     let target = config_path.display().to_string();
     let entry = build_continue_entry(exe, model);
     let merged = match merge_continue_json(&config_path, "lain", entry) {
@@ -1546,6 +1701,39 @@ fn configure_continue(
             target: Some(target),
             detail: Some(e.to_string()),
         },
+    }
+}
+
+fn configure_continue_block(
+    root: &Path,
+    exe: &Path,
+    model: Option<&Path>,
+    opts: &SetupOptions,
+) -> ConfigurationOutcome {
+    let path = continue_block_path(root);
+    let target = path.display().to_string();
+    let block = build_continue_block(exe, model);
+    let outcome = |state, detail| ConfigurationOutcome {
+        agent: "continue".into(),
+        state,
+        target: Some(target.clone()),
+        detail,
+    };
+    if opts.print_config {
+        println!("{block}");
+        return outcome(ConfigurationState::Printed, None);
+    }
+    if opts.dry_run {
+        return outcome(ConfigurationState::WouldConfigure, Some(block));
+    }
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return outcome(ConfigurationState::Failed, Some(e.to_string()));
+        }
+    }
+    match write_file_atomic(&path, block) {
+        Ok(()) => outcome(ConfigurationState::Configured, None),
+        Err(e) => outcome(ConfigurationState::Failed, Some(e.to_string())),
     }
 }
 
@@ -1911,6 +2099,72 @@ mod tests {
         assert_eq!(agent_from_answer(" 6 "), Some("generic"));
         assert_eq!(agent_from_answer("Codex"), Some("codex"));
         assert_eq!(agent_from_answer("bogus"), None);
+    }
+
+    #[test]
+    fn strip_jsonc_drops_comments_and_trailing_commas_only() {
+        let text = r#"{
+  // user comment
+  "servers": { "x": { "url": "http://a//b", "s": "q\"/*not*/" }, }, /* tail */
+  "list": [1, 2, ],
+}"#;
+        let v: Value = serde_json::from_str(&strip_jsonc(text)).unwrap();
+        assert_eq!(v["servers"]["x"]["url"], "http://a//b");
+        assert_eq!(v["servers"]["x"]["s"], "q\"/*not*/");
+        assert_eq!(v["list"], json!([1, 2]));
+    }
+
+    #[test]
+    fn merge_codex_toml_keeps_comments_and_other_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my settings\nmodel = \"o3\" # inline\n\n[mcp_servers.other]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        let entry = build_codex_entry(Path::new("/usr/bin/lain"), Some(Path::new("/m.onnx")));
+        let text = merge_codex_toml(&path, "lain", entry).unwrap();
+        assert!(
+            text.starts_with("# my settings\nmodel = \"o3\" # inline"),
+            "{text}"
+        );
+        let v: toml::Value = text.parse().unwrap();
+        assert_eq!(v["mcp_servers"]["other"]["command"].as_str(), Some("x"));
+        assert_eq!(
+            v["mcp_servers"]["lain"]["command"].as_str(),
+            Some("/usr/bin/lain")
+        );
+        assert_eq!(
+            v["mcp_servers"]["lain"]["env"]["LAIN_EMBEDDING_MODEL"].as_str(),
+            Some("/m.onnx")
+        );
+        // Re-running replaces the entry instead of duplicating it.
+        std::fs::write(&path, &text).unwrap();
+        let again =
+            merge_codex_toml(&path, "lain", build_codex_entry(Path::new("/b/lain"), None)).unwrap();
+        let v: toml::Value = again.parse().unwrap();
+        assert_eq!(
+            v["mcp_servers"]["lain"]["command"].as_str(),
+            Some("/b/lain")
+        );
+        assert!(v["mcp_servers"]["lain"].get("env").is_none());
+        assert_eq!(again.matches("[mcp_servers.lain]").count(), 1, "{again}");
+    }
+
+    #[test]
+    fn claude_scope_is_read_from_get_output() {
+        let get = "lain:\n  Scope: User config (available in all your projects)\n  Type: stdio\n";
+        assert_eq!(claude_scope_of(get), Some("user"));
+        assert_eq!(
+            claude_scope_of("  Scope: Local config (private to you in this project)"),
+            Some("local")
+        );
+        assert_eq!(
+            claude_scope_of("  Scope: Project config (shared via .mcp.json)"),
+            Some("project")
+        );
+        assert_eq!(claude_scope_of("lain:\n  Type: stdio"), None);
     }
 
     #[test]
@@ -2649,6 +2903,9 @@ mod tests {
     fn continue_writes_lain_in_model_context_protocol_servers() {
         let _guard = SERIAL.lock().unwrap();
         let (_tmp, fake_home) = continue_fixture();
+        // A legacy JSON setup: config.json and no config.yaml.
+        std::fs::create_dir_all(fake_home.join(".continue")).unwrap();
+        std::fs::write(fake_home.join(".continue/config.json"), r#"{"models": []}"#).unwrap();
         let opts = SetupOptions {
             workspace: None,
             agent: Some("continue".into()),
@@ -2669,6 +2926,7 @@ mod tests {
         let cfg = fake_home.join(".continue/config.json");
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed["models"], json!([]), "other keys are kept");
         let servers = parsed["experimental"]["modelContextProtocolServers"]
             .as_array()
             .expect("modelContextProtocolServers must be an array");
@@ -2676,8 +2934,49 @@ mod tests {
             .iter()
             .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("lain"))
             .expect("a 'lain' server entry must exist in the array");
-        assert_eq!(lain["transport"], "stdio");
-        assert_eq!(lain["command"], "/usr/bin/lain");
+        assert_eq!(lain["transport"]["type"], "stdio");
+        assert_eq!(lain["transport"]["command"], "/usr/bin/lain");
+        assert_eq!(lain["transport"]["args"], json!(["mcp"]));
+    }
+
+    #[test]
+    fn continue_yaml_users_get_a_workspace_block_file() {
+        let _guard = SERIAL.lock().unwrap();
+        let (tmp, fake_home) = continue_fixture();
+        std::fs::create_dir_all(fake_home.join(".continue")).unwrap();
+        let yaml = "# mine\nname: cfg\n";
+        std::fs::write(fake_home.join(".continue/config.yaml"), yaml).unwrap();
+        let opts = SetupOptions {
+            workspace: None,
+            agent: Some("continue".into()),
+            json: false,
+            dry_run: false,
+            print_config: false,
+            yes: true,
+            no_model: true,
+            lsp: None,
+        };
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let out = configure_continue(
+            &root,
+            std::path::Path::new("/opt/my apps/lain"),
+            Some(std::path::Path::new("/m: x.onnx")),
+            &opts,
+        );
+        assert!(matches!(out.state, ConfigurationState::Configured));
+        assert_eq!(
+            std::fs::read_to_string(fake_home.join(".continue/config.yaml")).unwrap(),
+            yaml,
+            "the user's config.yaml is not rewritten"
+        );
+        let block = std::fs::read_to_string(root.join(".continue/mcpServers/lain.yaml")).unwrap();
+        assert!(block.contains("command: \"/opt/my apps/lain\""), "{block}");
+        assert!(
+            block.contains("LAIN_EMBEDDING_MODEL: \"/m: x.onnx\""),
+            "{block}"
+        );
+        assert!(block.contains("schema: v1"), "{block}");
     }
 
     #[test]
@@ -2734,6 +3033,6 @@ mod tests {
             1,
             "duplicate 'lain' server entries must be deduplicated; got: {servers:?}"
         );
-        assert_eq!(lain_entries[0]["command"], "/usr/bin/lain");
+        assert_eq!(lain_entries[0]["transport"]["command"], "/usr/bin/lain");
     }
 }
