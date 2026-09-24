@@ -18,6 +18,8 @@
 //!    occupancy map is empty once everyone releases.
 //!
 //! Run with: cargo test --test coordination_benchmark -- --nocapture
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 
 use lain::graph::GraphDatabase;
 use lain::overlay::VolatileOverlay;
@@ -85,7 +87,7 @@ fn fresh_server(n_files: usize) -> (tempfile::TempDir, Arc<LainServer>, String, 
         .unwrap();
     }
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server = Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
     let v = run_register_agent(
         &server,
         serde_json::json!({"name": "bench", "kind": "kimi"}),

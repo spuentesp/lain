@@ -1,3 +1,5 @@
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 use lain::server::activity::ActivityTracker;
 use lain::server::intent::IntentRegistry;
 use lain::server::presence::*;
@@ -25,7 +27,7 @@ async fn query_graph_includes_occupancy() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
 
     // Register an agent and claim the file.
     let agent = server.presence().register(
@@ -402,7 +404,7 @@ async fn lain_server_exposes_presence_and_occupancy() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     assert!(server.presence().list_active(true).is_empty());
     assert!(server.occupancy().list_all().is_empty());
 }
@@ -531,7 +533,7 @@ async fn presence_tool_dispatchers_round_trip() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     let server_arc = std::sync::Arc::new(server);
 
     // Subscribe BEFORE register_agent so we don't miss AgentJoined.
@@ -1248,7 +1250,8 @@ async fn who_am_i_includes_parent_session_id() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     // Register a parent (no parent_session_id).
     let parent_reg = run_register_agent(&server, serde_json::json!({"name": "parent"})).unwrap();
@@ -1335,7 +1338,7 @@ fn run_claim_files_conflict_json_has_no_unknown_name_field() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     let server_arc = std::sync::Arc::new(server);
 
     // Register two agents, each holding a valid session token.
@@ -1555,7 +1558,7 @@ async fn to_old_path_fires_via_run_claim_files() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
     let server_arc = std::sync::Arc::new(server);
 
     // Drive the overlay revision past the ring buffer's 256-entry
@@ -1636,7 +1639,7 @@ async fn get_world_state_tool_returns_retracted_and_beyond_current() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
 
     // 1) Empty symbols → no-op WorldState
     let r = lain::server::mcp::presence_tools::run_get_world_state(&server, json!({}))
@@ -1718,7 +1721,7 @@ async fn get_recent_activity_tool_groups_by_path() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = LainServer::new(tmp.path(), &mem, None).expect("server");
+    let server = isolated_state::new_server(tmp.path(), &mem, None).expect("server");
 
     // Use a unique per-run path so the test is hermetic even if the
     // underlying state dir already contains audit events from prior
@@ -2061,7 +2064,8 @@ async fn any_authenticated_tool_call_extends_the_session() {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let v = run_register_agent(&server, serde_json::json!({"name": "alice"})).unwrap();
     let agent_id = v["agent_id"].as_str().unwrap().to_string();
@@ -2263,7 +2267,8 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let bob = run_register_agent_for_test(&server, "bob");
 
@@ -2316,7 +2321,8 @@ async fn session_removal_cleans_up_claims_and_locks() {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let alice = run_register_agent_for_test(&server, "alice");
     let bob = run_register_agent_for_test(&server, "bob");
@@ -2365,7 +2371,8 @@ async fn unregister_agent_cleans_up_claims_and_emits_event() {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
     let mut rx = server.presence_event_tx().subscribe();
 
     let alice = run_register_agent_for_test(&server, "alice");
@@ -2425,7 +2432,8 @@ async fn claim_files_accepts_string_form_files() {
     git2::Repository::init(tmp.path()).unwrap();
     std::fs::write(tmp.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = tmp.path().join(".lain/graph.bin");
-    let server = std::sync::Arc::new(LainServer::new(tmp.path(), &mem, None).expect("server"));
+    let server =
+        std::sync::Arc::new(isolated_state::new_server(tmp.path(), &mem, None).expect("server"));
 
     let alice = run_register_agent_for_test(&server, "alice");
 

@@ -505,9 +505,51 @@ async fn dispatch_tool_call(
     };
 
     match executor.call(name, args).await {
-        Ok(text) => (text, false),
+        Ok(mut text) => {
+            if let Some(note) = federation.and_then(|fed| indexing_notice(fed, name)) {
+                text.push_str(&note);
+            }
+            (text, false)
+        }
         Err(e) => (format!("Error: {e}"), true),
     }
+}
+
+/// Tools that answer from whatever the graph holds instead of waiting
+/// for readiness (`GraphIndependent`), yet read the graph.
+const PARTIAL_GRAPH_TOOLS: &[&str] = &[
+    "find_symbol",
+    "search_code",
+    "get_health",
+    "understand_repository",
+];
+
+/// A note for answers given while a repo is still being indexed.
+///
+/// `lain server` indexes in the background so it can answer at once;
+/// before, it indexed first and listened after. Answering early is only
+/// honest if the answer says it may be incomplete: `find_symbol` said
+/// "No matches" for a symbol the pass had not reached yet, and
+/// `get_health` said "Operational".
+fn indexing_notice(fed: &FederatedIndex, name: &str) -> Option<String> {
+    if !PARTIAL_GRAPH_TOOLS.contains(&name) {
+        return None;
+    }
+    let indexing: Vec<String> = fed
+        .list_repos()
+        .into_iter()
+        .filter(|(_, h)| *h == crate::federation::health::RepoHealth::Indexing)
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    if indexing.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n⏳ Still indexing: {}. This answer covers only what has been \
+         indexed so far and may be incomplete; retry when `get_health` no \
+         longer shows this note.",
+        indexing.join(", ")
+    ))
 }
 
 /// Wrap an args `Map<String, Value>` as a single `Value::Object` so
@@ -853,6 +895,21 @@ async fn notify_capabilities_changed(
     }
 }
 
+/// Wait until no federation repo is `Indexing`. No-op without a federation.
+async fn wait_for_federation_indexing(server: &LainServer) {
+    use crate::federation::health::RepoHealth;
+    let Some(fed) = server.federation() else {
+        return;
+    };
+    while fed
+        .list_repos()
+        .iter()
+        .any(|(_, h)| *h == RepoHealth::Indexing)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub(crate) async fn await_startup_reindex(
     server: Option<std::sync::Arc<LainServer>>,
     reindex_timeout: Option<std::time::Duration>,
@@ -873,10 +930,19 @@ pub(crate) async fn await_startup_reindex(
         // this outer race lets the outer timeout (or an explicit
         // cancel) win even if a phase is wedged in a non-cancellable
         // sync block. The token wins on both sides.
+        // `lain server` indexes federation repos in the background
+        // (`index_federation`). Let that pass finish first: this pass
+        // covers the same graph, and running both at once scanned every
+        // file twice with two language-server pools. Afterwards this one
+        // finds the graph current and returns at once, as it did when the
+        // federation was indexed before the server started.
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(crate::error::LainError::Cancelled),
-            r = server.build_core_memory() => r,
+            r = async {
+                wait_for_federation_indexing(&server).await;
+                server.build_core_memory().await
+            } => r,
         }
     })
     .await
@@ -3610,6 +3676,26 @@ mod tests {
         let graph = crate::graph::GraphDatabase::empty_read_only();
         let overlay = crate::overlay::VolatileOverlay::new();
         ToolExecutor::new_read_only(graph, overlay, std::path::PathBuf::from("."))
+    }
+
+    /// Tools that answer from a partial graph say so while a repo is
+    /// still indexing, and stop saying so once it is ready.
+    #[tokio::test]
+    async fn partial_answers_carry_an_indexing_notice() {
+        use crate::server::federation::health::RepoHealth;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _src = add_test_repo(&fed, tmp.path(), "busy").await;
+        let repo = fed.get_repo(&RepoId::new("busy").unwrap()).unwrap();
+
+        repo.set_health(RepoHealth::Indexing);
+        let note = indexing_notice(&fed, "find_symbol").expect("indexing must be noted");
+        assert!(note.contains("busy"), "{note}");
+        assert!(indexing_notice(&fed, "claim_files").is_none());
+
+        repo.set_health(RepoHealth::Ready);
+        assert!(indexing_notice(&fed, "find_symbol").is_none());
     }
 
     /// M4 step 8: a repo-scoped tool call must gate only on the repo it

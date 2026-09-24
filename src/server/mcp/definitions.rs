@@ -236,9 +236,9 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_audit_log",
-        description: "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset). Returns an array of AuditEvent objects (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
+        description: "Read the server's audit log (per-write events appended by the claim_files handler when a claim is granted). Args: since_unix (drop events whose ts_unix is strictly less than this), path_glob (filter to events whose path matches this glob — see src/server/glob_match.rs for the supported subset), limit (the most recent N matching events, default 200). Returns an array of AuditEvent objects, oldest first (ts_unix, agent_id, path, claim_set, racers, plan_revision, landed_revision). The on-disk file is `<state_dir>/audit.jsonl`, rotation-capped at 50 MB.",
         required_args: &[],
-        optional_args: &[],
+        optional_args: &["since_unix", "path_glob", "limit"],
     },
     ToolDef {
         name: "get_world_state",
@@ -250,7 +250,7 @@ pub const SERVER_TOOL_DEFS: &[ToolDef] = &[
         name: "get_recent_activity",
         description: "Compact digest of the audit log: groups recent edit_landed events by path (default), agent, or hour and returns a count + sample per group. Designed for LLM session compaction — instead of re-reading every audit.jsonl line, the agent gets a navigable summary and can call get_audit_log with a specific path_glob for full detail. Args: since_unix (filter by ts_unix), group_by ('path' (default) | 'agent' | 'hour'), path_glob (pre-filter by path before grouping), limit (max groups returned, default 20). Returns { groups: [{ key, count, first_ts, last_ts, sample_event }], total_events, total_groups, truncated, group_by }. truncated=true when total_groups > limit.",
         required_args: &[],
-        optional_args: &[],
+        optional_args: &["since_unix", "group_by", "path_glob", "limit"],
     },
     ToolDef {
         name: "add_annotation",

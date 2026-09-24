@@ -32,6 +32,22 @@ All notable changes to LAIN are documented here. Versions follow
 
 ### Fixed
 
+- `lain server` indexed every repo before it started listening, so it
+  answered nothing — not even `/health` — for seconds (rust-analyzer
+  installed) to minutes (large federations). Indexing now runs in the
+  background; `find_symbol`, `search_code`, `get_health` and
+  `understand_repository` answer at once with a "still indexing" note,
+  and graph tools return the existing `warming_up` response until the
+  repo is ready.
+- `get_audit_log` returned the whole audit window (40 MB on a long-lived
+  install) and parsed it on every call. It now returns the most recent
+  `limit` events (default 200), scanning from the end. Its arguments, and
+  `get_recent_activity`'s, are now declared in the tool schema.
+- The audit log is shared by every workspace on the machine, and each
+  repo's `get_audit_log` listed every other repo's edits. Events now
+  record their workspace, and both audit tools read only their own.
+- `LspPool` clones did not share the round-robin counter their comment
+  said they shared, so clones kept picking the same language server.
 - Re-indexing a directory added a second copy of its `Namespace` node,
   splitting its edges and making `lain doctor` reject the saved graph as
   corrupt ("graph index does not match its nodes"). The copy is now

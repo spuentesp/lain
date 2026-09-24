@@ -160,16 +160,16 @@ fn build_perf_fixture(root: &Path) {
     assert!(commit.success(), "git commit failed");
 }
 
-/// Spawn the server and wait until `/health` returns 200. Returns the
-/// guard plus the elapsed boot duration and the host string. The
-/// boot duration is the headline metric for
-/// `server_boot_under_5_seconds` — the other tests discard it.
+/// Spawn the server, wait until `/health` returns 200, then until every
+/// repo reports `ready`. Returns the guard, the time to the first 200
+/// (the metric for `server_boot_under_5_seconds`), the time until indexed
+/// (for `small_repo_index_under_10_seconds`), and the host string.
 fn boot_and_time(
     project_dir: &Path,
     repo_dir: &Path,
     data_dir: &Path,
     port: u16,
-) -> (ServerGuard, Duration, String) {
+) -> (ServerGuard, Duration, Duration, String) {
     let repo_id = repo_dir
         .file_name()
         .and_then(|s| s.to_str())
@@ -276,7 +276,28 @@ fn boot_and_time(
         }
     }
     let elapsed = boot_start.elapsed();
-    (guard, elapsed, host)
+
+    // The server answers while it indexes (indexing runs in the
+    // background), so wait for every repo to report `ready` before
+    // callers query it.
+    loop {
+        if boot_start.elapsed() > Duration::from_secs(120) {
+            let log = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            panic!("repos did not finish indexing within 120s on {host}; stderr:\n{log}");
+        }
+        let req = format!("GET /health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        let (_, body, _) = http_request(&host, &req);
+        let ready = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["federation"]["repos"].as_array().cloned())
+            .is_some_and(|repos| !repos.is_empty() && repos.iter().all(|r| r["health"] == "ready"));
+        if ready {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let indexed = boot_start.elapsed();
+    (guard, elapsed, indexed, host)
 }
 
 /// Build the standard fixture and boot a server against it. Used by
@@ -290,7 +311,8 @@ fn boot_default() -> (ServerGuard, String, tempfile::TempDir) {
     build_perf_fixture(&repo_dir);
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let (guard, _boot_elapsed, host) = boot_and_time(project.path(), &repo_dir, &data_dir, port);
+    let (guard, _boot_elapsed, _indexed, host) =
+        boot_and_time(project.path(), &repo_dir, &data_dir, port);
     (guard, host, project)
 }
 
@@ -352,7 +374,8 @@ fn server_boot_under_5_seconds() {
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let (guard, elapsed, host) = boot_and_time(project.path(), &repo_dir, &data_dir, port);
+    let (guard, elapsed, _indexed, host) =
+        boot_and_time(project.path(), &repo_dir, &data_dir, port);
     println!("server_boot_under_5_seconds: host={host} elapsed={elapsed:?}");
 
     let cap = relaxed(budget);
@@ -545,7 +568,8 @@ fn small_repo_index_under_10_seconds() {
     let data_dir = project.path().join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let (guard, elapsed, host) = boot_and_time(project.path(), &repo_dir, &data_dir, port);
+    let (guard, _listening, elapsed, host) =
+        boot_and_time(project.path(), &repo_dir, &data_dir, port);
     println!("small_repo_index_under_10_seconds: host={host} elapsed={elapsed:?}");
 
     let cap = relaxed(budget);

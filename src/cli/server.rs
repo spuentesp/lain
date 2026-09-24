@@ -49,86 +49,9 @@ pub async fn run_server(
         .await
         .map_err(|e| anyhow!("federation load: {e}"))?;
 
-    // `load_federation` adds each repo to the federation and projects whatever
-    // nodes are already in the per-repo DB, but it does NOT run the indexing
-    // pipeline (`tree-sitter` extract → LSP hydrate → git co-change). For a
-    // freshly-loaded federation the per-repo DB is empty, so federation tools
-    // that read from `repo.nodes()` (e.g. `search_org`) would return zero hits
-    // until something else kicks off indexing. The watcher would eventually
-    // pick up filesystem events, but the initial `git clone` won't fire any —
-    // so we explicitly run `repo.index()` on every registered repo here.
-    // Failures are logged and demoted to `Degraded`; the federation still comes
-    // up so partial results remain queryable.
-    for (id, _) in fed.list_repos() {
-        if let Some(repo) = fed.get_repo(&id) {
-            info!("lain server: indexing repo '{}'", id.as_str());
-            if let Err(e) = repo.index().await {
-                // `RepoIndex::index` already demotes its own health to
-                // `Degraded` on failure, but we re-assert it here so the
-                // demotion is independent of `index()`'s implementation
-                // details (e.g. if a future refactor moves the demotion
-                // out of `index()` callers won't silently lose it).
-                repo.set_health(RepoHealth::Degraded);
-                tracing::warn!(
-                    "lain server: indexing repo '{}' failed: {e} (marking Degraded)",
-                    id.as_str()
-                );
-            } else {
-                // After indexing, re-project so the global backend sees the
-                // newly-extracted nodes/edges.
-                if let Err(e) = fed.project_repo(&id).await {
-                    tracing::warn!(
-                        "lain server: project_repo for '{}' after indexing failed: {e}",
-                        id.as_str()
-                    );
-                }
-            }
-
-            // Re-index this repo when its checkout changes.
-            // `RepoIndex::start_watcher` had a test but no production
-            // caller, so a federated repo was frozen at whatever commit
-            // it was first indexed at — the same staleness that left this
-            // repo's own graph 29 commits behind. The comment above
-            // ("the watcher would eventually pick up filesystem events")
-            // described a watcher that nothing started.
-            if let Err(e) = repo.start_watcher().await {
-                tracing::warn!(
-                    "lain server: could not watch repo '{}' for re-index: {e}",
-                    id.as_str()
-                );
-            }
-        }
-    }
-
-    // Second pass: every repo's symbols are now known, so calls from a
-    // repo indexed early into one indexed later can finally resolve.
-    let repo_ids: Vec<_> = fed.list_repos().into_iter().map(|(id, _)| id).collect();
-    if repo_ids.len() > 1 {
-        for id in &repo_ids {
-            let Some(repo) = fed.get_repo(id) else {
-                continue;
-            };
-            match repo.relink_cross_repo().await {
-                Ok(0) => {}
-                Ok(n) => {
-                    info!(
-                        "lain server: linked {n} cross-repo edge(s) from '{}'",
-                        id.as_str()
-                    );
-                    if let Err(e) = fed.project_repo(id).await {
-                        tracing::warn!(
-                            "lain server: project_repo for '{}' after cross-repo link failed: {e}",
-                            id.as_str()
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    "lain server: cross-repo link for '{}' failed: {e}",
-                    id.as_str()
-                ),
-            }
-        }
-    }
+    // Indexing runs in the background so the server listens at once;
+    // see `index_federation`.
+    tokio::spawn(index_federation(Arc::clone(&fed)));
 
     let transport_enum = match transport {
         "http" => Transport::Http,
@@ -333,6 +256,97 @@ fn load_workspaces_for_server(
     let workspaces = crate::federation::workspace::WorkspacesFile::load(&workspaces_path)
         .map_err(|e| anyhow!("load {}: {e}", workspaces_path.display()))?;
     Ok(Some(Arc::new(workspaces)))
+}
+
+/// Index every repo, then link calls across repos, in the background.
+///
+/// This ran before the server started listening, so `lain server` answered
+/// nothing — not even `/health` — until every repo was indexed: seconds
+/// for a small repo with rust-analyzer installed, minutes for a large
+/// federation. Repos start in `RepoHealth::Indexing` and only turn `Ready`
+/// when their pass finishes, so tools and `get_health` report progress
+/// honestly in the meantime.
+async fn index_federation(fed: Arc<FederatedIndex>) {
+    // `load_federation` adds each repo to the federation and projects whatever
+    // nodes are already in the per-repo DB, but it does NOT run the indexing
+    // pipeline (`tree-sitter` extract → LSP hydrate → git co-change). For a
+    // freshly-loaded federation the per-repo DB is empty, so federation tools
+    // that read from `repo.nodes()` (e.g. `search_org`) would return zero hits
+    // until something else kicks off indexing. The watcher would eventually
+    // pick up filesystem events, but the initial `git clone` won't fire any —
+    // so we explicitly run `repo.index()` on every registered repo here.
+    // Failures are logged and demoted to `Degraded`; the federation still comes
+    // up so partial results remain queryable.
+    for (id, _) in fed.list_repos() {
+        if let Some(repo) = fed.get_repo(&id) {
+            info!("lain server: indexing repo '{}'", id.as_str());
+            if let Err(e) = repo.index().await {
+                // `RepoIndex::index` already demotes its own health to
+                // `Degraded` on failure, but we re-assert it here so the
+                // demotion is independent of `index()`'s implementation
+                // details (e.g. if a future refactor moves the demotion
+                // out of `index()` callers won't silently lose it).
+                repo.set_health(RepoHealth::Degraded);
+                tracing::warn!(
+                    "lain server: indexing repo '{}' failed: {e} (marking Degraded)",
+                    id.as_str()
+                );
+            } else {
+                // After indexing, re-project so the global backend sees the
+                // newly-extracted nodes/edges.
+                if let Err(e) = fed.project_repo(&id).await {
+                    tracing::warn!(
+                        "lain server: project_repo for '{}' after indexing failed: {e}",
+                        id.as_str()
+                    );
+                }
+            }
+
+            // Re-index this repo when its checkout changes.
+            // `RepoIndex::start_watcher` had a test but no production
+            // caller, so a federated repo was frozen at whatever commit
+            // it was first indexed at — the same staleness that left this
+            // repo's own graph 29 commits behind. The comment above
+            // ("the watcher would eventually pick up filesystem events")
+            // described a watcher that nothing started.
+            if let Err(e) = repo.start_watcher().await {
+                tracing::warn!(
+                    "lain server: could not watch repo '{}' for re-index: {e}",
+                    id.as_str()
+                );
+            }
+        }
+    }
+
+    // Second pass: every repo's symbols are now known, so calls from a
+    // repo indexed early into one indexed later can finally resolve.
+    let repo_ids: Vec<_> = fed.list_repos().into_iter().map(|(id, _)| id).collect();
+    if repo_ids.len() > 1 {
+        for id in &repo_ids {
+            let Some(repo) = fed.get_repo(id) else {
+                continue;
+            };
+            match repo.relink_cross_repo().await {
+                Ok(0) => {}
+                Ok(n) => {
+                    info!(
+                        "lain server: linked {n} cross-repo edge(s) from '{}'",
+                        id.as_str()
+                    );
+                    if let Err(e) = fed.project_repo(id).await {
+                        tracing::warn!(
+                            "lain server: project_repo for '{}' after cross-repo link failed: {e}",
+                            id.as_str()
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "lain server: cross-repo link for '{}' failed: {e}",
+                    id.as_str()
+                ),
+            }
+        }
+    }
 }
 
 /// Resolve the `--workspace` arg and dispatch to the right loader.
