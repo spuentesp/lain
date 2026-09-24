@@ -359,8 +359,13 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
         }
     }
     for id in held {
+        // Only promote what is still held: a watcher-triggered re-index may
+        // have finished (Ready) or failed (Degraded) in the meantime, and
+        // overwriting Degraded with Ready would hide the failure.
         if let Some(repo) = fed.get_repo(&id) {
-            repo.set_health(RepoHealth::Ready);
+            if repo.health() == RepoHealth::Indexing {
+                repo.set_health(RepoHealth::Ready);
+            }
         }
     }
 }
