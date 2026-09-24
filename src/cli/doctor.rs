@@ -336,7 +336,7 @@ fn observe_repository(report: &mut DoctorReport, root: &Path) -> Result<()> {
         working_tree_dirty: Some(was_dirty),
     };
     report.capabilities.git_history = Capability::new(CapabilityState::Ready, false);
-    let refresh = "Run `lain mcp` in this repository to build or refresh the index.";
+    let refresh = "Run `lain oneshot find_anchors` in this repository to build or refresh the index (an agent's `lain mcp` server also indexes on startup).";
     match inspect_persisted_graph(&root.join(".lain/graph.bin")) {
         Ok(commit) => {
             repository.indexed_commit = commit.clone();

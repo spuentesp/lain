@@ -52,13 +52,14 @@ lain setup --agent continue
 ```
 
 Use `lain setup --agent generic` for another MCP host. It writes this
-project-level configuration:
+project-level `.mcp.json`, with the absolute path of the `lain` binary that
+ran setup as `command`:
 
 ```json
 {
   "mcpServers": {
     "lain": {
-      "command": "lain",
+      "command": "/home/you/.local/bin/lain",
       "args": ["mcp"]
     }
   }

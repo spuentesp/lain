@@ -22,7 +22,7 @@ whenever they change, this file must change too.
 lain server --config /etc/lain/repos.yaml --transport http --port 9999
 ```
 
-- `--config <path>` (required) — path to a `repos.yaml` file
+- `--config <path>` — path to a `repos.yaml` file (default `./repos.yaml`)
 - `--transport http|stdio` (default `stdio`; set to `http` for the Command Center)
 - `--port <u16>` (default `9999`)
 - `--log-level <EnvFilter>` (default `info`)

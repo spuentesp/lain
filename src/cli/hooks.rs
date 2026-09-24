@@ -26,10 +26,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
-        /// the codebase but ignored here, so exporting it and omitting
-        /// `--url` failed with "the following required arguments were
-        /// not provided" — a flag that looked optional and was not.
+        /// Falls back to `$LAIN_URL`.
         #[arg(long, default_value = "")]
         url: String,
         /// File path being claimed. Repeat for a multi-file claim:
@@ -62,10 +59,7 @@ pub enum HooksAction {
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
-        /// the codebase but ignored here, so exporting it and omitting
-        /// `--url` failed with "the following required arguments were
-        /// not provided" — a flag that looked optional and was not.
+        /// Falls back to `$LAIN_URL`.
         #[arg(long, default_value = "")]
         url: String,
         /// Absolute file path being released.
@@ -84,9 +78,6 @@ pub enum HooksAction {
         #[arg(long, default_value = "")]
         parent_session_id: String,
     },
-    /// Detect symbol-level overlap between two git refs in a federation
-    /// workspace. Used by the pre-commit hook to refuse a commit that
-    /// would touch symbols also touched by `--base`.
     /// Record a tool-call observation (`tool_start`, `tool_end`,
     /// `session_start`, ...) for the activity feed. Per-tool-call
     /// observation is what surfaces Read / Grep / Bash in
@@ -129,15 +120,15 @@ pub enum HooksAction {
         #[arg(long, default_value = "")]
         at: String,
     },
+    /// Detect symbol-level overlap between two git refs in a federation
+    /// workspace. Used by the pre-commit hook to refuse a commit that
+    /// would touch symbols also touched by `--base`.
     OverlapCheck {
         /// Lain server URL (bare, e.g. `http://localhost:9999`). The MCP
         /// `/mcp` path is appended automatically; a value that already
         /// ends in `/mcp` is accepted unchanged for backwards
         /// compatibility with older hook scripts.
-        /// Falls back to `$LAIN_URL`. The env var was read elsewhere in
-        /// the codebase but ignored here, so exporting it and omitting
-        /// `--url` failed with "the following required arguments were
-        /// not provided" — a flag that looked optional and was not.
+        /// Falls back to `$LAIN_URL`.
         #[arg(long, default_value = "")]
         url: String,
         /// Base ref — commit SHA, branch name, or `HEAD~N`. Resolved
@@ -288,6 +279,18 @@ pub fn resolve_url(flag: &str) -> Result<String> {
     }
 }
 
+/// The JSON a tool returned, or the tool's own message as the error. A
+/// tool that fails (`isError`, or plain-text output) explains why in its
+/// text; "parse result text" alone hid that.
+fn tool_result_json(result: &serde_json::Value) -> Result<serde_json::Value> {
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    if result["isError"].as_bool() == Some(true) {
+        anyhow::bail!("{}", text.trim());
+    }
+    serde_json::from_str(text)
+        .map_err(|_| anyhow::anyhow!("unexpected tool output: {}", text.trim()))
+}
+
 fn register_if_needed(
     url: &str,
     name: &str,
@@ -324,8 +327,7 @@ fn register_if_needed(
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
     let result = post_tool_call(url, "register_agent", args)?;
-    let text = result["content"][0]["text"].as_str().unwrap_or("");
-    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
+    let parsed = tool_result_json(&result)?;
     let sess = HookSession {
         agent_id: parsed["agent_id"]
             .as_str()
@@ -409,8 +411,7 @@ pub fn claim(
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
     let result = post_tool_call(url, "claim_files", args)?;
-    let text = result["content"][0]["text"].as_str().unwrap_or("");
-    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
+    let parsed = tool_result_json(&result)?;
     let granted = parsed["granted"].as_array().map(|a| a.len()).unwrap_or(0);
     let conflicts = parsed["conflicts"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: {granted} granted, {conflicts} conflict(s)");
@@ -451,8 +452,7 @@ pub fn release(
         args["parent_session_id"] = serde_json::Value::String(parent.to_string());
     }
     let result = post_tool_call(url, "release_files", args)?;
-    let text = result["content"][0]["text"].as_str().unwrap_or("");
-    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
+    let parsed = tool_result_json(&result)?;
     let released = parsed["released"].as_array().map(|a| a.len()).unwrap_or(0);
     println!("lain hook: released {released} file(s)");
     Ok(())
@@ -729,8 +729,7 @@ pub fn overlap_check(url: &str, base: &str, head: Option<&str>, workspace: &str)
             "workspace": workspace,
         }),
     )?;
-    let text = result["content"][0]["text"].as_str().unwrap_or("");
-    let parsed: serde_json::Value = serde_json::from_str(text).context("parse result text")?;
+    let parsed = tool_result_json(&result)?;
     println!("{}", serde_json::to_string(&parsed)?);
     Ok(())
 }

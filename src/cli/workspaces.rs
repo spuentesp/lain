@@ -156,6 +156,38 @@ fn err_not_found(name: &str) -> LainError {
 }
 
 /// `lain workspaces create <name> [--description <text>] [--members repo,repo,...]`
+/// Trimmed member ids, checked against the `repos.yaml` beside the
+/// workspaces file when there is one. `--members "bytes, tokio"` stored
+/// `" tokio"`, and a typo such as `bytess` was accepted and only failed
+/// later, at server start.
+fn checked_members(workspaces_path: &Path, members: Vec<String>) -> Result<Vec<String>> {
+    let members: Vec<String> = members
+        .into_iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .collect();
+    let repos_path = workspaces_path.with_file_name("repos.yaml");
+    if !repos_path.is_file() {
+        return Ok(members);
+    }
+    let repos = crate::server::federation::config::FederationConfig::load(&repos_path)
+        .map_err(|e| anyhow!("load {}: {e}", repos_path.display()))?;
+    let known: Vec<String> = repos.repos.iter().map(|r| r.id.to_string()).collect();
+    let unknown: Vec<&String> = members.iter().filter(|m| !known.contains(m)).collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "unknown repo id(s) {unknown:?}; {} registers: {}",
+            repos_path.display(),
+            if known.is_empty() {
+                "none".to_string()
+            } else {
+                known.join(", ")
+            }
+        );
+    }
+    Ok(members)
+}
+
 pub fn run_create(
     name: &str,
     description: Option<String>,
@@ -166,6 +198,7 @@ pub fn run_create(
         anyhow::bail!("workspace name cannot be empty");
     }
     let path = resolve_config_path(config);
+    let members = checked_members(&path, members)?;
     let mut f = load_or_default(&path)?;
     if f.workspaces.iter().any(|w| w.name == name) {
         return Err(err_already_exists(name).into());
@@ -187,6 +220,10 @@ pub fn run_create(
 /// `lain workspaces add <name> --repo <repo-id>`
 pub fn run_add(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
     let path = resolve_config_path(config);
+    let repo = checked_members(&path, vec![repo.to_string()])?
+        .pop()
+        .ok_or_else(|| anyhow!("repo id cannot be empty"))?;
+    let repo = repo.as_str();
     let mut f = WorkspacesFile::load(&path).map_err(|e| anyhow!("load {}: {e}", path.display()))?;
     let ws = f
         .workspaces
@@ -442,6 +479,30 @@ mod tests {
             ws.contains("spf13"),
             "workspace written beside it; got {ws}"
         );
+    }
+
+    #[test]
+    fn members_are_trimmed_and_checked_against_repos_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("workspaces.yaml");
+        // No repos.yaml beside it: trimmed, not checked.
+        assert_eq!(
+            checked_members(&ws, vec!["a".into(), " b ".into(), "".into()]).unwrap(),
+            vec!["a", "b"]
+        );
+        std::fs::write(
+            dir.path().join("repos.yaml"),
+            "repos:\n- id: bytes\n  source:\n    type: local_clone\n    url: https://example.invalid/b.git\n    ref: main\n",
+        )
+        .unwrap();
+        assert_eq!(
+            checked_members(&ws, vec![" bytes".into()]).unwrap(),
+            vec!["bytes"]
+        );
+        let err = checked_members(&ws, vec!["bytess".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bytess") && err.contains("bytes"), "{err}");
     }
 
     #[test]

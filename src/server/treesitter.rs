@@ -1481,7 +1481,7 @@ fn container_of(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
                     }
                 }
                 // `int& Foo::bar()`: a reference declarator holds the
-                // function declarator as a plain child, not a field.
+                // function declarator as an unnamed child, not a field.
                 d = n.child_by_field_name("declarator").or_else(|| {
                     let mut c = n.walk();
                     let next = n
