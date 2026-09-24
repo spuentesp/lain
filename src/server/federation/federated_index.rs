@@ -37,6 +37,10 @@ fn global_id_str(repo: &RepoId, node: &GraphNode) -> String {
 }
 
 pub struct FederatedIndex {
+    /// Repositories from the config that could not be loaded (clone or
+    /// checkout failed), with the reason. They are left out rather than
+    /// stopping the server, and reported by `get_health`.
+    load_errors: RwLock<Vec<(String, String)>>,
     repos: RwLock<HashMap<RepoId, Arc<RepoIndex>>>,
     backend: Arc<dyn GraphBackend>,
     symbol_to_repos: DashMap<String, Vec<RepoId>>,
@@ -117,7 +121,18 @@ impl FederatedIndex {
             persist_lock: parking_lot::Mutex::new(()),
             projection_lock: parking_lot::Mutex::new(()),
             depends_cache: DashMap::new(),
+            load_errors: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Record a repository that failed to load.
+    pub fn record_load_error(&self, repo: &str, error: String) {
+        self.load_errors.write().push((repo.to_string(), error));
+    }
+
+    /// Repositories that failed to load, with the reason.
+    pub fn load_errors(&self) -> Vec<(String, String)> {
+        self.load_errors.read().clone()
     }
 
     /// Set the path the federation should rewrite `FederationManifest`

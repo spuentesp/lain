@@ -277,3 +277,70 @@ fn workspace_dir_source_content_hash_returns_none_for_unborn_head() {
         "unborn HEAD should yield None (no commit yet to hash), got {hash:?}",
     );
 }
+
+/// `--ref` may be a tag: `repos add --ref v1` used to fail on every start
+/// (`git reset origin/v1`).
+#[tokio::test]
+async fn clone_sources_accept_a_tag_or_a_branch() {
+    use std::process::Command;
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let ok = Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    let head = |dir: &std::path::Path| {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(origin.join("a.txt"), "1").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(&origin, &["commit", "--quiet", "-m", "one"]);
+    git(&origin, &["tag", "v1"]);
+    let tagged = head(&origin);
+    std::fs::write(origin.join("a.txt"), "2").unwrap();
+    git(&origin, &["commit", "--quiet", "-am", "two"]);
+    let tip = head(&origin);
+    let url = format!("file://{}", origin.display());
+
+    for (git_ref, want) in [("v1", &tagged), ("main", &tip)] {
+        let full = tmp.path().join(format!("full-{git_ref}"));
+        let src = LocalCloneSource::new(dummy_id(), &url, git_ref, full.clone()).unwrap();
+        src.fetch()
+            .await
+            .unwrap_or_else(|e| panic!("full clone {git_ref}: {e}"));
+        src.fetch()
+            .await
+            .unwrap_or_else(|e| panic!("refresh {git_ref}: {e}"));
+        assert_eq!(&head(&full), want, "full clone at {git_ref}");
+
+        let shallow = tmp.path().join(format!("shallow-{git_ref}"));
+        let src = ShallowCloneSource::new(
+            dummy_id(),
+            &url,
+            git_ref,
+            shallow.clone(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        src.fetch()
+            .await
+            .unwrap_or_else(|e| panic!("shallow clone {git_ref}: {e}"));
+        src.fetch()
+            .await
+            .unwrap_or_else(|e| panic!("shallow refresh {git_ref}: {e}"));
+        assert_eq!(&head(&shallow), want, "shallow clone at {git_ref}");
+    }
+}

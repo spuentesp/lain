@@ -47,9 +47,21 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
         let data_dir = config.data_dir.clone();
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            src.fetch().await?;
             let repo_id = src.id().clone();
-            fed_clone.add_repo(src, &data_dir).await?;
+            // One unreachable repository (a bad URL, a missing ref, no
+            // network) used to stop `lain server` from starting at all,
+            // though the docs promise it is only left out. Record it and
+            // carry on; `get_health` reports it.
+            if let Err(e) = src.fetch().await {
+                tracing::warn!("repo '{}' not loaded: {e}", repo_id.as_str());
+                fed_clone.record_load_error(repo_id.as_str(), e.to_string());
+                return Ok(());
+            }
+            if let Err(e) = fed_clone.add_repo(src, &data_dir).await {
+                tracing::warn!("repo '{}' not loaded: {e}", repo_id.as_str());
+                fed_clone.record_load_error(repo_id.as_str(), e.to_string());
+                return Ok(());
+            }
             fed_clone.project_repo(&repo_id).await?;
             // Wire the federation as this repo's cross-repo resolver
             // (wishlist #13) so a subsequent `repo.index()` can
@@ -63,6 +75,16 @@ pub async fn load_federation(config_path: &Path) -> Result<Arc<FederatedIndex>, 
     for h in handles {
         h.await
             .map_err(|e| LainError::Other(format!("join: {e}")))??;
+    }
+    // Nothing loaded at all is still an error: a server with no
+    // repositories can only mislead.
+    let errors = fed.load_errors();
+    if fed.list_repos().is_empty() && !errors.is_empty() {
+        let detail: Vec<String> = errors.iter().map(|(r, e)| format!("{r}: {e}")).collect();
+        return Err(LainError::Config(format!(
+            "no repository could be loaded: {}",
+            detail.join("; ")
+        )));
     }
 
     // Persist the manifest on a best-effort basis: a save failure must not
@@ -225,4 +247,54 @@ fn save_manifest(fed: &FederatedIndex, path: &Path) -> Result<(), LainError> {
         });
     }
     manifest.save(path)
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// One unreachable repository is left out and reported; the rest load.
+    #[tokio::test]
+    async fn an_unreachable_repo_does_not_stop_the_federation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tmp.path().join("good");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(good.join("a.py"), "def a():\n    pass\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(&good)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "-A"]);
+        git(&["commit", "--quiet", "-m", "x"]);
+        let cfg = tmp.path().join("repos.yaml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "data_dir: {}\nrepos:\n  - id: good\n    source: {{ type: workspace_dir, path: {} }}\n  \
+                 - id: bad\n    source: {{ type: local_clone, url: \"file://{}/nope\", ref: main }}\n",
+                tmp.path().join("data").display(),
+                good.display(),
+                tmp.path().display()
+            ),
+        )
+        .unwrap();
+        let fed = load_federation(&cfg)
+            .await
+            .expect("loads despite the bad repo");
+        let ids: Vec<String> = fed
+            .list_repos()
+            .into_iter()
+            .map(|(id, _)| id.as_str().to_string())
+            .collect();
+        assert_eq!(ids, vec!["good".to_string()]);
+        let errors = fed.load_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "bad");
+    }
 }
