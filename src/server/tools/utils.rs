@@ -415,12 +415,13 @@ fn read_body_excerpt(
     let f = File::open(path)?;
     let reader = BufReader::new(f);
     let mut buf = String::new();
+    // `start`/`end` are the graph's 0-based, inclusive range.
     for (i, line) in reader.lines().enumerate() {
-        let lineno = (i as u32) + 1;
+        let lineno = i as u32;
         if lineno < start {
             continue;
         }
-        if lineno >= end {
+        if lineno > end {
             break;
         }
         let line = line?;

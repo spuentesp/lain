@@ -106,7 +106,10 @@ pub fn find_symbol(
             .anchor_score
             .map(|s| format!(" anchor={s:.2}"))
             .unwrap_or_default();
-        let line = n.line_start.map(|l| format!(":{l}")).unwrap_or_default();
+        let line = n
+            .line_start
+            .map(|l| format!(":{}", l + 1))
+            .unwrap_or_default();
         out.push_str(&format!(
             "{}. `{}` {} {}{}{}\n",
             i + 1,
@@ -147,8 +150,9 @@ pub async fn get_context(
                 overlay,
                 workspace,
                 p.to_str().unwrap_or(""),
-                Some(ls),
-                Some(le.saturating_sub(ls) as usize),
+                // 1-based line; no extra context: exactly the symbol.
+                Some(ls + 1),
+                None,
             ) {
                 Ok(s) => format!("\n## Source\n\n{}", trim_for_section(&s, 30)),
                 Err(_) => String::new(),
@@ -304,15 +308,34 @@ pub async fn assess_change(
         Ok(String::new())
     };
 
-    let direct = extract_section(&callsites.unwrap_or_default(), "Direct dependents");
+    let callsites = callsites.unwrap_or_default();
+    let direct = extract_section(&callsites, "Direct dependents");
     let transitive = extract_section(&blast, "indirect");
     let untested_section = match untested {
         Ok(s) => format!("\n## Untested dependents\n\n{}", trim_for_section(&s, 8)),
         Err(_) => String::new(),
     };
 
-    let direct_count = count_bullets(&direct);
-    let transitive_count = count_bullets(&transitive);
+    // Counted from the stable lines of the two outputs, not from section
+    // text: one `- **caller**` line per calling function in the call-site
+    // listing, and blast radius's own total. Parsing sections by header
+    // found no "Direct dependents" header in call-site output, so the
+    // direct count was always 0 and the verdict too low.
+    let direct_count = callsites.lines().filter(|l| l.starts_with("- **")).count();
+    let transitive_count = blast
+        .lines()
+        .find_map(|l| {
+            l.trim_start_matches(['-', ' '])
+                .strip_prefix("Total transitively affected nodes: ")
+        })
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        // Heuristic (pattern-matched) callers are reported separately by
+        // the heuristic-only verdict below, not counted as reach.
+        .map(|total| {
+            let heuristic = blast.lines().filter(|l| l.contains("[heuristic,")).count();
+            total.saturating_sub(direct_count).saturating_sub(heuristic)
+        })
+        .unwrap_or_else(|| count_bullets(&transitive));
     // The blast-radius output carries a separate section ("~ N heuristic
     // caller(s) included") that the section extractors above don't see.
     // When the static graph is empty but heuristic evidence exists, the
@@ -744,7 +767,10 @@ fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
     }
     let mut out = String::new();
     for (i, n) in hits.iter().take(limit).enumerate() {
-        let line = n.line_start.map(|l| format!(":{l}")).unwrap_or_default();
+        let line = n
+            .line_start
+            .map(|l| format!(":{}", l + 1))
+            .unwrap_or_default();
         let anchor = n
             .anchor_score
             .map(|s| format!(" anchor={s:.2}"))
@@ -1136,6 +1162,48 @@ mod m6_tests {
     /// Without this third case pinned, the iter-21 `low*` heuristic
     /// could leak into the truly-safe path and confuse an agent into
     /// refusing to edit a leaf function.
+    /// Five direct callers: counted as five, and the verdict is high.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assess_change_counts_direct_callers() {
+        let tmp = std::env::temp_dir().join("test_assess_direct_count");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let target = GraphNode::new(NodeType::Function, "to_native".into(), "src/util.rs".into())
+            .with_location_in(0, 3, &ns);
+        graph.upsert_node(target.clone()).unwrap();
+        for i in 0..5u32 {
+            let caller = GraphNode::new(
+                NodeType::Function,
+                format!("caller_{i}"),
+                format!("src/c{i}.rs"),
+            )
+            .with_location_in(0, 5, &ns);
+            graph.upsert_node(caller.clone()).unwrap();
+            graph
+                .insert_edge(&GraphEdge::new(
+                    EdgeType::Calls,
+                    caller.id.clone(),
+                    target.id.clone(),
+                ))
+                .unwrap();
+        }
+        let mut a = Map::new();
+        a.insert("symbol".to_string(), Value::String("to_native".to_string()));
+        let out = assess_change(
+            &graph,
+            &overlay,
+            std::path::Path::new("/nonexistent"),
+            &a,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("Direct: 5;"), "{out}");
+        assert!(out.contains("verdict: **high**"), "{out}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn assess_change_truly_empty_blast_radius_says_low() {
         // Fresh graph with a single Function node and no callers.

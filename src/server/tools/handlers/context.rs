@@ -156,60 +156,66 @@ pub fn get_code_snippet(
     line: Option<u32>,
     context_lines: Option<usize>,
 ) -> Result<String, LainError> {
-    let ctx = context_lines.unwrap_or(10);
-    let line_num = line.unwrap_or(1) as usize;
+    // `line` is 1-based, as shown in every tool's output; graph ranges are
+    // 0-based. Mixing them showed the blank line above a symbol and cut
+    // its last line off.
+    let line_num = line.unwrap_or(1).max(1) as usize;
     let disk_path = resolve_against_workspace(workspace, path)?;
+    // Around a symbol, context is added only when asked for.
+    let around = context_lines.unwrap_or(0);
+    let symbol_range = |ls: u32, le: u32| {
+        let first = (ls as usize + 1).saturating_sub(around).max(1);
+        (first, le as usize + 1 + around)
+    };
 
     // Try overlay first
     if let Some(node) = overlay.get_node(path) {
         if let (Some(ls), Some(le)) = (node.line_start, node.line_end) {
-            return read_file_range(&disk_path, ls as usize, le as usize, ctx);
+            let (first, last) = symbol_range(ls, le);
+            return read_file_range(&disk_path, first, last);
         }
     }
 
     // Fall back to graph
-    if let Some(node) = graph.get_node_at_location(path, line.unwrap_or(1)) {
+    if let Some(node) = graph.get_node_at_location(path, line_num as u32 - 1) {
         if let (Some(ls), Some(le)) = (node.line_start, node.line_end) {
-            return read_file_range(&disk_path, ls as usize, le as usize, ctx);
+            let (first, last) = symbol_range(ls, le);
+            return read_file_range(&disk_path, first, last);
         }
     }
 
     // Just read the file with context around the line
+    let ctx = context_lines.unwrap_or(10);
     read_file_range(
         &disk_path,
-        line_num.saturating_sub(ctx),
+        line_num.saturating_sub(ctx).max(1),
         line_num + ctx,
-        ctx,
     )
 }
 
-fn read_file_range(path: &str, start: usize, end: usize, _ctx: usize) -> Result<String, LainError> {
+/// Lines `first..=last` (1-based, clamped to the file) with their numbers.
+fn read_file_range(path: &str, first: usize, last: usize) -> Result<String, LainError> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| LainError::NotFound(format!("Path not found: {path} ({e})")))?;
     let lines: Vec<&str> = content.lines().collect();
-
-    let start = start.saturating_sub(1).min(lines.len());
-    let end = end.min(lines.len());
-
-    if start >= end {
+    let first = first.max(1);
+    let last = last.min(lines.len());
+    if first > last {
         return Err(LainError::NotFound(format!(
-            "Invalid range: {} to {}",
-            start + 1,
-            end
+            "Invalid range: {first} to {last} ({path} has {} lines)",
+            lines.len()
         )));
     }
-
-    let snippet: Vec<String> = lines[start..end]
+    let snippet: Vec<String> = lines[first - 1..last]
         .iter()
         .enumerate()
-        .map(|(i, l)| format!("{:4}: {}", start + i + 1, l))
+        .map(|(i, l)| format!("{:4}: {}", first + i, l))
         .collect();
-
     Ok(format!(
         "File: {}\nShowing lines {}-{}\n\n{}\n",
         path,
-        start + 1,
-        end,
+        first,
+        last,
         snippet.join("\n")
     ))
 }
@@ -289,7 +295,7 @@ pub fn get_call_sites(
             // say that is what this is, rather than passing a
             // definition range off as a call position.
             let loc = if let (Some(ls), Some(le)) = (caller.line_start, caller.line_end) {
-                format!("{}:{}-{}", caller.path, ls, le)
+                format!("{}:{}-{}", caller.path, ls + 1, le + 1)
             } else {
                 caller.path.clone()
             };
@@ -333,7 +339,8 @@ fn call_lines_in(
         return Vec::new();
     };
     let (lo, hi) = match (caller.line_start, caller.line_end) {
-        (Some(ls), Some(le)) => (ls.saturating_sub(1) as usize, le as usize + 1),
+        // Graph ranges are 0-based and inclusive; `lineno` below is 1-based.
+        (Some(ls), Some(le)) => (ls as usize + 1, le as usize + 1),
         _ => (0usize, usize::MAX),
     };
     let mut out = Vec::new();
@@ -416,6 +423,45 @@ mod call_lines_tests {
         );
         // A missing in-repo path passes through so the read reports "not found".
         assert!(resolve_against_workspace(&ws, "src/nope.py").is_ok());
+    }
+
+    /// A symbol's snippet is exactly its lines: not the one above, not
+    /// missing the last.
+    #[test]
+    fn snippet_shows_exactly_the_symbol() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("u.py"),
+            "import os\n\ndef f(x):\n    y = x\n    return y\n\nz = 1\n",
+        )
+        .unwrap();
+        let graph = GraphDatabase::new(&ws.path().join(".lain")).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        // 0-based lines 2..=4: `def f` through `return y`.
+        graph
+            .upsert_node(
+                crate::schema::GraphNode::new(
+                    crate::schema::NodeType::Function,
+                    "f".into(),
+                    "u.py".into(),
+                )
+                .with_location_in(2, 4, &ns),
+            )
+            .unwrap();
+        let overlay = VolatileOverlay::new();
+        let out = get_code_snippet(&graph, &overlay, ws.path(), "u.py", Some(3), None).unwrap();
+        assert!(out.contains("Showing lines 3-5"), "{out}");
+        assert!(
+            out.contains("   3: def f(x):") && out.contains("   5:     return y"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("import os") && !out.contains("z = 1"),
+            "{out}"
+        );
+        // Explicit context widens it.
+        let out = get_code_snippet(&graph, &overlay, ws.path(), "u.py", Some(3), Some(1)).unwrap();
+        assert!(out.contains("Showing lines 2-6"), "{out}");
     }
 
     /// A Python variable named `fn` is not a Rust definition.
