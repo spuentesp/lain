@@ -459,7 +459,29 @@ impl ToolExecutor {
 
         // Special executor methods — not registered as ToolHandlers
         match name {
-            "get_health" => return self.get_health().await,
+            "get_health" => {
+                // With `repo_id`, the named federation repo's own health —
+                // this answered for the empty placeholder graph instead,
+                // for any id, even one not registered.
+                if let (Some(fed), Some(repo)) = (
+                    self.ctx.federation.as_ref(),
+                    args.get("repo_id").and_then(|v| v.as_str()),
+                ) {
+                    let bound = self.ctx.for_repo(repo).ok_or_else(|| {
+                        let known: Vec<String> = fed
+                            .list_repos()
+                            .into_iter()
+                            .map(|(id, _)| id.as_str().to_string())
+                            .collect();
+                        LainError::Config(format!(
+                            "unknown repo_id '{repo}'; registered: {}",
+                            known.join(", ")
+                        ))
+                    })?;
+                    return self.get_health_in(&bound).await;
+                }
+                return self.get_health().await;
+            }
             "get_capabilities" => return self.get_capabilities(),
             "get_agent_strategy" => return self.get_agent_strategy(),
             "install_language_server" => {
@@ -737,18 +759,23 @@ impl ToolExecutor {
     }
 
     pub async fn get_health(&self) -> Result<String, LainError> {
-        let (nodes, edges) = self.ctx.graph.get_stats();
-        let last_commit = self
-            .ctx
+        self.get_health_in(&self.ctx).await
+    }
+
+    /// Health of the repository `ctx` is bound to — the server's own, or one
+    /// federation repo's (`get_health {repo_id}`).
+    async fn get_health_in(&self, ctx: &ToolContext) -> Result<String, LainError> {
+        let (nodes, edges) = ctx.graph.get_stats();
+        let last_commit = ctx
             .graph
             .get_last_commit()?
             .unwrap_or_else(|| "None".to_string());
-        let overlay_stats = self.ctx.overlay.stats();
+        let overlay_stats = ctx.overlay.stats();
 
-        let embedder_status = if self.ctx.embedder.is_stub() {
+        let embedder_status = if ctx.embedder.is_stub() {
             "Not loaded (semantic search unavailable)".to_string()
         } else {
-            format!("Loaded ({}d embeddings)", self.ctx.embedder.embedding_dim())
+            format!("Loaded ({}d embeddings)", ctx.embedder.embedding_dim())
         };
 
         // Live LSP-failure count: sum every repo's
@@ -761,7 +788,7 @@ impl ToolExecutor {
         // Falls back to the cached `outcome.lsp_failures_last_cycle`
         // when the federation isn't wired in (single-repo executor
         // without a `FederatedIndex`).
-        let live_lsp_failures: u32 = match self.ctx.federation.as_ref() {
+        let live_lsp_failures: u32 = match ctx.federation.as_ref() {
             Some(fed) => fed
                 .list_repos()
                 .into_iter()
@@ -775,14 +802,14 @@ impl ToolExecutor {
         // `--workspace auto` (or any other resolution path) picked the right
         // repo. This is the field MCP clients read back to verify the server
         // is indexing the project they expected.
-        let workspace_display = self.ctx.workspace.display().to_string();
+        let workspace_display = ctx.workspace.display().to_string();
 
         // "X commits behind HEAD" — without it the bare SHA is a
         // confident-but-meaningless number. Run `git rev-list --count`
         // against the workspace; on failure (no git, not a repo) fall
         // back to the SHA-only display.
         let commit_status = match std::process::Command::new("git")
-            .args(["-C", self.ctx.workspace.to_str().unwrap_or(".")])
+            .args(["-C", ctx.workspace.to_str().unwrap_or(".")])
             .args(["rev-list", "--count", &format!("{}..HEAD", last_commit)])
             .output()
         {
@@ -798,8 +825,8 @@ impl ToolExecutor {
         };
 
         // Status reflects the last refresh outcome and git sensor responsiveness.
-        let git_healthy = self.ctx.git.is_alive();
-        let degraded = self.ctx.last_outcome.lock().is_degraded();
+        let git_healthy = ctx.git.is_alive();
+        let degraded = ctx.last_outcome.lock().is_degraded();
         let status = if degraded || !git_healthy {
             if !git_healthy {
                 "Degraded ⚠ (git sensor sidecar is down — see the warning below)"
@@ -809,7 +836,7 @@ impl ToolExecutor {
         } else {
             "Operational ✅"
         };
-        let git_sensor_display = match self.ctx.git.as_ref() {
+        let git_sensor_display = match ctx.git.as_ref() {
             crate::server::git::AnyGitSensor::InProcess(_) => "In-process (libgit2)".to_string(),
             crate::server::git::AnyGitSensor::Sidecar(sidecar) => {
                 let sh = sidecar.health();
@@ -848,7 +875,7 @@ impl ToolExecutor {
         // invisible because it only went to tracing::warn and stderr,
         // neither of which a stdio MCP client surfaces to the model.
         // This is the in-tool-output visibility path.
-        if let Some(line) = self.ctx.last_outcome.lock().banner_line() {
+        if let Some(line) = ctx.last_outcome.lock().banner_line() {
             output.push_str(&format!("- **{line}**\n"));
         }
 
@@ -898,7 +925,7 @@ impl ToolExecutor {
         // a missing-data bug; the histogram makes the data
         // visible. Sorted alphabetically by EdgeType Debug name for
         // stable output across runs.
-        let edge_hist = self.ctx.graph.edge_counts_by_type();
+        let edge_hist = ctx.graph.edge_counts_by_type();
         if !edge_hist.is_empty() {
             output.push_str("\n### Edge counts by type\n");
             for (kind, count) in &edge_hist {
@@ -912,7 +939,7 @@ impl ToolExecutor {
         // server is an optional precision layer.
         output.push_str("\n### Language Support\n");
         let available: std::collections::HashMap<String, bool> = {
-            let lsp = self.ctx.lsp_pool.next();
+            let lsp = ctx.lsp_pool.next();
             let lsp_guard = lsp.lock().await;
             lsp_guard
                 .get_supported_languages()
@@ -924,8 +951,7 @@ impl ToolExecutor {
             &'static str,
             (usize, Option<&'static str>),
         > = std::collections::BTreeMap::new();
-        for file in self
-            .ctx
+        for file in ctx
             .graph
             .get_nodes_by_type(crate::schema::NodeType::File)
             .unwrap_or_default()
