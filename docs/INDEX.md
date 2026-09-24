@@ -50,12 +50,6 @@ Active, scoped capability plans:
 
 `METADATA.toml` belongs to the release workflow rather than the reading path.
 
-Completed design plans (work landed; kept for historical record):
-- [`docs/archive/COORDINATION_CONSISTENCY_PLAN.md`](archive/COORDINATION_CONSISTENCY_PLAN.md)
-- [`docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md`](archive/INTENT_AND_OBSERVABILITY_PLAN.md)
-
-Each archive entry has a status line in [`docs/archive/README.md`](archive/README.md).
-
 Completed plans, audits, review notes, and the academic SRS package live in Git
 history. Keeping them out of the current tree prevents old implementation notes
 from competing with maintained documentation.

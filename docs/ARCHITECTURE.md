@@ -240,8 +240,7 @@ GREEN means the agent's declared scope is fine to edit; YELLOW
 warns of a peer's declared intent or current activity in the
 same scope; RED blocks when a peer holds an exclusive edit
 claim on the target. RED is authoritative because the underlying
-claim primitive is the file-lock from
-[`docs/archive/COORDINATION_CONSISTENCY_PLAN.md`](archive/COORDINATION_CONSISTENCY_PLAN.md);
+claim primitive is the file-lock fail-closed coordinator;
 the other two levels remain advisory so an agent can choose to
 proceed under caution. The YELLOW level now consults the static
 graph for symbol-scope distance (BFS over `Calls` edges, 32-hop
