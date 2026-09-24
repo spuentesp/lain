@@ -75,8 +75,16 @@ impl GitSensor {
     /// ignore rules only apply to untracked files — so the watcher still
     /// sees edits to tracked files an ignore pattern happens to match.
     pub fn is_ignored(&self, path: &Path) -> Result<bool, LainError> {
-        let rel = path.strip_prefix(&self.workspace).unwrap_or(path);
-        if self.repo.index()?.get_path(rel, 0).is_some() {
+        // Relative to the workspace, through symlinks and 8.3 short names
+        // (`/var` vs `/private/var` on macOS, `RUNNER~1` on Windows).
+        // `Index::get_path` panics on an absolute path instead of returning
+        // an error, so only a relative one may reach it.
+        let rel = crate::server::graph::graph_path(&self.workspace, path);
+        let rel_path = Path::new(&rel);
+        if rel_path.is_relative()
+            && !rel.contains(':')
+            && self.repo.index()?.get_path(rel_path, 0).is_some()
+        {
             return Ok(false);
         }
         Ok(self.repo.is_path_ignored(path)?)
@@ -928,5 +936,8 @@ mod tracked_files_tests {
         assert!(sensor
             .is_ignored(Path::new("tests/unity/test/scratch.c"))
             .unwrap());
+        // A path outside the workspace must not panic inside libgit2.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let _ = sensor.is_ignored(&elsewhere.path().join("x.rs"));
     }
 }
