@@ -7,7 +7,7 @@ You're editing one of the per-repo tool handler modules
 new domain.
 
 **Before you write any code, read
-[`docs/CONTRIBUTING_AGENTS.md`](../../../docs/CONTRIBUTING_AGENTS.md#the-inventory-pattern-in-five-lines).**
+[`docs/CONTRIBUTING_AGENTS.md`](../../../../docs/CONTRIBUTING_AGENTS.md#the-inventory-pattern-in-five-lines).**
 
 The short version:
 

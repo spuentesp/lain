@@ -434,7 +434,7 @@ If `world_state.note` is set, the agent must resync:
 Above the claim layer sits an *intent* layer: an explicit declaration
 of what the agent is trying to accomplish. The claim layer is the
 authoritative primitive for ownership (the file-lock fail-closed
-invariant from `docs/archive/COORDINATION_CONSISTENCY_PLAN.md`). The
+invariant). The
 intent layer is advisory; it gives the agent — and its peers — a
 richer picture than a list of file paths.
 
@@ -457,8 +457,7 @@ distinction: presence (registration, activity feed) is
 eventually-consistent and fail-open. Ownership (`claim_files`,
 `RED` evaluation) is strong-consistent and fail-closed. The
 coordination engine never downgrades a RED — the file-lock
-primitive in `docs/archive/COORDINATION_CONSISTENCY_PLAN.md` is
-the source of truth, not the in-memory registry.
+coordination primitive is the source of truth, not the in-memory registry.
 
 ### Graph-distance refinement
 
@@ -468,8 +467,7 @@ evaluator's `EvalContext` carries an `Option<&GraphDatabase>`;
 when supplied, `scope_distance` consults the graph via BFS over
 the `Calls` edge set (32-hop cap), with lexical `path_distance`
 remaining the fallback. This is what catches the
-`auth::validate_token` ↔ `session::SessionClaims` case described
-in `docs/archive/INTENT_AND_OBSERVABILITY_PLAN.md`: distinct files, one
+`auth::validate_token` ↔ `session::SessionClaims` case: distinct files, one
 hop apart on the call graph.
 
 ### `lain_intent`
