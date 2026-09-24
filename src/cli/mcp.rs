@@ -188,7 +188,7 @@ pub async fn run_mcp(
     // `.lain/graph.bin` lives next to the workspace so the persisted
     // graph follows the repo. Picked up by `save_state` / `load_state`.
     let mem_dir = workspace.join(".lain");
-    std::fs::create_dir_all(&mem_dir)
+    crate::config::create_state_dir(&mem_dir)
         .with_context(|| format!("create_dir_all({})", mem_dir.display()))?;
     let mem_path = mem_dir.join("graph.bin");
 

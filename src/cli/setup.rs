@@ -115,7 +115,8 @@ pub const PROMPT_FILENAME: &str = "PROMPT.md";
 /// reading the snippet. Returns the path on success.
 fn write_intent_prompt(workspace: &Path) -> Result<PathBuf, String> {
     let dir = workspace.join(".lain");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all({}): {e}", dir.display()))?;
+    crate::config::create_state_dir(&dir)
+        .map_err(|e| format!("create_dir_all({}): {e}", dir.display()))?;
     let path = dir.join(PROMPT_FILENAME);
     crate::cli::io::write_file_atomic(&path, LAIN_INTENT_PROMPT.as_bytes())
         .map_err(|e| format!("write {}: {e}", path.display()))?;
@@ -752,6 +753,16 @@ fn configure_generic(
             detail: Some(pretty),
         };
     }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "generic".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
+        };
+    }
     if config_path.is_file() {
         if let Err(e) = backup_file(&config_path) {
             return ConfigurationOutcome {
@@ -795,11 +806,9 @@ fn claude_cli_available() -> bool {
 /// project-scope registrations belong to the directory `claude` runs in,
 /// so running it from the caller's cwd would register the wrong project
 /// when `--workspace` points elsewhere.
-fn claude_command(opts: &SetupOptions) -> Command {
+fn claude_command(root: &Path) -> Command {
     let mut cmd = Command::new("claude");
-    if let Some(ws) = opts.workspace.as_ref() {
-        cmd.current_dir(ws);
-    }
+    cmd.current_dir(root);
     cmd
 }
 
@@ -824,8 +833,8 @@ fn claude_scope_of(get_output: &str) -> Option<&'static str> {
     }
 }
 
-fn claude_mcp_configured(opts: &SetupOptions, name: &str) -> bool {
-    claude_command(opts)
+fn claude_mcp_configured(root: &Path, name: &str) -> bool {
+    claude_command(root)
         .args(["mcp", "get", name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -835,6 +844,7 @@ fn claude_mcp_configured(opts: &SetupOptions, name: &str) -> bool {
 }
 
 fn configure_claude_code(
+    root: &Path,
     exe: &Path,
     model: Option<&Path>,
     opts: &SetupOptions,
@@ -852,11 +862,11 @@ fn configure_claude_code(
         };
     }
 
-    let already_configured = claude_mcp_configured(opts, "lain");
+    let already_configured = claude_mcp_configured(root, "lain");
     // Captured before anything is removed: it carries the scope to keep,
     // and it is the only record of the old entry if the new `add` fails.
     let previous_config = if already_configured {
-        claude_command(opts)
+        claude_command(root)
             .args(["mcp", "get", "lain"])
             .output()
             .ok()
@@ -934,14 +944,14 @@ fn configure_claude_code(
     // `add` fails, surface it so the user can restore by hand instead
     // of having to remember or reconstruct what they had.
     if already_configured {
-        let _ = claude_command(opts)
+        let _ = claude_command(root)
             .args(&remove_args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
 
-    match claude_command(opts).args(&add_args).output() {
+    match claude_command(root).args(&add_args).output() {
         Ok(out) if out.status.success() => {
             // PR 4: drop the intent protocol into `.lain/PROMPT.md`
             // alongside the existing setup artifacts. The user copies
@@ -952,16 +962,12 @@ fn configure_claude_code(
             // here doesn't unwind the MCP registration that already
             // succeeded — the operator can re-run `--agent claude
             // --print-config` to recover the snippet.
-            let prompt_detail = if let Some(ws) = opts.workspace.as_ref() {
-                match write_intent_prompt(ws) {
-                    Ok(path) => Some(format!("wrote intent protocol to {}", path.display())),
-                    Err(e) => Some(format!(
-                        "MCP configured, but PROMPT.md write failed: {e}. \
-                         Re-run with --print-config to recover the snippet."
-                    )),
-                }
-            } else {
-                None
+            let prompt_detail = match write_intent_prompt(root) {
+                Ok(path) => Some(format!("wrote intent protocol to {}", path.display())),
+                Err(e) => Some(format!(
+                    "MCP configured, but PROMPT.md write failed: {e}. \
+                     Re-run with --print-config to recover the snippet."
+                )),
             };
             ConfigurationOutcome {
                 agent: "claude-code".into(),
@@ -1195,6 +1201,16 @@ fn configure_codex(
             detail: Some(pretty),
         };
     }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "codex".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
+        };
+    }
     if config_path.is_file() {
         if let Err(e) = backup_file(&config_path) {
             return ConfigurationOutcome {
@@ -1273,6 +1289,16 @@ fn configure_cursor(
             state: ConfigurationState::WouldConfigure,
             target: Some(target),
             detail: Some(pretty),
+        };
+    }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "cursor".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
         };
     }
     if config_path.is_file() {
@@ -1389,6 +1415,16 @@ fn configure_vscode(
             state: ConfigurationState::WouldConfigure,
             target: Some(target),
             detail: Some(pretty),
+        };
+    }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "vscode".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
         };
     }
     if config_path.is_file() {
@@ -1676,6 +1712,16 @@ fn configure_continue(
             detail: Some(pretty),
         };
     }
+    // A re-run that changes nothing leaves the file (and the repo root)
+    // alone instead of piling up identical backups.
+    if std::fs::read_to_string(&config_path).is_ok_and(|old| old.trim_end() == pretty.trim_end()) {
+        return ConfigurationOutcome {
+            agent: "continue".into(),
+            state: ConfigurationState::Configured,
+            target: Some(target),
+            detail: Some("already configured; nothing changed".into()),
+        };
+    }
     if config_path.is_file() {
         if let Err(e) = backup_file(&config_path) {
             return ConfigurationOutcome {
@@ -1917,7 +1963,7 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
     let configuration = match agent.as_str() {
-        "claude-code" => configure_claude_code(&exe, semantic.model_path.as_deref(), &opts),
+        "claude-code" => configure_claude_code(&root, &exe, semantic.model_path.as_deref(), &opts),
         "codex" => configure_codex(&root, &exe, semantic.model_path.as_deref(), &opts),
         "cursor" => configure_cursor(&root, &exe, semantic.model_path.as_deref(), &opts),
         "vscode" => configure_vscode(&root, &exe, semantic.model_path.as_deref(), &opts),
@@ -2567,6 +2613,16 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".mcp.json.bak-"))
             .collect();
         assert_eq!(backups.len(), 1, "exactly one backup after one re-run");
+
+        // A third run with the same settings changes nothing: no new backup.
+        let third = configure_generic(tmp.path(), Path::new("/usr/bin/lain2"), None, &opts);
+        assert_eq!(third.state, ConfigurationState::Configured);
+        let backups = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".mcp.json.bak-"))
+            .count();
+        assert_eq!(backups, 1, "an unchanged re-run makes no backup");
     }
 
     // ─── M8: codex adapter ───────────────────────────────────────────────

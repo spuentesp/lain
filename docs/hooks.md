@@ -72,12 +72,15 @@ The wire shape, validation, and auth contract are documented in
 
 | Agent | Wrapper location | Hook events fired |
 |---|---|---|
-| Claude Code | `hooks/claude-code/post-tool.sh` | Read, Edit, Grep, Bash |
 | Kimi | `hooks/kimi/pre-tool.sh` | Read, Edit, Grep, Bash |
 | AGY | `hooks/agy/pre-tool.sh` | Read, Edit, Grep, Bash |
 | Codex | `hooks/codex/pre-tool.sh` | Read, Edit, Grep, Bash |
 
-All four wrappers are bash, fail-open (always exit 0), parse the
+Claude Code has no observation wrapper yet: `hooks/claude-code/pre-edit.sh`
+and `post-edit.sh` claim and release files around Edit/Write only (see
+`hooks/claude-code/README.md`).
+
+All three wrappers are bash, fail-open (always exit 0), parse the
 agent's stdin JSON envelope, extract `tool_name` and
 `tool_input.{file_path,command,pattern}`, and forward to `lain
 hooks observe` which POSTs `/hook`. The CLI subcommand and

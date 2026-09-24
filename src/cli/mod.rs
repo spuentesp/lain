@@ -262,8 +262,9 @@ pub enum Commands {
     Setup {
         #[arg(long)]
         workspace: Option<PathBuf>,
-        /// "claude-code" or "generic". Omit to be asked interactively
-        /// (TTY only); non-interactive runs default to "generic".
+        /// claude-code, codex, cursor, vscode, continue or generic. Omit
+        /// to be asked interactively (TTY only); non-interactive runs
+        /// default to "generic".
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]

@@ -211,6 +211,7 @@ fn main() -> Result<()> {
             no_model,
             lsp,
         }) => {
+            let as_json = json;
             let code = lain::cli::setup::run_setup(lain::cli::setup::SetupOptions {
                 workspace,
                 agent,
@@ -222,7 +223,15 @@ fn main() -> Result<()> {
                 lsp,
             })
             .unwrap_or_else(|error| {
-                eprintln!("setup failed: {error:#}");
+                if as_json {
+                    // `--json` promises machine-readable stdout, failures included.
+                    println!(
+                        "{}",
+                        serde_json::json!({"ready": false, "error": format!("{error:#}")})
+                    );
+                } else {
+                    eprintln!("setup failed: {error:#}");
+                }
                 2
             });
             std::process::exit(code);

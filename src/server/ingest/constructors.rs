@@ -192,7 +192,7 @@ fn allocate_staging_dir() -> Result<PathBuf, LainError> {
 /// Removes any stale file so a prior process's graph doesn't leak in.
 fn init_workspace_state(ws: &Path) -> Result<PathBuf, LainError> {
     let mem_dir = ws.join(".lain");
-    std::fs::create_dir_all(&mem_dir)?;
+    crate::config::create_state_dir(&mem_dir)?;
     let mem_path = mem_dir.join("graph.bin");
     let _ = std::fs::remove_file(&mem_path);
     Ok(mem_path)

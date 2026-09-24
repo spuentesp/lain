@@ -169,6 +169,23 @@ fn remove(config_path: &Path, name: &str) -> Result<()> {
         .with_context(|| format!("write {}", config_path.display()))?;
     crate::cli::signal::signal_reload(config_path)
         .with_context(|| format!("signal reload after removing '{name}'"))?;
+    println!("Removed repo '{name}' from {}", config_path.display());
+    // Workspaces that still list it would fail validation at server start.
+    let ws_path = config_path.with_file_name("workspaces.yaml");
+    if let Ok(ws) = crate::server::federation::workspace::WorkspacesFile::load(&ws_path) {
+        for w in ws
+            .workspaces
+            .iter()
+            .filter(|w| w.members.iter().any(|m| m == name))
+        {
+            eprintln!(
+                "warning: workspace '{}' in {} still lists '{name}'; run `lain workspaces remove {} --repo {name}`",
+                w.name,
+                ws_path.display(),
+                w.name
+            );
+        }
+    }
     Ok(())
 }
 
