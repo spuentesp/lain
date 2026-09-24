@@ -159,6 +159,16 @@ print(('__TOOL_ERROR__ ' if r.get('isError') else '')+t)
 }
 
 http_code() { curl -s -o /dev/null -w '%{http_code}' -m 20 "$1"; }
+# `lain server` answers at once and indexes in the background; wait until
+# no repo in /health reports `"health":"indexing"`, as a client would.
+wait_indexed() {
+  for _ in $(seq 1 "$2"); do
+    local body; body=$(curl -s -m 20 "$1/health" || true)
+    if [ -n "$body" ] && ! printf '%s' "$body" | grep -q '"health":"indexing"'; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
 
 # ── setup ─────────────────────────────────────────────────────────────
 cleanup() {
@@ -246,7 +256,11 @@ BOOT_MS=$(( (BOOT_T1 - BOOT_T0) / 1000000 ))
 if [ "$(http_code "$URL/health")" != "200" ]; then
   printf '%sserver never became healthy. log:%s\n' "$RED" "$RST"; tail -20 "$WORK/server.log"; exit 1
 fi
-printf '  healthy in %s ms (boot + index of the subject repo)\n' "$BOOT_MS"
+if ! wait_indexed "$URL" 120; then
+  printf '%ssubject repo never finished indexing. log:%s\n' "$RED" "$RST"; tail -20 "$WORK/server.log"; exit 1
+fi
+INDEX_MS=$(( ($(date +%s%N) - BOOT_T0) / 1000000 ))
+printf '  answering in %s ms, subject repo indexed in %s ms\n' "$BOOT_MS" "$INDEX_MS"
 
 # ══ 1. Server + surface ═══════════════════════════════════════════════
 section "1. Server and advertised surface"
@@ -709,6 +723,7 @@ for _ in $(seq 1 60); do
   [ "$(http_code "http://127.0.0.1:$FED_PORT/health")" = "200" ] && break
   sleep 1
 done
+wait_indexed "http://127.0.0.1:$FED_PORT" 120 || true
 
 fcall() {
   local fargs="${2:-}"; [ -z "$fargs" ] && fargs='{}'
@@ -898,7 +913,7 @@ print('  %-30s n=%-3d  p50 %5d ms   p95 %5d ms   max %5d ms%s'
   printf '  %-30s 20 concurrent get_health in %s ms\n' "parallel throughput" "$CMS"
 
   printf '\n  %sindexing%s\n' "$DIM" "$RST"
-  printf '  %-30s %s ms (boot + full index, %s nodes)\n' "cold start (subject)" "$BOOT_MS" "${NODES:-?}"
+  printf '  %-30s %s ms (boot + full index, %s nodes)\n' "cold start (subject)" "$INDEX_MS" "${NODES:-?}"
 
   # The fixture is deliberately tiny so its call graph can be reasoned
   # about by hand. Timings on 24 nodes say nothing about scale, so run
@@ -993,7 +1008,7 @@ if [ -s "$TIMES_TSV" ]; then
 fi
 
 if [ -n "$JSON_OUT" ]; then
-  python3 - "$RESULTS_TSV" "$TIMES_TSV" "$JSON_OUT" "$PASS" "$FAIL" "$SKIP" "$BOOT_MS" <<'PY'
+  python3 - "$RESULTS_TSV" "$TIMES_TSV" "$JSON_OUT" "$PASS" "$FAIL" "$SKIP" "$INDEX_MS" <<'PY'
 import json, sys, collections
 res_p, times_p, out_p, npass, nfail, nskip, boot = sys.argv[1:8]
 checks=[]
