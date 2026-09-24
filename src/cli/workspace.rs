@@ -282,7 +282,16 @@ mod tests {
                 // `oneshot_discovers_workspace_from_cwd` is the
                 // end-to-end check that the right workspace is
                 // chosen; here we only assert the skip is wired up.
-                assert_eq!(found, project_root.canonicalize().unwrap());
+                // The fallthrough is the process cwd's own git root. That
+                // is usually `project_root` too, but not when the build
+                // directory sits outside the checkout (a worktree nested
+                // in another repo, or a shared `CARGO_TARGET_DIR`), so
+                // compare against what the process cwd resolves to.
+                let cwd = std::env::current_dir().unwrap();
+                let expected = walk_up_for_git(&cwd)
+                    .unwrap()
+                    .expect("cwd is in a git repo");
+                assert_eq!(found, expected.canonicalize().unwrap());
             }
             None => {
                 // Acceptable only if the process cwd is not inside

@@ -154,6 +154,7 @@ mod tests {
             racers: vec![],
             plan_revision: Some(7),
             landed_revision: 42,
+            scope: None,
         };
         let json = serde_json::to_value(&PresenceEvent::EditLanded { event }).unwrap();
 
@@ -183,6 +184,7 @@ mod tests {
                 racers: vec![],
                 plan_revision: None,
                 landed_revision: 0,
+                scope: None,
             },
         })
         .await;

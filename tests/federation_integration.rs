@@ -6,6 +6,8 @@
 //! `GraphDatabase`. Full LSP hydration is best-effort: if no language
 //! server is on `PATH`, the file/module hierarchy still lands in the
 //! graph, which is what the smoke test asserts.
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 
 use lain::federation::health::RepoHealth;
 use lain::federation::repo_id::RepoId;
@@ -319,7 +321,9 @@ async fn cross_repo_calls_edges_materialize_via_real_lsp_pipeline() {
     );
     std::fs::write(&cfg_path, repos_yaml).unwrap();
 
-    let fed = load_federation(&cfg_path).await.expect("load_federation");
+    let fed = isolated_state::load_federation(&cfg_path)
+        .await
+        .expect("load_federation");
     let repo_a = fed
         .get_repo(&RepoId::new("a").unwrap())
         .expect("repo a registered");
@@ -479,7 +483,6 @@ async fn repo_index_start_watcher_does_not_panic() {
 
 use lain::federation::federated_index::FederatedIndex;
 use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
-use lain::federation::loader::load_federation;
 use lain::federation::repo_source::RepoSource;
 
 /// Write a minimal two-file Rust crate (`Cargo.toml` + `src/lib.rs`) into
@@ -527,7 +530,7 @@ async fn five_repos_indexed_and_queried() {
     }
     std::fs::write(&cfg_path, yaml).unwrap();
 
-    let fed = load_federation(&cfg_path).await.unwrap();
+    let fed = isolated_state::load_federation(&cfg_path).await.unwrap();
     let listed = fed.list_repos();
     assert_eq!(listed.len(), 5);
     // (Real MCP-equivalent queries are exercised by the e2e script in Task 23.)
@@ -619,13 +622,13 @@ async fn cold_restart_reloads_all_repos() {
 
     // First load: builds the federation and persists per-repo state.
     {
-        let _first = load_federation(&cfg_path).await.unwrap();
+        let _first = isolated_state::load_federation(&cfg_path).await.unwrap();
         assert_eq!(_first.list_repos().len(), 3);
     }
 
     // Second load: simulates a cold restart against the same on-disk config
     // and shared data dir. The repo set must come back unchanged.
-    let second = load_federation(&cfg_path).await.unwrap();
+    let second = isolated_state::load_federation(&cfg_path).await.unwrap();
     assert_eq!(second.list_repos().len(), 3);
 }
 
@@ -673,6 +676,7 @@ async fn lain_server_set_workspace_is_visible_to_mcp_dispatcher() {
             members: vec!["repo-a".into(), "repo-b".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
@@ -829,6 +833,7 @@ async fn detect_overlap_reports_shared_symbols() {
             members: vec!["auth-svc".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
@@ -925,6 +930,7 @@ async fn detect_overlap_rejects_unknown_workspace() {
             members: vec!["solo".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
@@ -993,6 +999,7 @@ async fn detect_overlap_two_shared_functions_is_high() {
             members: vec!["auth-svc".into()],
         }],
     });
+    isolated_state::isolate();
     let server = LainServer::with_federation_and_workspaces(
         Arc::clone(&fed),
         Transport::Stdio,
@@ -1094,7 +1101,7 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
         cfg_dir.path().join("data").display(),
     );
     std::fs::write(&cfg_path, yaml).unwrap();
-    let fed = load_federation(&cfg_path).await.unwrap();
+    let fed = isolated_state::load_federation(&cfg_path).await.unwrap();
     assert_eq!(
         fed.list_repos().len(),
         1,
@@ -1120,7 +1127,7 @@ async fn single_repo_federation_binds_per_repo_tools_to_real_graph() {
     // indexed repo graph. Clone the Arc so we can still read
     // `fed.get_repo(...).db()` below to compare against the
     // executor's view.
-    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
+    let server = isolated_state::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
         .expect("with_federation");
 
     // The per-repo tool's view of the world. `find_anchors` calls
@@ -1181,10 +1188,10 @@ async fn multi_repo_federation_falls_back_to_placeholder() {
         cfg_dir.path().join("data").display(),
     );
     std::fs::write(&cfg_path, yaml).unwrap();
-    let fed = load_federation(&cfg_path).await.unwrap();
+    let fed = isolated_state::load_federation(&cfg_path).await.unwrap();
     assert_eq!(fed.list_repos().len(), 2);
 
-    let server = LainServer::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
+    let server = isolated_state::with_federation(Arc::clone(&fed), Transport::Stdio, 0, None, None)
         .expect("with_federation");
 
     // The placeholder path: the executor's graph is fresh and
@@ -1238,7 +1245,7 @@ fn build_pr1_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<d
     let backend: Arc<dyn GraphBackend> =
         Arc::new(PetgraphBackend::new(tmp).expect("PetgraphBackend::new"));
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
-    let server = LainServer::with_federation(fed, Transport::Stdio, 0, None, None)
+    let server = isolated_state::with_federation(fed, Transport::Stdio, 0, None, None)
         .expect("LainServer::with_federation");
     (Arc::new(server), backend)
 }

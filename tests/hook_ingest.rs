@@ -14,6 +14,8 @@
 //! doesn't exercise the body parsing, error envelope, or the
 //! session-token auth — all of which are what real hook scripts
 //! actually depend on.
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 
 use lain::server::LainServer;
 use std::path::PathBuf;
@@ -27,7 +29,7 @@ fn isolated_server() -> (TempDir, std::sync::Arc<LainServer>) {
     git2::Repository::init(dir.path()).unwrap();
     std::fs::write(dir.path().join("a.rs"), "pub fn a() {}").unwrap();
     let mem = dir.path().join(".lain/graph.bin");
-    let server = LainServer::new(dir.path(), &mem, None).expect("LainServer::new");
+    let server = isolated_state::new_server(dir.path(), &mem, None).expect("LainServer::new");
     // `LainServer::new` returns a non-Arc; the test fixtures want an
     // Arc for cross-thread sharing. Wrap explicitly rather than
     // changing the constructor signature.

@@ -99,6 +99,14 @@ impl std::ops::DerefMut for ServerFixture {
     }
 }
 
+/// True while `/health` reports a federation repo as `indexing`.
+fn still_indexing(health_body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(health_body)
+        .ok()
+        .and_then(|v| v["federation"]["repos"].as_array().cloned())
+        .is_some_and(|repos| repos.iter().any(|r| r["health"] == "indexing"))
+}
+
 fn boot_server_fixture(port: u16) -> ServerFixture {
     let (guard, project, state, xdg_config) = boot_server(port);
     ServerFixture {
@@ -239,7 +247,10 @@ fn boot_server(
             Ok((status, response[body_start..].to_string()))
         })();
         match attempt {
-            Ok((200, _)) => break,
+            // The server answers while it indexes in the background; wait
+            // until no repo reports `indexing`.
+            Ok((200, body)) if !still_indexing(&body) => break,
+            Ok((200, _)) => std::thread::sleep(Duration::from_millis(100)),
             Ok((status, body)) => {
                 if start.elapsed() > Duration::from_secs(5) {
                     panic!("server returned HTTP {status} from /health: {body}");
@@ -769,7 +780,10 @@ fn request_reload_handles_corrupt_yaml() {
             Ok((status, response[body_start..].to_string()))
         })();
         match attempt {
-            Ok((200, _)) => break,
+            // The server answers while it indexes in the background; wait
+            // until no repo reports `indexing`.
+            Ok((200, body)) if !still_indexing(&body) => break,
+            Ok((200, _)) => std::thread::sleep(Duration::from_millis(100)),
             Ok(_) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 std::thread::sleep(Duration::from_millis(100));

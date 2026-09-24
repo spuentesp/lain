@@ -558,6 +558,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
         let all_claims = server.occupancy().list_for_agent(&session.id);
         let landed_revision = server.overlay().current_revision();
         let audit_dir = server.state_dir_for_audit();
+        let audit_scope = server.audit_scope();
         let ts_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
@@ -582,6 +583,7 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
                 racers: result.conflicts.clone(),
                 plan_revision,
                 landed_revision,
+                scope: Some(audit_scope.clone()),
             };
             if let Err(e) = append_edit_event(&audit_dir, &audit) {
                 tracing::warn!("audit append failed: {e}");

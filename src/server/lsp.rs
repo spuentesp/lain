@@ -1471,25 +1471,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex as AsyncMutex;
 
 /// Pool of LspMultiplexer instances for parallel LSP communication
+#[derive(Clone)]
 pub struct LspPool {
     multiplexers: Vec<Arc<AsyncMutex<LspMultiplexer>>>,
-    next: AtomicUsize,
-}
-
-impl Clone for LspPool {
-    fn clone(&self) -> Self {
-        // `AtomicUsize` isn't `Clone` so we can't `#[derive(Clone)]`, but
-        // every clone should share the round-robin counter (a freshly
-        // zeroed counter would split the multiplexer pool across clones
-        // and starve some multiplexers). The pool is intended to be cloned
-        // for read-only sharing, so pointing at the original counter is
-        // correct: it's a stateless index, not a per-clone state.
-        let next = AtomicUsize::new(self.next.load(Ordering::Relaxed));
-        LspPool {
-            multiplexers: self.multiplexers.clone(),
-            next,
-        }
-    }
+    /// Shared by every clone. A clone that copied the counter's value
+    /// (what the hand-written `Clone` did, despite its comment saying it
+    /// shared it) rotated on its own, so clones kept landing on the same
+    /// multiplexers while others sat idle.
+    next: Arc<AtomicUsize>,
 }
 
 impl LspPool {
@@ -1506,7 +1495,7 @@ impl LspPool {
         }
         Ok(Self {
             multiplexers,
-            next: AtomicUsize::new(0),
+            next: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -2264,5 +2253,21 @@ mod multi_install_tests {
                 "result.ext at index {i} must match request"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    /// Clones hand out multiplexers from one rotation.
+    #[test]
+    fn clones_share_the_round_robin() {
+        let pool =
+            LspPool::new(Path::new("."), 2, &crate::tuning::RuntimeConfig::default()).unwrap();
+        let clone = pool.clone();
+        let a = pool.next();
+        let b = clone.next();
+        assert!(!Arc::ptr_eq(&a, &b), "a clone restarted the rotation");
     }
 }

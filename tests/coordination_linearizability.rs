@@ -16,6 +16,8 @@
 //!    regressions.
 //!
 //! Repeated across many iterations to flush timing-dependent bugs.
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 
 use lain::server::mcp::presence_tools::{run_claim_files, run_register_agent, run_release_files};
 use lain::server::LainServer;
@@ -36,7 +38,7 @@ fn fresh_server() -> (TempDir, Arc<LainServer>) {
     git2::Repository::init(dir.path()).unwrap();
     std::fs::write(dir.path().join("contested.rs"), "pub fn contested() {}\n").unwrap();
     let mem = dir.path().join(".lain/graph.bin");
-    let server = LainServer::new(dir.path(), &mem, None).expect("LainServer::new");
+    let server = isolated_state::new_server(dir.path(), &mem, None).expect("LainServer::new");
     (dir, Arc::new(server))
 }
 

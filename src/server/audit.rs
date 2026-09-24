@@ -109,6 +109,15 @@ pub struct AuditEvent {
     /// effects land. Surfaced verbatim from the broadcast channel
     /// so audit and SSE consumers reference the same monotone.
     pub landed_revision: RevisionId,
+    /// Which workspace (or federation) the write belongs to — the stem
+    /// of its presence state file. The log is one file per state
+    /// directory, shared by every workspace on the machine, so without
+    /// this `get_audit_log` in one repo listed every other repo's edits
+    /// under ambiguous relative paths. `None` on events written before
+    /// the field existed; readers keep those, since they cannot be
+    /// attributed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// Append a single audit event to `audit.jsonl` under `state_dir`.
@@ -217,6 +226,63 @@ pub fn read_audit_log(
     Ok(out)
 }
 
+/// How far out of order appends may be (seconds) before a newest-first
+/// scan with `since_unix` stops. Appends come from one server in time
+/// order; this only absorbs clock adjustments.
+const SINCE_SKEW_SECS: f64 = 300.0;
+
+/// The most recent `limit` events that pass `keep` (and `since_unix`),
+/// oldest first — without parsing the whole rotation window.
+///
+/// `read_audit_log` parses every line of up to ~100 MB (two 50 MB files)
+/// and `get_audit_log` returned all of it: on a long-lived install that
+/// was a 40 MB tool response and a second of parsing per call. This walks
+/// the live file and then the rotated one from the end, parses only the
+/// lines it inspects, and stops at `limit` matches or once it is well
+/// past `since_unix`.
+pub fn read_audit_log_recent(
+    state_dir: &Path,
+    since_unix: Option<f64>,
+    limit: usize,
+    keep: impl Fn(&AuditEvent) -> bool,
+) -> std::io::Result<Vec<AuditEvent>> {
+    let mut newest_first = Vec::new();
+    'files: for name in [AUDIT_LOG_FILENAME, AUDIT_LOG_ROTATED] {
+        if newest_first.len() >= limit {
+            break;
+        }
+        let text = match std::fs::read_to_string(state_dir.join(name)) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for line in text.lines().rev() {
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(ev) = serde_json::from_str::<AuditEvent>(line) else {
+                continue;
+            };
+            if let Some(since) = since_unix {
+                if ev.ts_unix < since - SINCE_SKEW_SECS {
+                    break 'files;
+                }
+                if ev.ts_unix < since {
+                    continue;
+                }
+            }
+            if keep(&ev) {
+                newest_first.push(ev);
+                if newest_first.len() >= limit {
+                    break 'files;
+                }
+            }
+        }
+    }
+    newest_first.reverse();
+    Ok(newest_first)
+}
+
 /// Size in bytes of the live `audit.jsonl` under `state_dir`, i.e.
 /// the byte offset at which the next `append_edit_event` call will
 /// start writing. Returns `0` if the file is missing (fresh server)
@@ -270,6 +336,7 @@ mod tests {
             racers: vec![],
             plan_revision: None,
             landed_revision: 1,
+            scope: None,
         }
     }
 
@@ -388,6 +455,7 @@ mod tests {
             racers: vec![],
             plan_revision: None,
             landed_revision: 1,
+            scope: None,
         };
         append_edit_event(tmp.path(), &event).unwrap();
 
@@ -416,6 +484,24 @@ mod tests {
     /// whose `ts_unix >= since_unix`. Two events with timestamps on
     /// either side of the cutoff; the older is filtered, the newer
     /// is returned.
+    #[test]
+    fn recent_read_returns_the_newest_matches_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            let mut ev = sample_event(1_000.0 + i as f64, "a");
+            ev.path = format!("src/f{}.rs", i % 2);
+            append_edit_event(tmp.path(), &ev).unwrap();
+        }
+        let got = read_audit_log_recent(tmp.path(), None, 3, |e| e.path == "src/f1.rs").unwrap();
+        let ts: Vec<f64> = got.iter().map(|e| e.ts_unix).collect();
+        assert_eq!(ts, vec![1_045.0, 1_047.0, 1_049.0]);
+
+        // `since_unix` bounds the scan the same way `read_audit_log` does.
+        let got = read_audit_log_recent(tmp.path(), Some(1_040.0), 100, |_| true).unwrap();
+        assert_eq!(got.len(), 10);
+        assert_eq!(got.first().unwrap().ts_unix, 1_040.0);
+    }
+
     #[test]
     fn read_returns_events_newer_than_since() {
         let tmp = tempdir().unwrap();
@@ -458,6 +544,7 @@ mod tests {
             racers: vec![],
             plan_revision: None,
             landed_revision: 0,
+            scope: None,
         };
         let line = serde_json::to_string(&event).expect("serialize");
         assert!(

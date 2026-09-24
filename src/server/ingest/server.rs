@@ -377,6 +377,16 @@ impl LainServer {
         }
     }
 
+    /// This server's key in the shared audit log: the stem of its
+    /// presence state file, which is already unique per workspace (or
+    /// per `repos.yaml` in federation mode).
+    pub fn audit_scope(&self) -> String {
+        self.state_path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     pub fn state_dir_for_audit(&self) -> PathBuf {
         self.state_path()
             .parent()

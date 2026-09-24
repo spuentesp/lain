@@ -21,6 +21,7 @@ fn fresh_audit_event() -> AuditEvent {
         racers: vec![],
         plan_revision: None,
         landed_revision: RevisionId::default(),
+        scope: None,
     }
 }
 

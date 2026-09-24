@@ -9,6 +9,8 @@
 //!
 //! Reads `claim_files` end-to-end through the MCP dispatcher so the
 //! test exercises the same code path that hooks reach in production.
+#[path = "support/isolated_state.rs"]
+mod isolated_state;
 
 use lain::federation::federated_index::FederatedIndex;
 use lain::federation::graph_backend::{GraphBackend, PetgraphBackend};
@@ -48,8 +50,9 @@ fn claim(
 fn build_federation_server(tmp: &std::path::Path) -> (Arc<LainServer>, Arc<dyn GraphBackend>) {
     let backend: Arc<dyn GraphBackend> = Arc::new(PetgraphBackend::new(tmp).expect("backend"));
     let fed = Arc::new(FederatedIndex::new(backend.clone()));
-    let server = LainServer::with_federation(fed, lain::server::Transport::Stdio, 0, None, None)
-        .expect("with_federation");
+    let server =
+        isolated_state::with_federation(fed, lain::server::Transport::Stdio, 0, None, None)
+            .expect("with_federation");
     (Arc::new(server), backend)
 }
 

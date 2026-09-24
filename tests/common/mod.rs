@@ -433,7 +433,16 @@ pub fn wait_for_health(host: &str, deadline: Duration) {
             );
             let mut response = String::new();
             let _ = stream.read_to_string(&mut response);
-            if response.starts_with("HTTP/1.1 200") {
+            // The server answers while it indexes in the background, so a
+            // 200 alone no longer means the repos are indexed: also wait
+            // while any repo reports `indexing`. Terminal states (degraded,
+            // unavailable) end the wait like `ready` does.
+            let still_indexing = response
+                .split_once("\r\n\r\n")
+                .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+                .and_then(|v| v["federation"]["repos"].as_array().cloned())
+                .is_some_and(|repos| repos.iter().any(|r| r["health"] == "indexing"));
+            if response.starts_with("HTTP/1.1 200") && !still_indexing {
                 return;
             }
         }

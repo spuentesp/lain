@@ -222,6 +222,13 @@ pub fn arg_property_schema(name: &str) -> serde_json::Map<String, serde_json::Va
                 "Cross-references to other annotation targets.".into(),
             );
         }
+        "since_unix" => {
+            p.insert("type".into(), "number".into());
+            p.insert(
+                "description".into(),
+                "Drop events with ts_unix < this (Unix seconds).".into(),
+            );
+        }
         "since_unix_ms" => {
             p.insert("type".into(), "integer".into());
             p.insert(
