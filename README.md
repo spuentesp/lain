@@ -112,7 +112,9 @@ lain workspaces create tokio-stack --members bytes,tokio
 lain server --config ./repos.yaml --transport http --port 9999
 ```
 
-Open `http://localhost:9999` for the Command Center. Federation adds
+Open `http://localhost:9999` for the Command Center. The server listens on
+localhost only; set `LAIN_BIND_ADDR=0.0.0.0` (with `LAIN_API_KEYS=key1,…`)
+to expose it on the network. Federation adds
 organization-wide search and cross-repository blast-radius queries. The
 [federation guide](docs/FEDERATION.md) covers configuration, source types, and
 failure states.

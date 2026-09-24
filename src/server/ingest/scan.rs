@@ -16,6 +16,10 @@ pub struct StaticFileRef {
     pub edge_type: EdgeType,
     /// See [`crate::treesitter::StaticRef::foreign_receiver`].
     pub foreign_receiver: bool,
+    /// See [`crate::treesitter::StaticRef::self_receiver`].
+    pub self_receiver: bool,
+    /// See [`crate::treesitter::StaticRef::qualifier`].
+    pub qualifier: Option<String>,
 }
 
 /// A string literal that could indicate cross-boundary coupling
@@ -305,6 +309,8 @@ pub async fn scan_file_structure(
                 target_name: r.target_name,
                 edge_type: r.edge_type,
                 foreign_receiver: r.foreign_receiver,
+                self_receiver: r.self_receiver,
+                qualifier: r.qualifier.clone(),
             })
             .collect();
         let pattern_refs: Vec<PatternRef> = ts
@@ -439,6 +445,7 @@ pub async fn process_symbol_recursive_enriched(
         git_sync,
         commit_hash,
         false,
+        None,
     )
     .await
 }
@@ -454,8 +461,10 @@ async fn process_symbol_recursive_inner(
     git_sync: i64,
     commit_hash: String,
     inside_test_container: bool,
+    container: Option<String>,
 ) {
     let mut node = symbol.node;
+    node.container = container;
     node.last_lsp_sync = Some(lsp_sync);
     node.last_git_sync = Some(git_sync);
     node.commit_hash = Some(commit_hash.clone());
@@ -476,6 +485,22 @@ async fn process_symbol_recursive_inner(
         node_id.clone(),
     ));
 
+    // A type's members belong to it; members of a function (closures,
+    // locals) keep the function's own container.
+    let child_container = if matches!(
+        nodes.last().map(|n| &n.node_type),
+        Some(
+            NodeType::Class
+                | NodeType::Struct
+                | NodeType::Interface
+                | NodeType::Trait
+                | NodeType::Enum
+        )
+    ) {
+        nodes.last().map(|n| n.name.clone())
+    } else {
+        nodes.last().and_then(|n| n.container.clone())
+    };
     for child in symbol.children {
         process_symbol_recursive_inner(
             nodes,
@@ -486,6 +511,7 @@ async fn process_symbol_recursive_inner(
             git_sync,
             commit_hash.clone(),
             in_tests,
+            child_container.clone(),
         )
         .await;
     }
@@ -541,6 +567,7 @@ async fn add_tree_sitter_definitions(
         node.last_git_sync = Some(context.git_sync);
         node.commit_hash = Some(context.commit_hash.clone());
         node.is_deprecated = def.is_deprecated;
+        node.container = def.container.clone();
         // Populate `label` so `find ... | filter label X` works.
         // `is_deprecated` is exposed as the "deprecated" label so users can
         // query with the same syntax docs advertise.

@@ -208,8 +208,11 @@ pub fn resolve_node_ambiguous(
                 | crate::schema::NodeType::File
         )
     };
-    if is_container(&node) {
-        if let Some(i) = others.iter().position(|n| !is_container(n)) {
+    // Likewise a type stub (`core.pyi`, `widget.d.ts`) restates a definition
+    // that lives in the real module.
+    let is_stub = |n: &GraphNode| n.path.ends_with(".pyi") || n.path.ends_with(".d.ts");
+    if is_container(&node) || is_stub(&node) {
+        if let Some(i) = others.iter().position(|n| !is_container(n) && !is_stub(n)) {
             let symbol = others.remove(i);
             others.insert(0, std::mem::replace(&mut node, symbol));
         }

@@ -1263,6 +1263,8 @@ pub async fn relink_cross_repo(
                             target_name: r.target_name,
                             edge_type: r.edge_type,
                             foreign_receiver: r.foreign_receiver,
+                            self_receiver: r.self_receiver,
+                            qualifier: r.qualifier.clone(),
                         }),
                 );
             }

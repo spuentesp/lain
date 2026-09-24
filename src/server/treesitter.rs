@@ -28,6 +28,12 @@ pub struct StaticRef {
     /// a bare call or one on `self` / `this`. The resolver uses it to
     /// avoid linking `dict.update()` to the one user-defined `update`.
     pub foreign_receiver: bool,
+    /// A call on the caller's own object (`self.x()`, `this.x()`, a Go
+    /// method's receiver variable).
+    pub self_receiver: bool,
+    /// `Registry` in `Registry::new()`: the type or module a path-qualified
+    /// call names.
+    pub qualifier: Option<String>,
 }
 
 /// Known-bUILTIN blocklist — only canonical std/lib calls that are unambiguously
@@ -298,9 +304,10 @@ const JS_DEFS: &[(&str, NodeType)] = &[
 /// which is what callers write (`res.sendStatus(404)`). Assigning to
 /// `module.exports` itself names no method and is left out.
 const MEMBER_FUNCTION_ASSIGNMENT: (&str, NodeType) = (
-    "((assignment_expression left: (member_expression property: (property_identifier) @name) \
+    "((assignment_expression left: (member_expression object: (_) @obj property: (property_identifier) @name) \
      right: [(function_expression) (arrow_function) (generator_function)]) @d \
-     (#not-eq? @name \"exports\"))",
+     (#not-eq? @name \"exports\") \
+     (#not-match? @obj \"^(console|window|global|globalThis|document|process|navigator|self|Math|JSON|Object|Array|Promise)$\"))",
     NodeType::Function,
 );
 /// An exported binding to a call's result — a Pinia store
@@ -709,21 +716,23 @@ fn script_view<'a>(path: &Path, source: &'a str) -> Option<(&'static LangSpec, C
     }
     let spec = spec_for_ext(ext)?;
     if spec.id == "c" || spec.id == "cpp" {
-        return Some((spec, blank_attribute_macro_lines(source)));
+        return Some((spec, blank_attribute_macro_lines(spec, source)));
     }
     Some((spec_for_ext(ext)?, Cow::Borrowed(source)))
 }
 
-/// Blank C/C++ lines holding nothing but an ALL-CAPS macro name, keeping
-/// byte offsets and line numbers.
+/// Blank C/C++ lines holding nothing but an ALL-CAPS macro name, where the
+/// parser fails around them — keeping byte offsets and line numbers.
 ///
-/// Attribute-like macros on their own line (`CXXOPTS_NODISCARD`,
-/// `API_EXPORT`, `FORCEINLINE`) expand to nothing the parser can see; it
-/// reads the macro as the return type and recovers badly — cxxopts'
-/// `make_storage()` was lost that way, with every call to it. A lone
-/// upper-case word is otherwise at most a final enumerator written without
-/// its comma, which is not a definition Lain indexes.
-fn blank_attribute_macro_lines(source: &str) -> Cow<'_, str> {
+/// An attribute-like macro on its own line (`CXXOPTS_NODISCARD`,
+/// `API_EXPORT`) expands to nothing the parser can see; it reads the macro
+/// as the return type and recovers badly — cxxopts' `make_storage()` was
+/// lost that way. But a lone upper-case word is just as often the return
+/// type itself (`DWORD`, `HRESULT`, `BOOL` on the line above the name, the
+/// Windows style), and blanking that lost the function instead. So only
+/// lines within two lines of a parse error are blanked: where the grammar
+/// already copes, the source is left alone.
+fn blank_attribute_macro_lines<'a>(spec: &'static LangSpec, source: &'a str) -> Cow<'a, str> {
     let is_macro_line = |line: &str| {
         let t = line.trim();
         t.len() >= 3
@@ -734,9 +743,60 @@ fn blank_attribute_macro_lines(source: &str) -> Cow<'_, str> {
     if !source.lines().any(is_macro_line) {
         return Cow::Borrowed(source);
     }
+    let Some(tree) = compiled(spec).and_then(|c| parse(&c.language, source)) else {
+        return Cow::Borrowed(source);
+    };
+    if !tree.root_node().has_error() {
+        return Cow::Borrowed(source);
+    }
+    // Rows where an ERROR node starts, or a node is missing.
+    let mut error_rows = std::collections::BTreeSet::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if !n.has_error() {
+            continue;
+        }
+        if n.is_error() || n.is_missing() {
+            error_rows.insert(n.start_position().row);
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+    let near_error = |row: usize| error_rows.range(row..=row + 2).next().is_some();
+    // In a run of such lines directly above a declarator (`name(`,
+    // `Cls::name(`), the first is the return type (`DWORD` above `WINAPI`
+    // above `worker1(`) and stays; the rest are calling-convention or
+    // attribute macros. Above a type line (cxxopts' macro above
+    // `std::shared_ptr<Value>`), all of the run is macros.
+    let lines: Vec<&str> = source.split_inclusive('\n').collect();
+    let is_declarator = |line: &str| {
+        let t = line.trim_start();
+        let name_end = t
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '~'))
+            .unwrap_or(t.len());
+        name_end > 0 && t[name_end..].trim_start().starts_with('(')
+    };
+    let mut blank = vec![false; lines.len()];
+    let mut row = 0;
+    while row < lines.len() {
+        if !is_macro_line(lines[row]) {
+            row += 1;
+            continue;
+        }
+        let start = row;
+        while row < lines.len() && is_macro_line(lines[row]) {
+            row += 1;
+        }
+        let keeps_return_type = lines.get(row).is_some_and(|l| is_declarator(l));
+        for (r, b) in blank.iter_mut().enumerate().take(row).skip(start) {
+            *b = near_error(r) && !(keeps_return_type && r == start);
+        }
+    }
+    let mut changed = false;
     let mut out = String::with_capacity(source.len());
-    for line in source.split_inclusive('\n') {
-        if is_macro_line(line) {
+    for (row, line) in lines.iter().enumerate() {
+        if blank[row] {
+            changed = true;
             out.extend(
                 line.chars()
                     .map(|c| if c == '\n' || c == '\r' { c } else { ' ' }),
@@ -745,33 +805,59 @@ fn blank_attribute_macro_lines(source: &str) -> Cow<'_, str> {
             out.push_str(line);
         }
     }
-    Cow::Owned(out)
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(source)
+    }
 }
 
-/// Blank C# conditional-compilation lines (`#if`, `#elif`, `#else`,
-/// `#endif`), keeping byte offsets and line numbers.
+/// Keep one configuration of C# conditional compilation: the first branch
+/// of every `#if`. Directive lines and the bodies of `#elif`/`#else`
+/// branches are blanked, keeping byte offsets and line numbers.
 ///
 /// The grammar handles a directive between statements but not inside an
 /// expression, and it does not recover: commandlineparser's
 /// `TypeConverter.cs` splits a ternary with `#if !SKIP_FSHARP`, the whole
-/// file parsed as one `ERROR`, and every method after it was lost. With
-/// the directives blanked both branches read as ordinary code — here a
-/// valid ternary; at worst a duplicate declaration, which only matters to
-/// a compiler.
+/// file parsed as one `ERROR`, and every method after it was lost. Keeping
+/// *both* branches instead turned `#if NET6_0 sealed class Widget #else
+/// class Widget #endif { … }` into two nested classes.
 fn blank_cs_conditionals(source: &str) -> Cow<'_, str> {
-    let is_conditional = |line: &str| {
-        let t = line.trim_start();
-        ["#if", "#elif", "#else", "#endif"].iter().any(|d| {
-            t.strip_prefix(d)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    // `#if X`, `# if X`, `#if(X)`, `#endif//note` — `#` then optional
+    // blanks, then the directive word not followed by an identifier char.
+    let directive = |line: &str| -> Option<&'static str> {
+        let rest = line.trim_start().strip_prefix('#')?.trim_start();
+        ["if", "elif", "else", "endif"].into_iter().find(|d| {
+            rest.strip_prefix(d)
+                .is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
         })
     };
-    if !source.lines().any(is_conditional) {
+    if !source.lines().any(|l| directive(l).is_some()) {
         return Cow::Borrowed(source);
     }
+    // One entry per open `#if`: whether this level is in a skipped branch.
+    let mut skipping: Vec<bool> = Vec::new();
     let mut out = String::with_capacity(source.len());
     for line in source.split_inclusive('\n') {
-        if is_conditional(line) {
+        let outer_skipped = skipping.iter().any(|&s| s);
+        let blank_line = match directive(line) {
+            Some("if") => {
+                skipping.push(false);
+                true
+            }
+            Some("elif") | Some("else") => {
+                if let Some(top) = skipping.last_mut() {
+                    *top = true;
+                }
+                true
+            }
+            Some(_) => {
+                skipping.pop();
+                true
+            }
+            None => outer_skipped,
+        };
+        if blank_line {
             out.extend(
                 line.chars()
                     .map(|c| if c == '\n' || c == '\r' { c } else { ' ' }),
@@ -877,13 +963,31 @@ pub fn extract_refs_with_locals(
                     continue;
                 }
                 if let Ok(name) = cap.node.utf8_text(src_bytes) {
-                    if keep(name) {
+                    let recv = if edge_type == EdgeType::Calls {
+                        call_receiver(&cap.node, src_bytes)
+                    } else {
+                        Receiver::None
+                    };
+                    // `Registry::new()`: a type-qualified call names its
+                    // target precisely, so a builtin-looking name (`new`)
+                    // is kept; the resolver matches it to Registry's `new`
+                    // or to nothing.
+                    let type_qualified = matches!(&recv, Receiver::Qualified(q)
+                        if q.starts_with(|c: char| c.is_ascii_uppercase()));
+                    if type_qualified || keep(name) {
                         refs.push(StaticRef {
                             source_line: cap.node.start_position().row as u32,
                             target_name: name.to_string(),
                             edge_type: edge_type.clone(),
-                            foreign_receiver: edge_type == EdgeType::Calls
-                                && has_foreign_receiver(&cap.node, src_bytes),
+                            foreign_receiver: matches!(
+                                recv,
+                                Receiver::Foreign | Receiver::Qualified(_)
+                            ),
+                            self_receiver: recv == Receiver::OwnSelf,
+                            qualifier: match recv {
+                                Receiver::Qualified(q) => Some(q),
+                                _ => None,
+                            },
                         });
                     }
                 }
@@ -981,6 +1085,8 @@ fn macro_body_calls(
                                 target_name: name.to_string(),
                                 edge_type: EdgeType::Calls,
                                 foreign_receiver: false,
+                                self_receiver: false,
+                                qualifier: None,
                             });
                         }
                     }
@@ -1015,7 +1121,34 @@ fn is_adjacent_macro_call(name: &tree_sitter::Node) -> bool {
         .is_some_and(|args| args.start_byte() == name.end_byte())
 }
 
+/// Who a call is made on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Receiver {
+    /// A bare call: `helper()`.
+    None,
+    /// The caller's own object: `self.x()`, `this.x()`, Go's receiver
+    /// variable (`s.update()` inside `func (s *Server) …`), `Self::new()`.
+    OwnSelf,
+    /// Some other value: `d.update()`, `child.walk()`.
+    Foreign,
+    /// A type or module path: `Registry::new()`, `String::new()`,
+    /// `Foo::bar()` — the last path segment.
+    Qualified(String),
+}
+
+const SELF_LIKE: &[&str] = &[
+    "self", "this", "cls", "super", "Self", "$this", "base", "parent", "static",
+];
+
 fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
+    matches!(
+        call_receiver(name, src_bytes),
+        Receiver::Foreign | Receiver::Qualified(_)
+    )
+}
+
+/// The receiver of the call whose callee name is `name`.
+pub(crate) fn call_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> Receiver {
     const RECEIVER_FIELDS: &[&str] = &[
         "object",
         "receiver",
@@ -1023,36 +1156,70 @@ fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
         "value",
         "argument",
         "expression",
-        "scope",
         "target",
     ];
-    const SELF_LIKE: &[&str] = &[
-        "self", "this", "cls", "super", "Self", "$this", "base", "parent", "static",
-    ];
+    let text_of = |n: tree_sitter::Node| {
+        n.utf8_text(src_bytes)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let classify = |text: &str| -> Receiver {
+        // `super().update()` (Python) and `parent::get()` / `static::`
+        // (PHP) reach the class's own hierarchy, like `self`.
+        if SELF_LIKE.contains(&text)
+            || text.starts_with("super(")
+            || go_receiver_name(name, src_bytes).as_deref() == Some(text)
+        {
+            Receiver::OwnSelf
+        } else {
+            Receiver::Foreign
+        }
+    };
     // Swift implicit member (`.basicAuth()`): the receiver is a type the
     // context implies, never `self`.
     if name.parent().is_some_and(|p| {
         p.kind() == "prefix_expression" && p.child(0).is_some_and(|c| c.kind() == ".")
     }) {
-        return true;
+        return Receiver::Foreign;
     }
     // Token-tree calls (inside a Rust macro) have no call node: the
     // receiver, if any, is the token before a preceding `.`.
     if name.parent().is_some_and(|p| p.kind() == "token_tree") {
         let Some(dot) = name.prev_sibling().filter(|p| p.kind() == ".") else {
-            return false;
+            return Receiver::None;
         };
-        let text = dot
-            .prev_sibling()
-            .and_then(|r| r.utf8_text(src_bytes).ok())
-            .unwrap_or_default();
-        return !SELF_LIKE.contains(&text);
+        let text = dot.prev_sibling().map(text_of).unwrap_or_default();
+        return classify(&text);
     }
     let mut node = *name;
     for _ in 0..4 {
         let Some(parent) = node.parent() else {
-            return false;
+            return Receiver::None;
         };
+        // A path: Rust `a::b::f` (`path`), C++ `A::f` / PHP `A::f` (`scope`).
+        let scope = match parent.kind() {
+            "scoped_identifier" => parent.child_by_field_name("path"),
+            "qualified_identifier" | "scoped_call_expression" => {
+                parent.child_by_field_name("scope")
+            }
+            _ => None,
+        }
+        .filter(|r| r.end_byte() <= name.start_byte());
+        if let Some(r) = scope {
+            let text = text_of(r);
+            let last = text
+                .rsplit("::")
+                .next()
+                .unwrap_or(&text)
+                .trim_start_matches('\\');
+            let last = last.split('<').next().unwrap_or(last).to_string();
+            return if SELF_LIKE.contains(&last.as_str()) {
+                Receiver::OwnSelf
+            } else {
+                Receiver::Qualified(last)
+            };
+        }
         let receiver = RECEIVER_FIELDS.iter().find_map(|f| {
             parent
                 .child_by_field_name(f)
@@ -1067,19 +1234,38 @@ fn has_foreign_receiver(name: &tree_sitter::Node, src_bytes: &[u8]) -> bool {
                 .filter(|r| r.end_byte() <= name.start_byte())
         });
         if let Some(r) = receiver {
-            let text = r.utf8_text(src_bytes).unwrap_or_default().trim();
-            // `super().update()` (Python) and `parent::get()` / `static::`
-            // (PHP) reach the class's own hierarchy, like `self`.
-            let own = SELF_LIKE.contains(&text) || text.starts_with("super(");
-            return !own;
+            return classify(&text_of(r));
         }
         let kind = parent.kind();
         if kind.contains("call") || kind.contains("invocation") {
-            return false;
+            return Receiver::None;
         }
         node = parent;
     }
-    false
+    Receiver::None
+}
+
+/// In a Go method, the receiver variable's name (`s` in
+/// `func (s *Server) Refresh()`): calls on it are calls on the method's own
+/// value, like `self`.
+fn go_receiver_name(name: &tree_sitter::Node, src_bytes: &[u8]) -> Option<String> {
+    let mut cur = name.parent();
+    while let Some(n) = cur {
+        if n.kind() == "method_declaration" {
+            let recv = n.child_by_field_name("receiver")?;
+            let mut c = recv.walk();
+            let param = recv.named_children(&mut c).next()?;
+            return param
+                .child_by_field_name("name")
+                .and_then(|id| id.utf8_text(src_bytes).ok())
+                .map(str::to_string);
+        }
+        if n.kind() == "function_declaration" || n.kind() == "source_file" {
+            return None;
+        }
+        cur = n.parent();
+    }
+    None
 }
 
 // ── String Literal Extraction for Semantic Boundaries ──────────────────────
@@ -1173,6 +1359,8 @@ pub struct SymbolDef {
     pub is_deprecated: bool,
     /// Optional labels attached to the symbol (e.g. "test", "async").
     pub labels: Vec<String>,
+    /// The type the definition belongs to; see [`container_of`].
+    pub container: Option<String>,
 }
 
 /// Extract symbol definitions at any depth (methods, nested and exported
@@ -1242,9 +1430,89 @@ pub fn extract_definitions(path: &Path, source: &str) -> Vec<SymbolDef> {
             byte_end: node.end_byte() as u32,
             is_deprecated,
             labels,
+            container: container_of(&node, src_bytes),
         });
     }
     defs
+}
+
+/// Name of the type a definition belongs to: the nearest enclosing class,
+/// struct, interface, trait, `impl` block, object, protocol or Ruby
+/// module; a Go method's receiver type; the qualifier of an out-of-class
+/// C++ definition (`Foo::bar`). `None` for a free function.
+fn container_of(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let text = |n: tree_sitter::Node| n.utf8_text(src).ok().map(str::to_string);
+    // Strip generics and pointers: `Registry<T>` / `*Server` -> base name.
+    let base = |t: String| -> Option<String> {
+        let t = t.trim_start_matches(['*', '&', ' ']);
+        let end = t
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(t.len());
+        (end > 0).then(|| t[..end].to_string())
+    };
+    match node.kind() {
+        // Go: `func (s *Server) Refresh()`.
+        "method_declaration" if node.child_by_field_name("receiver").is_some() => {
+            let recv = node.child_by_field_name("receiver")?;
+            let mut stack = vec![recv];
+            while let Some(n) = stack.pop() {
+                if n.kind() == "type_identifier" {
+                    return text(n).and_then(base);
+                }
+                let mut c = n.walk();
+                stack.extend(n.children(&mut c));
+            }
+        }
+        // C++: `void Foo::bar() {}` outside the class.
+        "function_definition" => {
+            let mut d = node.child_by_field_name("declarator");
+            while let Some(n) = d {
+                if n.kind() == "qualified_identifier" {
+                    if let Some(scope) = n.child_by_field_name("scope") {
+                        return text(scope).and_then(base);
+                    }
+                }
+                d = n.child_by_field_name("declarator");
+            }
+        }
+        _ => {}
+    }
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        // The file's own root (Python's is also called `module`).
+        n.parent()?;
+        let k = n.kind();
+        // A function nested in a method is local to it, not a member.
+        if k.contains("function")
+            || k.contains("method")
+            || k.contains("closure")
+            || k.contains("lambda")
+        {
+            return None;
+        }
+        let is_type = k.contains("class")
+            || k.contains("struct")
+            || k.contains("interface")
+            || k.contains("trait")
+            || k.contains("protocol")
+            || k.contains("record_declaration")
+            || k.contains("enum_declaration")
+            || k.contains("extension")
+            || k == "impl_item"
+            || k == "object_declaration"
+            || k == "object_definition"
+            || k == "module";
+        if is_type && !k.ends_with("_body") && !k.contains("specifier_list") {
+            let name = n
+                .child_by_field_name("name")
+                .or_else(|| n.child_by_field_name("type"));
+            if let Some(name) = name.and_then(text).and_then(base) {
+                return Some(name);
+            }
+        }
+        cur = n.parent();
+    }
+    None
 }
 
 /// A `@typing.overload` stub: a type signature, not code. Indexing it gave
@@ -1795,6 +2063,110 @@ export class Ky {
     }
 
     #[test]
+    fn receivers_are_classified() {
+        let recv = |file: &str, src: &str, name: &str| {
+            let r = extract_refs(Path::new(file), src)
+                .into_iter()
+                .find(|r| r.target_name == name)
+                .unwrap_or_else(|| panic!("{name} not extracted from {file}"));
+            (r.foreign_receiver, r.self_receiver, r.qualifier)
+        };
+        // Go: the method's receiver variable is its own value.
+        let go = "package p\nfunc (s *Server) Refresh() { s.update(); other.update2() }\n";
+        assert_eq!(recv("a.go", go, "update"), (false, true, None));
+        assert_eq!(recv("a.go", go, "update2"), (true, false, None));
+        // Rust paths.
+        let rs =
+            "fn f() { let r = Registry::new(); let s = String::from(\"x\"); Self::build(); }\n";
+        assert_eq!(
+            recv("a.rs", rs, "new"),
+            (true, false, Some("Registry".into()))
+        );
+        assert_eq!(recv("a.rs", rs, "build"), (false, true, None));
+        // Python self.
+        let py = "class C:\n    def f(self):\n        self.load(1)\n        util.parse(2)\n";
+        assert_eq!(recv("a.py", py, "load"), (false, true, None));
+        assert_eq!(recv("a.py", py, "parse"), (true, false, None));
+    }
+
+    #[test]
+    fn assigning_to_a_global_is_not_a_definition() {
+        let src = "console.error = (...a) => {};\nglobal.fetch = async () => ({});\nres.sendStatus = function (c) {};\n";
+        let defs = def_names("jest.setup.js", src);
+        assert!(defs.iter().any(|(n, _)| n == "sendStatus"), "{defs:?}");
+        assert!(
+            !defs.iter().any(|(n, _)| n == "error" || n == "fetch"),
+            "{defs:?}"
+        );
+    }
+
+    #[test]
+    fn definitions_know_their_container() {
+        let cases: &[(&str, &str, &[(&str, Option<&str>)])] = &[
+            ("a.py", "def load(p): pass\nclass Cache:\n    def load(self, k): pass\n",
+             &[("load", None), ("Cache", None)]),
+            ("a.rs", "struct Registry;\nimpl Registry {\n    fn new() -> Self { Registry }\n}\nfn new() {}\n",
+             &[("new", Some("Registry"))]),
+            ("a.go", "package p\ntype Server struct{}\nfunc (s *Server) Refresh() {}\nfunc Free() {}\n",
+             &[("Refresh", Some("Server")), ("Free", None)]),
+            ("a.cpp", "class Foo { void inl() {} };\nvoid Foo::bar() {}\nvoid free_fn() {}\n",
+             &[("inl", Some("Foo")), ("bar", Some("Foo")), ("free_fn", None)]),
+            ("a.ts", "class Widget { render() {} }\nfunction render2() {}\n",
+             &[("render", Some("Widget")), ("render2", None)]),
+            ("a.rb", "class Tree\n  def walk(v)\n  end\nend\n", &[("walk", Some("Tree"))]),
+            ("b.py", "class C:\n    def run(self):\n        def inner():\n            pass\n", &[("run", Some("C")), ("inner", None)]),
+        ];
+        for (file, src, want) in cases {
+            let defs = extract_definitions(Path::new(file), src);
+            for (name, container) in *want {
+                let found: Vec<_> = defs
+                    .iter()
+                    .filter(|d| d.name == *name)
+                    .map(|d| d.container.as_deref())
+                    .collect();
+                assert!(
+                    found.contains(container),
+                    "{file}: {name} containers {found:?}, want {container:?}"
+                );
+            }
+        }
+        // Python: the method's container is the class.
+        let defs = extract_definitions(
+            Path::new("a.py"),
+            "class Cache:\n    def load(self, k): pass\n",
+        );
+        assert_eq!(
+            defs.iter()
+                .find(|d| d.name == "load")
+                .unwrap()
+                .container
+                .as_deref(),
+            Some("Cache")
+        );
+    }
+
+    #[test]
+    fn upper_case_return_types_on_their_own_line_are_kept() {
+        let src = "DWORD\nWINAPI\nworker1(void *p)\n{ return helper(2); }\n\
+                   UINT\nworker4(void *p) { return helper(4); }\n\
+                   HRESULT\nFoo::worker7() { return 0; }\n";
+        for file in ["w.c", "w.cpp"] {
+            let defs = def_names(file, src);
+            for want in ["worker1", "worker4"] {
+                assert!(
+                    defs.iter().any(|(n, _)| n == want),
+                    "{file}: {want} lost: {defs:?}"
+                );
+            }
+        }
+        let w7 = extract_definitions(Path::new("w.cpp"), src)
+            .into_iter()
+            .find(|d| d.name == "worker7")
+            .expect("worker7");
+        assert_eq!(w7.line_start, 6, "starts at its return type line");
+    }
+
+    #[test]
     fn attribute_macro_lines_do_not_hide_definitions() {
         let src = "class O {\n  CXXOPTS_NODISCARD\n  std::shared_ptr<Value>\n  make_storage() const\n  {\n    return m_value->clone();\n  }\n};\n\
                    void use(O* details) { details->make_storage(); }\n";
@@ -1855,6 +2227,18 @@ export class Ky {
         // A file that does not define it still treats it as the builtin.
         let calls = call_names("src/Other.php", "<?php\nfunction f() { assert(true); }\n");
         assert!(!calls.iter().any(|c| c == "assert"), "{calls:?}");
+    }
+
+    #[test]
+    fn csharp_if_else_class_headers_give_one_class() {
+        let src = "#if NET6_0\npublic sealed class Widget : IDisposable\n#else\npublic class Widget\n#endif\n{\n\
+                   # if (DEBUG)\n    void Trace() {}\n#endif//debug\n    public void Run() { Trace(); }\n}\n";
+        let widgets = def_names("A.cs", src)
+            .into_iter()
+            .filter(|(n, _)| n == "Widget")
+            .count();
+        assert_eq!(widgets, 1);
+        assert!(def_names("A.cs", src).iter().any(|(n, _)| n == "Run"));
     }
 
     #[test]
