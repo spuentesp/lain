@@ -225,7 +225,7 @@ mod unix_bench {
             write_frame(&mut self.stream, &req)?;
             self.stream.flush()?;
             match read_frame(&mut self.stream)? {
-                Response::HandshakeAck { version } => {
+                Response::HandshakeAck { version, .. } => {
                     if version != PROTOCOL_VERSION {
                         return Err(format!(
                             "handshake ack version mismatch: expected {}, got {}",

@@ -679,3 +679,22 @@ fn test_any_git_sensor_polymorphic_concurrency() {
     assert!(health.alive);
     assert_eq!(health.consecutive_failures, 0);
 }
+
+/// A binary that is not a working sidecar of this build — here, one that
+/// exits at once — is `Unavailable`, the error `AnyGitSensor` answers by
+/// falling back to the in-process sensor. An older sidecar found on
+/// `$PATH` used to be accepted and the graph silently missed files.
+#[test]
+fn an_unusable_sidecar_is_unavailable_so_lain_falls_back() {
+    let tmp = TempDir::new().unwrap();
+    init_simple_git_repo(tmp.path());
+    let fake = tmp.path().join("fake-sidecar");
+    std::fs::write(&fake, "#!/bin/sh\nexit 3\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    match SidecarGitSensor::new_with_options(tmp.path(), Some(fake), Duration::from_secs(2)) {
+        Err(LainError::Unavailable(_)) => {}
+        Err(other) => panic!("expected Unavailable, got {other:?}"),
+        Ok(_) => panic!("a sidecar that exits must not connect"),
+    }
+}

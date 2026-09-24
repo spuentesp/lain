@@ -18,7 +18,16 @@
 //! `use crate::sidecar_proto::*;`. If the prototype decides no-go, rip
 //! out the bin entries in Cargo.toml and delete this module.
 
-pub const PROTOCOL_VERSION: u32 = 1;
+/// 2: `HandshakeAck` carries the sidecar's build identity.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// This binary's build identity (`0.7.4 (f64cf6b)`), as the sidecar
+/// reports it in `HandshakeAck`. Lain refuses a sidecar from another
+/// build: an older one found on `$PATH` answered the same protocol with
+/// different behavior, and the graph silently missed files.
+pub fn build_id() -> String {
+    format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("LAIN_GIT_SHA"))
+}
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -73,6 +82,8 @@ pub enum Response {
     /// Acknowledges a successful handshake with the matching protocol version.
     HandshakeAck {
         version: u32,
+        /// [`build_id`] of the sidecar binary.
+        build: String,
     },
     /// Rejection of a handshake due to version mismatch or negotiation failure.
     HandshakeNack {
@@ -189,6 +200,7 @@ mod tests {
 
         let ack = Response::HandshakeAck {
             version: PROTOCOL_VERSION,
+            build: build_id(),
         };
         let mut ack_buf = Vec::new();
         write_frame(&mut ack_buf, &ack).expect("write ack failed");
