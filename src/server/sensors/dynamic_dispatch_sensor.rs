@@ -254,20 +254,30 @@ pub fn scan_workspace_dispatch(
         };
 
         let rel_path = graph_path(root, path);
-        let file_id = GraphNode::generate_id(&NodeType::File, &rel_path, "", None, namespace);
-
-        // Source endpoint must exist in the graph; `insert_edges_batch`
-        // drops edges whose endpoints aren't indexed. Track per-file so
-        // we don't re-upsert when many detectors fire on the same file.
-        if ensured_files.insert(file_id.clone()) {
-            let mut file_node = GraphNode::new(NodeType::File, String::new(), rel_path.clone());
-            file_node.id = file_id.clone();
-            graph.upsert_node(file_node)?;
-        }
+        // The scanner's own File node for this path — same name, same id.
+        // A nameless one (the old id) was a second File node for every file
+        // this walked, whether or not a detector fired.
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let file_id =
+            GraphNode::generate_id(&NodeType::File, &rel_path, &file_name, None, namespace);
 
         for det in DETECTORS.iter() {
             if !det.regex.is_match(&content) {
                 continue;
+            }
+            // Source endpoint must exist in the graph; `insert_edges_batch`
+            // drops edges whose endpoints aren't indexed. Normally the
+            // scanner made it already; upsert keeps what is there.
+            if ensured_files.insert(file_id.clone())
+                && !matches!(graph.get_node(&file_id), Ok(Some(_)))
+            {
+                let mut file_node =
+                    GraphNode::new(NodeType::File, file_name.clone(), rel_path.clone());
+                file_node.id = file_id.clone();
+                graph.upsert_node(file_node)?;
             }
 
             // Synthetic Hub target. Deterministic id per detector so

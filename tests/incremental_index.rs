@@ -301,3 +301,83 @@ async fn deleting_a_file_removes_its_nodes() {
         "the surviving file's symbols must not be collateral"
     );
 }
+
+/// A commit that shifts a function down a line, moves it to another file,
+/// or adds a function existing code already calls gives it a new id; the
+/// unchanged callers must follow it, as a fresh index would.
+#[tokio::test]
+async fn incremental_reindex_relinks_shifted_moved_and_new_symbols() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().to_path_buf();
+    let pkg = repo.join("pkg");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("b.py"), "def helper():\n    return 1\n").unwrap();
+    std::fs::write(
+        pkg.join("a.py"),
+        "from pkg.b import helper\n\ndef caller():\n    return helper() + later()\n",
+    )
+    .unwrap();
+    init_repo(&repo);
+
+    let data_tmp = tempfile::tempdir().unwrap();
+    let data_dir = data_tmp.path().to_path_buf();
+    let source =
+        Box::new(WorkspaceDirSource::new(RepoId::new("shift").unwrap(), repo.clone()).unwrap());
+    let ri = Arc::new(RepoIndex::new(source, &data_dir).unwrap());
+    ri.index().await.expect("full index");
+    assert_eq!(
+        incoming_calls(&ri, "helper"),
+        1,
+        "fixture: caller -> helper"
+    );
+
+    // 1. Shift helper down one line.
+    std::fs::write(
+        pkg.join("b.py"),
+        "# a comment\ndef helper():\n    return 1\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "shift"]);
+    ri.index().await.expect("incremental index");
+    assert_eq!(
+        incoming_calls(&ri, "helper"),
+        1,
+        "caller lost after a line shift"
+    );
+
+    // 2. Move helper to a new file.
+    std::fs::write(pkg.join("b.py"), "# moved\n").unwrap();
+    std::fs::write(pkg.join("c.py"), "def helper():\n    return 1\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "move"]);
+    ri.index().await.expect("incremental index");
+    // One File node per path (a sensor used to mint a second, nameless one).
+    let mut file_paths: Vec<String> = ri
+        .db()
+        .get_all_nodes()
+        .into_iter()
+        .filter(|n| n.node_type == lain::server::schema::NodeType::File)
+        .map(|n| n.path)
+        .collect();
+    let total = file_paths.len();
+    file_paths.sort();
+    file_paths.dedup();
+    assert_eq!(
+        total,
+        file_paths.len(),
+        "duplicate File nodes: {file_paths:?}"
+    );
+    assert_eq!(incoming_calls(&ri, "helper"), 1, "caller lost after a move");
+
+    // 3. Add `later`, which caller already calls.
+    std::fs::write(pkg.join("d.py"), "def later():\n    return 2\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "add later"]);
+    ri.index().await.expect("incremental index");
+    assert_eq!(
+        incoming_calls(&ri, "later"),
+        1,
+        "a new symbol got no callers"
+    );
+}

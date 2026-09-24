@@ -57,7 +57,12 @@ impl GitSensor {
     pub fn get_all_tracked_files(&self) -> Result<Vec<PathBuf>, LainError> {
         let mut files = Vec::new();
 
-        let index = self.repo.index()?;
+        let mut index = self.repo.index()?;
+        // libgit2 caches the index in memory; this sensor lives as long as
+        // the server, so without a re-read a file added by a later commit
+        // was missing here — and the orphan sweep then deleted the nodes
+        // the same pass had just indexed for it.
+        index.read(false)?;
         for entry in index.iter() {
             if let Ok(path) = std::str::from_utf8(&entry.path) {
                 let full_path = self.workspace.join(path);
@@ -81,10 +86,11 @@ impl GitSensor {
         // an error, so only a relative one may reach it.
         let rel = crate::server::graph::graph_path(&self.workspace, path);
         let rel_path = Path::new(&rel);
-        if rel_path.is_relative()
-            && !rel.contains(':')
-            && self.repo.index()?.get_path(rel_path, 0).is_some()
-        {
+        if rel_path.is_relative() && !rel.contains(':') && {
+            let mut index = self.repo.index()?;
+            index.read(false)?;
+            index.get_path(rel_path, 0).is_some()
+        } {
             return Ok(false);
         }
         Ok(self.repo.is_path_ignored(path)?)
