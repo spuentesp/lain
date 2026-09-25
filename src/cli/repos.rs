@@ -32,6 +32,14 @@ pub enum ReposAction {
 pub fn run(action: ReposAction, config_path: &Path) -> Result<()> {
     match action {
         ReposAction::Add { name, url, ref_ } => {
+            // Cheap checks first: a bad id or an empty URL used to wait out
+            // a `git ls-remote` of up to 20 s, and an empty URL was written
+            // and then stopped `lain server` from starting.
+            crate::federation::repo_id::RepoId::new(&name)
+                .map_err(|e| anyhow::anyhow!("invalid repo id '{name}': {e}"))?;
+            if url.trim().is_empty() {
+                anyhow::bail!("repo URL cannot be empty");
+            }
             let ref_ = match ref_ {
                 Some(r) => r,
                 None => remote_default_branch(&url).unwrap_or_else(|| {
@@ -89,7 +97,7 @@ fn add(config_path: &Path, name: &str, url: &str, ref_: &str) -> Result<()> {
 /// The branch a remote's `HEAD` points at. A fixed `main` default broke
 /// the README's own example: `tokio-rs/bytes` and `tokio-rs/tokio` use
 /// `master`, and cloning `--branch main` fails.
-fn remote_default_branch(url: &str) -> Option<String> {
+pub(crate) fn remote_default_branch(url: &str) -> Option<String> {
     use std::io::Read;
     // Never prompt for credentials, and give up after 20s: this is only a
     // default, and `--ref` always works.

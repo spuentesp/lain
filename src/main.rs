@@ -100,7 +100,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Ask {
             config: _,
-            question: _,
+            question,
         }) => {
             // NOTE: `cli::ask::run_ask` is the PreToolUse hook handler
             // — it reads JSON from stdin and outputs a permission
@@ -109,7 +109,7 @@ fn main() -> Result<()> {
             // them through (likely by serializing into stdin or by
             // adding an interactive prompt). For now the args are
             // accepted for surface parity and ignored at dispatch.
-            lain::cli::ask::run_ask()
+            lain::cli::ask::run_ask(question.as_deref())
         }
         Some(Commands::Mcp {
             workspace,

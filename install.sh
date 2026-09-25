@@ -643,9 +643,19 @@ main() {
     echo "Next steps:"
     local rc_hint="~/.bashrc"
     if [ "$(basename "${SHELL:-}")" = "zsh" ]; then rc_hint="~/.zshrc"; fi
-    echo "  1. Open a new terminal (or: source $rc_hint)"
-    echo "  2. Restart your agent (Claude Code, Cursor, etc.)"
-    echo "  3. Try: lain query \"find Function | limit 5\""
+    local lain_cmd="lain"
+    if check_in_path; then
+      echo "  1. Restart your agent (Claude Code, Cursor, etc.)"
+    elif grep -qs "$INSTALL_DIR" "$HOME/.bashrc" "$HOME/.zshrc" 2>/dev/null; then
+      echo "  1. Open a new terminal (or: source $rc_hint), then restart your agent"
+    else
+      # Nothing was added to a shell rc (non-interactive install): the
+      # full path works now; the PATH line above makes `lain` work too.
+      lain_cmd="${INSTALL_DIR}/${BIN_NAME}"
+      echo "  1. Restart your agent (Claude Code, Cursor, etc.)"
+    fi
+    echo "  2. In a repository: $lain_cmd setup    (checks the index, offers language servers)"
+    echo "  3. Try: $lain_cmd oneshot find_anchors"
     echo ""
     echo "Documentation: https://github.com/spuentesp/lain"
   else

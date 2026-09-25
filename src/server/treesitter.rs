@@ -1642,12 +1642,14 @@ fn refine_kind(
 /// 1. It's NOT in the builtin blocklist, OR
 /// 2. It IS defined locally (secondary classification via local_definitions)
 fn is_user_defined_call(name: &str, local_definitions: &HashSet<String>) -> bool {
-    if name.len() <= 1 {
-        return false;
-    }
-    // Secondary classification: locally-defined symbols override builtin blocklist
+    // Locally-defined symbols override every filter below — including the
+    // length one: `def g(): …; g()` is a real call, and one-letter names
+    // were dropped before this check was reached.
     if local_definitions.contains(name) {
         return true;
+    }
+    if name.len() <= 1 {
+        return false;
     }
     // Primary filter: not a known builtin
     !BUILTIN_CALLS.contains(&name)
@@ -2692,6 +2694,26 @@ fn main() {
         assert!(
             calls.contains(&"process"),
             "should find process even if in locals"
+        );
+    }
+}
+
+#[cfg(test)]
+mod short_name_tests {
+    use super::*;
+
+    /// A one-letter function defined in the file is still a call target.
+    #[test]
+    fn a_locally_defined_one_letter_call_is_kept() {
+        let refs = extract_refs(
+            Path::new("a.py"),
+            "def g():\n    return 1\n\ndef h():\n    return g() + x()\n",
+        );
+        let names: Vec<&str> = refs.iter().map(|r| r.target_name.as_str()).collect();
+        assert!(names.contains(&"g"), "{names:?}");
+        assert!(
+            !names.contains(&"x"),
+            "undefined one-letter names stay filtered: {names:?}"
         );
     }
 }
