@@ -334,6 +334,132 @@ check_writeable() {
   return 1
 }
 
+# Detect which hash tool is available. Mirrors npm-shim/scripts/runtime.js:
+# sha256sum on Linux, shasum -a 256 on macOS.
+_hash_tool() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then
+    # macOS ships `shasum` (perl-based); -a 256 selects SHA-256.
+    echo "shasum -a 256"
+  else
+    echo ""
+  fi
+}
+
+# Compute the SHA-256 hex digest of a file using the available tool.
+_sha256_of() {
+  local file="$1"
+  local tool
+  tool=$(_hash_tool)
+  if [ -z "$tool" ]; then
+    return 1
+  fi
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+  case "$tool" in
+    sha256sum)
+      sha256sum "$file" 2>/dev/null | cut -d' ' -f1 ;;
+    "shasum -a 256")
+      shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1 ;;
+  esac
+}
+
+# Parse the expected SHA-256 hex digest from a SHA256SUMS text block
+# for the given asset filename.  Handles both GNU coreutils plain format
+# and the `*`-prefixed BSD/md5sum style.
+_parse_sha256sums() {
+  local sums_text="$1"
+  local asset_name="$2"
+  local line match
+  while IFS= read -r line || [ -n "$line" ]; do
+    match=$(echo "$line" | sed -nE 's/^([a-fA-F0-9]{64})[[:space:]]+\*?(.+)$/\1 \2/p')
+    if [ -z "$match" ]; then
+      continue
+    fi
+    local digest filename
+    digest=$(echo "$match" | cut -d' ' -f1)
+    filename=$(echo "$match" | cut -d' ' -f2-)
+    if [ "$filename" = "$asset_name" ]; then
+      echo "$digest"
+      return 0
+    fi
+  done <<< "$sums_text"
+  return 1
+}
+
+# Download SHA256SUMS from the release, then verify the downloaded tarball
+# against the expected hash BEFORE extraction.  Fails loudly on mismatch.
+_verify_archive() {
+  local version="$1"
+  local platform="$2"
+  local tmpdir="$3"
+  local asset_name="lain-${version}-${platform}.tar.gz"
+  local tarball="${tmpdir}/lain.tar.gz"
+  local sums_url="https://github.com/$REPO/releases/download/v${version}/SHA256SUMS"
+
+  info "Fetching SHA256SUMS for v${version}..."
+
+  local sums_text
+  if command -v curl >/dev/null 2>&1; then
+    sums_text=$(curl -fsSL "$sums_url") || {
+      error "Failed to download SHA256SUMS from $sums_url"
+      return 1
+    }
+  elif command -v wget >/dev/null 2>&1; then
+    sums_text=$(wget -q -O- "$sums_url") || {
+      error "Failed to download SHA256SUMS from $sums_url"
+      return 1
+    }
+  else
+    error "curl or wget is required to verify checksums."
+    return 1
+  fi
+
+  local expected
+  expected=$(_parse_sha256sums "$sums_text" "$asset_name") || {
+    error "SHA256SUMS has no entry for $asset_name"
+    echo ""
+    echo "Expected one of:"
+    echo "  lain-${version}-x86_64-unknown-linux-gnu.tar.gz"
+    echo "  lain-${version}-aarch64-apple-darwin.tar.gz"
+    echo "  lain-${version}-x86_64-pc-windows-msvc.tar.gz"
+    return 1
+  }
+
+  local tool
+  tool=$(_hash_tool)
+  if [ -z "$tool" ]; then
+    error "Neither sha256sum nor shasum is available. Cannot verify archive checksum."
+    return 1
+  fi
+
+  info "Verifying ${asset_name}..."
+
+  local actual
+  actual=$(_sha256_of "$tarball") || {
+    error "Failed to compute SHA-256 of downloaded archive."
+    return 1
+  }
+
+  if [ "$actual" != "$expected" ]; then
+    error "Checksum mismatch for ${asset_name}!"
+    echo ""
+    echo "  Expected:  $expected"
+    echo "  Actual:    $actual"
+    echo ""
+    echo "  This archive may have been corrupted in transit or tampered with."
+    echo "  Checksum source: $sums_url"
+    echo ""
+    echo "  To retry, re-run the installer."
+    return 1
+  fi
+
+  info "Checksum verified OK."
+  return 0
+}
+
 install() {
   local version="$1"
   local platform="$2"
@@ -360,6 +486,13 @@ install() {
     fi
   else
     error "curl or wget is required to download LAIN."
+    rm -rf "$tmpdir"
+    exit 1
+  fi
+
+  # SHA-256 of the tarball against SHA256SUMS — done before extraction so
+  # a corrupted/tampered archive never gets extracted to disk.
+  if ! _verify_archive "$version" "$platform" "$tmpdir"; then
     rm -rf "$tmpdir"
     exit 1
   fi
@@ -406,21 +539,36 @@ verify_installation() {
     return 1
   fi
 
-  # Try to run it
-  if "${bin_path}" --version >/dev/null 2>&1; then
-    local installed_version
-    installed_version=$("${bin_path}" --version 2>&1 | head -1)
-    info "Successfully installed: $installed_version"
-    return 0
-  elif "${bin_path}.exe" --version >/dev/null 2>&1; then
-    local installed_version
-    installed_version=$("${bin_path}.exe" --version 2>&1 | head -1)
-    info "Successfully installed: $installed_version"
-    return 0
+  # Determine which binary was installed.
+  local run_bin="$bin_path"
+  [ ! -f "$bin_path" ] && run_bin="${bin_path}.exe"
+  [ ! -f "$run_bin" ] && run_bin="$bin_path"
+
+  # Second pass: binary --version check.
+  local installed_version
+  if "${run_bin}" --version >/dev/null 2>&1; then
+    installed_version=$("${run_bin}" --version 2>&1 | head -1)
+    info "Binary verified: $installed_version"
   else
     warn "Binary installed but --version check failed."
     return 1
   fi
+
+  # Third pass: sidecar --version check (non-fatal if only the sidecar
+  # check fails — the main binary is fine and users can update separately).
+  local sidecar_path="${INSTALL_DIR}/lain-git-sidecar"
+  [ ! -f "$sidecar_path" ] && sidecar_path="${INSTALL_DIR}/lain-git-sidecar.exe"
+  if [ -f "$sidecar_path" ]; then
+    if "${sidecar_path}" --version >/dev/null 2>&1; then
+      local sidecar_version
+      sidecar_version=$("${sidecar_path}" --version 2>&1 | head -1)
+      info "Sidecar verified: $sidecar_version"
+    else
+      warn "Sidecar binary present but --version check failed."
+    fi
+  fi
+
+  return 0
 }
 
 main() {
