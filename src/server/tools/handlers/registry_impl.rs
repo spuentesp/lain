@@ -831,13 +831,7 @@ impl ToolHandler for RunBuildHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        // Default cwd to the workspace so the tool works without an explicit
-        // `cwd` argument.
-        let cwd = if str_arg(args, "cwd").is_empty() {
-            ctx.workspace.to_string_lossy().to_string()
-        } else {
-            str_arg(args, "cwd")
-        };
+        let cwd = run_cwd(ctx, args)?;
         let release = bool_arg(args, "release").unwrap_or(false);
         handlers::execution::run_build(
             &ctx.graph,
@@ -871,11 +865,7 @@ impl ToolHandler for RunTestsHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let cwd = if str_arg(args, "cwd").is_empty() {
-            ctx.workspace.to_string_lossy().to_string()
-        } else {
-            str_arg(args, "cwd")
-        };
+        let cwd = run_cwd(ctx, args)?;
         let filter = if str_arg(args, "filter").is_empty() {
             None
         } else {
@@ -915,11 +905,7 @@ impl ToolHandler for RunClippyHandler {
         ctx: &ToolContext,
         args: &Map<String, Value>,
     ) -> Result<String, LainError> {
-        let cwd = if str_arg(args, "cwd").is_empty() {
-            ctx.workspace.to_string_lossy().to_string()
-        } else {
-            str_arg(args, "cwd")
-        };
+        let cwd = run_cwd(ctx, args)?;
         let fix = bool_arg(args, "fix").unwrap_or(false);
         handlers::execution::run_clippy(
             &ctx.graph,
@@ -1477,4 +1463,16 @@ fn open_annotations_for_symbol(ctx: &ToolContext, symbol: &str) -> String {
     }];
     let summaries = summaries_for_targets_in_registry(&ctx.annotations, &repo, &targets);
     format_open_annotations_section(&summaries)
+}
+
+/// The directory a build/test/lint tool runs in: the workspace, or a
+/// `cwd` inside it. A `cwd` elsewhere (`../other-project`, `/tmp/x`) ran
+/// that directory's build and test scripts — arbitrary commands, reachable
+/// by any MCP caller.
+fn run_cwd(ctx: &ToolContext, args: &Map<String, Value>) -> Result<String, LainError> {
+    let cwd = str_arg(args, "cwd");
+    if cwd.is_empty() {
+        return Ok(ctx.workspace.to_string_lossy().to_string());
+    }
+    crate::server::tools::handlers::context::resolve_against_workspace(&ctx.workspace, &cwd)
 }

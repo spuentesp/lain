@@ -413,15 +413,8 @@ fn gate_for_dispatch(
 /// reading the repository's source and claiming files. Exposing it is now a
 /// deliberate choice, and doing so without keys is logged as a warning.
 fn http_bind_host() -> String {
-    let host = std::env::var("LAIN_BIND_ADDR")
-        .ok()
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let loopback = host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
+    let host = http_bind_host_quiet();
+    let loopback = is_loopback_host(&host);
     let keys = std::env::var("LAIN_API_KEYS").is_ok_and(|k| !k.trim().is_empty());
     if !loopback && !keys {
         tracing::warn!(
@@ -430,6 +423,95 @@ fn http_bind_host() -> String {
         );
     }
     host
+}
+
+fn http_bind_host_quiet() -> String {
+    std::env::var("LAIN_BIND_ADDR")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The host part of a `Host` header or an origin URL
+/// (`http://127.0.0.1:9999` → `127.0.0.1`, `[::1]:80` → `::1`).
+fn host_of(authority_or_origin: &str) -> String {
+    let rest = authority_or_origin
+        .split_once("://")
+        .map_or(authority_or_origin, |(_, r)| r);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    if let Some(v6) = rest.strip_prefix('[') {
+        return v6.split(']').next().unwrap_or(v6).to_string();
+    }
+    rest.rsplit_once(':')
+        .map_or(rest, |(h, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                rest
+            }
+        })
+        .to_string()
+}
+
+/// Refuse requests a browser page could forge (the MCP spec requires
+/// servers to validate `Origin`):
+/// - an `Origin` that is not loopback, unless listed in
+///   `LAIN_ALLOWED_ORIGINS` (comma-separated, e.g. `https://app.example`);
+/// - on a loopback bind, a `Host` that is not loopback (DNS rebinding);
+/// - a POST whose body is not declared `application/json` (a simple
+///   cross-origin form or `text/plain` POST skips the CORS preflight).
+fn browser_guard(
+    method: &Method,
+    headers: &hyper::HeaderMap,
+    loopback_bind: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(origin) = header("origin") {
+        let allowed = std::env::var("LAIN_ALLOWED_ORIGINS").unwrap_or_default();
+        let listed = allowed
+            .split(',')
+            .map(|o| o.trim().trim_end_matches('/'))
+            .any(|o| !o.is_empty() && o.eq_ignore_ascii_case(origin.trim_end_matches('/')));
+        if !listed && !is_loopback_host(&host_of(origin)) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "cross-origin request refused; set LAIN_ALLOWED_ORIGINS to allow this origin",
+            ));
+        }
+    }
+    if loopback_bind {
+        if let Some(host) = header("host") {
+            if !is_loopback_host(&host_of(host)) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Host is not loopback; this server only answers localhost",
+                ));
+            }
+        }
+    }
+    if method == Method::POST {
+        let json = header("content-type").is_some_and(|ct| {
+            ct.split(';')
+                .next()
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+        });
+        if !json {
+            return Err((
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "POST bodies must be Content-Type: application/json",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Per-process status snapshot carried into the HTTP request handler
@@ -1812,6 +1894,27 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
+    // Browser guard, before anything else: a web page the user has open
+    // can POST to a loopback port (a `text/plain` body needs no CORS
+    // preflight) or reach it through DNS rebinding, and every tool —
+    // including file reads and webhooks — would answer it.
+    if let Err((code, why)) = browser_guard(
+        &method,
+        req.headers(),
+        is_loopback_host(&http_bind_host_quiet()),
+    ) {
+        let body_bytes = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32003, "message": why},
+            "id": null
+        }))
+        .unwrap_or_default();
+        return Ok(Response::builder()
+            .status(code)
+            .body(full_body(Bytes::from(body_bytes)))
+            .unwrap());
+    }
+
     // Auth + rate limit (P0 #1). `/health` is unauthenticated by design
     // (operational probe). All other endpoints — including `/mcp` and
     // `/events` — require a valid `Authorization: Bearer <key>` and
@@ -2920,6 +3023,67 @@ mod tests {
         let rid = resolve_repo_or_error(&fed, "", &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    #[test]
+    fn browser_guard_refuses_forgeable_requests() {
+        use hyper::header::{HeaderMap, HeaderValue};
+        let h = |pairs: &[(&'static str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, HeaderValue::from_str(v).unwrap());
+            }
+            m
+        };
+        let json = ("content-type", "application/json");
+        // A normal agent/CLI request.
+        assert!(
+            browser_guard(&Method::POST, &h(&[json, ("host", "127.0.0.1:9999")]), true).is_ok()
+        );
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[
+                json,
+                ("host", "localhost:9999"),
+                ("origin", "http://localhost:9999")
+            ]),
+            true
+        )
+        .is_ok());
+        assert!(browser_guard(&Method::POST, &h(&[json, ("host", "[::1]:9999")]), true).is_ok());
+        // A page elsewhere.
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[json, ("origin", "http://evil.example.com")]),
+            true
+        )
+        .is_err());
+        // DNS rebinding: loopback socket, foreign Host.
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[json, ("host", "evil.example.com:9999")]),
+            true
+        )
+        .is_err());
+        // Exposed on purpose: any Host is fine.
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[json, ("host", "lain.internal:9999")]),
+            false
+        )
+        .is_ok());
+        // Preflight-free bodies.
+        assert!(browser_guard(&Method::POST, &h(&[("content-type", "text/plain")]), true).is_err());
+        assert!(browser_guard(&Method::POST, &h(&[]), true).is_err());
+        assert!(browser_guard(
+            &Method::POST,
+            &h(&[("content-type", "application/json; charset=utf-8")]),
+            true
+        )
+        .is_ok());
+        assert!(browser_guard(&Method::GET, &h(&[("host", "127.0.0.1:1")]), true).is_ok());
+        assert_eq!(host_of("http://evil.example.com:80/x"), "evil.example.com");
+        assert_eq!(host_of("[::1]:9"), "::1");
     }
 
     /// A node id handed back by one repo's tool routes a follow-up call to
