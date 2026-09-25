@@ -503,7 +503,14 @@ impl SidecarInner {
                     )));
                 }
                 let ours = crate::sidecar_proto::build_id();
-                if build != ours {
+                // Debug builds only warn: `cargo test --lib` after a commit
+                // rebuilds the library with a new build id but not the
+                // sidecar binary, and every sidecar test would then fall
+                // back. Release builds — what users run, and where an old
+                // sidecar on $PATH silently dropped files — refuse.
+                if build != ours && cfg!(debug_assertions) {
+                    tracing::warn!("git sidecar is build {build}, this binary is {ours}");
+                } else if build != ours {
                     return Err(LainError::Unavailable(format!(
                         "git sidecar is build {build}, this binary is {ours}; put the \
                          matching lain-git-sidecar beside it, or set LAIN_GIT_SIDECAR_BIN"
