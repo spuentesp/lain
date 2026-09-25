@@ -476,12 +476,16 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             let real = dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
             roots.iter().any(|root| real.starts_with(root))
         } else {
-            // Lexically: `a/../b` is fine, `../b` leaves the root.
+            // Lexically: `a/../b` is fine, `../b` leaves the root, and a
+            // rooted path without a drive (`\\x` on Windows) is not relative.
             let mut depth: i32 = 0;
             p.components().all(|c| {
                 match c {
                     std::path::Component::ParentDir => depth -= 1,
                     std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                        return false
+                    }
                     _ => {}
                 }
                 depth >= 0

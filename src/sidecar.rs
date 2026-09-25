@@ -505,8 +505,8 @@ impl SidecarInner {
                 let ours = crate::sidecar_proto::build_id();
                 if build != ours {
                     return Err(LainError::Unavailable(format!(
-                        "git sidecar is build {build}, this lain is {ours}; install the \
-                         matching lain-git-sidecar next to lain or set LAIN_GIT_SIDECAR_BIN"
+                        "git sidecar is build {build}, this binary is {ours}; put the \
+                         matching lain-git-sidecar beside it, or set LAIN_GIT_SIDECAR_BIN"
                     )));
                 }
                 Ok(())

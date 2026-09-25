@@ -118,6 +118,16 @@ pub fn get_context_for_prompt(
 /// `lain server` serves that tool over HTTP.
 fn resolve_against_workspace(workspace: &std::path::Path, path: &str) -> Result<String, LainError> {
     let p = std::path::Path::new(path);
+    // Rooted without being absolute is a Windows case: `\Windows\win.ini`
+    // or `/etc/passwd` has no drive, so `is_absolute()` is false and
+    // `join` resolves it against the workspace's drive root — outside it.
+    let rooted = p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::RootDir | std::path::Component::Prefix(_)
+            )
+        });
     let candidate = if p.is_absolute() {
         p.to_path_buf()
     } else {
@@ -139,7 +149,7 @@ fn resolve_against_workspace(workspace: &std::path::Path, path: &str) -> Result<
             let escapes = p
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir));
-            if p.is_absolute() || escapes {
+            if rooted || escapes {
                 Err(outside())
             } else {
                 Ok(candidate.to_string_lossy().into_owned())

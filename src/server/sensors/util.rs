@@ -5,26 +5,52 @@
 
 use crate::graph::GraphDatabase;
 use crate::schema::GraphNode;
-use ignore::DirEntry;
 use std::path::Path;
 
-/// Walk every file under `root`, honouring `.gitignore` and hidden-file
-/// rules. Per-entry errors are flattened away — a malformed symlink or a
-/// target that vanishes mid-walk must not abort ingestion.
-///
-/// Iteration order is filesystem-defined and matches the inline
-/// `ignore::WalkBuilder` the sensors used previously (depth-first,
-/// alphabetical), so any test that compares full output keeps passing.
-///
-/// Returns the [`DirEntry`] (not `&Path`) because the underlying
-/// iterator owns each entry; callers typically do
-/// `for entry in walk_workspace(root) { let path = entry.path(); … }`.
-pub fn walk_workspace(root: &Path) -> impl Iterator<Item = DirEntry> {
-    ignore::WalkBuilder::new(root)
+/// A file found by [`walk_workspace`].
+pub struct WalkedFile(std::path::PathBuf);
+
+impl WalkedFile {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Walk every file under `root`: what the main scan indexes, so a sensor
+/// sees the same code the graph has. That is every path the walker yields
+/// honouring `.gitignore` and hidden-file rules, plus every file git
+/// tracks even though `.gitignore` matches it (generated code that is
+/// checked in) — skipping those left routes defined there without
+/// `CallsHttp` edges although their handlers were indexed. Per-entry errors
+/// are flattened away — a malformed symlink or a target that vanishes
+/// mid-walk must not abort ingestion.
+pub fn walk_workspace(root: &Path) -> impl Iterator<Item = WalkedFile> {
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut files: Vec<std::path::PathBuf> = ignore::WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
         .build()
         .flatten()
+        .map(|e| e.into_path())
+        .inspect(|p| {
+            seen.insert(p.clone());
+        })
+        .collect();
+    if let Ok(repo) = git2::Repository::open(root) {
+        if let (Ok(index), Some(workdir)) = (repo.index(), repo.workdir()) {
+            for entry in index.iter() {
+                let rel = String::from_utf8_lossy(&entry.path).to_string();
+                let path = workdir.join(&rel);
+                // Hidden paths stay out, as in the walk above.
+                let hidden = rel.split('/').any(|c| c.starts_with('.'));
+                if !hidden && path.starts_with(root) && path.is_file() && !seen.contains(&path) {
+                    seen.insert(path.clone());
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files.into_iter().map(WalkedFile)
 }
 
 /// `CamelCase` / `mixedCase` → `snake_case`. Each non-initial uppercase
@@ -98,6 +124,25 @@ mod tests {
         assert_eq!(to_camel_case("get_user"), "getUser");
         assert_eq!(to_camel_case("GetUser"), "GetUser");
         assert_eq!(to_camel_case(""), "");
+    }
+
+    #[test]
+    fn walker_visits_tracked_files_that_gitignore_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("gen")).unwrap();
+        std::fs::write(root.join(".gitignore"), "gen/\n").unwrap();
+        std::fs::write(root.join("gen/routes.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join("gen/untracked.py"), "y = 1\n").unwrap();
+        let repo = git2::Repository::init(root).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("gen/routes.py")).unwrap();
+        index.write().unwrap();
+        let names: Vec<_> = walk_workspace(root)
+            .filter_map(|e| e.path().file_name().map(|n| n.to_owned()))
+            .collect();
+        assert!(names.iter().any(|n| n == "routes.py"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "untracked.py"), "{names:?}");
     }
 
     #[test]

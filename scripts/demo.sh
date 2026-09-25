@@ -339,13 +339,15 @@ check_contains "vscode adapter emits `servers.lain` schema" '"servers"' \
 check_contains "vscode adapter names the server 'lain'" '"lain"' \
     "$(cat "$CLIENT_FAKE_HOME/vscode.out")"
 
-# Continue: writes ~/.continue/config.json under
-# experimental.modelContextProtocolServers.
+# Continue: legacy ~/.continue/config.json setups get the JSON edit; the
+# fake HOME here has none, which is the YAML-era path checked below.
 HOME="$CLIENT_FAKE_HOME/continue" "$LAIN" setup --workspace "$SUBJECT" \
     --agent continue --yes --no-model --print-config > "$CLIENT_FAKE_HOME/continue.out" 2>&1
-check_contains "continue adapter emits the experimental block" '"experimental"' \
+# With no ~/.continue/config.json (or with config.yaml) the adapter writes a
+# workspace block file, `.continue/mcpServers/lain.yaml`.
+check_contains "continue adapter emits a v1 block" 'schema: v1' \
     "$(cat "$CLIENT_FAKE_HOME/continue.out")"
-check_contains "continue adapter emits modelContextProtocolServers" 'modelContextProtocolServers' \
+check_contains "continue adapter emits mcpServers" 'mcpServers:' \
     "$(cat "$CLIENT_FAKE_HOME/continue.out")"
 
 # Codex: prefers `codex mcp add` when the CLI is on PATH; otherwise
