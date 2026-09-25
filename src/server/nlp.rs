@@ -64,7 +64,32 @@ impl NlpEmbedder {
     /// `lain mcp` treated the value as a file — both go through here now.
     pub fn resolve_model_paths(p: &Path) -> (PathBuf, PathBuf) {
         if p.is_dir() {
-            (p.join("model.onnx"), p.join("tokenizer.json"))
+            // `model.onnx`, or else the one `.onnx` the installers put there
+            // (`install.sh` and `lain setup` both write
+            // `all-MiniLM-L6-v2.onnx`, and the docs say to pass the dir).
+            let model = if p.join("model.onnx").exists() {
+                p.join("model.onnx")
+            } else {
+                let mut onnx: Vec<PathBuf> = std::fs::read_dir(p)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|e| e.path())
+                            .filter(|f| f.extension().is_some_and(|x| x == "onnx"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                onnx.sort();
+                let preferred = p.join("all-MiniLM-L6-v2.onnx");
+                if onnx.contains(&preferred) {
+                    preferred
+                } else if onnx.len() == 1 {
+                    onnx.remove(0)
+                } else {
+                    p.join("model.onnx")
+                }
+            };
+            (model, p.join("tokenizer.json"))
         } else {
             let tokenizer = p
                 .parent()
@@ -72,6 +97,24 @@ impl NlpEmbedder {
                 .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
             (p.to_path_buf(), tokenizer)
         }
+    }
+
+    /// The embedder for `model` (or `LAIN_EMBEDDING_MODEL` when `None`),
+    /// or the stub when it cannot load. Semantic search is optional: a
+    /// wrong path or a corrupt model file used to stop `lain mcp` from
+    /// starting at all, taking every other tool down with it.
+    pub fn load_or_stub(model: Option<&Path>, max_threads: usize) -> Self {
+        let loaded = match model {
+            Some(p) => {
+                let (model, tokenizer) = Self::resolve_model_paths(p);
+                Self::with_max_threads(&model, &tokenizer, max_threads)
+            }
+            None => Self::new_with_threads(max_threads),
+        };
+        loaded.unwrap_or_else(|e| {
+            tracing::warn!("embedding model not loaded ({e}); semantic search is unavailable");
+            Self::new_stub()
+        })
     }
 
     /// Initialize with default paths (models/all-MiniLM-L6-v2.onnx).
@@ -664,5 +707,34 @@ mod query_prefix_tests {
         // Verified structurally: `embed` does not consult query_prefix.
         assert_eq!(e.query_prefix(), "PREFIX: ");
         assert!(e.embed("fn login()").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod model_path_tests {
+    use super::*;
+
+    #[test]
+    fn a_model_directory_accepts_the_installers_file_name() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("all-MiniLM-L6-v2.onnx"), b"x").unwrap();
+        let (model, tok) = NlpEmbedder::resolve_model_paths(d.path());
+        assert_eq!(model, d.path().join("all-MiniLM-L6-v2.onnx"));
+        assert_eq!(tok, d.path().join("tokenizer.json"));
+        std::fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        assert_eq!(
+            NlpEmbedder::resolve_model_paths(d.path()).0,
+            d.path().join("model.onnx")
+        );
+    }
+
+    /// A missing or broken model is a warning, not a startup failure.
+    #[test]
+    fn a_bad_model_falls_back_to_the_stub() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(NlpEmbedder::load_or_stub(Some(&d.path().join("nope.onnx")), 1).is_stub());
+        std::fs::write(d.path().join("m.onnx"), b"not a model").unwrap();
+        std::fs::write(d.path().join("tokenizer.json"), b"{").unwrap();
+        assert!(NlpEmbedder::load_or_stub(Some(&d.path().join("m.onnx")), 1).is_stub());
     }
 }

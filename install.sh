@@ -555,8 +555,13 @@ main() {
   # Offer to download ONNX model
   local model_path=""
   if [ -n "$OPT_EMBEDDING_MODEL" ]; then
-    model_path="$OPT_EMBEDDING_MODEL"
-    info "Using provided model: $model_path"
+    if [ -e "$OPT_EMBEDDING_MODEL" ]; then
+      # Absolute: the registration is global and runs from any directory.
+      model_path="$(cd "$(dirname "$OPT_EMBEDDING_MODEL")" && pwd)/$(basename "$OPT_EMBEDDING_MODEL")"
+      info "Using provided model: $model_path"
+    else
+      warn "--embedding-model $OPT_EMBEDDING_MODEL does not exist; registering without a model (semantic search off)"
+    fi
   elif [ -n "$OPT_DOWNLOAD_MODEL" ]; then
     model_path=$(download_onnx_model)
   elif [ -z "$OPT_YES" ]; then
@@ -605,6 +610,10 @@ main() {
   case "$agent" in
     claude)
       if command -v claude >/dev/null 2>&1; then
+        # A re-run replaces the entry: `add` refuses an existing name.
+        if claude mcp get lain >/dev/null 2>&1; then
+          claude mcp remove --scope user lain >/dev/null 2>&1 || true
+        fi
         if claude mcp add --scope user lain -- "$lain_bin" "${lain_args[@]}"; then
           info "Registered 'lain' MCP server with Claude Code (user scope)"
         else

@@ -259,12 +259,7 @@ fn build_embedder_pair(
     model_path: Option<&Path>,
     tuning: &TuningConfig,
 ) -> Result<(NlpEmbedder, CrossEncoder), LainError> {
-    let mut embedder = if let Some(p) = model_path {
-        let (model, tokenizer) = NlpEmbedder::resolve_model_paths(p);
-        NlpEmbedder::with_max_threads(&model, &tokenizer, tuning.ingestion.nlp_max_threads)?
-    } else {
-        NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
-    };
+    let mut embedder = NlpEmbedder::load_or_stub(model_path, tuning.ingestion.nlp_max_threads);
     // The query/document asymmetry belongs to the model, so the
     // embedder carries it rather than each caller remembering.
     embedder.set_query_prefix(tuning.query_prefix.clone());
@@ -607,18 +602,12 @@ impl LainServer {
         graph.set_namespace(id_namespace);
         let overlay = VolatileOverlay::new();
 
-        let embedder = if let Some(model_path) = embedding_model {
-            let (model, tokenizer_path) = NlpEmbedder::resolve_model_paths(model_path);
-            NlpEmbedder::with_max_threads(
-                &model,
-                &tokenizer_path,
-                tuning.ingestion.nlp_max_threads,
-            )?
-        } else {
-            // No --embedding-model CLI arg; fall back to LAIN_EMBEDDING_MODEL
-            // env var (handled inside NlpEmbedder::new_with_threads).
-            NlpEmbedder::new_with_threads(tuning.ingestion.nlp_max_threads)?
-        };
+        // No --embedding-model CLI arg falls back to LAIN_EMBEDDING_MODEL
+        // (inside `new_with_threads`); either way a bad model is a warning.
+        let embedder = NlpEmbedder::load_or_stub(
+            embedding_model.map(|p| p.as_ref()),
+            tuning.ingestion.nlp_max_threads,
+        );
 
         if embedder.is_stub() {
             info!("NLP embedder running in stub mode - semantic search unavailable");

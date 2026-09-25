@@ -446,12 +446,22 @@ pub fn search_code(
     args: &Map<String, Value>,
 ) -> Result<String, LainError> {
     let query = required_str_arg(args, "query")?;
+    if query.trim().is_empty() {
+        return Err(LainError::InvalidArgument(
+            "search_code needs a non-empty `query`".to_string(),
+        ));
+    }
     let mode_arg = str_arg(args, "mode").to_lowercase();
     let mode = if mode_arg.is_empty() {
         "auto".to_string()
     } else {
         mode_arg
     };
+    if !matches!(mode.as_str(), "auto" | "lexical" | "semantic") {
+        return Err(LainError::InvalidArgument(format!(
+            "unknown search mode '{mode}'; use auto, lexical or semantic"
+        )));
+    }
     let limit = usize_arg(args, "limit").unwrap_or(10);
 
     let mut fell_back = false;

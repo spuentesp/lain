@@ -35,7 +35,7 @@ impl LainServer {
                         // matching `ready`/`failed` transition back, the
                         // same contract `await_startup_reindex` follows
                         // for the startup path.
-                        match s.build_core_memory().await {
+                        match s.build_core_memory_until_complete().await {
                             Ok(()) => {
                                 if let Err(e) = s.sync_volatile_overlay().await {
                                     warn!(
