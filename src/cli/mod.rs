@@ -141,11 +141,14 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Single-user LLM-assisted query.
+    /// PreToolUse hook handler: reads the hook's JSON (as the argument or
+    /// on stdin) and prints a decision. Not a question-answering command —
+    /// use `lain oneshot search_code "<text>"` for that.
     Ask {
         #[arg(long, default_value = "./repos.yaml")]
         config: PathBuf,
-        question: String,
+        /// The hook JSON payload (else read from stdin).
+        question: Option<String>,
     },
     /// Start an MCP server on stdio.
     ///
@@ -169,10 +172,10 @@ pub enum Commands {
         /// Repeatable: `lain mcp --workspace /repo/a --workspace /repo/b`.
         /// When omitted, the binary reads `LAIN_WORKSPACE` (a
         /// comma-separated list); if that's also unset, it walks up
-        /// from the agent harness's cwd (via `/proc/$PPID/cwd`),
-        /// falling back to the process's own cwd. That policy is
-        /// what makes `lain mcp` Just Work under any agent harness,
-        /// including Kimi's plugin-security cwd pinning.
+        /// from its own cwd (the directory the host launched it in),
+        /// falling back to the agent harness's cwd (`/proc/$PPID/cwd`)
+        /// when its own cwd is a plugin directory or holds the lain
+        /// binary — Kimi's plugin-security cwd pinning.
         #[arg(long, value_name = "PATH")]
         workspace: Vec<PathBuf>,
         /// Path to the ONNX bi-encoder model directory. See

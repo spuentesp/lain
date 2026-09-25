@@ -36,15 +36,22 @@ pub fn run_init(workspace: Option<&Path>, force: bool, print: bool) -> Result<()
             workspace.display()
         ));
     }
-    // Repo id: the basename of the workspace dir, sanitized.
-    let id = workspace
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("repo")
-        .to_string();
+    // Repo id: the basename of the workspace dir, sanitized. It used to go
+    // in verbatim: `proj #1` became id `proj` (the rest read as a YAML
+    // comment) and `a: b` made the file invalid.
+    let id = repo_id_from_dir_name(
+        workspace
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("repo"),
+    );
+    // The path as a double-quoted YAML scalar (JSON string syntax is valid
+    // YAML), so `#`, `: ` and quotes in it survive.
+    let quoted_path =
+        serde_json::to_string(&workspace.display().to_string()).context("quote workspace path")?;
     let body = REPOS_TEMPLATE
         .replace("{id}", &id)
-        .replace("{path}", &workspace.display().to_string());
+        .replace("{path}", &quoted_path);
 
     if print {
         print!("{body}");
@@ -66,3 +73,43 @@ pub fn run_init(workspace: Option<&Path>, force: bool, print: bool) -> Result<()
 }
 
 pub(crate) use crate::cli::workspace::find_git_workspace_root as find_git_workspace;
+
+/// A valid repo id from a directory name: characters outside
+/// `[A-Za-z0-9._-]` become `-`.
+fn repo_id_from_dir_name(name: &str) -> String {
+    let id: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let id = id.trim_matches('-').to_string();
+    if id.is_empty() || crate::federation::repo_id::RepoId::new(&id).is_err() {
+        "repo".to_string()
+    } else {
+        id
+    }
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    #[test]
+    fn directory_names_become_valid_ids_and_paths_are_quoted() {
+        assert_eq!(repo_id_from_dir_name("proj #1"), "proj--1");
+        assert_eq!(repo_id_from_dir_name("a: b"), "a--b");
+        assert_eq!(repo_id_from_dir_name("###"), "repo");
+        let body = REPOS_TEMPLATE
+            .replace("{id}", &repo_id_from_dir_name("proj #1"))
+            .replace("{path}", &serde_json::to_string("/x/proj #1").unwrap());
+        let cfg: crate::federation::config::FederationConfig =
+            serde_yaml::from_str(&body).expect("valid YAML");
+        assert_eq!(cfg.repos[0].id, "proj--1");
+        assert!(body.contains("\"/x/proj #1\""), "{body}");
+    }
+}

@@ -50,7 +50,8 @@ pub enum WorkspacesAction {
         name: String,
         #[arg(long)]
         from: String,
-        #[arg(long, default_value = "main")]
+        /// Branch or tag. Defaults to the remote's default branch.
+        #[arg(long)]
         ref_: Option<String>,
     },
     /// List all known workspaces.
@@ -250,6 +251,13 @@ pub fn run_remove(name: &str, repo: &str, config: Option<&Path>) -> Result<()> {
         .iter_mut()
         .find(|w| w.name == name)
         .ok_or_else(|| anyhow!("{}", err_not_found(name)))?;
+    let repo = repo.trim();
+    if !ws.members.iter().any(|m| m == repo) {
+        anyhow::bail!(
+            "'{repo}' is not a member of workspace '{name}' (members: {})",
+            ws.members.join(", ")
+        );
+    }
     ws.members.retain(|m| m != repo);
     f.validate().map_err(|e| anyhow!("validate: {e}"))?;
     save(&path, &f)?;
@@ -299,6 +307,9 @@ pub async fn run_init(
     if from_url.is_empty() {
         anyhow::bail!("--from url cannot be empty");
     }
+    // Ask the remote, as `repos add` does: a hardcoded `main` broke every
+    // definition repo whose default branch is `master`.
+    let ref_ = ref_.or_else(|| crate::cli::repos::remote_default_branch(from_url));
     let path = resolve_config_path(config);
     let local_root = std::env::var_os("LAIN_HOME")
         .map(PathBuf::from)

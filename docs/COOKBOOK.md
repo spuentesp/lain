@@ -22,7 +22,7 @@ use more than one.
 | Catch architectural regressions in pull requests | **CI** | The `lain-health-badge` action, or `lain mcp` in a workflow |
 
 **MCP** is the "agent in the IDE" mode. The agent launches lain as a
-stdio subprocess per session, and lain answers 69 read-only tools
+stdio subprocess per session, and lain answers its read-only tools
 against the on-disk graph of whatever repo the agent is in. This is
 the most common deployment and the one to start with.
 
@@ -72,8 +72,9 @@ symbols in this codebase?"
 
 **Benefits.**
 
-- 69 read-only tools over MCP — the same ones documented in
-  `docs/tool-schema.json`. None of them mutate the workspace.
+- Read-only tools over MCP: a focused default set, or every tool in
+  `docs/tool-schema.json` with `LAIN_TOOL_PROFILE=full`. None of the
+  default ones mutate the workspace.
 - Persistent on-disk index at `.lain/graph.bin`. The first call on
   a fresh checkout pays the index cost (seconds to minutes, bounded
   by `LAIN_REINDEX_TIMEOUT`); every later call is sub-second.
@@ -135,17 +136,15 @@ the binary download — it is expected. Allow it.
 
 ### Recipe: add lain to Cursor / VS Code Copilot / Continue.dev
 
-The MCP config schema is the same across these hosts. For each,
-locate the MCP servers setting and add:
+`lain setup --agent cursor|vscode|continue` writes the right file for
+each host (recipes below). By hand, the entry differs per host:
 
-```json
-{
-  "lain": {
-    "command": "lain",
-    "args": ["mcp"]
-  }
-}
-```
+- **Cursor** (`~/.cursor/mcp.json`):
+  `{"mcpServers": {"lain": {"command": "lain", "args": ["mcp"]}}}`
+- **VS Code** (`.vscode/mcp.json` or the user `mcp.json`):
+  `{"servers": {"lain": {"type": "stdio", "command": "lain", "args": ["mcp"]}}}`
+- **Continue** (`<workspace>/.continue/mcpServers/lain.yaml`):
+  `name: Lain` / `version: 0.0.1` / `schema: v1` / `mcpServers: [{name: lain, command: lain, args: ["mcp"]}]`
 
 **Cursor:** `Settings` → `Cursor Settings` → `MCP` → `Add new
 global MCP server`. Paste the JSON.
@@ -153,8 +152,8 @@ global MCP server`. Paste the JSON.
 **VS Code Copilot:** `.vscode/mcp.json` in the workspace, or the
 Copilot Chat MCP settings UI.
 
-**Continue.dev:** `~/.continue/config.json` under
-`"experimental.modelContextProtocolServers"`.
+**Continue.dev:** a block file in `<workspace>/.continue/mcpServers/`
+(current Continue), or the legacy `~/.continue/config.json`.
 
 **Verification:** each host lists `lain` (or `mcp__lain__*`)
 tools in its tool picker.
@@ -202,12 +201,12 @@ command palette; `lain` should appear with a green status.
 lain setup --agent continue
 ```
 
-Writes `~/.continue/config.json` under
-`experimental.modelContextProtocolServers` (an array of MCP
-server entries, one per editor integration). The adapter
-deduplicates by `name`: any existing `lain` entry is replaced
-by the freshly-configured one, and every other entry is left
-intact.
+With `~/.continue/config.yaml` (current Continue) or no Continue config
+yet, writes a block file, `<workspace>/.continue/mcpServers/lain.yaml`,
+leaving your own config untouched. A legacy `config.json`-only setup
+gets an entry in `experimental.modelContextProtocolServers` (with a
+`transport` object); any existing `lain` entry is replaced and every
+other entry is left intact.
 
 Verification: open Continue, the `lain` model-context-protocol
 server should appear in the model dropdown.

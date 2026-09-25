@@ -28,6 +28,17 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
             })?,
     };
     let memory_path = root.join(".lain/graph.bin");
+    // Opening a missing graph "succeeds" with an empty one, so an
+    // unindexed repository answered every query with `count: 0`, exit 0.
+    if !memory_path.is_file() {
+        eprintln!(
+            "Error: {} has no index yet ({} is missing).\n\nHint: run `lain oneshot find_anchors` \
+             there to build it (an agent's `lain mcp` also builds it on first start).",
+            root.display(),
+            memory_path.display()
+        );
+        std::process::exit(1);
+    }
 
     let graph = match GraphDatabase::new(&memory_path) {
         Ok(g) => g,
@@ -95,8 +106,56 @@ fn parse_query(expr: &str) -> Result<QuerySpec, String> {
                 STEPS.join(", ")
             ));
         }
+        check_step_words(part)?;
     }
     Ok(parse_query_string(t))
+}
+
+/// Reject words the pipe parser would silently skip: `find Function nmae
+/// x` returned every function, `connect Calls incomng` ran outgoing.
+fn check_step_words(part: &str) -> Result<(), String> {
+    let words: Vec<&str> = part.split_whitespace().collect();
+    let unknown = |w: &str, expected: &str| {
+        Err(format!(
+            "unknown word '{w}' in `{part}`; expected {expected}"
+        ))
+    };
+    match words.first().copied() {
+        Some("find") => {
+            let mut i = 1;
+            // An optional node type first.
+            if words
+                .get(i)
+                .is_some_and(|w| !matches!(*w, "name" | "limit"))
+            {
+                i += 1;
+            }
+            while i < words.len() {
+                match words[i] {
+                    "name" | "limit" if i + 1 < words.len() => i += 2,
+                    w => return unknown(w, "`name <pattern>` or `limit <n>` after the type"),
+                }
+            }
+            Ok(())
+        }
+        Some("connect") => {
+            let mut i = 2; // `connect <EdgeType>`
+            while i < words.len() {
+                match words[i] {
+                    "incoming" | "in" | "outgoing" | "out" | "both" => i += 1,
+                    "depth" if i + 1 < words.len() => i += 2,
+                    w => {
+                        return unknown(
+                            w,
+                            "incoming, outgoing, both or `depth <n|a..b>` after the edge type",
+                        )
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn parse_query_string(expr: &str) -> QuerySpec {
@@ -323,6 +382,10 @@ mod parse_tests {
         assert!(parse_query("find Function name helper | connect Calls incoming depth 2").is_ok());
         assert!(parse_query("garbage").is_err());
         assert!(parse_query("find Function | frobnicate").is_err());
+        assert!(parse_query("find Function nmae hello").is_err());
+        assert!(parse_query("find Function name hello | connect Calls incomng").is_err());
+        assert!(parse_query("find name hello limit 5").is_ok());
+        assert!(parse_query("find Function | connect Calls out depth 1..3").is_ok());
         assert!(parse_query("{not json").is_err());
     }
 }
