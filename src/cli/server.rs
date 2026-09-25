@@ -369,8 +369,44 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     // Keep the federation's global view current: a watcher-triggered
     // re-index changes one repo's graph, and until it is projected again
     // search_org and the cross-repo tools answer from the old one.
+    // Clone sources are fetched on this cadence while the server runs (the
+    // docs promised a refresh interval; only startup fetched). A fetch that
+    // moves the checkout is picked up by the repo's watcher and re-indexed.
+    let mut last_fetch: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        for (id, _) in fed.list_repos() {
+            let Some(repo) = fed.get_repo(&id) else {
+                continue;
+            };
+            let every = match repo.source().source_config() {
+                crate::federation::config::SourceConfig::LocalClone { .. } => 300,
+                crate::federation::config::SourceConfig::ShallowClone {
+                    refresh_interval_secs,
+                    ..
+                } => (*refresh_interval_secs).max(30),
+                crate::federation::config::SourceConfig::WorkspaceDir { .. } => continue,
+            };
+            let now = std::time::Instant::now();
+            let due = last_fetch
+                .get(id.as_str())
+                .is_none_or(|t| now.duration_since(*t).as_secs() >= every);
+            if !due {
+                continue;
+            }
+            if !last_fetch.contains_key(id.as_str()) {
+                // Startup already fetched; count from now.
+                last_fetch.insert(id.as_str().to_string(), now);
+                continue;
+            }
+            last_fetch.insert(id.as_str().to_string(), now);
+            tokio::spawn(async move {
+                if let Err(e) = repo.source().fetch().await {
+                    tracing::warn!("lain server: refreshing '{}' failed: {e}", id.as_str());
+                }
+            });
+        }
         let stale: Vec<_> = fed
             .list_repos()
             .into_iter()

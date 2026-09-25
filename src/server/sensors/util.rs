@@ -38,12 +38,26 @@ pub fn walk_workspace(root: &Path) -> impl Iterator<Item = WalkedFile> {
         .collect();
     if let Ok(repo) = git2::Repository::open(root) {
         if let (Ok(index), Some(workdir)) = (repo.index(), repo.workdir()) {
+            // Compare canonical forms (macOS `/var` → `/private/var`,
+            // Windows `\\?\`), but report paths under `root` as the caller
+            // spelled it, so they match the walk above.
+            let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            let (canon_root, canon_wd) = (canon(root), canon(workdir));
             for entry in index.iter() {
                 let rel = String::from_utf8_lossy(&entry.path).to_string();
-                let path = workdir.join(&rel);
                 // Hidden paths stay out, as in the walk above.
-                let hidden = rel.split('/').any(|c| c.starts_with('.'));
-                if !hidden && path.starts_with(root) && path.is_file() && !seen.contains(&path) {
+                if rel.split('/').any(|c| c.starts_with('.')) {
+                    continue;
+                }
+                let Ok(below_root) = canon_wd
+                    .join(&rel)
+                    .strip_prefix(&canon_root)
+                    .map(Path::to_path_buf)
+                else {
+                    continue;
+                };
+                let path = root.join(below_root);
+                if path.is_file() && !seen.contains(&path) {
                     seen.insert(path.clone());
                     files.push(path);
                 }
