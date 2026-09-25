@@ -212,7 +212,7 @@ impl RuntimeTraceStore {
     pub fn snapshot(&self) -> Vec<RuntimeEdge> {
         let guard = self.inner.lock();
         let mut v: Vec<_> = guard.edges.values().cloned().collect();
-        v.sort_by(|a, b| b.last_seen_unix.cmp(&a.last_seen_unix));
+        v.sort_by_key(|a| std::cmp::Reverse(a.last_seen_unix));
         v
     }
 
@@ -315,8 +315,7 @@ mod tests {
 
     #[test]
     fn purge_drops_expired_edges() {
-        let mut cfg = StoreConfig::default();
-        cfg.ttl_secs = 1;
+        let cfg = StoreConfig { ttl_secs: 1, ..Default::default() };
         let store = RuntimeTraceStore::new(cfg);
 
         let root = make_span("t1", "root", None);
@@ -329,7 +328,7 @@ mod tests {
         // Mutate last_seen by hand: the only knob for deterministic tests.
         {
             let mut g = store.inner.lock();
-            for (_, e) in g.edges.iter_mut() {
+            for e in g.edges.values_mut() {
                 e.last_seen_unix -= 10;
             }
         }
@@ -340,8 +339,7 @@ mod tests {
 
     #[test]
     fn capacity_guard_drops_oldest_first() {
-        let mut cfg = StoreConfig::default();
-        cfg.max_edges = 2;
+        let cfg = StoreConfig { max_edges: 2, ..Default::default() };
         let store = RuntimeTraceStore::new(cfg);
 
         let mk = |trace: &str, leaf: &str| {

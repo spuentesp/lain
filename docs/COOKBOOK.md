@@ -519,7 +519,7 @@ mode is a no-op if the previous one isn't there.
 The inert-tool list at `src/server/tools.rs:580` is the contract
 for which tools are loaded by default. To publish a custom
 subset, fork `src/server/tools/registry.rs` and rebuild. Most
-teams will not need this; the default 69-tool surface is what
+teams will not need this; the default 83-tool surface is what
 the agents are tested against.
 
 ### Self-hosting the embedder model

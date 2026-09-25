@@ -600,26 +600,6 @@ fn generate_socket_path() -> PathBuf {
 /// the trailing NUL.
 const MAX_SOCKET_PATH: usize = 103;
 
-#[cfg(test)]
-mod socket_path_tests {
-    /// Paths generated back to back — faster than the clock ticks — are
-    /// all distinct.
-    #[test]
-    fn socket_paths_are_unique_within_a_process() {
-        let paths: std::collections::HashSet<_> =
-            (0..1000).map(|_| super::generate_socket_path()).collect();
-        assert_eq!(paths.len(), 1000);
-    }
-
-    /// A long `$TMPDIR` must not produce a path too long to bind.
-    #[cfg(unix)]
-    #[test]
-    fn socket_paths_fit_the_platform_limit() {
-        let path = super::generate_socket_path();
-        assert!(path.as_os_str().len() <= super::MAX_SOCKET_PATH, "{path:?}");
-    }
-}
-
 fn resolve_sidecar_binary(custom: Option<&Path>) -> Result<PathBuf, LainError> {
     if let Some(p) = custom {
         if p.exists() {
@@ -767,5 +747,25 @@ mod unsupported {
         fn flush(&mut self) -> io::Result<()> {
             Err(unsupported())
         }
+    }
+}
+
+#[cfg(test)]
+mod socket_path_tests {
+    /// Paths generated back to back — faster than the clock ticks — are
+    /// all distinct.
+    #[test]
+    fn socket_paths_are_unique_within_a_process() {
+        let paths: std::collections::HashSet<_> =
+            (0..1000).map(|_| super::generate_socket_path()).collect();
+        assert_eq!(paths.len(), 1000);
+    }
+
+    /// A long `$TMPDIR` must not produce a path too long to bind.
+    #[cfg(unix)]
+    #[test]
+    fn socket_paths_fit_the_platform_limit() {
+        let path = super::generate_socket_path();
+        assert!(path.as_os_str().len() <= super::MAX_SOCKET_PATH, "{path:?}");
     }
 }

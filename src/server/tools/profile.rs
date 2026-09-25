@@ -7,7 +7,7 @@
 //! while `Full` advertises every registered tool.
 //!
 //! The default is `Semantic` because the project has consistently
-//! measured that raw 80-tool schemas encourage smaller models to
+//! measured that raw 83-tool schemas encourage smaller models to
 //! pattern-match across all descriptions and flounder. The
 //! `LAIN_TOOL_PROFILE=full` opt-out is documented in
 //! `docs/quickstart-tools.md` and surfaced through `get_capabilities`
@@ -95,7 +95,7 @@ pub enum ToolProfile {
     /// essentials + escape hatch). Recommended for smaller models
     /// and any cold-startup that doesn't need every low-level tool.
     Semantic,
-    /// Full 80-tool surface. Same schema as the generated on-disk snapshot.
+    /// Full 83-tool surface. Same schema as the generated on-disk snapshot.
     /// before PR3. Opt-in via `LAIN_TOOL_PROFILE=full`.
     Full,
 }
@@ -289,7 +289,7 @@ mod tests {
         use crate::server::tools::profile::SemanticProfileFamlies;
         for canonical in SEMANTIC_PROFILE {
             assert!(
-                SEMANTIC_PROFILE.contains(&canonical),
+                SEMANTIC_PROFILE.contains(canonical),
                 "SEMANTIC_PROFILE should always contain itself: {canonical}"
             );
         }

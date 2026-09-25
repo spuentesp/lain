@@ -2119,6 +2119,7 @@ export class Ky {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)]
     fn definitions_know_their_container() {
         let cases: &[(&str, &str, &[(&str, Option<&str>)])] = &[
             ("a.py", "def load(p): pass\nclass Cache:\n    def load(self, k): pass\n",
@@ -2425,6 +2426,7 @@ function f() { const inner = make() }
     /// Each promised language: definitions (including methods nested in a
     /// type) and the calls between them.
     #[test]
+    #[allow(clippy::type_complexity)]
     fn every_language_extracts_definitions_and_calls() {
         use NodeType::*;
         #[rustfmt::skip]

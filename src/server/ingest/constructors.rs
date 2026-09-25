@@ -605,7 +605,7 @@ impl LainServer {
         // No --embedding-model CLI arg falls back to LAIN_EMBEDDING_MODEL
         // (inside `new_with_threads`); either way a bad model is a warning.
         let embedder = NlpEmbedder::load_or_stub(
-            embedding_model.map(|p| p.as_ref()),
+            embedding_model,
             tuning.ingestion.nlp_max_threads,
         );
 

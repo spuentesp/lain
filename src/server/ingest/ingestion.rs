@@ -369,7 +369,7 @@ impl LainServer {
             let max_per_mux = if pool_size == 0 {
                 0
             } else {
-                (n_exts + pool_size - 1) / pool_size
+                n_exts.div_ceil(pool_size)
             };
             if max_per_mux > 1 {
                 info!(
@@ -2209,8 +2209,16 @@ mod readiness_progress_tests {
         };
         assert_eq!(crate::git::GitSensorMode::default(), expected);
         let root = git_fixture_with_one_file();
-        let server =
-            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        // Force the sidecar mode explicitly so the test is deterministic
+        // regardless of whether the env-var resolution finds a usable sidecar
+        // binary on the host.
+        let server = LainServer::with_git_sensor_mode(
+            root.path(),
+            &root.path().join("state/graph.bin"),
+            None,
+            crate::git::GitSensorMode::Sidecar,
+        )
+        .unwrap();
         assert_eq!(server.ingest().git().mode(), expected);
     }
 

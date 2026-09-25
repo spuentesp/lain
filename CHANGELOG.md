@@ -1029,7 +1029,7 @@ All notable changes to LAIN are documented here. Versions follow
   drops the non-existent `export_graph_json` heading (was 270) and adds
   a *Tools documented elsewhere* section linking to the 28 tools that
   live in `FEDERATION.md` / `multiplayer.md` / `hot-reload.md` /
-  `command-center.md`; the canonical surface is 67 tools, so this page
+  `command-center.md`; the canonical surface is 83 tools, so this page
   now covers 39 of them, not all of them. `docs/TECHNICAL.md` swaps a
   `curl … export_graph_json` example for `describe_schema`, and notes
   that `lain schema dump` is the wire-format authority. `docs/ARCHITECTURE.md`

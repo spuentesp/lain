@@ -1,9 +1,8 @@
-//! Bug #2 sidecar prototype — parent benchmark driver.
+//! Git-isolation sidecar — parent benchmark driver.
 //!
 //! Spawns `lain-git-sidecar` over a Unix domain socket, runs a
 //! mix of `GitSensor` methods through it, and prints p50 / p95 / p99
-//! latencies alongside an in-process baseline. The numbers decide
-//! go/no-go on the full sidecar implementation.
+//! latencies alongside an in-process baseline.
 //!
 //! Usage:
 //!
@@ -75,7 +74,7 @@ mod unix_bench {
         let baseline_sensor = GitSensor::new(&repo_path)?;
         let since_hash = baseline_sensor.get_latest_commit_info()?.0;
 
-        println!("== Bug #2 sidecar prototype: IPC overhead ==");
+        println!("== Git-isolation sidecar: IPC overhead ==");
         println!("repo:           {}", repo_path.display());
         println!("iterations:     {} (+ {} warmup)", iters, warmup);
         println!();
@@ -321,7 +320,7 @@ mod unix_bench {
         p99: Duration,
     }
 
-    fn percentiles(samples: &mut Vec<Duration>) -> Percentiles {
+    fn percentiles(samples: &mut [Duration]) -> Percentiles {
         samples.sort();
         let n = samples.len();
         let pick = |p: f64| -> Duration {

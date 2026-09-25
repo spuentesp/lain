@@ -948,59 +948,6 @@ fn contains_token(hay: &str, needle: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-mod dependency_tests {
-    use super::*;
-
-    #[test]
-    fn tokens_are_bounded() {
-        assert!(contains_token(
-            "require github.com/spf13/pflag v1.0.5",
-            "pflag"
-        ));
-        assert!(contains_token(
-            "\"dependencies\": {\"left-pad\": \"1\"}",
-            "left-pad"
-        ));
-        assert!(!contains_token("mypflagger", "pflag"));
-        assert!(!contains_token(
-            "repository = \"https://github.com/tokio-rs/bytes\"",
-            "tokio"
-        ));
-        assert!(!contains_token("homepage = \"https://tokio.rs\"", "tokio"));
-        assert!(contains_token(
-            "[dependencies]\ntokio = { version = \"1\" }",
-            "tokio"
-        ));
-        assert!(contains_token("bytes = \"1.0\"", "bytes"));
-    }
-
-    #[test]
-    fn declared_identifiers_read_the_module_name() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("go.mod"),
-            "module github.com/spf13/pflag\n\ngo 1.12\n",
-        )
-        .unwrap();
-        let ids = declared_identifiers(&RepoId::new("flags").unwrap(), dir.path());
-        assert!(ids.contains(&"pflag".to_string()), "{ids:?}");
-        assert!(
-            ids.contains(&"github.com/spf13/pflag".to_string()),
-            "{ids:?}"
-        );
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("package.json"),
-            "{\n  \"name\": \"@acme/core\",\n}",
-        )
-        .unwrap();
-        let ids = declared_identifiers(&RepoId::new("core").unwrap(), dir.path());
-        assert!(ids.contains(&"@acme/core".to_string()), "{ids:?}");
-    }
-}
-
 impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
     fn refresh(&self) {
         self.rebuild_symbol_index();
@@ -1075,5 +1022,58 @@ impl crate::federation::cross_repo::CrossRepoResolver for FederatedIndex {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_bounded() {
+        assert!(contains_token(
+            "require github.com/spf13/pflag v1.0.5",
+            "pflag"
+        ));
+        assert!(contains_token(
+            "\"dependencies\": {\"left-pad\": \"1\"}",
+            "left-pad"
+        ));
+        assert!(!contains_token("mypflagger", "pflag"));
+        assert!(!contains_token(
+            "repository = \"https://github.com/tokio-rs/bytes\"",
+            "tokio"
+        ));
+        assert!(!contains_token("homepage = \"https://tokio.rs\"", "tokio"));
+        assert!(contains_token(
+            "[dependencies]\ntokio = { version = \"1\" }",
+            "tokio"
+        ));
+        assert!(contains_token("bytes = \"1.0\"", "bytes"));
+    }
+
+    #[test]
+    fn declared_identifiers_read_the_module_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module github.com/spf13/pflag\n\ngo 1.12\n",
+        )
+        .unwrap();
+        let ids = declared_identifiers(&RepoId::new("flags").unwrap(), dir.path());
+        assert!(ids.contains(&"pflag".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"github.com/spf13/pflag".to_string()),
+            "{ids:?}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"@acme/core\",\n}",
+        )
+        .unwrap();
+        let ids = declared_identifiers(&RepoId::new("core").unwrap(), dir.path());
+        assert!(ids.contains(&"@acme/core".to_string()), "{ids:?}");
     }
 }

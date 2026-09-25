@@ -9,7 +9,7 @@ use crate::server::tools::utils::format_duration;
 use crate::server::tools::utils::resolve_node;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 pub fn explore_architecture(
@@ -488,7 +488,7 @@ pub fn architectural_observations(
 /// the payload is well under 1 KB, leaving plenty of room in a
 /// agent's context for the actual question that follows.
 pub fn understand_repository(
-    workspace: &PathBuf,
+    workspace: &Path,
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
     git: &Arc<AnyGitSensor>,
@@ -576,7 +576,7 @@ pub fn understand_repository(
             }
         }
         let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
         ranked.into_iter().take(8).map(|(p, _)| p).collect()
     };
 
@@ -661,7 +661,7 @@ fn language_for_ext(ext: &str) -> &'static str {
 /// `IndexLifecycleSnapshot` rather than recomputing.
 fn capability_state_json(
     snap: &crate::server::readiness::IndexLifecycleSnapshot,
-    key: &str,
+    _key: &str,
 ) -> Value {
     // The snapshot's `state` field already reflects the aggregate
     // (WarmingUp / Ready / UnavailableError); the per-capability
@@ -670,16 +670,14 @@ fn capability_state_json(
     // coarse grain: required capabilities inherit the snapshot
     // state; the optional `semantic_search` reports Ready if the
     // embedder is loaded, UnavailableOptional otherwise.
-    let (state_label, optional) = match key {
-        _ => (
-            match snap.state {
-                crate::server::readiness::IndexState::Ready => "ready",
-                crate::server::readiness::IndexState::WarmingUp => "warming_up",
-                crate::server::readiness::IndexState::UnavailableError => "unavailable_error",
-            },
-            false,
-        ),
-    };
+    let (state_label, optional) = (
+        match snap.state {
+            crate::server::readiness::IndexState::Ready => "ready",
+            crate::server::readiness::IndexState::WarmingUp => "warming_up",
+            crate::server::readiness::IndexState::UnavailableError => "unavailable_error",
+        },
+        false,
+    );
     json!({
         "state": state_label,
         "optional": optional,

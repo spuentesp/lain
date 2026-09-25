@@ -377,7 +377,8 @@ async fn run_git_sensor_watchdog<T>(
 /// - If `alive` is false, it writes the timestamp to `busy_since` (just like the
 ///   mutex watchdog) and logs a warning.
 /// - When `alive` recovers to true, it clears `busy_since`.
-/// Honors `cancel` and clears `busy_since` on exit.
+///
+///   Honors `cancel` and clears `busy_since` on exit.
 async fn run_sidecar_watchdog(
     git: Arc<AnyGitSensor>,
     busy_since: Arc<AtomicU64>,

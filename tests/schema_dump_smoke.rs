@@ -250,7 +250,7 @@ fn live_tools_list_byte_matches_on_disk_schema_dump() {
         // tool from the five sources). To match that here, the server
         // must run in `Full` profile, not the default `Semantic`
         // (which would filter the live response down to ~28 curated
-        // tools and diverge from the 80-tool on-disk schema).
+        // tools and diverge from the 83-tool on-disk schema).
         // Without this env var the live side would silently drop
         // everything not in `SEMANTIC_PROFILE`, breaking the
         // byte-comparison invariant.

@@ -1,4 +1,4 @@
-//! Wire protocol for the Bug #2 sidecar prototype.
+//! Wire protocol for the git-isolation sidecar.
 //!
 //! The child (`lain-git-sidecar`) opens a `git2::Repository` and answers
 //! libgit2 calls from the parent over a Unix domain socket. Each
@@ -15,8 +15,7 @@
 //!
 //! This module is shared by both binaries (`src/bin/lain-git-sidecar.rs`
 //! and `src/bin/sidecar_bench.rs`). It's part of the lib so both can
-//! `use crate::sidecar_proto::*;`. If the prototype decides no-go, rip
-//! out the bin entries in Cargo.toml and delete this module.
+//! `use crate::sidecar_proto::*;`.
 
 /// 2: `HandshakeAck` carries the sidecar's build identity.
 pub const PROTOCOL_VERSION: u32 = 2;

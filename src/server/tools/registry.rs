@@ -456,7 +456,7 @@ impl ToolRegistry {
             }
         })
         .collect();
-        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs.sort_by(|a, b| a.name.cmp(b.name));
         defs
     }
 }

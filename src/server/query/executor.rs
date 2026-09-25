@@ -559,7 +559,7 @@ fn check_node_types(find: &FindOp) -> Result<(), LainError> {
         .iter()
         .map(|t| t.to_string())
         .collect();
-    Err(LainError::Other(format!(
+    Err(LainError::InvalidArgument(format!(
         "unknown node type(s) {unknown:?}; valid types: {}",
         valid.join(", ")
     )))

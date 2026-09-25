@@ -692,7 +692,7 @@ impl ToolExecutor {
         );
         // Surface the active tool profile so an agent can self-
         // discover whether it's running on the curated Semantic
-        // surface or the full 80-tool surface. An agent that
+        // surface or the full 83-tool surface. An agent that
         // wants the full list can either set `LAIN_TOOL_PROFILE=full`
         // on restart, or call `get_agent_strategy` for the full
         // enumeration (the curated surface includes it as an escape
