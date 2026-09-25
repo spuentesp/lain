@@ -154,7 +154,7 @@ is shallow.
 |-------------------------|--------|----------|---------|-------|
 | `url`                   | string | yes      | —       | Same rules as `local_clone`. |
 | `ref`                   | string | no       | `"main"` | Same rules as `local_clone`. |
-| `refresh_interval_secs` | u64    | no       | `300`   | Captured and exposed via `source.refresh_interval()`; the loader does not currently throttle fetches based on this value. (Future enhancement.) |
+| `refresh_interval_secs` | u64    | no       | `300`   | How often a running `lain server` fetches the repo (minimum 30). A fetch that moves the checkout is re-indexed. `local_clone` repos are fetched every 300 s. |
 
 **Use when:** the repo is large, you only need the latest commit's
 nodes/edges, and disk matters. The default 5-minute refresh interval
