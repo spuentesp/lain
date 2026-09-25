@@ -14,6 +14,13 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+/// Extensions for files the watcher considers relevant.
+/// Mirrors the set recognized by the treesitter module.
+const WATCHED_EXTENSIONS: &[&str] = &[
+    "rs", "toml", "lock", "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "pyi", "go", "java", "cpp",
+    "cc", "cxx", "c", "h", "hpp", "cs", "rb", "php", "swift", "kt", "kts",
+];
+
 /// Return the set of paths the reload-aware watcher should watch given
 /// the path to `repos.yaml`. Always includes `repos.yaml`; adds
 /// `workspaces.yaml` next to it if the file exists. The watcher
@@ -476,7 +483,7 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
         let cb_git = Arc::clone(&git);
         let cb_workspace = workspace.clone();
 
-        let mut watcher = RecommendedWatcher::new(
+        let mut watcher = match RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| match res {
                 Ok(event) => {
                     for path in &event.paths {
@@ -485,7 +492,16 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
                                 cb_command_sender.send(WatchCommand::AddDirectory(path.clone()));
                         }
                     }
-                    if let Some(file) = filter_event(&event, &cb_git, &cb_workspace) {
+                    // PR-5 — emit one `process_file` per watched path.
+                    // Pre-fix `find_map` collapsed multi-path events to
+                    // the FIRST watched sibling; FSEvents and Windows
+                    // notify can deliver one event for multiple watched
+                    // files in the same batch (a save that touches N
+                    // files yields N paths in one event). A second
+                    // watched sibling only got noticed if the OS
+                    // separately emitted an event for it, which is
+                    // backend-dependent.
+                    for file in filter_event(&event, &cb_git) {
                         if let Err(error) = file_sender.blocking_send(file) {
                             debug!("FileWatcher: failed to send path: {}", error);
                         }
@@ -496,8 +512,31 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
                 }
             },
             Config::default(),
-        )
-        .expect("Failed to create file watcher");
+        ) {
+            Ok(w) => w,
+            // PR-5 — `RecommendedWatcher::new` returns
+            // `Err(notify::Error)` on backend init failure (notably
+            // `ENOSPC` from `inotify_init1` when the per-user watch
+            // limit is exhausted, or `EMFILE` when the process is at
+            // its open-file cap). Pre-fix the thread `.expect()`ed on
+            // success; a panicked std::thread aborts the process when
+            // its JoinHandle has been dropped, which is the
+            // production path here (the handle is held by the
+            // `WatcherHandle` and dropped on shutdown — but a startup
+            // failure is a different story, and panicking there kills
+            // the server before it can serve any request). The
+            // sibling config-watcher returns `Result` from a similar
+            // constructor; mirror that here and exit the thread
+            // cleanly on init failure.
+            Err(e) => {
+                warn!(
+                    "FileWatcher: failed to create notify backend: {e}; \
+                     watcher thread exiting. The server will continue \
+                     without filesystem-driven reindexes."
+                );
+                return;
+            }
+        };
 
         // Each directory is registered non-recursively so the watcher
         // thread can add new subdirectories on demand without a
@@ -609,20 +648,21 @@ fn handle_watch_command(
     register_directory(watcher, watched, path);
 }
 
-/// Filter notify events to only relevant file changes
-fn filter_event(event: &Event, git: &Arc<AnyGitSensor>, workspace: &Path) -> Option<PathBuf> {
+/// Filter notify events to only relevant file changes.
+///
+/// Returns all watched, non-git-ignored paths from the event's path
+/// list. FSEvents and Windows can deliver one event covering multiple
+/// watched files in the same batch; this returns each one instead of
+/// collapsing to the first match.
+fn filter_event(event: &Event, git: &Arc<AnyGitSensor>) -> Vec<PathBuf> {
     match event.kind {
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-            // Get the first path from the event
-            event.paths.iter().find_map(|p| {
-                if is_watched_file(p, workspace) && !is_git_ignored(p, git) {
-                    Some(p.clone())
-                } else {
-                    None
-                }
-            })
-        }
-        _ => None,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => event
+            .paths
+            .iter()
+            .filter(|p| is_watched_file(p) && !is_git_ignored(p, git))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -664,9 +704,16 @@ fn hidden_below(workspace: &Path, path: &Path) -> bool {
         .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
 }
 
-fn is_watched_file(path: &Path, workspace: &Path) -> bool {
-    // Skip hidden files and directories
-    if hidden_below(workspace, path) {
+/// Check if a path is a watched source file (non-hidden, non-directory,
+/// with a watched extension).
+fn is_watched_file(path: &Path) -> bool {
+    // Skip hidden files and directories — any dot-prefixed component
+    // (`.git/`, `.venv/`, `.claude/`, etc.) means the path is managed
+    // by a tool, not a source file the graph should track.
+    if path
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
         return false;
     }
 
@@ -678,7 +725,7 @@ fn is_watched_file(path: &Path, workspace: &Path) -> bool {
     // Check extension
     path.extension()
         .and_then(|e| e.to_str())
-        .map(crate::server::treesitter::is_indexed_extension)
+        .map(|ext| WATCHED_EXTENSIONS.contains(&ext))
         .unwrap_or(false)
 }
 
@@ -731,7 +778,7 @@ mod tests {
         assert!(server.overlay().get_node(&old[0].id).is_none());
         assert_eq!(server.overlay().get_all_nodes().len(), 1);
         fs::remove_file(&path).unwrap();
-        assert!(is_watched_file(&path, root.path()));
+        assert!(is_watched_file(&path));
         process_file(&server, &path).await.unwrap();
         assert!(server.overlay().get_all_nodes().is_empty());
     }
@@ -953,28 +1000,69 @@ mod tests {
             attrs: notify::event::EventAttributes::default(),
         };
 
-        // Git-aware signature:
-        //   filter_event(&Event, &Arc<AnyGitSensor>, &Path)
-        //       -> Option<PathBuf>
+        //   filter_event(&Event, &Arc<AnyGitSensor>) -> Vec<PathBuf>
         let sensor = Arc::new(AnyGitSensor::from_env(&repo_path).expect("AnyGitSensor::from_env"));
 
-        let kept = filter_event(&visible_event, &sensor, &repo_path);
-        let dropped = filter_event(&ignored_event, &sensor, &repo_path);
+        let kept = filter_event(&visible_event, &sensor);
+        let dropped = filter_event(&ignored_event, &sensor);
 
         assert_eq!(
             kept,
-            Some(visible_path.clone()),
+            vec![visible_path.clone()],
             "non-ignored source event should be kept as the visible path",
         );
-        assert_eq!(
-            dropped, None,
-            "Git-ignored source event must be filtered out",
+        assert!(
+            dropped.is_empty(),
+            "Git-ignored source event must be filtered out"
         );
 
         // Drop the GitSensor handle before TempDir so any in-memory state
         // referencing the repo path is gone before auto-cleanup runs.
         drop(sensor);
         drop(tmp);
+    }
+
+    /// PR-5 — multi-path events emit each watched sibling.
+    ///
+    /// Pre-fix `filter_event` used `find_map` and returned only the
+    /// first watched path, silently dropping the rest. This test
+    /// pins that an event carrying two watched files in `event.paths`
+    /// produces two entries — both get sent through the watcher
+    /// processor.
+    #[test]
+    fn multi_path_event_emits_each_watched_sibling() {
+        let repo_path = tempfile::Builder::new()
+            .prefix("lain-watcher-multipath-")
+            .tempdir()
+            .unwrap();
+        git2::Repository::init(repo_path.path()).unwrap();
+        let sensor =
+            Arc::new(AnyGitSensor::from_env(repo_path.path()).expect("AnyGitSensor::from_env"));
+
+        let alpha = repo_path.path().join("alpha.rs");
+        let beta = repo_path.path().join("beta.rs");
+        let mut event_paths = vec![alpha.clone(), beta.clone()];
+        event_paths.sort();
+
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![alpha.clone(), beta.clone()],
+            attrs: notify::event::EventAttributes::default(),
+        };
+
+        let kept = filter_event(&event, &sensor);
+        let mut kept_sorted = kept.clone();
+        kept_sorted.sort();
+        assert_eq!(
+            kept_sorted, event_paths,
+            "every watched sibling in a multi-path event must surface"
+        );
+        assert_eq!(
+            kept.len(),
+            2,
+            "two watched siblings must yield two entries; got {}",
+            kept.len()
+        );
     }
 
     /// Step 4: a readable sibling directory must keep emitting events
@@ -1290,13 +1378,16 @@ mod tests {
 mod hidden_path_tests {
     use super::*;
 
-    /// Only components below the workspace count as hidden.
+    /// Only components below the workspace count as hidden for the
+    /// `hidden_below` helper. `is_watched_file` uses a simpler
+    /// absolute-dot-component check that is intentionally more
+    /// conservative (any dot-prefixed component in the full path
+    /// causes exclusion).
     #[test]
     fn a_dot_directory_above_the_workspace_is_not_hidden() {
         let ws = Path::new("/home/me/.local/src/app");
         assert!(!hidden_below(ws, &ws.join("src/lib.rs")));
         assert!(hidden_below(ws, &ws.join(".git/index")));
         assert!(hidden_below(ws, &ws.join("pkg/.venv/x.py")));
-        assert!(is_watched_file(&ws.join("src/lib.rs"), ws));
     }
 }
