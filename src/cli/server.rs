@@ -376,6 +376,15 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
         std::collections::HashMap::new();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Drop entries for repos that were removed since the last tick.
+        // Without this, `last_fetch` grows linearly with the cumulative
+        // count of repos ever added across hot-add/hot-remove churn.
+        let live_ids: std::collections::HashSet<String> = fed
+            .list_repos()
+            .into_iter()
+            .map(|(id, _)| id.to_string())
+            .collect();
+        last_fetch.retain(|id, _| live_ids.contains(id));
         for (id, _) in fed.list_repos() {
             let Some(repo) = fed.get_repo(&id) else {
                 continue;
@@ -401,9 +410,30 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
                 continue;
             }
             last_fetch.insert(id.as_str().to_string(), now);
+            // Cap each fetch at 5 minutes. A remote that accepts the
+            // TCP connection but never returns (slow proxy, hung CI
+            // runner) would otherwise pin a `spawn_blocking` slot in
+            // the tokio blocking pool for the lifetime of the process.
+            // The next tick stamps `last_fetch` regardless — the
+            // watcher will pick up any actual file-system change once
+            // the fetch finally returns or the timeout fires.
+            const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
             tokio::spawn(async move {
-                if let Err(e) = repo.source().fetch().await {
-                    tracing::warn!("lain server: refreshing '{}' failed: {e}", id.as_str());
+                match tokio::time::timeout(FETCH_TIMEOUT, repo.source().fetch()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            "lain server: refreshing '{}' failed: {e}",
+                            id.as_str()
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "lain server: refreshing '{}' timed out after {}s",
+                            id.as_str(),
+                            FETCH_TIMEOUT.as_secs()
+                        );
+                    }
                 }
             });
         }

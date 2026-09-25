@@ -288,9 +288,9 @@ impl AnnotationStore {
             std::fs::create_dir_all(parent).map_err(|e| LainError::Io(e.to_string()))?;
         }
         let conn = Connection::open(path)
-            .map_err(|e| LainError::Other(format!("annotation sqlite open: {e}")))?;
+            .map_err(|e| LainError::Database(format!("annotation sqlite open: {e}")))?;
         conn.execute_batch(SCHEMA_SQL)
-            .map_err(|e| LainError::Other(format!("annotation sqlite migrate: {e}")))?;
+            .map_err(|e| LainError::Database(format!("annotation sqlite migrate: {e}")))?;
         Ok(Self {
             conn: parking_lot::Mutex::new(conn),
         })
@@ -302,10 +302,12 @@ impl AnnotationStore {
     /// every `explain_symbol` call).
     pub fn add(&self, a: &Annotation) -> Result<(), LainError> {
         if a.body.is_empty() {
-            return Err(LainError::Other("annotation body must not be empty".into()));
+            return Err(LainError::InvalidArgument(
+                "annotation body must not be empty".into(),
+            ));
         }
         if a.body.len() > MAX_BODY_BYTES {
-            return Err(LainError::Other(format!(
+            return Err(LainError::InvalidArgument(format!(
                 "annotation body exceeds {MAX_BODY_BYTES} bytes"
             )));
         }
@@ -331,7 +333,7 @@ impl AnnotationStore {
                 refs_json,
             ],
         )
-        .map_err(|e| LainError::Other(format!("annotation sqlite insert: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite insert: {e}")))?;
         Ok(())
     }
 
@@ -387,14 +389,14 @@ impl AnnotationStore {
         let params_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
         let mut stmt = conn
             .prepare(&sql)
-            .map_err(|e| LainError::Other(format!("annotation sqlite prepare: {e}")))?;
+            .map_err(|e| LainError::Database(format!("annotation sqlite prepare: {e}")))?;
         let mut rows = stmt
             .query(params_refs.as_slice())
-            .map_err(|e| LainError::Other(format!("annotation sqlite query: {e}")))?;
+            .map_err(|e| LainError::Database(format!("annotation sqlite query: {e}")))?;
         let mut out = Vec::new();
         while let Some(row) = rows
             .next()
-            .map_err(|e| LainError::Other(format!("annotation sqlite row: {e}")))?
+            .map_err(|e| LainError::Database(format!("annotation sqlite row: {e}")))?
         {
             let mut a = row_to_annotation(row)?;
             if a.status == AnnotationStatus::Open.as_str() {
@@ -437,7 +439,7 @@ impl AnnotationStore {
                  WHERE id = ?3 AND status = 'open'",
                 params![by.as_str(), now, id],
             )
-            .map_err(|e| LainError::Other(format!("annotation sqlite update: {e}")))?;
+            .map_err(|e| LainError::Database(format!("annotation sqlite update: {e}")))?;
         if updated == 0 {
             return Err(LainError::NotFound(format!(
                 "annotation {id} not found or already resolved"
@@ -452,7 +454,7 @@ impl AnnotationStore {
                 |row| Ok(row_to_annotation(row)),
             )
             .optional()
-            .map_err(|e| LainError::Other(format!("annotation sqlite select: {e}")))?;
+            .map_err(|e| LainError::Database(format!("annotation sqlite select: {e}")))?;
         match row {
             Some(Ok(a)) => Ok(a),
             Some(Err(e)) => Err(e),
@@ -471,7 +473,7 @@ impl AnnotationStore {
                 |row| Ok(row_to_annotation(row)),
             )
             .optional()
-            .map_err(|e| LainError::Other(format!("annotation sqlite select: {e}")))?;
+            .map_err(|e| LainError::Database(format!("annotation sqlite select: {e}")))?;
         row.transpose().map_err(|e: LainError| e)
     }
 }
@@ -510,42 +512,42 @@ fn annotation_target_from_row(a: &Annotation) -> Option<AnnotationTarget> {
 fn row_to_annotation(row: &rusqlite::Row<'_>) -> Result<Annotation, LainError> {
     let id: String = row
         .get(0)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col id: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col id: {e}")))?;
     let target_kind: String = row
         .get(1)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col kind: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col kind: {e}")))?;
     let target_id: String = row
         .get(2)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col tid: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col tid: {e}")))?;
     let kind: String = row
         .get(3)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col kind2: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col kind2: {e}")))?;
     let body: String = row
         .get(4)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col body: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col body: {e}")))?;
     let author: String = row
         .get(5)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col author: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col author: {e}")))?;
     let created_at: i64 = row
         .get(6)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col created_at: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col created_at: {e}")))?;
     let updated_at: i64 = row
         .get(7)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col updated_at: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col updated_at: {e}")))?;
     let status: String = row
         .get(8)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col status: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col status: {e}")))?;
     let resolved_by: Option<String> = row
         .get(9)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col resolved_by: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col resolved_by: {e}")))?;
     let resolved_at: Option<i64> = row
         .get(10)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col resolved_at: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col resolved_at: {e}")))?;
     let refs_json: String = row
         .get(11)
-        .map_err(|e| LainError::Other(format!("annotation sqlite col refs_json: {e}")))?;
+        .map_err(|e| LainError::Database(format!("annotation sqlite col refs_json: {e}")))?;
     let refs: Vec<AnnotationTarget> = serde_json::from_str(&refs_json)
-        .map_err(|e| LainError::Other(format!("refs parse: {e}")))?;
+        .map_err(|e| LainError::Serialization(format!("refs parse: {e}")))?;
     Ok(Annotation {
         id,
         target_kind,
@@ -756,9 +758,9 @@ mod tests {
         }
         .into_annotation();
         a.body = String::new();
-        assert!(matches!(store.add(&a), Err(LainError::Other(_))));
+        assert!(matches!(store.add(&a), Err(LainError::InvalidArgument(_))));
         a.body = "x".repeat(MAX_BODY_BYTES + 1);
-        assert!(matches!(store.add(&a), Err(LainError::Other(_))));
+        assert!(matches!(store.add(&a), Err(LainError::InvalidArgument(_))));
     }
 
     #[test]
