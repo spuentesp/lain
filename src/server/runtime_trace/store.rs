@@ -315,7 +315,10 @@ mod tests {
 
     #[test]
     fn purge_drops_expired_edges() {
-        let cfg = StoreConfig { ttl_secs: 1, ..Default::default() };
+        let cfg = StoreConfig {
+            ttl_secs: 1,
+            ..Default::default()
+        };
         let store = RuntimeTraceStore::new(cfg);
 
         let root = make_span("t1", "root", None);
@@ -339,7 +342,10 @@ mod tests {
 
     #[test]
     fn capacity_guard_drops_oldest_first() {
-        let cfg = StoreConfig { max_edges: 2, ..Default::default() };
+        let cfg = StoreConfig {
+            max_edges: 2,
+            ..Default::default()
+        };
         let store = RuntimeTraceStore::new(cfg);
 
         let mk = |trace: &str, leaf: &str| {

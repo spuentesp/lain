@@ -171,16 +171,17 @@ pub fn build_with_store(
                 }
             }
             EdgeType::DynamicDispatch | EdgeType::BusTopic | EdgeType::RouteMatches
-                if seen_heuristic.insert(caller.id.clone()) => {
-                    // Overlay edges don't carry provenance yet; tag with
-                    // a synthetic detector so the consumer knows the
-                    // path. Confidence 0.5 = threshold default.
-                    heuristic_callers.push(HeuristicCaller {
-                        target_id: caller.id.clone(),
-                        detector: "overlay".to_string(),
-                        confidence: 0.5,
-                    });
-                }
+                if seen_heuristic.insert(caller.id.clone()) =>
+            {
+                // Overlay edges don't carry provenance yet; tag with
+                // a synthetic detector so the consumer knows the
+                // path. Confidence 0.5 = threshold default.
+                heuristic_callers.push(HeuristicCaller {
+                    target_id: caller.id.clone(),
+                    detector: "overlay".to_string(),
+                    confidence: 0.5,
+                });
+            }
             _ => {}
         }
     }

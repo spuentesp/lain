@@ -18,7 +18,6 @@ use std::time::SystemTime;
 /// in `tools/handlers/query_tests.rs`.
 #[tokio::test]
 async fn query_graph_includes_occupancy() {
-
     let tmp = tempfile::tempdir().unwrap();
     // `LainServer::new` -> `GitSensor::new` calls `git2::Repository::open`,
     // which requires a real initialized repo — a bare `.git` directory
