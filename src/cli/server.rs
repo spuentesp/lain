@@ -412,11 +412,20 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
             last_fetch.insert(id.as_str().to_string(), now);
             // Cap each fetch at 5 minutes. A remote that accepts the
             // TCP connection but never returns (slow proxy, hung CI
-            // runner) would otherwise pin a `spawn_blocking` slot in
-            // the tokio blocking pool for the lifetime of the process.
-            // The next tick stamps `last_fetch` regardless — the
-            // watcher will pick up any actual file-system change once
-            // the fetch finally returns or the timeout fires.
+            // runner) would otherwise have the refresh loop blocked
+            // indefinitely waiting on it — `tokio::spawn` doesn't
+            // outlive the awaiter, so the whole `for (id, _)` loop
+            // stalls and no other repo gets its periodic check.
+            //
+            // NOTE: this bounds the *wait* in this loop. The spawned
+            // task is dropped on timeout, but `spawn_blocking` around
+            // `Command::new("git")` is not cancellable — the leaked
+            // `std::thread` keeps running until the OS-level TCP
+            // timeout fires. Killing the child `git` process is the
+            // only way to actually release the thread; doing so
+            // safely needs a process-tree kill, which is bigger than
+            // this change. Until then, treat `FETCH_TIMEOUT` as
+            // bounded wait, not bounded resource use.
             const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
             tokio::spawn(async move {
                 match tokio::time::timeout(FETCH_TIMEOUT, repo.source().fetch()).await {

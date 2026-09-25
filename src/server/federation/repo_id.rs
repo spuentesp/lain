@@ -150,4 +150,57 @@ mod tests {
     fn global_id_parse_rejects_too_few_parts() {
         assert!(GlobalId::parse("foo:bar").is_err());
     }
+
+    /// Regression for round-3 #9: a malformed Kind segment must be
+    /// rejected at parse time, not silently round-trip into a graph
+    /// lookup that surfaces as an indistinguishable `NotFound`.
+    #[test]
+    fn global_id_parse_rejects_unknown_kind() {
+        // `Foo` is not a `NodeType` variant — round-3 #9 path.
+        let err = GlobalId::parse("auth-svc:Foo:src/main.rs:hello").unwrap_err();
+        assert!(
+            matches!(err, crate::error::LainError::InvalidGlobalId(_)),
+            "expected InvalidGlobalId, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unknown node kind"),
+            "error message should mention unknown kind: {err}"
+        );
+    }
+
+    /// Pin every `NodeType` Debug name that the parser accepts. If a
+    /// new variant is added to `NodeType` but not to this list,
+    /// `GlobalId::parse` will reject otherwise-valid ids produced by
+    /// the cold-start path.
+    #[test]
+    fn global_id_parse_accepts_every_node_type() {
+        let repo = RepoId::new("svc").unwrap();
+        let path = "src/x";
+        let name = "fn";
+        let kinds = [
+            "File",
+            "Namespace",
+            "Module",
+            "Package",
+            "Class",
+            "Interface",
+            "Struct",
+            "Enum",
+            "Trait",
+            "Function",
+            "Method",
+            "Property",
+            "Variable",
+            "Constant",
+            "HttpRoute",
+            "Topic",
+            "Resource",
+            "Schema",
+            "Synthetic",
+        ];
+        for k in kinds {
+            let s = format!("{repo}:{k}:{path}:{name}");
+            GlobalId::parse(&s).unwrap_or_else(|e| panic!("kind {k} should parse: {e}"));
+        }
+    }
 }

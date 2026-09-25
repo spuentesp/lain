@@ -261,4 +261,30 @@ repos:
 "#;
         assert!(FederationConfig::load_from_str(yaml).is_err());
     }
+
+    /// Regression for round-3 federation #5: two entries with the
+    /// same id used to silently keep only the second while the
+    /// first's on-disk `graph.bin` collided with the second's
+    /// `RepoIndex::new` read. `load_from_str` now rejects at parse
+    /// time so the operator sees the mistake on startup.
+    #[test]
+    fn rejects_duplicate_repo_ids() {
+        let yaml = r#"
+data_dir: /tmp
+repos:
+  - id: same
+    source: { type: workspace_dir, path: /srv/a }
+  - id: same
+    source: { type: workspace_dir, path: /srv/b }
+"#;
+        let err = FederationConfig::load_from_str(yaml).unwrap_err();
+        assert!(
+            matches!(err, LainError::Config(_)),
+            "expected Config error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("duplicate repo id 'same'"),
+            "error should name the duplicate id: {err}"
+        );
+    }
 }
