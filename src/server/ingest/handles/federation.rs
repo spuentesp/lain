@@ -135,14 +135,13 @@ impl FederationHandle {
                 "FederationHandle::add_repo called on a non-federation server".into(),
             )
         })?;
-        let source = crate::server::federation::config::FederationConfig::default()
-            .build_source_for(repo)
-            .map_err(|e| {
-                crate::server::error::LainError::Config(format!(
-                    "build_source_for({}): {e}",
-                    repo.id
-                ))
-            })?;
+        let config = crate::server::federation::config::FederationConfig {
+            data_dir: data_dir.to_path_buf(),
+            ..Default::default()
+        };
+        let source = config.build_source_for(repo).map_err(|e| {
+            crate::server::error::LainError::Config(format!("build_source_for({}): {e}", repo.id))
+        })?;
         // `WorkspaceDirSource::fetch` is a no-op; `LocalCloneSource` and
         // `ShallowCloneSource` actually clone. Hot-reload only sees
         // already-on-disk sources (`workspace_dir`), but we still call
@@ -152,6 +151,34 @@ impl FederationHandle {
         let repo_id = source.id().clone();
         fed.add_repo(source, data_dir).await?;
         fed.project_repo(&repo_id).await?;
+        // Index it, as startup does for every repo: adding only registered
+        // an empty graph that stayed `indexing` until the next restart.
+        // Then link calls between it and the others, and watch it.
+        let fed = Arc::clone(fed);
+        let id = repo_id.clone();
+        tokio::spawn(async move {
+            let Some(repo) = fed.get_repo(&id) else {
+                return;
+            };
+            if let Err(e) = repo.index().await {
+                tracing::warn!("indexing hot-added repo '{id}' failed: {e}");
+                repo.set_health(crate::federation::health::RepoHealth::Degraded);
+                return;
+            }
+            for (other, _) in fed.list_repos() {
+                if let Some(r) = fed.get_repo(&other) {
+                    if let Err(e) = r.relink_cross_repo().await {
+                        tracing::warn!("cross-repo link for '{other}' failed: {e}");
+                    }
+                }
+                if let Err(e) = fed.project_repo(&other).await {
+                    tracing::warn!("project_repo for '{other}' failed: {e}");
+                }
+            }
+            if let Err(e) = repo.start_watcher().await {
+                tracing::warn!("could not watch hot-added repo '{id}': {e}");
+            }
+        });
         // `record_sync` lives on `RefreshState` in PR 3.7b; this handle
         // signals "sync happened" via a callback so the LainServer
         // can route it. In this PR we just log and let the caller

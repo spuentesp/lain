@@ -353,6 +353,8 @@ struct PresenceState {
     sessions: HashMap<AgentId, AgentSession>,
     by_token: HashMap<String, AgentId>,
     expires_after: Duration,
+    /// Session lifetime for `AgentMode::Background`.
+    background_expires_after: Duration,
 }
 
 /// Callback type fired on each `PresenceRegistry` mutation. Wrapped
@@ -403,8 +405,18 @@ impl PresenceRegistry {
     /// and read from there — one place to change the number, and an
     /// operator whose agents behave differently can actually change it.
     pub fn new() -> Self {
-        let cfg = crate::server::tuning::PresenceConfig::default();
-        Self::with_expiry(Duration::from_secs(cfg.interactive_session_ttl_secs))
+        Self::from_config(&crate::server::tuning::PresenceConfig::default())
+    }
+
+    /// Registry with the lifetimes from `.lain/tuning.toml`'s
+    /// `[presence]`. The servers built theirs with `new()`, so the
+    /// documented `interactive_session_ttl_secs` /
+    /// `background_session_ttl_secs` settings changed nothing.
+    pub fn from_config(cfg: &crate::server::tuning::PresenceConfig) -> Self {
+        let reg = Self::with_expiry(Duration::from_secs(cfg.interactive_session_ttl_secs));
+        reg.inner.lock().background_expires_after =
+            Duration::from_secs(cfg.background_session_ttl_secs);
+        reg
     }
 
     pub fn with_expiry(expires_after: Duration) -> Self {
@@ -413,6 +425,9 @@ impl PresenceRegistry {
                 sessions: HashMap::new(),
                 by_token: HashMap::new(),
                 expires_after,
+                background_expires_after: Duration::from_secs(
+                    crate::server::tuning::PresenceConfig::default().background_session_ttl_secs,
+                ),
             })),
             persist_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             on_remove_cb: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -559,16 +574,17 @@ impl PresenceRegistry {
     /// should release its claims promptly.
     pub fn expires_after_for(&self, mode: &AgentMode) -> Duration {
         match mode {
-            AgentMode::Background => Duration::from_secs(
-                crate::server::tuning::PresenceConfig::default().background_session_ttl_secs,
-            ),
+            AgentMode::Background => self.inner.lock().background_expires_after,
             AgentMode::Interactive => self.expires_after(),
         }
     }
 
     pub fn expire_stale(&self) -> Vec<AgentId> {
         let now = SystemTime::now();
-        let expires_after = self.inner.lock().expires_after;
+        let (expires_after, background_expires_after) = {
+            let s = self.inner.lock();
+            (s.expires_after, s.background_expires_after)
+        };
         let stale: Vec<AgentId> = {
             let mut s = self.inner.lock();
             let stale: Vec<AgentId> = s
@@ -576,10 +592,7 @@ impl PresenceRegistry {
                 .iter()
                 .filter(|(_, sess)| {
                     let ttl = match sess.mode {
-                        AgentMode::Background => Duration::from_secs(
-                            crate::server::tuning::PresenceConfig::default()
-                                .background_session_ttl_secs,
-                        ),
+                        AgentMode::Background => background_expires_after,
                         AgentMode::Interactive => expires_after,
                     };
                     now.duration_since(sess.last_heartbeat).unwrap_or_default() >= ttl
@@ -3134,6 +3147,30 @@ mod audit_persistence_tests {
         assert!(
             !lock_path.exists(),
             "lock file must be deleted when session is removed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ttl_config_tests {
+    use super::*;
+
+    /// `[presence]` session lifetimes from tuning.toml are honoured.
+    #[test]
+    fn tuned_session_lifetimes_are_used() {
+        let cfg = crate::server::tuning::PresenceConfig {
+            interactive_session_ttl_secs: 5,
+            background_session_ttl_secs: 7,
+            ..Default::default()
+        };
+        let reg = PresenceRegistry::from_config(&cfg);
+        assert_eq!(
+            reg.expires_after_for(&AgentMode::Interactive),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            reg.expires_after_for(&AgentMode::Background),
+            Duration::from_secs(7)
         );
     }
 }

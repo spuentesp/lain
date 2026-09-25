@@ -474,17 +474,18 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let cb_command_sender = command_sender;
         let cb_git = Arc::clone(&git);
+        let cb_workspace = workspace.clone();
 
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| match res {
                 Ok(event) => {
                     for path in &event.paths {
-                        if is_created_directory_event(&event, path) {
+                        if is_created_directory_event(&event, path, &cb_workspace) {
                             let _ =
                                 cb_command_sender.send(WatchCommand::AddDirectory(path.clone()));
                         }
                     }
-                    if let Some(file) = filter_event(&event, &cb_git) {
+                    if let Some(file) = filter_event(&event, &cb_git, &cb_workspace) {
                         if let Err(error) = file_sender.blocking_send(file) {
                             debug!("FileWatcher: failed to send path: {}", error);
                         }
@@ -537,7 +538,7 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
         while let Ok(command) = command_receiver.recv() {
             match command {
                 WatchCommand::AddDirectory(path) => {
-                    handle_watch_command(path, &mut watcher, &mut watched, &git);
+                    handle_watch_command(path, &mut watcher, &mut watched, &git, &workspace);
                     if let Some(ref done) = command_done {
                         // Best-effort: the test may have already
                         // dropped its receiver after asserting. A
@@ -564,14 +565,11 @@ fn run_watcher_thread(args: WatcherThreadArgs) -> std::thread::JoinHandle<()> {
 /// imprecise (`Any`/`Other`), and on Linux inotify the syscall
 /// ordering means `is_dir()` is always true by the time the callback
 /// runs.
-fn is_created_directory_event(event: &Event, path: &Path) -> bool {
+fn is_created_directory_event(event: &Event, path: &Path, workspace: &Path) -> bool {
     if !matches!(event.kind, EventKind::Create(_)) {
         return false;
     }
-    if path
-        .components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-    {
+    if hidden_below(workspace, path) {
         return false;
     }
     match event.kind {
@@ -594,15 +592,13 @@ fn handle_watch_command(
     watcher: &mut RecommendedWatcher,
     watched: &mut HashSet<PathBuf>,
     git: &Arc<AnyGitSensor>,
+    workspace: &Path,
 ) {
     if !path.is_dir() {
         debug!("FileWatcher: ignoring non-directory command {:?}", path);
         return;
     }
-    if path
-        .components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-    {
+    if hidden_below(workspace, &path) {
         debug!("FileWatcher: ignoring hidden directory {:?}", path);
         return;
     }
@@ -614,12 +610,12 @@ fn handle_watch_command(
 }
 
 /// Filter notify events to only relevant file changes
-fn filter_event(event: &Event, git: &Arc<AnyGitSensor>) -> Option<PathBuf> {
+fn filter_event(event: &Event, git: &Arc<AnyGitSensor>, workspace: &Path) -> Option<PathBuf> {
     match event.kind {
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
             // Get the first path from the event
             event.paths.iter().find_map(|p| {
-                if is_watched_file(p) && !is_git_ignored(p, git) {
+                if is_watched_file(p, workspace) && !is_git_ignored(p, git) {
                     Some(p.clone())
                 } else {
                     None
@@ -649,12 +645,28 @@ fn is_git_ignored(path: &Path, git: &Arc<AnyGitSensor>) -> bool {
 }
 
 /// Check if a path is a watched source file
-fn is_watched_file(path: &Path) -> bool {
-    // Skip hidden files and directories
-    if path
-        .components()
+/// A hidden component *below* the workspace (`.git/…`, `.venv/…`). The
+/// workspace's own path may contain one (`~/.local/src/app`, a
+/// `.claude/worktrees/…` checkout); testing the absolute path made the
+/// watcher drop every event in such a workspace.
+fn hidden_below(workspace: &Path, path: &Path) -> bool {
+    let rel: PathBuf = match path.strip_prefix(workspace) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => {
+            let canon = |p: &Path| dunce::canonicalize(p).ok();
+            match (canon(workspace), canon(path)) {
+                (Some(ws), Some(p)) => p.strip_prefix(&ws).map(Path::to_path_buf).unwrap_or(p),
+                _ => path.to_path_buf(),
+            }
+        }
+    };
+    rel.components()
         .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-    {
+}
+
+fn is_watched_file(path: &Path, workspace: &Path) -> bool {
+    // Skip hidden files and directories
+    if hidden_below(workspace, path) {
         return false;
     }
 
@@ -719,7 +731,7 @@ mod tests {
         assert!(server.overlay().get_node(&old[0].id).is_none());
         assert_eq!(server.overlay().get_all_nodes().len(), 1);
         fs::remove_file(&path).unwrap();
-        assert!(is_watched_file(&path));
+        assert!(is_watched_file(&path, root.path()));
         process_file(&server, &path).await.unwrap();
         assert!(server.overlay().get_all_nodes().is_empty());
     }
@@ -942,12 +954,12 @@ mod tests {
         };
 
         // Git-aware signature:
-        //   filter_event(&Event, &Arc<AnyGitSensor>)
+        //   filter_event(&Event, &Arc<AnyGitSensor>, &Path)
         //       -> Option<PathBuf>
         let sensor = Arc::new(AnyGitSensor::from_env(&repo_path).expect("AnyGitSensor::from_env"));
 
-        let kept = filter_event(&visible_event, &sensor);
-        let dropped = filter_event(&ignored_event, &sensor);
+        let kept = filter_event(&visible_event, &sensor, &repo_path);
+        let dropped = filter_event(&ignored_event, &sensor, &repo_path);
 
         assert_eq!(
             kept,
@@ -1271,5 +1283,20 @@ mod tests {
             .expect("watcher thread should exit cleanly");
 
         drop(git);
+    }
+}
+
+#[cfg(test)]
+mod hidden_path_tests {
+    use super::*;
+
+    /// Only components below the workspace count as hidden.
+    #[test]
+    fn a_dot_directory_above_the_workspace_is_not_hidden() {
+        let ws = Path::new("/home/me/.local/src/app");
+        assert!(!hidden_below(ws, &ws.join("src/lib.rs")));
+        assert!(hidden_below(ws, &ws.join(".git/index")));
+        assert!(hidden_below(ws, &ws.join("pkg/.venv/x.py")));
+        assert!(is_watched_file(&ws.join("src/lib.rs"), ws));
     }
 }

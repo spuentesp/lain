@@ -172,7 +172,12 @@ pub async fn run_rebuild(
         // is supposed to write the file before signalling, and a
         // hand-edit would be present on disk by the time the watcher
         // fires.
-        let repos_file = FederationConfig::load(&repos_yaml)?;
+        // `data_dir` relative to repos.yaml, as at startup: a hot-added
+        // `local_clone` was cloned under the server's cwd instead.
+        let repos_file = crate::server::federation::loader::resolve_data_dir(
+            FederationConfig::load(&repos_yaml)?,
+            &repos_yaml,
+        );
 
         // Resolve the workspace file (next to repos.yaml). Optional.
         let workspaces_path = workspaces_path_for(&repos_yaml);

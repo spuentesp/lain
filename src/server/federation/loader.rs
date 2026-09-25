@@ -14,7 +14,10 @@ use tokio::sync::Semaphore;
 /// resolved next to the config file. Against the process's cwd, running
 /// `lain server --config ../stack/repos.yaml` from elsewhere created a
 /// fresh data directory there and re-indexed everything from cold.
-fn resolve_data_dir(mut config: FederationConfig, config_path: &Path) -> FederationConfig {
+pub(crate) fn resolve_data_dir(
+    mut config: FederationConfig,
+    config_path: &Path,
+) -> FederationConfig {
     if config.data_dir.is_relative() {
         let base = config_path
             .parent()

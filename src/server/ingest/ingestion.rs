@@ -151,7 +151,12 @@ impl LainServer {
                 return Err(LainError::Cancelled);
             }
             self.ingest().graph().set_last_commit(latest_commit)?;
-            self.ingest().graph().save_to_disk().await?;
+            // Persisting is for the next start; this process serves from memory.
+            // An unwritable `.lain` failed the whole pass, so a complete
+            // in-memory index was reported unavailable and redone every tick.
+            if let Err(e) = self.ingest().graph().save_to_disk().await {
+                warn!("could not persist the graph ({e}); serving it from memory only");
+            }
             return Ok(());
         }
 
@@ -996,7 +1001,12 @@ impl LainServer {
         } else {
             self.ingest().graph().set_last_commit(latest_commit)?;
         }
-        self.ingest().graph().save_to_disk().await?;
+        // Persisting is for the next start; this process serves from memory.
+        // An unwritable `.lain` failed the whole pass, so a complete
+        // in-memory index was reported unavailable and redone every tick.
+        if let Err(e) = self.ingest().graph().save_to_disk().await {
+            warn!("could not persist the graph ({e}); serving it from memory only");
+        }
 
         // Bump the overlay freshness so the indexer doesn't read as
         // "stale" the moment the server comes up. The index path
@@ -1479,7 +1489,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         }
         sweep_orphans(path, graph, git);
         graph.set_last_commit(latest_commit)?;
-        graph.save_to_disk_sync()?;
+        if let Err(e) = graph.save_to_disk_sync() {
+            warn!("could not persist the graph ({e}); serving it from memory only");
+        }
         return Ok(());
     }
 
@@ -1716,7 +1728,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         return Err(LainError::Cancelled);
     }
     graph.set_last_commit(latest_commit)?;
-    graph.save_to_disk_sync()?;
+    if let Err(e) = graph.save_to_disk_sync() {
+        warn!("could not persist the graph ({e}); serving it from memory only");
+    }
 
     info!(
         "[federation] {:?}: fully indexed in {:?}",
@@ -2506,6 +2520,23 @@ mod readiness_progress_tests {
         ));
         assert_eq!(partial_files_left(&e), Some(7));
         assert_eq!(partial_files_left(&LainError::Other("boom".into())), None);
+    }
+
+    /// An unwritable state directory costs persistence, not the index.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unwritable_state_dir_still_serves_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = git_fixture_with_one_file();
+        let state = root.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let server = LainServer::new(root.path(), &state.join("graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = server.build_core_memory().await;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.expect("indexing succeeds without persistence");
+        assert!(server.ingest().graph().find_node_by_name("hello").is_some());
     }
 
     /// Non-source files do not count toward `max_files_per_scan`.
