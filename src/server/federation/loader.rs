@@ -295,7 +295,9 @@ mod load_tests {
                  - id: bad\n    source: {{ type: local_clone, url: \"file://{}/nope\", ref: main }}\n",
                 tmp.path().join("data").display(),
                 good.display(),
-                tmp.path().display()
+                // Forward slashes: a Windows path's backslashes are escapes
+                // inside a double-quoted YAML string.
+                tmp.path().display().to_string().replace('\\', "/")
             ),
         )
         .unwrap();
