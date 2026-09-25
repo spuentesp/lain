@@ -1,0 +1,710 @@
+name: CI full-battery probe (temporary)
+
+# Two-tier CI: cheap battery on dev/PR-to-dev, full hardened on
+# main and PR-to-main. Job-level `if: FULL_BATTERY_EXPR` (see below)
+# keeps the matrix lean on dev without splitting the workflow file.
+#
+# The condition is inlined into each gated job's `if:` rather than
+# read from a shared `env:` var: job-level `if:` only has access to
+# the `github`, `inputs`, and `needs` contexts (confirmed via
+# actionlint -- `env` is not among them, even for workflow-level env
+# vars, and referencing it there invalidates the whole workflow file
+# at schedule time with zero jobs run). `github.*` alone is enough
+# for this condition, so no extra job is needed to smuggle it through
+# `needs.*.outputs` either.
+#
+#   dev push / PR-to-dev:  ubuntu-only test + lint + npm-shim
+#                          + health-badge + schema-drift (~5 min)
+#   main push / PR-to-main: full matrix + capability + coverage
+#                          + version-drift + action-contracts (~20 min)
+#
+# Two more cuts on top of the full-battery gate, both scoped to the
+# heavier jobs (Tier 1 -- lint/npm-shim/action-contracts -- always
+# runs, even in draft, for fast feedback):
+#   - Draft PRs skip the heavier jobs (`github.event.pull_request.draft
+#     != true`). A push event has no `pull_request` context, so this
+#     evaluates to `null != true` (true) there and never affects
+#     push-triggered runs.
+#   - Docs-only changes additionally skip the rust-matrix-building jobs
+#     (`test-cross`, `capability`, `schema-drift`) via the `changes`
+#     job's `docs_only` output. The classifier defaults to `false`
+#     (run everything) whenever it can't establish a diff base, so an
+#     unrecognized file type or force-push never silently skips a real
+#     code change.
+#
+# `concurrency:` cancels superseded runs so rapid-fire commits don't
+# pile up behind each other. `github.head_ref` is only set for
+# pull_request events; the `|| github.ref` fallback gives push events
+# (main/dev) their own per-branch group instead of colliding on an
+# empty string.
+on:
+  push:
+    branches: ['ci-probe/**']
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Top-level `permissions: {}` denies everything by default; each job
+# grants only what it needs (mirroring safeskill.yml's posture).
+# Dependabot keeps the SHA-pinned action versions current.
+permissions: {}
+
+jobs:
+  changes:
+    name: Detect change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify changed files
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.event.after }}"
+          fi
+
+          # Any uncertainty about the diff range (new branch, force-push,
+          # missing context) defaults to docs_only=false -- run the full
+          # matrix. The only way to skip it is a diff this script can
+          # positively classify as docs-only, never the absence of one.
+          if [ -z "$BASE" ] || [ -z "$HEAD" ] || [[ "$BASE" =~ ^0+$ ]]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "Could not determine a diff base; running full matrix."
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          if [ -z "$CHANGED" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "No changed files detected; running full matrix."
+            exit 0
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # docs/tool-schema.json lives under docs/ but is a generated
+          # artifact, not documentation -- it's the exact file
+          # `schema-drift` exists to catch drifting undetected. `^docs/`
+          # below would otherwise let a PR that edits only this file
+          # skip the one check whose job is to verify it, so it's
+          # special-cased out of the docs-only allowlist before the
+          # general classification runs.
+          if echo "$CHANGED" | grep -qx 'docs/tool-schema.json'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "docs/tool-schema.json changed; treating as non-docs so schema-drift still runs."
+            exit 0
+          fi
+
+          # ci.yml defines the matrix/jobs these very checks run as --
+          # a change to its own logic must run the full battery to
+          # prove the new logic still works. Every *other* workflow
+          # file (release.yml, distribution-acceptance.yml, the
+          # lain-health-badge action, etc.) can't affect what `cargo
+          # test` does, so it's safe to fold into the general allowlist
+          # below. Confirmed live 2026-09-16/17: three separate
+          # CI-config-only PRs (none touching a line of Rust) each
+          # still paid for the full 3-OS matrix + Coverage + Capability
+          # suite because this classifier didn't recognize
+          # .github/workflows or .github/actions at all.
+          if echo "$CHANGED" | grep -qx '\.github/workflows/ci\.yml'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "ci.yml itself changed; running full matrix to validate it."
+            exit 0
+          fi
+
+          # Conservative allowlist: every changed file must match one of
+          # these patterns for the run to count as docs-only (name kept
+          # for compatibility with the test-cross/capability/coverage
+          # jobs that already gate on this output -- it now also covers
+          # non-ci.yml CI config, not just prose docs). Anything
+          # unrecognized counts as code.
+          NON_DOCS=$(echo "$CHANGED" | grep -vE '(\.md$|^docs/|^LICENSE$|^\.github/ISSUE_TEMPLATE/|^\.gitignore$|^\.github/workflows/|^\.github/actions/)' || true)
+          if [ -z "$NON_DOCS" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "All changed files match the docs-only allowlist."
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "Non-docs files changed:"
+            echo "$NON_DOCS"
+          fi
+
+  test:
+    name: Cargo Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # A hung test (this session hit a real one: a subprocess reader
+    # with no timeout blocking forever) must fail the job, not sit on
+    # the runner queue for the 360-minute GitHub default.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Fast lane: Linux only. macos/windows cells move to the
+        # `test-cross` job below, which is gated on full_battery.
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies (ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config cmake git
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      # Swatinem/rust-cache keys on Cargo.lock + os + toolchain, so each
+      # matrix cell gets its own target/ cache. The cross-run speedup
+      # within one OS is what the original ubuntu-only job relied on.
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # 17 tests in `tests/use_cases/battery_*` invoke the `lain` binary at
+      # `target/debug/lain` and panic with a helpful message if it is
+      # missing. Building it here (rather than relying on `cargo test`
+      # to incidentally produce it) keeps the panic-fallback dead and
+      # the Windows matrix cell green.
+      - name: Build binaries (for use_cases/battery_* and sidecar tests that invoke them as subprocesses)
+        shell: bash
+        run: cargo build --bin lain --bin lain-git-sidecar
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --workspace
+
+      # Every `mod foo;` must resolve to a *committed* file. Catches the
+      # failure local tests structurally cannot: the module compiles from
+      # the working tree while the commit omits the file, so a clean
+      # checkout fails with E0583. The script called itself a pre-push
+      # check and nothing ever invoked it.
+      - name: Module declarations resolve to committed files
+        shell: bash
+        run: bash scripts/check-mod-resolution.sh
+
+      - name: Run JS tests
+        shell: bash
+        run: |
+          cd tests/js
+          npm ci
+          npm test
+
+  test-cross:
+    # Cross-platform (macOS + Windows) cells. Only runs on full
+    # battery — i.e. push to main or PR targeting main. Saves
+    # ~10 min/runner on every dev push and PR-to-dev. Also skips on
+    # docs-only diffs and draft PRs (see header comment).
+    name: Cargo Test cross-platform (${{ matrix.os }})
+    needs: [changes]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    if: (true) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build binaries (for use_cases/battery_* and sidecar tests that invoke them as subprocesses)
+        shell: bash
+        run: cargo build --bin lain --bin lain-git-sidecar
+
+      - name: Check Windows release archive contents
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          bash scripts/package-windows-release.sh \
+            target/debug \
+            "$RUNNER_TEMP/lain-windows-ci.tar.gz"
+          tar tzf - < "$RUNNER_TEMP/lain-windows-ci.tar.gz"
+
+      - name: Run tests
+        shell: bash
+        run: cargo test --workspace
+
+      - name: Module declarations resolve to committed files
+        shell: bash
+        run: bash scripts/check-mod-resolution.sh
+
+  capability:
+    name: Capability suite (demo.sh)
+    needs: [changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: (true) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config cmake git
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      # `scripts/demo.sh` boots a real server against a fixture whose call
+      # graph is known by construction and asserts lain's answers against
+      # that ground truth — 113 checks, and the claim the README leads
+      # with. Nothing ran it, so it could rot between manual invocations
+      # and the README would keep advertising it.
+      - name: Ground-truth capability checks
+        run: bash scripts/demo.sh --quick
+
+  health-badge:
+    name: Lain architecture health badge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft != true
+    # The action posts a commit status and a PR comment. The default
+    # GITHUB_TOKEN is read-only; grant the scopes the steps need.
+    permissions:
+      statuses: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Self-reference: use the action at HEAD, the same commit the
+      # workflow is shipping in. Consumers pin to a tag (see the
+      # action's README); the same repo cannot pin to a tag that
+      # does not exist yet on the first release run.
+      - uses: ./.github/actions/lain-health-badge
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          min-fan-out: '15'
+
+  version-drift:
+    name: lain-version default tracks latest release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    # The drift check runs on main, where release tags are pushed.
+    # On PRs the comparison would fail the moment a new tag is cut,
+    # before the bump PR can land -- confirmed live: this job failed
+    # on this exact PR when v0.7.4-rc1 was cut mid-review, before
+    # action.yml's pinned default caught up. Push-to-main only, not
+    # the broader full-battery condition the other gated jobs share.
+    if: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Extract pinned version from action.yml
+        id: pinned
+        run: |
+          # Print from the `lain-version:` line to the first `default:`
+          # line, then extract the vX.Y.Z token. The regex accepts an
+          # optional pre-release suffix (`-rc1`, `-beta.2`, etc.) so the
+          # same extractor keeps working when the next release is a
+          # pre-release; without this, `v0.7.4-rc1` would silently
+          # produce an empty match and the drift check would error out
+          # the first time a pre-release is cut.
+          PINNED=$(sed -n '/lain-version:/,/default:/p' .github/actions/lain-health-badge/action.yml \
+            | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?" | head -1)
+          if [ -z "$PINNED" ]; then
+            echo "::error::could not parse lain-version default from action.yml"
+            exit 1
+          fi
+          echo "version=${PINNED}" >> "$GITHUB_OUTPUT"
+          echo "Pinned default: ${PINNED}"
+      - name: Fetch latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release view --json tagName --jq .tagName)
+          if [ -z "$TAG" ]; then
+            echo "::error::no releases found on this repo"
+            exit 1
+          fi
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Latest release: ${TAG}"
+      - name: Check
+        env:
+          PINNED: ${{ steps.pinned.outputs.version }}
+          LATEST: ${{ steps.latest.outputs.version }}
+        run: |
+          if [ "$PINNED" != "$LATEST" ]; then
+            echo "::error::action.yml pins $PINNED but latest release is $LATEST"
+            echo "::error::bump the 'lain-version' default in .github/actions/lain-health-badge/action.yml"
+            exit 1
+          fi
+          echo "OK: pinned ($PINNED) == latest ($LATEST)"
+
+  lint:
+    name: Lint + format + doc tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # These checks aren't OS-specific — ubuntu runs them once and
+    # the three test-matrix cells pick up the rest. Failures here
+    # block merge regardless of the test matrix's color.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # `cargo fmt --check` — URGENT FIXES #6 baseline. Pre-fix,
+      # formatting was unchecked and drifted (~30 diffs in
+      # committed code, per `docs/CI.md`). The companion commit
+      # on this branch ("style: cargo fmt --all baseline") made
+      # the tree conform to current rustfmt; this job keeps it
+      # there going forward.
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      # `cargo clippy -- -D warnings` — promotes lints to errors
+      # so a new warning is a CI failure, not a "we'll fix it
+      # later" footnote. `--workspace --all-targets` covers
+      # integration tests and benches too. The allow list silences
+      # noisy lint families that produce ~200 warnings in the
+      # current tree (style/complexity/perf/pedantic) and unrelated
+      # test-helper dead-code warnings that clippy can't see across
+      # test crates. The strict correctness subset is what blocks
+      # merges here.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::style -A clippy::complexity -A clippy::perf -A clippy::pedantic -A unused -A dead_code
+      # Doc tests — `cargo test --workspace` runs them, but
+      # they're cheap to run separately and a dedicated job makes
+      # it easy to bisect when a doc example drifts.
+      - name: cargo test --doc
+        run: cargo test --workspace --doc
+
+  schema-drift:
+    name: Tool schema matches docs/tool-schema.json
+    needs: [changes]
+    timeout-minutes: 15
+    if: needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # The drift check is the documented contract (docs/CI.md §
+    # "Schema drift"): `lain schema dump` is the canonical tool-
+    # surface JSON; `docs/tool-schema.json` is the on-disk copy.
+    # A non-empty `git diff` on the regenerated file fails CI,
+    # forcing the PR to include the regenerated snapshot.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config cmake git
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build release binary
+        run: cargo build --release
+      - name: Regenerate schema
+        run: ./target/release/lain schema dump --out /tmp/schema.json
+      - name: Diff against committed snapshot
+        run: |
+          if ! diff -u docs/tool-schema.json /tmp/schema.json; then
+            echo "::error::docs/tool-schema.json is out of date. \
+                  Run \`make schema\` (or \`./target/release/lain \
+                  schema dump --out docs/tool-schema.json\`) and \
+                  commit the result."
+            exit 1
+          fi
+          echo "OK: docs/tool-schema.json matches the live schema"
+
+  npm-shim:
+    name: npm-shim install tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # The npm-shim is what `npm install lain-mcp` runs. Its install
+    # script (`scripts/install.js`) is the only piece of JavaScript
+    # that ships to end users; tests in `scripts/install.test.js`
+    # were not on any CI matrix (URGENT FIXES #6). Failures here
+    # would silently break every consumer install.
+    defaults:
+      run:
+        working-directory: npm-shim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Node 20 was deprecated on github-actions runners on
+          # 2025-09-19; bumped to 22 (LTS, current default). The
+          # npm-shim's `engines.node` is `>=18`, so 22 is in range.
+          node-version: '22'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Windows archive contract tests
+        working-directory: .
+        run: python3 scripts/test_package_windows_release.py
+
+  arch-guardrails:
+    name: Architecture guardrails (no redundant code)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    # Tier 1: runs on every PR (draft included), no docs_only gating.
+    # The four scripts under `scripts/check-*.py` enforce the
+    # duplication / single-source rules documented in
+    # `docs/CONTRIBUTING_AGENTS.md`. They are pure-Python stdlib and
+    # finish in well under a minute — the cost of catching a new
+    # sensor that copies the walker from an existing one, or a
+    # second `format_duration`, is a 50-line script; the cost of
+    # letting that drift land is a 200-line cleanup PR.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Sensor duplication
+        run: python scripts/check-no-duplicate-sensors.py
+      - name: MCP dispatch shape
+        run: python scripts/check-mcp-dispatch-shape.py
+      - name: Mirror DTOs
+        run: python scripts/check-no-mirror-dtos.py
+      - name: format_duration uniqueness
+        run: python scripts/check-format-duration-once.py
+      # The self-tests (`test_check_*.py`) live next to each check
+      # and run against a tempdir copy, so they can never affect the
+      # real tree. ~1s combined.
+      - name: Check self-tests
+        run: |
+          python scripts/test_check_no_duplicate_sensors.py
+          python scripts/test_check_mcp_dispatch_shape.py
+          python scripts/test_check_no_mirror_dtos.py
+          python scripts/test_check_format_duration_once.py
+
+
+  coverage:
+    # Coverage run is intentionally restricted to full_battery
+    # (push-to-main or PR-to-main). PRs already pay the `cargo test
+    # --workspace` cost on every OS; adding a coverage build per PR
+    # would lengthen the queue without changing the merge signal
+    # (codecov.io still annotates PRs from the latest main-branch
+    # upload). Until a baseline is chosen, the upload never fails
+    # CI: `fail_ci_if_error: false` plus codecov.yml's
+    # target=0/threshold=0 settings keep the badge dark until the
+    # first deliberate baseline PR.
+    name: Coverage (cargo llvm-cov)
+    needs: [changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # docs_only added 2026-09-17: this job has no bearing on prose docs
+    # or non-ci.yml CI config, and (unlike test-cross/capability) had no
+    # docs_only gate at all -- it paid for a full instrumented rebuild
+    # on every push/PR-to-main regardless of what changed.
+    if: (true) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config cmake git
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Build lain binary (for use_cases/battery_* tests that invoke it as a subprocess)
+        # 17 tests in `tests/use_cases/battery_*` invoke the `lain`
+        # binary and panic with a helpful message if it is missing.
+        # `cargo llvm-cov` defaults to a separate target_dir
+        # (target/llvm-cov-target), so the build here uses the same
+        # --target-dir the next step will use, keeping the binary at
+        # the path the tests expect.
+        run: cargo build --bin lain --target-dir target
+
+      - name: Generate coverage
+        # CARGO_TARGET_DIR matches the explicit --target-dir on the
+        # build step above. cargo-llvm-cov's CLI rejects --target-dir
+        # as a flag, so the equivalent is set as an env var.
+        env:
+          CARGO_TARGET_DIR: target
+          LAIN_PERF_BUDGET_MULTIPLIER: '4.0'
+        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        if: false  # probe branch: no external upload
+        uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: false
+
+
+  action-contracts:
+    name: Badge and release contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # This job is one of the three the header comment above names as
+    # Tier 1 ("lint/npm-shim/action-contracts -- always runs, even in
+    # draft, for fast feedback"), but the `draft != true` clause this
+    # inherited from the heavier jobs contradicted that: it made draft
+    # PRs targeting main skip release-contract validation entirely
+    # until marked ready. No draft exclusion here, matching lint/
+    # npm-shim, which never had one.
+    if: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Release metadata consistency
+        run: python scripts/check-release-version.py
+      - name: Release provenance export tests
+        run: python scripts/test_release_provenance.py
+      - name: Release gate regression tests
+        run: python scripts/test_release_version.py
+      # METADATA.toml / server.json / sync-server-json.py drift gate.
+      # Added in PR #2; the smoke test catches drift the version check
+      # ignores (description / homepage / keywords / repository.url).
+      - name: Canonical metadata sync gate
+        run: python scripts/test_sync_metadata.py
+      # Fast, network-free unit tests for the Milestone 9 clean-room
+      # check script (reader-thread timeout handling, protocol-violation
+      # detection) against a fake in-process server. The real live-network
+      # run against a published `npx @spuentesp/lain-mcp` lives in
+      # distribution-acceptance.yml, not here -- it exercises external
+      # published state, not this diff, so it doesn't belong on every PR.
+      - name: Clean-room check script unit tests
+        run: python scripts/test_clean_room_mcp_check.py
+      - name: Cached-binary assertion helper unit tests
+        run: python scripts/test_assert_cached_binary.py
+      - name: Action configuration and version pinning
+        run: python .github/actions/lain-health-badge/tests/test_action.py
+      - name: Badge extraction
+        run: bash .github/actions/lain-health-badge/tests/test_extract_added_fns.sh
+      - name: Installer checks
+        run: bash tests/install-test.sh
+
+  # Publishes the `lain/agent-contract` commit status directly from
+  # this workflow run, instead of the separate agent-contract.yml's
+  # `workflow_run: [CI]` rollup. That indirection never actually fired
+  # for a PR's own commit -- confirmed live: dozens of prior PR-branch
+  # CI completions, zero corresponding agent-contract runs, only ever
+  # firing from CI runs already on `main` (i.e. post-merge). Since
+  # `lain/agent-contract` is a required branch-protection check, this
+  # meant no PR could ever satisfy it before merge; only an admin
+  # bypass got PRs in. Running the aggregation as a job in this same
+  # workflow fires deterministically for every push and pull_request,
+  # on every branch, with no separate trigger to go stale.
+  #
+  # Same aggregate rule as before: PASS iff every agent-relevant job
+  # (capability, schema-drift, npm-shim) is success or skipped.
+  #
+  # For pull_request events from forks, GitHub downgrades the
+  # default `GITHUB_TOKEN` to read-only, so the `gh api ... statuses/...`
+  # POST below would 403. The branch protection check is still required
+  # on fork PRs, but it can never be satisfied from inside a fork-PR
+  # workflow run; that's a separate problem (the cross-repo status
+  # publishing pattern, see PR #43 / `docs/BRANCHING.md`). Here we
+  # just skip the job cleanly on fork PRs so it doesn't surface as a
+  # confusing CI failure.
+  agent-contract:
+    name: Publish agent-contract status
+    needs: [capability, schema-drift, npm-shim]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Aggregate into lain/agent-contract commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CAPABILITY: ${{ needs.capability.result }}
+          SCHEMA_DRIFT: ${{ needs.schema-drift.result }}
+          NPM_SHIM: ${{ needs.npm-shim.result }}
+        run: |
+          set -euo pipefail
+
+          # `github.sha` on a pull_request event is the ephemeral
+          # merge commit, not the PR's actual head commit -- posting a
+          # status there would be invisible to the PR branch of the
+          # protection check it's meant to satisfy. Use the real head
+          # SHA for PRs; `github.sha` is already correct for push.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
+
+          status="success"
+          total=0
+          passed=0
+          for result in "$CAPABILITY" "$SCHEMA_DRIFT" "$NPM_SHIM"; do
+            total=$((total + 1))
+            if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
+              passed=$((passed + 1))
+            else
+              status="failure"
+            fi
+          done
+          summary="${passed}/${total} agent-contract jobs green"
+          echo "Rollup for ${SHA}: ${summary} -> ${status}"
+
+          gh api "repos/${{ github.repository }}/statuses/${SHA}" \
+            --method POST \
+            --field state="$status" \
+            --field description="$summary" \
+            --field context='lain/agent-contract'
