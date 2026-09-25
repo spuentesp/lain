@@ -39,7 +39,48 @@ impl GlobalId {
         if parts.len() < 4 {
             return Err(crate::error::LainError::InvalidGlobalId(s.to_string()));
         }
+        // Validate the `Kind` segment is a real NodeType. Without this
+        // check, `repo:Foo:src/main.rs:hello` parses as a GlobalId that
+        // no graph lookup will ever resolve — the caller sees a
+        // `NotFound` that's indistinguishable from a genuinely missing
+        // symbol, and debugging requires reading the helper.
+        let kind_str = parts[1];
+        if !Self::is_known_node_kind(kind_str) {
+            return Err(crate::error::LainError::InvalidGlobalId(format!(
+                "{s}: unknown node kind `{kind_str}`"
+            )));
+        }
         Ok(Self(s.to_string()))
+    }
+
+    /// True iff `s` is the `Debug` rendering of a known [`NodeType`]
+    /// variant. `GlobalId::new` formats the kind with `{:?}`, which
+    /// yields the bare variant name (`Function`, `Struct`, `Method`,
+    /// …) — so a string match against the static list is sufficient
+    /// and avoids dragging a `FromStr` impl into the schema.
+    fn is_known_node_kind(s: &str) -> bool {
+        matches!(
+            s,
+            "File"
+                | "Namespace"
+                | "Module"
+                | "Package"
+                | "Class"
+                | "Interface"
+                | "Struct"
+                | "Enum"
+                | "Trait"
+                | "Function"
+                | "Method"
+                | "Property"
+                | "Variable"
+                | "Constant"
+                | "HttpRoute"
+                | "Topic"
+                | "Resource"
+                | "Schema"
+                | "Synthetic"
+        )
     }
 
     /// Parse out the node-type component of a global id, e.g.

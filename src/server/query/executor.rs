@@ -89,7 +89,7 @@ impl<'a> Executor<'a> {
             // mistake worth reporting rather than quietly running the ops.
             QueryMode::Tool => {
                 let Some(name) = &spec.named else {
-                    return Err(LainError::Mcp(
+                    return Err(LainError::InvalidArgument(
                         "mode \"tool\" runs a named query, but no `named` was given; \
                          set `named`, or use mode \"query\" to run the ops array"
                             .to_string(),
@@ -100,7 +100,7 @@ impl<'a> Executor<'a> {
             // Ops only. `named` alongside it is contradictory input.
             QueryMode::Query => {
                 if spec.named.is_some() {
-                    return Err(LainError::Mcp(
+                    return Err(LainError::InvalidArgument(
                         "mode \"query\" runs the ops array, but `named` was also given; \
                          drop one of them, or use mode \"auto\""
                             .to_string(),
@@ -308,7 +308,7 @@ impl<'a> Executor<'a> {
                 .map(|e| e.to_string())
                 .collect();
             valid.sort();
-            return Err(LainError::Mcp(format!(
+            return Err(LainError::InvalidArgument(format!(
                 "unknown edge type(s) {}: valid edge types are {}",
                 unknown.join(", "),
                 valid.join(", ")
