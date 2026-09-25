@@ -35,6 +35,10 @@ pub enum LainError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// A tool argument that is missing, mistyped or out of range.
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("Not found: {0}")]
     NotFound(String),
 

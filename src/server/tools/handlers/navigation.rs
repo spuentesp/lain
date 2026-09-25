@@ -121,7 +121,24 @@ pub async fn get_call_chain(
         Ok(vec![resolve(handle)?])
     };
     let starts = all_named(from)?;
-    let ends: HashSet<String> = all_named(to)?.into_iter().map(|n| n.id).collect();
+    let end_nodes = all_named(to)?;
+    // An endpoint found only through the federation fallback lives in
+    // another repository, where this graph's call edges cannot reach.
+    // Searching anyway answered "No call path found", which reads as
+    // "they are unrelated".
+    let local = |n: &GraphNode| {
+        overlay.get_node(&n.id).is_some() || matches!(graph.get_node(&n.id), Ok(Some(_)))
+    };
+    for (handle, nodes) in [(from, &starts), (to, &end_nodes)] {
+        if !nodes.is_empty() && !nodes.iter().any(local) {
+            return Err(LainError::NotFound(format!(
+                "'{handle}' is not in this repository (found in {}); call chains are traced \
+                 within one repository — pass the repo_id that holds both ends",
+                nodes[0].path
+            )));
+        }
+    }
+    let ends: HashSet<String> = end_nodes.into_iter().map(|n| n.id).collect();
 
     let mut queue = VecDeque::new();
     let mut parents = HashMap::new();
@@ -165,7 +182,7 @@ pub async fn get_call_chain(
 
     let Some(end_id) = found else {
         return Ok(format!(
-            "No call path found from '{}' to '{}' in Merged Brain.",
+            "No call path found from '{}' to '{}' in this repository.",
             from, to
         ));
     };

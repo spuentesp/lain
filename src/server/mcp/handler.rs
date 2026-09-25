@@ -236,8 +236,12 @@ pub fn resolve_repo_for_tool(
             } else if listed.len() == 1 {
                 Ok(listed[0].0.clone())
             } else {
+                // Name the ids: "or symbol" was advice many tools cannot take.
+                let mut ids: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
+                ids.sort_unstable();
                 Err(LainError::Config(format!(
-                    "tool '{tool_name}' requires scoping: multiple repos; pass repo_id or symbol"
+                    "tool '{tool_name}' requires scoping: multiple repos; pass repo_id (one of: {})",
+                    ids.join(", ")
                 )))
             }
         }
@@ -1118,7 +1122,7 @@ pub(crate) async fn await_startup_reindex(
             _ = cancel.cancelled() => Err(crate::error::LainError::Cancelled),
             r = async {
                 wait_for_federation_indexing(&server).await;
-                server.build_core_memory().await
+                server.build_core_memory_until_complete().await
             } => r,
         }
     })
@@ -3824,7 +3828,7 @@ mod tests {
     ///
     /// Pins the entire wrapped message byte-exactly — both the
     /// `LainError::Config` "Config error: " prefix and the agreed
-    /// `tool '<name>' requires scoping: multiple repos; pass repo_id or symbol`
+    /// `tool '<name>' requires scoping: multiple repos; pass repo_id (one of: …)`
     /// body. Drift in either layer (e.g. someone rewording the body,
     /// dropping the tool-name prefix, or changing how `LainError`
     /// formats `Config`) fails this test loudly.
@@ -3851,7 +3855,7 @@ mod tests {
 
         assert_eq!(
             text,
-            "Config error: tool 'explain_symbol' requires scoping: multiple repos; pass repo_id or symbol",
+            "Config error: tool 'explain_symbol' requires scoping: multiple repos; pass repo_id (one of: repo-a, repo-b)",
             "scoping error format drift — bare 'multiple repos; ...' string reappeared or wrapper changed",
         );
     }
@@ -4111,7 +4115,12 @@ mod tests {
              its call to the coordinator."
         );
 
-        let direct_build_core_memory_calls = source.matches(".build_core_memory()").count();
+        // The coordinator calls the looping form (a capped repository takes
+        // several passes); either spelling counts as the one entry point.
+        let direct_build_core_memory_calls = source.matches(".build_core_memory()").count()
+            + source
+                .matches(".build_core_memory_until_complete()")
+                .count();
         assert_eq!(
             direct_build_core_memory_calls, 1,
             "expected exactly one direct `.build_core_memory()` call in this file's \

@@ -290,7 +290,7 @@ impl Default for FileWatcher {
 /// the same exclusions the rest of the indexer applies. Every candidate is
 /// additionally probed with `read_dir` so a directory we cannot actually
 /// list is dropped here rather than failing later inside `notify`.
-fn discover_watch_directories(workspace: &Path) -> Vec<PathBuf> {
+pub(crate) fn discover_watch_directories(workspace: &Path) -> Vec<PathBuf> {
     let walker = ignore::WalkBuilder::new(workspace)
         .hidden(true)
         .git_ignore(true)
