@@ -98,82 +98,52 @@ impl GitSensor {
 
     /// Get all uncommitted changes (staged and unstaged)
     pub fn get_uncommitted_changes(&self) -> Result<Vec<FileChange>, LainError> {
-        let mut changes = Vec::new();
-
-        // Get HEAD commit for comparison
-        let head = self.repo.head().ok();
-        let head_commit = head.as_ref().and_then(|h| h.peel_to_commit().ok());
-
-        // Get staged changes
-        let mut opts = DiffOptions::new();
-        opts.include_untracked(true);
-
-        // Compare index to HEAD for staged changes
-        if let Some(commit) = head_commit {
-            let diff =
-                self.repo
-                    .diff_tree_to_index(commit.tree().ok().as_ref(), None, Some(&mut opts))?;
-
-            diff.foreach(
-                &mut |delta, _| {
-                    if let Some(path) = delta.new_file().path() {
-                        changes.push(FileChange {
-                            path: self.workspace.join(path),
-                            change_type: ChangeType::Modified,
-                            staged: true,
-                        });
-                    }
-                    true
-                },
-                None,
-                None,
-                None,
-            )?;
+        // One status pass, one entry per path. It was three diffs appended
+        // together: an untracked file came back as both Modified (the
+        // index-to-workdir diff with untracked included) and Added (the
+        // status pass), a staged-and-edited file twice, and a deleted file
+        // as Modified.
+        // libgit2 caches the index; another process's `git add` must show.
+        if let Ok(mut index) = self.repo.index() {
+            let _ = index.read(false);
         }
-
-        // Get unstaged changes (workdir to index)
-        let diff = self.repo.diff_index_to_workdir(None, Some(&mut opts))?;
-
-        diff.foreach(
-            &mut |delta, _| {
-                if let Some(path) = delta.new_file().path() {
-                    let full_path = self.workspace.join(path);
-                    let staged = changes.iter().any(|c| c.path == full_path);
-                    changes.push(FileChange {
-                        path: full_path,
-                        change_type: if delta.old_file().path().is_none() {
-                            ChangeType::Added
-                        } else {
-                            ChangeType::Modified
-                        },
-                        staged,
-                    });
-                }
-                true
-            },
-            None,
-            None,
-            None,
-        )?;
-
-        // Get untracked files
         let mut status_opts = StatusOptions::new();
         status_opts.include_untracked(true);
         status_opts.recurse_untracked_dirs(true);
-
+        status_opts.include_ignored(false);
         let statuses = self.repo.statuses(Some(&mut status_opts))?;
 
+        let mut changes = Vec::new();
         for entry in statuses.iter() {
-            if entry.status().is_wt_new() {
-                if let Ok(path) = entry.path() {
-                    let full_path = self.workspace.join(path);
-                    changes.push(FileChange {
-                        path: full_path,
-                        change_type: ChangeType::Added,
-                        staged: false,
-                    });
-                }
+            let st = entry.status();
+            let Ok(path) = entry.path() else {
+                continue;
+            };
+            let staged = st.is_index_new()
+                || st.is_index_modified()
+                || st.is_index_deleted()
+                || st.is_index_renamed()
+                || st.is_index_typechange();
+            let unstaged = st.is_wt_new()
+                || st.is_wt_modified()
+                || st.is_wt_deleted()
+                || st.is_wt_renamed()
+                || st.is_wt_typechange();
+            if !staged && !unstaged {
+                continue;
             }
+            let change_type = if st.is_wt_deleted() || (st.is_index_deleted() && !st.is_wt_new()) {
+                ChangeType::Deleted
+            } else if st.is_wt_new() || st.is_index_new() {
+                ChangeType::Added
+            } else {
+                ChangeType::Modified
+            };
+            changes.push(FileChange {
+                path: self.workspace.join(path),
+                change_type,
+                staged,
+            });
         }
 
         debug!("Found {} uncommitted changes", changes.len());
