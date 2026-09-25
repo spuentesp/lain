@@ -393,6 +393,23 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     }
 }
 
+/// Whether the global active-workspace pointer belongs to the project
+/// whose `repos.yaml` is `config_path`: same workspaces file when the
+/// pointer records one, otherwise (older pointers) a workspace of that name
+/// exists here.
+fn active_pointer_applies(active: &ActiveWorkspace, config_path: &Path) -> bool {
+    let here = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("workspaces.yaml");
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    match active.config_path.as_deref() {
+        Some(set_from) if set_from.is_absolute() => canon(set_from) == canon(&here),
+        _ => crate::federation::workspace::WorkspacesFile::load(&here)
+            .is_ok_and(|f| f.workspaces.iter().any(|w| w.name == active.name)),
+    }
+}
+
 /// Resolve the `--workspace` arg and dispatch to the right loader.
 /// Exposed at the file level so a unit test can exercise the resolution
 /// without spinning up an MCP server.
@@ -405,6 +422,22 @@ async fn load_federation_for_workspace(
         "" | "none" => None, // explicit "no workspace" — today's behavior
         "auto" => {
             match ActiveWorkspace::load() {
+                // The pointer is global (~/.config/lain); it only applies to
+                // the project whose workspaces file it was set from. Using
+                // it everywhere made `lain workspaces use` in one project
+                // stop `lain server` in every other one.
+                Ok(Some(active)) if !active_pointer_applies(&active, config_path) => {
+                    warn!(
+                        "active workspace '{}' was set for {}, not this project; serving all repos",
+                        active.name,
+                        active
+                            .config_path
+                            .as_deref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "another project".into())
+                    );
+                    None
+                }
                 Ok(Some(active)) => Some(active.name),
                 Ok(None) => None, // no pointer set → fall through to all-repos
                 Err(e) => {
@@ -500,4 +533,52 @@ fn init_tracing(log_level: &str) {
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .try_init();
+}
+
+#[cfg(test)]
+mod active_pointer_tests {
+    use super::*;
+
+    #[test]
+    fn a_pointer_from_another_project_does_not_apply() {
+        let here = tempfile::tempdir().unwrap();
+        let there = tempfile::tempdir().unwrap();
+        for d in [here.path(), there.path()] {
+            std::fs::write(d.join("repos.yaml"), "repos: []\n").unwrap();
+            std::fs::write(
+                d.join("workspaces.yaml"),
+                "workspaces:\n- name: stack\n  members: [a]\n",
+            )
+            .unwrap();
+        }
+        let set_there = ActiveWorkspace {
+            name: "stack".into(),
+            config_path: Some(there.path().join("workspaces.yaml")),
+        };
+        assert!(!active_pointer_applies(
+            &set_there,
+            &here.path().join("repos.yaml")
+        ));
+        assert!(active_pointer_applies(
+            &set_there,
+            &there.path().join("repos.yaml")
+        ));
+        // A legacy pointer (no path) applies where the name exists.
+        let legacy = ActiveWorkspace {
+            name: "stack".into(),
+            config_path: None,
+        };
+        assert!(active_pointer_applies(
+            &legacy,
+            &here.path().join("repos.yaml")
+        ));
+        let unknown = ActiveWorkspace {
+            name: "nope".into(),
+            config_path: None,
+        };
+        assert!(!active_pointer_applies(
+            &unknown,
+            &here.path().join("repos.yaml")
+        ));
+    }
 }

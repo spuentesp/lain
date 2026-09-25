@@ -189,8 +189,11 @@ pub fn get_code_snippet(
         }
     }
 
-    // Fall back to graph
-    if let Some(node) = graph.get_node_at_location(path, line_num as u32 - 1) {
+    // Fall back to graph, keyed by the repo-relative path: `./pkg/a.py`
+    // and the absolute spelling missed the symbol lookup that `pkg/a.py`
+    // got, and showed a different range.
+    let key = crate::server::graph::graph_path(workspace, std::path::Path::new(&disk_path));
+    if let Some(node) = graph.get_node_at_location(&key, line_num as u32 - 1) {
         if let (Some(ls), Some(le)) = (node.line_start, node.line_end) {
             let (first, last) = symbol_range(ls, le);
             return read_file_range(&disk_path, first, last);
@@ -213,6 +216,12 @@ fn read_file_range(path: &str, first: usize, last: usize) -> Result<String, Lain
     let lines: Vec<&str> = content.lines().collect();
     let first = first.max(1);
     let last = last.min(lines.len());
+    if first > lines.len() {
+        return Err(LainError::NotFound(format!(
+            "line {first} is past the end of {path} ({} lines)",
+            lines.len()
+        )));
+    }
     if first > last {
         return Err(LainError::NotFound(format!(
             "Invalid range: {first} to {last} ({path} has {} lines)",
@@ -356,24 +365,45 @@ fn call_lines_in(
         (Some(ls), Some(le)) => (ls as usize + 1, le as usize + 1),
         _ => (0usize, usize::MAX),
     };
+    // Lines naming the callee as a word, and among them the ones shaped
+    // like a call (`name(`, `name (`). The word alone also matched
+    // docstrings and prose (`:param send:`), so a caller showed five
+    // "call" lines for one call. Call-shaped lines win; bare mentions are
+    // kept only when there is no call-shaped line at all (Ruby and Scala
+    // call without parentheses).
     let mut out = Vec::new();
+    let mut call_shaped = Vec::new();
     for (idx, line) in text.lines().enumerate() {
         let lineno = idx + 1;
         if lineno < lo || lineno > hi {
             continue;
         }
+        let t = line.trim_start();
+        if ["//", "#", "/*", "* ", "--"]
+            .iter()
+            .any(|c| t.starts_with(c))
+            || t == "*"
+        {
+            continue;
+        }
         let mut found = false;
+        let mut shaped = false;
         for (i, _) in line.match_indices(callee) {
             let before = line[..i].chars().next_back();
-            let after = line[i + callee.len()..].chars().next();
+            let rest = &line[i + callee.len()..];
+            let after = rest.chars().next();
             let boundary = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
             if boundary(before) && boundary(after) {
                 found = true;
-                break;
+                let next = rest.trim_start().chars().next();
+                // `name(`, `name<T>(` / `name::<T>(`, `name { … }` (Swift
+                // trailing closure), `name!(` (Rust macro form).
+                if matches!(next, Some('(' | '<' | '{' | '!')) || rest.starts_with("::<") {
+                    shaped = true;
+                }
             }
         }
         // An import names the callee without calling it.
-        let t = line.trim_start();
         if ["import ", "from ", "use ", "#include", "using ", "require "]
             .iter()
             .any(|kw| t.starts_with(kw))
@@ -389,9 +419,16 @@ fn call_lines_in(
             .any(|kw| line.contains(&format!("{kw} {callee}")));
         if found && !defines {
             out.push(lineno);
+            if shaped {
+                call_shaped.push(lineno);
+            }
         }
     }
-    out
+    if call_shaped.is_empty() {
+        out
+    } else {
+        call_shaped
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +509,13 @@ mod call_lines_tests {
         let overlay = VolatileOverlay::new();
         let out = get_code_snippet(&graph, &overlay, ws.path(), "u.py", Some(3), None).unwrap();
         assert!(out.contains("Showing lines 3-5"), "{out}");
+        // Other spellings of the same file find the same symbol.
+        let abs = ws.path().join("u.py").to_string_lossy().to_string();
+        for spelling in ["./u.py", abs.as_str()] {
+            let other =
+                get_code_snippet(&graph, &overlay, ws.path(), spelling, Some(3), None).unwrap();
+            assert!(other.contains("Showing lines 3-5"), "{spelling}: {other}");
+        }
         assert!(
             out.contains("   3: def f(x):") && out.contains("   5:     return y"),
             "{out}"
@@ -521,6 +565,35 @@ mod call_lines_tests {
         );
         assert_eq!(
             call_lines_in(ws.path(), &caller_in("a.rs", (1, 3)), "helper"),
+            vec![2]
+        );
+    }
+
+    /// Docstring and comment mentions are not call sites; a paren-less
+    /// call still counts when it is the only mention.
+    #[test]
+    fn prose_mentions_are_not_call_sites() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ws.path().join("s.py"),
+            "def request(self):
+    \"\"\"Build and send it.\n    :param send: whether to send\n    \"\"\"\n    # send happens below\n    return self.send(prep)\n",
+        )
+        .unwrap();
+        assert_eq!(
+            call_lines_in(ws.path(), &caller_in("s.py", (0, 5)), "send"),
+            vec![6]
+        );
+        std::fs::write(
+            ws.path().join("r.rb"),
+            "def go
+  deliver :now
+end
+",
+        )
+        .unwrap();
+        assert_eq!(
+            call_lines_in(ws.path(), &caller_in("r.rb", (0, 2)), "deliver"),
             vec![2]
         );
     }

@@ -184,7 +184,7 @@ pub fn resolve_node_ambiguous(
     overlay: &VolatileOverlay,
     handle: &str,
 ) -> Result<(GraphNode, Vec<GraphNode>), LainError> {
-    let mut node = resolve_node(graph, overlay, handle)?;
+    let node = resolve_node(graph, overlay, handle)?;
     // Only a bare-name lookup can be ambiguous: an id or a path already
     // names one node.
     let mut others: Vec<GraphNode> = if node.name == handle {
@@ -211,12 +211,27 @@ pub fn resolve_node_ambiguous(
     // Likewise a type stub (`core.pyi`, `widget.d.ts`) restates a definition
     // that lives in the real module.
     let is_stub = |n: &GraphNode| n.path.ends_with(".pyi") || n.path.ends_with(".d.ts");
-    if is_container(&node) || is_stub(&node) {
-        if let Some(i) = others.iter().position(|n| !is_container(n) && !is_stub(n)) {
-            let symbol = others.remove(i);
-            others.insert(0, std::mem::replace(&mut node, symbol));
-        }
+    if others.is_empty() {
+        return Ok((node, others));
     }
+    // Choose the way `find_symbol` ranks its list — real symbols first,
+    // then anchor score, then path and line — so every tool answers about
+    // the definition `find_symbol` puts first. It took whichever node the
+    // name index returned first, and `get_call_sites send` answered about
+    // a different `send` than `find_symbol send` recommended.
+    others.push(node);
+    others.sort_by(|a, b| {
+        (is_container(a) || is_stub(a))
+            .cmp(&(is_container(b) || is_stub(b)))
+            .then_with(|| {
+                b.anchor_score
+                    .partial_cmp(&a.anchor_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line_start.cmp(&b.line_start))
+    });
+    let node = others.remove(0);
     Ok((node, others))
 }
 
@@ -226,17 +241,24 @@ pub fn ambiguity_note(chosen: &GraphNode, others: &[GraphNode]) -> String {
     if others.is_empty() {
         return String::new();
     }
+    // `path:line`, 1-based: two definitions in one file were
+    // indistinguishable by path alone.
+    let at = |n: &GraphNode| match n.line_start {
+        Some(l) => format!("{}:{}", n.path, l + 1),
+        None => n.path.clone(),
+    };
     let mut note = format!(
-        "⚠ '{}' is defined {} times; this answer is about the one in {}. \
+        "⚠ '{}' is defined {} times; this answer is about the one at {} ({}). \
          Others: ",
         chosen.name,
         others.len() + 1,
-        chosen.path
+        at(chosen),
+        chosen.id
     );
     let shown: Vec<String> = others
         .iter()
         .take(5)
-        .map(|n| format!("{} ({})", n.path, n.id))
+        .map(|n| format!("{} ({})", at(n), n.id))
         .collect();
     note.push_str(&shown.join(", "));
     if others.len() > 5 {
@@ -283,12 +305,12 @@ pub fn json_type_name(v: &Value) -> &'static str {
 pub fn required_str_arg(args: &Map<String, Value>, key: &str) -> Result<String, LainError> {
     match args.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
-        Some(other) => Err(LainError::NotFound(format!(
+        Some(other) => Err(LainError::InvalidArgument(format!(
             "Argument '{}' must be a string, got {}",
             key,
             json_type_name(other)
         ))),
-        None => Err(LainError::NotFound(format!(
+        None => Err(LainError::InvalidArgument(format!(
             "Missing required argument: {}",
             key
         ))),

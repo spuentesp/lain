@@ -947,9 +947,26 @@ impl RepoIndex {
         )
         .map_err(|e| LainError::Other(format!("watcher init: {e}")))?;
 
-        watcher
-            .watch(&path, RecursiveMode::Recursive)
-            .map_err(|e| LainError::Other(format!("watcher.watch({:?}): {e}", path)))?;
+        if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+            // A recursive watch follows symlinks and fails as a whole on
+            // one unreadable directory — an untracked link to `/etc` turned
+            // re-indexing off for the entire repo. Fall back to watching
+            // each directory the indexer would read (the `ignore` walk,
+            // which does not follow links), plus `.git` for commits.
+            tracing::warn!(
+                "[federation] recursive watch of {path:?} failed ({e}); watching its directories one by one"
+            );
+            let _ = watcher.unwatch(&path);
+            let mut dirs = crate::server::watcher::discover_watch_directories(&path);
+            dirs.push(path.join(".git"));
+            let watched = dirs
+                .iter()
+                .filter(|d| watcher.watch(d, RecursiveMode::NonRecursive).is_ok())
+                .count();
+            if watched == 0 {
+                return Err(LainError::Other(format!("watcher.watch({path:?}): {e}")));
+            }
+        }
 
         *self.watcher.lock() = Some(watcher);
         *self.watcher_task.lock() = Some(task);
@@ -1420,6 +1437,36 @@ mod tests {
             "indexed_signal should be ready immediately after index_forced returns Ok"
         );
     }
+    /// A symlink into a directory the watcher cannot read (an untracked
+    /// link to `/etc`, say) must not turn watching off for the repo.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_linked_directory_does_not_stop_the_watcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        std::fs::write(root.path().join("lib.rs"), "pub fn f() {}\n").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let locked = outside.path().join("locked");
+        std::fs::create_dir_all(locked.join("inner")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("etcdir")).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let repo = Arc::new(
+            RepoIndex::new(
+                Box::new(
+                    WorkspaceDirSource::new(RepoId::new("linked").unwrap(), root.path().to_owned())
+                        .unwrap(),
+                ),
+                state.path(),
+            )
+            .unwrap(),
+        );
+        let result = repo.start_watcher().await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.expect("watcher starts despite the unreadable linked directory");
+    }
+
     #[tokio::test]
     async fn deactivation_clears_owned_overlay_and_stops_watcher() {
         let root = tempfile::tempdir().unwrap();

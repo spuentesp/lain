@@ -20,6 +20,24 @@ impl LainServer {
     /// `Arc<Mutex<…>>` (git, lsp) — so calling it on a clone of the
     /// `LainServer` is safe and the writes are visible to the original
     /// `Arc<LainServer>` the MCP layer holds.
+    /// [`Self::build_core_memory`], repeated while each pass is partial
+    /// but leaves fewer files than the one before — a repository over
+    /// `max_files_per_scan` takes several passes. Stops at the first pass
+    /// that makes no progress (a scan timeout on the same files), which
+    /// is reported as that pass's error.
+    pub async fn build_core_memory_until_complete(&self) -> Result<(), LainError> {
+        let mut left_before = usize::MAX;
+        loop {
+            match self.build_core_memory().await {
+                Err(e) => match partial_files_left(&e) {
+                    Some(left) if left < left_before => left_before = left,
+                    _ => return Err(e),
+                },
+                ok => return ok,
+            }
+        }
+    }
+
     pub async fn build_core_memory(&self) -> Result<(), LainError> {
         // Defensive gate: sidecar processes should never call build_core_memory,
         // but if a future refactor routes them here, bail out cleanly instead
@@ -145,7 +163,46 @@ impl LainServer {
         // Batch files into chunks to reduce task spawning overhead
         let files_per_batch = self.ingest().tuning().ingestion.files_per_batch;
         let max_files = self.ingest().tuning().ingestion.max_files_per_scan;
-        let files_to_scan: Vec<_> = files.iter().take(max_files).cloned().collect();
+        // A capped pass used to take the same first `max_files` of the list
+        // every time, so a repository over the cap never converged: every
+        // pass was partial, the marker never advanced, and the index was
+        // never ready. Now:
+        // - files a previous pass already scanned for this same target
+        //   commit (their File node carries it) are skipped, so successive
+        //   passes cover the rest and the last one completes;
+        // - only parseable source counts toward the cap — a `.json` costs a
+        //   File node, and 5,000 of them kept a one-source-file repo from
+        //   ever finishing.
+        let workspace_root = self.ingest().config().workspace.clone();
+        let done_for_target = |f: &PathBuf| {
+            self.ingest()
+                .graph()
+                .get_file_node(&crate::graph::graph_path(&workspace_root, f))
+                .is_some_and(|n| n.commit_hash.as_deref() == Some(latest_commit.as_str()))
+        };
+        let remaining: Vec<PathBuf> = files
+            .iter()
+            .filter(|f| !done_for_target(f))
+            .cloned()
+            .collect();
+        let resumed = remaining.len() < files.len();
+        let is_source = |f: &PathBuf| {
+            f.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(crate::treesitter::is_indexed_extension)
+        };
+        let mut source_taken = 0usize;
+        let files_to_scan: Vec<_> = remaining
+            .iter()
+            .filter(|f| {
+                if !is_source(f) {
+                    return true;
+                }
+                source_taken += 1;
+                source_taken <= max_files
+            })
+            .cloned()
+            .collect();
         let file_chunks: Vec<Vec<PathBuf>> = files_to_scan
             .chunks(files_per_batch)
             .map(|chunk| chunk.to_vec())
@@ -387,7 +444,7 @@ impl LainServer {
         // must NOT advance `set_last_commit` — otherwise the graph claims to be
         // current at HEAD while missing files, which is worse than being visibly
         // behind. See the guarded `set_last_commit` at the end of this function.
-        let mut partial = files.len() > files_to_scan.len();
+        let mut partial = remaining.len() > files_to_scan.len();
         if partial {
             warn!(
                 "Scan capped at max_files_per_scan={} of {} changed files;                  this pass is partial and will not advance the indexed-commit marker",
@@ -551,13 +608,31 @@ impl LainServer {
             "Resolving {} tree-sitter static references...",
             all_static_refs.len()
         );
-        if last_commit.is_some() {
+        // A pass resuming an earlier capped one is incremental too: refs
+        // from files scanned before into the files scanned now must resolve.
+        if last_commit.is_some() || resumed {
             let git_sensor = Arc::clone(self.ingest().git());
-            let tracked = offthread(cancel.clone(), move || {
+            let tracked_result = offthread(cancel.clone(), move || {
                 git_sensor.try_get_all_tracked_files()
             })
-            .await
-            .unwrap_or_default();
+            .await;
+            // Drop deleted and moved-away paths *before* resolving. After a
+            // rename the old path's definition still sat beside the new
+            // one, so every call to it resolved to the stale node (or was
+            // dropped as ambiguous) and the later sweep deleted it with its
+            // edges: `git mv a.py lib.py` left lib.py's functions with no
+            // callers until a full re-index. Only with a complete listing —
+            // an empty one would read as "everything was deleted".
+            if let Ok(tracked_paths) = &tracked_result {
+                let tracked_keys: HashSet<String> = tracked_paths
+                    .iter()
+                    .map(|p| crate::graph::graph_path(&self.ingest().config().workspace, p))
+                    .collect();
+                if let Err(e) = self.ingest().graph().prune_orphans(&tracked_keys) {
+                    warn!("Orphan sweep before resolve failed: {e}");
+                }
+            }
+            let tracked = tracked_result.unwrap_or_default();
             let extra = refs_into_rescanned(
                 &self.ingest().config().workspace,
                 self.ingest().graph(),
@@ -949,9 +1024,10 @@ impl LainServer {
                 scanned, failed, duration
             );
             return Err(LainError::Other(format!(
-                "index pass was partial: {} of {} changed files scanned",
+                "{PARTIAL_PASS}: {} of {} changed files scanned; {} left",
                 scanned + failed,
                 files.len(),
+                remaining.len().saturating_sub(scanned + failed),
             )));
         }
 
@@ -1560,6 +1636,9 @@ pub async fn index_one_repo(request: IndexRequest<'_>) -> Result<(), LainError> 
         return Err(LainError::Cancelled);
     }
     if last_commit.is_some() && !force {
+        // Deleted and renamed-away paths go before resolving (see the
+        // single-workspace pipeline for the rename that lost its callers).
+        sweep_orphans(path, graph, git);
         let tracked = git.get_all_tracked_files().unwrap_or_default();
         all_static_refs.extend(refs_into_rescanned(path, graph, &files_to_scan, &tracked));
     }
@@ -2036,6 +2115,57 @@ mod readiness_progress_tests {
         );
     }
 
+    /// `git mv a.py lib.py` (committed) keeps the moved function's
+    /// callers on an incremental pass.
+    #[tokio::test]
+    async fn a_renamed_file_keeps_its_callers() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success())
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.path().join("a.py"), "def helper_hh():\n    return 1\n").unwrap();
+        std::fs::write(
+            root.path().join("b.py"),
+            "from a import helper_hh\n\ndef user_uu():\n    return helper_hh()\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        server.build_core_memory().await.unwrap();
+        let callers = |server: &LainServer| {
+            let g = server.ingest().graph();
+            let target = g
+                .find_all_nodes_by_name("helper_hh")
+                .into_iter()
+                .find(|n| n.node_type == crate::schema::NodeType::Function)
+                .expect("helper_hh indexed");
+            (
+                target.path.clone(),
+                g.get_edges_to(&target.id)
+                    .unwrap()
+                    .iter()
+                    .filter(|e| e.edge_type == crate::schema::EdgeType::Calls)
+                    .count(),
+            )
+        };
+        assert_eq!(callers(&server), ("a.py".to_string(), 1));
+        git(&["mv", "a.py", "lib.py"]);
+        git(&["commit", "-qm", "move"]);
+        server.build_core_memory().await.unwrap();
+        assert_eq!(callers(&server), ("lib.py".to_string(), 1));
+    }
+
     /// Bug #2 from the 2026-09-18 Tauri postmortem: a libgit2 call that
     /// wedges (packed-refs read on a huge monorepo, hung filesystem)
     /// leaves the parking_lot `GitSensor` mutex held by the stuck
@@ -2346,10 +2476,77 @@ mod readiness_progress_tests {
             "a capped partial pass must report failure, not Ok(()), so callers don't publish ready"
         );
         // The partial pass still persists what it scanned...
+        // One source file (the cap) plus the committed `.lain/tuning.toml`,
+        // which is not source and does not count toward it.
         let snapshot = server.readiness().snapshot();
-        assert_eq!(snapshot.files_total, Some(1));
+        assert_eq!(snapshot.files_total, Some(2));
         // ...but must not have advanced the indexed-commit marker to HEAD.
         assert_eq!(server.ingest().graph().get_last_commit().unwrap(), None);
+
+        // The next pass resumes with the file the first one skipped, and
+        // completes: a capped repository converges instead of rescanning
+        // the same first files forever.
+        server
+            .build_core_memory()
+            .await
+            .expect("second pass completes");
+        assert!(server.ingest().graph().get_last_commit().unwrap().is_some());
+        for f in ["a", "b"] {
+            assert!(
+                server.ingest().graph().find_node_by_name(f).is_some(),
+                "{f} indexed"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_errors_carry_the_files_left() {
+        let e = LainError::Other(format!(
+            "{PARTIAL_PASS}: 5 of 12 changed files scanned; 7 left"
+        ));
+        assert_eq!(partial_files_left(&e), Some(7));
+        assert_eq!(partial_files_left(&LainError::Other("boom".into())), None);
+    }
+
+    /// Non-source files do not count toward `max_files_per_scan`.
+    #[tokio::test]
+    async fn non_source_files_do_not_use_up_the_scan_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success())
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        for i in 0..5 {
+            std::fs::write(root.path().join(format!("d{i}.json")), "{}").unwrap();
+        }
+        std::fs::write(root.path().join("only.py"), "def only_fn():\n    pass\n").unwrap();
+        std::fs::create_dir_all(root.path().join(".lain")).unwrap();
+        std::fs::write(
+            root.path().join(".lain/tuning.toml"),
+            "[ingestion]\nmax_files_per_scan = 1\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "fixture"]);
+        let server =
+            LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
+        disable_real_lsp(&server, root.path()).await;
+        server
+            .build_core_memory()
+            .await
+            .expect("one source file fits the cap");
+        assert!(server
+            .ingest()
+            .graph()
+            .find_node_by_name("only_fn")
+            .is_some());
     }
 }
 
@@ -2439,4 +2636,20 @@ mod nlp_offthread_tests {
         let _t: TuningConfig = TuningConfig::default();
         let _arc: Arc<TuningConfig> = Arc::new(TuningConfig::default());
     }
+}
+
+/// How a partial pass's error begins; see [`partial_files_left`].
+const PARTIAL_PASS: &str = "index pass was partial";
+
+/// Files a partial pass left for the next one, read from its error.
+fn partial_files_left(e: &LainError) -> Option<usize> {
+    let LainError::Other(msg) = e else {
+        return None;
+    };
+    msg.strip_prefix(PARTIAL_PASS)?
+        .rsplit_once("; ")?
+        .1
+        .strip_suffix(" left")?
+        .parse()
+        .ok()
 }

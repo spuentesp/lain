@@ -128,7 +128,14 @@ fn write_intent_prompt(workspace: &Path) -> Result<PathBuf, String> {
 /// entry point already honors), the CWD-relative default `NlpEmbedder`
 /// falls back to, then the shared install directory `install.sh
 /// --download-model` and this command both write to.
+/// Absolute paths: the result is written into agent configs that apply in
+/// every directory, where a cwd-relative `models/…` finds nothing.
 fn locate_existing_model() -> Option<(PathBuf, PathBuf)> {
+    let absolute = |p: PathBuf| dunce::canonicalize(&p).unwrap_or(p);
+    locate_existing_model_relative().map(|(m, t)| (absolute(m), absolute(t)))
+}
+
+fn locate_existing_model_relative() -> Option<(PathBuf, PathBuf)> {
     if let Some(env) = std::env::var_os("LAIN_EMBEDDING_MODEL") {
         let (model, tokenizer) = NlpEmbedder::resolve_model_paths(Path::new(&env));
         if model.is_file() && tokenizer.is_file() {
@@ -271,8 +278,8 @@ fn resolve_semantic_model(opts: &SetupOptions) -> SemanticModelStatus {
             state: SemanticModelState::NotInstalled,
             model_path: None,
             detail: Some(
-                "Run `lain setup --yes` or download manually (see README's \
-                 \"Setting Up Semantic Search\" section)."
+                "Run `lain setup --yes`, or download it manually (docs/QUICKSTART.md, \
+                 \"semantic search model\")."
                     .into(),
             ),
         };
@@ -1957,8 +1964,10 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
 
     let doctor_report = doctor::build_report(Some(&root))?;
     let detected = detect_languages(&root);
-    let semantic = resolve_semantic_model(&opts);
+    // Language servers first: a bad `--lsp` must fail before the ~90 MB
+    // model download starts, as a bad `--agent` does.
     let language_servers = resolve_language_servers(&opts, &detected)?;
+    let semantic = resolve_semantic_model(&opts);
     let languages: Vec<String> = detected.into_iter().map(|d| d.name).collect();
     let exe = std::env::current_exe().context("locate current lain binary")?;
 
@@ -2010,6 +2019,17 @@ pub fn run_setup(opts: SetupOptions) -> Result<i32> {
         } else {
             print_human(&report);
         }
+    } else if report.configuration.state == ConfigurationState::Failed {
+        // Stdout stays config-only, but a failure must say why (it printed
+        // nothing at all and exited 1).
+        eprintln!(
+            "setup failed: {}",
+            report
+                .configuration
+                .detail
+                .as_deref()
+                .unwrap_or("could not build the configuration")
+        );
     }
     Ok(if report.ready { 0 } else { 1 })
 }
@@ -2049,6 +2069,15 @@ fn print_human(report: &SetupReport) {
         ("Git history", &report.capabilities.git_history),
     ] {
         use crate::server::readiness::CapabilityState::*;
+        // A fresh repository has no index yet; that is expected, not an
+        // error — the agent's `lain mcp` builds it on first start.
+        if label == "Structural index"
+            && capability.state == UnavailableError
+            && !report.repository.join(".lain/graph.bin").exists()
+        {
+            println!("  {label:<17} ○ not built yet (built when the agent first starts lain)");
+            continue;
+        }
         let mark = match capability.state {
             Ready | StaleUsable => "✓",
             WarmingUp => "○",

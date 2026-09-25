@@ -409,9 +409,12 @@ pub fn run_use(name: &str, config: Option<&Path>) -> Result<()> {
             ))
         ));
     }
+    // Absolute: the pointer is global, and `lain server` compares it with
+    // its own project's workspaces file to know whether it applies.
+    let absolute = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
     ActiveWorkspace {
         name: name.to_string(),
-        config_path: Some(path.clone()),
+        config_path: Some(absolute),
     }
     .save()
     .map_err(|e| anyhow!("save active workspace: {e}"))?;
