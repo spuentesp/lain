@@ -17,7 +17,17 @@ pub fn trace_dependency(
 ) -> Result<String, LainError> {
     // 1. Resolve handle
     let start_node = resolve_node(graph, overlay, symbol)?;
+    let start_id = start_node.id.clone();
 
+    // Dependencies are what the code uses, not what contains it or merely
+    // changes with it: following `Contains` / `CoChangedWith` / `Pattern`
+    // pulled in whole files and unrelated modules.
+    let is_dependency = |t: &EdgeType| {
+        !matches!(
+            t,
+            EdgeType::Contains | EdgeType::CoChangedWith | EdgeType::Pattern
+        )
+    };
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     let mut results = Vec::new();
@@ -28,22 +38,27 @@ pub fn trace_dependency(
             continue;
         }
         visited.insert(node.id.clone());
-        results.push(node.clone());
+        // The symbol is not its own dependency.
+        if node.id != start_id {
+            results.push(node.clone());
+        }
 
         // Get edges from both static and overlay
         let mut targets = HashSet::new();
 
         // Static edges
         if let Ok(edges) = graph.get_edges_from(&node.id) {
-            for e in edges {
+            for e in edges.into_iter().filter(|e| is_dependency(&e.edge_type)) {
                 targets.insert(e.target_id);
             }
         }
 
         // Overlay edges
         let overlay_edges = overlay.get_outgoing_edges(&node.id);
-        for (target, _) in overlay_edges {
-            targets.insert(target.id);
+        for (target, edge_type) in overlay_edges {
+            if is_dependency(&edge_type) {
+                targets.insert(target.id);
+            }
         }
 
         for tid in targets {
