@@ -297,7 +297,6 @@ pub async fn assess_change(
     ui_link: crate::server::tools::UiLink<'_>,
 ) -> Result<String, LainError> {
     let symbol = required_str_arg(args, "symbol")?;
-    let depth = str_arg(args, "depth");
     let include_tests = !matches!(
         args.get("include_tests").and_then(Value::as_bool),
         Some(false)
@@ -317,12 +316,12 @@ pub async fn assess_change(
     .await?;
     let callsites =
         crate::server::tools::handlers::context::get_call_sites(workspace, graph, overlay, &symbol);
-    let untested = if include_tests {
-        crate::server::tools::handlers::testing::find_untested_functions(
-            graph,
-            overlay,
-            Some(usize_arg(args, "limit").unwrap_or(20)),
-        )
+    // Which tests reach this symbol through calls. This section used to be
+    // the repository-wide `find_untested_functions` list — nothing to do
+    // with the symbol's dependents.
+    let untested: Result<String, LainError> = if include_tests {
+        crate::server::tools::utils::resolve_node(graph, overlay, &symbol)
+            .map(|node| tests_reaching(graph, &node.id, usize_arg(args, "limit").unwrap_or(20)))
     } else {
         Ok(String::new())
     };
@@ -331,8 +330,8 @@ pub async fn assess_change(
     let direct = extract_section(&callsites, "Direct dependents");
     let transitive = extract_section(&blast, "indirect");
     let untested_section = match untested {
-        Ok(s) => format!("\n## Untested dependents\n\n{}", trim_for_section(&s, 8)),
-        Err(_) => String::new(),
+        Ok(s) if !s.is_empty() => format!("\n## Test coverage\n\n{s}\n"),
+        _ => String::new(),
     };
 
     // Counted from the stable lines of the two outputs, not from section
@@ -375,14 +374,8 @@ pub async fn assess_change(
         "high"
     };
 
-    let depth_caveat = if depth.is_empty() {
-        String::new()
-    } else {
-        format!(" (depth={depth})")
-    };
-
     Ok(format!(
-        "## assess_change: {symbol}{depth_caveat}\n\n\
+        "## assess_change: {symbol}\n\n\
          ## Direct dependents\n\n{}\n\n\
          ## Transitive reach\n\n{}\n\
          {untested_section}\n\
@@ -390,6 +383,50 @@ pub async fn assess_change(
         trim_for_section(&direct, 20),
         trim_for_section(&transitive, 12),
     ))
+}
+
+/// Test functions that reach `target` through `Calls` edges, walking
+/// callers breadth-first. A symbol no test reaches is the risk worth
+/// naming before an edit.
+fn tests_reaching(graph: &GraphDatabase, target: &str, limit: usize) -> String {
+    use crate::schema::EdgeType;
+    use std::collections::{HashSet, VecDeque};
+    const MAX_VISITED: usize = 5000;
+    let mut seen: HashSet<String> = HashSet::from([target.to_string()]);
+    let mut queue: VecDeque<String> = VecDeque::from([target.to_string()]);
+    let mut tests: Vec<String> = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        if seen.len() > MAX_VISITED {
+            break;
+        }
+        for edge in graph.get_edges_to(&id).unwrap_or_default() {
+            if edge.edge_type != EdgeType::Calls || !seen.insert(edge.source_id.clone()) {
+                continue;
+            }
+            if let Ok(Some(caller)) = graph.get_node(&edge.source_id) {
+                if caller.label.as_deref() == Some("test") {
+                    tests.push(format!("{} ({})", caller.name, caller.path));
+                }
+            }
+            queue.push_back(edge.source_id);
+        }
+    }
+    if tests.is_empty() {
+        return "No test calls this symbol, directly or through its callers.".to_string();
+    }
+    tests.sort();
+    let shown: Vec<String> = tests.iter().take(limit).map(|t| format!("- {t}")).collect();
+    let more = tests.len().saturating_sub(limit);
+    format!(
+        "{} test(s) reach it:\n{}{}",
+        tests.len(),
+        shown.join("\n"),
+        if more > 0 {
+            format!("\n- … {more} more")
+        } else {
+            String::new()
+        }
+    )
 }
 
 /// M6 tool 5 of 5: `search_code` ("Find code that does Y")
@@ -828,6 +865,45 @@ fn lexical_search(graph: &GraphDatabase, query: &str, limit: usize) -> String {
 mod m6_tests {
     use super::*;
     use crate::schema::{EdgeType, GraphEdge, GraphNode};
+
+    #[test]
+    fn tests_reaching_walks_callers_to_tests() {
+        let tmp = std::env::temp_dir().join("test_semantic_tests_reaching");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let graph = GraphDatabase::new(&tmp).unwrap();
+        let f = |n: &str| GraphNode::new(NodeType::Function, n.into(), "a.py".into());
+        let (target, mid) = (f("target"), f("mid"));
+        let mut t = f("test_mid");
+        t.label = Some("test".into());
+        let lonely = f("lonely");
+        let ids = (
+            target.id.clone(),
+            mid.id.clone(),
+            t.id.clone(),
+            lonely.id.clone(),
+        );
+        graph.insert_nodes_batch(&[target, mid, t, lonely]).unwrap();
+        graph
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Calls,
+                ids.1.clone(),
+                ids.0.clone(),
+            ))
+            .unwrap();
+        graph
+            .insert_edge(&GraphEdge::new(
+                EdgeType::Calls,
+                ids.2.clone(),
+                ids.1.clone(),
+            ))
+            .unwrap();
+        let out = tests_reaching(&graph, &ids.0, 20);
+        assert!(
+            out.contains("1 test(s)") && out.contains("test_mid"),
+            "{out}"
+        );
+        assert!(tests_reaching(&graph, &ids.3, 20).starts_with("No test"));
+    }
 
     fn make_test_graph() -> (GraphDatabase, VolatileOverlay) {
         let tmp = std::env::temp_dir().join("test_semantic_handlers");

@@ -31,11 +31,47 @@ pub fn detect_toolchains(cwd: &Path, toolchains_dir: Option<&Path>) -> Vec<Strin
 
     let mut detected = Vec::new();
     for (name, marker) in &markers {
-        if cwd.join(marker).exists() {
+        let alternates: &[&str] = match name.as_str() {
+            // A Python project need not have a pyproject.toml.
+            "python" => &[
+                "setup.py",
+                "setup.cfg",
+                "pytest.ini",
+                "tox.ini",
+                "requirements.txt",
+            ],
+            _ => &[],
+        };
+        if marker_present(cwd, marker) || alternates.iter().any(|m| cwd.join(m).exists()) {
             detected.push(name.clone());
         }
     }
+    // HashMap order is random, and callers take the first entry: a repo
+    // with both package.json and Cargo.toml got a different toolchain from
+    // one call to the next. Order by a fixed priority, then name.
+    const PRIORITY: &[&str] = &["rust", "go", "typescript", "javascript", "python"];
+    detected.sort_by_key(|n| {
+        (
+            PRIORITY
+                .iter()
+                .position(|p| p == n)
+                .unwrap_or(PRIORITY.len()),
+            n.clone(),
+        )
+    });
     detected
+}
+
+/// A marker is a file name, or `*.ext` for any file with that extension.
+fn marker_present(cwd: &Path, marker: &str) -> bool {
+    match marker.strip_prefix("*.") {
+        Some(ext) => std::fs::read_dir(cwd).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.path().extension().is_some_and(|x| x == ext))
+        }),
+        None => cwd.join(marker).exists(),
+    }
 }
 
 /// Load toolchain markers from directory.
@@ -833,5 +869,26 @@ mod program_resolution_tests {
                 "{name} has no way to find its toolchain off PATH"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod detection_tests {
+    use super::*;
+
+    #[test]
+    fn detection_is_ordered_and_finds_python_and_glob_markers() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("package.json"), "{}").unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "").unwrap();
+        for _ in 0..5 {
+            assert_eq!(detect_toolchains(d.path(), None)[0], "rust");
+        }
+        let py = tempfile::tempdir().unwrap();
+        std::fs::write(py.path().join("setup.py"), "").unwrap();
+        assert_eq!(detect_toolchains(py.path(), None), vec!["python"]);
+        let cs = tempfile::tempdir().unwrap();
+        std::fs::write(cs.path().join("App.csproj"), "").unwrap();
+        assert_eq!(detect_toolchains(cs.path(), None), vec!["csharp"]);
     }
 }

@@ -201,6 +201,7 @@ impl<'a> Executor<'a> {
     }
 
     fn execute_find(&mut self, find: &FindOp) -> Result<Vec<GraphNodeRef>, LainError> {
+        check_node_types(find)?;
         let nodes = self.graph.query_nodes(
             find.type_selector.as_ref(),
             find.name.as_ref(),
@@ -265,6 +266,24 @@ impl<'a> Executor<'a> {
 
         let mut unique_ids = HashMap::new();
         found_nodes.retain(|n| unique_ids.insert(n.id.clone(), true).is_none());
+
+        // `target`: keep only the reached nodes it selects.
+        if let Some(target) = connect.target.as_deref() {
+            check_node_types(target)?;
+            let allowed: std::collections::HashSet<String> = self
+                .graph
+                .query_nodes(
+                    target.type_selector.as_ref(),
+                    target.name.as_ref(),
+                    target.label_selector.as_ref(),
+                    target.path.as_deref(),
+                )
+                .into_iter()
+                .map(|n| n.id.clone())
+                .filter(|id| target.id.as_ref().is_none_or(|want| want == id))
+                .collect();
+            found_nodes.retain(|n| allowed.contains(&n.id));
+        }
 
         self.nodes_visited += found_nodes.len();
 
@@ -525,4 +544,23 @@ impl From<Direction> for PetDirection {
             Direction::Both => PetDirection::Outgoing,
         }
     }
+}
+
+/// Reject node type names that do not exist instead of matching nothing.
+fn check_node_types(find: &FindOp) -> Result<(), LainError> {
+    let Some(sel) = find.type_selector.as_ref() else {
+        return Ok(());
+    };
+    let unknown = sel.unknown_types();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let valid: Vec<String> = crate::server::schema::NodeType::all()
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    Err(LainError::Other(format!(
+        "unknown node type(s) {unknown:?}; valid types: {}",
+        valid.join(", ")
+    )))
 }

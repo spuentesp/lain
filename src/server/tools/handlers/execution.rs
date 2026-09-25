@@ -41,6 +41,50 @@ fn spawn_error(program: &str, work_dir: &Path, e: std::io::Error) -> LainError {
     ))
 }
 
+/// `cmd.output()` bounded by `limit`, killing the whole process tree on
+/// timeout. Dropping a timed-out `output()` future killed nothing: `npm
+/// test` → `sh -c …` → the test runner all kept running, after the call
+/// returned "timed out" and even after the server exited. The command runs
+/// in its own process group (Unix) so its descendants go with it.
+async fn output_with_timeout(
+    mut cmd: Command,
+    limit: Duration,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    use std::process::Stdio;
+    cmd.kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Ok(Err(e)),
+    };
+    let pid = child.id();
+    let result = timeout(limit, child.wait_with_output()).await;
+    if result.is_err() {
+        if let Some(pid) = pid {
+            kill_tree(pid);
+        }
+    }
+    result
+}
+
+fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stderr(std::process::Stdio::null())
+        .status();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Parse a command string like "cargo build --message-format=json" into
 /// a Command, plus the program name for error reporting.
 ///
@@ -99,9 +143,21 @@ pub async fn run_build(
 ) -> Result<String, LainError> {
     let work_dir = cwd.map(Path::new).unwrap_or(Path::new("."));
 
+    if !work_dir.is_dir() {
+        return Err(LainError::NotFound(format!(
+            "cwd {} is not a directory",
+            work_dir.display()
+        )));
+    }
     // Detect toolchain
     let detected = detect_toolchains(work_dir, None);
-    let toolchain_name = detected.first().map(|s| s.as_str()).unwrap_or("unknown");
+    let Some(toolchain_name) = detected.first().map(|s| s.as_str()) else {
+        return Err(LainError::NotFound(format!(
+            "no project found in {} (looked for Cargo.toml, go.mod, package.json, \
+             pyproject.toml/setup.py/pytest.ini, …); pass `cwd` pointing at the project",
+            work_dir.display()
+        )));
+    };
 
     // Load profile and get build command + parser
     let profiles = load_toolchain_profiles(None);
@@ -139,7 +195,7 @@ pub async fn run_build(
     // the timeout "for arbitrary command execution" and was never read by
     // anything.
     let cmd_timeout = Duration::from_secs(runtime.default_command_timeout_secs);
-    let output = match timeout(cmd_timeout, cmd.output()).await {
+    let output = match output_with_timeout(cmd, cmd_timeout).await {
         Ok(r) => r.map_err(|e| spawn_error(&program, work_dir, e))?,
         Err(_) => {
             return Err(LainError::Mcp(format!(
@@ -222,19 +278,34 @@ pub async fn run_tests(
     };
 
     let (mut cmd, program) = parse_command(&profile.test_cmd(), Some(profile));
-    // Inject filter for rust if provided
-    if toolchain_name == "rust" || toolchain_name == "cargo" {
-        if let Some(f) = filter {
+    // Pass the filter the way each runner takes it; say so when it can't.
+    let filter_applied = match (filter, toolchain_name) {
+        (None, _) => true,
+        (Some(f), "rust" | "cargo") => {
             cmd.arg(f);
+            true
         }
-    }
+        (Some(f), "go") => {
+            cmd.args(["-run", f]);
+            true
+        }
+        (Some(f), "python") if program == "pytest" => {
+            cmd.args(["-k", f]);
+            true
+        }
+        (Some(f), "javascript" | "typescript") if program == "npm" => {
+            cmd.args(["--", f]);
+            true
+        }
+        _ => false,
+    };
     cmd.current_dir(work_dir);
 
     let default_timeout = runtime.default_test_timeout_secs;
     let timeout_duration =
         Duration::from_secs(timeout_secs.unwrap_or(default_timeout as usize) as u64);
 
-    let result = timeout(timeout_duration, cmd.output())
+    let result = output_with_timeout(cmd, timeout_duration)
         .await
         .map_err(|_| LainError::Mcp("Tests timed out".to_string()))?
         .map_err(|e| spawn_error(&program, work_dir, e))?;
@@ -253,7 +324,13 @@ pub async fn run_tests(
         toolchain_name
     );
     if let Some(f) = filter {
-        response.push_str(&format!("Filter: {}\n", f));
+        if filter_applied {
+            response.push_str(&format!("Filter: {}\n", f));
+        } else {
+            response.push_str(&format!(
+                "Filter: {f} — ignored, not supported for {toolchain_name}; ran every test\n"
+            ));
+        }
     }
     response.push_str(&format!("Exit code: {}\n", exit_code));
 
@@ -315,7 +392,7 @@ pub async fn run_clippy(
     // Same unbounded wait as `run_build` had; clippy on a large workspace
     // is exactly the call most likely to outlive an agent's patience.
     let cmd_timeout = Duration::from_secs(runtime.default_command_timeout_secs);
-    let output = match timeout(cmd_timeout, cmd.output()).await {
+    let output = match output_with_timeout(cmd, cmd_timeout).await {
         Ok(r) => r.map_err(|e| spawn_error("cargo", work_dir, e))?,
         Err(_) => {
             return Err(LainError::Mcp(format!(
@@ -404,6 +481,35 @@ mod spawn_tests {
         let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         let msg = spawn_error("cargo", Path::new("/ws"), e).to_string();
         assert!(msg.contains("cargo") && msg.contains("/ws"), "{msg}");
+    }
+
+    /// A timed-out command takes its descendants with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timeout_kills_the_whole_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sh -c 'echo $$ > {}; sleep 60' & wait",
+            marker.display()
+        ));
+        let r = output_with_timeout(cmd, Duration::from_millis(500)).await;
+        assert!(r.is_err(), "must time out");
+        let pid = std::fs::read_to_string(&marker).unwrap().trim().to_string();
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!alive, "grandchild {pid} survived the timeout");
     }
 
     /// Resolving the program is not enough: toolchains shell out to

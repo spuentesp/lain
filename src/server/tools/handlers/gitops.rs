@@ -19,7 +19,15 @@ pub fn get_file_diff(
     let filtered: Vec<_> = if let Some(p) = path_filter {
         changes
             .iter()
-            .filter(|c| c.path.to_string_lossy().contains(p))
+            // A repo-relative file or directory, not a substring of the
+            // absolute path (`a` matched every file under `/home/a…`).
+            .filter(|c| {
+                let full = c.path.to_string_lossy().replace('\\', "/");
+                let want = p.trim_start_matches("./").trim_end_matches('/');
+                full == want
+                    || full.ends_with(&format!("/{want}"))
+                    || full.contains(&format!("/{want}/"))
+            })
             .collect()
     } else {
         changes.iter().collect()
@@ -77,14 +85,27 @@ pub fn get_branch_status(git: &Arc<AnyGitSensor>) -> Result<String, LainError> {
 
     let mut status = String::from("## Git Branch Status\n\n");
     status.push_str(&format!("**Branch:** `{}`\n", branch));
-    status.push_str(&format!(
-        "**Status:**{}\n",
-        if is_valid {
-            " ✅ Clean"
-        } else {
-            " ⚠️ Not a git repo"
-        }
-    ));
+    if !is_valid {
+        status.push_str("**Status:** ⚠️ Not a git repo\n");
+        return Ok(status);
+    }
+    // "Clean" used to mean only "this is a git repository".
+    let changes = git.get_uncommitted_changes()?;
+    if changes.is_empty() {
+        status.push_str("**Status:** ✅ Clean\n");
+    } else {
+        let count =
+            |t: fn(&ChangeType) -> bool| changes.iter().filter(|c| t(&c.change_type)).count();
+        let staged = changes.iter().filter(|c| c.staged).count();
+        status.push_str(&format!(
+            "**Status:** ✏️ {} uncommitted change(s): {} modified, {} added, {} deleted ({} staged)\n",
+            changes.len(),
+            count(|t| matches!(t, ChangeType::Modified)),
+            count(|t| matches!(t, ChangeType::Added)),
+            count(|t| matches!(t, ChangeType::Deleted)),
+            staged
+        ));
+    }
 
     Ok(status)
 }
