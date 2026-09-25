@@ -170,7 +170,11 @@ pub enum DepthSpec {
 impl DepthSpec {
     pub fn to_range(&self) -> RangeInclusive<u32> {
         match self {
-            DepthSpec::Single(n) => *n..=*n,
+            // `depth: 3` is "up to three hops", as the docs' examples use it
+            // (`depth: 10` with a `target` to find a call chain). It meant
+            // exactly three, so shorter paths vanished.
+            DepthSpec::Single(0) => 0..=0,
+            DepthSpec::Single(n) => 1..=*n,
             DepthSpec::Range { min, max } => *min..=*max,
         }
     }
@@ -195,6 +199,24 @@ pub enum TypeSelector {
 }
 
 impl TypeSelector {
+    /// Names that are not a node type. Matching is exact, so `"function"`
+    /// or `"Bogus"` matched nothing and the query answered `count 0`.
+    pub fn unknown_types(&self) -> Vec<String> {
+        let valid: std::collections::HashSet<String> = crate::server::schema::NodeType::all()
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        let named: Vec<&String> = match self {
+            TypeSelector::Single(s) => vec![s],
+            TypeSelector::Or(v) => v.iter().collect(),
+        };
+        named
+            .into_iter()
+            .filter(|n| !valid.contains(*n))
+            .cloned()
+            .collect()
+    }
+
     pub fn matches(&self, node_type: &str) -> bool {
         match self {
             TypeSelector::Single(s) => s == node_type,

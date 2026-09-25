@@ -391,3 +391,52 @@ fn get_all_tracked_files_works_with_relative_workspace_path() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// One entry per path: an untracked file is Added once, a staged-then-edited
+/// file once, and a deleted file is Deleted.
+#[test]
+fn uncommitted_changes_are_one_entry_per_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repo = git2::Repository::init(root).unwrap();
+    std::fs::write(root.join("keep.txt"), "a\n").unwrap();
+    std::fs::write(root.join("gone.txt"), "b\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("keep.txt")).unwrap();
+    index.add_path(Path::new("gone.txt")).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("t", "t@t").unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "i", &tree, &[])
+        .unwrap();
+
+    std::fs::write(root.join("keep.txt"), "a2\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("keep.txt")).unwrap();
+    index.write().unwrap();
+    std::fs::write(root.join("keep.txt"), "a3\n").unwrap();
+    std::fs::remove_file(root.join("gone.txt")).unwrap();
+    std::fs::write(root.join("new.txt"), "c\n").unwrap();
+
+    let sensor = GitSensor::new(root).unwrap();
+    let changes = sensor.get_uncommitted_changes().unwrap();
+    let find = |name: &str| {
+        let hits: Vec<_> = changes.iter().filter(|c| c.path.ends_with(name)).collect();
+        assert_eq!(hits.len(), 1, "{name}: {changes:?}");
+        hits[0].clone()
+    };
+    assert!(matches!(
+        find("keep.txt").change_type,
+        crate::git::ChangeType::Modified
+    ));
+    assert!(find("keep.txt").staged);
+    assert!(matches!(
+        find("gone.txt").change_type,
+        crate::git::ChangeType::Deleted
+    ));
+    assert!(matches!(
+        find("new.txt").change_type,
+        crate::git::ChangeType::Added
+    ));
+    assert_eq!(changes.len(), 3, "{changes:?}");
+}
