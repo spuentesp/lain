@@ -185,7 +185,7 @@ pub fn evaluate(server: &LainServer, body: Value) -> Result<Value, String> {
         id: agent_intent
             .as_ref()
             .map(|i| i.id.clone())
-            .unwrap_or_else(crate::server::intent::IntentId::new),
+            .unwrap_or_default(),
         agent_id: session.id.clone(),
         goal: agent_intent
             .as_ref()

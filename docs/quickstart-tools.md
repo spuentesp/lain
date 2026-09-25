@@ -10,7 +10,7 @@ Quick reference for LAIN MCP tools.
 > 15-tool semantic surface (the M5 bootstrap + the M6 high-level
 > Agent API + readiness + multiplayer essentials), with a few
 > contextual additions depending on the server's mode
-> (federation / workspace / server-status). The full 80-tool
+> (federation / workspace / server-status). The full 83-tool
 > surface is reachable via `LAIN_TOOL_PROFILE=full`. The active
 > profile is reported through `get_capabilities.tool_profile` so
 > agents self-discover the filter on first connect. See
@@ -395,9 +395,9 @@ automatically. Relative paths resolve against that repo's checkout, so
 
 ## Tools documented elsewhere
 
-This page covers 39 of the 67 tools in the canonical surface
-(`tests/cli_surface.rs`-pinned). The remaining 28 are documented where
-they are central to the workflow they belong to:
+This page covers 38 of the 83 tools in the canonical surface
+(`docs/tool-schema.json`, the `lain schema dump` snapshot). The rest
+are documented where they are central to the workflow they belong to:
 
 - **Federation** ([`FEDERATION.md`](FEDERATION.md)): `list_repos`,
   `get_repo_info`, `get_federation_health`, `search_org`,

@@ -353,10 +353,8 @@ fn symbol_distance_via_graph(graph: &crate::graph::GraphDatabase, a: &str, b: &s
             return None;
         }
         for edge in graph.all_edges() {
-            if edge.source_id == node {
-                if visited.insert(edge.target_id.clone()) {
-                    frontier.push_back((d + 1, edge.target_id));
-                }
+            if edge.source_id == node && visited.insert(edge.target_id.clone()) {
+                frontier.push_back((d + 1, edge.target_id));
             }
         }
     }
@@ -639,8 +637,8 @@ mod tests {
             "other::c".into(),
         ))
         .unwrap();
-        let intent = intent_of("alice", vec!["auth::a".into()]);
-        let peer = intent_of("codex", vec!["other::c".into()]);
+        let intent = intent_of("alice", vec!["auth::a"]);
+        let peer = intent_of("codex", vec!["other::c"]);
         let ctx_no_graph = EvalContext {
             intent: Some(&intent),
             target: "auth::a",

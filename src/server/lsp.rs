@@ -632,7 +632,7 @@ impl LspMultiplexer {
         // LSP_STARTUP_TIMEOUT; with the bridge's own Arc<Mutex>,
         // the mux contention is brief.
         let path: Option<&std::path::Path> = sentinel_path.filter(|p| p.is_file());
-        let work = match self.prewarm_phase1(ext, path.as_deref()).await {
+        let work = match self.prewarm_phase1(ext, path).await {
             Phase1Outcome::Done => return,
             Phase1Outcome::Proceed(work) => work,
         };

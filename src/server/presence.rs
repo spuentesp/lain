@@ -489,7 +489,7 @@ impl PresenceRegistry {
                 &activity_for_cb,
             );
             let mut slot = cell_for_cb.lock();
-            *slot = Some(result.map_err(|e| e));
+            *slot = Some(result);
         });
         let mut slot = self.persist_cb.lock();
         let prev = slot.take();
@@ -1002,7 +1002,7 @@ impl OccupancyMap {
                 &activity_for_cb,
             );
             let mut slot = cell_for_cb.lock();
-            *slot = Some(result.map_err(|e| e));
+            *slot = Some(result);
         });
         let mut slot = self.persist_cb.lock();
         let prev = slot.take();

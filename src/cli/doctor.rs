@@ -47,7 +47,7 @@ pub struct InstallationReport {
 /// Active wire-level tool profile. Surfaced in `doctor --json` so an
 /// operator checking an offline server can see whether `tools/list`
 /// will return the curated 15-tool semantic surface or the full
-/// 80-tool surface. The advertised count is what the next
+/// 83-tool surface. The advertised count is what the next
 /// `tools/list` round-trip will report — lower than the registry
 /// total under `semantic`, equal to the registry total under
 /// `full`.
@@ -471,11 +471,7 @@ pub fn build_report(workspace: Option<&Path>) -> Result<DoctorReport> {
     let registry = crate::tools::registry::ToolRegistry::definitions();
     let inventory_in_profile = registry
         .iter()
-        .filter(|d| {
-            crate::server::tools::profile::SEMANTIC_PROFILE
-                .iter()
-                .any(|name| *name == d.name)
-        })
+        .filter(|d| crate::server::tools::profile::SEMANTIC_PROFILE.contains(&d.name))
         .count();
     let initial_advertised = match profile {
         crate::server::tools::profile::ToolProfile::Full => {

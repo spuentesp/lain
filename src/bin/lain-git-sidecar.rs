@@ -1,9 +1,9 @@
-//! Bug #2 sidecar prototype — child process.
+//! Git-isolation sidecar — child process shipped alongside `lain`.
 //!
 //! Hosts a `git2::Repository` and answers libgit2 calls from the
-//! parent over a Unix domain socket. Throwaway prototype for the
-//! 2026-09-18 Tauri federation postmortem's "sidecar process for
-//! libgit2" investigation (Bug #2 root cause).
+//! parent over a Unix domain socket. Isolating git operations in a
+//! child process works around `git2::Repository` being `Send` but not
+//! `Sync` — each `lain` instance spawns one of these per workspace.
 //!
 //! Wire protocol: see `crate::sidecar_proto`.
 //!
@@ -13,11 +13,13 @@
 //! lain-git-sidecar <repo-path> <socket-path>
 //! ```
 //!
-//! Listens on `<socket-path>`, serves one connection at a time
-//! (single-threaded for the prototype — concurrent connections
-//! would need threading + per-connection `git2::Repository` handles
-//! which is out of scope here), exits on `Request::Shutdown` or
-//! EOF.
+//! Listens on `<socket-path>`, serves one connection at a time.
+//! The single-connection constraint is a hard limit: `git2::Repository`
+//! is not `Sync`, so concurrent requests would require a thread pool
+//! with per-connection repository handles, which is out of scope.
+//! A second client connecting while the first is active will block
+//! in the OS accept queue until the first connection closes.
+//! Exits on `Request::Shutdown` or EOF.
 
 #[cfg(unix)]
 mod unix_sidecar {
@@ -166,9 +168,8 @@ mod unix_sidecar {
             socket_path.display()
         );
 
-        // Single connection at a time for the prototype. Production
-        // would want a thread pool + per-connection GitSensor (or a
-        // thread-safe Arc<Mutex<GitSensor>> shared across connections).
+        // Single connection at a time. Concurrent connections queue in
+        // the OS listen backlog until the active connection closes.
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => match handle_connection(stream, &sensor) {

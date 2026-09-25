@@ -111,7 +111,7 @@ fn requires_repo_scope(tool_name: &str) -> bool {
 
 /// The argument that names a symbol for this tool, used to route a
 /// federation call to the one repository defining it.
-fn symbol_hint<'a>(args: &'a Map<String, serde_json::Value>) -> Option<&'a str> {
+fn symbol_hint(args: &Map<String, serde_json::Value>) -> Option<&str> {
     ["symbol", "name", "from"]
         .iter()
         .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
@@ -737,12 +737,6 @@ fn indexing_note(what: &str) -> String {
 
 /// Wrap an args `Map<String, Value>` as a single `Value::Object` so
 /// the runner functions' `Value` parameter type matches. The runner
-/// functions re-deserialize through their own `serde_json::from_value`
-/// calls, so the wrapping is just shape preservation.
-fn args_map_to_value(map: serde_json::Map<String, Value>) -> Value {
-    Value::Object(map)
-}
-
 struct LainHandler {
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
@@ -2782,6 +2776,7 @@ mod tests {
     use crate::federation::federated_index::FederatedIndex;
     use crate::federation::graph_backend::PetgraphBackend;
     use crate::server::mcp::envelope::arg_property_schema;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     /// Pins the fix for the live e2e finding: the advertised schema for
@@ -3541,6 +3536,23 @@ mod tests {
 
         // 2. The default mode reports ok status and its kind: the sidecar
         //    on Unix, the in-process sensor where there are no Unix sockets.
+        //    Pin LAIN_GIT_SENSOR so this test is deterministic regardless of
+        //    whether a sidecar binary is on PATH on the host.
+        let sidecar_bin = std::env::var_os("CARGO_BIN_EXE_lain-git-sidecar")
+            .map(PathBuf::from)
+            .or_else(|| {
+                for dir in &["target/debug", "target/release"] {
+                    let p = std::path::Path::new(dir).join("lain-git-sidecar");
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+                None
+            });
+        if let Some(p) = sidecar_bin {
+            std::env::set_var("LAIN_GIT_SIDECAR_BIN", &p);
+        }
+        std::env::set_var("LAIN_GIT_SENSOR", "sidecar");
         let (mode, kind) = if cfg!(unix) {
             (GitSensorMode::Sidecar, "sidecar")
         } else {

@@ -619,6 +619,7 @@ fn release_filesystem(path: &str, agent_name: &str) -> Result<()> {
 /// Always exits 0 on network failure so a transient server outage
 /// can't block the agent — same fail-open contract as `claim` and
 /// `release`.
+#[allow(clippy::too_many_arguments)]
 pub fn observe(
     url: &str,
     agent_name: &str,
@@ -671,14 +672,14 @@ pub fn observe(
         }
         let client = reqwest::blocking::Client::new();
         let resp = client
-            .post(&endpoint.replace("/mcp", "/hook"))
+            .post(endpoint.replace("/mcp", "/hook"))
             .json(&body)
             .send();
         let _ = resp; // fail-open
     } else {
         let client = reqwest::blocking::Client::new();
         let resp = client
-            .post(&endpoint.replace("/mcp", "/hook"))
+            .post(endpoint.replace("/mcp", "/hook"))
             .json(&body)
             .send();
         let _ = resp;

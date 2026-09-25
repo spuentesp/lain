@@ -18,7 +18,6 @@ use std::time::SystemTime;
 /// in `tools/handlers/query_tests.rs`.
 #[tokio::test]
 async fn query_graph_includes_occupancy() {
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     // `LainServer::new` -> `GitSensor::new` calls `git2::Repository::open`,
@@ -396,7 +395,6 @@ fn list_all_returns_all_claimed_paths() {
 /// by the federation constructors; this test exercises the simpler path.
 #[tokio::test]
 async fn lain_server_exposes_presence_and_occupancy() {
-    use lain::server::LainServer;
     // Build a single-workspace server (uses the placeholder ingestion)
     let tmp = tempfile::tempdir().unwrap();
     // `GitSensor::new` calls `git2::Repository::open`, which requires an
@@ -527,7 +525,6 @@ async fn presence_tool_dispatchers_round_trip() {
         run_claim_files, run_list_active_agents, run_list_occupancy, run_my_claims,
         run_register_agent, run_release_files, run_who_am_i,
     };
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -1244,7 +1241,6 @@ fn parent_session_id_round_trips_on_agent_session() {
 #[tokio::test]
 async fn who_am_i_includes_parent_session_id() {
     use lain::server::mcp::presence_tools::{run_list_subagents, run_register_agent, run_who_am_i};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -1332,7 +1328,6 @@ fn conflict_entry_carries_agent_id_and_last_seen_unix() {
 #[test]
 fn run_claim_files_conflict_json_has_no_unknown_name_field() {
     use lain::server::mcp::presence_tools::run_claim_files;
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -1552,7 +1547,6 @@ fn claim_without_plan_revision_deserializes_to_none() {
 #[tokio::test]
 async fn to_old_path_fires_via_run_claim_files() {
     use lain::server::schema::{GraphNode, NodeType};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -1632,7 +1626,6 @@ async fn to_old_path_fires_via_run_claim_files() {
 // -------------------------------------------------------------------------
 #[tokio::test]
 async fn get_world_state_tool_returns_retracted_and_beyond_current() {
-    use lain::server::LainServer;
     use serde_json::json;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -2058,7 +2051,6 @@ fn interactive_ttl_is_sized_for_model_latency() {
 #[tokio::test]
 async fn any_authenticated_tool_call_extends_the_session() {
     use lain::server::mcp::presence_tools::{run_my_claims, run_register_agent};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -2261,7 +2253,6 @@ fn read_over_another_read_carries_no_advisory() {
 async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
     use lain::server::mcp::presence_tools::run_claim_files;
     use lain::server::presence::{AgentId, ClaimIntent, ClaimRequest};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -2315,7 +2306,6 @@ async fn a_conflict_from_a_departed_holder_reports_a_null_name() {
 async fn session_removal_cleans_up_claims_and_locks() {
     use lain::server::mcp::presence_tools::run_claim_files;
     use lain::server::presence::AgentId;
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -2365,7 +2355,6 @@ async fn session_removal_cleans_up_claims_and_locks() {
 async fn unregister_agent_cleans_up_claims_and_emits_event() {
     use lain::server::mcp::presence_tools::run_claim_files;
     use lain::server::presence::{AgentId, PresenceEvent};
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
@@ -2425,7 +2414,6 @@ async fn unregister_agent_cleans_up_claims_and_emits_event() {
 #[tokio::test]
 async fn claim_files_accepts_string_form_files() {
     use lain::server::mcp::presence_tools::run_claim_files;
-    use lain::server::LainServer;
 
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();

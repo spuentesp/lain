@@ -214,6 +214,7 @@ pub async fn get_context(
 /// Composes `trace_dependency` for direct graph neighbors,
 /// `get_coupling_radar` for co-change partners, and `semantic_search`
 /// for semantic neighbors (when an NLP model is loaded).
+#[allow(clippy::too_many_arguments)]
 pub async fn find_related(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
@@ -435,6 +436,7 @@ fn tests_reaching(graph: &GraphDatabase, target: &str, limit: usize) -> String {
 /// `semantic` uses the NLP model; `auto` (default) tries
 /// semantic first and falls back to lexical, recording the
 /// fallback in the response so the agent knows what happened.
+#[allow(clippy::too_many_arguments)]
 pub fn search_code(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
@@ -601,6 +603,7 @@ fn path_hint_option(s: &str) -> Option<String> {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn resolve_for_snippet(
     graph: &GraphDatabase,
     overlay: &VolatileOverlay,
@@ -654,10 +657,10 @@ fn extract_section(body: &str, header_marker: &str) -> String {
         let trimmed = line.trim_start();
         let trimmed_lower = trimmed.to_lowercase();
         if !in_section {
-            if trimmed_lower.starts_with("- ") || trimmed_lower.starts_with("## ") {
-                if trimmed_lower.contains(&header_lower) {
-                    in_section = true;
-                }
+            if (trimmed_lower.starts_with("- ") || trimmed_lower.starts_with("## "))
+                && trimmed_lower.contains(&header_lower)
+            {
+                in_section = true;
             }
         } else if trimmed.is_empty() {
             // Blank line ends the section (body sections are
@@ -707,6 +710,7 @@ fn count_bullets(section: &str) -> usize {
         .count()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn semantic_call(
     workspace: &std::path::Path,
     graph: &GraphDatabase,
