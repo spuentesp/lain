@@ -282,9 +282,17 @@ pub fn navigate_to_anchor(
         visited.insert(current.id.clone());
 
         let score = current.anchor_score.unwrap_or(0.0);
-        if best_anchor.is_none()
-            || score > best_anchor.as_ref().unwrap().anchor_score.unwrap_or(0.0)
-        {
+        // `if let` so the comparison guard is one expression and a
+        // future refactor can't strip the `is_none()` short-circuit
+        // and turn the inner `unwrap()` into a panic on the first
+        // iteration. The trailing `else` keeps the original
+        // short-circuit semantics: take the candidate only when its
+        // score strictly beats the current best.
+        let replace = match &best_anchor {
+            None => true,
+            Some(b) => score > b.anchor_score.unwrap_or(0.0),
+        };
+        if replace {
             best_anchor = Some(current.clone());
         }
 

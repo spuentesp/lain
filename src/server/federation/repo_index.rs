@@ -254,9 +254,6 @@ impl RepoIndex {
         if let Some(task) = self.watcher_task.lock().take() {
             task.abort();
         }
-        if let Some(task) = self.watcher_task.lock().take() {
-            task.abort();
-        }
         let overlay = self.server_overlay.lock().clone();
         let ids: Vec<_> = self
             .overlay_paths
@@ -1071,23 +1068,32 @@ impl RepoIndex {
         // "commit landed but reindex hasn't run" (file still exists,
         // keep overlay) from "path is genuinely gone" (file gone,
         // purge eagerly).
-        {
+        // Collect stale ids first; release the `overlay_paths` lock
+        // before calling `overlay.remove_node`. `overlay_paths` is a
+        // parking_lot lock (non-reentrant) and the overlay's own
+        // bookkeeping may need to acquire it during `remove_node` in
+        // the future — holding it here is a latent lock-ordering
+        // hazard across crate boundaries.
+        let stale_ids: Vec<String> = {
             let mut owned = self.overlay_paths.lock();
             let stale_paths: Vec<String> = owned
                 .keys()
                 .filter(|p| !current_paths.contains(*p))
                 .cloned()
                 .collect();
+            let mut ids = Vec::new();
             for path in stale_paths {
                 let deleted_from_disk = !workspace_root.join(&path).is_file();
                 if indexed_current_commit || deleted_from_disk {
-                    if let Some(ids) = owned.remove(&path) {
-                        for id in ids {
-                            overlay.remove_node(&id);
-                        }
+                    if let Some(path_ids) = owned.remove(&path) {
+                        ids.extend(path_ids);
                     }
                 }
             }
+            ids
+        };
+        for id in &stale_ids {
+            overlay.remove_node(id);
         }
 
         // Drop entries for THIS repo's changed paths BEFORE scanning —

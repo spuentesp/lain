@@ -351,10 +351,17 @@ impl PresenceLayer {
         // it for the duration of this critical section by stashing
         // the previous callback and installing a fresh one that
         // records its result in the cell.
-        let persist_result =
+        //
+        // One cell per registry: a shared cell would let the second
+        // callback's error overwrite the first. Both presence and
+        // occupancy persist can fail independently; both must reach
+        // the caller.
+        let presence_persist =
+            std::sync::Arc::new(parking_lot::Mutex::new(None::<Result<(), String>>));
+        let occupancy_persist =
             std::sync::Arc::new(parking_lot::Mutex::new(None::<Result<(), String>>));
         let prev_presence_cb = self.presence.swap_persist_capture(
-            std::sync::Arc::clone(&persist_result),
+            std::sync::Arc::clone(&presence_persist),
             path.clone(),
             self.presence.clone(),
             self.occupancy.clone(),
@@ -362,7 +369,7 @@ impl PresenceLayer {
             self.activity.clone(),
         );
         let prev_occupancy_cb = self.occupancy.swap_persist_capture(
-            std::sync::Arc::clone(&persist_result),
+            std::sync::Arc::clone(&occupancy_persist),
             path.clone(),
             self.presence.clone(),
             self.occupancy.clone(),
@@ -376,7 +383,10 @@ impl PresenceLayer {
         if let Some(prev) = prev_occupancy_cb {
             self.occupancy.restore_persist_callback(prev);
         }
-        if let Some(Err(e)) = persist_result.lock().clone() {
+        if let Some(Err(e)) = presence_persist.lock().clone() {
+            return Err(CoordinationError::PersistFailed(e));
+        }
+        if let Some(Err(e)) = occupancy_persist.lock().clone() {
             return Err(CoordinationError::PersistFailed(e));
         }
         Ok(result)

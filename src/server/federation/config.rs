@@ -86,7 +86,29 @@ impl FederationConfig {
         Self::load_from_str(&s)
     }
     pub fn load_from_str(s: &str) -> Result<Self, LainError> {
-        serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))
+        let cfg: FederationConfig =
+            serde_yaml::from_str(s).map_err(|e| LainError::Config(format!("yaml: {e}")))?;
+        cfg.validate_unique_repo_ids()?;
+        Ok(cfg)
+    }
+    /// Reject duplicate `id` entries. Two `RepoConfig`s with the same id
+    /// both build sources pointing at `data_dir/<id>` on disk; the
+    /// federation then `deactivate`s the first inside `add_repo` and
+    /// silently keeps the second, while the on-disk graph.bin collides
+    /// between the two sources' `RepoIndex::new` reads. Fail loudly at
+    /// load time instead.
+    fn validate_unique_repo_ids(&self) -> Result<(), LainError> {
+        use std::collections::HashSet;
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.repos.len());
+        for r in &self.repos {
+            if !seen.insert(r.id.as_str()) {
+                return Err(LainError::Config(format!(
+                    "duplicate repo id '{}' in repos.yaml; ids must be unique",
+                    r.id
+                )));
+            }
+        }
+        Ok(())
     }
     /// Return the configured Git sensor mode, taking precedence in order:
     /// 1. `LAIN_GIT_SENSOR` environment variable

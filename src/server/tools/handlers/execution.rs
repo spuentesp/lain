@@ -144,7 +144,7 @@ pub async fn run_build(
     let work_dir = cwd.map(Path::new).unwrap_or(Path::new("."));
 
     if !work_dir.is_dir() {
-        return Err(LainError::NotFound(format!(
+        return Err(LainError::Config(format!(
             "cwd {} is not a directory",
             work_dir.display()
         )));
@@ -152,7 +152,7 @@ pub async fn run_build(
     // Detect toolchain
     let detected = detect_toolchains(work_dir, None);
     let Some(toolchain_name) = detected.first().map(|s| s.as_str()) else {
-        return Err(LainError::NotFound(format!(
+        return Err(LainError::Unavailable(format!(
             "no project found in {} (looked for Cargo.toml, go.mod, package.json, \
              pyproject.toml/setup.py/pytest.ini, …); pass `cwd` pointing at the project",
             work_dir.display()
@@ -164,7 +164,7 @@ pub async fn run_build(
     let profile = match profiles.get(toolchain_name) {
         Some(p) => p,
         None => {
-            return Err(LainError::NotFound(format!(
+            return Err(LainError::Config(format!(
                 "No profile found for toolchain: {}. Add a toolchains/{}.toml file.",
                 toolchain_name, toolchain_name
             )));
@@ -198,7 +198,7 @@ pub async fn run_build(
     let output = match output_with_timeout(cmd, cmd_timeout).await {
         Ok(r) => r.map_err(|e| spawn_error(&program, work_dir, e))?,
         Err(_) => {
-            return Err(LainError::Mcp(format!(
+            return Err(LainError::Unavailable(format!(
                 "`{program}` timed out after {}s in {} \
                  (raise `runtime.default_command_timeout_secs` in .lain/tuning.toml)",
                 runtime.default_command_timeout_secs,
@@ -307,7 +307,7 @@ pub async fn run_tests(
 
     let result = output_with_timeout(cmd, timeout_duration)
         .await
-        .map_err(|_| LainError::Mcp("Tests timed out".to_string()))?
+        .map_err(|_| LainError::Unavailable("Tests timed out".to_string()))?
         .map_err(|e| spawn_error(&program, work_dir, e))?;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
@@ -395,7 +395,7 @@ pub async fn run_clippy(
     let output = match output_with_timeout(cmd, cmd_timeout).await {
         Ok(r) => r.map_err(|e| spawn_error("cargo", work_dir, e))?,
         Err(_) => {
-            return Err(LainError::Mcp(format!(
+            return Err(LainError::Unavailable(format!(
                 "clippy timed out after {}s in {} \
                  (raise `runtime.default_command_timeout_secs` in .lain/tuning.toml)",
                 runtime.default_command_timeout_secs,

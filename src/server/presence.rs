@@ -467,6 +467,13 @@ impl PresenceRegistry {
         intent: std::sync::Arc<crate::server::intent::IntentRegistry>,
         activity: std::sync::Arc<crate::server::activity::ActivityTracker>,
     ) -> Option<PersistFn> {
+        // NOTE: not re-entrant. If the closure passed to
+        // `f()` inside `with_shared_presence` indirectly triggers a
+        // second `swap_persist_capture` (e.g. through a nested hook),
+        // the inner swap's `restore_persist_callback` will overwrite
+        // the outer slot's prior closure when the inner scope exits,
+        // and the outer slot ends up holding the inner's previous
+        // callback. Keep the swap depth at one.
         let cell_for_cb = std::sync::Arc::clone(&cell);
         let path_for_cb = path.clone();
         let presence_for_cb = std::sync::Arc::clone(&presence);

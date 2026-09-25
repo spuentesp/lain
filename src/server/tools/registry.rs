@@ -425,7 +425,7 @@ impl ToolRegistry {
                 return entry.0.call(ctx, args).await;
             }
         }
-        Err(LainError::NotFound(format!("Unknown tool: {}", name)))
+        Err(LainError::InvalidArgument(format!("Unknown tool: {}", name)))
     }
 
     /// Collect all tool definitions for MCP schema registration.

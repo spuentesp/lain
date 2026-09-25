@@ -562,7 +562,7 @@ fn parse_node_type(s: &str) -> Result<NodeType, LainError> {
         "method" => NodeType::Method,
         "class" => NodeType::Class,
         other => {
-            return Err(LainError::Other(format!(
+            return Err(LainError::InvalidArgument(format!(
                 "unsupported type_filter `{other}` (try function/method/class/struct/interface/trait/enum/module/file)"
             )))
         }

@@ -154,23 +154,47 @@ impl FederationHandle {
         // Index it, as startup does for every repo: adding only registered
         // an empty graph that stayed `indexing` until the next restart.
         // Then link calls between it and the others, and watch it.
+        //
+        // Order matters and mirrors the cold-start path in
+        // `crate::server::federation::loader`: wire the cross-repo
+        // resolver BEFORE `index()` so the new repo's outgoing
+        // `Calls` resolve into the existing federation; index the
+        // repo so its symbols exist; project it so existing repos'
+        // relink passes can resolve calls INTO it; THEN relink
+        // existing repos. Without this order, `relink_cross_repo`
+        // runs against a `symbol_to_repos` that does not yet contain
+        // the new repo's symbols and the new repo's own calls
+        // silently drop without a resolver — the federation-wide
+        // graph stays incomplete until an unrelated filesystem edit
+        // triggers a watcher re-link.
         let fed = Arc::clone(fed);
         let id = repo_id.clone();
         tokio::spawn(async move {
             let Some(repo) = fed.get_repo(&id) else {
                 return;
             };
+            // 1. Wire resolver before index so the new repo's calls resolve.
+            repo.set_cross_repo_resolver(fed.clone());
             if let Err(e) = repo.index().await {
                 tracing::warn!("indexing hot-added repo '{id}' failed: {e}");
                 repo.set_health(crate::federation::health::RepoHealth::Degraded);
                 return;
             }
+            // 2. Project so existing repos' relinks see this repo's symbols.
+            if let Err(e) = fed.project_repo(&id).await {
+                tracing::warn!("project_repo for '{id}' failed: {e}");
+            }
+            // 3. Relink every repo (now they can resolve calls both ways).
             for (other, _) in fed.list_repos() {
                 if let Some(r) = fed.get_repo(&other) {
                     if let Err(e) = r.relink_cross_repo().await {
                         tracing::warn!("cross-repo link for '{other}' failed: {e}");
                     }
                 }
+            }
+            // 4. Re-project everyone so the federation-wide symbol index
+            //    reflects the new edges produced by the relinks.
+            for (other, _) in fed.list_repos() {
                 if let Err(e) = fed.project_repo(&other).await {
                     tracing::warn!("project_repo for '{other}' failed: {e}");
                 }

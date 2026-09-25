@@ -137,7 +137,7 @@ pub(crate) fn resolve_against_workspace(
         workspace.join(p)
     };
     let outside = || {
-        LainError::Other(format!(
+        LainError::InvalidArgument(format!(
             "path '{path}' is outside the repository; pass a path relative to {}",
             workspace.display()
         ))
@@ -223,7 +223,7 @@ fn read_file_range(path: &str, first: usize, last: usize) -> Result<String, Lain
         )));
     }
     if first > last {
-        return Err(LainError::NotFound(format!(
+        return Err(LainError::InvalidArgument(format!(
             "Invalid range: {first} to {last} ({path} has {} lines)",
             lines.len()
         )));
