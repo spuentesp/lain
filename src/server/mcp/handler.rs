@@ -205,6 +205,12 @@ pub fn resolve_repo_for_tool(
     match symbol_hint {
         Some(s) => match fed.resolve_symbol(s) {
             Ok(r) => Ok(r),
+            // A node id (from `query_graph`, `find_symbol`, …) names exactly
+            // one repo: the one whose graph holds it. Routing only by name
+            // failed every id-based follow-up call without `repo_id`.
+            Err(_) if repo_owning_node(fed, s).is_some() => {
+                Ok(repo_owning_node(fed, s).expect("checked above"))
+            }
             Err(e) => {
                 // The hint exists to *choose a repo*. With exactly one
                 // repo there is nothing to choose, and failing the call
@@ -236,6 +242,28 @@ pub fn resolve_repo_for_tool(
             }
         }
     }
+}
+
+/// The repo whose graph holds node `id`, if exactly one does. A global id
+/// (`repo:Kind:path:name`) names its repo outright.
+fn repo_owning_node(fed: &FederatedIndex, id: &str) -> Option<RepoId> {
+    if let Ok(gid) = crate::federation::repo_id::GlobalId::parse(id) {
+        if let Ok(r) = RepoId::new(gid.repo_id()) {
+            if fed.get_repo(&r).is_some() {
+                return Some(r);
+            }
+        }
+    }
+    let owners: Vec<RepoId> = fed
+        .list_repos()
+        .into_iter()
+        .map(|(r, _)| r)
+        .filter(|r| {
+            fed.get_repo(r)
+                .is_some_and(|idx| matches!(idx.db().get_node(id), Ok(Some(_))))
+        })
+        .collect();
+    (owners.len() == 1).then(|| owners.into_iter().next().expect("one owner"))
 }
 
 /// `get_health` for a multi-repo federation: the aggregate, then one line
@@ -2892,6 +2920,25 @@ mod tests {
         let rid = resolve_repo_or_error(&fed, "", &args)
             .expect("explicit repo_id must short-circuit past the symbol hint");
         assert_eq!(rid.as_str(), "explicit-repo");
+    }
+
+    /// A node id handed back by one repo's tool routes a follow-up call to
+    /// that repo without `repo_id`.
+    #[tokio::test]
+    async fn a_node_id_routes_to_the_repo_that_holds_it() {
+        use crate::schema::{GraphNode, NodeType};
+        let tmp = tempfile::tempdir().unwrap();
+        let fed = FederatedIndex::new(Arc::new(PetgraphBackend::new(tmp.path()).unwrap()));
+        let _a = add_test_repo(&fed, tmp.path(), "ra").await;
+        let _b = add_test_repo(&fed, tmp.path(), "rb").await;
+        let node = GraphNode::new(NodeType::Function, "f".into(), "x.py".into());
+        let id = node.id.clone();
+        let rb = fed.get_repo(&RepoId::new("rb").unwrap()).unwrap();
+        rb.db().upsert_node(node).unwrap();
+        let rid = resolve_repo_for_tool(&fed, "get_call_sites", Some(&id), None).unwrap();
+        assert_eq!(rid.as_str(), "rb");
+        // An id no repo holds still fails with the scoping error.
+        assert!(resolve_repo_for_tool(&fed, "get_call_sites", Some("no-such-id"), None).is_err());
     }
 
     /// On a federation server, tools routed by `repo_id` declare it; tools

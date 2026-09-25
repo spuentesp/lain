@@ -323,6 +323,18 @@ impl GraphDatabase {
         paths: &[String],
         nodes: &[GraphNode],
     ) -> Result<usize, LainError> {
+        self.replace_nodes_inner(paths, nodes, false)
+    }
+
+    /// [`Self::replace_nodes_for_paths`], optionally dropping the paths'
+    /// `Namespace` nodes too — for directories nothing tracked lives in
+    /// any more.
+    fn replace_nodes_inner(
+        &self,
+        paths: &[String],
+        nodes: &[GraphNode],
+        drop_namespaces: bool,
+    ) -> Result<usize, LainError> {
         use std::collections::HashMap as StdHashMap;
 
         self.check_writable()?;
@@ -372,7 +384,7 @@ impl GraphDatabase {
                 let mut kept: Vec<NodeIndex> = Vec::new();
                 for idx in old {
                     match graph.node_weight(idx) {
-                        Some(n) if n.node_type == NodeType::Namespace => {
+                        Some(n) if n.node_type == NodeType::Namespace && !drop_namespaces => {
                             kept.push(idx);
                         }
                         Some(n) => {
@@ -623,9 +635,24 @@ impl GraphDatabase {
             .filter(|key| !tracked.contains(key))
             .collect();
 
+        // Directories that still hold a tracked file: their Namespace nodes
+        // stay. Any other stale key is a deleted file or an emptied
+        // directory, whose folder node would otherwise live forever.
+        let mut live_dirs: HashSet<&str> = HashSet::new();
+        for file in tracked {
+            let mut dir = file.as_str();
+            while let Some(i) = dir.rfind('/') {
+                dir = &dir[..i];
+                if !live_dirs.insert(dir) {
+                    break;
+                }
+            }
+        }
+
         let mut removed = 0usize;
         for key in stale {
-            removed += self.replace_nodes_for_paths(&[key], &[])?;
+            let emptied = !live_dirs.contains(key.as_str());
+            removed += self.replace_nodes_inner(&[key], &[], emptied)?;
         }
         Ok(removed)
     }
@@ -1918,6 +1945,34 @@ mod replace_tests {
         assert_eq!(removed, 1);
         assert!(g.find_node_by_name("live").is_some());
         assert!(g.find_node_by_name("dead").is_none());
+    }
+
+    /// A directory whose last file was deleted loses its folder node; one
+    /// that still holds a tracked file (directly or deeper) keeps it.
+    #[test]
+    fn prune_orphans_drops_namespaces_of_emptied_directories() {
+        let g = db("lain_test_prune_ns");
+        let ns =
+            |name: &str, path: &str| GraphNode::new(NodeType::Namespace, name.into(), path.into());
+        let f =
+            |name: &str, path: &str| GraphNode::new(NodeType::Function, name.into(), path.into());
+        g.insert_nodes_batch(&[
+            ns("src", "src"),
+            ns("deep", "src/deep"),
+            ns("other", "other"),
+            f("keep", "src/deep/k.rs"),
+            f("gone", "other/d.py"),
+        ])
+        .unwrap();
+        let tracked: HashSet<String> = ["src/deep/k.rs".to_string()].into_iter().collect();
+        g.prune_orphans(&tracked).unwrap();
+        assert!(g.find_node_by_name("src").is_some());
+        assert!(g.find_node_by_name("deep").is_some());
+        assert!(
+            g.find_node_by_name("other").is_none(),
+            "emptied directory's node is gone"
+        );
+        assert!(g.find_node_by_name("gone").is_none());
     }
 }
 
