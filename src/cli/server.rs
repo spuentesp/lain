@@ -422,10 +422,7 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
                 match tokio::time::timeout(FETCH_TIMEOUT, repo.source().fetch()).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
-                        tracing::warn!(
-                            "lain server: refreshing '{}' failed: {e}",
-                            id.as_str()
-                        );
+                        tracing::warn!("lain server: refreshing '{}' failed: {e}", id.as_str());
                     }
                     Err(_) => {
                         tracing::warn!(
