@@ -642,8 +642,10 @@ async fn dispatch_tool_call(
         // A health check that fails unless you already know a repo id is
         // no health check: unscoped `get_health` across several repos
         // answers for the federation, per repo.
+        // One loaded repo plus some that failed to load is still a
+        // federation; the single-repo report never mentioned them.
         if name == "get_health"
-            && fed.list_repos().len() > 1
+            && (fed.list_repos().len() > 1 || !fed.load_errors().is_empty())
             && !args_map.contains_key("repo_id")
             && !args_map.contains_key("symbol")
         {

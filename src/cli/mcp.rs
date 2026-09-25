@@ -256,6 +256,7 @@ pub async fn run_mcp(
 /// `run_server --transport stdio`. The tempfile is cleaned up after
 /// the server exits (success or failure).
 async fn run_mcp_federation(workspaces: &[PathBuf], embedding_model: Option<&Path>) -> Result<()> {
+    sweep_dead_federation_files();
     let yaml = build_repos_yaml_for_workspaces(workspaces);
     let tmp_path = std::env::temp_dir().join(format!(
         "lain-mcp-repos-{}-{}.yaml",
@@ -281,9 +282,57 @@ async fn run_mcp_federation(workspaces: &[PathBuf], embedding_model: Option<&Pat
             .await;
 
     // Cleanup. Best-effort — a leftover tempfile in /tmp is annoying
-    // but not a correctness issue.
+    // but not a correctness issue. A process killed by a signal never gets
+    // here; `sweep_dead_federation_files` removes its files next time.
+    let _ = std::fs::remove_file(crate::cli::signal::socket_path_for(&tmp_path));
     let _ = std::fs::remove_file(&tmp_path);
     result
+}
+
+/// Remove `lain-mcp-repos-<pid>-…` configs and reload sockets left by
+/// `lain mcp` processes that no longer exist (killed by SIGTERM/SIGINT,
+/// which skip the cleanup above).
+fn sweep_dead_federation_files() {
+    let alive = |pid: &str| {
+        if pid == std::process::id().to_string() {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    };
+    let dirs = [
+        std::env::temp_dir(),
+        crate::config::run_dir(),
+        PathBuf::from("/tmp"),
+    ];
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(rest) = name
+                .strip_prefix("lain-mcp-repos-")
+                .or_else(|| name.strip_prefix("lain-lain-mcp-repos-"))
+            else {
+                continue;
+            };
+            let pid = rest.split('-').next().unwrap_or("");
+            if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()) && !alive(pid) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Run a read-only **sidecar** MCP server against an owner.

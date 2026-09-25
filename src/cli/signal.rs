@@ -28,7 +28,32 @@ pub fn socket_path_for(repos_yaml: &Path) -> PathBuf {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "default".to_string());
-    crate::config::run_dir().join(format!("{stem}.sock"))
+    // Keyed by the config's full path, not just its stem: every project's
+    // `repos.yaml` mapped to one `repos.sock`, a second server unlinked the
+    // first one's socket, and `lain repos add` in one project reloaded
+    // another project's server. Both sides canonicalize, so `./repos.yaml`
+    // and an absolute spelling agree.
+    let full = dunce::canonicalize(repos_yaml).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|d| d.join(repos_yaml))
+            .unwrap_or_else(|_| repos_yaml.to_path_buf())
+    });
+    // FNV-1a: stable across processes and Rust versions, unlike the std
+    // hasher's unspecified algorithm.
+    let hash = full
+        .to_string_lossy()
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x100000001b3)
+        });
+    let name = format!("{stem}-{:08x}.sock", hash as u32);
+    let path = crate::config::run_dir().join(&name);
+    // A Unix socket path over ~104 bytes cannot be bound at all; a long
+    // runtime directory silently turned hot reload off.
+    if path.as_os_str().len() > 100 {
+        return PathBuf::from("/tmp").join(format!("lain-{name}"));
+    }
+    path
 }
 
 /// Tell the server (if running) to reload. Returns `Ok(())` whether
@@ -128,22 +153,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn socket_path_for_uses_repos_yaml_stem() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repos = tmp.path().join("my-repos.yaml");
-        let sock = socket_path_for(&repos);
-        // The parent must be the run_dir, the filename ends in `.sock`.
-        let name = sock.file_name().unwrap().to_string_lossy().to_string();
-        assert_eq!(name, "my-repos.sock");
-        assert!(sock.parent().is_some());
+    fn socket_path_for_is_per_config_file() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("repos.yaml"), "").unwrap();
+        std::fs::write(b.path().join("repos.yaml"), "").unwrap();
+        let sa = socket_path_for(&a.path().join("repos.yaml"));
+        let sb = socket_path_for(&b.path().join("repos.yaml"));
+        assert_ne!(sa, sb, "two projects' repos.yaml get two sockets");
+        let name = sa.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.contains("repos-") && name.ends_with(".sock"), "{name}");
+        // Same file, same socket, however it is spelled.
+        let dotted = a.path().join(".").join("repos.yaml");
+        assert_eq!(socket_path_for(&dotted), sa);
+        assert!(sa.as_os_str().len() <= 104, "{sa:?}");
     }
 
     #[test]
     fn socket_path_for_defaults_when_no_stem() {
         let path = socket_path_for(Path::new("/"));
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        // No stem → default.sock.
-        assert_eq!(name, "default.sock");
+        assert!(name.contains("default-"), "{name}");
     }
 
     #[test]
