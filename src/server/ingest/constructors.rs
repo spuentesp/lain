@@ -401,7 +401,7 @@ fn build_federation_server(config: FederationServerConfig) -> Result<LainServer,
     // Presence layer: registry + occupancy + broadcast channel.
     // The expiry loop prunes stale sessions + claim TTLs and
     // broadcasts `PresenceEvent` notifications.
-    let presence = Arc::new(PresenceRegistry::new());
+    let presence = Arc::new(PresenceRegistry::from_config(&tuning.presence));
     let occupancy = Arc::new(OccupancyMap::new());
     // Intent + activity trackers ride alongside presence/occupancy
     // (PR 1 of `docs/INTENT_AND_OBSERVABILITY_PLAN.md`). They share
@@ -679,7 +679,7 @@ impl LainServer {
 
         let presence_handle = Arc::new(super::handles::PresenceLayer::new(
             Arc::clone(&presence_state_seen),
-            Arc::new(PresenceRegistry::new()),
+            Arc::new(PresenceRegistry::from_config(&tuning.presence)),
             Arc::new(OccupancyMap::new()),
             intent_registry,
             activity_tracker,

@@ -88,6 +88,12 @@ pub fn get_federation_health(fed: &FederatedIndex) -> FederationHealth {
             RepoHealth::Missing => h.missing += 1,
         }
     }
+    // Repos in repos.yaml that failed to load are registered nowhere else,
+    // but they are part of the federation the operator asked for: count
+    // them as unavailable, or 2 of 4 repos loading read as "healthy".
+    let not_loaded = fed.load_errors().len();
+    h.total_repos += not_loaded;
+    h.unavailable += not_loaded;
     h.memory_estimate_bytes = (h.total_nodes as u64) * 200 + (h.total_edges as u64) * 100;
 
     // `docs/REPOS_YAML.md`: "Fraction of repos that must reach `Ready`
@@ -679,6 +685,17 @@ mod ready_threshold_tests {
             h.healthy,
             "an empty federation has nothing failing to be ready"
         );
+    }
+
+    /// Repos that failed to load count against health.
+    #[test]
+    fn unloaded_repos_are_unavailable_and_unhealthy() {
+        let (_tmp, fed) = empty_fed();
+        fed.record_load_error("gone", "clone failed".into());
+        let h = get_federation_health(&fed);
+        assert_eq!(h.total_repos, 1);
+        assert_eq!(h.unavailable, 1);
+        assert!(!h.healthy);
     }
 
     #[test]

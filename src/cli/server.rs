@@ -371,23 +371,46 @@ async fn index_federation(fed: Arc<FederatedIndex>) {
     // search_org and the cross-repo tools answer from the old one.
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        for (id, _) in fed.list_repos() {
-            let Some(repo) = fed.get_repo(&id) else {
+        let stale: Vec<_> = fed
+            .list_repos()
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| fed.get_repo(id).is_some_and(|r| r.take_projection_stale()))
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        // A change in one repo can add or move a callee that *other* repos
+        // call: relink every repo, not just the changed one, or those
+        // callers stay unlinked (or point at the old location) until they
+        // happen to be re-indexed themselves.
+        let to_relink: Vec<_> = if fed.list_repos().len() > 1 {
+            fed.list_repos().into_iter().map(|(id, _)| id).collect()
+        } else {
+            stale.clone()
+        };
+        for id in &to_relink {
+            let Some(repo) = fed.get_repo(id) else {
                 continue;
             };
-            if !repo.take_projection_stale() {
-                continue;
-            }
-            if multi_repo {
-                if let Err(e) = repo.relink_cross_repo().await {
-                    tracing::warn!(
-                        "lain server: cross-repo relink for '{}' failed: {e}",
-                        id.as_str()
-                    );
+            let linked = if fed.list_repos().len() > 1 {
+                match repo.relink_cross_repo().await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!(
+                            "lain server: cross-repo relink for '{}' failed: {e}",
+                            id.as_str()
+                        );
+                        0
+                    }
                 }
-            }
-            if let Err(e) = fed.project_repo(&id).await {
-                tracing::warn!("lain server: re-projecting '{}' failed: {e}", id.as_str());
+            } else {
+                0
+            };
+            if stale.contains(id) || linked > 0 {
+                if let Err(e) = fed.project_repo(id).await {
+                    tracing::warn!("lain server: re-projecting '{}' failed: {e}", id.as_str());
+                }
             }
         }
     }

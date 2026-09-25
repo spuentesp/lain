@@ -289,7 +289,13 @@ pub fn get_call_sites(
     let mut lines_by_caller: Vec<(&crate::schema::GraphNode, Vec<usize>)> = Vec::new();
     let mut total_sites = 0usize;
     for caller in &callers {
-        let sites = call_lines_in(workspace, caller, &node.name);
+        // An uncommitted edit shifts the caller: search its current range,
+        // from the overlay's copy of the same function, when there is one.
+        let current = overlay
+            .find_nodes_by_name(&caller.name)
+            .into_iter()
+            .find(|o| o.path == caller.path && o.node_type == caller.node_type);
+        let sites = call_lines_in(workspace, current.as_ref().unwrap_or(caller), &node.name);
         total_sites += sites.len();
         lines_by_caller.push((caller, sites));
     }

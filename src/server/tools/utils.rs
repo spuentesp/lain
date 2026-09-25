@@ -53,7 +53,16 @@ pub fn resolve_node(
     // 3. Try Overlay by Name
     let overlay_names = overlay.find_nodes_by_name(handle);
     if let Some(n) = overlay_names.iter().find(|n| n.name == handle) {
-        return Ok(n.clone());
+        // An edited-but-uncommitted file puts a fresh copy of each of its
+        // symbols in the overlay, with new ids and no edges. Answering with
+        // that copy hid every caller of the symbol (and counted it twice)
+        // until the next commit. The committed definition of the same
+        // name, file and kind is the one the call graph knows.
+        let committed = graph
+            .find_all_nodes_by_name(handle)
+            .into_iter()
+            .find(|g| g.path == n.path && g.node_type == n.node_type);
+        return Ok(committed.unwrap_or_else(|| n.clone()));
     }
     // 4. Try Graph by Name
     if let Some(n) = graph.find_node_by_name(handle) {
@@ -619,6 +628,7 @@ pub fn token_recall(query: &str, candidate: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::NodeType;
     use serde_json::json;
 
     /// A present-but-wrong-typed argument must not report as missing.
@@ -645,6 +655,36 @@ mod tests {
         assert!(
             missing.contains("Missing required argument: symbol"),
             "an absent argument should still report as missing, got: {missing}"
+        );
+    }
+
+    /// An uncommitted edit's overlay copy of a symbol does not shadow the
+    /// committed definition that carries the call edges.
+    #[test]
+    fn an_edited_files_overlay_copy_resolves_to_the_committed_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphDatabase::new(&dir.path().join("graph.bin")).unwrap();
+        let overlay = VolatileOverlay::new();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let committed = GraphNode::new(NodeType::Function, "banner".into(), "src/color.rs".into())
+            .with_location_in(10, 12, &ns);
+        let committed_id = committed.id.clone();
+        graph.upsert_node(committed).unwrap();
+        let edited = GraphNode::new(NodeType::Function, "banner".into(), "src/color.rs".into())
+            .with_location_in(11, 13, &ns);
+        assert_ne!(edited.id, committed_id, "the fixture needs a shifted copy");
+        overlay.insert_node(edited);
+        assert_eq!(
+            resolve_node(&graph, &overlay, "banner").unwrap().id,
+            committed_id
+        );
+        // A symbol that exists only in the overlay still resolves there.
+        let fresh = GraphNode::new(NodeType::Function, "brand_new".into(), "src/x.rs".into());
+        let fresh_id = fresh.id.clone();
+        overlay.insert_node(fresh);
+        assert_eq!(
+            resolve_node(&graph, &overlay, "brand_new").unwrap().id,
+            fresh_id
         );
     }
 
