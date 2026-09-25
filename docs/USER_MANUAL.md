@@ -25,10 +25,10 @@ reference, tuning options, and day-to-day operating notes.
 | `lain workspaces` | Create and switch named groups of repositories. |
 | `lain query` | Run a `query_graph` operation array against a saved graph. |
 | `lain init` | Create a minimal `repos.yaml` for the current Git repository. |
-| `lain ask` | Ask one question using semantic search when an embedding model is configured, with a structural fallback when it isn't. |
+| `lain ask` | PreToolUse hook handler used by `hooks/claude/lain-hook.sh`: takes the hook JSON and prints a decision. To search code from a shell, use `lain oneshot search_code "<text>"`. |
 | `lain hooks` | Claim or release files and check branch overlap from agent hooks. |
 | `lain doctor` | Check the binary, graph freshness, install paths, and MCP connection. Exit codes are 0 ready, 1 degraded, and 2 unusable. |
-| `lain capabilities` | Print structural, semantic, runtime, and coordination readiness. Add `--json` for scripts. |
+| `lain capabilities` | Print readiness of symbols, the call graph, git history and semantic search. Add `--json` for scripts. |
 | `lain status` | Print repository, index, and MCP readiness. Add `--json` for scripts. |
 | `lain schema` | Write the MCP tool schema used by schema-drift CI. |
 
@@ -125,8 +125,8 @@ lsp_prewarm_skip_extensions = ["js", "css"]
 ```
 
 Set `LAIN_LSP_PREWARM=false` to skip the warm-up without editing the file.
-`lain doctor --json` prints the resolved settings and the result for each
-language server.
+`lain doctor --json` prints the repository's readiness report; `get_health`
+lists each language and whether its language server is installed.
 
 `state_lock_retry_interval_ms` sets the contention tail latency:
 with eight agents on one file, p99 on `claim_files` is roughly ten

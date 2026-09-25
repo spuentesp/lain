@@ -106,11 +106,11 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
         // possible (so `limit=5` lands as a number, `active=true`
         // as a bool); otherwise left as strings. This mirrors the
         // behavior callers get from a JSON object.
+        let schema = tool_input_schema(tool);
         let mut map = serde_json::Map::new();
         for arg in args {
             if let Some((k, v)) = arg.split_once('=') {
-                let parsed = serde_json::from_str(v).unwrap_or_else(|_| json!(v));
-                map.insert(k.to_string(), parsed);
+                map.insert(k.to_string(), typed_value(schema.as_ref(), k, v)?);
             }
         }
         Value::Object(map)
@@ -287,11 +287,8 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
 
 /// Map bare positional arguments onto `tool`'s required arguments.
 fn positional_args(tool: &str, args: &[String]) -> Result<Value> {
-    let schemas = crate::server::mcp::definitions::dump_tools_schema(&[]);
-    let schema = schemas
-        .iter()
-        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(tool))
-        .and_then(|t| t.get("inputSchema"));
+    let schema_owned = tool_input_schema(tool);
+    let schema = schema_owned.as_ref();
     let required: Vec<String> = schema
         .and_then(|s| s.get("required"))
         .and_then(|r| r.as_array())
@@ -328,15 +325,62 @@ fn positional_args(tool: &str, args: &[String]) -> Result<Value> {
     }
     let mut map = serde_json::Map::new();
     for (name, raw) in names.iter().zip(args) {
-        let parsed = serde_json::from_str(raw).unwrap_or_else(|_| json!(raw));
-        map.insert(name.clone(), parsed);
+        map.insert(name.clone(), typed_value(schema, name, raw)?);
     }
     Ok(Value::Object(map))
+}
+
+fn tool_input_schema(tool: &str) -> Option<Value> {
+    crate::server::mcp::definitions::dump_tools_schema(&[])
+        .into_iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(tool))
+        .and_then(|t| t.get("inputSchema").cloned())
+}
+
+/// A command-line value converted to the type the tool's schema declares
+/// for `name`. Guessing from the text turned `find_symbol 2024` into a
+/// number the tool refused, and let `limit=abc` through as a string the
+/// tool silently ignored.
+fn typed_value(schema: Option<&Value>, name: &str, raw: &str) -> Result<Value> {
+    let declared = schema
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.get(name))
+        .and_then(|p| p.get("type"))
+        .and_then(|t| t.as_str());
+    match declared {
+        Some("string") => Ok(json!(raw)),
+        Some("integer") => raw
+            .parse::<i64>()
+            .map(|n| json!(n))
+            .map_err(|_| anyhow!("`{name}` must be an integer, got '{raw}'")),
+        Some("number") => raw
+            .parse::<f64>()
+            .map(|n| json!(n))
+            .map_err(|_| anyhow!("`{name}` must be a number, got '{raw}'")),
+        Some("boolean") => raw
+            .parse::<bool>()
+            .map(|b| json!(b))
+            .map_err(|_| anyhow!("`{name}` must be true or false, got '{raw}'")),
+        // Arrays, objects, or no schema: JSON if it parses, else text.
+        _ => Ok(serde_json::from_str(raw).unwrap_or_else(|_| json!(raw))),
+    }
 }
 
 #[cfg(test)]
 mod positional_tests {
     use super::*;
+
+    #[test]
+    fn values_follow_the_schema_types() {
+        let v = positional_args("find_symbol", &["2024".into()]).unwrap();
+        assert_eq!(v, json!({"name": "2024"}));
+        let schema = tool_input_schema("find_anchors");
+        assert!(typed_value(schema.as_ref(), "limit", "abc").is_err());
+        assert_eq!(
+            typed_value(schema.as_ref(), "limit", "5").unwrap(),
+            json!(5)
+        );
+    }
 
     #[test]
     fn positionals_follow_the_required_arguments() {

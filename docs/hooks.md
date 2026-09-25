@@ -1,6 +1,6 @@
 # Pre-Edit Hooks
 
-`lain` ships bash hooks for the popular AI agents (Claude Code, Kimi, Agy, Codex). The hooks run before every Edit/Write/MultiEdit and call `lain hooks claim <path>` to register the agent + claim the file. lain returns conflicts in JSON, which the hook surfaces to the agent's context.
+`lain` ships bash hooks for the popular AI agents (Claude Code, Kimi, Agy, Codex). The hooks run before every Edit/Write/MultiEdit and call `lain hooks claim --path <file>` to register the agent + claim the file. lain returns conflicts in JSON, which the hook surfaces to the agent's context.
 
 ## Install
 
@@ -16,7 +16,7 @@ Pick your agent and follow the README in its directory:
 ## Common setup
 
 1. `lain server` must be running on HTTP (e.g., `lain server --config ./repos.yaml --transport http --port 9999`).
-2. Set `LAIN_URL` if not using the default (`http://localhost:9999` — bare server URL; the MCP `/mcp` path is appended automatically by the CLI).
+2. Set `LAIN_URL` to the server (e.g. `http://localhost:9999` — bare URL; the CLI appends `/mcp`). The hook scripts default to that address; `lain hooks …` itself needs `--url` or `LAIN_URL`.
 3. Each agent's hook calls `lain hooks claim --url $LAIN_URL --path <file>`. The first invocation auto-registers the agent and caches the session token to `~/.config/lain/hooks/<agent>.session`.
 
 ## Verification

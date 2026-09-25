@@ -172,7 +172,7 @@ Best results with the **BGE** model family (`bge-small-en-v1.5` recommended); se
 ### query_graph
 Flexible graph query via ops-array. See `docs/quickstart-query.md`.
 ```json
-{ "name": "query_graph", "arguments": { "spec": { "ops": [...] } } }
+{ "name": "query_graph", "arguments": { "query": { "ops": [...] } } }
 ```
 
 ## Code Health
