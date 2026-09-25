@@ -116,7 +116,10 @@ pub fn get_context_for_prompt(
 /// paths through and join `../..` unchecked, so `get_code_snippet` read any
 /// file on the host — `/etc/passwd`, keys, other repositories — and
 /// `lain server` serves that tool over HTTP.
-fn resolve_against_workspace(workspace: &std::path::Path, path: &str) -> Result<String, LainError> {
+pub(crate) fn resolve_against_workspace(
+    workspace: &std::path::Path,
+    path: &str,
+) -> Result<String, LainError> {
     let p = std::path::Path::new(path);
     // Rooted without being absolute is a Windows case: `\Windows\win.ini`
     // or `/etc/passwd` has no drive, so `is_absolute()` is false and

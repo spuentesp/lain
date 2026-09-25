@@ -472,8 +472,14 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
     };
     for f in &a.files {
         let p = std::path::Path::new(&f.path);
+        if f.path.trim().is_empty() {
+            return Err("claim_files: empty path".to_string());
+        }
         let inside = if p.is_absolute() {
-            let real = dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            // `canonical_form`, not `canonicalize`: a file that does not
+            // exist yet failed canonicalization and was compared raw, so
+            // `<ws>/../../home/me/.ssh/x` passed a lexical `starts_with`.
+            let real = crate::server::path_util::canonical_form(p);
             roots.iter().any(|root| real.starts_with(root))
         } else {
             // Lexically: `a/../b` is fine, `../b` leaves the root, and a
