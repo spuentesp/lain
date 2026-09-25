@@ -2500,4 +2500,12 @@ fn claims_outside_the_workspace_are_refused() {
         let err = claim(bad).expect_err(bad);
         assert!(err.contains("outside the repository"), "{bad}: {err}");
     }
+    // An absolute path to a file that does not exist yet, escaping with `..`.
+    let escape = format!(
+        "{}/../../../../../../../../tmp/lain-nope-x",
+        tmp.path().display()
+    );
+    let err = claim(&escape).expect_err("unborn escape");
+    assert!(err.contains("outside the repository"), "{err}");
+    assert!(claim("").is_err(), "empty path");
 }

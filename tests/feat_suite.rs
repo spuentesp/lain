@@ -73,9 +73,12 @@ fn git_init(path: &std::path::Path) {
 /// specific separator spelling, so we compare component-by-component
 /// instead of as raw strings. Splitting on either separator handles
 /// both platforms in one branch.
+/// Whether `path` names the repo file `expected` (as components). In a
+/// federation the claim key is the repo's absolute path, so compare the
+/// trailing components: `src/a.rs` and `/tmp/x/repo/src/a.rs` both match.
 fn path_components_eq(path: &str, expected: &[&str]) -> bool {
     let actual: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
-    actual == expected
+    actual.ends_with(expected)
 }
 
 /// Fixture directories the spawned `lain server` needs for its entire

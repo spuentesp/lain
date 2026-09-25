@@ -840,7 +840,20 @@ pub fn canonical_claim_path(roots: &[PathBuf], path: &Path) -> PathBuf {
             .iter()
             .map(|root| canonical_form(&root.join(path)))
             .find(|candidate| candidate.exists());
-        match anchored.or_else(|| roots.first().map(|root| canonical_form(&root.join(path)))) {
+        // A file that does not exist yet belongs to the root that has its
+        // directory. Falling back to the first root — in federation a
+        // staging placeholder — gave `pkg/new.py` a different key from
+        // `<repo>/pkg/new.py`, and two agents both got the edit claim.
+        let unborn = || {
+            roots
+                .iter()
+                .map(|root| canonical_form(&root.join(path)))
+                .find(|candidate| candidate.parent().is_some_and(|d| d.is_dir()))
+        };
+        match anchored
+            .or_else(unborn)
+            .or_else(|| roots.first().map(|root| canonical_form(&root.join(path))))
+        {
             Some(p) => p,
             None => return PathBuf::from(posix_string(path)),
         }
