@@ -5,8 +5,8 @@
 use crate::error::LainError;
 use crate::federation::federated_index::FederatedIndex;
 use crate::federation::repo_id::RepoId;
-use crate::server::LainServer;
 use crate::server::mcp::tools_registry::{invoke_inventory, tool_result};
+use crate::server::LainServer;
 use crate::tools::ToolExecutor;
 use async_trait::async_trait;
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
@@ -346,7 +346,7 @@ pub struct McpContext<'a> {
 /// returns the result. The inventory entry type lives in
 /// `tools_registry.rs`; `McpToolEntry` and `inventory::collect!` are
 /// imported from there.
-
+///
 /// Unified MCP tool dispatcher shared by Stdio and HTTP transports.
 ///
 /// Dispatches server-status, reload, multiplayer presence, federation,
@@ -408,7 +408,6 @@ async fn dispatch_tool_call(
 /// the runner functions' `Value` parameter type matches. The runner
 /// functions re-deserialize through their own `serde_json::from_value`
 /// calls, so the wrapping is just shape preservation.
-
 struct LainHandler {
     executor: Arc<ToolExecutor>,
     federation: Option<Arc<FederatedIndex>>,
@@ -2955,7 +2954,7 @@ mod tests {
 
     #[test]
     fn health_response_surfaces_git_sensor_telemetry_and_sidecar_degraded_state() {
-        use crate::server::git::{AnyGitSensor, GitSensorMode};
+        use crate::server::git::{sidecar_binary_helpers, AnyGitSensor, GitSensorMode};
 
         let repo_root = std::env::current_dir().unwrap();
         let in_proc_sensor = AnyGitSensor::new(&repo_root, GitSensorMode::InProcess).unwrap();
@@ -2966,6 +2965,10 @@ mod tests {
         assert_eq!(body["git_sensor"]["kind"], "in_process");
 
         // 2. Default mode (Sidecar) reports ok status and sidecar kind.
+        // Ensure the sidecar binary is available before constructing a sidecar
+        // sensor — same resolution as `default_mode_is_sidecar`.
+        sidecar_binary_helpers::ensure_sidecar_bin_env()
+            .expect("sidecar binary must be available or buildable for this test");
         let sidecar_sensor = AnyGitSensor::from_env(&repo_root).unwrap();
         assert_eq!(sidecar_sensor.mode(), GitSensorMode::Sidecar);
         let sidecar_body = build_health_body(0, 0, None, None, Some(&sidecar_sensor));

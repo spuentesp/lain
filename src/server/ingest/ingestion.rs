@@ -1841,6 +1841,12 @@ mod readiness_progress_tests {
             crate::git::GitSensorMode::default(),
             crate::git::GitSensorMode::Sidecar
         );
+        // Ensure the sidecar binary is available before creating a server in
+        // sidecar mode.  In a fresh worktree with no prior `cargo build`,
+        // `resolve_sidecar_binary` builds it once via `cargo build
+        // --bin lain-git-sidecar` and caches the result.
+        crate::server::git::sidecar_binary_helpers::ensure_sidecar_bin_env()
+            .expect("sidecar binary must be available or buildable for this test");
         let root = git_fixture_with_one_file();
         let server =
             LainServer::new(root.path(), &root.path().join("state/graph.bin"), None).unwrap();
