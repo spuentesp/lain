@@ -2776,7 +2776,6 @@ mod tests {
     use crate::federation::federated_index::FederatedIndex;
     use crate::federation::graph_backend::PetgraphBackend;
     use crate::server::mcp::envelope::arg_property_schema;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     /// Pins the fix for the live e2e finding: the advertised schema for

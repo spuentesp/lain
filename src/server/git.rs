@@ -982,7 +982,7 @@ pub(crate) mod sidecar_binary_helpers {
                 }
                 // Look for a token ending with the binary name.
                 for token in trimmed.split_whitespace().rev() {
-                    let t = token.trim_end_matches(|c: char| c == ',' || c == ')');
+                    let t = token.trim_end_matches([',', ')']);
                     if t.ends_with(SIDECAR_NAME)
                         || t.ends_with(&format!("lain-git-sidecar{exe_suffix}"))
                     {
