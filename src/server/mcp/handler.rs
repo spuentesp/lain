@@ -3524,7 +3524,7 @@ mod tests {
 
     #[test]
     fn health_response_surfaces_git_sensor_telemetry_and_sidecar_degraded_state() {
-        use crate::server::git::{AnyGitSensor, GitSensorMode};
+        use crate::server::git::{sidecar_binary_helpers, AnyGitSensor, GitSensorMode};
 
         let repo_root = std::env::current_dir().unwrap();
         let in_proc_sensor = AnyGitSensor::new(&repo_root, GitSensorMode::InProcess).unwrap();
@@ -3536,22 +3536,10 @@ mod tests {
 
         // 2. The default mode reports ok status and its kind: the sidecar
         //    on Unix, the in-process sensor where there are no Unix sockets.
-        //    Pin LAIN_GIT_SENSOR so this test is deterministic regardless of
-        //    whether a sidecar binary is on PATH on the host.
-        let sidecar_bin = std::env::var_os("CARGO_BIN_EXE_lain-git-sidecar")
-            .map(PathBuf::from)
-            .or_else(|| {
-                for dir in &["target/debug", "target/release"] {
-                    let p = std::path::Path::new(dir).join("lain-git-sidecar");
-                    if p.exists() {
-                        return Some(p);
-                    }
-                }
-                None
-            });
-        if let Some(p) = sidecar_bin {
-            std::env::set_var("LAIN_GIT_SIDECAR_BIN", &p);
-        }
+        //    Ensure the sidecar binary is available before constructing a sidecar
+        //    sensor — same resolution as `default_mode_is_sidecar`.
+        sidecar_binary_helpers::ensure_sidecar_bin_env()
+            .expect("sidecar binary must be available or buildable for this test");
         std::env::set_var("LAIN_GIT_SENSOR", "sidecar");
         let (mode, kind) = if cfg!(unix) {
             (GitSensorMode::Sidecar, "sidecar")
