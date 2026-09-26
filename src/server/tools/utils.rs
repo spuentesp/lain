@@ -25,12 +25,11 @@ use std::time::SystemTime;
 /// federation runs in one process; the sidecar shares this cache
 /// with the owner at the OS page-cache level only — it has its own
 /// file-content cache.
-static FILE_CONTENT_CACHE: OnceLock<
-    parking_lot::Mutex<lru::LruCache<PathBuf, (SystemTime, Vec<String>)>>,
-> = OnceLock::new();
+type FileContentCache = parking_lot::Mutex<lru::LruCache<PathBuf, (SystemTime, Vec<String>)>>;
 
-pub(crate) fn file_content_cache(
-) -> &'static parking_lot::Mutex<lru::LruCache<PathBuf, (SystemTime, Vec<String>)>> {
+static FILE_CONTENT_CACHE: OnceLock<FileContentCache> = OnceLock::new();
+
+pub(crate) fn file_content_cache() -> &'static FileContentCache {
     FILE_CONTENT_CACHE.get_or_init(|| {
         // `.max(1)` is a defensive clamp for a hand-edited tuning.toml
         // setting the capacity to 0; `LruCache::new` panics on a

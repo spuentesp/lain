@@ -60,11 +60,13 @@ struct TreeSitterFile {
 /// `parking_lot::Mutex` because every LSP call inside a single file's
 /// scan briefly acquires it. The contention is bounded by the
 /// per-file serial scan loop, so a separate coarse lock is fine.
+type ByContentCache = parking_lot::Mutex<
+    std::collections::HashMap<(PathBuf, [u8; 32]), Vec<crate::lsp::HierarchicalSymbol>>,
+>;
+
 #[derive(Default)]
 pub struct LspScanCache {
-    by_content: parking_lot::Mutex<
-        std::collections::HashMap<(PathBuf, [u8; 32]), Vec<crate::lsp::HierarchicalSymbol>>,
-    >,
+    by_content: ByContentCache,
 }
 
 impl LspScanCache {

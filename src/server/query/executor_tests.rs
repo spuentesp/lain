@@ -6,7 +6,6 @@ use crate::query::executor::Executor;
 use crate::query::spec::*;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 type EmbeddingCache = Arc<Mutex<lru::LruCache<String, Vec<f32>>>>;
