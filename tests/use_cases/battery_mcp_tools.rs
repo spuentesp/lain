@@ -171,9 +171,15 @@ fn navigate_to_anchor_works_for_indexed_anchor() {
     use lain::server::tools::handlers::navigation::navigate_to_anchor;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
+    let result = navigate_to_anchor(&db, &overlay, "orchestrate");
     assert!(
-        navigate_to_anchor(&db, &overlay, "orchestrate").is_ok()
-            || navigate_to_anchor(&db, &overlay, "orchestrate").is_err()
+        result.is_ok(),
+        "navigate_to_anchor must return Ok for an indexed symbol"
+    );
+    let text = result.unwrap();
+    assert!(
+        text.contains("orchestrate"),
+        "result must name the anchor symbol we navigated to: {text}"
     );
 }
 #[test]
@@ -227,8 +233,20 @@ fn compare_modules_works_on_known_modules() {
     use lain::server::tools::handlers::architecture::compare_modules;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let r = compare_modules(&db, &overlay, "src/lib.rs", "tests/common/mod.rs");
-    assert!(r.is_ok() || r.is_err());
+    // compare_modules resolves its arguments via resolve_node, which
+    // finds nodes by name — "src/lib.rs" matches the orchestrator node
+    // (whose path is "src/lib.rs"), and "tests/common/mod.rs" matches
+    // test_helper. The output names the resolved nodes, not the paths.
+    let result = compare_modules(&db, &overlay, "src/lib.rs", "tests/common/mod.rs");
+    assert!(
+        result.is_ok(),
+        "compare_modules must return Ok for known modules"
+    );
+    let text = result.unwrap();
+    assert!(
+        text.contains("orchestrate") && text.contains("test_helper"),
+        "result must name both compared symbols (resolved from the module args): {text}"
+    );
 }
 #[test]
 fn compare_modules_rejects_unknown_modules() {
@@ -252,8 +270,18 @@ fn explore_architecture_handles_unknown_module() {
     use lain::server::tools::handlers::architecture::explore_architecture;
     let (_dir, db) = build_fixture();
     let overlay = VolatileOverlay::new();
-    let r = explore_architecture(&db, &overlay, 2);
-    assert!(r.is_ok() || r.is_err());
+    let result = explore_architecture(&db, &overlay, 2);
+    assert!(
+        result.is_ok(),
+        "explore_architecture must return Ok even on a fixture with no File nodes"
+    );
+    let text = result.unwrap();
+    // The fixture has no File nodes, so the body is empty but the
+    // header and depth note are always present.
+    assert!(
+        text.contains("Architecture Overview") && text.contains("Max Depth: 2"),
+        "result must include the architecture header and depth note: {text}"
+    );
 }
 
 // ─── architectural_observations ──────────────────────────────────
@@ -579,25 +607,15 @@ fn graph_database_get_all_nodes_returns_inserted() {
 }
 
 // ─── run_build / run_tests / run_clippy ──────────────────────────
-
-#[test]
-fn run_build_data_surface_workspace_is_known() {
-    let (_dir, _db) = build_fixture();
-    // The handlers spawn `cargo` on the workspace; absent a real Rust
-    // fixture in the tempdir, they error gracefully. The contract
-    // pinned here: "does not panic". See `tests/failure_modes.rs`
-    // for the wire-shape pin.
-}
-
-#[test]
-fn run_tests_data_surface_workspace_is_known() {
-    let (_dir, _db) = build_fixture();
-}
-
-#[test]
-fn run_clippy_data_surface_workspace_is_known() {
-    let (_dir, _db) = build_fixture();
-}
+// DELETED (D5): These three tests had empty bodies. The underlying
+// handlers (RunBuildHandler etc.) need a real Rust workspace with
+// Cargo.toml to produce a meaningful result — the tempdir fixture
+// used throughout this file is just a graph store with no Cargo
+// project. Without a real project the handlers can't be exercised,
+// and any assertion here would be hollow. The wire-shape pin lives
+// in tests/failure_modes.rs. This gap is honest (the tools work in
+// a real Lain session, just not in a unit test without a fixture).
+// ═══════════════════════════════════════════════════════════════════
 
 // ═══ GraphDatabase-level invariants ════════════════════════════════
 //
