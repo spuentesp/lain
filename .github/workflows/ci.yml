@@ -264,7 +264,7 @@ jobs:
     needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.base_ref == 'main')) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'dev'))) && needs.changes.outputs.docs_only != 'true' && github.event.pull_request.draft != true
     permissions:
       contents: read
     steps:
@@ -528,10 +528,10 @@ jobs:
     # --workspace` cost on every OS; adding a coverage build per PR
     # would lengthen the queue without changing the merge signal
     # (codecov.io still annotates PRs from the latest main-branch
-    # upload). Until a baseline is chosen, the upload never fails
-    # CI: `fail_ci_if_error: false` plus codecov.yml's
-    # target=0/threshold=0 settings keep the badge dark until the
-    # first deliberate baseline PR.
+    # upload). Coverage regressions do fail CI: codecov.yml compares
+    # against the base commit (target: auto, threshold: 1%) and the
+    # upload step sets `fail_ci_if_error: true` so a broken upload is
+    # visible instead of silently leaving the badge dark.
     name: Coverage (cargo llvm-cov)
     needs: [changes]
     runs-on: ubuntu-latest
@@ -586,7 +586,7 @@ jobs:
         uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
         with:
           files: lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: false
 

@@ -16,7 +16,7 @@ group cancels superseded runs for the same ref.
 | architecture guardrails | yes | yes |
 | generated tool-schema drift | yes for code changes | yes for code changes |
 | architecture health report | PRs | PRs |
-| capability suite (`scripts/demo.sh --quick`) | no | yes for code changes |
+| capability suite (`scripts/demo.sh --quick`) | yes for code changes | yes for code changes |
 | coverage | no | yes for code changes |
 | release/action contracts | no | yes |
 | release-version drift | no | push to `main` |
