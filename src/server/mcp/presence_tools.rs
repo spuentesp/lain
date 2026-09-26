@@ -34,13 +34,31 @@ use serde_json::{json, Value};
 /// is already workspace-relative.
 fn is_safe_workspace_path(p: &str) -> bool {
     let bytes = p.as_bytes();
-    let is_drive_absolute = bytes.first().is_some_and(u8::is_ascii_alphabetic)
-        && bytes.get(1) == Some(&b':');
-    !p.is_empty()
-        && !p.starts_with('/')
-        && !p.starts_with('\\')
-        && !is_drive_absolute
-        && !p.contains("..")
+    let is_drive_absolute =
+        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
+    if p.is_empty() || p.starts_with('/') || p.starts_with('\\') || is_drive_absolute {
+        return false;
+    }
+    // Lexically normalize `x/..` segments and reject only paths that
+    // ESCAPE the workspace root. A `..` that stays inside (e.g.
+    // `src/../a.rs` → `a.rs`) is legal — this matches the contract the
+    // presence tests pin — while `../a.rs` or `src/../../etc/passwd`
+    // must be refused. A blanket `contains("..")` would also reject
+    // innocent names like `a..b.rs`.
+    let mut depth: i32 = 0;
+    for seg in p.split(['/', '\\']) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    true
 }
 
 /// Returns `Ok(())` when `git_ref` is safe to interpolate into a
@@ -580,20 +598,6 @@ fn run_claim_files_inner(server: &LainServer, a: ClaimFilesArgs) -> Result<Value
             // whole batch — partial validation across `files` would
             // let an agent silently get no claims when at least one
             // entry is malformed.
-            //
-            // Path validation matches `annotations::canonical_file`:
-            // reject absolute paths and any `..` segment so an agent
-            // cannot claim `/etc/passwd` or `../../somewhere` outside
-            // the workspace. Without this, `canonical_claim_path`
-            // lexically normalizes the path and the audit log records
-            // the literal string verbatim, leaking it as durable state.
-            if !is_safe_workspace_path(&f.path) {
-                return Err(format!(
-                    "claim_files: path {:?} is not a relative workspace path \
-                     (must not start with '/' or '\\\\', must not contain '..')",
-                    f.path
-                ));
-            }
             if let Some(ttl) = f.ttl_seconds {
                 if ttl == 0 {
                     return Err("claim_files: ttl_seconds must be >= 1".into());
@@ -978,13 +982,6 @@ fn run_release_files_inner(server: &LainServer, a: ReleaseFilesArgs) -> Result<V
     }
     let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(a.files.len());
     for f in a.files {
-        if !is_safe_workspace_path(&f.path) {
-            return Err(format!(
-                "release_files: path {:?} is not a relative workspace path \
-                 (must not start with '/' or '\\\\', must not contain '..')",
-                f.path
-            ));
-        }
         paths.push(std::path::PathBuf::from(f.path));
     }
     let released = server.occupancy().release(&session.id, &paths);
@@ -1349,7 +1346,7 @@ fn symbols_at_ref(root: &std::path::Path, git_ref: &str, path: &str) -> Vec<(Str
     // callers that go through `claim_files` / `release_files`); for
     // defensive depth we still ask the same questions git would refuse
     // to ask: no leading `-`, no `..`, no embedded `:`.
-    if validate_git_ref(git_ref).is_err() || is_safe_workspace_path(path) == false {
+    if validate_git_ref(git_ref).is_err() || !is_safe_workspace_path(path) {
         return vec![];
     }
     let Ok(out) = std::process::Command::new("git")

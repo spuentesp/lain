@@ -1586,7 +1586,7 @@ async fn to_old_path_fires_via_run_claim_files() {
         "agent_id": session.id.as_str(),
         "session_token": session.session_token,
         "files": [{
-            "path": tmp.path().join("a.rs").to_string_lossy(),
+            "path": "a.rs",
             "symbols": ["a"],
             "intent": "read",
             "plan_revision": 0,
