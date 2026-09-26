@@ -370,7 +370,7 @@ impl FederatedIndex {
                 // in-memory graph may not reflect it yet — surfacing
                 // the disk value would mislead callers into thinking
                 // the graph is current. The acceptance criterion
-                // (docs/FOLLOWUPS.md entry #6) is: `last_indexed_commit`
+                // (Cooperative cancellation token follow-up) is: `last_indexed_commit`
                 // is `null` until a successful index pass has
                 // reached a commit, then the actual commit string.
                 let last_indexed_commit = if indexed_signal {

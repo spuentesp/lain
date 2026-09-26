@@ -180,7 +180,7 @@ impl ReadinessHandle {
         });
     }
 
-    /// AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md §"Cooperative
+    /// AGENT_UX_ROADMAP.md M4 follow-up ("Cooperative
     /// cancellation token"): publish `unavailable_error` with the
     /// stable `index_cancelled` problem code. Distinct from
     /// `failed()` because shutdown is not a failure: `retryable:

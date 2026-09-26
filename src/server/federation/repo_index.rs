@@ -212,7 +212,7 @@ pub struct RepoIndex {
     /// `get_capabilities`. Wired up in PR B
     /// (`feat/m4-spawn-blocking`).
     outstanding: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// AGENT_UX_ROADMAP.md M4 follow-up (FOLLOWUPS.md §"Cooperative
+    /// AGENT_UX_ROADMAP.md M4 follow-up ("Cooperative
     /// cancellation token"): server-owned shutdown signal threaded
     /// through every long-running phase in the federation pipeline
     /// (`index_one_repo`, the receiver loop spawned by
