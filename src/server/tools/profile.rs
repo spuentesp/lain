@@ -44,6 +44,7 @@ pub const SEMANTIC_PROFILE: &[&str] = &[
     "list_entry_points",
     "get_call_chain",
     "get_coupling_radar",
+    "find_dead_code",
     "explain_dispatch",
     // Readiness / self-discovery
     "get_health",
@@ -197,10 +198,10 @@ mod tests {
     #[test]
     fn semantic_profile_is_small_and_curated() {
         let set = SEMANTIC_PROFILE;
-        // 21 hand-curated entries. Pinning a count catches "I added one
+        // 22 hand-curated entries. Pinning a count catches "I added one
         // more without realising" — if you add a tool, the change should
         // be conscious, not silent.
-        assert_eq!(set.len(), 21, "SEMANTIC_PROFILE drifted; review the list");
+        assert_eq!(set.len(), 22, "SEMANTIC_PROFILE drifted; review the list");
 
         // Sanity: every name in the list is non-empty and the list
         // contains no duplicates (Set semantics).
