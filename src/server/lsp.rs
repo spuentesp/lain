@@ -1532,15 +1532,6 @@ pub struct LspPool {
     next: Arc<AtomicUsize>,
 }
 
-impl Clone for LspPool {
-    fn clone(&self) -> Self {
-        LspPool {
-            multiplexers: self.multiplexers.clone(),
-            next: Arc::clone(&self.next),
-        }
-    }
-}
-
 impl LspPool {
     pub fn new(
         workspace: &Path,
