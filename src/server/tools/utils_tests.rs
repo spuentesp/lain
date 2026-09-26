@@ -355,7 +355,6 @@ mod file_content_cache_tests {
     use super::super::utils::{file_content_cache, read_lines_cached};
     use crate::schema::GraphNode;
     use crate::server::tools::utils::build_enriched_text;
-    use std::path::Path;
     use std::time::Duration;
 
     /// A cache hit serves the same content without re-reading. We
