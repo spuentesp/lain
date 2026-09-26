@@ -33,11 +33,17 @@ pub const SEMANTIC_PROFILE: &[&str] = &[
     "find_related",
     "assess_change",
     "search_code",
-    // Dynamic-dispatch mitigation (Tiers 1-3): when get_blast_radius
-    // returns empty, explain_dispatch tells you whether the gap is
-    // because nothing calls you, or because static analysis can't see
-    // the dispatcher. Default-verdict `insufficient_evidence` triggers
-    // the smoke command path documented in get_agent_strategy.
+    // Architecture / code-understanding: get_blast_radius, find_anchors,
+    // list_entry_points, get_call_chain, and get_coupling_radar are the
+    // primary tools `get_agent_strategy` recommends. explain_dispatch
+    // supplements them (Tiers 1-3: when get_blast_radius returns empty,
+    // explain_dispatch tells you whether the gap is because nothing calls
+    // you, or because static analysis can't see the dispatcher).
+    "get_blast_radius",
+    "find_anchors",
+    "list_entry_points",
+    "get_call_chain",
+    "get_coupling_radar",
     "explain_dispatch",
     // Readiness / self-discovery
     "get_health",
@@ -48,6 +54,8 @@ pub const SEMANTIC_PROFILE: &[&str] = &[
     "claim_files",
     "release_files",
     "get_world_state",
+    // Multiplayer file-level occupancy awareness
+    "list_occupancy",
     // Escape hatch — full tool enumeration, on demand.
     "get_agent_strategy",
 ];
@@ -91,9 +99,10 @@ impl SemanticProfileFamlies {
 /// can decide whether to opt out of the curated default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolProfile {
-    /// Default. 15 tools (the M5/M6 high-level layer + multiplayer
-    /// essentials + escape hatch). Recommended for smaller models
-    /// and any cold-startup that doesn't need every low-level tool.
+    /// Default. 21 tools (the M5/M6 high-level layer + architecture
+    /// tools + multiplayer essentials + escape hatch). Recommended for
+    /// smaller models and any cold-startup that doesn't need every
+    /// low-level tool.
     Semantic,
     /// Full 83-tool surface. Same schema as the generated on-disk snapshot.
     /// before PR3. Opt-in via `LAIN_TOOL_PROFILE=full`.
@@ -188,10 +197,10 @@ mod tests {
     #[test]
     fn semantic_profile_is_small_and_curated() {
         let set = SEMANTIC_PROFILE;
-        // 15 hand-curated entries. Pinning a count catches "I added one
+        // 21 hand-curated entries. Pinning a count catches "I added one
         // more without realising" — if you add a tool, the change should
         // be conscious, not silent.
-        assert_eq!(set.len(), 15, "SEMANTIC_PROFILE drifted; review the list");
+        assert_eq!(set.len(), 21, "SEMANTIC_PROFILE drifted; review the list");
 
         // Sanity: every name in the list is non-empty and the list
         // contains no duplicates (Set semantics).
@@ -306,5 +315,13 @@ mod tests {
             !SEMANTIC_PROFILE.contains(&"run_build"),
             "run_build is intentionally outside the Semantic profile"
         );
+        // Architecture / code-understanding tools recommended by get_agent_strategy
+        assert!(SEMANTIC_PROFILE.contains(&"get_blast_radius"));
+        assert!(SEMANTIC_PROFILE.contains(&"get_call_chain"));
+        assert!(SEMANTIC_PROFILE.contains(&"find_anchors"));
+        assert!(SEMANTIC_PROFILE.contains(&"list_entry_points"));
+        assert!(SEMANTIC_PROFILE.contains(&"get_coupling_radar"));
+        // Multiplayer occupancy
+        assert!(SEMANTIC_PROFILE.contains(&"list_occupancy"));
     }
 }
