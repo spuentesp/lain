@@ -298,7 +298,7 @@ mod tests {
         use crate::server::tools::profile::SemanticProfileFamlies;
         for canonical in SEMANTIC_PROFILE {
             assert!(
-                SEMANTIC_PROFILE.contains(&canonical),
+                SEMANTIC_PROFILE.contains(canonical),
                 "SEMANTIC_PROFILE should always contain itself: {canonical}"
             );
         }

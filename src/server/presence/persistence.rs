@@ -20,10 +20,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::OccupancyMap;
 use super::claim::{Claim, ClaimIntent};
 use super::occupancy::FileOccupancy;
 use super::registry::{AgentSession, PresenceRegistry};
+use super::OccupancyMap;
 
 /// On-disk schema for `PresenceRegistry` + `OccupancyMap`. Fields are
 /// `Vec<(K, V)>` rather than maps because serde-json's `HashMap`
@@ -323,9 +323,24 @@ pub fn load_pair(
         }
     }
     let mut new_by_agent = HashMap::new();
+    let now = std::time::SystemTime::now();
+    let mut ttl_revoked: Vec<(super::agent::AgentId, PathBuf)> = Vec::new();
     for (k, claims) in state.occupancy_by_agent {
         let agent_id = super::agent::AgentId(k.clone());
-        for claim in &claims {
+        let mut kept = Vec::new();
+        for claim in claims {
+            // D9 fix: drop claims whose TTL has already elapsed at load time.
+            // Mirrors the wall-clock skew guard in `expire_by_ttl`:
+            // `now < claimed_at` means the wall clock jumped backwards past
+            // this claim's creation; in that case keep the claim and let the
+            // expiry tick correct it on the next run.
+            let expired = claim
+                .expires_at
+                .is_some_and(|exp| exp <= now && now >= claim.claimed_at);
+            if expired {
+                ttl_revoked.push((agent_id.clone(), claim.path.clone()));
+                continue;
+            }
             let entry = new_by_file.entry(claim.path.clone()).or_default();
             if claim.symbols.is_empty() {
                 entry
@@ -352,8 +367,11 @@ pub fn load_pair(
                         .insert(agent_id.clone(), claim.last_touched_unix);
                 }
             }
+            kept.push(claim);
         }
-        new_by_agent.insert(agent_id, claims);
+        if !kept.is_empty() {
+            new_by_agent.insert(agent_id, kept);
+        }
     }
 
     let mut s = reg.inner.lock();
@@ -410,6 +428,12 @@ pub fn load_pair(
     // block the competing agent indefinitely. So drop the orphans
     // here and emit one `ClaimRevoked` per reclaimed path so SSE
     // subscribers see the same view the new server has.
+    //
+    // D9 fix: also drop and revoke claims whose TTL expired before
+    // load time (checked during `new_by_agent` construction). These
+    // are filtered out of `by_agent` / `by_file` before the lock is
+    // acquired so no extra pruning is needed here — only the event
+    // emission remains.
     //
     // The cross-check happens after both `o.by_file` and `o.by_agent`
     // are populated so we can prune consistently. The `lock_leases`
@@ -475,6 +499,16 @@ pub fn load_pair(
                     });
                 }
             }
+        }
+        // D9 fix: TTL-expired claims were already filtered out of
+        // `o.by_agent` / `o.by_file` during construction above; emit
+        // the events so SSE subscribers see the same view the new server has.
+        for (agent_id, path) in ttl_revoked {
+            revoked.push(crate::server::presence::PresenceEvent::ClaimRevoked {
+                agent_id,
+                path,
+                reason: "ttl_expired".to_string(),
+            });
         }
         revoked
     };
@@ -591,8 +625,8 @@ mod audit_persistence_tests {
 
         // Round-trip back through `load_pair` -> PersistedState with no
         // parse error, then double-check we read what we wrote.
-        let reg2 = PresenceRegistry::new();
-        let occ2 = OccupancyMap::new();
+        let _reg2 = PresenceRegistry::new();
+        let _occ2 = OccupancyMap::new();
         load_pair_legacy(&path, &reg, &occ).expect("load_pair");
         let parsed: PersistedState = serde_json::from_str(&written).unwrap();
         assert_eq!(parsed.audit_offset_bytes, 0);
@@ -876,6 +910,136 @@ mod audit_persistence_tests {
         // Live state must be completely untouched
         assert!(reg.get(&alice_id).is_some());
         assert!(occ.list_for_path(Path::new("foo.rs")).is_some());
+    }
+
+    /// D9 regression: TTL-expired claims must be dropped on load, and
+    /// a `ClaimRevoked { reason: "ttl_expired" }` event must be emitted
+    /// so SSE subscribers see the same view the restarted server has.
+    #[test]
+    fn load_pair_drops_ttl_expired_claims() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let audit_path = dir.path().join(crate::server::audit::AUDIT_LOG_FILENAME);
+        std::fs::write(&audit_path, b"audit").unwrap();
+
+        // State file carries two agents with one claim each:
+        // - alice: claim with no expiry (fresh, must survive)
+        // - bob:   claim whose TTL already expired before load (must be dropped)
+        //
+        // `SystemTime` serialises as { "secs_since_epoch": N, "nsecs_since_epoch": 0 }.
+        // `started_at` / `last_heartbeat` on `AgentSession` are plain `SystemTime`.
+        // `claimed_at` / `last_touched_unix` on `Claim` use the `unix_secs` helper
+        // (plain u64).
+        //
+        // Bob's TTL is set to epoch 1 (1970-01-01 00:00:01 UTC) so it is safely in
+        // the past regardless of wall-clock skew; `claimed_at = 2` satisfies the
+        // guard `now >= claimed_at` so expiry is triggered.
+        let state_json = serde_json::json!({
+            "sessions": [
+                ["alice-id", {
+                    "id": "alice-id",
+                    "name": "alice",
+                    "kind": "ClaudeCode",
+                    "mode": "Interactive",
+                    "pid": null,
+                    "parent_session_id": null,
+                    "session_token": "alice-token",
+                    "started_at": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                    "last_heartbeat": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                }],
+                ["bob-id", {
+                    "id": "bob-id",
+                    "name": "bob",
+                    "kind": "ClaudeCode",
+                    "mode": "Interactive",
+                    "pid": null,
+                    "parent_session_id": null,
+                    "session_token": "bob-token",
+                    "started_at": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                    "last_heartbeat": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
+                }]
+            ],
+            "occupancy_by_file": [],
+            "occupancy_file_intents": [],
+            "occupancy_by_agent": [
+                // alice — no expiry, survives the load
+                ["alice-id", [{
+                    "agent_id": "alice-id",
+                    "path": "src/alice.rs",
+                    "symbols": [],
+                    "content_hash": null,
+                    "intent": "Edit",
+                    "claimed_at": 10_u64,
+                    "last_touched_unix": 10_u64,
+                    "expires_at": null,
+                }]],
+                // bob — TTL expired long ago, must be dropped
+                // `expires_at` is a plain `Option<SystemTime>` so must use the
+                // { "secs_since_epoch": ..., "nanos_since_epoch": ... } struct shape
+                // (serde uses `nanos_since_epoch` on this toolchain).
+                ["bob-id", [{
+                    "agent_id": "bob-id",
+                    "path": "src/bob.rs",
+                    "symbols": [],
+                    "content_hash": null,
+                    "intent": "Edit",
+                    "claimed_at": 2_u64,
+                    "last_touched_unix": 2_u64,
+                    "expires_at": { "secs_since_epoch": 1_i64, "nanos_since_epoch": 0_u32 },
+                }]],
+            ],
+            "audit_offset_bytes": 0_u64,
+            "audit_reset_at_unix": serde_json::Value::Null,
+            "intents": [],
+            "activities": [],
+        });
+        std::fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&state_json).unwrap(),
+        )
+        .unwrap();
+
+        let reg = PresenceRegistry::new();
+        let occ = OccupancyMap::new();
+        let events = load_pair_legacy(&state_path, &reg, &occ).expect("load_pair must succeed");
+
+        // Alice's claim must survive (session exists + claim present in occupancy)
+        assert!(
+            reg.get(&super::super::agent::AgentId("alice-id".into()))
+                .is_some(),
+            "alice's session must be restored"
+        );
+        assert!(
+            occ.list_for_path(Path::new("src/alice.rs")).is_some(),
+            "alice's non-expired claim must survive the load"
+        );
+
+        // Bob's session is restored (sessions are separate from claims), but
+        // his TTL-expired claim must NOT appear in occupancy.
+        assert!(
+            reg.get(&super::super::agent::AgentId("bob-id".into()))
+                .is_some(),
+            "bob's session must be restored"
+        );
+        assert!(
+            occ.list_for_path(Path::new("src/bob.rs")).is_none(),
+            "bob's TTL-expired claim must be dropped on load"
+        );
+
+        // Exactly one ttl_expired event for bob's claim
+        let ttl_events: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(e, crate::server::presence::PresenceEvent::ClaimRevoked {
+                reason, ..
+            } if reason == "ttl_expired")
+            })
+            .collect();
+        assert_eq!(
+            ttl_events.len(),
+            1,
+            "exactly one ttl_expired event expected; got {ttl_events:?}"
+        );
     }
 
     #[test]
