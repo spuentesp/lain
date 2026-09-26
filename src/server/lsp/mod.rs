@@ -92,37 +92,17 @@ const LSP_RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// addition is visible in code review.
 const LSP_INSTALL_BINARIES: &[&str] = &[
     // Debian / Ubuntu
-    "apt-get",
-    "apt",
-    "dpkg",
-    // Fedora / RHEL
-    "dnf",
-    "yum",
-    "rpm",
-    // Arch
-    "pacman",
-    // Alpine
-    "apk",
-    // macOS
-    "brew",
-    "port",
-    // Node
-    "npm",
-    "yarn",
-    "pnpm",
-    // Python
-    "pip",
-    "pip3",
-    // Go
-    "go",
-    // Rust
-    "cargo",
-    // Snap / Flatpak
-    "snap",
-    "flatpak",
-    // openSUSE
-    "zypper",
-    // Gentoo
+    "apt-get", "apt", "dpkg", // Fedora / RHEL
+    "dnf", "yum", "rpm", // Arch
+    "pacman", // Alpine
+    "apk", // macOS
+    "brew", "port", // Node
+    "npm", "yarn", "pnpm", // Python
+    "pip", "pip3", // Go
+    "go", // Rust
+    "cargo", // Snap / Flatpak
+    "snap", "flatpak", // openSUSE
+    "zypper", // Gentoo
     "emerge",
 ];
 /// Per-language timeout for the cold-boot prewarm `documentSymbol`
@@ -195,12 +175,21 @@ const fn lsp_entry(
     )
 }
 
-const TS_LS_INSTALL: Option<&'static str> = Some("npm install -g typescript typescript-language-server");
+const TS_LS_INSTALL: Option<&'static str> =
+    Some("npm install -g typescript typescript-language-server");
 const CLANGD_INSTALL: Option<&'static str> = Some("brew install llvm");
 
 const LANGUAGE_MAP: &[(&str, LspConfig)] = &[
-    lsp_entry("rs", "rust-analyzer", Some("rustup component add rust-analyzer")),
-    lsp_entry("go", "gopls", Some("go install golang.org/x/tools/gopls@latest")),
+    lsp_entry(
+        "rs",
+        "rust-analyzer",
+        Some("rustup component add rust-analyzer"),
+    ),
+    lsp_entry(
+        "go",
+        "gopls",
+        Some("go install golang.org/x/tools/gopls@latest"),
+    ),
     lsp_entry("ts", "typescript-language-server", TS_LS_INSTALL),
     lsp_entry("tsx", "typescript-language-server", TS_LS_INSTALL),
     lsp_entry("js", "typescript-language-server", TS_LS_INSTALL),
@@ -1408,7 +1397,6 @@ pub fn detect_extensions_from_files(
     out.sort();
     out
 }
-
 
 #[cfg(test)]
 mod availability_tests {

@@ -5,12 +5,62 @@
 
 use crate::schema::{EdgeType, NodeType};
 use parking_lot::Mutex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
 thread_local! {
     static PARSER: Mutex<Parser> = Mutex::new(Parser::new());
+}
+
+/// Process-wide cache of compiled tree-sitter queries.
+///
+/// `tree_sitter::Query::new` is non-trivial — it walks the AST pattern and
+/// allocates per-pattern state. With 9 call sites × N files per indexing pass,
+/// that was 5 000-25 000 query compilations per language. Compiled `Query`
+/// values are `Send + Sync` after construction (`QueryCursor` is the
+/// per-thread cursor), so a single shared instance is safe to share across
+/// threads. Keyed by `(language_name, pattern)`; both are `&'static str`
+/// literals that already exist as module-level `const`s.
+///
+/// A miss compiles the query and stores the `Arc`; a hit returns a clone.
+/// The first caller pays the compile cost; every subsequent caller gets the
+/// shared query. The cache is read-only after warmup, so the
+/// `parking_lot::Mutex` is uncontended.
+type CompiledQueryMap = HashMap<(&'static str, &'static str), Arc<Query>>;
+
+static COMPILED_QUERIES: OnceLock<Mutex<CompiledQueryMap>> = OnceLock::new();
+
+/// Compile (or fetch from cache) a tree-sitter query for `language` /
+/// `pattern`. Returns `None` on the same compilation failures the
+/// pre-cache `if let Ok(query) = Query::new(...)` arms fell through on.
+fn compiled_query(language: &'static str, pattern: &'static str) -> Option<Arc<Query>> {
+    let cache = COMPILED_QUERIES.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let guard = cache.lock();
+        if let Some(q) = guard.get(&(language, pattern)) {
+            return Some(Arc::clone(q));
+        }
+    }
+    let lang = match language {
+        "rust" => tree_sitter_rust::language(),
+        "python" => tree_sitter_python::language(),
+        "javascript" => tree_sitter_javascript::language(),
+        _ => return None,
+    };
+    let Ok(q) = Query::new(&lang, pattern) else {
+        return None;
+    };
+    let arc = Arc::new(q);
+    let mut guard = cache.lock();
+    // Re-check under the write lock in case another thread raced ahead
+    // and inserted the same key — keep the first compile, share the Arc.
+    if let Some(existing) = guard.get(&(language, pattern)) {
+        return Some(Arc::clone(existing));
+    }
+    guard.insert((language, pattern), Arc::clone(&arc));
+    Some(arc)
 }
 
 /// A raw reference found in source code, not yet resolved to graph node IDs.
@@ -19,6 +69,16 @@ pub struct StaticRef {
     pub source_line: u32,
     pub target_name: String,
     pub edge_type: EdgeType,
+    /// A call made on some other value (`d.update()`, `arr.push()`), not
+    /// a bare call or one on `self` / `this`. The resolver uses it to
+    /// avoid linking `dict.update()` to the one user-defined `update`.
+    pub foreign_receiver: bool,
+    /// A call on the caller's own object (`self.x()`, `this.x()`, a Go
+    /// method's receiver variable).
+    pub self_receiver: bool,
+    /// `Registry` in `Registry::new()`: the type or module a path-qualified
+    /// call names.
+    pub qualifier: Option<String>,
 }
 
 /// Known-bUILTIN blocklist — only canonical std/lib calls that are unambiguously
@@ -204,6 +264,7 @@ pub fn extract_refs_with_locals(
         "rs" => extract(
             source,
             tree_sitter_rust::language(),
+            "rust",
             &[RUST_CALLS_1, RUST_CALLS_2, RUST_CALLS_3],
             &[RUST_TYPES],
             local_definitions,
@@ -211,6 +272,7 @@ pub fn extract_refs_with_locals(
         "py" => extract(
             source,
             tree_sitter_python::language(),
+            "python",
             &[PY_CALLS_1, PY_CALLS_2],
             &[PY_TYPES],
             local_definitions,
@@ -218,6 +280,7 @@ pub fn extract_refs_with_locals(
         "js" | "jsx" | "ts" | "tsx" => extract(
             source,
             tree_sitter_javascript::language(),
+            "javascript",
             &[JS_CALLS_1, JS_CALLS_2, JS_NEW],
             &[JS_TYPES],
             local_definitions,
@@ -254,8 +317,9 @@ const JS_TYPES: &str = "(identifier) @name";
 fn extract(
     source: &str,
     language: Language,
-    call_patterns: &[&str],
-    type_patterns: &[&str],
+    language_name: &'static str,
+    call_patterns: &[&'static str],
+    type_patterns: &[&'static str],
     local_definitions: &HashSet<String>,
 ) -> Vec<StaticRef> {
     PARSER.with(|parser| {
@@ -272,7 +336,7 @@ fn extract(
 
         // Calls
         for pattern in call_patterns {
-            if let Ok(query) = Query::new(&language, pattern) {
+            if let Some(query) = compiled_query(language_name, pattern) {
                 let mut cursor = QueryCursor::new();
                 for m in cursor.matches(&query, tree.root_node(), src_bytes) {
                     for cap in m.captures {
@@ -282,6 +346,9 @@ fn extract(
                                     source_line: cap.node.start_position().row as u32,
                                     target_name: name.to_string(),
                                     edge_type: EdgeType::Calls,
+                                    foreign_receiver: false,
+                                    self_receiver: false,
+                                    qualifier: None,
                                 });
                             }
                         }
@@ -292,7 +359,7 @@ fn extract(
 
         // Type usages
         for pattern in type_patterns {
-            if let Ok(query) = Query::new(&language, pattern) {
+            if let Some(query) = compiled_query(language_name, pattern) {
                 let mut cursor = QueryCursor::new();
                 for m in cursor.matches(&query, tree.root_node(), src_bytes) {
                     for cap in m.captures {
@@ -302,6 +369,9 @@ fn extract(
                                     source_line: cap.node.start_position().row as u32,
                                     target_name: name.to_string(),
                                     edge_type: EdgeType::Uses,
+                                    foreign_receiver: false,
+                                    self_receiver: false,
+                                    qualifier: None,
                                 });
                             }
                         }

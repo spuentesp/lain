@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::{LspMultiplexer, PrewarmOutcome};

@@ -42,8 +42,26 @@ pub fn graph_path(workspace: &Path, path: &Path) -> String {
 #[derive(Clone)]
 pub struct GraphDatabase {
     graph: Arc<RwLock<StableGraph<GraphNode, GraphEdge>>>,
-    index_map: DashMap<String, NodeIndex>,
-    path_index: DashMap<String, Vec<NodeIndex>>,
+    // The three secondary indexes are wrapped in `Arc` so that
+    // `GraphDatabase::clone()` (the derive) shares the underlying
+    // index state across handles — the `graph` field is already
+    // `Arc<RwLock<…>>` for the same reason. `DashMap::clone()` is a
+    // deep copy that builds new shards, so a plain `DashMap` field
+    // would diverge between two clones of the same database: the
+    // federation tests already depend on `db().clone()` and
+    // `db().upsert_node(...)` reflecting through subsequent lookups
+    // via the original handle. `Arc<DashMap<…>>` makes that work.
+    index_map: Arc<DashMap<String, NodeIndex>>,
+    path_index: Arc<DashMap<String, Vec<NodeIndex>>>,
+    /// A3 — secondary index keyed on `node.name`. Maintained under the same
+    /// write lock that updates `index_map` and `path_index`, so a reader that
+    /// consults it under the graph read lock sees the old pair or the new
+    /// pair, never a mix. The hot call site is `resolve_static_edges` in
+    /// the indexing pipeline, which used to scan every node on every pass
+    /// (`db.get_all_nodes()`) to build a `HashMap<name, …>` for name-keyed
+    /// ref resolution; with this index that scan becomes an O(1) lookup
+    /// per ref.
+    name_index: Arc<DashMap<String, Vec<NodeIndex>>>,
     last_commit: Arc<RwLock<Option<String>>>,
     persistence_path: PathBuf,
     /// When true, every public `insert_*` / `set_*` / `save_to_disk` returns
@@ -141,8 +159,9 @@ impl GraphDatabase {
     fn empty(memory_path: &Path) -> Self {
         Self {
             graph: Arc::new(RwLock::new(StableGraph::new())),
-            index_map: DashMap::new(),
-            path_index: DashMap::new(),
+            index_map: Arc::new(DashMap::new()),
+            path_index: Arc::new(DashMap::new()),
+            name_index: Arc::new(DashMap::new()),
             last_commit: Arc::new(RwLock::new(None)),
             persistence_path: memory_path.to_path_buf(),
             read_only: false,
@@ -210,9 +229,11 @@ impl GraphDatabase {
             }
         } else {
             let path = node.path.clone();
+            let name = node.name.clone();
             let idx = graph.add_node(node.clone());
             self.index_map.insert(node.id.clone(), idx);
             self.path_index.entry(path).or_default().push(idx);
+            self.name_index.entry(name).or_default().push(idx);
         }
         Ok(())
     }
@@ -245,6 +266,7 @@ impl GraphDatabase {
                     None
                 } else {
                     let path = node.path.clone();
+                    let name = node.name.clone();
                     let idx = graph.add_node(node.clone());
                     // Pre-fix this was deferred to Phase 2 (after
                     // `drop(graph)`), creating the race window. Move
@@ -252,6 +274,7 @@ impl GraphDatabase {
                     // lock as the petgraph insert.
                     self.index_map.insert(node.id.clone(), idx);
                     self.path_index.entry(path.clone()).or_default().push(idx);
+                    self.name_index.entry(name).or_default().push(idx);
                     Some((node.id.clone(), path, idx))
                 }
             })
@@ -353,6 +376,7 @@ impl GraphDatabase {
                         }
                         Some(n) => {
                             let id = n.id.clone();
+                            let name = n.name.clone();
                             collateral_edges += graph.edges(idx).count();
                             // Capture inbound edges from files this pass
                             // is not rebuilding, before they go with the
@@ -378,6 +402,26 @@ impl GraphDatabase {
                                                     // (get_edges_to, blast radius) silently returns
                                                     // empty while name-keyed lookups still work.
                             self.index_map.remove(&id);
+                            // A3 — same rationale for `name_index`: a
+                            // node that genuinely goes away must drop
+                            // its name entry too. The replacement
+                            // re-inserts under the same id (deterministic)
+                            // and the same name, so the entry is rebuilt
+                            // by the loop below — but a *different* node
+                            // that subsequently takes this name (e.g. a
+                            // re-introduced symbol with the same name in
+                            // a different file) would otherwise leak an
+                            // entry pointing at a vacated slot.
+                            let name_now_empty =
+                                if let Some(mut entry) = self.name_index.get_mut(&name) {
+                                    entry.retain(|i| *i != idx);
+                                    entry.is_empty()
+                                } else {
+                                    false
+                                };
+                            if name_now_empty {
+                                self.name_index.remove(&name);
+                            }
                             removed_ids.push(id);
                         }
                         // index pointed at a vacated slot; nothing to remove
@@ -399,6 +443,16 @@ impl GraphDatabase {
                     }
                     let idx = graph.add_node((*node).clone());
                     self.index_map.insert(node.id.clone(), idx);
+                    // A3 — mirror the id/path insertion in the
+                    // `name_index`. The remove loop above already
+                    // dropped the stale name entry for any node that
+                    // went away under the same name, so this re-adds
+                    // it cleanly; for genuinely new names it is the
+                    // first insertion.
+                    self.name_index
+                        .entry(node.name.clone())
+                        .or_default()
+                        .push(idx);
                     fresh.push(idx);
                 }
                 new_entries.push((path.clone(), fresh));
@@ -465,6 +519,7 @@ impl GraphDatabase {
 
         let mut removed = 0usize;
         let mut cleared_paths: Vec<(String, NodeIndex)> = Vec::new();
+        let mut cleared_names: Vec<(String, NodeIndex)> = Vec::new();
         {
             let mut graph = self.graph.write();
             for id in ids {
@@ -473,6 +528,10 @@ impl GraphDatabase {
                 };
                 if let Some(node) = graph.node_weight(idx) {
                     cleared_paths.push((node.path.clone(), idx));
+                    // A3 — mirror the path bookkeeping for the name
+                    // index so a removed id doesn't leave a name
+                    // entry pointing at a vacated slot.
+                    cleared_names.push((node.name.clone(), idx));
                 }
                 if graph.remove_node(idx).is_some() {
                     removed += 1;
@@ -493,6 +552,18 @@ impl GraphDatabase {
             };
             if now_empty {
                 self.path_index.remove(&path);
+            }
+        }
+        // A3 — same cleanup for name_index.
+        for (name, idx) in cleared_names {
+            let now_empty = if let Some(mut entry) = self.name_index.get_mut(&name) {
+                entry.retain(|i| *i != idx);
+                entry.is_empty()
+            } else {
+                false
+            };
+            if now_empty {
+                self.name_index.remove(&name);
             }
         }
         Ok(removed)
@@ -732,6 +803,22 @@ impl GraphDatabase {
         self.get_node(id)
     }
 
+    /// A5 — hand out a read guard on the underlying `StableGraph` so
+    /// callers that already hold a `NodeIndex` (e.g. from
+    /// `find_indices_by_name`) can resolve it to a node weight
+    /// without going back through the id-keyed `index_map`. The guard
+    /// is released when the caller's scope exits; concurrent writers
+    /// block until then.
+    ///
+    /// Read-only callers in the indexing pipeline prefer this over
+    /// `get_node`/`get_node_by_id` because it avoids the extra
+    /// `DashMap` lookup — the resolver already has the index.
+    pub fn graph_ref_for_read(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, StableGraph<GraphNode, GraphEdge>> {
+        self.graph.read()
+    }
+
     pub fn traverse(
         &self,
         start: &str,
@@ -926,23 +1013,48 @@ impl GraphDatabase {
     /// Every node with this name, sorted by (path, id) so the order is
     /// stable across reindexes.
     pub fn find_all_nodes_by_name(&self, name: &str) -> Vec<GraphNode> {
+        // A3 — route through `name_index` instead of a full
+        // `node_weights()` scan. The index returns the `NodeIndex`
+        // values for the name; we still clone the node weights and
+        // sort them so the output order matches the previous contract.
+        let graph = self.graph.read();
         let mut hits: Vec<GraphNode> = self
-            .graph
-            .read()
-            .node_weights()
-            .filter(|n| n.name == name)
-            .cloned()
-            .collect();
+            .name_index
+            .get(name)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter_map(|idx| graph.node_weight(*idx).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
         hits.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
         hits
     }
 
+    /// A3 — snapshot of the `NodeIndex` values for `name`. Used by the
+    /// indexing resolve phase to look up name-keyed refs without cloning
+    /// every node in the graph. Returns an empty vec if the name has
+    /// no entries — same contract as the previous `get_all_nodes()`
+    /// filter.
+    pub fn find_indices_by_name(&self, name: &str) -> Vec<NodeIndex> {
+        self.name_index
+            .get(name)
+            .map(|indices| indices.value().clone())
+            .unwrap_or_default()
+    }
+
     pub fn find_node_by_path(&self, path: &str) -> Option<GraphNode> {
-        self.graph
-            .read()
-            .node_weights()
-            .find(|n| n.path == path)
-            .cloned()
+        // A4: route through `path_index` instead of a full `node_weights()`
+        // scan. `has_node_at_path` already does this; the only difference
+        // here is what we return. Falls back to None when the path has no
+        // entries in the index — same contract as the linear scan.
+        let graph = self.graph.read();
+        self.path_index.get(path).and_then(|indices| {
+            indices
+                .iter()
+                .find_map(|idx| graph.node_weight(*idx).cloned())
+        })
     }
 
     /// O(1) existence check via `path_index`, for callers that only need
@@ -1093,165 +1205,118 @@ impl GraphDatabase {
 
     pub fn calculate_anchor_scores(&self) -> Result<(), LainError> {
         self.check_writable()?;
+        // A6 — split into a read-only compute phase (no graph write
+        // lock; runs `par_iter` over nodes for free parallelism on the
+        // hot Pass-1 walk) and a write phase (one lock, applies
+        // scores). The graph is read-only during the compute phase;
+        // the indexing pipeline is the single writer, so the invariant
+        // holds.
+        //
+        // The function's contract is unchanged: scores end up on the
+        // node weights, the top symbol normalizes to 100.0, anchor
+        // semantics (Calls-only, test-path filtered, log2(1+calls_out),
+        // dead-function baseline) are preserved verbatim.
+        let (raws, max_raw) = self.compute_anchor_raws()?;
+        self.write_anchor_scores(&raws, max_raw)?;
+        Ok(())
+    }
+
+    /// A6 — compute the raw hub score for every node and the
+    /// corpus-wide max. Read-only: takes no write lock, parallel over
+    /// node indices via rayon. The two-pass design (compute max,
+    /// normalize) requires the full raws Vec plus the max; both come
+    /// out of this single pass because the max is just a fold over
+    /// the per-node raws.
+    ///
+    /// Hub semantics preserved from the previous inline version:
+    ///
+    ///   raw = calls_in * log2(1 + calls_out) * size_factor
+    ///   size_factor = min(1, body_lines / 8)
+    ///
+    /// Test-path symbols and edges with test-path endpoints are
+    /// excluded. Functions with zero callers get a half-strength
+    /// baseline (`size_factor * 0.5`) so dead code stays visible
+    /// without outranking anything that has at least one caller.
+    /// Pinned by `anchor_hub_tests::*`.
+    fn compute_anchor_raws(&self) -> Result<(Vec<(NodeIndex, f32)>, f32), LainError> {
+        use rayon::prelude::*;
+
+        let graph = self.graph.read();
+        let indices: Vec<NodeIndex> = graph.node_indices().collect();
+
+        let raws: Vec<(NodeIndex, f32)> = indices
+            .par_iter()
+            .map(|&idx| {
+                let node = &graph[idx];
+                if is_test_path(&node.path) {
+                    return (idx, 0.0);
+                }
+                let raw = match node.node_type {
+                    NodeType::Function | NodeType::Method => {
+                        let calls_in_unfiltered = graph
+                            .edges_directed(idx, Direction::Incoming)
+                            .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                            .count() as f32;
+                        let calls_in = graph
+                            .edges_directed(idx, Direction::Incoming)
+                            .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                            .filter(|e| !is_test_path(&graph[e.source()].path))
+                            .count() as f32;
+                        let calls_out = graph
+                            .edges_directed(idx, Direction::Outgoing)
+                            .filter(|e| e.weight().edge_type == EdgeType::Calls)
+                            .filter(|e| !is_test_path(&graph[e.target()].path))
+                            .count() as f32;
+                        let body_lines = match (node.line_start, node.line_end) {
+                            (Some(s), Some(e)) => e.saturating_sub(s) as f32 + 1.0,
+                            _ => 1.0,
+                        };
+                        let size_factor = (body_lines / 8.0).min(1.0);
+                        if calls_in_unfiltered == 0.0 {
+                            size_factor * 0.5
+                        } else {
+                            calls_in * (1.0 + calls_out).log2() * size_factor
+                        }
+                    }
+                    _ => 0.0,
+                };
+                (idx, raw)
+            })
+            .collect();
+
+        let max_raw = raws.iter().map(|(_, r)| *r).fold(0.0f32, f32::max);
+        Ok((raws, max_raw))
+    }
+
+    /// A6 — apply the normalized anchor score plus fan_in / fan_out /
+    /// calls_in / calls_out to every node. Takes one write lock for
+    /// the whole pass; the per-node writes are O(1) and the lock is
+    /// uncontended outside the indexing pipeline.
+    fn write_anchor_scores(
+        &self,
+        raws: &[(NodeIndex, f32)],
+        max_raw: f32,
+    ) -> Result<(), LainError> {
+        self.check_writable()?;
         let mut graph = self.graph.write();
 
-        // Two-pass: compute raw hub scores, find the corpus-wide max,
-        // then normalize every node so the top symbol scores 100 and
-        // everything else scales accordingly.
-        //
-        // Without this normalization the raw score grows unbounded as
-        // the corpus grows (we've observed values up to 1063 in
-        // production). That makes the search ranking
-        // `sim + anchor_weight * anchor` anchor-dominated, hiding
-        // semantically better matches and producing different rankings
-        // across reindexes of the same code.
-        //
-        // With percentile normalization:
-        //   - The top symbol in any corpus always scores 100
-        //   - Ranks reflect *relative* importance, not raw fan_in
-        //   - Rankings are stable across reindexes unless the identity
-        //     of the top changes
-        //   - Composes cleanly with the per-candidate-set min-max
-        //     normalization in search.rs
-        let indices: Vec<_> = graph.node_indices().collect();
-
-        // Pass 1: compute raw hub scores, find max.
-        //
-        // Hub semantics. An anchor is an ORCHESTRATION hub — called
-        // by many (calls_in), coordinating many (calls_out), with a
-        // real body (size_factor):
-        //
-        //     raw = calls_in * log2(1 + calls_out) * size_factor
-        //     size_factor = min(1, body_lines / 8)
-        //
-        // Only Calls edges count. The superseded fan_in/(fan_out+1)
-        // counted every edge type (including Contains from the parent
-        // file) and actively punished fan_out, which is backwards for
-        // hubs — it put 1-line helpers like `as_str` at the top of
-        // find_anchors.
-        //
-        // The approved design wrote `log2(2 + calls_out)`, so that
-        // calls_out = 0 yielded a factor of 1. This uses `1 +`
-        // deliberately: a function that calls nothing coordinates
-        // nothing, so it scores 0 however many callers it has — the
-        // stronger form of the same intent. Pinned by
-        // `anchor_hub_tests::{leaf_utility_scores_zero,
-        // hub_outranks_trivial_helper}`.
-        //
-        // Known limit: Calls edges are name-resolved when LSP type
-        // info is unavailable, so every `.as_str()` in the repo
-        // collapses onto one node and inflates its calls_in. A
-        // ubiquitous method name can still surface at the top;
-        // `find_anchors` reports the path so you can see which
-        // definition was scored.
-        let mut max_raw: f32 = 0.0;
-        let mut raws: Vec<(petgraph::graph::NodeIndex, f32)> = Vec::with_capacity(indices.len());
-        for idx in &indices {
-            let node = &graph[*idx];
-            // Test code is hub-shaped (fixtures call everything and are
-            // called by every test) but anchors are entry points into
-            // the PRODUCT. Test-path symbols score 0, and Calls edges
-            // with a test-path endpoint don't count toward fan-in/out
-            // either (fifty `test_*` callers don't make `default` an
-            // orchestration hub). Inline `#[cfg(test)]` modules inside
-            // regular src files are only detectable via the
-            // `*_tests.rs` / `tests.rs` file-stem conventions.
-            if is_test_path(&node.path) {
-                raws.push((*idx, 0.0));
-                continue;
-            }
-            let raw = match node.node_type {
-                NodeType::Function | NodeType::Method => {
-                    // Unfiltered Calls count — used only to decide
-                    // whether the baseline applies. The baseline
-                    // is for functions with *no* callers at all
-                    // (a wishlist-#14 small-fixture artifact, where
-                    // every function scores 0 and the sort is
-                    // unstable). A function whose only callers are
-                    // tests still scores 0 — the test-caller filter
-                    // is a stronger "test code doesn't count as
-                    // production signal" statement, not a dead-code
-                    // signal, and we must not relax it by handing
-                    // the function a baseline weight.
-                    let calls_in_unfiltered = graph
-                        .edges_directed(*idx, Direction::Incoming)
-                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
-                        .count() as f32;
-                    let calls_in = graph
-                        .edges_directed(*idx, Direction::Incoming)
-                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
-                        .filter(|e| !is_test_path(&graph[e.source()].path))
-                        .count() as f32;
-                    let calls_out = graph
-                        .edges_directed(*idx, Direction::Outgoing)
-                        .filter(|e| e.weight().edge_type == EdgeType::Calls)
-                        .filter(|e| !is_test_path(&graph[e.target()].path))
-                        .count() as f32;
-                    let body_lines = match (node.line_start, node.line_end) {
-                        (Some(s), Some(e)) => e.saturating_sub(s) as f32 + 1.0,
-                        _ => 1.0,
-                    };
-                    let size_factor = (body_lines / 8.0).min(1.0);
-                    if calls_in_unfiltered == 0.0 {
-                        // Baseline weight for functions with no
-                        // callers. Without this, every raw in a small
-                        // fixture (or a fixture where the LSP path
-                        // didn't pick up calls) is 0, the max_raw is
-                        // 0, and every normalized score is 0 — the
-                        // sort is unstable at zero and top anchors
-                        // come back in arbitrary order. With 0.5x,
-                        // dead functions stay visible (so the user
-                        // can see what was indexed) but any function
-                        // with at least one caller outranks them:
-                        // calls_in >= 1 and calls_out >= 1 gives
-                        // raw >= 1 * 1 * size_factor = size_factor,
-                        // which exceeds 0.5 * size_factor. Pinned by
-                        // `anchor_hub_tests::dead_function_baseline_weight`.
-                        size_factor * 0.5
-                    } else {
-                        // log2(1 + calls_out): a leaf that calls
-                        // nothing is not an orchestration hub and
-                        // scores 0 — no matter how many callers it
-                        // has (the `as_str` problem).
-                        calls_in * (1.0 + calls_out).log2() * size_factor
-                    }
-                }
-                _ => 0.0,
-            };
-            if raw > max_raw {
-                max_raw = raw;
-            }
-            raws.push((*idx, raw));
-        }
-
-        // Pass 2: write fan_in/fan_out + normalized anchor back
         for (idx, raw) in raws {
-            let fan_in = graph.neighbors_directed(idx, Direction::Incoming).count() as u32;
-            let fan_out = graph.neighbors_directed(idx, Direction::Outgoing).count() as u32;
-            // Calls-only counts, stored alongside the all-edge ones.
-            // "How many callers?" is a different question from "how
-            // coupled is this?", and answering the first with the
-            // second is why a dead-code check could never fire: the
-            // `Contains` edge from a symbol's own file guarantees
-            // `fan_in >= 1`. No test-path filter here — that is an
-            // anchor-scoring policy, not a fact about the graph.
+            let fan_in = graph.neighbors_directed(*idx, Direction::Incoming).count() as u32;
+            let fan_out = graph.neighbors_directed(*idx, Direction::Outgoing).count() as u32;
             let calls_in = graph
-                .edges_directed(idx, Direction::Incoming)
+                .edges_directed(*idx, Direction::Incoming)
                 .filter(|e| e.weight().edge_type == EdgeType::Calls)
                 .count() as u32;
             let calls_out = graph
-                .edges_directed(idx, Direction::Outgoing)
+                .edges_directed(*idx, Direction::Outgoing)
                 .filter(|e| e.weight().edge_type == EdgeType::Calls)
                 .count() as u32;
-            // 100.0 scale so display "anchor 12.34" is human-readable;
-            // top-of-corpus symbol always scores 100 regardless of how
-            // big the codebase grows.
             let normalized = if max_raw > 0.0 {
                 raw / max_raw * 100.0
             } else {
                 0.0
             };
-            if let Some(node) = graph.node_weight_mut(idx) {
+            if let Some(node) = graph.node_weight_mut(*idx) {
                 node.fan_in = Some(fan_in);
                 node.fan_out = Some(fan_out);
                 node.calls_in = Some(calls_in);
@@ -1481,6 +1546,17 @@ impl GraphDatabase {
         }
     }
 
+    /// The `File` node for `path`, via the path index.
+    pub fn get_file_node(&self, path: &str) -> Option<GraphNode> {
+        let graph = self.graph.read();
+        let indices = self.path_index.get(path)?;
+        indices
+            .iter()
+            .filter_map(|&idx| graph.node_weight(idx))
+            .find(|n| n.node_type == NodeType::File)
+            .cloned()
+    }
+
     pub fn has_references_from(&self, id: &str) -> bool {
         let graph = self.graph.read();
 
@@ -1570,9 +1646,22 @@ impl GraphDatabase {
         }
 
         let mut path_index = HashMap::new();
+        let mut name_index = HashMap::new();
         for (idx, node) in state.graph.node_references() {
             path_index
                 .entry(node.path.clone())
+                .or_insert_with(Vec::new)
+                .push(idx);
+            // A3 — rebuild `name_index` in the same pass over the
+            // loaded petgraph nodes so `find_indices_by_name` /
+            // `find_all_nodes_by_name` work immediately after a cold
+            // load, not just after the next indexing pass.
+            // `load_from_disk` previously went through
+            // `graph.node_weights()` for name lookups; post-fix the
+            // secondary index is authoritative. The on-disk format
+            // is unchanged — `name_index` is purely derived state.
+            name_index
+                .entry(node.name.clone())
                 .or_insert_with(Vec::new)
                 .push(idx);
         }
@@ -1585,6 +1674,10 @@ impl GraphDatabase {
         self.path_index.clear();
         for (k, v) in path_index {
             self.path_index.insert(k, v);
+        }
+        self.name_index.clear();
+        for (k, v) in name_index {
+            self.name_index.insert(k, v);
         }
         *self.last_commit.write() = state.last_commit;
         Ok(())
@@ -2103,6 +2196,294 @@ mod anchor_hub_tests {
             hub_score > dead_score,
             "live hub ({hub_score}) must outrank dead function \
              ({dead_score}) of identical size_factor"
+        );
+    }
+}
+
+#[cfg(test)]
+mod name_index_tests {
+    //! A3 — invariants for the secondary `name_index` on `GraphDatabase`.
+    //!
+    //! The index is a thin lookup accelerator for the resolve phase; it
+    //! must stay in sync with the graph through every mutation path
+    //! (`insert_nodes_batch`, `replace_nodes_for_paths`,
+    //! `remove_nodes_by_ids`, `upsert_node`). These tests pin that
+    //! invariant: a stale entry that points at a vacated slot, or a
+    //! missing entry for a live node, would either miss real refs or
+    //! manufacture edges to ghosts. Either failure mode is silent at
+    //! the call site, so we pin both halves explicitly.
+
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+
+    fn db(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    fn func(name: &str, path: &str) -> GraphNode {
+        GraphNode::new(NodeType::Function, name.into(), path.into())
+    }
+
+    /// `find_indices_by_name` returns the indices that were inserted,
+    /// and `find_all_nodes_by_name` returns the matching node set in
+    /// the same (path, id) order the previous linear-scan implementation
+    /// produced.
+    #[test]
+    fn name_index_reflects_insert_nodes_batch() {
+        let g = db("lain_test_name_index_insert");
+        let alpha = func("alpha", "src/a.rs");
+        let beta = func("beta", "src/b.rs");
+        g.insert_nodes_batch(&[alpha.clone(), beta.clone()])
+            .unwrap();
+
+        let alpha_idx = g.find_indices_by_name("alpha");
+        assert_eq!(
+            alpha_idx.len(),
+            1,
+            "alpha must have exactly one entry in the name index"
+        );
+        let alpha_hits = g.find_all_nodes_by_name("alpha");
+        assert_eq!(
+            alpha_hits.len(),
+            1,
+            "alpha must surface from the name-keyed lookup"
+        );
+        assert_eq!(
+            alpha_hits[0].id, alpha.id,
+            "the lookup must return alpha's actual node"
+        );
+
+        let beta_idx = g.find_indices_by_name("beta");
+        assert_eq!(beta_idx.len(), 1);
+        assert_ne!(
+            alpha_idx[0], beta_idx[0],
+            "distinct nodes -> distinct indices"
+        );
+
+        assert!(
+            g.find_indices_by_name("nonexistent").is_empty(),
+            "unknown names must return an empty vec"
+        );
+    }
+
+    /// Two nodes sharing the same name (common in the wild — eleven
+    /// `fn parse` in this repo) must coexist in the name index with
+    /// both indices present.
+    #[test]
+    fn name_index_handles_shared_names_across_paths() {
+        let g = db("lain_test_name_index_shared");
+        let p1 = func("parse", "src/a.rs");
+        let p2 = func("parse", "src/b.rs");
+        let p3 = func("parse", "src/c.rs");
+        g.insert_nodes_batch(&[p1.clone(), p2.clone(), p3.clone()])
+            .unwrap();
+
+        let parse_indices = g.find_indices_by_name("parse");
+        assert_eq!(
+            parse_indices.len(),
+            3,
+            "all three `parse` nodes must be in the name index; got {}",
+            parse_indices.len()
+        );
+
+        let nodes = g.find_all_nodes_by_name("parse");
+        assert_eq!(nodes.len(), 3);
+        // Sorted by (path, id) — same order the previous linear scan produced.
+        assert_eq!(nodes[0].path, "src/a.rs");
+        assert_eq!(nodes[1].path, "src/b.rs");
+        assert_eq!(nodes[2].path, "src/c.rs");
+    }
+
+    /// Re-scanning a file replaces its nodes under the same id (deterministic)
+    /// and the same name. The remove loop above must drop the stale name
+    /// entry, and the insert loop must re-add it.
+    #[test]
+    fn name_index_stays_in_sync_after_replace_nodes_for_paths() {
+        let g = db("lain_test_name_index_replace");
+        let alpha = func("alpha", "src/a.rs");
+        let beta = func("beta", "src/a.rs");
+        g.insert_nodes_batch(&[alpha.clone(), beta.clone()])
+            .unwrap();
+
+        g.replace_nodes_for_paths(&["src/a.rs".to_string()], std::slice::from_ref(&alpha))
+            .unwrap();
+
+        let alpha_idx = g.find_indices_by_name("alpha");
+        let beta_idx = g.find_indices_by_name("beta");
+        assert_eq!(
+            alpha_idx.len(),
+            1,
+            "alpha survives the replace and the name index reflects it"
+        );
+        assert!(
+            beta_idx.is_empty(),
+            "beta was removed; its name entry must be gone — got {} entries",
+            beta_idx.len()
+        );
+    }
+
+    /// A symbol that goes away under a name that another surviving node
+    /// also uses must leave the name index with the right survivors, not
+    /// leak the removed index.
+    #[test]
+    fn name_index_does_not_leak_removed_indices_on_replace() {
+        let g = db("lain_test_name_index_replace_shared");
+        let p1 = func("parse", "src/a.rs");
+        let p2 = func("parse", "src/b.rs");
+        g.insert_nodes_batch(&[p1.clone(), p2.clone()]).unwrap();
+        let p2_idx_before = g.find_indices_by_name("parse")[1];
+        assert_eq!(g.find_indices_by_name("parse").len(), 2);
+
+        g.replace_nodes_for_paths(&["src/a.rs".to_string()], &[])
+            .unwrap();
+
+        let parse_idx = g.find_indices_by_name("parse");
+        assert_eq!(
+            parse_idx.len(),
+            1,
+            "the survivor must remain; got {} entries",
+            parse_idx.len()
+        );
+        assert_eq!(
+            parse_idx[0], p2_idx_before,
+            "the survivor index must be the original src/b.rs parse"
+        );
+    }
+
+    /// `remove_nodes_by_ids` mirrors the path_index cleanup for the name
+    /// index. A removed id must drop its name entry.
+    #[test]
+    fn name_index_stays_in_sync_after_remove_nodes_by_ids() {
+        let g = db("lain_test_name_index_remove_by_id");
+        let a = func("alpha", "src/a.rs");
+        let b = func("alpha", "src/b.rs");
+        g.insert_nodes_batch(&[a.clone(), b.clone()]).unwrap();
+        assert_eq!(g.find_indices_by_name("alpha").len(), 2);
+
+        g.remove_nodes_by_ids(std::slice::from_ref(&a.id)).unwrap();
+
+        let alpha_idx = g.find_indices_by_name("alpha");
+        assert_eq!(
+            alpha_idx.len(),
+            1,
+            "one alpha remains; name index must reflect exactly that"
+        );
+        let survivors = g.find_all_nodes_by_name("alpha");
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(survivors[0].id, b.id);
+    }
+
+    /// `upsert_node` (the single-node sibling of `insert_nodes_batch`)
+    /// must keep the index in sync too. The federated backend uses this
+    /// path, so a regression here would corrupt cross-repo lookups.
+    /// The federation resolver regression test
+    /// (`runtime_trace::server::tests::federation_resolver_narrows_via_code_repo_attribute`)
+    /// exercises the cross-clone propagation end-to-end; this unit test
+    /// pins the single-handle invariant.
+    #[test]
+    fn name_index_stays_in_sync_after_upsert_node() {
+        let g = db("lain_test_name_index_upsert");
+        g.upsert_node(func("alpha", "src/a.rs")).unwrap();
+        assert_eq!(g.find_indices_by_name("alpha").len(), 1);
+
+        // Upsert with the same id (deterministic) but a different path
+        // — this is the rename case. Same name, same id, different
+        // path; the name entry stays (id is the key, name is the
+        // secondary index key), path entry updates.
+        let mut renamed = func("alpha", "src/c.rs");
+        renamed.id = func("alpha", "src/a.rs").id;
+        g.upsert_node(renamed).unwrap();
+        assert_eq!(
+            g.find_indices_by_name("alpha").len(),
+            1,
+            "rename under the same id/name keeps the entry count at 1"
+        );
+    }
+
+    /// Cloning the database must share the name index (Arc<DashMap<…>>).
+    /// The federation tests rely on this — the per-repo db is cloned
+    /// out of `FederatedIndex` and indexed via `upsert_node`, and
+    /// subsequent reads via the original handle must see those writes.
+    /// DashMap's `Clone` is a deep copy of the shards; without the
+    /// `Arc` wrap, mutations would diverge across handles and the
+    /// resolver would silently miss every node.
+    #[test]
+    fn name_index_propagates_across_clones() {
+        let g = db("lain_test_name_index_clone");
+        let handle = g.clone();
+        g.upsert_node(func("alpha", "src/a.rs")).unwrap();
+
+        let via_handle = handle.find_indices_by_name("alpha");
+        assert_eq!(
+            via_handle.len(),
+            1,
+            "a clone must see the upsert; got {} entries",
+            via_handle.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod load_from_disk_name_index_tests {
+    //! A3 — `load_from_disk` must rebuild `name_index` from the loaded
+    //! petgraph nodes. Without this, `find_indices_by_name` and
+    //! `find_all_nodes_by_name` return empty until the next indexing
+    //! pass repopulates them. The pre-fix code went through
+    //! `graph.node_weights()` for name lookups and didn't depend on
+    //! the secondary index, so the rebuild was implicit. Post-fix the
+    //! secondary index is authoritative; the rebuild must be explicit.
+
+    use super::*;
+    use crate::schema::{GraphNode, NodeType};
+
+    /// Persist a small graph, load it fresh, and assert that
+    /// `find_node_by_name` works on the loaded instance without any
+    /// indexing pass. Pre-fix this test was a no-op (the lookup
+    /// used `node_weights()`); post-fix it's the contract that pins
+    /// the rebuild in `load_from_disk`.
+    #[test]
+    fn name_index_is_rebuilt_on_load_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("graph.bin");
+        let writer = GraphDatabase::new(&path).expect("db");
+        let alpha = GraphNode::new(NodeType::Function, "alpha".into(), "src/a.rs".into());
+        let beta = GraphNode::new(NodeType::Function, "beta".into(), "src/b.rs".into());
+        writer
+            .insert_nodes_batch(&[alpha.clone(), beta.clone()])
+            .expect("insert");
+        writer.save_to_disk_sync().expect("save");
+
+        // Fresh load from the same path. The new instance shares
+        // no `name_index` with the writer.
+        drop(writer);
+        let reader = GraphDatabase::new(&path).expect("reload");
+        assert_eq!(reader.node_count(), 2, "two nodes survive the round trip");
+
+        // `find_node_by_name` must work immediately. Pre-fix this
+        // test was a no-op (the lookup went through petgraph);
+        // post-fix it's the regression test for the rebuild.
+        let alpha_hits = reader.find_all_nodes_by_name("alpha");
+        assert_eq!(
+            alpha_hits.len(),
+            1,
+            "name_index must be rebuilt on load — got {} hits",
+            alpha_hits.len()
+        );
+        assert_eq!(alpha_hits[0].id, alpha.id);
+
+        let beta_hits = reader.find_all_nodes_by_name("beta");
+        assert_eq!(beta_hits.len(), 1);
+        assert_eq!(beta_hits[0].id, beta.id);
+
+        // `find_indices_by_name` is the lower-level lookup the
+        // resolve phase uses; it must work too.
+        assert_eq!(reader.find_indices_by_name("alpha").len(), 1);
+        assert_eq!(reader.find_indices_by_name("beta").len(), 1);
+        assert!(
+            reader.find_node_by_name("missing").is_none(),
+            "unknown names still return None"
         );
     }
 }

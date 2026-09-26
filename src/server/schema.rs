@@ -449,6 +449,11 @@ pub struct GraphNode {
     /// `signature` with a structured payload.
     #[serde(default)]
     pub label: Option<String>,
+    /// The type, class, module, or namespace a method or property belongs to.
+    /// Used by `definitions_know_their_container` tests and by the resolve
+    /// phase to distinguish `util.parse()` from a free `parse()`.
+    #[serde(default)]
+    pub container: Option<String>,
     // Staleness Metadata
     #[serde(default)]
     pub last_lsp_sync: Option<i64>,
@@ -606,6 +611,7 @@ impl GraphNode {
             co_change_count: None,
             is_deprecated: false,
             label: None,
+            container: None,
             last_lsp_sync: None,
             last_git_sync: None,
             commit_hash: None,

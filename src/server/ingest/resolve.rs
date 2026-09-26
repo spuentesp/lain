@@ -80,33 +80,36 @@ pub fn resolve_call_edges(
     resolver: Option<&dyn CrossRepoResolver>,
     source_repo: Option<&RepoId>,
 ) -> Vec<GraphEdge> {
-    let mut edges = Vec::with_capacity(refs.len());
-    for (source_id, ref_loc) in refs {
-        let path_str = graph_path(workspace, &ref_loc.path);
-        let mut resolved_target: Option<String> = None;
-        if let Some(target) = db.get_node_at_location(&path_str, ref_loc.line) {
-            if target.id != *source_id {
-                resolved_target = Some(target.id);
-            }
-        } else if let (Some(resolver), Some(src)) = (resolver, source_repo) {
-            if let Some(gid) =
-                resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line))
-            {
-                let gid_str = gid.as_str().to_string();
-                if gid_str != *source_id {
-                    resolved_target = Some(gid_str);
+    use rayon::prelude::*;
+
+    // A5 — each ref is independent: it does a `get_node_at_location`
+    // (short `path_index` lookup) and possibly a cross-repo resolver
+    // call. Parallelise across refs; the graph read lock is held only
+    // for the brief per-ref lookup.
+    refs.par_iter()
+        .filter_map(|(source_id, ref_loc)| {
+            let path_str = graph_path(workspace, &ref_loc.path);
+            if let Some(target) = db.get_node_at_location(&path_str, ref_loc.line) {
+                if target.id != *source_id {
+                    return Some(GraphEdge::new(
+                        EdgeType::Calls,
+                        source_id.clone(),
+                        target.id,
+                    ));
+                }
+            } else if let (Some(resolver), Some(src)) = (resolver, source_repo) {
+                if let Some(gid) =
+                    resolver.resolve_cross_repo(src, None, Some(&ref_loc.path), Some(ref_loc.line))
+                {
+                    let gid_str = gid.as_str().to_string();
+                    if gid_str != *source_id {
+                        return Some(GraphEdge::new(EdgeType::Calls, source_id.clone(), gid_str));
+                    }
                 }
             }
-        }
-        if let Some(target_id) = resolved_target {
-            edges.push(GraphEdge::new(
-                EdgeType::Calls,
-                source_id.clone(),
-                target_id,
-            ));
-        }
-    }
-    edges
+            None
+        })
+        .collect()
 }
 
 /// The language family a source path belongs to, for the purpose of
@@ -120,20 +123,176 @@ fn language_group(path: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
         "py" | "pyi" => "python",
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
+        // A component's `<script>` imports and is imported by plain modules.
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte" => "js",
         "go" => "go",
         "java" => "java",
-        "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" => "c",
+        "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "c",
         "cs" => "csharp",
-        "rb" => "ruby",
+        "rb" | "rake" => "ruby",
         "swift" => "swift",
         "kt" | "kts" => "kotlin",
-        "scala" => "scala",
-        "vue" => "vue",
-        "svelte" => "svelte",
+        "scala" | "sc" => "scala",
+        "php" => "php",
         _ => return None,
     })
 }
+
+/// Method names built-in containers, strings and promises share across
+/// languages. A call to one of these on a foreign receiver only links to a
+/// same-file definition; see `resolve_static_edges`.
+const COMMON_METHOD_NAMES: &[&str] = &[
+    "get",
+    "set",
+    "has",
+    "add",
+    "update",
+    "delete",
+    "remove",
+    "discard",
+    "pop",
+    "push",
+    "append",
+    "extend",
+    "insert",
+    "clear",
+    "copy",
+    "items",
+    "keys",
+    "values",
+    "entries",
+    "setdefault",
+    "map",
+    "filter",
+    "reduce",
+    "forEach",
+    "find",
+    "findIndex",
+    "some",
+    "every",
+    "includes",
+    "indexOf",
+    "slice",
+    "splice",
+    "concat",
+    "sort",
+    "reverse",
+    "split",
+    "replace",
+    "strip",
+    "lstrip",
+    "rstrip",
+    "lower",
+    "upper",
+    "toLowerCase",
+    "toUpperCase",
+    "startswith",
+    "endswith",
+    "startsWith",
+    "endsWith",
+    "format",
+    "encode",
+    "decode",
+    "then",
+    "catch",
+    "finally",
+    "toString",
+    "equals",
+    "hashCode",
+    "contains",
+    "containsKey",
+    "put",
+    "size",
+    "length",
+    "isEmpty",
+    "stream",
+    "collect",
+    // Ruby core (Array, Hash, Enumerable, String, Object): sinatra's test
+    // helper defines `include?`, and every `arr.include?(x)` in the repo
+    // linked to it.
+    "include?",
+    "each",
+    "each_value",
+    "each_key",
+    "each_pair",
+    "each_with_index",
+    "each_with_object",
+    "key?",
+    "has_key?",
+    "member?",
+    "fetch",
+    "select",
+    "reject",
+    "detect",
+    "inject",
+    "any?",
+    "all?",
+    "none?",
+    "empty?",
+    "count",
+    "first",
+    "last",
+    "merge",
+    "merge!",
+    "dup",
+    "freeze",
+    "compact",
+    "flatten",
+    "uniq",
+    "sort_by",
+    "group_by",
+    "min",
+    "max",
+    "sum",
+    "join",
+    "to_s",
+    "to_a",
+    "to_h",
+    "to_sym",
+    "to_i",
+    "gsub",
+    "sub",
+    "match",
+    "downcase",
+    "upcase",
+    "start_with?",
+    "end_with?",
+    "delete_if",
+    "keep_if",
+    "tap",
+    "send",
+    "respond_to?",
+    "is_a?",
+    "nil?",
+    // Kotlin / Swift / JS collections and strings.
+    "addAll",
+    "removeAll",
+    "getOrDefault",
+    "getOrPut",
+    "joinToString",
+    "flatMap",
+    "firstOrNull",
+    "lastOrNull",
+    "toList",
+    "toMap",
+    "toSet",
+    "trim",
+    // Rust core traits and std types.
+    "clone",
+    "len",
+    "is_empty",
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "unwrap",
+    "expect",
+    "as_ref",
+    "as_str",
+    "to_string",
+    "to_owned",
+    "borrow",
+    "lock",
+];
 
 /// Whether a name reference in `from` may resolve to a definition in `to`.
 ///
@@ -161,7 +320,7 @@ fn may_link_across(from: &str, to: &str) -> bool {
 /// nodes by name. Self-edges are dropped; `Uses` edges are only kept
 /// when the target is a type-level declaration
 /// (see [`is_type_level_target`]). Each (source, target) pair is
-/// emitted at most once via the local `seen` set.
+/// emitted at most once via a final dedup pass.
 ///
 /// `refs` already carries the source file path + line for each entry;
 /// no workspace path is needed here.
@@ -171,87 +330,324 @@ pub fn resolve_static_edges(
     resolver: Option<&dyn CrossRepoResolver>,
     source_repo: Option<&RepoId>,
 ) -> Vec<GraphEdge> {
-    // (id, type, path). The path is what lets an ambiguous name be
-    // resolved to the definition in the calling file.
-    let mut name_index: HashMap<String, Vec<(String, crate::schema::NodeType, String)>> =
-        HashMap::new();
-    for node in db.get_all_nodes() {
-        name_index.entry(node.name.clone()).or_default().push((
-            node.id.clone(),
-            node.node_type.clone(),
-            node.path.clone(),
-        ));
-    }
+    use rayon::prelude::*;
 
-    let mut edges: Vec<GraphEdge> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    for sr in refs {
-        let Some(source_node) = db.get_node_at_location(&sr.file_path, sr.source_line) else {
-            continue;
-        };
-        let Some(candidates) = name_index.get(sr.target_name.as_str()) else {
-            if let (Some(resolver), Some(src)) = (resolver, source_repo) {
-                if let Some(gid) =
-                    resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None)
-                {
-                    let gid_str = gid.as_str().to_string();
-                    if gid_str != source_node.id {
-                        let key = (source_node.id.clone(), gid_str.clone());
-                        if seen.insert(key) {
-                            edges.push(GraphEdge::new(
+    // Build id -> container map once, before the parallel loop.
+    // Each node contributes its id and the container it belongs to (None for free functions).
+    let containers: HashMap<String, Option<String>> = db
+        .get_all_nodes()
+        .into_iter()
+        .map(|n| (n.id, n.container.clone()))
+        .collect();
+
+    // A5 + A3 — the old implementation cloned every node in the graph
+    // into a `HashMap<name, Vec<(id, type, path)>>` here, on every
+    // indexing pass. `db.find_indices_by_name(name)` now does the
+    // same lookup in O(matches) via the secondary `name_index`, and
+    // the per-ref work below resolves the candidate `NodeIndex`s into
+    // `(id, type, path)` triples lazily, only for the names that
+    // actually appear in the refs.
+    //
+    // The outer ref loop is independent per iteration (each ref looks
+    // up its own source node and its own target candidates), so it
+    // parallelises cleanly across refs. The graph read lock is held
+    // only for the brief `get_node_at_location` / per-candidate
+    // `node_weight` clone — bounded O(µs) per ref.
+    let raw: Vec<GraphEdge> = refs
+        .par_iter()
+        .flat_map(|sr| {
+            // Code outside any named definition — a test's `it(() => …)`
+            // callback, a script's `if __name__ == "__main__":` block, an
+            // RSpec `describe` — is attributed to its file. Dropping it lost
+            // most callers in JS/TS test suites, where nearly every call sits
+            // in an anonymous callback.
+            let Some(source_node) = db
+                .get_node_at_location(&sr.file_path, sr.source_line)
+                .or_else(|| db.get_file_node(&sr.file_path))
+            else {
+                return Vec::new();
+            };
+
+            let container_of = |id: &str| containers.get(id).cloned().flatten();
+
+            let indices = db.find_indices_by_name(&sr.target_name);
+            if indices.is_empty() {
+                // No local candidate; try the cross-repo resolver.
+                if let (Some(resolver), Some(src)) = (resolver, source_repo) {
+                    if let Some(gid) =
+                        resolver.resolve_cross_repo(src, Some(&sr.target_name), None, None)
+                    {
+                        let gid_str = gid.as_str().to_string();
+                        if gid_str != source_node.id {
+                            return vec![GraphEdge::new(
                                 sr.edge_type.clone(),
                                 source_node.id.clone(),
                                 gid_str,
-                            ));
+                            )];
                         }
                     }
                 }
+                return Vec::new();
             }
-            continue;
-        };
-        // A name that several definitions share cannot be resolved by
-        // name alone. Emitting an edge to *every* candidate — which is
-        // what this did — manufactures callers wholesale: with eleven
-        // `fn parse` definitions, `Args::parse()` in main.rs (clap's
-        // derive) and `n.parse()` on a `&str` (stdlib) each produced
-        // eleven edges, and `get_call_sites parse` answered with 61
-        // callers, the same list for every one of the eleven nodes.
-        //
-        // Prefer a definition in the calling file, which is the case
-        // that is actually decidable. Otherwise emit nothing: a missing
-        // edge is a gap, N wrong edges are a lie, and the lie also
-        // inflates `find_anchors` and `get_blast_radius`.
-        // Drop candidates written in another language before counting.
-        // A cross-language hit is never a real call here: these refs come
-        // from a single-language tree-sitter parse of one file.
-        let candidates: Vec<&(String, crate::schema::NodeType, String)> = candidates
-            .iter()
-            .filter(|(_, _, path)| may_link_across(&sr.file_path, path))
-            .collect();
 
-        let resolved: Vec<&(String, crate::schema::NodeType, String)> = if candidates.len() == 1 {
-            candidates
-        } else {
-            candidates
-                .into_iter()
-                .filter(|(_, _, path)| path == &sr.file_path)
-                .collect()
-        };
-        for (target_id, target_type, _) in resolved {
-            if *target_id == source_node.id {
-                continue;
+            // A name that several definitions share cannot be resolved by
+            // name alone. Emitting an edge to *every* candidate — which is
+            // what this did — manufactures callers wholesale: with eleven
+            // `fn parse` definitions, `Args::parse()` in main.rs (clap's
+            // derive) and `n.parse()` on a `&str` (stdlib) each produced
+            // eleven edges, and `get_call_sites parse` answered with 61
+            // callers, the same list for every one of the eleven nodes.
+            //
+            // Prefer a definition in the calling file, which is the case
+            // that is actually decidable. Otherwise emit nothing: a missing
+            // edge is a gap, N wrong edges are a lie, and the lie also
+            // inflates `find_anchors` and `get_blast_radius`.
+            //
+            // Drop candidates written in another language before counting.
+            // A cross-language hit is never a real call here: these refs come
+            // from a single-language tree-sitter parse of one file.
+            let graph = db.graph_ref_for_read();
+            let is_module = |ty: &crate::schema::NodeType| {
+                matches!(
+                    ty,
+                    crate::schema::NodeType::Module
+                        | crate::schema::NodeType::Namespace
+                        | crate::schema::NodeType::Package
+                        | crate::schema::NodeType::File
+                )
+            };
+            let candidates: Vec<(String, crate::schema::NodeType, String, Option<String>)> =
+                indices
+                    .into_iter()
+                    .filter_map(|idx| {
+                        let n = graph.node_weight(idx)?;
+                        if !may_link_across(&sr.file_path, &n.path) {
+                            return None;
+                        }
+                        // A call cannot target a module. Rust's `mod tangle;` names a
+                        // Module node after the `fn tangle` it contains, and the pair
+                        // read as ambiguous, so `tangle(&markdown)` linked to nothing.
+                        if sr.edge_type == EdgeType::Calls && is_module(&n.node_type) {
+                            return None;
+                        }
+                        Some((
+                            n.id.clone(),
+                            n.node_type.clone(),
+                            n.path.clone(),
+                            n.container.clone(),
+                        ))
+                    })
+                    .collect();
+
+            let is_stub = |p: &str| p.ends_with(".pyi") || p.ends_with(".d.ts");
+            // Type stubs (`core.pyi`, `widget.d.ts`) restate definitions that
+            // live in the real module; counted as candidates they made every
+            // such name ambiguous and its callers vanished.
+            let candidates: Vec<_> = if candidates.iter().any(|(_, _, p, _)| !is_stub(p)) {
+                candidates
+                    .into_iter()
+                    .filter(|(_, _, p, _)| !is_stub(p))
+                    .collect()
+            } else {
+                candidates
+            };
+
+            let source_container = source_node.container.clone();
+            let mut candidates: Vec<_> = if sr.edge_type != EdgeType::Calls {
+                candidates
+            } else if let Some(q) = &sr.qualifier {
+                // `Registry::new()`: Registry's own `new`, or nothing. A
+                // lower-case path is a module (`util::helper`, `detail::f`),
+                // which says nothing about containers.
+                let own: Vec<_> = candidates
+                    .iter()
+                    .filter(|(_, _, _, c)| c.as_deref() == Some(q.as_str()))
+                    .cloned()
+                    .collect();
+                if !own.is_empty() {
+                    own
+                } else if q.starts_with(|c: char| c.is_ascii_uppercase())
+                    && candidates.iter().any(|(_, _, _, c)| c.is_some())
+                {
+                    // `String::new()` beside a repo `Registry::new`.
+                    return Vec::new();
+                } else {
+                    candidates
+                }
+            } else if sr.self_receiver {
+                // `self.load()` / `this.render()`: the caller's own type first.
+                let own: Vec<_> = candidates
+                    .iter()
+                    .filter(|(_, _, _, c)| source_container.is_some() && c == &source_container)
+                    .cloned()
+                    .collect();
+                if own.is_empty() {
+                    candidates
+                } else {
+                    own
+                }
+            } else if sr.foreign_receiver {
+                // A call through another object never reaches a free function
+                // of the calling file (`util.parse()` beside a local `parse`),
+                // and is not the caller calling itself — unless the caller is
+                // a method: `child.walk(v)` inside `Tree.walk` is recursion on
+                // another node, not a call to some other file's `walk`.
+                candidates
+                    .into_iter()
+                    .filter(|(id, _, path, c)| {
+                        !(path == &sr.file_path && c.is_none() && containers.contains_key(id))
+                    })
+                    .filter(|(id, _, _, _)| *id != source_node.id || source_container.is_some())
+                    .collect()
+            } else {
+                // A bare call. In Java, C#, Kotlin, Swift, C++, Scala and Ruby it
+                // reaches the caller's own methods implicitly; elsewhere
+                // (Python, Rust, JS/TS, Go, PHP) only free functions — `load(x)`
+                // in a file that also has `Cache.load` calls the module one.
+                let implicit_this = matches!(
+                    language_group(&sr.file_path),
+                    Some("java" | "csharp" | "kotlin" | "swift" | "c" | "scala" | "ruby")
+                );
+                let own: Vec<_> = candidates
+                    .iter()
+                    .filter(|(_, _, _, c)| {
+                        implicit_this && source_container.is_some() && c == &source_container
+                    })
+                    .cloned()
+                    .collect();
+                // A type is not a free function: `new Foo(x)` names both the
+                // class and its constructor, and preferring the class as the
+                // "free" candidate hid the constructor's callers.
+                let free: Vec<_> = candidates
+                    .iter()
+                    .filter(|(_, ty, _, c)| {
+                        c.is_none()
+                            && matches!(
+                                ty,
+                                crate::schema::NodeType::Function | crate::schema::NodeType::Method
+                            )
+                    })
+                    .cloned()
+                    .collect();
+                if !own.is_empty() {
+                    own
+                } else if !free.is_empty() && free.len() < candidates.len() {
+                    free
+                } else {
+                    candidates
+                }
+            };
+
+            // Recursion through another instance links nowhere: drop the
+            // caller itself whenever it is still a candidate.
+            if sr.edge_type == EdgeType::Calls
+                && sr.foreign_receiver
+                && source_container.is_some()
+                && candidates.iter().any(|(id, _, _, _)| *id == source_node.id)
+            {
+                return Vec::new();
             }
-            if sr.edge_type == EdgeType::Uses && !is_type_level_target(target_type) {
-                continue;
-            }
-            let key = (source_node.id.clone(), (*target_id).to_string());
-            if seen.insert(key) {
-                edges.push(GraphEdge::new(
+
+            // Now resolve, applying the COMMON_METHOD_NAMES blocklist and
+            // overload-group logic. Overloads emit multiple edges; all other
+            // cases emit zero or one edge.
+            if candidates.len() == 1 {
+                // `d.update()` on a dict, `arr.push()` on an array: a common
+                // container / string / promise method called on some other
+                // value is almost never the repository's one method of that
+                // name in another file. Linking it made `merge_setting` call
+                // `RequestsCookieJar.update`.
+                if sr.foreign_receiver
+                    && COMMON_METHOD_NAMES.contains(&sr.target_name.as_str())
+                    && candidates[0].2 != sr.file_path
+                {
+                    return Vec::new();
+                }
+                let (id, ty, _, _) = candidates.remove(0);
+                if id == source_node.id {
+                    return Vec::new();
+                }
+                if sr.edge_type == EdgeType::Uses && !is_type_level_target(&ty) {
+                    return Vec::new();
+                }
+                vec![GraphEdge::new(
                     sr.edge_type.clone(),
                     source_node.id.clone(),
-                    (*target_id).to_string(),
-                ));
+                    id,
+                )]
+            } else {
+                let same_file: Vec<_> = candidates
+                    .iter()
+                    .filter(|(_, _, path, _)| path == &sr.file_path)
+                    .cloned()
+                    .collect();
+                // Overloads: in a statically overloaded language, same-named
+                // definitions that all sit in one file are one method's
+                // overloads, not unrelated symbols. Link the call to the group
+                // rather than drop it; `Foo.bar(1)` and `Foo.bar("x")` both
+                // call "bar" in Foo.java.
+                let builtin_on_foreign =
+                    sr.foreign_receiver && COMMON_METHOD_NAMES.contains(&sr.target_name.as_str());
+                let overload_group = same_file.is_empty()
+                    && !builtin_on_foreign
+                    && !candidates.is_empty()
+                    && candidates.iter().all(|(_, _, p, _)| p == &candidates[0].2)
+                    && matches!(
+                        language_group(&candidates[0].2),
+                        Some("java" | "csharp" | "kotlin" | "scala" | "swift" | "c")
+                    );
+                if overload_group {
+                    // Emit one edge per overload.
+                    let mut edges = Vec::with_capacity(candidates.len());
+                    for (id, ty, _, _) in candidates {
+                        if id == source_node.id {
+                            continue;
+                        }
+                        if sr.edge_type == EdgeType::Uses && !is_type_level_target(&ty) {
+                            continue;
+                        }
+                        edges.push(GraphEdge::new(
+                            sr.edge_type.clone(),
+                            source_node.id.clone(),
+                            id,
+                        ));
+                    }
+                    return edges;
+                }
+                // Prefer same-file candidate; drop if ambiguous.
+                if same_file.len() == 1 {
+                    let (id, ty, _, _) = same_file[0].clone();
+                    if id == source_node.id {
+                        return Vec::new();
+                    }
+                    if sr.edge_type == EdgeType::Uses && !is_type_level_target(&ty) {
+                        return Vec::new();
+                    }
+                    vec![GraphEdge::new(
+                        sr.edge_type.clone(),
+                        source_node.id.clone(),
+                        id,
+                    )]
+                } else {
+                    Vec::new()
+                }
             }
+        })
+        .collect();
+
+    // Dedup by (source_id, target_id). The old serial code did this
+    // inline via a `seen` HashSet; with par_iter the natural shape is
+    // collect-then-dedup. Two refs can legitimately produce the same
+    // (source, target) pair when the same call site is matched by more
+    // than one tree-sitter pattern (e.g. a scoped identifier that also
+    // matches a call_expression's function field), and the resolve
+    // phase used to coalesce those into a single edge.
+    let mut seen: HashSet<(String, String)> = HashSet::with_capacity(raw.len());
+    let mut edges: Vec<GraphEdge> = Vec::with_capacity(raw.len());
+    for e in raw {
+        let key = (e.source_id.clone(), e.target_id.clone());
+        if seen.insert(key) {
+            edges.push(e);
         }
     }
     edges
@@ -267,6 +663,8 @@ pub fn resolve_pattern_edges(
     refs: &[PatternRef],
     limits: PatternLimits,
 ) -> Vec<GraphEdge> {
+    use rayon::prelude::*;
+
     if refs.is_empty() {
         return Vec::new();
     }
@@ -279,13 +677,30 @@ pub fn resolve_pattern_edges(
     let file_nodes: HashMap<&str, &crate::schema::GraphNode> =
         nodes.iter().map(|n| (n.path.as_str(), n)).collect();
 
-    let mut value_to_files: HashMap<String, Vec<String>> = HashMap::new();
-    for pr in refs {
-        let entry = value_to_files.entry(pr.value.clone()).or_default();
-        if !entry.contains(&pr.file_path) {
-            entry.push(pr.file_path.clone());
-        }
-    }
+    // A5 — the value-clustering pass builds a `HashMap<value, Vec<path>>`
+    // across the full ref set. The merge is associative and commutative,
+    // so it parallelises cleanly: each worker thread builds a
+    // per-chunk map, then we reduce into a single map.
+    let value_to_files: HashMap<String, Vec<String>> = refs
+        .par_iter()
+        .fold(HashMap::<String, Vec<String>>::new, |mut acc, pr| {
+            let entry = acc.entry(pr.value.clone()).or_default();
+            if !entry.contains(&pr.file_path) {
+                entry.push(pr.file_path.clone());
+            }
+            acc
+        })
+        .reduce(HashMap::<String, Vec<String>>::new, |mut a, b| {
+            for (k, v) in b {
+                let entry = a.entry(k).or_default();
+                for path in v {
+                    if !entry.contains(&path) {
+                        entry.push(path);
+                    }
+                }
+            }
+            a
+        });
 
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
     for (value, files) in value_to_files {
@@ -394,6 +809,9 @@ mod ambiguous_name_tests {
             source_line: 10,
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
@@ -425,6 +843,9 @@ mod ambiguous_name_tests {
             source_line: 15,
             target_name: "parse".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the local definition");
@@ -451,6 +872,9 @@ mod ambiguous_name_tests {
             source_line: 10,
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert!(
@@ -479,6 +903,9 @@ mod ambiguous_name_tests {
             source_line: 10,
             target_name: "renderWidget".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, ".ts -> .tsx is the same language family");
@@ -507,6 +934,9 @@ mod ambiguous_name_tests {
             source_line: 60,
             target_name: "run_tests".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "exactly one edge, to the Python definition");
@@ -609,9 +1039,365 @@ mod ambiguous_name_tests {
             source_line: 15,
             target_name: "sweep_orphans".to_string(),
             edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
         }];
         let edges = resolve_static_edges(&db, &refs, None, None);
         assert_eq!(edges.len(), 1, "a unique name must still resolve");
+        assert_eq!(edges[0].target_id, target_id);
+    }
+
+    /// `d.update()` on some other value does not link to the one
+    /// user-defined `update` in another file; `self.update()` and a
+    /// distinctive name still do.
+    #[test]
+    fn a_common_method_on_a_foreign_receiver_does_not_link_across_files() {
+        let tmp = std::env::temp_dir().join("lain_resolve_foreign_receiver");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        db.upsert_node(fn_node("update", "src/cookies.py", (1, 5)))
+            .unwrap();
+        db.upsert_node(fn_node("merge_cookies", "src/cookies.py", (6, 9)))
+            .unwrap();
+        db.upsert_node(fn_node("merge_setting", "src/sessions.py", (10, 20)))
+            .unwrap();
+        let r = |name: &str, foreign: bool| StaticFileRef {
+            file_path: "src/sessions.py".to_string(),
+            source_line: 15,
+            target_name: name.to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: foreign,
+            self_receiver: false,
+            qualifier: None,
+        };
+        assert!(resolve_static_edges(&db, &[r("update", true)], None, None).is_empty());
+        assert_eq!(
+            resolve_static_edges(&db, &[r("update", false)], None, None).len(),
+            1
+        );
+        assert_eq!(
+            resolve_static_edges(&db, &[r("merge_cookies", true)], None, None).len(),
+            1,
+            "a distinctive method name still links"
+        );
+    }
+
+    /// Overloads of one method in one file (Java) receive the call; the
+    /// same name spread across files stays ambiguous.
+    #[test]
+    fn overloads_in_one_file_receive_calls_from_elsewhere() {
+        let tmp = std::env::temp_dir().join("lain_resolve_overloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        for lines in [(10, 20), (30, 40)] {
+            let n = GraphNode::new(
+                NodeType::Function,
+                "emit".into(),
+                "src/CodeWriter.java".into(),
+            )
+            .with_location_in(lines.0, lines.1, &ns);
+            db.upsert_node(n).unwrap();
+        }
+        db.upsert_node(fn_node("build", "src/TypeSpec.java", (1, 50)))
+            .unwrap();
+        let r = StaticFileRef {
+            file_path: "src/TypeSpec.java".to_string(),
+            source_line: 25,
+            target_name: "emit".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: true,
+            self_receiver: false,
+            qualifier: None,
+        };
+        assert_eq!(resolve_static_edges(&db, &[r], None, None).len(), 2);
+
+        db.upsert_node(fn_node("emit", "src/Other.java", (1, 5)))
+            .unwrap();
+        let r = StaticFileRef {
+            file_path: "src/TypeSpec.java".to_string(),
+            source_line: 25,
+            target_name: "emit".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: true,
+            self_receiver: false,
+            qualifier: None,
+        };
+        assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
+
+        // `map.put(k, v)` on some other value must not link to a class's
+        // `put` overloads either.
+        for lines in [(60, 70), (80, 90)] {
+            let n = GraphNode::new(NodeType::Function, "put".into(), "src/Cache.java".into())
+                .with_location_in(lines.0, lines.1, &ns);
+            db.upsert_node(n).unwrap();
+        }
+        let r = StaticFileRef {
+            file_path: "src/TypeSpec.java".to_string(),
+            source_line: 25,
+            target_name: "put".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: true,
+            self_receiver: false,
+            qualifier: None,
+        };
+        assert!(resolve_static_edges(&db, &[r], None, None).is_empty());
+    }
+
+    fn def_in(name: &str, path: &str, lines: (u32, u32), container: Option<&str>) -> GraphNode {
+        let ns = crate::schema::RepoNamespace::for_test();
+        let mut n = GraphNode::new(NodeType::Function, name.into(), path.into())
+            .with_location_in(lines.0, lines.1, &ns);
+        n.container = container.map(str::to_string);
+        n
+    }
+
+    fn call_at(file: &str, line: u32, name: &str) -> StaticFileRef {
+        StaticFileRef {
+            file_path: file.into(),
+            source_line: line,
+            target_name: name.into(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
+        }
+    }
+
+    fn fresh(name: &str) -> GraphDatabase {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        GraphDatabase::new(&tmp).unwrap()
+    }
+
+    fn targets(db: &GraphDatabase, refs: &[StaticFileRef]) -> Vec<String> {
+        resolve_static_edges(db, refs, None, None)
+            .into_iter()
+            .map(|e| e.target_id)
+            .collect()
+    }
+
+    /// `child.walk(v)` inside `Tree.walk` is recursion on another node, not
+    /// a call to `Dir.walk` in another file.
+    #[test]
+    fn recursion_through_another_instance_links_nowhere() {
+        let db = fresh("lain_resolve_recursion");
+        db.upsert_node(def_in("walk", "tree.py", (5, 10), Some("Tree")))
+            .unwrap();
+        db.upsert_node(def_in("walk", "fs.py", (1, 3), Some("Dir")))
+            .unwrap();
+        let mut r = call_at("tree.py", 7, "walk");
+        r.foreign_receiver = true;
+        assert!(targets(&db, &[r]).is_empty());
+    }
+
+    /// One file with a module `load` and `Cache.load`: the bare call is the
+    /// module function, `self.load` is the method.
+    #[test]
+    fn bare_and_self_calls_pick_free_function_and_method() {
+        let db = fresh("lain_resolve_free_vs_method");
+        let free = def_in("load", "app.py", (0, 2), None);
+        let method = def_in("load", "app.py", (4, 6), Some("Cache"));
+        let caller = def_in("warm", "app.py", (7, 12), Some("Cache"));
+        let (free_id, method_id) = (free.id.clone(), method.id.clone());
+        for n in [free, method, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        assert_eq!(targets(&db, &[call_at("app.py", 8, "load")]), vec![free_id]);
+        let mut s = call_at("app.py", 9, "load");
+        s.self_receiver = true;
+        assert_eq!(targets(&db, &[s]), vec![method_id]);
+    }
+
+    /// `new Widget(x)` in another file names the class and its
+    /// constructor; the class must not win as a "free" candidate.
+    #[test]
+    fn a_constructor_call_reaches_the_constructor() {
+        let db = fresh("lain_resolve_ctor");
+        let ns = crate::schema::RepoNamespace::for_test();
+        let class = GraphNode::new(NodeType::Class, "Widget".into(), "Widget.cs".into())
+            .with_location_in(0, 20, &ns);
+        let ctor = def_in("Widget", "Widget.cs", (2, 5), Some("Widget"));
+        let caller = def_in("Build", "App.cs", (0, 9), Some("App"));
+        let ctor_id = ctor.id.clone();
+        for n in [class, ctor, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        assert!(targets(&db, &[call_at("App.cs", 3, "Widget")]).contains(&ctor_id));
+    }
+
+    /// `Self::new(src).tokenize()` inside `Lexer::lex` reaches the
+    /// same file's `Lexer::tokenize`.
+    #[test]
+    fn a_call_on_a_constructed_value_reaches_the_same_files_method() {
+        let db = fresh("lain_resolve_same_file_method");
+        let method = def_in("tokenize", "lexer.rs", (10, 12), Some("Lexer"));
+        let caller = def_in("lex", "lexer.rs", (2, 4), Some("Lexer"));
+        let method_id = method.id.clone();
+        for n in [method, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        let mut r = call_at("lexer.rs", 3, "tokenize");
+        r.foreign_receiver = true;
+        assert_eq!(targets(&db, &[r]), vec![method_id]);
+    }
+
+    /// `Registry::new()` is Registry's `new`; `String::new()` is not.
+    #[test]
+    fn a_type_qualified_call_matches_the_container() {
+        let db = fresh("lain_resolve_qualified");
+        let new = def_in("new", "src/registry.rs", (2, 4), Some("Registry"));
+        let new_id = new.id.clone();
+        db.upsert_node(new).unwrap();
+        db.upsert_node(def_in("main", "src/main.rs", (0, 10), None))
+            .unwrap();
+        let mut ok = call_at("src/main.rs", 2, "new");
+        ok.qualifier = Some("Registry".into());
+        ok.foreign_receiver = true;
+        let mut std = call_at("src/main.rs", 3, "new");
+        std.qualifier = Some("String".into());
+        std.foreign_receiver = true;
+        assert_eq!(targets(&db, &[ok]), vec![new_id]);
+        assert!(targets(&db, &[std]).is_empty());
+    }
+
+    /// `util.parse(x)` beside a local free `parse` calls util's.
+    #[test]
+    fn a_receiver_call_skips_the_calling_files_free_function() {
+        let db = fresh("lain_resolve_module_call");
+        db.upsert_node(def_in("parse", "src/app.py", (0, 2), None))
+            .unwrap();
+        let util = def_in("parse", "src/util.py", (0, 2), None);
+        let util_id = util.id.clone();
+        db.upsert_node(util).unwrap();
+        db.upsert_node(def_in("load", "src/app.py", (4, 9), Some("Config")))
+            .unwrap();
+        let mut r = call_at("src/app.py", 6, "parse");
+        r.foreign_receiver = true;
+        assert_eq!(targets(&db, &[r]), vec![util_id]);
+    }
+
+    /// A `.pyi` stub does not make the real definition ambiguous.
+    #[test]
+    fn stubs_do_not_hide_callers() {
+        let db = fresh("lain_resolve_stub");
+        let real = def_in("compute", "pkg/core.py", (0, 3), None);
+        let real_id = real.id.clone();
+        db.upsert_node(real).unwrap();
+        db.upsert_node(def_in("compute", "pkg/core.pyi", (0, 0), None))
+            .unwrap();
+        db.upsert_node(def_in("main", "pkg/main.py", (0, 5), None))
+            .unwrap();
+        assert_eq!(
+            targets(&db, &[call_at("pkg/main.py", 2, "compute")]),
+            vec![real_id]
+        );
+    }
+
+    /// `mod tangle;` and `fn tangle` share a name; the call goes to the
+    /// function.
+    #[test]
+    fn a_call_ignores_a_same_named_module() {
+        let tmp = std::env::temp_dir().join("lain_resolve_module_vs_fn");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let module = GraphNode::new(NodeType::Module, "tangle".into(), "src/lib.rs".into())
+            .with_location_in(372, 372, &ns);
+        let func = GraphNode::new(NodeType::Function, "tangle".into(), "src/tangle.rs".into())
+            .with_location_in(2, 40, &ns);
+        let caller = GraphNode::new(NodeType::Function, "search".into(), "src/search.rs".into())
+            .with_location_in(100, 120, &ns);
+        let (func_id, caller_id) = (func.id.clone(), caller.id.clone());
+        for n in [module, func, caller] {
+            db.upsert_node(n).unwrap();
+        }
+        let r = StaticFileRef {
+            file_path: "src/search.rs".to_string(),
+            source_line: 106,
+            target_name: "tangle".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
+        };
+        let edges = resolve_static_edges(&db, &[r], None, None);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(
+            (edges[0].source_id.as_str(), edges[0].target_id.as_str()),
+            (caller_id.as_str(), func_id.as_str())
+        );
+    }
+
+    /// `session.request(...)` inside requests/api.py's module-level
+    /// `request()` calls `Session.request`, not itself.
+    #[test]
+    fn a_call_through_another_object_is_not_a_self_call() {
+        let tmp = std::env::temp_dir().join("lain_resolve_foreign_self");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+        let ns = crate::schema::RepoNamespace::for_test();
+        let api = GraphNode::new(NodeType::Function, "request".into(), "src/api.py".into())
+            .with_location_in(1, 20, &ns);
+        let session = GraphNode::new(
+            NodeType::Function,
+            "request".into(),
+            "src/sessions.py".into(),
+        )
+        .with_location_in(1, 50, &ns);
+        let (api_id, session_id) = (api.id.clone(), session.id.clone());
+        db.upsert_node(api).unwrap();
+        db.upsert_node(session).unwrap();
+
+        let call = |foreign_receiver| StaticFileRef {
+            file_path: "src/api.py".to_string(),
+            source_line: 10,
+            target_name: "request".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver,
+            self_receiver: false,
+            qualifier: None,
+        };
+        let edges = resolve_static_edges(&db, &[call(true)], None, None);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!(
+            (edges[0].source_id.as_str(), edges[0].target_id.as_str()),
+            (api_id.as_str(), session_id.as_str())
+        );
+
+        // A bare `request()` there is recursion: no edge, and certainly
+        // not one to the other file's `request`.
+        assert!(resolve_static_edges(&db, &[call(false)], None, None).is_empty());
+    }
+
+    /// A call outside every named definition (a test callback, a
+    /// `__main__` block) belongs to its file rather than being dropped.
+    #[test]
+    fn a_call_outside_any_definition_is_attributed_to_its_file() {
+        let tmp = std::env::temp_dir().join("lain_resolve_module_scope");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let db = GraphDatabase::new(&tmp).unwrap();
+
+        let target = fn_node("create_pinia", "src/a.ts", (1, 5));
+        let target_id = target.id.clone();
+        db.upsert_node(target).unwrap();
+        let file = GraphNode::new(NodeType::File, "a.spec.ts".into(), "test/a.spec.ts".into());
+        let file_id = file.id.clone();
+        db.upsert_node(file).unwrap();
+
+        let refs = vec![StaticFileRef {
+            file_path: "test/a.spec.ts".to_string(),
+            source_line: 7,
+            target_name: "create_pinia".to_string(),
+            edge_type: EdgeType::Calls,
+            foreign_receiver: false,
+            self_receiver: false,
+            qualifier: None,
+        }];
+        let edges = resolve_static_edges(&db, &refs, None, None);
+        assert_eq!(edges.len(), 1, "module-scope call must link");
+        assert_eq!(edges[0].source_id, file_id);
         assert_eq!(edges[0].target_id, target_id);
     }
 }

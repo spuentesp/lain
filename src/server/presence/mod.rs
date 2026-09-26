@@ -10,8 +10,6 @@
 
 use std::path::PathBuf;
 
-
-
 mod agent;
 mod claim;
 mod occupancy;

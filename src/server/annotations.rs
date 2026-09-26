@@ -959,10 +959,14 @@ mod tests {
 
         // MAX_REFS + 1 entries — over the cap.
         let too_many: Vec<AnnotationTarget> = (0..=MAX_REFS)
-            .map(|i| AnnotationTarget::Symbol { symbol: format!("s{i}") })
+            .map(|i| AnnotationTarget::Symbol {
+                symbol: format!("s{i}"),
+            })
             .collect();
         let over = AddAnnotationInputs {
-            target: AnnotationTarget::Symbol { symbol: "fn a".into() },
+            target: AnnotationTarget::Symbol {
+                symbol: "fn a".into(),
+            },
             kind: AnnotationKind::Note,
             body: "ok".into(),
             author: AgentId("alice".into()),
@@ -974,10 +978,14 @@ mod tests {
 
         // The boundary itself is allowed.
         let exactly_max: Vec<AnnotationTarget> = (0..MAX_REFS)
-            .map(|i| AnnotationTarget::Symbol { symbol: format!("s{i}") })
+            .map(|i| AnnotationTarget::Symbol {
+                symbol: format!("s{i}"),
+            })
             .collect();
         let at = AddAnnotationInputs {
-            target: AnnotationTarget::Symbol { symbol: "fn a".into() },
+            target: AnnotationTarget::Symbol {
+                symbol: "fn a".into(),
+            },
             kind: AnnotationKind::Note,
             body: "ok".into(),
             author: AgentId("alice".into()),

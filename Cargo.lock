@@ -1251,6 +1251,7 @@ dependencies = [
  "parking_lot",
  "petgraph",
  "proptest",
+ "rayon",
  "regex",
  "reqwest",
  "rusqlite",

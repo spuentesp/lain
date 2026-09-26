@@ -20,10 +20,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::OccupancyMap;
 use super::claim::{Claim, ClaimIntent};
 use super::occupancy::FileOccupancy;
 use super::registry::{AgentSession, PresenceRegistry};
+use super::OccupancyMap;
 
 /// On-disk schema for `PresenceRegistry` + `OccupancyMap`. Fields are
 /// `Vec<(K, V)>` rather than maps because serde-json's `HashMap`

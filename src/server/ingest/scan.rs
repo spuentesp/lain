@@ -14,6 +14,16 @@ pub struct StaticFileRef {
     pub source_line: u32,
     pub target_name: String,
     pub edge_type: EdgeType,
+    /// A call made on some other value (`d.update()`, `arr.push()`), not
+    /// a bare call or one on `self` / `this`. The resolver uses it to
+    /// avoid linking `dict.update()` to the one user-defined `update`.
+    pub foreign_receiver: bool,
+    /// A call on the caller's own object (`self.x()`, `this.x()`, a Go
+    /// method's receiver variable).
+    pub self_receiver: bool,
+    /// `Registry` in `Registry::new()`: the type or module a path-qualified
+    /// call names.
+    pub qualifier: Option<String>,
 }
 
 /// A string literal that could indicate cross-boundary coupling
@@ -302,6 +312,9 @@ pub async fn scan_file_structure(
                 source_line: r.source_line,
                 target_name: r.target_name,
                 edge_type: r.edge_type,
+                foreign_receiver: r.foreign_receiver,
+                self_receiver: r.self_receiver,
+                qualifier: r.qualifier,
             })
             .collect();
         let pattern_refs: Vec<PatternRef> = ts

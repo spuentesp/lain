@@ -34,8 +34,8 @@ use serde_json::{json, Value};
 /// is already workspace-relative.
 fn is_safe_workspace_path(p: &str) -> bool {
     let bytes = p.as_bytes();
-    let is_drive_absolute = bytes.first().is_some_and(u8::is_ascii_alphabetic)
-        && bytes.get(1) == Some(&b':');
+    let is_drive_absolute =
+        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
     !p.is_empty()
         && !p.starts_with('/')
         && !p.starts_with('\\')

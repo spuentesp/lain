@@ -37,6 +37,8 @@ notify = "6"
 
 # In-memory graph for volatile overlay
 petgraph = { version = "0.6", features = ["serde-1"] }
+# Data-level parallelism
+rayon = "1.10"
 
 # Persistence
 bincode = { version = "2", features = ["serde"] }

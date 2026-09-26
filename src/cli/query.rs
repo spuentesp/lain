@@ -51,7 +51,9 @@ pub fn run_query(expression: &str, workspace: Option<&std::path::Path>) -> Resul
             Ok(g) => g,
             Err(e) => {
                 eprintln!("Error: Failed to load graph at {:?}: {}", memory_path, e);
-                eprintln!("\nHint: Run 'lain mcp' (or 'lain server') first to build the code graph.");
+                eprintln!(
+                    "\nHint: Run 'lain mcp' (or 'lain server') first to build the code graph."
+                );
                 std::process::exit(1);
             }
         };
