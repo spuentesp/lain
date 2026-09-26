@@ -37,6 +37,8 @@ notify = "6"
 
 # In-memory graph for volatile overlay
 petgraph = { version = "0.6", features = ["serde-1"] }
+# Data-level parallelism
+rayon = "1.10"
 
 # Persistence
 bincode = { version = "2", features = ["serde"] }
@@ -99,7 +101,6 @@ which = "8.0.2"
 
 # Concurrency primitives
 dashmap = "6.0"
-rayon = "1.10"
 async-recursion = "1.1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # Bounded LRU cache for the embedding hot path (B1). Pure data-structure
