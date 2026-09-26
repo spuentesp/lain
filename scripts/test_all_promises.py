@@ -140,7 +140,7 @@ def spawn_server(lain_bin, workspace, state_dir, port, extra=()):
         f"      path: {workspace}\n"
     )
     repos.close()
-    # `LAIN_TOOL_PROFILE=full` opts in to the full 30-tool
+    # `LAIN_TOOL_PROFILE=full` opts in to the full 83-tool
     # surface — including the multiplayer/intent tools the docs
     # promise. The default `semantic` profile curates a 15-tool
     # subset that excludes them (see
@@ -255,10 +255,8 @@ def a_tools_list_advertises_documented(lain_bin, c):
 
 def a_tools_list_advertises_full_multiplayer_surface(lain_bin, c):
     """Pinned promise: every doc-claimed multiplayer/intent tool
-    appears in tools/list. Currently FAILS — the
-    inventory-registered multiplayer tools aren't included in
-    the tools/list response. This is a real broken promise that
-    needs to be fixed for the docs to match reality."""
+    appears in tools/list. The server must advertise all tools
+    the docs promise."""
     advertised = set(c.tools_list())
     missing = [t for t in DOC_MULTIPLAYER_TOOLS if t not in advertised]
     if missing:
@@ -730,7 +728,7 @@ def main():
     try:
         print(_bold("\n── A. tools/list parity ──"))
         run("A1 minimum multiplayer tools advertised", lambda: a_tools_list_advertises_documented(lain_bin, c))
-        run("A2 full multiplayer surface advertised (broken — see detail)",
+        run("A2 full multiplayer surface advertised",
             lambda: a_tools_list_advertises_full_multiplayer_surface(lain_bin, c))
         run("A3 every documented tool is callable",
             lambda: a_documented_mcp_tools_all_callable(lain_bin, c))
