@@ -4,7 +4,7 @@ use crate::graph::GraphDatabase;
 use crate::schema::{EdgeType, GraphEdge, GraphNode, NodeType};
 use dashmap::DashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// On-disk envelope for `federated_graph.bin`: the `LNF2` magic followed
 /// by a little-endian `u32` schema version. Anything else — headerless
@@ -183,7 +183,7 @@ impl PetgraphBackend {
         node.id = global_id.to_string();
         self.db.upsert_node(node)?;
         self.index.insert(global_id.to_string(), parsed);
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     /// Direct access to the underlying `GraphDatabase` for bulk operations.
@@ -208,7 +208,7 @@ impl GraphBackend for PetgraphBackend {
         let global_id = GlobalId::parse(&node.id)?;
         self.db.upsert_node(node.clone())?;
         self.index.insert(node.id, global_id);
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_node_global(
@@ -223,7 +223,7 @@ impl GraphBackend for PetgraphBackend {
 
     fn upsert_edge(&self, edge: GraphEdge) -> Result<(), LainError> {
         self.db.upsert_edge(edge)?;
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_edges_batch(&self, edges: &[GraphEdge]) -> Result<(), LainError> {
@@ -233,7 +233,7 @@ impl GraphBackend for PetgraphBackend {
         for edge in edges {
             self.db.upsert_edge(edge.clone())?;
         }
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn upsert_nodes_batch(&self, nodes: &[GraphNode]) -> Result<(), LainError> {
@@ -245,7 +245,7 @@ impl GraphBackend for PetgraphBackend {
             self.db.upsert_node(node.clone())?;
             self.index.insert(node.id.clone(), global_id);
         }
-        self.db.save_to_disk_sync()
+        self.save()
     }
 
     fn remove_nodes(&self, global_ids: &[String]) -> Result<usize, LainError> {

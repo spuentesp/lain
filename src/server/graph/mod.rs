@@ -1752,8 +1752,20 @@ impl GraphDatabase {
     }
 
     pub(crate) fn validate_persisted_payload(data: &[u8]) -> Result<(), LainError> {
-        let (state, _read) =
+        let (state, read) =
             persist::decode_state(data).map_err(|e| LainError::Database(e.to_string()))?;
+        if read != data.len() {
+            // bincode 2 has no reject_trailing_bytes option: the decoded
+            // frame's byte count must match the payload exactly, or the
+            // loader would accept a valid frame and silently discard
+            // junk after it.
+            return Err(LainError::Database(format!(
+                "graph payload carries {} trailing bytes after a valid frame ({} of {} consumed)",
+                data.len() - read,
+                read,
+                data.len()
+            )));
+        }
         if state.path_format_version != PATH_FORMAT_VERSION {
             return Err(LainError::Database(format!(
                 "graph payload path format v{} does not match v{}",
