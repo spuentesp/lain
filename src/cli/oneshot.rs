@@ -285,7 +285,9 @@ pub fn run_oneshot(workspace: Option<&Path>, tool: &str, args: &[String]) -> Res
     Ok(())
 }
 
-/// Map bare positional arguments onto `tool`'s required arguments.
+/// Map bare positional arguments onto `tool`'s required arguments,
+/// then (when it has none) onto its optional string arguments in
+/// declaration order — e.g. `lain oneshot find_dead_code <like>`.
 fn positional_args(tool: &str, args: &[String]) -> Result<Value> {
     let schema_owned = tool_input_schema(tool);
     let schema = schema_owned.as_ref();
@@ -309,7 +311,21 @@ fn positional_args(tool: &str, args: &[String]) -> Result<Value> {
     } else if has_property("symbol") || schema.is_none() {
         vec!["symbol".to_string()]
     } else {
-        Vec::new()
+        schema
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.as_object())
+            .map(|p| {
+                p.keys()
+                    .filter(|k| {
+                        p.get(*k)
+                            .and_then(|v| v.get("type"))
+                            .and_then(|t| t.as_str())
+                            == Some("string")
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     };
     if args.len() > names.len() {
         anyhow::bail!(
@@ -369,6 +385,12 @@ fn typed_value(schema: Option<&Value>, name: &str, raw: &str) -> Result<Value> {
 #[cfg(test)]
 mod positional_tests {
     use super::*;
+
+    #[test]
+    fn optional_string_args_take_positionals_when_nothing_is_required() {
+        let v = positional_args("find_dead_code", &["auth handler".into()]).unwrap();
+        assert_eq!(v, json!({"like": "auth handler"}));
+    }
 
     #[test]
     fn values_follow_the_schema_types() {

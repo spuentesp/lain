@@ -25,7 +25,12 @@ use tracing::{debug, info, warn};
 #[cfg(not(unix))]
 use unsupported::UnixStream;
 
-const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Per-call timeout for sidecar IPC. Two seconds was too tight for
+/// git operations on medium repositories: co-change analysis over
+/// ~1000 commits takes 2.5–3.5s, and the socket timeout then surfaces
+/// as a spurious `EAGAIN` frame-read failure mid-index. 30s covers
+/// large repos with margin; `LAIN_GIT_SIDECAR_TIMEOUT_SECS` overrides.
+const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPAWN_WINDOW: Duration = Duration::from_secs(30);
 const MAX_RESPAWNS_PER_WINDOW: usize = 3;
 

@@ -2267,6 +2267,36 @@ pub fn load_pair(
         }
     }
 
+    // D9 follow-up: `new_by_file` is rebuilt from `occupancy_by_file`
+    // and `occupancy_file_intents`, which carry no TTL data. Drop the
+    // same (agent, path) pairs the by_agent pass revoked — otherwise a
+    // restart resurrects the expired claim through `list_occupancy`,
+    // which reads `by_file`.
+    for (agent_id, path) in &ttl_revoked {
+        if let Some(entry) = new_by_file.get_mut(path) {
+            entry.agents.remove(agent_id);
+            for set in entry.symbols.values_mut() {
+                set.remove(agent_id);
+            }
+            for m in entry.intents.values_mut() {
+                m.remove(agent_id);
+            }
+            for m in entry.last_touched.values_mut() {
+                m.remove(agent_id);
+            }
+            entry.symbols.retain(|_, s| !s.is_empty());
+            entry.intents.retain(|_, m| !m.is_empty());
+            entry.last_touched.retain(|_, m| !m.is_empty());
+            if entry.agents.is_empty()
+                && entry.symbols.is_empty()
+                && entry.intents.is_empty()
+                && entry.last_touched.is_empty()
+            {
+                new_by_file.remove(path);
+            }
+        }
+    }
+
     let mut s = reg.inner.lock();
     let mut o = occ.inner.lock();
     s.sessions = new_sessions;
@@ -3432,7 +3462,10 @@ mod load_persistence_tests {
                     "last_heartbeat": { "secs_since_epoch": 10_i64, "nanos_since_epoch": 0_u32 },
                 }]
             ],
-            "occupancy_by_file": [],
+            "occupancy_by_file": [
+                ["src/alice.rs", ["alice-id"], []],
+                ["src/bob.rs", ["bob-id"], []],
+            ],
             "occupancy_file_intents": [],
             "occupancy_by_agent": [
                 // alice — no expiry, survives the load
