@@ -6,6 +6,24 @@ use dashmap::DashMap;
 use std::ops::Range;
 use std::path::Path;
 
+/// On-disk envelope for `federated_graph.bin`: the `LNF2` magic followed
+/// by a little-endian `u32` schema version. Anything else — headerless
+/// bytes, an unknown magic, a version mismatch, or a corrupt body under a
+/// valid header — is rejected with `LainError::FederationSchemaMismatch`
+/// rather than loaded.
+pub const FEDERATION_GRAPH_MAGIC: &[u8] = b"LNF2";
+pub const FEDERATION_GRAPH_VERSION: u32 = 2;
+pub const FEDERATION_GRAPH_HEADER_LEN: usize = FEDERATION_GRAPH_MAGIC.len() + 4;
+
+/// Sibling file holding the validated payload (everything after the
+/// envelope header); this is what `GraphDatabase` is opened against, so
+/// reloads see only bytes that passed `validate_persisted_payload`.
+fn payload_path_for(bin_path: &Path) -> std::path::PathBuf {
+    let mut p = bin_path.as_os_str().to_owned();
+    p.push(".payload");
+    std::path::PathBuf::from(p)
+}
+
 pub trait GraphBackend: Send + Sync {
     fn upsert_node(&self, node: GraphNode) -> Result<(), LainError>;
     fn upsert_node_global(
@@ -87,12 +105,10 @@ impl PetgraphBackend {
             // shorter file means a torn write or a hand-crafted sentinel.
             // Treating it as a valid no-op (the previous behaviour) lets a
             // `GraphDatabase::new` soft-fall-through mask the corruption.
-            if bytes.is_empty() || bytes.len() < FEDERATION_GRAPH_HEADER_LEN {
-                return Err(LainError::FederationSchemaMismatch {
-                    found: 0,
-                    required: FEDERATION_GRAPH_VERSION,
-                });
-            } else if &bytes[..FEDERATION_GRAPH_MAGIC.len()] != FEDERATION_GRAPH_MAGIC {
+            if bytes.is_empty()
+                || bytes.len() < FEDERATION_GRAPH_HEADER_LEN
+                || &bytes[..FEDERATION_GRAPH_MAGIC.len()] != FEDERATION_GRAPH_MAGIC
+            {
                 return Err(LainError::FederationSchemaMismatch {
                     found: 0,
                     required: FEDERATION_GRAPH_VERSION,
@@ -113,7 +129,7 @@ impl PetgraphBackend {
                 let payload = &bytes[FEDERATION_GRAPH_HEADER_LEN..];
                 GraphDatabase::validate_persisted_payload(payload).map_err(|error| {
                     tracing::warn!(
-                        "Rejecting corrupt federation graph payload at {}: {error}. Run `lain reindex` to rebuild.",
+                        "Rejecting corrupt federation graph payload at {}: {error}. Remove it and re-run to rebuild.",
                         bin_path.display()
                     );
                     LainError::FederationPayloadCorrupt {

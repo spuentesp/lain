@@ -1752,14 +1752,8 @@ impl GraphDatabase {
     }
 
     pub(crate) fn validate_persisted_payload(data: &[u8]) -> Result<(), LainError> {
-        use bincode::Options;
-
-        let state: GraphState = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(data.len() as u64)
-            .reject_trailing_bytes()
-            .deserialize(data)
-            .map_err(|e| LainError::Database(e.to_string()))?;
+        let (state, _read) =
+            persist::decode_state(data).map_err(|e| LainError::Database(e.to_string()))?;
         if state.path_format_version != PATH_FORMAT_VERSION {
             return Err(LainError::Database(format!(
                 "graph payload path format v{} does not match v{}",
