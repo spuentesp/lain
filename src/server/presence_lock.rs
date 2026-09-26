@@ -547,31 +547,6 @@ impl FileLock {
     }
 }
 
-/// Read the on-disk nonce for `lock_path` and compare it to
-/// `expected_nonce`. Returns `Ok(())` when they match (or when the
-/// file is missing, so a release on a gone sentinel is idempotent),
-/// `Err(ReleaseError::NotOwner)` on a mismatch. Used by
-/// `FileLock::refresh_lock` (which only checks, never deletes) and as
-/// a building block for the atomic compare-and-delete release.
-fn check_ownership(lock_path: &Path, expected_nonce: &str) -> Result<(), ReleaseError> {
-    match std::fs::metadata(lock_path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Ok(_) => {
-            let found = read_nonce(lock_path);
-            if found == expected_nonce {
-                Ok(())
-            } else {
-                Err(ReleaseError::NotOwner {
-                    path: lock_path.to_path_buf(),
-                    expected: expected_nonce.to_string(),
-                    found,
-                })
-            }
-        }
-        Err(e) => Err(ReleaseError::Io(e)),
-    }
-}
-
 /// Atomic compare-and-delete: the lock file is renamed into a private
 /// sibling tempfile before its nonce is checked, so the original
 /// filename is not visible to other agents during the check. If the
